@@ -17,10 +17,23 @@ one needs an explicit decision recorded in `DECISIONS.md`.
 
 1. **The server is AUTHORITATIVE on every id.** Bus ids, agent ids, message ids, and sequence
    numbers are minted by the server and never by a client. A client-supplied id is input to be
-   validated, never an identity to be trusted. Ids are never reused, including across restarts.
+   validated, never an identity to be trusted. **Ids are never reused, including across restarts —
+   and this was reaffirmed WITHOUT narrowing on 2026-08-02.** Recovery may not reissue an index it
+   has already handed out, even for a record it discards: a salvage path that reuses the index of a
+   damaged tail record is a DEFECT to fix, not a licence to narrow this invariant. When recovery
+   discards a record, the sequence advances past the hole; it never rewinds. Contrast invariant 4,
+   which WAS deliberately narrowed — this one was not.
 2. **Every agent id is fully qualified: `<bus-id>.<agent-id>`.** That namespacing is what makes
    cross-bus routing and agent-list exchange unambiguous. Buses have ids for the same reason.
-3. **The CLIENT signs a SERVER-PROVIDED session token.** Note the direction — an earlier wording had
+3. **Enrolment is INVITE-ONLY (2026-08-02), and the CLIENT signs a SERVER-PROVIDED session
+   token.** No agent may enrol without redeeming an operator-minted invite. This closes the root
+   cause of a whole family of pre-auth attacks rather than patching them one at a time: an
+   unauthenticated enrolment route let an attacker mint its own agents, and from there exhaust the
+   session table, lock out a named agent, or enumerate the roster. Invites must be single-use,
+   expiring, and revocable, and redeeming one is the ONLY way onto the bus — including for peer
+   buses.
+
+   On the credential itself: Note the direction — an earlier wording had
    this backwards ("the server signs the agent's key"), which is neither the decision nor the code.
    At enrolment the agent presents its Ed25519 **public** key and the server records it. To get a
    credential the agent asks for a session, the **server** provides the token value, the agent
@@ -116,9 +129,17 @@ one needs an explicit decision recorded in `DECISIONS.md`.
     bus deliberately exposed on a real interface needs both.
 
     Consequences that must be designed, not assumed:
-    - **Certificate provisioning is the hard part for a local tool**, and it is what decides whether
-      this is usable. A bus that demands a CA-issued certificate to run on a laptop will simply be
-      run with verification disabled, which is worse than no TLS because it looks secure.
+    - **Certificates are SELF-SIGNED and TLS is MUTUAL (decided 2026-08-02).** Both ends present a
+      certificate and both verify. There is no CA: trust is established at enrolment, where the
+      agent's client-certificate fingerprint is bound to its server-minted agent id and the bus's
+      certificate fingerprint is pinned by the client. That reuses the trust-on-first-use moment
+      enrolment already is, rather than inventing a second trust model — and it means a bus runs on
+      a laptop with no certificate authority anywhere in the picture.
+    - **mTLS and the session token are BOTH required, and they do different jobs.** mTLS proves which
+      key holder is on the connection; the session token is the revocable, time-bounded application
+      credential. Do not let one silently replace the other — but DO cross-check them: a session
+      token presented over a connection whose client certificate belongs to a different agent must
+      be rejected, which is a stronger property than either mechanism gives alone.
     - **The CLI must make the trusted path the easy path.** Whatever the scheme, `bus enrol` against
       a fresh bus has to work without the user hand-editing a trust store.
     - Never disable certificate verification to make something work, and never ship a flag that

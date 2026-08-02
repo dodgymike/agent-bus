@@ -913,3 +913,235 @@ a bus deliberately exposed on a real interface needs both.
    enrolment, operator-supplied cert/key paths, or both.
 2. Whether plaintext is permitted *anywhere*, including tests and local development, or truly never.
 3. Whether relay peers use mutual TLS in addition to the session-token scheme.
+
+---
+
+## 2026-08-02 — The message sequence high-water mark lives in the WAL message body, read via a replay-time PREPARE observer (ID-2-WIRING-SCHEMA)
+
+**Context.** `ids.Resume(floor)` requires the highest sequence EVER WRITTEN TO DISK — committed,
+aborted **and dangling** — because a fsynced PREPARE burns its number forever even if the process
+dies before the COMMIT (`internal/ids/sequence.go:87-122`). Nothing in the durability layer can
+supply that value today:
+
+- the sequence lives inside the caller-written `wal.Entry.Body`, and `wal` deliberately does not
+  interpret `Kind` or `Body` (`internal/wal/log.go:72-73`);
+- `wal.Replay` hands its callback **committed** entries only;
+- `wal.Recovered` carries no message-sequence high-water mark at all. `Recovered.NextIndex` is the
+  WAL **record** index (`replay.go:399-403`) — incremented by commits and aborts too, shared by every
+  record type. It is a different counter and the two are not interchangeable.
+
+So the floor could not be derived until it was decided WHERE the number lives. That is this decision.
+`ID2_WIRING_DEEPDIVE.md` §3.5/§4.2/§4.4 ranked the options and prototyped each; this entry settles
+the fork it left open.
+
+**Decision.** **Option A′.**
+
+1. **The message sequence is a top-level, cleartext field of the WAL message body**:
+   for `wal.Entry{Kind: "message"}`, `Body` is a JSON **object** carrying `"seq": <uint64, non-zero>`
+   at the top level, readable by the server without any key. This is the ONLY field ID-2-WIRING
+   commits the MSG epic to; everything else about the message body — sender, recipients, timestamp,
+   content hash, idempotency key, signature, any future envelope — stays open for MSG/SIGN/IDEM to
+   design.
+2. **The WAL offers every PREPARE to an observer during the replay pass that already happens**, and
+   the **application** decodes `seq` out of the body. `wal` still does not interpret `Body`; the
+   decode lives in the caller's callback, so `log.go:72-73`'s promise survives intact.
+3. **No on-disk format change. No `ondisk-format-version` value is consumed by this decision.**
+
+**Why A′ — the evidence, not the aesthetics.**
+
+- **`Replay` already decodes every PREPARE.** `internal/wal/replay.go:129-131` calls `DecodePrepare`
+  on every PREPARE record — committed, aborted and dangling alike — because a prepare payload that
+  does not decode means the file no longer says what it recorded. The decoded `Entry` is then thrown
+  away unless the entry later commits. A′ hands that already-materialised value to the application
+  instead of discarding it. The floor therefore costs **zero additional passes and zero additional
+  decodes**.
+- **It removes a third startup scan before it is ever added.** Option A (a caller-side `ScanAll` +
+  body decode) yields the identical number but adds a full third scan of the WAL at startup, directly
+  aggravating the already-filed `2a961fcc` — *"Startup scans the WAL twice (soon three times) — bound
+  the cost"*. That task's "(soon three times)" anticipated exactly this. A′ makes it moot.
+- **The deepdive proved it yields the right floor from a dangling prepare in one pass**
+  (`ID2_WIRING_DEEPDIVE.md` §4.2, `one-pass floor = 100 (records=100 applied=99 dangling=1)`,
+  `proof-check: verdict=PASS`), at a measured cost of ~16 lines in `replay.go` with
+  `./internal/wal` staying fully green.
+
+**The §4.4 disproof test — RUN, and it does NOT fire.**
+
+The deepdive made its recommendation conditional and named the test that would overturn it:
+
+> *"if a CRYPTO task specifies that `wal.Entry.Body` for `Kind=="message"` is a bare opaque blob
+> rather than an envelope, A′ is disproven and B wins."*
+
+The deep-diver explicitly did not read the CRYPTO epic task bodies and flagged that as a bounded gap
+(§0). This task read all of them. **No such task exists, and the live ones say the opposite:**
+
+- Every task that would have made the body opaque — CRYPTO-5 (X3DH), CRYPTO-6 (Double Ratchet on the
+  DM path), CRYPTO-7 (ratchet durability), CRYPTO-8 (broadcast AEAD), CRYPTO-9 (encrypted relay) — is
+  **`deferred`**.
+- **CRYPTO-11** (`todo`): *"there is no ciphertext — bodies travel in cleartext with a detached
+  Ed25519 signature"*, and the plaintext-vs-ciphertext question *"is now moot and must not be
+  re-opened"*.
+- **CRYPTO-12** (`todo`): *"State PLAINLY in PROTOCOL.md that message bodies are NOT encrypted — any
+  relaying/intermediate bus and any party with WAL/disk access can read every message body; this is a
+  deliberate, user-approved property, not an oversight."*
+- This is not merely a backlog state, it is **already a recorded decision**: *"2026-08-02 — Message
+  auth/integrity only (libsodium-style signatures); encryption deferred"* above, on direct user
+  instruction — *"No encryption, no X3DH, no Double Ratchet, no forward secrecy for now. The ratchet
+  direction in `CRYPTO_DEEPDIVE.md` is superseded — its recommendation must not be actioned."*
+
+**And the test does not fire even in the world where encryption returns.** Three independent reasons,
+which is what makes A′ safe rather than merely currently-convenient:
+
+1. **Even the superseded maximal-encryption design kept an envelope.** `CRYPTO_DEEPDIVE.md:725`
+   describes the change as *"changes the shape of every message body from plaintext to
+   `{ciphertext, ratchet_header, …}`"* — a JSON object with named fields, with the ciphertext confined
+   to one of them. That is an envelope, not a bare blob.
+2. **A bare opaque blob is not a representable value at the WAL layer.** `Entry.Body` MUST be valid
+   JSON — `log.go:80-87` documents it, `canonicalBody` (`log.go:555-573`) enforces it via
+   `json.Compact`, and `Write` rejects invalid JSON with `ErrInvalidBody`. Ciphertext can only ever
+   reach the WAL as a *field inside a JSON object*, which is precisely the shape A′ needs.
+3. **Two other epics independently require the server to read `seq` out of the body.** DUR-5's audit
+   record is *"message id, **sequence**, sender, recipient(s), bus path traversed, timestamp, size,
+   and a content hash"* — the server cannot write that record without reading the sequence. SIGN-4's
+   recipient cursor is built on the same server-minted monotonic sequence. And per invariant 1 the
+   server MINTS the sequence in the first place. A world in which the bus cannot read `seq` out of its
+   own durable record is self-contradictory: DUR-5 and SIGN-4 would break in it too. **The sequence is
+   routing metadata, not content** — the same line invariant 6 already draws for the audit log.
+
+**Options rejected, and why.**
+
+- **Option B — promote the sequence to a WAL-level field** (`Entry.Seq` / `preparePayload.Seq`,
+  `Recovered.HighestSequence`). Architecturally the cleanest: `wal` would compute the floor itself and
+  no caller could get it wrong. **Rejected on price, not on principle.** It is an **on-disk format
+  change** and the deepdive proved the break rather than assuming it: `log.go:671` calls
+  `dec.DisallowUnknownFields()`, so an older binary meeting a newer log fails with
+  `prepare payload does not decode: json: unknown field "seq"` and **refuses to start**. Fail-safe,
+  but a hard downgrade break — and the on-disk `FormatVersion` would still say `1`, so the operator
+  gets `corrupt at offset 16` instead of an honest version mismatch. B therefore also requires a
+  `FormatVersion` bump, which makes **every existing WAL unreadable** (`format.go:328-329` refuses a
+  mismatch outright). That buys a reserved version number, a migration story and a downgrade break in
+  exchange for moving a correctness obligation out of a reviewed ~10-line callback — an obligation
+  that is *already* visible and enforced by the seal gate (ID-2-WIRING-SEAL), which makes the floor
+  claim a greppable `seq.Seal()` line at exactly the point a reviewer must check the derivation.
+  **B also acquires a layering change** — `wal` would gain knowledge of a message sequence — which is
+  the thing `log.go:72-73` was written to prevent.
+- **Option A — caller-side `ScanAll` + decode the body.** Correct, and proven to yield the same floor,
+  but it is the most expensive way to get an answer that a pass we already run is holding in a local
+  variable. Rejected as strictly dominated by A′.
+- **Option C — make the floor an acceptance criterion of the first MSG task that writes a message.**
+  Not a mechanism, a schedule; kept as a *complement* to A′, not a substitute. On its own it is a
+  promise that gets lost, and the MSG-2 implementer then writes the natural, wrong, `go vet`-clean
+  `Replay`-fold. With the seal gate landed it becomes a mechanism, because minting an id without
+  writing `seq.Seal()` is impossible.
+
+**Ordering note — no version number was taken.** `ondisk-format-version` currently holds `1` (the
+shipped format) and `2` (**already reserved by DUR-12**, the CRC32C → HMAC-SHA256 keyed MAC). A′
+consumes neither. If encryption is ever revived and B becomes necessary, it must **reserve its own
+value at that time** — format changes are ORDERED and two changes must never share one version
+number. Never hand-pick it.
+
+**Consequences.**
+
+- **`wal` gains an observer hook, not a schema.** ID-2-WIRING-OBSERVER implements it; the shape the
+  deepdive prototyped and this decision assumes is: `Replay` keeps its exact signature and delegates
+  to a new `ReplayWithPrepares(path, fn func(Committed) error, onPrepare func(Entry) error)`, where
+  `onPrepare` is called once for **every** PREPARE record in file order regardless of how it later
+  resolves, a nil `onPrepare` reproduces today's behaviour exactly, and an error from `onPrepare`
+  fails the replay the same way an error from `fn` does. `wal` passes the `Entry` through without
+  interpreting it.
+- **The derivation must ERROR, never return 0, on failure.** `ids.Resume(0)` is documented as exactly
+  equivalent to `NewSequence` (`sequence.go:159-160`), so a floor of `0` derived from an *empty* log
+  and a floor of `0` derived from a *failed* decode are indistinguishable at the type level. `Seal()`
+  does not fix that. The startup derivation must refuse to start on a scan or decode error rather than
+  hand `Resume` a zero — this is a required behaviour of ID-2-WIRING-STARTUP, not a nicety.
+- **A non-numeric, missing or zero `"seq"` in a message-kind prepare body is a startup failure**, for
+  the same reason: silently skipping an undecodable body would lower the floor exactly when it must
+  not move.
+- **Contract text this implies** (owned by whoever holds `CONTRACTS*.md` / `PROTOCOL.md`, filed
+  separately — this task wrote no contract file): *the WAL body of a `"message"`-kind entry is a JSON
+  object carrying a top-level `"seq"` (uint64, non-zero), the server-minted message sequence; it is
+  cleartext and readable by the bus; the message-sequence high-water mark is derived at startup from
+  every PREPARE in the log, committed, aborted and dangling alike.*
+- **Residual, shared by A′ and B alike, and therefore not a differentiator:** a whole-log
+  **quarantine** renames the unreadable log aside and starts a fresh one at index 1
+  (`recover.go:252-262`), and a repaired tail discards records declared never-durable. Sequences
+  burned in bytes that are no longer replayed cannot be recovered from the WAL by *any* option here —
+  B would compute its `HighestSequence` in the same pass over the same surviving bytes. This is the
+  message-sequence face of the invariant-1 narrowing already filed for the WAL record index
+  (`e120153b`), and it belongs on that task's docket rather than in a second one.
+- **This decision commits the MSG epic to exactly one field and nothing else.** It is deliberately the
+  smallest schema commitment that unblocks the floor derivation.
+
+
+---
+
+## 2026-08-02 — Five decisions: MAC key, invite-only enrolment, no id reuse, self-signed mTLS
+
+User answers to the five outstanding questions. Two of them change work that was in flight.
+
+### 1. The HMAC key lives in the DATA DIR; a missing or wrong key is FATAL
+
+Unblocks **DUR-12** (format version 2 already reserved). The key is a file in the data directory,
+mode 0600.
+
+Honest statement of what that does and does not buy: it **completely** defeats the attack that
+motivated the change — an ordinary enrolled client crafting a payload whose CRC makes damage look
+like a complete record — because a client cannot compute a MAC over a key it does not hold. It buys
+**nothing** against an attacker who already has data-directory write access; such an attacker can
+read the key and forge freely. That is an accepted limit, not an oversight, and belongs in
+`PROTOCOL.md`.
+
+**A missing or wrong key at startup is FATAL**, and this is a deliberate exception to the
+always-restart rule (invariant 6). The reasoning: a wrong key makes *every* record fail
+verification, so "discard the unverifiable" would discard the entire log. Always-restart exists to
+stop *media damage* holding the bus hostage; a wrong key is *misconfiguration*, it is fixable in
+seconds, and destroying the log over it would be the worst possible response. Fail loudly and name
+the key path.
+
+### 2. Enrolment is INVITE-ONLY — and `AUTH-1-FU-ACTIVECAP` is P0
+
+The deeper fix. Every pre-auth attack found so far shares one root: **enrolment was
+unauthenticated**, so an attacker could mint its own agents. From there it could exhaust the
+16384-entry session table (ACTIVECAP), lock out a named agent (PENDINGCAP, already fixed), or
+enumerate the roster. Capping table sizes patches the symptoms one at a time; requiring an invite
+removes the capability.
+
+Invites must be **single-use, expiring and revocable**, and redemption is the only route onto the
+bus — including for peer buses. `AUTH-1-FU-ACTIVECAP` is raised to **P0**; note it is now
+defence-in-depth behind the invite gate rather than the sole bound, so the safe cap keyed on a
+*proven* agent id (an active session implies possession of that agent's private key) is still the
+right shape.
+
+### 3. NO id reuse — invariant 1 stands, and the salvage reissue is a DEFECT
+
+Invariant 1 is reaffirmed **without narrowing**. Recovery may not reissue an index it has already
+handed out, even for a record it discards: when recovery discards a record the sequence advances
+past the hole, it never rewinds.
+
+**This makes the current salvage behaviour a bug, not a documented narrowing.** `internal/wal`
+reissues the index of a damaged tail record, and `DUR-11` was in flight implementing exactly that.
+Contrast invariant 4, which the user *did* deliberately narrow — the difference is that a narrowing
+is a choice recorded up front, while this was a behaviour discovered after the fact and is now
+rejected.
+
+### 4. Commit history: LEAVE IT
+
+`5a352de` and `3318872` each span two or three tasks. No rewrite. The mis-titling is recorded in
+`AGENT_LOG.md` and in the commits' own messages; that record is the remedy.
+
+### 5. TLS: SELF-SIGNED certificates, MUTUAL TLS
+
+No certificate authority anywhere. Both ends present a certificate and both verify. Trust is
+established at **enrolment**, which is already the trust-establishing moment: the agent's client-cert
+fingerprint is bound to its server-minted agent id, and the bus's cert fingerprint is pinned by the
+client. This reuses the TOFU machinery the design already needed rather than inventing a second
+trust model, and it means a bus runs on a laptop with no CA in the picture.
+
+**mTLS does not replace the session token; both are required.** mTLS proves which key holder is on
+the connection; the session token is the revocable, time-bounded application credential — and
+revocability is exactly what a certificate does not give you without a CRL. They should be
+cross-checked: a session token presented over a connection whose client certificate belongs to a
+*different* agent must be rejected. That is a stronger property than either mechanism alone, and it
+is free once both exist.
+
+Invite-only enrolment and mTLS compose well: the invite is what authorises a new client certificate
+to be bound to a new agent id in the first place.
