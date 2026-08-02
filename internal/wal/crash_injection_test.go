@@ -112,15 +112,29 @@ func acceptedHistory(t *testing.T) (path string, acked []Committed, ackedAt []in
 	return filepath.Join(dir, WALFileName), acked, ackedAt
 }
 
-// crashFixture copies bytes into a fresh directory and returns that directory
-// and the WAL path inside it. Each sweep iteration gets its own directory: a
-// sweep that damaged one shared file in place would be testing the accumulation
-// of its own damage, not the damage it meant to inject.
-func crashFixture(t *testing.T, parent string, n int, b []byte) (dir, path string) {
+// crashFixture copies a DATA DIRECTORY -- the log bytes b, and the MAC key that
+// authenticates them, taken from the directory pristine lives in -- into a fresh
+// directory, and returns that directory and the WAL path inside it. Each sweep
+// iteration gets its own directory: a sweep that damaged one shared file in
+// place would be testing the accumulation of its own damage, not the damage it
+// meant to inject.
+//
+// The key travels with the log because it is a property of the DIRECTORY, not of
+// the file. A copy of a WAL without its key next to it is not a crashed bus, it
+// is a misconfigured one, and recovery refuses that on purpose -- so a fixture
+// that left the key behind would be testing the wrong failure entirely.
+func crashFixture(t *testing.T, parent string, n int, pristine string, b []byte) (dir, path string) {
 	t.Helper()
 	dir = filepath.Join(parent, fmt.Sprintf("case-%04d", n))
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		t.Fatalf("crashFixture: mkdir: %v", err)
+	}
+	key, err := os.ReadFile(macKeyPath(filepath.Dir(pristine)))
+	if err != nil {
+		t.Fatalf("crashFixture: read the MAC key of the pristine log: %v", err)
+	}
+	if err := os.WriteFile(macKeyPath(dir), key, macKeyMode); err != nil {
+		t.Fatalf("crashFixture: write the MAC key: %v", err)
 	}
 	path = filepath.Join(dir, WALFileName)
 	if err := os.WriteFile(path, b, fileMode); err != nil {
@@ -190,7 +204,7 @@ func TestCrashInjectionTruncationPrefixSweep(t *testing.T) {
 
 	for cut := 0; cut <= len(full); cut++ {
 		cut := int64(cut)
-		dir, path := crashFixture(t, parent, int(cut), full)
+		dir, path := crashFixture(t, parent, int(cut), pristine, full)
 		truncate(t, path, cut)
 
 		got, rec, err := recoverFixture(t, dir)
@@ -260,7 +274,7 @@ func TestCrashInjectionTruncationIsResumable(t *testing.T) {
 		if cut < FileHeaderSize || cut > int64(len(full)) {
 			continue
 		}
-		dir, path := crashFixture(t, parent, i, full)
+		dir, path := crashFixture(t, parent, i, pristine, full)
 		truncate(t, path, cut)
 
 		want := acked[:visibleAt(ackedAt, cut)]
@@ -413,7 +427,7 @@ func TestCrashInjectionSingleBitCorruptionSweep(t *testing.T) {
 	var losses []loss
 
 	for off := int64(0); off < int64(len(full)); off++ {
-		dir, path := crashFixture(t, parent, int(off), full)
+		dir, path := crashFixture(t, parent, int(off), pristine, full)
 		flipByte(t, path, off)
 
 		got, rec, err := recoverFixture(t, dir)
@@ -504,6 +518,13 @@ const (
 	// ciMidCommitWrite: two entries acknowledged, a third prepared and fsynced,
 	// and a PARTIAL commit frame on the end of the file.
 	ciMidCommitWrite = "mid-commit-write"
+
+	// ciV1Upgrade: Open a data directory holding a format version 1 log, so the
+	// process spends real time inside upgradeV1. THE PARENT does the killing
+	// here, the instant the `.upgrade` temporary appears -- that file exists only
+	// while upgradeV1 is running, so a kill triggered by its existence is a kill
+	// inside the upgrade rather than a kill at a hopeful moment.
+	ciV1Upgrade = "v1-upgrade"
 )
 
 // TestCrashInjectionChild is the child half of the kill below. Without
@@ -517,7 +538,22 @@ func TestCrashInjectionChild(t *testing.T) {
 	if dir == "" {
 		t.Fatalf("child: %s=%q but %s is empty", envCIPoint, point, envCIDir)
 	}
-	if point != ciMidCommitWrite {
+	switch point {
+	case ciMidCommitWrite:
+		// falls through to the body below
+	case ciV1Upgrade:
+		// No suicide here: the PARENT kills this process while Open is inside
+		// upgradeV1. If the kill loses the race, Open finishes normally and the
+		// child exits 0, which the parent detects and retries.
+		l, err := Open(LogOptions{Dir: dir})
+		if err != nil {
+			t.Fatalf("child: Open on a format version 1 log: %v", err)
+		}
+		if err := l.Close(); err != nil {
+			t.Fatalf("child: Close: %v", err)
+		}
+		return
+	default:
 		t.Fatalf("child: unknown crash point %q", point)
 	}
 
@@ -549,7 +585,7 @@ func TestCrashInjectionChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child: encodeCommit: %v", err)
 	}
-	frame := encodeFrame(txn.PrepareIndex()+1, TypeCommit, payload)
+	frame := testCodec(t, filepath.Join(dir, WALFileName)).encodeFrame(txn.PrepareIndex()+1, TypeCommit, payload)
 	partial := FrameHeaderSize + len(payload)/2
 	if partial <= FrameHeaderSize || partial >= len(frame) {
 		t.Fatalf("child: a %d-byte cut of a %d-byte frame is not a torn payload", partial, len(frame))
@@ -1458,5 +1494,342 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 		assertLogged(t, out, "ERROR", "wal discarded a damaged record",
 			"stage=replay", "record_index=34", "record_type=commit", "an acknowledged write is lost here")
 		assertLogged(t, out, "WARN", "wal rewrote a damaged log, keeping every intact record", "kept=39")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// DUR-12 -- crash injection for the format version 1 -> 2 UPGRADE.
+//
+// The upgrade is a whole-file rewrite that runs once, at startup, on every
+// existing bus. It is therefore the single riskiest thing in the durability
+// layer: it touches every byte of a log that is currently the only copy of
+// accepted history, and it runs exactly when a machine is most likely to be
+// rebooted.
+//
+// Its crash-safety argument is that THE ORIGINAL IS NEVER TOUCHED UNTIL AN
+// ATOMIC RENAME. Everything is written to `<log>.upgrade`, fsynced, and verified
+// by re-scanning and re-digesting before the rename; a backup hard link is taken
+// first. That makes the reachable on-disk states after a crash exactly:
+//
+//	S1 original v1, no temporary                     (crash before the create)
+//	S2 original v1, a PARTIAL temporary              (crash during the copy)
+//	S3 original v1, a COMPLETE temporary + a backup  (crash before the rename)
+//	S4 converted v2, no temporary, a backup          (crash after the rename)
+//
+// and the required behaviour in S1..S3 is identical: the temporary is MEANINGLESS
+// (it is a partial copy of a file that is still intact), so it is removed and the
+// whole upgrade is redone. S4 is already done and the next start must not run it
+// again.
+//
+// WHAT IS A REAL KILL AND WHAT IS NOT, stated plainly rather than left to be
+// discovered. The first case below is a REAL SIGKILL of a real process genuinely
+// executing upgradeV1: the parent watches for the `.upgrade` temporary, which
+// exists only between the create and the rename, and kills the moment it appears.
+// The remaining cases CONSTRUCT the reachable states directly, because the
+// harness has no seam inside upgradeV1 to stop at a chosen instruction -- there
+// is no injection hook in the production code and this task does not add one. The
+// states are enumerated from the code above rather than guessed at, and the first
+// case proves the enumeration is the one a real crash produces.
+// ---------------------------------------------------------------------------
+
+// upgradeTmpPath is the temporary upgradeV1 converts into. It exists ONLY while
+// the upgrade is running, which is what makes it a usable crash trigger.
+func upgradeTmpPath(dir string) string { return filepath.Join(dir, WALFileName+".upgrade") }
+
+// bigV1Log lays down a format version 1 WAL of `txns` complete transactions --
+// 2*txns records -- and returns the path and the records as written.
+//
+// It is deliberately LARGE. The kill below is triggered by the appearance of the
+// `.upgrade` temporary, so the only way to miss the window is for the whole
+// conversion to finish between two polls; a log big enough to take a visible
+// fraction of a second to convert makes that essentially impossible while still
+// costing the suite well under a second to build.
+func bigV1Log(t *testing.T, dir string, txns int) (path string, recs []v1Record) {
+	t.Helper()
+	ts := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	pad := strings.Repeat("p", 96)
+	for i := 0; i < txns; i++ {
+		body := json.RawMessage(fmt.Sprintf(`{"n":%d,"pad":%q}`, i, pad))
+		p, err := encodePrepare("message", body, ts.Add(time.Duration(i)*time.Millisecond))
+		if err != nil {
+			t.Fatalf("bigV1Log: encodePrepare: %v", err)
+		}
+		c, err := encodeCommit(uint64(2*i + 1))
+		if err != nil {
+			t.Fatalf("bigV1Log: encodeCommit: %v", err)
+		}
+		recs = append(recs,
+			v1Record{Index: uint64(2*i + 1), Type: TypePrepare, Payload: p},
+			v1Record{Index: uint64(2*i + 2), Type: TypeCommit, Payload: c})
+	}
+	path = filepath.Join(dir, WALFileName)
+	writeV1Log(t, path, KindWAL, recs...)
+	return path, recs
+}
+
+// killChildWhenAppears starts this test binary at the given crash point and
+// SIGKILLs it the instant `watch` exists on disk.
+//
+// It reports whether the child really died on SIGKILL. A child that finished
+// first exits 0 and is reported as a miss rather than being papered over: a
+// crash test that cannot prove the crash happened is a test of nothing.
+func killChildWhenAppears(t *testing.T, point, dir, watch string) (sigkilled bool, out string) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		self = os.Args[0]
+	}
+	cmd := exec.Command(self, "-test.run=^TestCrashInjectionChild$", "-test.v")
+	cmd.Env = append(os.Environ(), envCIPoint+"="+point, envCIDir+"="+dir)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the crash child: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	deadline := time.Now().Add(60 * time.Second)
+	var waitErr error
+	watching := true
+	for watching {
+		select {
+		case waitErr = <-done:
+			// It finished before we saw the temporary: a miss, not a failure.
+			return false, buf.String()
+		default:
+		}
+		if _, serr := os.Stat(watch); serr == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			watching = false
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatalf("the crash child never created %s within 60s\n--- child output ---\n%s", watch, buf.String())
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	waitErr = <-done
+
+	var ee *exec.ExitError
+	if !errors.As(waitErr, &ee) {
+		return false, buf.String() // exited cleanly in the gap between the stat and the signal
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("wait status is %T, want syscall.WaitStatus", ee.Sys())
+	}
+	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("the crash child exited with status %d instead of dying on SIGKILL\n--- child output ---\n%s",
+			ws.ExitStatus(), buf.String())
+	}
+	return true, buf.String()
+}
+
+// assertUpgradeRedoneAndComplete is the shared "the next start puts it right"
+// assertion: whatever the crash left behind, one ordinary Open must produce a
+// version 2 log holding EXACTLY the records the version 1 fixture held, replay
+// every committed entry, and leave no temporary behind.
+func assertUpgradeRedoneAndComplete(t *testing.T, dir, path string, recs []v1Record, wantApplied int) {
+	t.Helper()
+	got, rec, _, err := openCapturing(t, dir)
+	if err != nil {
+		t.Fatalf("the start after the crash: %v: a crash during the upgrade must simply redo it", err)
+	}
+	if len(got) != wantApplied {
+		t.Fatalf("the start after the crash replayed %d entries, want %d: the upgrade must lose nothing", len(got), wantApplied)
+	}
+	if rec.DiscardCount != 0 || rec.MissingRecords != 0 {
+		t.Errorf("Recovered = {discards %d, missing %d}, want 0 and 0", rec.DiscardCount, rec.MissingRecords)
+	}
+	if v, err := detectFormat(path, KindWAL); err != nil || v != FormatVersion {
+		t.Fatalf("after the recovery start the log reports format version %d (err %v), want %d", v, err, FormatVersion)
+	}
+	assertRecordsIdentical(t, path, recs)
+	if left := globIn(t, dir, WALFileName+".upgrade"); len(left) != 0 {
+		t.Errorf("the upgrade temporary %v survived the recovery start: a stale temporary is meaningless and must be removed", left)
+	}
+}
+
+// TestCrashInjectionV1UpgradeIsRedoneAfterACrash walks the crash states of the
+// version 1 -> 2 upgrade. See the block comment above for which of them is a
+// real kill and which are constructed, and why.
+func TestCrashInjectionV1UpgradeIsRedoneAfterACrash(t *testing.T) {
+	// 12 000 transactions -- 24 000 records, about 4 MB of version 1 log. Big
+	// enough that the conversion cannot slip between two 50 us polls, small
+	// enough to build in a few milliseconds.
+	const bigTxns = 12000
+	// Attempts at landing the kill inside upgradeV1. Each is independent, on its
+	// own data directory; the test requires at least one to land.
+	const attempts = 6
+
+	t.Run("a real SIGKILL inside upgradeV1 leaves the version 1 log complete and the next start redoes it", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("re-execs a multi-megabyte upgrade; skipped under -short")
+		}
+		landed := 0
+		for attempt := 0; attempt < attempts && landed == 0; attempt++ {
+			dir := t.TempDir()
+			path, recs := bigV1Log(t, dir, bigTxns)
+			original := readFile(t, path)
+
+			sigkilled, out := killChildWhenAppears(t, ciV1Upgrade, dir, upgradeTmpPath(dir))
+			if !sigkilled {
+				continue // the upgrade finished before the kill; try again
+			}
+			version, err := detectFormat(path, KindWAL)
+			if err != nil {
+				t.Fatalf("after the kill the log cannot be identified: %v\n--- child output ---\n%s", err, out)
+			}
+			if version != formatVersionV1 {
+				// The kill landed between the rename and the process dying. That
+				// is state S4, which is a completed upgrade, not a crashed one.
+				continue
+			}
+			landed++
+
+			// (1) THE ORIGINAL IS UNTOUCHED AND STILL COMPLETE. This is the whole
+			// crash-safety argument: a crash mid-upgrade costs nothing because
+			// the only copy of history was never written to.
+			if after := readFile(t, path); !bytes.Equal(after, original) {
+				t.Fatalf("the version 1 log CHANGED during the upgrade (%d bytes before, %d after): "+
+					"the original must not be touched until the atomic rename", len(original), len(after))
+			}
+			scanned, _, err := ScanAll(path, KindWAL)
+			if err != nil {
+				t.Fatalf("the version 1 log does not scan after the crash: %v", err)
+			}
+			if len(scanned) != len(recs) {
+				t.Fatalf("the version 1 log holds %d records after the crash, want all %d", len(scanned), len(recs))
+			}
+
+			// (2) THE NEXT START REDOES THE WHOLE UPGRADE AND LOSES NOTHING.
+			assertUpgradeRedoneAndComplete(t, dir, path, recs, bigTxns)
+		}
+		if landed == 0 {
+			t.Fatalf("in %d attempts the kill never landed inside upgradeV1 (the `.upgrade` temporary was never observed with the log still at version 1); "+
+				"this test proved NOTHING about a crash during the upgrade", attempts)
+		}
+	})
+
+	// The constructed states. Each plants one of S2/S3 by hand on a SMALL v1 log
+	// and asserts the same contract: the temporary is removed, the upgrade is
+	// redone from the original, nothing is lost.
+	t.Run("constructed crash states are removed and the upgrade is redone", func(t *testing.T) {
+		// completeUpgradeTmp renders the file upgradeV1 would have produced: a
+		// correct, complete version 2 conversion sitting in the temporary,
+		// awaiting a rename that never happened.
+		completeUpgradeTmp := func(t *testing.T, dir string, recs []v1Record) []byte {
+			t.Helper()
+			to, err := currentCodec(filepath.Join(dir, WALFileName), KindWAL, nil)
+			if err != nil {
+				t.Fatalf("resolving the version 2 codec: %v", err)
+			}
+			b := to.makeFileHeader(KindWAL)
+			for _, r := range recs {
+				b = append(b, to.encodeFrame(r.Index, r.Type, r.Payload)...)
+			}
+			return b
+		}
+
+		cases := []struct {
+			name string
+			// plant writes whatever the crash left in the directory, other than
+			// the version 1 log itself.
+			plant func(t *testing.T, dir string, recs []v1Record)
+		}{
+			{
+				// S2, the commonest shape: killed part way through the copy, so
+				// the temporary is a PREFIX of the converted file. It is not a
+				// log, it is half of one, and resuming it would be guesswork.
+				name: "a partial .upgrade temporary (killed during the copy)",
+				plant: func(t *testing.T, dir string, recs []v1Record) {
+					full := completeUpgradeTmp(t, dir, recs)
+					if err := os.WriteFile(upgradeTmpPath(dir), full[:len(full)/3], fileMode); err != nil {
+						t.Fatalf("planting a partial temporary: %v", err)
+					}
+				},
+			},
+			{
+				// S2 at its earliest: created, nothing written yet.
+				name: "a zero-length .upgrade temporary (killed just after the create)",
+				plant: func(t *testing.T, dir string, recs []v1Record) {
+					if err := os.WriteFile(upgradeTmpPath(dir), nil, fileMode); err != nil {
+						t.Fatalf("planting an empty temporary: %v", err)
+					}
+				},
+			},
+			{
+				// A temporary left by some OTHER, older crash, holding bytes that
+				// are not a conversion of THIS log at all. Reusing it would swap
+				// one bus's history for another's -- so "remove, never resume" is
+				// not a tidiness rule, it is a correctness one.
+				name: "a stale .upgrade temporary holding unrelated garbage",
+				plant: func(t *testing.T, dir string, recs []v1Record) {
+					if err := os.WriteFile(upgradeTmpPath(dir), bytes.Repeat([]byte{0xC3}, 4096), fileMode); err != nil {
+						t.Fatalf("planting a garbage temporary: %v", err)
+					}
+				},
+			},
+			{
+				// S3: the conversion was complete and verified, the backup link
+				// was taken, and the machine died before the rename. The
+				// temporary is CORRECT here -- and it is still discarded and
+				// rebuilt, because upgradeV1 does not resume, it restarts.
+				name: "a complete .upgrade temporary and a backup, killed just before the rename",
+				plant: func(t *testing.T, dir string, recs []v1Record) {
+					if err := os.WriteFile(upgradeTmpPath(dir), completeUpgradeTmp(t, dir, recs), fileMode); err != nil {
+						t.Fatalf("planting a complete temporary: %v", err)
+					}
+					backup := filepath.Join(dir, fmt.Sprintf("%s.v1-%d", WALFileName, 1)) // a fixed, pre-crash timestamp
+					if err := os.Link(filepath.Join(dir, WALFileName), backup); err != nil {
+						t.Fatalf("planting the backup link: %v", err)
+					}
+				},
+			},
+		}
+
+		planted := 0
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				planted++
+				dir := t.TempDir()
+				path, recs, want := v1TxnLog(t, dir)
+				original := readFile(t, path)
+				tc.plant(t, dir, recs)
+
+				got, _, _, err := openCapturing(t, dir)
+				if err != nil {
+					t.Fatalf("Open after %s: %v", tc.name, err)
+				}
+				if !sameCommitted(got, want) {
+					t.Fatalf("the recovery start delivered %s, want %s", showCommitted(got), showCommitted(want))
+				}
+				assertUpgradeRedoneAndComplete(t, dir, path, recs, len(want))
+
+				// The version 1 bytes were kept, and every backup in the
+				// directory -- the one this crash planted and the one the redone
+				// upgrade took -- still holds the ORIGINAL log.
+				backups := globIn(t, dir, WALFileName+".v1-*")
+				if len(backups) == 0 {
+					t.Fatalf("the redone upgrade kept no version 1 backup")
+				}
+				for _, b := range backups {
+					if got := readFile(t, filepath.Join(dir, b)); !bytes.Equal(got, original) {
+						t.Errorf("the backup %s (%d bytes) is not the original %d-byte version 1 log", b, len(got), len(original))
+					}
+				}
+			})
+		}
+		// After the loop, so a table filtered down to nothing fails loudly rather
+		// than reporting a pass having planted no crash state at all.
+		if planted == 0 {
+			t.Fatalf("no crash state was planted: this test asserted NOTHING")
+		}
 	})
 }

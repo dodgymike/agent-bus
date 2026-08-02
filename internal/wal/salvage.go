@@ -166,6 +166,16 @@ type repairPlan struct {
 	// damaged header and nothing salvageable is not a log this code can
 	// interpret at all, and is quarantined rather than rewritten.
 	Salvageable bool
+
+	// HeaderMagicOK and HeaderVersion are what the FILE HEADER'S first twelve
+	// bytes SAY, whether or not the header's tag verified. They exist for
+	// exactly one decision, and it is the wrong-key one: a header that is
+	// structurally ours and claims the current version, whose tag does not
+	// verify, and behind which not one record verifies either, is
+	// indistinguishable from a log opened under the WRONG KEY -- so recovery
+	// refuses rather than quarantining it. See repairLog.
+	HeaderMagicOK bool
+	HeaderVersion uint32
 }
 
 func (p *repairPlan) add(d Discard) {
@@ -206,7 +216,7 @@ func (p *repairPlan) needsRewrite() bool {
 // the "cannot read this file at all" class described at the top of this file.
 //
 // keep may be nil, in which case the walk only decides and counts.
-func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error) {
+func salvage(path string, kind Kind, c codec, keep func(Record) error) (repairPlan, error) {
 	plan := repairPlan{TailAt: -1}
 
 	f, err := os.Open(path)
@@ -222,16 +232,17 @@ func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error
 	size := fi.Size()
 	plan.Size = size
 
-	if err := checkSalvageHeader(f, path, kind, size, &plan); err != nil {
+	if err := checkSalvageHeader(f, path, kind, c, size, &plan); err != nil {
 		return plan, err
 	}
 
-	off := int64(FileHeaderSize)
-	if size < FileHeaderSize {
+	headerSize := c.fileHeaderSize()
+	off := headerSize
+	if size < headerSize {
 		// Nothing but a torn header. There is no record in these bytes, so the
 		// whole file is the discard.
 		plan.add(Discard{Stage: "framing", Offset: 0, Length: size,
-			Reason: fmt.Sprintf("the file is %d bytes, too short to hold even a %d-byte file header", size, FileHeaderSize)})
+			Reason: fmt.Sprintf("the file is %d bytes, too short to hold even a %d-byte file header", size, headerSize)})
 		plan.TailAt = 0
 		return plan, nil
 	}
@@ -242,7 +253,7 @@ func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error
 			br = bufio.NewReader(io.NewSectionReader(f, off, size-off))
 		}
 
-		rec, err := readFrame(br, path, off)
+		rec, err := readFrame(c, br, path, off)
 		if err == io.EOF {
 			break
 		}
@@ -255,7 +266,7 @@ func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error
 				// records that are probably still there.
 				return plan, err
 			}
-			resumeAt, err := plan.recoverAfterDamage(f, off, size, keep)
+			resumeAt, err := plan.recoverAfterDamage(f, c, off, size, keep)
 			if err != nil {
 				return plan, err
 			}
@@ -265,7 +276,7 @@ func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error
 		}
 
 		if rec.Index <= plan.LastIndex {
-			// The frame's checksum verified, so these bytes are exactly what
+			// The frame's tag verified, so these bytes are exactly what
 			// some writer wrote -- but they are in the wrong place: an old
 			// record resurrected under us, or the same record twice. Keeping it
 			// would replay history out of order, so it goes, loudly.
@@ -292,20 +303,20 @@ func salvage(path string, kind Kind, keep func(Record) error) (repairPlan, error
 // recoverAfterDamage handles one damaged frame at off: it decides where good
 // data resumes, works out whether the damaged frame is recoverable after all,
 // and records the discard. It returns the offset the walk continues from.
-func (p *repairPlan) recoverAfterDamage(f *os.File, off, size int64, keep func(Record) error) (int64, error) {
-	hdr, hdrOK := frameHeaderAt(f, off, size)
+func (p *repairPlan) recoverAfterDamage(f *os.File, c codec, off, size int64, keep func(Record) error) (int64, error) {
+	hdr, hdrOK := frameHeaderAt(f, c, off, size)
 
 	// The declared extent of the damaged frame. When only the PAYLOAD is
 	// damaged the length field is still right, so the next record starts
-	// exactly there -- one checksum instead of a byte-by-byte search.
+	// exactly there -- one verification instead of a byte-by-byte search.
 	declared := int64(-1)
 	if hdrOK {
 		if n := int64(binary.BigEndian.Uint32(hdr[0:4])); n <= MaxPayloadSize {
-			declared = FrameHeaderSize + n
+			declared = c.frameHeaderSize() + n
 		}
 	}
 
-	next, exhausted, err := resyncFrom(f, size, off, p.LastIndex, declared)
+	next, exhausted, err := resyncFrom(f, c, size, off, p.LastIndex, declared)
 	if err != nil {
 		return 0, err
 	}
@@ -321,11 +332,11 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, off, size int64, keep func(R
 	// Is the damaged frame actually COMPLETE, with only its length field wrong?
 	// Records are contiguous, so the frame's true end is where the next
 	// surviving record begins (or the end of the file). Rewriting the length to
-	// that and asking the writer's own checksum is a PROOF, not a guess: only
-	// the true length reproduces the stored value. When it matches, every byte
-	// the record needs is present and it is kept rather than thrown away.
+	// that and asking the writer's own tag is a PROOF, not a guess: only the
+	// true length reproduces the stored value. When it matches, every byte the
+	// record needs is present and it is kept rather than thrown away.
 	if hdrOK {
-		if rec, ok := rebuildFrame(f, off, end, hdr); ok && rec.Index > p.LastIndex {
+		if rec, ok := rebuildFrame(f, c, off, end, hdr); ok && rec.Index > p.LastIndex {
 			p.LastIndex = rec.Index
 			p.Kept++
 			p.Rebuilt++
@@ -366,12 +377,14 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, off, size int64, keep func(R
 	return end, nil
 }
 
-// frameHeaderAt reads the 20 bytes at off, when there are that many left.
-func frameHeaderAt(f *os.File, off, size int64) ([]byte, bool) {
-	if size-off < FrameHeaderSize {
+// frameHeaderAt reads one frame header's worth of bytes at off, when there are
+// that many left.
+func frameHeaderAt(f *os.File, c codec, off, size int64) ([]byte, bool) {
+	headerSize := c.frameHeaderSize()
+	if size-off < headerSize {
 		return nil, false
 	}
-	hdr := make([]byte, FrameHeaderSize)
+	hdr := make([]byte, headerSize)
 	if _, err := f.ReadAt(hdr, off); err != nil {
 		return nil, false
 	}
@@ -384,41 +397,53 @@ func frameHeaderAt(f *os.File, off, size int64) ([]byte, bool) {
 // rebuildFrame asks whether the damaged frame at off is a COMPLETE record whose
 // LENGTH FIELD is the only thing wrong, on the hypothesis that it ends at end.
 //
-// It is the same checksum check the pre-2026-08-02 code used as a VETO on
+// It is the same tag check the pre-2026-08-02 code used as a VETO on
 // truncation, repurposed: under the old refuse-to-start policy the only thing
 // that could be done with "this record is really intact" was to refuse the
 // repair; now the record can simply be kept, which loses nothing at all.
 //
-// HOW STRONG THIS IS, stated exactly. A wrong length essentially never
-// reproduces the stored checksum, so a match is overwhelming evidence that the
-// payload is all there and that a partial write cannot explain the frame -- an
-// interrupted append leaves fewer bytes than the header declares, never a
-// mangled header over a complete payload. It is NOT a proof, and this package
-// no longer calls it one: the checksum is a 32-bit CRC, so roughly one wrong
-// length in 2^32 collides by accident, and an adversary who can choose payload
-// bytes can construct a collision deliberately because CRC32C is unkeyed (see
-// the note in doc.go). Both of those are properties of the FORMAT, closing with
-// the keyed-MAC replacement, not of this check.
-func rebuildFrame(f *os.File, off, end int64, hdr []byte) (Record, bool) {
-	trueLen := end - off - FrameHeaderSize
+// HOW STRONG THIS IS, stated exactly, and it is stronger since format version 2.
+//
+// The length field is INSIDE the covered range, so only the true length
+// reproduces the stored tag. Against ACCIDENT that was already overwhelming
+// evidence -- an interrupted append leaves fewer bytes than the header declares,
+// never a mangled header over a complete payload.
+//
+// What changed is the ADVERSARIAL half. Under version 1 this was a 32-bit
+// unkeyed CRC32C: about one wrong length in 2^32 collides by chance, and anyone
+// who could choose payload bytes could construct a collision ON PURPOSE, so the
+// check held against accident only. Under version 2 the tag is HMAC-SHA256 over
+// a key the client does not hold, so a chosen-payload collision is no longer a
+// thing an attacker can compute: THE LENGTH-FIELD REPAIR IS NOW A REAL PROOF
+// AGAINST AN ADVERSARY, not merely against accident.
+//
+// The honest limit, unchanged: none of this helps against an attacker who
+// already has WRITE ACCESS TO THE DATA DIRECTORY, because the key file sits in
+// that directory and such an attacker can simply read it and forge whatever
+// they like (DECISIONS.md 2026-08-02). The MAC defends the log from its own
+// CLIENTS, not from someone who owns the disk.
+func rebuildFrame(f *os.File, c codec, off, end int64, hdr []byte) (Record, bool) {
+	headerSize := c.frameHeaderSize()
+	trueLen := end - off - headerSize
 	if trueLen < 0 || trueLen > MaxPayloadSize {
 		return Record{}, false
 	}
 	payload := make([]byte, trueLen)
-	if _, err := f.ReadAt(payload, off+FrameHeaderSize); err != nil && err != io.EOF {
+	if _, err := f.ReadAt(payload, off+headerSize); err != nil && err != io.EOF {
 		return Record{}, false
 	}
-	var probe [16]byte
-	copy(probe[:], hdr[0:16])
+	probe := make([]byte, frameCoveredBytes)
+	copy(probe, hdr[0:frameCoveredBytes])
 	binary.BigEndian.PutUint32(probe[0:4], uint32(trueLen))
-	if frameChecksum(probe[:], payload) != binary.BigEndian.Uint32(hdr[16:20]) {
+	if !c.verifyTag(probe, payload, hdr[frameCoveredBytes:headerSize]) {
 		return Record{}, false
 	}
 	return Record{
-		Index:   binary.BigEndian.Uint64(hdr[4:12]),
-		Type:    Type(binary.BigEndian.Uint16(hdr[12:14])),
-		Payload: payload,
-		Offset:  off,
+		Index:    binary.BigEndian.Uint64(hdr[4:12]),
+		Type:     Type(binary.BigEndian.Uint16(hdr[12:14])),
+		Payload:  payload,
+		Offset:   off,
+		legacyV1: c.isV1(),
 	}, true
 }
 
@@ -443,52 +468,62 @@ func rebuildFrame(f *os.File, off, end int64, hdr []byte) (Record, bool) {
 //     are dense, so this is a narrow window and it is what makes the search
 //     both cheap and selective;
 //   - a payload length that is legal and that fits inside the file;
-//   - and finally the writer's own checksum over the bytes actually there.
+//   - and finally the writer's own tag over the bytes actually there.
 //
 // The declared boundary of the damaged frame is tried FIRST, before any
 // scanning: when only a payload byte was flipped, the length field is still
 // correct and the next record starts exactly there, so the common case costs
-// one checksum rather than a walk.
+// one verification rather than a walk.
 //
-// WHAT THIS SEARCH CANNOT DO, stated honestly, and WHY IT IS SAFE ANYWAY TODAY.
+// WHAT THIS SEARCH IS AND IS NOT PROTECTED AGAINST, stated honestly.
 //
-// The only authenticity check available is CRC32C, which is UNKEYED. So a client
-// who could get chosen bytes into a payload could embed a byte sequence that
-// this search accepts as a record -- and because the first candidate in file
-// order wins, they would not even need to know the current index; a ladder of
-// ascending forged indices would do. Security demonstrated exactly that against
-// a hand-built file: forged prepare+commit frames were admitted, copied into the
-// rewritten log by rewriteLog as if genuine, and delivered to the Applier as
-// accepted history.
+// Under format version 1 the only authenticity check available was CRC32C,
+// which is UNKEYED, so a client who could get chosen bytes into a payload could
+// embed a byte sequence this search accepts as a record -- and because the first
+// candidate in file order wins, they did not even need to know the current
+// index; a ladder of ascending forged indices would do. Security demonstrated
+// exactly that against a hand-built file: forged prepare+commit frames were
+// admitted, copied into the rewritten log by rewriteLog as if genuine, and
+// delivered to the Applier as accepted history.
 //
-// WHAT MAKES IT UNREACHABLE IN THIS SERVER, and this is written down because it
-// was previously true only by ACCIDENT and nothing recorded it:
+// FORMAT VERSION 2 CLOSES THAT OUTRIGHT. The tag is HMAC-SHA256 over a key that
+// lives in the data directory and that no client ever sees, so a client cannot
+// compute a tag for bytes it chooses, and this search cannot be made to accept
+// a payload-embedded frame. The forgery argument is DEAD, not mitigated.
 //
-//	A FRAME HEADER CANNOT BE EXPRESSED IN A WAL PAYLOAD.
+// What that retires, and it is worth saying because it used to be the ONLY thing
+// holding the forgery out: the argument that A FRAME HEADER CANNOT BE EXPRESSED
+// IN A WAL PAYLOAD -- every header contains NUL bytes, and the sole writer of
+// WAL payloads runs bodies through canonicalBody -> json.Compact, which rejects
+// a raw control byte in a string. That was true only by ACCIDENT, and it was
+// load-bearing. It is no longer load-bearing: the payload channel may now widen
+// to arbitrary bytes (binary bodies, compression, E2E ciphertext) without this
+// search becoming forgeable. TestWALPayloadsCannotCarryAFrameHeader may stay as
+// defence in depth, but nothing here depends on it any more.
 //
-// Every frame header contains NUL bytes -- payloadLen <= 1 MiB puts a zero in
-// its top byte, the reserved field is two zeros, and any modest index adds four
-// more. The only writer of WAL payloads is Log (see log.go), whose bodies go
-// through canonicalBody -> json.Compact, and JSON rejects a raw control byte
-// inside a string. A client therefore cannot place the bytes a forged header
-// needs. TestWALPayloadsCannotCarryAFrameHeader pins this, and it must be
-// treated as load-bearing rather than incidental.
+// THE LIMIT THAT REMAINS: none of this helps against an attacker who already has
+// WRITE ACCESS TO THE DATA DIRECTORY. The key file sits in that directory; such
+// an attacker reads it and forges freely. That is an accepted, recorded limit
+// (DECISIONS.md 2026-08-02), not an oversight.
 //
-// THE CONDITION UNDER WHICH THAT STOPS HOLDING, so it is not discovered the hard
-// way: the moment the payload channel widens to arbitrary bytes -- a binary or
-// base64-decoded body, compression, E2E ciphertext, or an audit record carrying
-// raw content bytes -- this argument evaporates and the keyed MAC becomes a
-// BLOCKING PRECONDITION for that change, not a later improvement.
-func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) (int64, bool, error) {
+// AND WHAT THE MAC DOES NOT SOLVE, so that none of the machinery below is
+// mistaken for redundant: the MAC answers "are these bytes intact and ours?".
+// It does not answer "WHERE IS THE NEXT RECORD?". Finding that offset in a file
+// with a hole blown in it is what the two stages, the density window and
+// rebuildFrame are for, and the MAC makes each of those checks STRONGER -- their
+// final test is now unforgeable -- rather than unnecessary. Removing any of them
+// would reintroduce a data-loss bug that has already been measured once (see
+// stage 2).
+func resyncFrom(f *os.File, c codec, size, from int64, lastIndex uint64, declared int64) (int64, bool, error) {
 	// STAGE 0: the damaged frame's own declared boundary. When only a payload
 	// byte was flipped the length field is still correct, so the next record
-	// starts exactly there and the whole search costs one checksum.
-	if declared > 0 && from+declared+FrameHeaderSize <= size {
+	// starts exactly there and the whole search costs one verification.
+	if declared > 0 && from+declared+c.frameHeaderSize() <= size {
 		// One candidate cannot exhaust a 4096-verification, 64 MiB budget: a
 		// single payload is at most MaxPayloadSize. The budget is passed for
 		// uniformity, not because it can fire here.
 		budget := resyncBudget{}
-		ok, err := validFrameAt(f, size, from+declared, lastIndex, &budget)
+		ok, err := validFrameAt(f, c, size, from+declared, lastIndex, &budget)
 		if err != nil {
 			return 0, false, err
 		}
@@ -499,7 +534,7 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 
 	// STAGE 1: scan with the DENSITY window, which is a tight filter and keeps
 	// the ordinary case cheap.
-	o, exhausted, err := scanForFrame(f, size, from, lastIndex, true)
+	o, exhausted, err := scanForFrame(f, c, size, from, lastIndex, true)
 	if err != nil || o >= 0 || exhausted {
 		return o, exhausted, err
 	}
@@ -522,11 +557,10 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 	// So the rule is: A BOUNDED SEARCH FINDING NOTHING IS NEVER ON ITS OWN
 	// GROUNDS FOR "NOTHING FOLLOWS". Stage 2 keeps the two filters that are
 	// actually sound -- an index strictly greater than the last survivor's, and
-	// the record's own checksum -- and drops only the heuristic one. It runs
-	// with a FRESH budget so that a stage-1 near-miss cannot starve it, and it
-	// costs nothing in the common case because stage 1 almost always answers
-	// first.
-	return scanForFrame(f, size, from, lastIndex, false)
+	// the record's own tag -- and drops only the heuristic one. It runs with a
+	// FRESH budget so that a stage-1 near-miss cannot starve it, and it costs
+	// nothing in the common case because stage 1 almost always answers first.
+	return scanForFrame(f, c, size, from, lastIndex, false)
 }
 
 // scanForFrame walks [from+1, size) for the first offset holding an intact
@@ -541,10 +575,11 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 // Each call carries its own budget. Exhausting it is reported rather than
 // hidden, because a search that gave up is not the same fact as a search that
 // finished and found nothing.
-func scanForFrame(f *os.File, size, from int64, lastIndex uint64, dense bool) (int64, bool, error) {
+func scanForFrame(f *os.File, c codec, size, from int64, lastIndex uint64, dense bool) (int64, bool, error) {
 	budget := resyncBudget{}
-	buf := make([]byte, resyncChunk+FrameHeaderSize)
-	for base := from + 1; base+FrameHeaderSize <= size; base += resyncChunk {
+	headerSize := c.frameHeaderSize()
+	buf := make([]byte, int64(resyncChunk)+headerSize)
+	for base := from + 1; base+headerSize <= size; base += resyncChunk {
 		n := size - base
 		if n > int64(len(buf)) {
 			n = int64(len(buf))
@@ -552,9 +587,9 @@ func scanForFrame(f *os.File, size, from int64, lastIndex uint64, dense bool) (i
 		if _, err := f.ReadAt(buf[:n], base); err != nil && err != io.EOF {
 			return 0, false, fmt.Errorf("wal: repair: read %d bytes at offset %d while searching for the next intact record: %w", n, base, err)
 		}
-		for i := int64(0); i+FrameHeaderSize <= n; i++ {
+		for i := int64(0); i+headerSize <= n; i++ {
 			o := base + i
-			hdr := buf[i : i+FrameHeaderSize]
+			hdr := buf[i : i+headerSize]
 			if binary.BigEndian.Uint16(hdr[14:16]) != 0 {
 				continue
 			}
@@ -562,14 +597,14 @@ func scanForFrame(f *os.File, size, from int64, lastIndex uint64, dense bool) (i
 			if idx <= lastIndex {
 				continue
 			}
-			if dense && idx > lastIndex+uint64((size-o)/FrameHeaderSize)+1 {
+			if dense && idx > lastIndex+uint64((size-o)/headerSize)+1 {
 				continue
 			}
 			payloadLen := int64(binary.BigEndian.Uint32(hdr[0:4]))
-			if payloadLen > MaxPayloadSize || o+FrameHeaderSize+payloadLen > size {
+			if payloadLen > MaxPayloadSize || o+headerSize+payloadLen > size {
 				continue
 			}
-			ok, err := verifyFrame(f, o, hdr, payloadLen, &budget)
+			ok, err := verifyFrame(f, c, o, hdr, payloadLen, &budget)
 			if err != nil {
 				return 0, false, err
 			}
@@ -602,8 +637,8 @@ func (b *resyncBudget) spend(n int64) bool {
 }
 
 // validFrameAt applies the full candidate test at a single offset.
-func validFrameAt(f *os.File, size, o int64, lastIndex uint64, budget *resyncBudget) (bool, error) {
-	hdr, ok := frameHeaderAt(f, o, size)
+func validFrameAt(f *os.File, c codec, size, o int64, lastIndex uint64, budget *resyncBudget) (bool, error) {
+	hdr, ok := frameHeaderAt(f, c, o, size)
 	if !ok {
 		return false, nil
 	}
@@ -614,23 +649,24 @@ func validFrameAt(f *os.File, size, o int64, lastIndex uint64, budget *resyncBud
 		return false, nil
 	}
 	payloadLen := int64(binary.BigEndian.Uint32(hdr[0:4]))
-	if payloadLen > MaxPayloadSize || o+FrameHeaderSize+payloadLen > size {
+	if payloadLen > MaxPayloadSize || o+c.frameHeaderSize()+payloadLen > size {
 		return false, nil
 	}
-	return verifyFrame(f, o, hdr, payloadLen, budget)
+	return verifyFrame(f, c, o, hdr, payloadLen, budget)
 }
 
-// verifyFrame reads a candidate's payload and checks the record checksum,
-// spending the search's work budget.
-func verifyFrame(f *os.File, o int64, hdr []byte, payloadLen int64, budget *resyncBudget) (bool, error) {
+// verifyFrame reads a candidate's payload and checks the record's tag, spending
+// the search's work budget.
+func verifyFrame(f *os.File, c codec, o int64, hdr []byte, payloadLen int64, budget *resyncBudget) (bool, error) {
 	if !budget.spend(payloadLen) {
 		return false, nil
 	}
+	headerSize := c.frameHeaderSize()
 	payload := make([]byte, payloadLen)
-	if _, err := f.ReadAt(payload, o+FrameHeaderSize); err != nil && err != io.EOF {
-		return false, fmt.Errorf("wal: repair: read a %d-byte payload at offset %d while searching for the next intact record: %w", payloadLen, o+FrameHeaderSize, err)
+	if _, err := f.ReadAt(payload, o+headerSize); err != nil && err != io.EOF {
+		return false, fmt.Errorf("wal: repair: read a %d-byte payload at offset %d while searching for the next intact record: %w", payloadLen, o+headerSize, err)
 	}
-	return frameChecksum(hdr[0:16], payload) == binary.BigEndian.Uint32(hdr[16:20]), nil
+	return c.verifyTag(hdr[0:frameCoveredBytes], payload, hdr[frameCoveredBytes:headerSize]), nil
 }
 
 // checkSalvageHeader classifies the file header, which is the one place the
@@ -639,34 +675,41 @@ func verifyFrame(f *os.File, o int64, hdr []byte, payloadLen int64, budget *resy
 //   - The header verifies: nothing to do.
 //   - The header does not verify but the magic and version are ours, or are
 //     garbage: DAMAGE. It is rebuilt, because the header's content is a
-//     constant -- there is nothing in it to recover, only 16 bytes to rewrite
-//     -- and refusing to start over a flipped bit in a fixed preamble would
-//     throw away an entire readable log.
+//     constant -- there is nothing in it to recover, only a fixed preamble to
+//     rewrite -- and refusing to start over a flipped bit there would throw
+//     away an entire readable log.
 //   - The magic names the OTHER kind of log: NOT damage. An audit file is not a
 //     WAL, and "repairing" its header would relabel it and replay records that
 //     were never write-ahead records. Fatal.
 //   - The version is a different number under OUR magic: NOT damage. This
 //     binary does not implement that layout, and guessing at it is how a
 //     downgrade eats a log. Fatal.
-func checkSalvageHeader(f *os.File, path string, kind Kind, size int64, plan *repairPlan) error {
-	if size < FileHeaderSize {
+//
+// It also records what the header SAYS -- HeaderMagicOK and HeaderVersion --
+// whether or not it verified, because that is what lets repairLog separate
+// "the header is damaged" from "the key is wrong". See repairLog.
+func checkSalvageHeader(f *os.File, path string, kind Kind, c codec, size int64, plan *repairPlan) error {
+	headerSize := c.fileHeaderSize()
+	if size < headerSize {
 		plan.HeaderDamaged = true
 		return nil
 	}
-	hdr := make([]byte, FileHeaderSize)
+	hdr := make([]byte, headerSize)
 	if _, err := f.ReadAt(hdr, 0); err != nil {
 		return fmt.Errorf("wal: repair %s: read the file header: %w", path, err)
 	}
 	magic := string(hdr[0:8])
 	version := binary.BigEndian.Uint32(hdr[8:12])
+	plan.HeaderMagicOK = magic == kind.magic()
+	plan.HeaderVersion = version
 
 	if got := kindForMagic(magic); got != 0 && got != kind {
 		return corruptf(path, 0, "file is a %s file, want a %s file; recovery will not reinterpret one log as the other", got, kind)
 	}
-	if magic == kind.magic() && version != FormatVersion {
-		return corruptf(path, 0, "format version %d, want %d; this binary does not implement that layout and recovery will not guess at it", version, FormatVersion)
+	if plan.HeaderMagicOK && version != c.version {
+		return corruptf(path, 0, "format version %d, want %d; this binary does not implement that layout and recovery will not guess at it", version, c.version)
 	}
-	if err := parseFileHeader(hdr, path, kind); err != nil {
+	if err := c.parseFileHeader(hdr, path, kind); err != nil {
 		plan.HeaderDamaged = true
 	}
 	return nil
@@ -683,7 +726,7 @@ func checkSalvageHeader(f *os.File, path string, kind Kind, size int64, plan *re
 // in the same directory, fsynced, and then renamed over the original, which is
 // atomic. A crash at any point before the rename leaves the ORIGINAL file
 // exactly as it was, so the worst case is that the same repair runs again.
-func rewriteLog(path string, kind Kind, want repairPlan) (repairPlan, error) {
+func rewriteLog(path string, kind Kind, c codec, want repairPlan) (repairPlan, error) {
 	tmp := path + ".repair"
 	// A stale temporary from a crashed repair is meaningless: it is a partial
 	// copy of a file that is still intact. Remove it rather than reuse it.
@@ -701,18 +744,26 @@ func rewriteLog(path string, kind Kind, want repairPlan) (repairPlan, error) {
 	}
 
 	bw := bufio.NewWriter(f)
-	if _, err := bw.Write(makeFileHeader(kind)); err != nil {
+	if _, err := bw.Write(c.makeFileHeader(kind)); err != nil {
 		cleanup()
 		return repairPlan{}, fmt.Errorf("wal: repair %s: write the file header of %s: %w", path, tmp, err)
 	}
-	// encodeFrame reproduces a surviving frame BYTE FOR BYTE: the checksum this
-	// walk verified covers the length, the index, the type and the reserved
-	// field as well as the payload, so every input to encodeFrame is already
-	// proven to be what was on disk. For a frame whose length field was rebuilt
-	// it emits the frame the writer originally wrote, which is the whole point
-	// of the proof in rebuildFrame.
-	plan, err := salvage(path, kind, func(rec Record) error {
-		_, werr := bw.Write(encodeFrame(rec.Index, rec.Type, rec.Payload))
+	// A REPAIR REWRITES THE FILE IN THE VERSION IT ALREADY IS -- c is the codec
+	// the walk above read it with, so a version 1 log is repaired as version 1
+	// and upgradeV1 converts it afterwards. That ordering is forced: the
+	// upgrade's strict scan cannot read a damaged log, so the damage has to go
+	// first. This is the ONE caller permitted to encode a legacy frame (see
+	// codec.encodeFrame); the file it produces is immediately upgraded and is
+	// never appended to in version 1.
+	//
+	// encodeFrame reproduces a surviving frame BYTE FOR BYTE: the tag this walk
+	// verified covers the length, the index, the type and the reserved field as
+	// well as the payload, so every input to encodeFrame is already proven to be
+	// what was on disk. For a frame whose length field was rebuilt it emits the
+	// frame the writer originally wrote, which is the whole point of the proof
+	// in rebuildFrame.
+	plan, err := salvage(path, kind, c, func(rec Record) error {
+		_, werr := bw.Write(c.encodeFrame(rec.Index, rec.Type, rec.Payload))
 		return werr
 	})
 	if err != nil {

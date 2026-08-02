@@ -1,10 +1,16 @@
 package wal
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
@@ -213,14 +219,31 @@ func RepairTail(path string, kind Kind, logger *logging.Logger) (TailRepair, err
 // decision that widened it from "a verified-corrupt tail" to "damaged records
 // anywhere" is recorded and dated.
 func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
-	res := Repair{Path: path}
-
 	// Checked BEFORE the file is touched. A caller that does not know what kind
 	// of file this is must never reach the rewrite, which would otherwise stamp
 	// a meaningless magic into the header it writes.
 	if kind.magic() == "" {
-		return res, fmt.Errorf("wal: repair %s: %w: %s", path, ErrUnknownKind, kind)
+		return Repair{Path: path}, fmt.Errorf("wal: repair %s: %w: %s", path, ErrUnknownKind, kind)
 	}
+	// A file that is absent or zero-length provably holds no record, so it is
+	// answered BEFORE the codec is resolved: a read of a log that is not there
+	// must not create a MAC key as a side effect.
+	if empty, err := logIsEmpty(path); err != nil || empty {
+		return Repair{Path: path}, err
+	}
+	c, err := resolveCodec(path, kind, logger)
+	if err != nil {
+		return Repair{Path: path}, err
+	}
+	return repairLog(path, kind, c, logger)
+}
+
+// repairLog is RepairLog with the codec already resolved, so that Open resolves
+// the format and loads the MAC key exactly once for the whole of recovery, and
+// so that the version 1 path can repair a legacy log in its own format before
+// upgradeV1 converts it.
+func repairLog(path string, kind Kind, c codec, logger *logging.Logger) (Repair, error) {
+	res := Repair{Path: path}
 
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -236,11 +259,11 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 		return res, nil
 	}
 
-	if _, _, _, err := scanFraming(path, kind); err == nil {
+	if _, _, _, err := scanFraming(path, kind, c); err == nil {
 		return res, nil // the file is well framed end to end
 	}
 
-	plan, err := salvage(path, kind, nil)
+	plan, err := salvage(path, kind, c, nil)
 	if err != nil {
 		return res, err // only the "cannot read this file" class reaches here
 	}
@@ -249,6 +272,43 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 	// salvaged is not a log this code can make anything of. Move it aside and
 	// start fresh, rather than refuse to boot for ever.
 	if plan.HeaderDamaged && !plan.Salvageable {
+		// EXCEPT when that is what a WRONG KEY looks like, which is the one
+		// deliberate exception to the always-restart policy (DECISIONS.md
+		// 2026-08-02, "a missing or wrong key is FATAL").
+		//
+		// The two cases are separated by evidence, not by guesswork. A wrong key
+		// fails the file header's MAC and EVERY record's MAC, because it fails
+		// all of them for the same reason. Damage confined to the header leaves
+		// the records verifying -- so plan.Salvageable being TRUE proves the key
+		// is right, and that case is handled below exactly as it always was: the
+		// header is rebuilt, every record is kept, the bus starts.
+		//
+		// What is left here is a header that is structurally OURS and claims the
+		// CURRENT version, whose MAC fails, with not one verifying record behind
+		// it. That is byte-indistinguishable from opening an intact log under the
+		// wrong key, and quarantining it would rename an entire probably-intact
+		// log aside over a misconfiguration that takes seconds to fix. Every
+		// other shape -- garbage magic, a file shorter than a header, a version 1
+		// log -- keeps today's quarantine behaviour untouched.
+		//
+		// THE ACCEPTED COST, stated plainly: a genuinely destroyed version 2 log
+		// (right key, header gone, no record readable anywhere) no longer
+		// self-quarantines. It needs one manual `mv` before the bus will start.
+		// That is the price of not deleting a log because someone mounted the
+		// wrong volume.
+		//
+		// One narrowing, and it only ever makes recovery MORE available: a file
+		// no longer than its own header holds no record at all, so there is
+		// nothing a wrong key could be hiding and nothing quarantining it can
+		// destroy. That case keeps the old behaviour -- moved aside, fresh log,
+		// bus starts -- rather than demanding an operator delete an empty file
+		// by hand.
+		if !c.isV1() && plan.HeaderMagicOK && plan.HeaderVersion == FormatVersion && plan.Size > c.fileHeaderSize() {
+			keyPath := macKeyPath(filepath.Dir(path))
+			return res, &macKeyErr{sentinel: ErrMACKeyMismatch,
+				msg: fmt.Sprintf("wal: %s: the file header does not verify under the MAC key at %s, and not one record in the file verifies under it either; that is what a WRONG KEY looks like, and recovery will not discard a log that is probably intact over a misconfiguration (a missing or wrong key is a deliberate exception to the always-restart policy). If the key is genuinely lost, move %s aside by hand and restart.",
+					path, keyPath, path)}
+		}
 		dest, qerr := quarantine(path)
 		if qerr != nil {
 			return res, qerr // renaming failed: a filesystem problem, not damage
@@ -294,7 +354,7 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 		before := plan.Size
 		// rewriteLog re-runs the walk and checks it against plan BEFORE it
 		// renames anything, so a disagreement leaves the original file untouched.
-		after, err := rewriteLog(path, kind, plan)
+		after, err := rewriteLog(path, kind, c, plan)
 		if err != nil {
 			return res, err
 		}
@@ -331,13 +391,193 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 	}
 
 	// Prove the result rather than assume it. The repair only ever writes frames
-	// whose checksum this code verified, so a failure here means the repair
-	// itself is broken -- and the answer to that is NOT to repair again, which
-	// would happily eat a log one pass at a time.
-	if _, _, _, err := scanFraming(path, kind); err != nil {
+	// whose tag this code verified, so a failure here means the repair itself is
+	// broken -- and the answer to that is NOT to repair again, which would
+	// happily eat a log one pass at a time.
+	if _, _, _, err := scanFraming(path, kind, c); err != nil {
 		return res, fmt.Errorf("wal: repair %s: the repaired log is still not readable; recovery will not repair it a second time and it needs operator inspection: %w", path, err)
 	}
 	return res, nil
+}
+
+// upgradeV1 converts a format version 1 log to version 2, ONCE, at startup.
+//
+// # Why this exists at all
+//
+// Format version 2 replaced the unkeyed CRC32C with a keyed HMAC-SHA256. A naive
+// version bump would BRICK EVERY EXISTING BUS: a version 2 reader would find a
+// version number it does not implement, refuse to start, and there would be no
+// route back. So the story, which the file header makes enforceable, is:
+//
+//	A VERSION 1 LOG IS VERIFIED WITH CRC32C, REPAIRED IF DAMAGED WITH THE
+//	VERSION 1 CODEC, THEN CONVERTED ONCE TO VERSION 2 AT STARTUP.
+//
+// A FILE IS ENTIRELY ONE VERSION. There is never a mixed version-1-then-version-2
+// file: the version lives in the file header, one header describes one file, and
+// a version 2 writer never emits a version 1 frame. That is why the conversion
+// is a whole-file rewrite rather than an append.
+//
+// # What is preserved
+//
+// INDICES, TYPES AND PAYLOADS ARE CARRIED ACROSS BYTE FOR BYTE. Nothing is
+// renumbered and nothing is compacted -- invariant 1 forbids reusing an id, and
+// a log with holes in its index sequence is legal, permanent state. The
+// conversion changes the FRAMING and nothing else.
+//
+// # Crash safety
+//
+// Everything is written to a temporary file, verified, and renamed over the
+// original, which is atomic. THE ORIGINAL IS UNTOUCHED UNTIL THE RENAME, so a
+// crash at any point simply re-runs the whole upgrade on the next start -- which
+// is why the stale temporary is removed rather than resumed, and why this
+// function is idempotent and returns nil when the file is already version 2.
+//
+// # Verification before the rename
+//
+// The converted file is re-scanned WITH THE VERSION 2 CODEC and its records
+// digested again; the record count and the digest must match what was read out
+// of the original. A mismatch is FATAL and leaves the original in place. This is
+// the same discipline as rewriteLog's two-pass check and for the same reason: a
+// disagreement is a bug in this code, not damage in the file, and restarting
+// onto a converted log that nothing verified is worse than not restarting.
+func upgradeV1(path string, kind Kind, to codec, logger *logging.Logger) error {
+	version, err := detectFormat(path, kind)
+	if err != nil {
+		return err
+	}
+	if version != formatVersionV1 {
+		// Already converted -- by a previous start, or by the repair above,
+		// which rewrites the file in whatever version it read it in. Or gone:
+		// an unreadable log may have been quarantined. Either way, nothing to do.
+		return nil
+	}
+	from := codec{version: formatVersionV1}
+
+	tmp := path + ".upgrade"
+	// A stale temporary from a crashed upgrade is meaningless: it is a partial
+	// copy of a file that is still intact. Remove it rather than resume it.
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wal: upgrade %s: remove the stale temporary %s: %w", path, tmp, err)
+	}
+
+	src, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("wal: upgrade %s: open: %w", path, err)
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, fileMode)
+	if err != nil {
+		return fmt.Errorf("wal: upgrade %s: create the temporary %s: %w", path, tmp, err)
+	}
+	cleanup := func() {
+		dst.Close()
+		os.Remove(tmp)
+	}
+
+	bw := bufio.NewWriter(dst)
+	if _, err := bw.Write(to.makeFileHeader(kind)); err != nil {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: write the file header of %s: %w", path, tmp, err)
+	}
+	// A RUNNING digest, not a slice of records: a log may be far larger than
+	// memory, and the check below must cost O(1) space however big it is.
+	digest := sha256.New()
+	records := uint64(0)
+	if _, err := scanFrom(from, src, path, kind, func(rec Record) error {
+		if _, werr := bw.Write(to.encodeFrame(rec.Index, rec.Type, rec.Payload)); werr != nil {
+			return werr
+		}
+		records++
+		digestRecord(digest, rec)
+		return nil
+	}); err != nil {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: read it as on-disk format version %d: %w", path, formatVersionV1, err)
+	}
+	if err := bw.Flush(); err != nil {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: flush %s: %w", path, tmp, err)
+	}
+	if err := dst.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: fsync %s: %w", path, tmp, err)
+	}
+
+	gotRecords, gotDigest, err := digestLog(tmp, kind, to)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: re-read the converted %s: %w", path, tmp, err)
+	}
+	if gotRecords != records || !bytes.Equal(gotDigest, digest.Sum(nil)) {
+		cleanup()
+		return fmt.Errorf("wal: upgrade %s: the converted log does not match the original (original %d records digest %x, converted %d records digest %x); this is a bug in the upgrade, not damage in the file, and the log has NOT been changed",
+			path, records, digest.Sum(nil), gotRecords, gotDigest)
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("wal: upgrade %s: close %s: %w", path, tmp, err)
+	}
+
+	// A BEST-EFFORT backup of the original, by hard link so it costs no space
+	// and cannot itself fail half way. If the filesystem will not link, that is
+	// logged and the upgrade CONTINUES: refusing to boot for want of a backup
+	// would contradict the always-restart policy, and the operator's real backup
+	// is not this file.
+	backup := fmt.Sprintf("%s.v1-%d", path, time.Now().UTC().UnixNano())
+	if err := os.Link(path, backup); err != nil {
+		logger.Warn("wal could not keep a backup of the format version 1 log before upgrading it",
+			"path", path, "backup", backup, "error", err.Error())
+		backup = ""
+	}
+
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("wal: upgrade %s: rename %s over it: %w", path, tmp, err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("wal: upgrade %s: fsync the directory after the rename: %w", path, err)
+	}
+	logger.Info("wal upgraded a log from on-disk format version 1 to 2",
+		"path", path, "records", records, "backup", backup,
+		"key", macKeyPath(filepath.Dir(path)))
+	return nil
+}
+
+// digestRecord folds one record's IDENTITY -- index, type and payload -- into a
+// running digest.
+//
+// It is an internal SELF-CHECK, not a security primitive: it answers "did the
+// conversion carry every record across unchanged?" and nothing else. The fields
+// are length-prefixed so that two different record streams cannot produce the
+// same byte string, which is the only property it needs.
+func digestRecord(h hash.Hash, rec Record) {
+	var b [14]byte
+	binary.BigEndian.PutUint64(b[0:8], rec.Index)
+	binary.BigEndian.PutUint16(b[8:10], uint16(rec.Type))
+	binary.BigEndian.PutUint32(b[10:14], uint32(len(rec.Payload)))
+	h.Write(b[:])
+	h.Write(rec.Payload)
+}
+
+// digestLog scans path with codec c and returns the record count and the running
+// digest of every record's identity. See digestRecord.
+func digestLog(path string, kind Kind, c codec) (uint64, []byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	records := uint64(0)
+	if _, err := scanFrom(c, f, path, kind, func(rec Record) error {
+		records++
+		digestRecord(h, rec)
+		return nil
+	}); err != nil {
+		return 0, nil, err
+	}
+	return records, h.Sum(nil), nil
 }
 
 // maxDiscardsLogged bounds how many discards are named individually in the log.
@@ -409,14 +649,14 @@ func sizeOf(path string) int64 {
 // directory (see the note in Open), so a second process writing to the same log
 // can still interleave with the whole repair. Excluding that needs a real
 // directory lock, and this ordering is only the cheap half of the answer.
-func scanFraming(path string, kind Kind) (records uint64, end, size int64, err error) {
+func scanFraming(path string, kind Kind, c codec) (records uint64, end, size int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("wal: open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	end, scanErr := scanFrom(f, path, kind, func(Record) error {
+	end, scanErr := scanFrom(c, f, path, kind, func(Record) error {
 		records++
 		return nil
 	})

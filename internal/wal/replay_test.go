@@ -757,7 +757,7 @@ func appendRawFrame(t *testing.T, path string, index uint64, typ Type, payload [
 		t.Fatalf("OpenFile(%s) to append a raw frame: %v", path, err)
 	}
 	defer f.Close()
-	if _, err := f.Write(encodeFrame(index, typ, payload)); err != nil {
+	if _, err := f.Write(testCodec(t, path).encodeFrame(index, typ, payload)); err != nil {
 		t.Fatalf("appending a raw frame: %v", err)
 	}
 }

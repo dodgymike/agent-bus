@@ -23,6 +23,10 @@ const fileMode os.FileMode = 0600
 type Writer struct {
 	path string
 	kind Kind
+	// c is the on-disk format this Writer appends in. It is ALWAYS the current
+	// version: OpenWriter refuses a format version 1 file outright, so a Writer
+	// can never emit a legacy frame.
+	c codec
 
 	mu       sync.Mutex
 	f        *os.File
@@ -51,16 +55,34 @@ func OpenWriter(path string, kind Kind) (*Writer, error) {
 	if kind.magic() == "" {
 		return nil, fmt.Errorf("wal: open %s: %w: %s", path, ErrUnknownKind, kind)
 	}
+	c, err := resolveCodec(path, kind, nil)
+	if err != nil {
+		return nil, err
+	}
+	// THERE IS NO DOWNGRADE WRITE. A version 1 log is READ so it can be
+	// upgraded, never appended to: mixing versions inside one file is
+	// impossible by construction (the version lives in the file header), so
+	// appending here would mean writing a legacy frame for ever. Open performs
+	// the upgrade at startup and therefore never reaches this.
+	if c.isV1() {
+		return nil, fmt.Errorf("wal: open %s for appending: the file is in on-disk format version %d; it must be upgraded to version %d before it can be appended to -- wal.Open performs that upgrade at startup",
+			path, formatVersionV1, FormatVersion)
+	}
+	return openWriter(path, kind, c)
+}
 
+// openWriter is OpenWriter with the codec already resolved, so that Open loads
+// the MAC key exactly once for the whole of recovery.
+func openWriter(path string, kind Kind, c codec) (*Writer, error) {
 	// O_EXCL rather than a stat-then-open: it makes "did I create this file?"
 	// an atomic answer from the kernel instead of a guess with a race in it.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, fileMode)
 	if err == nil {
-		if err := initFile(f, path, kind); err != nil {
+		if err := initFile(f, path, kind, c); err != nil {
 			f.Close()
 			return nil, err
 		}
-		return &Writer{path: path, kind: kind, f: f, next: 1, size: FileHeaderSize}, nil
+		return &Writer{path: path, kind: kind, c: c, f: f, next: 1, size: c.fileHeaderSize()}, nil
 	}
 	if !errors.Is(err, os.ErrExist) {
 		return nil, fmt.Errorf("wal: create %s: %w", path, err)
@@ -76,17 +98,17 @@ func OpenWriter(path string, kind Kind) (*Writer, error) {
 		return nil, fmt.Errorf("wal: stat %s: %w", path, err)
 	}
 	if fi.Size() == 0 {
-		if err := initFile(f, path, kind); err != nil {
+		if err := initFile(f, path, kind, c); err != nil {
 			f.Close()
 			return nil, err
 		}
-		return &Writer{path: path, kind: kind, f: f, next: 1, size: FileHeaderSize}, nil
+		return &Writer{path: path, kind: kind, c: c, f: f, next: 1, size: c.fileHeaderSize()}, nil
 	}
 
 	// Scan without retaining the records: the writer only needs the last index
 	// and the end offset, and a log may be far larger than memory.
 	last := uint64(0)
-	end, err := scanFrom(f, path, kind, func(rec Record) error {
+	end, err := scanFrom(c, f, path, kind, func(rec Record) error {
 		last = rec.Index
 		return nil
 	})
@@ -94,14 +116,14 @@ func OpenWriter(path string, kind Kind) (*Writer, error) {
 		f.Close()
 		return nil, err
 	}
-	return &Writer{path: path, kind: kind, f: f, next: last + 1, size: end}, nil
+	return &Writer{path: path, kind: kind, c: c, f: f, next: last + 1, size: end}, nil
 }
 
 // initFile writes and fsyncs the file header, then fsyncs the parent
 // directory. Both syncs are required: the first makes the header durable, the
 // second makes the directory entry that names the file durable.
-func initFile(f *os.File, path string, kind Kind) error {
-	hdr := makeFileHeader(kind)
+func initFile(f *os.File, path string, kind Kind, c codec) error {
+	hdr := c.makeFileHeader(kind)
 	if n, err := f.WriteAt(hdr, 0); err != nil || n != len(hdr) {
 		return fmt.Errorf("wal: write file header to %s at offset 0: %w", path, shortWrite(err, n, len(hdr)))
 	}
@@ -169,7 +191,7 @@ func (w *Writer) Append(t Type, payload []byte) (Record, error) {
 	}
 
 	off, index := w.size, w.next
-	frame := encodeFrame(index, t, payload)
+	frame := w.c.encodeFrame(index, t, payload)
 
 	if n, err := w.f.WriteAt(frame, off); err != nil || n != len(frame) {
 		return Record{}, w.poison(fmt.Errorf("wal: append to %s at offset %d: %w",
@@ -184,7 +206,7 @@ func (w *Writer) Append(t Type, payload []byte) (Record, error) {
 	// The payload is the writer's own copy inside frame, never the caller's
 	// slice, so a caller that reuses its buffer cannot mutate a returned
 	// Record out from under the reader that later replays it.
-	return Record{Index: index, Type: t, Payload: frame[FrameHeaderSize:], Offset: off}, nil
+	return Record{Index: index, Type: t, Payload: frame[w.c.frameHeaderSize():], Offset: off}, nil
 }
 
 // poison latches the first failure and returns the error to report. The caller

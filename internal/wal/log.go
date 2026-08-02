@@ -241,25 +241,68 @@ func Open(opts LogOptions) (*Log, error) {
 	// cannot be interpreted at all -- moves it aside so startup can continue
 	// with a fresh log. It then PROVES its own result by re-scanning, so Replay
 	// below always sees a file that parses end to end.
+	//
+	// THE ON-DISK FORMAT AND THE MAC KEY ARE RESOLVED ONCE, HERE, and threaded
+	// through every pass, so recovery cannot change its mind about which format
+	// it is reading half way and does not load the key four times.
+	//
+	// A FORMAT VERSION 1 LOG IS UPGRADED BEFORE ANYTHING ELSE HAPPENS TO IT, in
+	// two steps that have to be in this order: it is repaired IN VERSION 1 (the
+	// upgrade's strict scan cannot read a damaged log), then converted once to
+	// version 2 (see upgradeV1). After that the file is version 2 and the rest of
+	// recovery is the ordinary path. Nothing appends to a version 1 file --
+	// OpenWriter refuses one outright.
 	// ---------------------------------------------------------------------
-	repair, err := RepairLog(path, KindWAL, opts.Logger)
+	version, err := detectFormat(path, KindWAL)
 	if err != nil {
-		return nil, err // RepairLog already names the path and the offset
+		return nil, err // detectFormat already names the path
+	}
+	var legacyRepair Repair
+	if version == formatVersionV1 {
+		legacyRepair, err = repairLog(path, KindWAL, codec{version: formatVersionV1}, opts.Logger)
+		if err != nil {
+			return nil, err
+		}
+		to, err := currentCodec(path, KindWAL, opts.Logger)
+		if err != nil {
+			return nil, err
+		}
+		if err := upgradeV1(path, KindWAL, to, opts.Logger); err != nil {
+			return nil, err
+		}
+	}
+
+	c, err := resolveCodec(path, KindWAL, opts.Logger)
+	if err != nil {
+		return nil, err
+	}
+
+	repair, err := repairLog(path, KindWAL, c, opts.Logger)
+	if err != nil {
+		return nil, err // repairLog already names the path and the offset
+	}
+	// A legacy log that needed repairing was repaired BEFORE the upgrade, so the
+	// pass above found the converted file clean. Report the repair that actually
+	// happened rather than the no-op that followed it.
+	// Its NextIndex is still right: the upgrade carries indices across byte for
+	// byte and never renumbers.
+	if legacyRepair.Truncated || legacyRepair.Rewritten || legacyRepair.Quarantined != "" || legacyRepair.DiscardCount > 0 {
+		repair = legacyRepair
 	}
 
 	var apply func(Committed) error
 	if opts.Applier != nil {
 		apply = opts.Applier.Apply
 	}
-	rec, err := Replay(path, apply)
+	rec, err := replay(path, c, apply)
 	if err != nil {
-		return nil, err // Replay already names the path and the offset
+		return nil, err // replay already names the path and the offset
 	}
 	rec.Repaired = repair
 
-	w, err := OpenWriter(path, KindWAL)
+	w, err := openWriter(path, KindWAL, c)
 	if err != nil {
-		return nil, err // OpenWriter already names the path
+		return nil, err // openWriter already names the path
 	}
 	// Replay and OpenWriter read the same file in two passes, so they must agree
 	// about where it ends. If they do not, the file changed between the passes

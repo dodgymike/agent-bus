@@ -28,7 +28,8 @@ type indexedOp struct {
 func buildWALIndexed(t *testing.T, ops []indexedOp) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), WALFileName)
-	buf := makeFileHeader(KindWAL)
+	c := testCodec(t, path)
+	buf := c.makeFileHeader(KindWAL)
 	ts := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	for _, op := range ops {
 		var payload []byte
@@ -46,7 +47,7 @@ func buildWALIndexed(t *testing.T, ops []indexedOp) string {
 		if err != nil {
 			t.Fatalf("buildWALIndexed: encode %s: %v", op.typ, err)
 		}
-		buf = append(buf, encodeFrame(op.index, op.typ, payload)...)
+		buf = append(buf, c.encodeFrame(op.index, op.typ, payload)...)
 	}
 	if err := os.WriteFile(path, buf, fileMode); err != nil {
 		t.Fatalf("buildWALIndexed: write %s: %v", path, err)

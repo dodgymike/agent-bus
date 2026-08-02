@@ -29,8 +29,15 @@ func ScanAll(path string, kind Kind) ([]Record, int64, error) {
 	}
 	defer f.Close()
 
+	// Resolved AFTER the open, so a scan of a log that is not there reports the
+	// missing log rather than anything about a key.
+	c, err := resolveCodec(path, kind, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	var recs []Record
-	end, err := scanFrom(f, path, kind, func(rec Record) error {
+	end, err := scanFrom(c, f, path, kind, func(rec Record) error {
 		recs = append(recs, rec)
 		return nil
 	})
@@ -45,42 +52,43 @@ func ScanAll(path string, kind Kind) ([]Record, int64, error) {
 // go through it, so the writer can never disagree with the reader about where a
 // file ends. fn lets a caller establish the next index without holding an entire
 // log in memory, and is the seam recovery uses for a streaming replay.
-func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64, error) {
+func scanFrom(c codec, r io.Reader, path string, kind Kind, fn func(Record) error) (int64, error) {
 	if kind.magic() == "" {
 		return 0, fmt.Errorf("wal: scan %s: %w: %s", path, ErrUnknownKind, kind)
 	}
 	br := bufio.NewReader(r)
 
-	hdr := make([]byte, FileHeaderSize)
+	headerSize := c.fileHeaderSize()
+	hdr := make([]byte, headerSize)
 	n, err := io.ReadFull(br, hdr)
 	if err != nil {
 		if err == io.EOF {
 			return 0, &CorruptError{Path: path, Offset: 0,
-				Reason: fmt.Sprintf("file is empty: it has no %d-byte file header", FileHeaderSize),
+				Reason: fmt.Sprintf("file is empty: it has no %d-byte file header", headerSize),
 				Err:    io.ErrUnexpectedEOF}
 		}
 		if err == io.ErrUnexpectedEOF {
 			return 0, &CorruptError{Path: path, Offset: 0,
-				Reason: fmt.Sprintf("truncated file header: have %d of %d bytes", n, FileHeaderSize),
+				Reason: fmt.Sprintf("truncated file header: have %d of %d bytes", n, headerSize),
 				Err:    err}
 		}
 		return 0, fmt.Errorf("wal: read file header of %s at offset 0: %w", path, err)
 	}
-	if err := parseFileHeader(hdr, path, kind); err != nil {
+	if err := c.parseFileHeader(hdr, path, kind); err != nil {
 		return 0, err
 	}
 
-	off := int64(FileHeaderSize)
+	off := headerSize
 	lastIndex := uint64(0)
 	for {
-		rec, err := readFrame(br, path, off)
+		rec, err := readFrame(c, br, path, off)
 		if err == io.EOF { // clean end of file, exactly on a frame boundary
 			return off, nil
 		}
 		if err != nil {
 			return off, err
 		}
-		// The checksum proves the frame is intact; the sequence check proves
+		// The tag proves the frame is intact; the sequence check proves
 		// the RECORDS ARE IN ORDER. An old frame resurrected underneath us, or
 		// the same record written twice, leaves every individual checksum happy
 		// and shows up only here.
@@ -100,7 +108,7 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 		// hole exists rather than only on the start that made it.
 		if rec.Index <= lastIndex {
 			e := corruptf(path, off, "record index %d does not follow the previous record (index %d): a record was resurrected in place or written twice", rec.Index, lastIndex)
-			// The frame itself checksummed, so a partial write cannot explain
+			// The frame's own tag verified, so a partial write cannot explain
 			// this. See CorruptError.FrameIntact.
 			e.FrameIntact = true
 			e.FrameEnd = off + rec.frameSize()
@@ -117,16 +125,17 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 // readFrame reads one record frame from r, which must be positioned at off.
 // It returns io.EOF, and only io.EOF, when r is exhausted exactly on a frame
 // boundary; every other short read is corruption.
-func readFrame(r io.Reader, path string, off int64) (Record, error) {
-	var hdr [FrameHeaderSize]byte
-	n, err := io.ReadFull(r, hdr[:])
+func readFrame(c codec, r io.Reader, path string, off int64) (Record, error) {
+	headerSize := c.frameHeaderSize()
+	hdr := make([]byte, headerSize)
+	n, err := io.ReadFull(r, hdr)
 	if err != nil {
 		if err == io.EOF && n == 0 {
 			return Record{}, io.EOF
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return Record{}, &CorruptError{Path: path, Offset: off,
-				Reason: fmt.Sprintf("truncated frame header: have %d of %d bytes", n, FrameHeaderSize),
+				Reason: fmt.Sprintf("truncated frame header: have %d of %d bytes", n, headerSize),
 				Err:    io.ErrUnexpectedEOF}
 		}
 		return Record{}, fmt.Errorf("wal: read %s at offset %d: %w", path, off, err)
@@ -136,25 +145,24 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 	index := binary.BigEndian.Uint64(hdr[4:12])
 	typ := Type(binary.BigEndian.Uint16(hdr[12:14]))
 	reserved := binary.BigEndian.Uint16(hdr[14:16])
-	stored := binary.BigEndian.Uint32(hdr[16:20])
+	stored := hdr[frameCoveredBytes:headerSize]
 
 	// From here on the header has been read in full, so the frame DECLARES an
 	// extent. Every error below carries it (see CorruptError.FrameEnd) --
 	// including the absurd-length and non-zero-reserved cases, where the
 	// declared length is not to be trusted but is still what the bytes say and
 	// is the only evidence there is about where this frame was meant to end.
-	frameEnd := off + int64(FrameHeaderSize) + int64(payloadLen)
+	frameEnd := off + headerSize + int64(payloadLen)
 	damaged := func(format string, args ...interface{}) *CorruptError {
 		e := corruptf(path, off, format, args...)
 		e.FrameEnd = frameEnd
 		return e
 	}
 
-	// Both structural checks happen BEFORE the payload is allocated. The
-	// checksum cannot help here: verifying it needs the payload, and reading
-	// the payload needs a length we are not yet entitled to trust. So the
-	// length is first bounded, then -- because the checksum covers the header
-	// -- checked.
+	// Both structural checks happen BEFORE the payload is allocated. The tag
+	// cannot help here: verifying it needs the payload, and reading the payload
+	// needs a length we are not yet entitled to trust. So the length is first
+	// bounded, then -- because the tag covers the header -- checked.
 	if reserved != 0 {
 		return Record{}, damaged("reserved field is %#04x, want 0", reserved)
 	}
@@ -171,14 +179,23 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 				Err:      io.ErrUnexpectedEOF,
 				FrameEnd: frameEnd}
 		}
-		return Record{}, fmt.Errorf("wal: read %s payload at offset %d: %w", path, off+FrameHeaderSize, err)
+		return Record{}, fmt.Errorf("wal: read %s payload at offset %d: %w", path, off+headerSize, err)
 	}
 
-	if sum := frameChecksum(hdr[0:16], payload); sum != stored {
-		return Record{}, damaged("checksum mismatch: computed %#08x, stored %#08x", sum, stored)
+	if !c.verifyTag(hdr[0:frameCoveredBytes], payload, stored) {
+		// The COMPUTED tag is not quoted into the message under version 2: it is
+		// the value an attacker needs, and handing it back for arbitrary chosen
+		// bytes would turn every corrupt-frame log line into a MAC oracle. The
+		// version 1 CRC is unkeyed and there is nothing to leak, so it is still
+		// named -- the numbers are genuinely useful in a hex dump.
+		if c.isV1() {
+			return Record{}, damaged("checksum mismatch: computed %#08x, stored %#08x",
+				frameChecksum(hdr[0:frameCoveredBytes], payload), binary.BigEndian.Uint32(stored))
+		}
+		return Record{}, damaged("checksum mismatch: the frame does not verify under the MAC key")
 	}
 
-	// The type is deliberately NOT rejected when unknown: the checksum says
-	// these bytes are what some writer intended. See Type.Known.
-	return Record{Index: index, Type: typ, Payload: payload, Offset: off}, nil
+	// The type is deliberately NOT rejected when unknown: the tag says these
+	// bytes are what some writer intended. See Type.Known.
+	return Record{Index: index, Type: typ, Payload: payload, Offset: off, legacyV1: c.isV1()}, nil
 }

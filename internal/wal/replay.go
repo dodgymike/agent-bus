@@ -111,6 +111,26 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 	// file header to be positioned after.
 	empty := Recovered{Path: path, NextIndex: 1}
 
+	// The codec is resolved AFTER the empty cases inside replay, so replaying a
+	// log that is not there reports an empty log rather than anything about a
+	// key -- and does not create one as a side effect of a read.
+	if empty, err := logIsEmpty(path); err != nil || empty {
+		return Recovered{Path: path, NextIndex: 1}, err
+	}
+	c, err := resolveCodec(path, KindWAL, nil)
+	if err != nil {
+		return empty, err
+	}
+	return replay(path, c, fn)
+}
+
+// replay is Replay with the codec already resolved, so that Open works out the
+// format and loads the MAC key exactly once for the whole of recovery.
+func replay(path string, c codec, fn func(Committed) error) (Recovered, error) {
+	// An empty log: next index 1, and no offset, because there is not even a
+	// file header to be positioned after.
+	empty := Recovered{Path: path, NextIndex: 1}
+
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -150,7 +170,7 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 
 	expectIndex := uint64(1)
 
-	end, err := scanFrom(f, path, KindWAL, func(rec Record) error {
+	end, err := scanFrom(c, f, path, KindWAL, func(rec Record) error {
 		// A hole in the index sequence is a record that is not in the file:
 		// discarded by an earlier recovery, or lost from the media. It is not
 		// an error -- a repaired log has holes by design, because survivors are
@@ -272,7 +292,7 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 			return nil
 
 		default:
-			// scanFrom accepts an unknown type on purpose (its checksum proves
+			// scanFrom accepts an unknown type on purpose (its tag proves
 			// some writer meant those exact bytes; see Type.Known). Replay
 			// cannot know what such a record did to accepted history, so it
 			// discards it and says so. TypeAuditMessage lands here too -- audit

@@ -154,7 +154,8 @@ func TestWALCrashChild(t *testing.T) {
 		if err != nil {
 			t.Fatalf("child: encodePrepare: %v", err)
 		}
-		frame := encodeFrame(5, TypePrepare, payload) // records 1-4 exist; 5 is next
+		// records 1-4 exist; 5 is next
+		frame := testCodec(t, filepath.Join(dir, WALFileName)).encodeFrame(5, TypePrepare, payload)
 		partial := len(frame) / 2
 		if partial <= FrameHeaderSize {
 			t.Fatalf("child: half a frame is %d bytes, which does not reach past the %d-byte header",

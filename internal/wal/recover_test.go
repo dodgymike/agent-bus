@@ -3,10 +3,13 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1968,5 +1971,562 @@ func TestMACKeyCreationRule(t *testing.T) {
 				t.Errorf("the key file is mode %v, want %v", fi.Mode().Perm(), macKeyMode)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DUR-12 -- the format version 1 -> 2 upgrade, and the two key states that are
+// a deliberate exception to the always-restart policy.
+//
+// These three tests are the halves of one contract, and getting the CONTRAST
+// right is the whole difficulty:
+//
+//	a version 1 log with no key   -> generate a key, upgrade, lose nothing
+//	a version 2 log with no key   -> REFUSE, and do not touch the log
+//	a version 2 log with a wrong key -> REFUSE, and do not touch the log
+//
+// The refusals exist because under a fresh or wrong key EVERY record fails
+// verification, so a discard-the-unverifiable pass would destroy a log that is
+// probably intact over a misconfiguration. The permission exists because a
+// version 1 log's records are authenticated by an unkeyed CRC32C, so a brand new
+// key can cost nothing -- it is exactly what the upgrade needs.
+// ---------------------------------------------------------------------------
+
+// v1FixtureClock is a fixed clock, so a version 1 fixture is byte-reproducible
+// and a comparison against a backup is a comparison of the same bytes twice.
+func v1FixtureClock() time.Time { return time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC) }
+
+// v1TxnLog lays down a genuine FORMAT VERSION 1 WAL in dir -- the legacy 16-byte
+// file header and 20-byte CRC32C frames -- holding three transactions: one
+// committed, one ABORTED, one committed. It returns the path, the records
+// exactly as they were written, and what a correct replay must deliver.
+//
+// The abort is in there on purpose. The upgrade carries records across the
+// framing change byte for byte, so a record type that recovery treats specially
+// is the one most likely to be quietly dropped or renumbered by a conversion
+// that is subtly wrong.
+func v1TxnLog(t *testing.T, dir string) (path string, recs []v1Record, want []Committed) {
+	t.Helper()
+	ts := v1FixtureClock()
+	enc := func(b []byte, err error) []byte {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("encoding a version 1 fixture payload: %v", err)
+		}
+		return b
+	}
+	recs = []v1Record{
+		{Index: 1, Type: TypePrepare, Payload: enc(encodePrepare("message", json.RawMessage(`{"n":1}`), ts))},
+		{Index: 2, Type: TypeCommit, Payload: enc(encodeCommit(1))},
+		{Index: 3, Type: TypePrepare, Payload: enc(encodePrepare("agent", nil, ts.Add(time.Second)))},
+		{Index: 4, Type: TypeAbort, Payload: enc(encodeAbort(3, "no room"))},
+		{Index: 5, Type: TypePrepare, Payload: enc(encodePrepare("message", json.RawMessage(`{"n":3}`), ts.Add(2*time.Second)))},
+		{Index: 6, Type: TypeCommit, Payload: enc(encodeCommit(5))},
+	}
+	path = filepath.Join(dir, WALFileName)
+	writeV1Log(t, path, KindWAL, recs...)
+	want = []Committed{
+		wantC(1, 2, "message", `{"n":1}`),
+		wantC(5, 6, "message", `{"n":3}`),
+	}
+	return path, recs, want
+}
+
+// dirEntryNames lists the names in dir, sorted. It is how a "the log was not
+// touched" assertion proves the negative as well as the positive: no quarantine
+// copy, no `.upgrade` temporary, no backup, nothing new at all.
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// globIn returns the sorted names in dir matching pattern.
+func globIn(t *testing.T, dir, pattern string) []string {
+	t.Helper()
+	var found []string
+	for _, name := range dirEntryNames(t, dir) {
+		ok, err := filepath.Match(pattern, name)
+		if err != nil {
+			t.Fatalf("bad glob %q: %v", pattern, err)
+		}
+		if ok {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
+// assertRecordsIdentical demands that the log holds exactly the records the
+// version 1 fixture held, with the SAME indices, types and payload bytes.
+//
+// The indices are the point. The upgrade rewrites every frame, which is the one
+// moment in this package's life when renumbering would be easy and invisible --
+// and invariant 1 forbids reusing an id, so a record that came out of the
+// upgrade with a different index would be a violation the record count cannot
+// see.
+func assertRecordsIdentical(t *testing.T, path string, want []v1Record) {
+	t.Helper()
+	got, _, err := ScanAll(path, KindWAL)
+	if err != nil {
+		t.Fatalf("ScanAll after the upgrade: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the upgraded log holds %d records, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Index != want[i].Index {
+			t.Errorf("record %d has index %d after the upgrade, want %d: the upgrade must NEVER renumber (invariant 1)",
+				i, got[i].Index, want[i].Index)
+		}
+		if got[i].Type != want[i].Type {
+			t.Errorf("record %d is a %s after the upgrade, want a %s", i, got[i].Type, want[i].Type)
+		}
+		if !bytes.Equal(got[i].Payload, want[i].Payload) {
+			t.Errorf("record %d has payload %q after the upgrade, want %q: payloads cross the framing change byte for byte",
+				i, got[i].Payload, want[i].Payload)
+		}
+	}
+}
+
+// TestWALReadsFormatVersion1Log is the do-not-brick-existing-buses leg.
+//
+// A bus that is running today has a version 1 log. A version bump with no read
+// path would meet a version number it does not implement, refuse to start, and
+// leave no route back. So a version 1 log must be READ, converted once, and lose
+// absolutely nothing in the process -- and the conversion must be idempotent,
+// because a start that upgraded twice would mean the first one did not stick.
+func TestWALReadsFormatVersion1Log(t *testing.T) {
+	dir := t.TempDir()
+	path, recs, want := v1TxnLog(t, dir)
+	original := readFile(t, path)
+
+	// The fixture really is version 1, and really is laid out the legacy way.
+	// Without this the whole test could be passing against a version 2 file.
+	if v, err := detectFormat(path, KindWAL); err != nil || v != formatVersionV1 {
+		t.Fatalf("the fixture reports format version %d (err %v), want %d", v, err, formatVersionV1)
+	}
+	wantSize := int64(fileHeaderSizeV1)
+	for _, r := range recs {
+		wantSize += int64(frameHeaderSizeV1 + len(r.Payload))
+	}
+	if int64(len(original)) != wantSize {
+		t.Fatalf("the fixture is %d bytes, want %d: it is not laid out in the legacy 16/20-byte framing", len(original), wantSize)
+	}
+	if _, err := OpenWriter(path, KindWAL); err == nil {
+		t.Fatalf("OpenWriter accepted a version 1 log: there is no downgrade write, so it must refuse one outright")
+	}
+
+	// ---- the upgrade ----
+	got, rec, out, err := openCapturing(t, dir)
+	if err != nil {
+		t.Fatalf("Open on a format version 1 log: %v: an existing bus must not be bricked by the format bump", err)
+	}
+	if !sameCommitted(got, want) {
+		t.Fatalf("replay of the upgraded log delivered %s, want %s", showCommitted(got), showCommitted(want))
+	}
+	if rec.NextIndex != 7 {
+		t.Errorf("Recovered.NextIndex = %d, want 7 (one past the highest index that crossed the upgrade)", rec.NextIndex)
+	}
+	if rec.DiscardCount != 0 || rec.MissingRecords != 0 {
+		t.Errorf("the upgrade lost something: Recovered = {discards %d, missing %d}, want 0 and 0",
+			rec.DiscardCount, rec.MissingRecords)
+	}
+	assertLogged(t, out, "info", "wal upgraded a log from on-disk format version 1 to 2",
+		"records=6", "path=")
+
+	// ---- the file is now version 2, and holds exactly what it held before ----
+	if v, err := detectFormat(path, KindWAL); err != nil || v != FormatVersion {
+		t.Fatalf("after Open the log reports format version %d (err %v), want %d", v, err, FormatVersion)
+	}
+	upgraded := readFile(t, path)
+	if v := binary.BigEndian.Uint32(upgraded[8:12]); v != FormatVersion {
+		t.Errorf("the file header's version field is %d, want %d", v, FormatVersion)
+	}
+	assertRecordsIdentical(t, path, recs)
+
+	// ---- the version 1 bytes were kept ----
+	backups := globIn(t, dir, WALFileName+".v1-*")
+	if len(backups) != 1 {
+		t.Fatalf("the directory holds %d version 1 backups (%v), want exactly 1", len(backups), backups)
+	}
+	if b := readFile(t, filepath.Join(dir, backups[0])); !bytes.Equal(b, original) {
+		t.Fatalf("the backup %s is %d bytes and does not match the %d-byte original: the backup must be the ORIGINAL version 1 file",
+			backups[0], len(b), len(original))
+	}
+	if leftovers := globIn(t, dir, WALFileName+".upgrade"); len(leftovers) != 0 {
+		t.Errorf("the upgrade temporary %v was left behind", leftovers)
+	}
+
+	// ---- a second start is a NO-OP ----
+	got2, _, out2, err := openCapturing(t, dir)
+	if err != nil {
+		t.Fatalf("the second Open: %v", err)
+	}
+	if !sameCommitted(got2, want) {
+		t.Fatalf("the second start delivered %s, want %s", showCommitted(got2), showCommitted(want))
+	}
+	assertNotLogged(t, out2, "wal upgraded a log from on-disk format version 1 to 2")
+	if again := readFile(t, path); !bytes.Equal(again, upgraded) {
+		t.Errorf("the second start CHANGED the log (%d bytes vs %d): the upgrade must run exactly once",
+			len(again), len(upgraded))
+	}
+	if b := globIn(t, dir, WALFileName+".v1-*"); len(b) != 1 {
+		t.Errorf("after the second start the directory holds %d version 1 backups (%v), want still exactly 1", len(b), b)
+	}
+
+	// ---- appends carry on from the right index ----
+	l, err := Open(LogOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open to append after the upgrade: %v", err)
+	}
+	defer l.Close()
+	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"after":"upgrade"}`)})
+	if err != nil {
+		t.Fatalf("Write after the upgrade: %v", err)
+	}
+	if c.PrepareIndex != 7 || c.CommitIndex != 8 {
+		t.Fatalf("the first write after the upgrade got prepare %d / commit %d, want 7 / 8: indices continue, they do not restart",
+			c.PrepareIndex, c.CommitIndex)
+	}
+}
+
+// v2LogWithRecords writes n complete transactions into a fresh data directory
+// through the REAL two-phase path under the deterministic golden key, and
+// returns the directory, the WAL path and the exact bytes on disk.
+func v2LogWithRecords(t *testing.T, n int) (dir, path string, image []byte) {
+	t.Helper()
+	dir = t.TempDir()
+	plantGoldenMACKey(t, dir)
+	ts := v1FixtureClock()
+	i := 0
+	l, err := Open(LogOptions{Dir: dir, Now: func() time.Time {
+		i++
+		return ts.Add(time.Duration(i) * time.Second)
+	}})
+	if err != nil {
+		t.Fatalf("v2LogWithRecords: Open: %v", err)
+	}
+	for k := 0; k < n; k++ {
+		if _, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"n":` + strconv.Itoa(k) + `}`)}); err != nil {
+			t.Fatalf("v2LogWithRecords: Write %d: %v", k, err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("v2LogWithRecords: Close: %v", err)
+	}
+	path = filepath.Join(dir, WALFileName)
+	return dir, path, readFile(t, path)
+}
+
+// TestWALWrongMACKeyIsFatal is the one place recovery is allowed to refuse to
+// start, and the assertion that matters most is not the error -- it is that THE
+// LOG IS STILL THERE, byte for byte.
+//
+// A wrong key makes an intact log look exactly like a destroyed one: the file
+// header's MAC fails and so does every record's, because they fail for the same
+// reason. Under the always-restart policy the natural response would be to
+// quarantine or discard, and that would turn "someone mounted the wrong volume"
+// or "the key file was restored from the wrong backup" into permanent data loss
+// over a misconfiguration that takes seconds to fix. So this refuses, names the
+// key file, and touches nothing.
+func TestWALWrongMACKeyIsFatal(t *testing.T) {
+	tests := []struct {
+		name string
+		// key is what replaces the correct key file.
+		key string
+		// want is the sentinel errors.Is must match.
+		want error
+		// names are strings the message must carry. %L is the log path and %K
+		// the key path, substituted per case.
+		names []string
+	}{
+		{
+			name:  "a different, well-formed key refuses and names both paths",
+			key:   forgerMACKey + "\n",
+			want:  ErrMACKeyMismatch,
+			names: []string{"%L", "%K", "WRONG KEY"},
+		},
+		{
+			name:  "a key of the wrong length refuses",
+			key:   "0123456789\n",
+			want:  ErrMACKeyMalformed,
+			names: []string{"%K", "10 characters", "64 hexadecimal characters"},
+		},
+		{
+			name:  "a key that is not hexadecimal refuses",
+			key:   strings.Repeat("z", 64) + "\n",
+			want:  ErrMACKeyMalformed,
+			names: []string{"%K", "not hexadecimal"},
+		},
+		{
+			name:  "an empty key file refuses rather than being regenerated",
+			key:   "",
+			want:  ErrMACKeyMalformed,
+			names: []string{"%K", "0 characters"},
+		},
+	}
+
+	probed := 0
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir, path, before := v2LogWithRecords(t, 3)
+			keyPath := macKeyPath(dir)
+			entriesBefore := dirEntryNames(t, dir)
+			probed++
+
+			if err := os.WriteFile(keyPath, []byte(tc.key), macKeyMode); err != nil {
+				t.Fatalf("replacing the key file: %v", err)
+			}
+
+			_, _, out, err := openCapturing(t, dir)
+			if err == nil {
+				t.Fatalf("Open SUCCEEDED with %s; a key that cannot read this log is fatal on purpose", tc.name)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Open error = %v, want one matching %v", err, tc.want)
+			}
+			for _, want := range tc.names {
+				want = strings.ReplaceAll(strings.ReplaceAll(want, "%L", path), "%K", keyPath)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error does not name %q, so an operator cannot tell which file to fix: %v", want, err)
+				}
+			}
+
+			// THE ASSERTION THIS TEST EXISTS FOR. Nothing was truncated,
+			// rewritten, quarantined or deleted: the log is byte-for-byte what it
+			// was, and no new file appeared beside it.
+			after := readFile(t, path)
+			if !bytes.Equal(before, after) {
+				t.Fatalf("the log CHANGED after a refused start (%d bytes before, %d after): "+
+					"a misconfiguration must never cost a byte of a log that is probably intact", len(before), len(after))
+			}
+			if got := dirEntryNames(t, dir); !reflect.DeepEqual(got, entriesBefore) {
+				t.Errorf("the data directory now holds %v, want the unchanged %v: nothing may be quarantined or copied aside",
+					got, entriesBefore)
+			}
+			assertNotLogged(t, out, "wal quarantined an unreadable log and started a fresh one")
+			assertNotLogged(t, out, "wal truncated damage at the end of the log")
+			assertNotLogged(t, out, "wal rewrote a damaged log, keeping every intact record")
+		})
+	}
+	if probed == 0 {
+		t.Fatalf("no key state was probed: this test asserted NOTHING about a wrong key")
+	}
+}
+
+// TestWALMissingMACKeyOnV1LogIsNotFatal is the sharp edge of the whole task: the
+// SAME missing key file is harmless in one state and fatal in another, and the
+// two are asserted together because the contrast is the contract.
+//
+//	version 1 log, no key      -> generate one, upgrade, lose nothing.
+//	                              Version 1 records are authenticated by an
+//	                              unkeyed CRC32C, so a fresh key costs nothing.
+//	version 2 log with records -> REFUSE and touch nothing. Under a fresh key
+//	                              every record would fail, and a
+//	                              discard-the-unverifiable pass would destroy an
+//	                              intact log over a lost key file.
+//	version 2 header only      -> generate one and start. The file provably holds
+//	                              no record, so there is nothing to lose, and
+//	                              refusing would hold the bus hostage to an empty
+//	                              file.
+func TestWALMissingMACKeyOnV1LogIsNotFatal(t *testing.T) {
+	probed := 0
+
+	t.Run("a version 1 log with no key generates one and upgrades", func(t *testing.T) {
+		probed++
+		dir := t.TempDir()
+		path, recs, want := v1TxnLog(t, dir)
+		keyPath := macKeyPath(dir)
+		if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+			t.Fatalf("the fixture already has a key file (stat err = %v); there is nothing to prove", err)
+		}
+
+		got, rec, _, err := openCapturing(t, dir)
+		if err != nil {
+			t.Fatalf("Open on a version 1 log with no key: %v: this is the state EVERY existing bus is in", err)
+		}
+		if !sameCommitted(got, want) {
+			t.Fatalf("replay delivered %s, want %s: the upgrade under a fresh key must lose nothing", showCommitted(got), showCommitted(want))
+		}
+		if rec.DiscardCount != 0 || rec.MissingRecords != 0 {
+			t.Errorf("Recovered = {discards %d, missing %d}, want 0 and 0", rec.DiscardCount, rec.MissingRecords)
+		}
+		assertRecordsIdentical(t, path, recs)
+
+		// The generated key is a real key file: 0600, and 64 hexadecimal
+		// characters that decode to the key length this package uses.
+		fi, err := os.Stat(keyPath)
+		if err != nil {
+			t.Fatalf("no key file was generated at %s: %v", keyPath, err)
+		}
+		if fi.Mode().Perm() != macKeyMode {
+			t.Errorf("the generated key file is mode %v, want %v: anything that can read it can forge every record",
+				fi.Mode().Perm(), macKeyMode)
+		}
+		text := strings.TrimRight(string(readFile(t, keyPath)), "\r\n")
+		if len(text) != hex.EncodedLen(macKeySize) {
+			t.Fatalf("the generated key holds %d characters, want %d", len(text), hex.EncodedLen(macKeySize))
+		}
+		if _, err := hex.DecodeString(text); err != nil {
+			t.Errorf("the generated key is not hexadecimal: %v", err)
+		}
+		if text == goldenMACKey || text == forgerMACKey {
+			t.Errorf("the generated key is a CONSTANT from this test file; it must come from crypto/rand")
+		}
+	})
+
+	t.Run("a version 2 log with records and no key is FATAL and leaves the log untouched", func(t *testing.T) {
+		probed++
+		dir, path, before := v2LogWithRecords(t, 3)
+		keyPath := macKeyPath(dir)
+		if err := os.Remove(keyPath); err != nil {
+			t.Fatalf("removing the key file: %v", err)
+		}
+		entriesBefore := dirEntryNames(t, dir)
+
+		_, _, out, err := openCapturing(t, dir)
+		if err == nil {
+			t.Fatalf("Open SUCCEEDED on a version 2 log whose key is missing; under a fresh key every record would fail verification")
+		}
+		if !errors.Is(err, ErrMACKeyMissing) {
+			t.Fatalf("Open error = %v, want one matching ErrMACKeyMissing", err)
+		}
+		for _, want := range []string{path, keyPath} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the error does not name %q; it must name BOTH the log and the key: %v", want, err)
+			}
+		}
+		if _, serr := os.Stat(keyPath); !os.IsNotExist(serr) {
+			t.Errorf("a key file was generated at %s anyway (stat err = %v)", keyPath, serr)
+		}
+		if after := readFile(t, path); !bytes.Equal(before, after) {
+			t.Fatalf("the log CHANGED after a refused start (%d bytes before, %d after)", len(before), len(after))
+		}
+		if got := dirEntryNames(t, dir); !reflect.DeepEqual(got, entriesBefore) {
+			t.Errorf("the data directory now holds %v, want the unchanged %v", got, entriesBefore)
+		}
+		assertNotLogged(t, out, "wal quarantined an unreadable log and started a fresh one")
+	})
+
+	t.Run("a version 2 file header and nothing else starts, because it holds no record", func(t *testing.T) {
+		probed++
+		dir, path, before := v2LogWithRecords(t, 0)
+		if int64(len(before)) != FileHeaderSize {
+			t.Fatalf("the fixture is %d bytes, want exactly the %d-byte file header", len(before), FileHeaderSize)
+		}
+		if err := os.Remove(macKeyPath(dir)); err != nil {
+			t.Fatalf("removing the key file: %v", err)
+		}
+
+		got, _, _, err := openCapturing(t, dir)
+		if err != nil {
+			t.Fatalf("Open on a header-only version 2 log with no key: %v: it provably holds no record, so refusing would hold the bus hostage for nothing", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("replay delivered %d entries from a header-only log", len(got))
+		}
+		if _, serr := os.Stat(macKeyPath(dir)); serr != nil {
+			t.Errorf("no key file was generated: %v", serr)
+		}
+		// The unreadable header was moved aside, never deleted: the operator is
+		// owed the bytes even when this code can make nothing of them.
+		aside := globIn(t, dir, WALFileName+".corrupt-*")
+		if len(aside) != 1 {
+			t.Fatalf("the directory holds %d quarantined files (%v), want exactly 1: the old header is renamed, never deleted", len(aside), aside)
+		}
+		if b := readFile(t, filepath.Join(dir, aside[0])); !bytes.Equal(b, before) {
+			t.Errorf("the quarantined file is not the original %d bytes", len(before))
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("no fresh log was created at %s: %v", path, err)
+		}
+	})
+
+	if probed == 0 {
+		t.Fatalf("no key state was probed: this test asserted NOTHING")
+	}
+}
+
+// TestWALV2HeaderDamageWithTheRightKeyStillRepairs is the case that must NOT be
+// mistaken for a wrong key, and it is the reason the wrong-key diagnosis is made
+// on EVIDENCE rather than on the header alone.
+//
+// A wrong key fails the file header's MAC and every record's MAC. Damage
+// confined to the header fails the header's MAC and NOTHING else -- so a single
+// record that verifies PROVES the key is right, and the answer is the ordinary
+// header rebuild: every record kept, the bus starts. If this test ever starts
+// reporting ErrMACKeyMismatch, recovery has begun refusing to boot over a
+// flipped bit in 32 bytes it can regenerate from a constant.
+func TestWALV2HeaderDamageWithTheRightKeyStillRepairs(t *testing.T) {
+	dir, path, before := v2LogWithRecords(t, 3)
+	pristine, _, err := ScanAll(path, KindWAL)
+	if err != nil {
+		t.Fatalf("the fixture does not scan clean: %v", err)
+	}
+	if len(pristine) != 6 {
+		t.Fatalf("the fixture holds %d records, want 6", len(pristine))
+	}
+
+	// Clobber the file header's 32-byte MAC and nothing else. The magic and the
+	// version field survive, so the file still positively identifies itself as
+	// ours and as version 2 -- which is exactly the shape a wrong key produces.
+	patch(t, path, frameCoveredBytes, bytes.Repeat([]byte{0xAB}, MACSize))
+	if bytes.Equal(readFile(t, path), before) {
+		t.Fatalf("the header tag was not actually clobbered")
+	}
+
+	got, rec, out, err := openCapturing(t, dir)
+	if err != nil {
+		t.Fatalf("Open with a damaged header and the RIGHT key: %v: one verifying record proves the key is right, and this must be an ordinary header rebuild",
+			err)
+	}
+	if errors.Is(err, ErrMACKeyMismatch) {
+		t.Fatalf("header damage was diagnosed as a wrong key")
+	}
+	if !rec.Repaired.HeaderRepaired {
+		t.Fatalf("Repaired = %+v, want HeaderRepaired true", rec.Repaired)
+	}
+	if rec.Repaired.DiscardCount != 0 || rec.Repaired.DiscardedBytes != 0 {
+		t.Errorf("Repaired discarded %d regions / %d bytes, want 0: only the header was damaged",
+			rec.Repaired.DiscardCount, rec.Repaired.DiscardedBytes)
+	}
+	if rec.Repaired.Kept != uint64(len(pristine)) {
+		t.Errorf("Repaired.Kept = %d, want %d: every record must survive a header rebuild", rec.Repaired.Kept, len(pristine))
+	}
+	if len(got) != 3 {
+		t.Errorf("replay delivered %d entries, want 3", len(got))
+	}
+	assertLogged(t, out, "error", "wal rebuilding a damaged file header", "records_salvaged=6")
+
+	// Every record is still there, with its original index, type and bytes...
+	var want []uint64
+	for _, r := range pristine {
+		want = append(want, r.Index)
+	}
+	assertSurvivors(t, path, KindWAL, pristine, want)
+
+	// ...and the bus is genuinely usable afterwards, which "Open returned nil"
+	// on its own does not prove.
+	l, err := Open(LogOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open after the header rebuild: %v", err)
+	}
+	defer l.Close()
+	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"after":"header repair"}`)})
+	if err != nil {
+		t.Fatalf("Write after the header rebuild: %v", err)
+	}
+	if c.PrepareIndex != 7 {
+		t.Errorf("the write after the header rebuild got prepare index %d, want 7", c.PrepareIndex)
 	}
 }
