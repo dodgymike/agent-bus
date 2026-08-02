@@ -757,6 +757,70 @@ func TestWALRepairTailIsOneShot(t *testing.T) {
 	repairAssertUntouched(t, path, repaired, third)
 }
 
+// TestWALRepairTailToHeaderOnly is the degenerate end of the range: the FIRST
+// record a brand-new log ever wrote was the one that was torn, so the cut lands
+// on the file header itself and the repaired log holds no records at all.
+//
+// It is worth its own test because it is the one repair whose result is a file
+// with nothing in it but a header, and three separate pieces of code have to
+// agree that this is a valid log rather than a broken one: the scan (which must
+// hit EOF exactly on the frame boundary), Replay (which must report an empty
+// history with NextIndex 1, not an error), and Open's cross-check that the
+// replay's EndOffset and the writer's size still match. A cut to
+// FileHeaderSize is also the closest this package ever legitimately comes to
+// cutting at offset 0, which truncatableTail refuses outright.
+func TestWALRepairTailToHeaderOnly(t *testing.T) {
+	dir, path, _, _ := buildWAL(t, opPrepare("message", `{"n":1}`))
+	recs, _ := repairScanClean(t, path, KindWAL, 1)
+	if recs[0].Offset != FileHeaderSize {
+		t.Fatalf("the only record starts at offset %d, want %d", recs[0].Offset, FileHeaderSize)
+	}
+	truncate(t, path, FileHeaderSize+FrameHeaderSize+1) // header landed, payload did not
+
+	res, err := RepairTail(path, KindWAL, nil)
+	if err != nil {
+		t.Fatalf("RepairTail: %v", err)
+	}
+	if !res.Truncated || res.At != FileHeaderSize || res.NextIndex != 1 {
+		t.Fatalf("TailRepair = %+v, want Truncated true, At %d, NextIndex 1", res, FileHeaderSize)
+	}
+	if got := fileSize(t, path); got != FileHeaderSize {
+		t.Fatalf("the repaired file is %d bytes, want exactly the %d-byte header", got, FileHeaderSize)
+	}
+	repairAssertPrefix(t, path, KindWAL, nil)
+
+	// The header-only file is a valid EMPTY log, not a corrupt one.
+	var c collector
+	r, err := Replay(path, c.fn)
+	if err != nil {
+		t.Fatalf("Replay of the header-only file: %v, want an empty log", err)
+	}
+	if r.Records != 0 || r.Applied != 0 || len(r.Dangling) != 0 || r.NextIndex != 1 {
+		t.Errorf("Recovered = %+v, want an empty log with NextIndex 1", r)
+	}
+	if len(c.got) != 0 {
+		t.Errorf("the header-only file delivered %s, want nothing", showCommitted(c.got))
+	}
+
+	// And a server starts on it and writes record 1 -- the index the torn frame
+	// carried, reissued because that frame never completed an fsync.
+	l, err := Open(LogOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open on the repaired header-only log: %v", err)
+	}
+	defer l.Close()
+	if rep := l.Recovered().Repaired; rep.Truncated {
+		t.Errorf("Recovered().Repaired = %+v, want no repair: RepairTail already cut this file", rep)
+	}
+	c1, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"n":2}`)})
+	if err != nil {
+		t.Fatalf("Write after the repair: %v", err)
+	}
+	if c1.PrepareIndex != 1 || c1.CommitIndex != 2 {
+		t.Fatalf("the first write got {prepare:%d commit:%d}, want {1 2}", c1.PrepareIndex, c1.CommitIndex)
+	}
+}
+
 // TestWALRepairTailLogsTheCut: the task is "detected, LOGGED, and truncated".
 // The warning is emitted BEFORE the cut, so that a crash during the truncate
 // still leaves an operator a record of what was about to be discarded, and the

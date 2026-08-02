@@ -118,25 +118,38 @@
 #   --quiet       suppress the proof command's own output; print only the verdict.
 #   -h, --help    this text.
 #
-# Output: human lines on stderr, plus one machine-readable verdict line on
-# stdout:
-#   proof-check: verdict=<PASS|FAIL|VACUOUS|UNVERIFIABLE> class=<...> exit=<n> tests_run=<n> top_level=<n> skipped=<n> empty_pkgs=<n>
+# Output: human lines AND the proof's own output on stderr; one
+# machine-readable verdict line on stdout:
+#   proof-check: verdict=<PASS|FAIL|VACUOUS|UNVERIFIABLE> class=<...> exit=<n> tests_run=<n> top_level=<n> skipped=<n> failed=<n> empty_pkgs=<n>
 #
 # Exit codes:
-#   0  PASS          — ran, exited 0, and (if it ran Go tests) >=1 test really ran
-#   1  FAIL          — ran and exited non-zero
+#   0  PASS          — ran, exited 0, and (if it ran Go tests) >=1 test really
+#                      ran and none failed
+#   1  FAIL          — ran and exited non-zero, OR >=1 test failed behind an
+#                      exit code that masked it
 #   2  usage error
 #   3  UNVERIFIABLE  — cannot be checked: n/a, unfilled <placeholder>, not valid
-#                      shell, or a segment whose command does not exist. NOT a
+#                      shell, a segment whose command does not exist, or a proof
+#                      that names `go test` but whose test output we never saw
+#                      (invoked by absolute path / with a scrubbed PATH). NOT a
 #                      claim that the underlying work is broken.
 #   4  VACUOUS       — exited 0 but proved nothing: zero tests ran (the trap
 #                      above), or every test that ran was skipped
 #
-# Known limitation: to count tests, `go test` invocations inside the proof are
-# re-run through a shim that adds `-v` and merges stderr into stdout. A proof
-# that parses non-verbose `go test` output, or that redirects the two streams
-# separately, will see different text than it would standalone. Nothing in this
-# backlog does; if yours does, run it directly and say so in test_summary.
+# Known limitations:
+#  * To count tests, `go test` invocations inside the proof run through a shim
+#    that adds `-v` and merges stderr into stdout (`go build`/`vet`/`list` pass
+#    through untouched). A proof that parses non-verbose `go test` output, or
+#    that redirects the two streams separately, will see different text than it
+#    would standalone. Nothing in this backlog does; if yours does, run it
+#    directly and say so in test_summary.
+#  * The empty-package warning is per output line, not per listed package, so a
+#    package that ran tests in one invocation and none in a second within the
+#    same proof is still named. Read the warning, do not just read the verdict.
+#  * The multi-package allowance generalises from one invocation to the whole
+#    proof: `go test -run TestOld ./a && go test -run TestNew ./b` PASSES with a
+#    warning even when TestNew does not exist. If the test THIS task adds is in
+#    a warned package, the proof did not exercise it.
 
 set -uo pipefail
 

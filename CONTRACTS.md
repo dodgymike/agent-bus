@@ -80,12 +80,17 @@ it to talk to a bus.
 
 ### `scripts/proof-check.sh` (added 2026-08-02)
 
-**Why it exists.** `go test -race -run TestThatDoesNotExist ./internal/wal` prints
-`ok … [no tests to run]` and **exits 0**. ~70% of this backlog's `proof_cmd` values have that shape,
-so a task could be flipped to `done` behind a proof whose named test was never written. A second
-variant is worse because it leaves no marker at all: a test body that is just `t.Skip()` exits 0
-with no `[no tests to run]` text, so grepping for that string does not catch it. This script closes
-both.
+**Why it exists.** Three ways a proof command exits 0 while proving nothing:
+
+1. `go test -race -run TestThatDoesNotExist ./internal/wal` prints `ok … [no tests to run]` and
+   **exits 0**. ~70% of this backlog's `proof_cmd` values have that shape, so a task could be
+   flipped to `done` behind a proof whose named test was never written.
+2. A test body that is just `t.Skip()` exits 0 with **no** `[no tests to run]` text at all, so
+   grepping for that string does not catch it.
+3. `A ; B` exits with `B`'s status and `|| true` swallows failure outright — so a **red** suite can
+   sit behind a green exit code.
+
+The script closes all three: it counts what actually ran rather than trusting the exit status.
 
 ```
 scripts/proof-check.sh [--task <id>] [--classify] [--strict] [--quiet] '<proof command>'
@@ -93,9 +98,9 @@ scripts/proof-check.sh [--task <id>] [--classify] [--strict] [--quiet] '<proof c
 
 | Option | Meaning |
 | --- | --- |
-| `--task <id>` | Fetch `proof_cmd` from the Spec Server (task key or `public_id`) via `scripts/spec-cloud.sh`, then check it. Requires `jq`. |
-| `--classify` | Static classification only — **runs nothing**. Safe on untrusted input. |
-| `--strict` | Additionally require *every* package listed in a `go test` invocation to contribute ≥1 test. Opt-in. |
+| `--task <id>` | Fetch `proof_cmd` from the Spec Server (task key or `public_id`) via `scripts/spec-cloud.sh`, then check it. Requires `jq`. Id is validated against `^[A-Za-z0-9._-]+$` — it is interpolated into a URL that carries a bearer token. Note this *does* make a network call before classifying; it just never executes the proof. |
+| `--classify` | Static classification only — **executes no part of the proof command**. |
+| `--strict` | Additionally require *every* package listed in a `go test` invocation to contribute ≥1 test. Opt-in; reports `VACUOUS`/exit 4. |
 | `--quiet` | Suppress the proof's own output; print only the verdict. |
 
 | Env var | Default | Meaning |
@@ -106,16 +111,18 @@ scripts/proof-check.sh [--task <id>] [--classify] [--strict] [--quiet] '<proof c
 
 | Code | Verdict | Meaning |
 | --- | --- | --- |
-| `0` | `PASS` | Ran, exited 0, and if it ran Go tests then ≥1 test really ran and not all skipped |
-| `1` | `FAIL` | Ran and exited non-zero |
+| `0` | `PASS` | Ran, exited 0, and if Go tests ran then ≥1 really ran, none failed, not all skipped |
+| `1` | `FAIL` | Ran and exited non-zero, **or** ≥1 test failed behind an exit code that masked it |
 | `2` | — | Usage error |
-| `3` | `UNVERIFIABLE` | Cannot be checked: `n/a`, unfilled `<placeholder>`, invalid shell, or a segment whose command does not exist (prose, or a wrapper not built yet). **Not** a claim the work is broken. |
+| `3` | `UNVERIFIABLE` | Cannot be checked: `n/a`, unfilled `<placeholder>`, invalid shell, a segment whose command does not exist (prose, or a wrapper not built yet), or a proof naming `go test` whose test output was never captured (absolute-path `go`, scrubbed `PATH`). **Not** a claim the work is broken. |
 | `4` | `VACUOUS` | Exited 0 but proved nothing: zero tests ran, or every test that ran skipped |
 
-Stdout carries one machine-readable line; human output goes to stderr:
+Stdout carries **only** the machine-readable verdict line. All human output *and the proof's own
+output* go to stderr, so a proof cannot print a convincing forgery of the verdict onto stdout. The
+exit code, not the text, is authoritative.
 
 ```
-proof-check: verdict=<PASS|FAIL|VACUOUS|UNVERIFIABLE> class=<tags> exit=<n> tests_run=<n> top_level=<n> skipped=<n> empty_pkgs=<n>
+proof-check: verdict=<PASS|FAIL|VACUOUS|UNVERIFIABLE> class=<tags> exit=<n> tests_run=<n> top_level=<n> skipped=<n> failed=<n> empty_pkgs=<n>
 ```
 
 **Non-Go proofs are first-class.** `test -s PROTOCOL.md`, `grep -q … FILE`, `scripts/bus-*.sh …`,
@@ -130,14 +137,22 @@ mode that gets guards switched off. The trap being closed is *zero tests anywher
 opts into the stricter rule per-proof.
 
 **Trust boundary.** A `proof_cmd` is executable input: the script runs it verbatim, with your
-privileges, in the repo root. With `--task` the string comes from the Spec Server, so anyone who can
-edit that backlog can choose a command that runs on your machine. Use `--classify` to inspect
-statically without executing.
+privileges and your full environment, in the repo root. With `--task` the string comes from the Spec
+Server, so anyone who can edit that backlog can choose a command that runs on your machine. Use
+`--classify` to inspect statically without executing. The echoed `proof:` line has non-printable
+bytes replaced with `?`, so ANSI escapes cannot repaint it to hide what will run.
 
-**Known limitation.** To count tests, `go test` invocations are re-run through a `go` shim that
-injects `-v` and merges stderr into stdout (`go build`/`go vet`/`go list` pass through untouched). A
-proof that parses non-verbose `go test` output, or redirects the two streams separately, will see
-different text than it would standalone. Nothing in the current backlog does.
+**Known limitations.**
+
+- To count tests, `go test` runs through a `go` shim (installed on `PATH` for every run, so
+  indirectly-invoked tests are still counted) that injects `-v` and merges stderr into stdout;
+  `go build`/`go vet`/`go list` pass through untouched. A proof that parses non-verbose `go test`
+  output, or redirects the two streams separately, will see different text than standalone. Nothing
+  in the current backlog does.
+- The empty-package warning is per output line, not per listed package, and the multi-package
+  allowance generalises from one invocation to the whole proof: `go test -run TestOld ./a &&
+  go test -run TestNew ./b` PASSES with a warning even when `TestNew` does not exist. **The
+  completing agent must read the warning line, not just the verdict.**
 
 **Policy (recommendation, not yet enforced):** completion should *require running* `proof-check.sh
 --task <id>` and quoting its verdict line in `test_summary`, while `proof_cmd` stays stored as the

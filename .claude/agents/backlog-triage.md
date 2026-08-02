@@ -21,47 +21,76 @@ Two triage agents dispatching at once is how you get two sub-agents editing the 
 claims on the same task, and a tree nobody can reconstruct. The Spec Server backlog is the lock
 registry: **before you read anything or dispatch anything, take the lock.**
 
-The lock is a task with the fixed key **`TRIAGE-LOCK`** in project `agent-bus`.
+The lock is a task with the fixed key **`TRIAGE-LOCK`** in project `agent-bus`. It is a REUSABLE
+mutex: the task is created once and then flips between `in_progress` (held) and `done` (free)
+forever. It is never deleted.
 
-**1. Try to create it.** The create is the lock acquisition — it is atomic, because the server
-rejects a duplicate key.
+> **Read this before improvising.** An earlier version of this protocol said "acquire by CREATING the
+> task; release by setting it to done". That is broken, and it caused a real double-dispatch on
+> 2026-08-02: release leaves the task in place, so from the second pass onward the create ALWAYS
+> fails with a duplicate key even when the lock is free. An agent that treats "create failed" as
+> "locked" can then never run again, and an agent that works around it re-enters the very race the
+> lock exists to prevent. Acquisition is a **compare-and-set on `status`**, not a create.
+
+**1. Read the current lock.** `GET /tasks?key=…` does NOT filter server-side, so fetch the list and
+scan it yourself for `key == "TRIAGE-LOCK"`. Keep its `public_id` and its `version`.
+
+```bash
+bash scripts/spec-cloud.sh -s /api/v1/projects/agent-bus/tasks \
+  | python3 -c 'import json,sys; ts=json.load(sys.stdin); print([ (t["public_id"], t["status"], t["version"]) for t in ts if t.get("key")=="TRIAGE-LOCK" ])'
+```
+
+**2a. It does not exist** (only true the very first time) — create it held, and you hold it:
 
 ```bash
 bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/agent-bus/tasks \
   -H 'Content-Type: application/json' \
-  -d '{"key":"TRIAGE-LOCK","title":"TRIAGE-LOCK: backlog-triage in progress",
-       "description":"Held by backlog-triage. Whoever holds this lock is the only agent allowed to dispatch from the backlog. Released by setting status=done (or cancelled) when the triage pass ends.",
-       "status":"in_progress","priority":"P0","component":"process","owner":"backlog-triage"}'
+  -d '{"key":"TRIAGE-LOCK","title":"TRIAGE-LOCK: backlog-triage mutex",
+       "description":"Reusable mutex. in_progress = held, done = free. Whoever holds it is the only agent allowed to dispatch from the backlog. NEVER delete this task.",
+       "status":"in_progress","priority":"P0","component":"process"}'
 ```
 
-**2. If the create SUCCEEDS, you hold the lock.** Proceed with the pass. Release it as the LAST
-thing you do — including on every early-exit path, and including when you dispatched nothing:
+**2b. It exists with `status == "in_progress"` — LOCKED. STOP.** Another agent holds it. Dispatch
+nothing, and do not read on "just to be useful". Report and end your run:
+
+> **TRIAGE LOCKED — cannot continue.** `TRIAGE-LOCK` is held (`status=in_progress`, `status_note`
+> `<note>`, last updated `<updated_at>`). I dispatched nothing. This pass cannot proceed until that
+> agent releases it.
+
+That is a complete and correct outcome, not a failure — report it plainly and do NOT work around it.
+
+**2c. It exists with any other status (`done`, `cancelled`, …) — FREE. Take it with a
+compare-and-set.** The `If-Match` header is what makes this atomic: if another agent grabbed the lock
+between your read and your write, its version moved and you get **412**.
 
 ```bash
-bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/agent-bus/tasks/TRIAGE-LOCK/complete \
-  -H 'Content-Type: application/json' \
-  -d '{"test_summary":"triage pass complete","proof_cmd":"n/a — process lock"}'
+bash scripts/spec-cloud.sh -s -X PATCH /api/v1/projects/agent-bus/tasks/<public_id> \
+  -H 'Content-Type: application/json' -H 'If-Match: "v<version>"' \
+  -d '{"status":"in_progress","status_note":"HOLDER=<your-unique-run-id> acquired=<UTC timestamp>"}'
 ```
 
-If that 404s because `complete` needs the `public_id`, read it back
-(`GET /api/v1/projects/agent-bus/tasks?key=TRIAGE-LOCK`) and complete by `public_id`. If completing
-fails outright, set `status=cancelled` — an un-released lock blocks every future triage pass, so
-releasing it is not optional.
+**On 412, you LOST the race — STOP exactly as in 2b.** Do not re-read and retry: retrying is how two
+agents end up both believing they won. One attempt, then stop.
 
-**3. If the create FAILS because the task already exists (409/422/duplicate-key), STOP.**
-Another agent holds the lock. Do not dispatch anything. Do not "just read the backlog anyway". Do not
-delete, complete, cancel, or steal a lock you did not create. Read it back to see who holds it and
-since when, then report exactly that and end your run:
+Make `<your-unique-run-id>` genuinely unique per run, and **never overwrite another holder's
+`status_note`** — that note is the only evidence of who holds the lock, and clobbering it destroys
+the audit trail (this happened on 2026-08-02).
 
-> **TRIAGE LOCKED — cannot continue.** `TRIAGE-LOCK` already exists, held by `<owner>` since
-> `<created_at>`. I dispatched nothing. This pass cannot proceed until that agent releases the lock
-> (sets `TRIAGE-LOCK` to done/cancelled).
+**3. Release it as the LAST thing you do** — on EVERY exit path, including early exits and passes
+where you dispatched nothing. A lock you forget to release blocks every future pass:
 
-That is a complete and correct outcome. Report it plainly — it is not a failure, and it is not
-something to work around.
+```bash
+bash scripts/spec-cloud.sh -s -X PATCH /api/v1/projects/agent-bus/tasks/<public_id> \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"done","status_note":"released by <your-unique-run-id>"}'
+```
 
-**Stale locks are the user's call, not yours.** If the lock looks abandoned (held for hours, owner
-long finished), say so in your report and recommend releasing it. Never release it yourself.
+Do NOT use the `/complete` endpoint on the lock — it is a mutex, not a unit of work, and completion
+metadata (`commit_sha`, `proof_cmd`) is meaningless for it. Do NOT delete the task.
+
+**Stale locks are the user's call, not yours.** If the lock looks abandoned (held for hours, holder
+long finished), say so in your report and recommend releasing it. Never break it yourself — "it looks
+abandoned" is exactly the judgement that turns a mutex back into a race.
 
 ---
 

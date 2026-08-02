@@ -105,6 +105,33 @@ func TestParseMessageIDRejectsMalformed(t *testing.T) {
 	}
 }
 
+// TestParseMessageIDRejectsOversizedInputWithoutEchoingIt pins the length cap.
+// The longest well-formed id is MaxMessageIDLen bytes, so anything longer is
+// rejected before any formatting happens -- and the rejection must NOT quote
+// the input, because %q escapes a control byte to four characters and would
+// hand an attacker a multiple of their own input back in a log line.
+func TestParseMessageIDRejectsOversizedInputWithoutEchoingIt(t *testing.T) {
+	longest := strings.Repeat("b", 64) + "-" + "18446744073709551615"
+	if len(longest) != MaxMessageIDLen {
+		t.Fatalf("test setup: longest valid id is %d bytes, want MaxMessageIDLen = %d", len(longest), MaxMessageIDLen)
+	}
+	if _, _, err := ParseMessageID(longest); err != nil {
+		t.Fatalf("ParseMessageID(<%d-byte maximal id>) = %v, want nil: the cap must not reject the longest VALID id", len(longest), err)
+	}
+
+	oversized := strings.Repeat("\x00", 1<<20) + "-7"
+	_, _, err := ParseMessageID(oversized)
+	if err == nil {
+		t.Fatalf("ParseMessageID(<%d-byte id>) = nil error, want rejection past MaxMessageIDLen = %d", len(oversized), MaxMessageIDLen)
+	}
+	if got := len(err.Error()); got > 200 {
+		t.Fatalf("error string is %d bytes for a %d-byte input; it must not echo the input", got, len(oversized))
+	}
+	if strings.Contains(err.Error(), "\x00") || strings.Contains(err.Error(), `\x00`) {
+		t.Fatalf("error string echoes the attacker-controlled input: %q", err.Error())
+	}
+}
+
 // TestParseMessageIDLeadingMinusIsStructurallyUnreachable documents a
 // contract subtlety: because ParseMessageID splits on the LAST '-', any '-'
 // that would appear in the sequence half is, by construction, never in the
