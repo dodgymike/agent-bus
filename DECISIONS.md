@@ -599,3 +599,38 @@ So:
 **Open, deliberately not decided here:** the token's format and whether it carries claims or is an
 opaque server-side handle; whether sessions persist across restart; the exact skew tolerance; and
 whether one binary serves both agents and humans.
+
+---
+
+## 2026-08-02 — The Go CLI replaces the shell wrappers (amends invariant 7)
+
+**Context.** Invariant 7 required every capability to ship a `scripts/bus-*.sh` wrapper, so that an
+agent never constructs an HTTP call. The AUTH-1 decision introduced a compiled Go CLI as the agent
+interface, leaving two competing delivery vehicles. Separately, a CLI epic had been filed for a
+*human* client, which overlapped it almost entirely.
+
+**Decision (user, verbatim).** *"the go cli should take the place of the .sh files and be easy to use
+for a human + friendly for an agent to use or embed"*
+
+So there is **one client**, a compiled Go binary, serving both audiences. The shell wrappers are
+retired as their subcommands land. Invariant 7 is amended, not weakened: nobody hand-writes HTTP, and
+a feature without its CLI subcommand is still not done.
+
+**Consequences.**
+
+- **"Embed" is the load-bearing word.** It means the CLI must be a thin shell over a **reusable Go
+  client package**, and that package therefore cannot live under `internal/` — Go would forbid any
+  other module importing it. Deciding this late would be expensive, so it is decided now: the client
+  package is importable, and its exported surface is a public API subject to compatibility care.
+- **Three audiences, three concrete requirements** (see invariant 7 for the full text): readable
+  output and remedial errors for humans; `--json`, stable exit codes, no interactive prompts and
+  no TTY-dependent credential input for agents shelling out; an importable package for agents
+  embedding. The long-poll command streams newline-delimited JSON so it can be consumed
+  incrementally rather than buffered to completion.
+- **The AGENTIF epic must be re-scoped.** Its eight tasks are shell wrappers; they become CLI
+  subcommands. `AGENTIF-1` (`bus-serve.sh`) already shipped and is the only wrapper that exists.
+- **The CLI epic and AGENTIF now overlap and should be reconciled** — most likely merged, since the
+  heavy lifting is identical and the only difference is output formatting.
+- `AGENT_PROTOCOL.md` must be rewritten against CLI subcommands rather than shell scripts.
+- The binary now has a second consumer with a compatibility expectation, so its flags, exit codes and
+  JSON shapes belong in `CONTRACTS.md` like any other contract surface.

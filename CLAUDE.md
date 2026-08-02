@@ -36,8 +36,22 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    payloads — a log holding plaintext would be unwritable the moment PFS lands, and a log holding
    ciphertext it can never decrypt would be dead weight. The log is append-only in the strict sense:
    no in-place edits, no truncation except a verified-corrupt tail during recovery.
-7. **Agents never hand-write HTTP.** Every capability ships with a `scripts/bus-*.sh` wrapper and an
-   `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its wrapper is not done.
+7. **Nobody hand-writes HTTP — the compiled Go CLI is THE client.** Every capability ships with a CLI
+   subcommand and an `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its subcommand
+   is not done. The CLI **replaces** the `scripts/bus-*.sh` wrappers (decided 2026-08-02); shell
+   wrappers are no longer the delivery vehicle, and the ones that exist are to be retired as their
+   subcommands land. It does all the heavy lifting: key generation and storage, session-token refresh,
+   long-polling with cursor management, reconnect/backoff, and verification of inbound messages.
+
+   It has **three audiences, and all three are requirements, not aspirations**:
+   - **A human**, interactively: readable default output, sane defaults, `--help` that answers the
+     common question, and errors that name the remedy rather than the stack.
+   - **An agent**, shelling out: `--json` on every command, stable documented exit codes, never an
+     interactive prompt, and credentials from config/env rather than a TTY. The long-poll command
+     streams newline-delimited JSON so it can be piped and consumed incrementally.
+   - **An agent, embedding it**: the CLI is a thin shell over a reusable Go client package. That
+     package therefore CANNOT live under `internal/` — an importable client is the whole point of
+     "embed", and putting it in `internal/` silently forecloses it.
 8. **Simple beats clever.** Go stdlib first. A third-party dependency needs a justification in
    `DECISIONS.md`.
 9. **NEVER write your own crypto.** This is absolute and overrides every other preference in this
