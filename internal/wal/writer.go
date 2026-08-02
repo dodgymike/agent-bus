@@ -38,9 +38,10 @@ type Writer struct {
 // the PARENT DIRECTORY is fsynced so that the file's existence -- not just its
 // contents -- survives a crash. If it does exist, its header is validated and
 // its records are scanned strictly (see ScanAll) to establish the next index
-// and the append offset; any malformed record is an error here. Deciding that
-// a corrupt tail may be truncated is recovery policy and belongs to RepairTail,
-// which does its work before OpenWriter is called (see Open).
+// and the append offset; any malformed record is an error here. Deciding what
+// damage may be removed is recovery policy and belongs to RepairLog, which does
+// its work -- and verifies its own result -- before OpenWriter is called (see
+// Open).
 //
 // A zero-length existing file is the one case treated as fresh rather than
 // corrupt: it is the crash window between creating the file and writing its
@@ -145,9 +146,10 @@ func shortWrite(err error, n, want int) error {
 // If the write is short or fails, or the fsync fails, the file may now carry a
 // torn tail and the Writer is POISONED: this and every subsequent Append or
 // Sync returns an error matching ErrPoisoned. Appending after a torn write
-// would bury the damage in the MIDDLE of the file, and invariant 6 makes that
-// a fatal condition rather than a truncatable tail -- so the writer refuses to
-// keep going instead of trading a recoverable file for an unrecoverable one.
+// would bury the damage in the MIDDLE of the file, and while recovery can now
+// salvage that -- it discards the damaged record and keeps the ones behind it
+// -- salvaging is a lossy answer to a problem the writer can simply decline to
+// create. So the writer still refuses to keep going.
 func (w *Writer) Append(t Type, payload []byte) (Record, error) {
 	if !t.Known() {
 		return Record{}, fmt.Errorf("wal: append to %s: %w: %s", w.path, ErrUnknownType, t)

@@ -210,7 +210,10 @@ type CorruptError struct {
 	//     tailHasRecordsAfterIt): a crash mid-append leaves a prefix of one frame
 	//     and nothing beyond it, so bytes beyond the damage mean it is not a tail.
 	//
-	// Truncation policy reads this flag as an absolute veto; see RepairTail.
+	// Recovery still treats this flag as "a partial write cannot explain it",
+	// but since 2026-08-02 that is no longer a veto on removing the record -- it
+	// is a reason to look for intact records AFTER it rather than assume the log
+	// ends here. See RepairLog.
 	FrameIntact bool
 }
 

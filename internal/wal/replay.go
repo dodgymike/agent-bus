@@ -49,11 +49,19 @@ import (
 // messages and/or corruption, with logging".
 //
 // So each of those is now DISCARDED and RECORDED in Recovered.Discarded, and
-// the replay continues. Nothing is discarded silently: Open logs every entry of
-// Recovered.Discarded, with its offset, record index and type, at ERROR when
-// what was lost had been acknowledged (a commit record) and WARN otherwise.
-// A discard that does not reach the log is a bug, and there are tests that fail
-// when one does not.
+// the replay continues. Nothing is discarded silently: Open logs the discards in
+// Recovered.Discarded, with offset, record index and type, at ERROR when what
+// was lost had been acknowledged (a commit record) and WARN otherwise. A discard
+// that does not reach the log is a bug, and there are tests that fail when one
+// does not.
+//
+// Two CAPS apply to the detail and to neither of the totals, which is the
+// precise claim: Recovered.Discarded retains at most maxDiscardsRetained
+// entries and Open names at most maxDiscardsLogged of them individually, so a
+// file that is damage from end to end cannot be held in memory as error text or
+// turn one restart into a hundred thousand log lines. Recovered.DiscardCount and
+// the emitted total are EXACT regardless. So "how much was lost" is never
+// capped; only "which ones are described one by one" is.
 //
 // The honest consequence, stated rather than buried: a COMMIT record whose
 // prepare was discarded is an ACKNOWLEDGED WRITE THAT IS NOW LOST. It is
@@ -125,12 +133,20 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 	// open holds every PREPARE that has not yet been committed or aborted,
 	// keyed by its index -- which is also its transaction id (see Log).
 	// openBytes tracks what those entries are retaining, so the bound below is
-	// on MEMORY and not merely on a count. openOrder holds the same indices in
-	// file order so the OLDEST can be evicted when a bound is hit.
+	// on MEMORY and not merely on a count.
+	//
+	// There is deliberately NO side list of indices in file order. An earlier
+	// version kept one to find the oldest prepare cheaply, and security measured
+	// what that cost: the list was appended to for EVERY prepare in the file and
+	// compacted only from inside the eviction path, which never runs on a
+	// healthy log -- so a 23.7 MB WAL with zero unresolved prepares retained
+	// 1.76 MB of index list, growing linearly with the FILE. That is the
+	// O(unresolved prepares) bound this function documents, broken, and at
+	// 10 GiB it is the boot-time OOM the eviction was written to avoid.
+	// Eviction only ever runs on a file this server did not write, so it can
+	// afford to scan the (at most maxOpenPrepares) live entries instead.
 	open := make(map[uint64]Entry)
 	openBytes := int64(0)
-	var openOrder []uint64
-	orderHead := 0
 
 	expectIndex := uint64(1)
 
@@ -186,12 +202,15 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 			// bound exactly as tight as it was.
 			openBytes += int64(len(e.Kind)) + int64(len(e.Body))
 			open[rec.Index] = e
-			openOrder = append(openOrder, rec.Index)
 			for len(open) > maxOpenPrepares || openBytes > maxOpenPrepareBytes {
-				victim, ok := oldestOpen(open, openOrder, &orderHead)
-				if !ok || victim == rec.Index {
+				// The record just read is never the victim: evicting it would
+				// leave the loop unable to make progress when one entry alone
+				// exceeds the byte bound. len(open) > 1 guarantees a different
+				// victim exists.
+				if len(open) < 2 {
 					break
 				}
+				victim := oldestOpen(open)
 				ev := open[victim]
 				delete(open, victim)
 				openBytes -= int64(len(ev.Kind)) + int64(len(ev.Body))
@@ -199,10 +218,6 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 					Index: victim, Type: TypePrepare, TypeKnown: true,
 					Reason: fmt.Sprintf("evicted the oldest unresolved prepare to stay inside recovery's memory bounds (%d prepares, %d bytes): this file holds more open transactions than the write path can produce, so it was not written by this server",
 						maxOpenPrepares, maxOpenPrepareBytes)})
-			}
-			if orderHead > maxOpenPrepares && orderHead*2 >= len(openOrder) {
-				openOrder = append(openOrder[:0], openOrder[orderHead:]...)
-				orderHead = 0
 			}
 			return nil
 
@@ -319,18 +334,21 @@ func reasonOf(err error) string {
 	return elide(err.Error(), maxCauseChars)
 }
 
-// oldestOpen finds the earliest prepare still unresolved, advancing head past
-// entries that have already been committed or aborted. Indices rise through the
-// file, so openOrder is sorted and the front is the oldest.
-func oldestOpen(open map[uint64]Entry, order []uint64, head *int) (uint64, bool) {
-	for *head < len(order) {
-		idx := order[*head]
-		*head++
-		if _, ok := open[idx]; ok {
-			return idx, true
+// oldestOpen returns the earliest prepare still unresolved: indices rise
+// through the file, so the smallest live key is the oldest record.
+//
+// It is O(open), not O(file), and open is capped at maxOpenPrepares. That is
+// the whole point -- see the note in Replay about the index list this replaced.
+// It runs only from the eviction path, which only fires on a file this server
+// did not write. The caller must not call it on an empty map.
+func oldestOpen(open map[uint64]Entry) uint64 {
+	oldest := uint64(0)
+	for idx := range open {
+		if oldest == 0 || idx < oldest {
+			oldest = idx
 		}
 	}
-	return 0, false
+	return oldest
 }
 
 // addDiscard records one loss, keeping the counts exact while capping the

@@ -55,14 +55,22 @@
 //     destroy a file that is probably intact.
 //
 // The thing that keeps this honest is no longer "we never discard". It is
-// "WE NEVER DISCARD SILENTLY". Every discarded region is reported in
+// "WE NEVER DISCARD SILENTLY". Discarded regions are reported in
 // Repair.Discards or Recovered.Discarded and written to the operator log by
 // RepairLog and Open -- at ERROR when what was lost had been acknowledged (a
 // commit record) or cannot be identified, WARN otherwise. A discard that does
 // not reach the log is a bug, and the crash-injection tests fail when one does
 // not.
 //
-// # Damage does not cascade
+// The DETAIL is capped and the TOTALS are not, which is the exact claim: at
+// most maxDiscardsRetained regions are retained for the caller and at most
+// maxDiscardsLogged are named one by one, so a file that is damage from end to
+// end cannot be held in memory as error text nor turn one restart into a
+// hundred thousand log lines -- but the exact count and byte total are always
+// emitted. "How much was lost" is never capped; only "which ones are described
+// individually" is.
+//
+// # Damage does not cascade, with one bounded exception
 //
 // Discarding the DAMAGED record is sanctioned. Deleting later records that are
 // themselves intact is not. After damage, recovery searches FORWARD for the
@@ -73,6 +81,24 @@
 // boundary, which is precisely the case recovery does not exist for, and with
 // one a reviewer's probe showed a single flipped bit in a mid-file length field
 // deleting eight committed records.
+//
+// The search also runs in TWO STAGES, and the second one exists because the
+// first was measurably wrong. Stage one narrows candidates by an index-density
+// window, which is cheap and sharp; stage two repeats the scan without it. A
+// repaired log has permanent index HOLES, so after a large hole the true next
+// record's index exceeds what the density window allows, and with stage one
+// alone the genuine record was rejected, the search reported "nothing follows",
+// and recovery deleted every committed record to the end of the file WHILE
+// LOGGING THAT IT HAD FOUND A TORN TAIL. The rule that came out of that, and
+// that must not be relaxed: A BOUNDED SEARCH FINDING NOTHING IS NEVER ON ITS
+// OWN GROUNDS FOR "NOTHING FOLLOWS".
+//
+// THE EXCEPTION: the search has a work budget, because the bytes it walks are
+// attacker-influenced. A region dense enough with frame-like headers to exhaust
+// it makes the search give up, and everything from the damage to the end of the
+// file is then discarded without proof that any of it was unreadable. It is
+// reported in Repair.Exhausted and logged at ERROR twice. That is the only way
+// one damaged record can still cost an intact one.
 //
 // # What recovery does to the file, in order (see Open)
 //
@@ -132,7 +158,11 @@
 //     tail -- a damaged record with an intact record behind it does not move
 //     the high-water mark, because the search resumes at the survivor.
 //   - A record whose LENGTH FIELD alone is corrupt is RECOVERED, not discarded:
-//     its own checksum over the bytes actually present proves the payload is all
-//     there. That is a genuine proof, and it is the one place the word is still
-//     used in this package.
+//     its own checksum over the bytes actually present is overwhelming evidence
+//     that the payload is all there. It is NOT called a proof. A 32-bit CRC
+//     collides by accident about once in 2^32 wrong lengths, and being unkeyed
+//     it can be collided on purpose by anyone who chooses payload bytes. The
+//     word "proof" was removed from this package for exactly that reason; what
+//     is left is a strong check whose strength is a property of the format and
+//     improves when the keyed MAC lands.
 package wal

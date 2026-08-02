@@ -384,13 +384,21 @@ func frameHeaderAt(f *os.File, off, size int64) ([]byte, bool) {
 // rebuildFrame asks whether the damaged frame at off is a COMPLETE record whose
 // LENGTH FIELD is the only thing wrong, on the hypothesis that it ends at end.
 //
-// It is the same checksum proof the pre-2026-08-02 code used as a VETO on
+// It is the same checksum check the pre-2026-08-02 code used as a VETO on
 // truncation, repurposed: under the old refuse-to-start policy the only thing
 // that could be done with "this record is really intact" was to refuse the
-// repair; now the record can simply be kept, which loses nothing at all. Only
-// the true length reproduces the stored checksum, so a match cannot be
-// manufactured by a partial write -- an interrupted append leaves fewer bytes
-// than the header declares, never a mangled header over a complete payload.
+// repair; now the record can simply be kept, which loses nothing at all.
+//
+// HOW STRONG THIS IS, stated exactly. A wrong length essentially never
+// reproduces the stored checksum, so a match is overwhelming evidence that the
+// payload is all there and that a partial write cannot explain the frame -- an
+// interrupted append leaves fewer bytes than the header declares, never a
+// mangled header over a complete payload. It is NOT a proof, and this package
+// no longer calls it one: the checksum is a 32-bit CRC, so roughly one wrong
+// length in 2^32 collides by accident, and an adversary who can choose payload
+// bytes can construct a collision deliberately because CRC32C is unkeyed (see
+// the note in doc.go). Both of those are properties of the FORMAT, closing with
+// the keyed-MAC replacement, not of this check.
 func rebuildFrame(f *os.File, off, end int64, hdr []byte) (Record, bool) {
 	trueLen := end - off - FrameHeaderSize
 	if trueLen < 0 || trueLen > MaxPayloadSize {
@@ -442,17 +450,44 @@ func rebuildFrame(f *os.File, off, end int64, hdr []byte) (Record, bool) {
 // correct and the next record starts exactly there, so the common case costs
 // one checksum rather than a walk.
 //
-// WHAT THIS SEARCH CANNOT DO, stated honestly: the checksum is CRC32C, which is
-// unkeyed, so a client who can get a chosen payload into the log can put a
-// byte sequence in it that this search will accept as a record. That is a known
-// property of the format, not of this function (see format.go), and it is being
-// closed by replacing CRC32C with a keyed MAC in a separate task -- at which
-// point a candidate a client could forge stops existing. Until then the index
-// window is the only thing narrowing it, and it is narrow.
+// WHAT THIS SEARCH CANNOT DO, stated honestly, and WHY IT IS SAFE ANYWAY TODAY.
+//
+// The only authenticity check available is CRC32C, which is UNKEYED. So a client
+// who could get chosen bytes into a payload could embed a byte sequence that
+// this search accepts as a record -- and because the first candidate in file
+// order wins, they would not even need to know the current index; a ladder of
+// ascending forged indices would do. Security demonstrated exactly that against
+// a hand-built file: forged prepare+commit frames were admitted, copied into the
+// rewritten log by rewriteLog as if genuine, and delivered to the Applier as
+// accepted history.
+//
+// WHAT MAKES IT UNREACHABLE IN THIS SERVER, and this is written down because it
+// was previously true only by ACCIDENT and nothing recorded it:
+//
+//	A FRAME HEADER CANNOT BE EXPRESSED IN A WAL PAYLOAD.
+//
+// Every frame header contains NUL bytes -- payloadLen <= 1 MiB puts a zero in
+// its top byte, the reserved field is two zeros, and any modest index adds four
+// more. The only writer of WAL payloads is Log (see log.go), whose bodies go
+// through canonicalBody -> json.Compact, and JSON rejects a raw control byte
+// inside a string. A client therefore cannot place the bytes a forged header
+// needs. TestWALPayloadsCannotCarryAFrameHeader pins this, and it must be
+// treated as load-bearing rather than incidental.
+//
+// THE CONDITION UNDER WHICH THAT STOPS HOLDING, so it is not discovered the hard
+// way: the moment the payload channel widens to arbitrary bytes -- a binary or
+// base64-decoded body, compression, E2E ciphertext, or an audit record carrying
+// raw content bytes -- this argument evaporates and the keyed MAC becomes a
+// BLOCKING PRECONDITION for that change, not a later improvement.
 func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) (int64, bool, error) {
-	budget := resyncBudget{}
-
+	// STAGE 0: the damaged frame's own declared boundary. When only a payload
+	// byte was flipped the length field is still correct, so the next record
+	// starts exactly there and the whole search costs one checksum.
 	if declared > 0 && from+declared+FrameHeaderSize <= size {
+		// One candidate cannot exhaust a 4096-verification, 64 MiB budget: a
+		// single payload is at most MaxPayloadSize. The budget is passed for
+		// uniformity, not because it can fire here.
+		budget := resyncBudget{}
 		ok, err := validFrameAt(f, size, from+declared, lastIndex, &budget)
 		if err != nil {
 			return 0, false, err
@@ -462,6 +497,52 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 		}
 	}
 
+	// STAGE 1: scan with the DENSITY window, which is a tight filter and keeps
+	// the ordinary case cheap.
+	o, exhausted, err := scanForFrame(f, size, from, lastIndex, true)
+	if err != nil || o >= 0 || exhausted {
+		return o, exhausted, err
+	}
+
+	// STAGE 2: scan again WITHOUT the density window.
+	//
+	// This stage exists because of a data-loss bug security reproduced against
+	// stage 1 alone, and the reasoning behind it is the whole of why it must
+	// stay. A repaired log has permanent index HOLES -- survivors are never
+	// renumbered -- so the gap between the last survivor's index and the next
+	// record's can be arbitrarily large. The density window bounds a candidate's
+	// index by how many records could still FIT before the end of the file,
+	// which after a big hole is smaller than the real next index. The genuine
+	// next record was then rejected by a cheap filter, the search reported "no
+	// intact record follows", and recovery deleted every committed record to the
+	// end of the file WHILE LOGGING THAT IT HAD FOUND A TORN TAIL. Measured: a
+	// log with indices 1, 2, 50001, 50002 and one flipped bit in a length field
+	// lost an acknowledged write and reported no error.
+	//
+	// So the rule is: A BOUNDED SEARCH FINDING NOTHING IS NEVER ON ITS OWN
+	// GROUNDS FOR "NOTHING FOLLOWS". Stage 2 keeps the two filters that are
+	// actually sound -- an index strictly greater than the last survivor's, and
+	// the record's own checksum -- and drops only the heuristic one. It runs
+	// with a FRESH budget so that a stage-1 near-miss cannot starve it, and it
+	// costs nothing in the common case because stage 1 almost always answers
+	// first.
+	return scanForFrame(f, size, from, lastIndex, false)
+}
+
+// scanForFrame walks [from+1, size) for the first offset holding an intact
+// record whose index follows lastIndex, and returns -1 when there is none.
+//
+// dense selects the extra index heuristic: with it on, a candidate's index must
+// also be no larger than the number of records that could still fit before the
+// end of the file. That is a cheap, sharp filter and it is WRONG on its own --
+// see the stage-2 comment in resyncFrom -- so it is only ever used as a first
+// pass whose failure is not conclusive.
+//
+// Each call carries its own budget. Exhausting it is reported rather than
+// hidden, because a search that gave up is not the same fact as a search that
+// finished and found nothing.
+func scanForFrame(f *os.File, size, from int64, lastIndex uint64, dense bool) (int64, bool, error) {
+	budget := resyncBudget{}
 	buf := make([]byte, resyncChunk+FrameHeaderSize)
 	for base := from + 1; base+FrameHeaderSize <= size; base += resyncChunk {
 		n := size - base
@@ -473,15 +554,15 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 		}
 		for i := int64(0); i+FrameHeaderSize <= n; i++ {
 			o := base + i
-			if o+FrameHeaderSize > size {
-				break
-			}
 			hdr := buf[i : i+FrameHeaderSize]
 			if binary.BigEndian.Uint16(hdr[14:16]) != 0 {
 				continue
 			}
 			idx := binary.BigEndian.Uint64(hdr[4:12])
-			if idx <= lastIndex || idx > lastIndex+uint64((size-o)/FrameHeaderSize)+1 {
+			if idx <= lastIndex {
+				continue
+			}
+			if dense && idx > lastIndex+uint64((size-o)/FrameHeaderSize)+1 {
 				continue
 			}
 			payloadLen := int64(binary.BigEndian.Uint32(hdr[0:4]))
@@ -498,9 +579,6 @@ func resyncFrom(f *os.File, size, from int64, lastIndex uint64, declared int64) 
 			if ok {
 				return o, false, nil
 			}
-		}
-		if base+resyncChunk <= base { // overflow guard; unreachable for real files
-			break
 		}
 	}
 	return -1, false, nil
@@ -529,8 +607,10 @@ func validFrameAt(f *os.File, size, o int64, lastIndex uint64, budget *resyncBud
 	if !ok {
 		return false, nil
 	}
-	idx := binary.BigEndian.Uint64(hdr[4:12])
-	if idx <= lastIndex || idx > lastIndex+uint64((size-o)/FrameHeaderSize)+1 {
+	// NO density bound here, deliberately: this offset is not a guess, it is the
+	// boundary the damaged frame itself declared, and after a repair the index
+	// gap across a hole can be arbitrarily large (see resyncFrom stage 2).
+	if idx := binary.BigEndian.Uint64(hdr[4:12]); idx <= lastIndex {
 		return false, nil
 	}
 	payloadLen := int64(binary.BigEndian.Uint32(hdr[0:4]))
@@ -603,7 +683,7 @@ func checkSalvageHeader(f *os.File, path string, kind Kind, size int64, plan *re
 // in the same directory, fsynced, and then renamed over the original, which is
 // atomic. A crash at any point before the rename leaves the ORIGINAL file
 // exactly as it was, so the worst case is that the same repair runs again.
-func rewriteLog(path string, kind Kind) (repairPlan, error) {
+func rewriteLog(path string, kind Kind, want repairPlan) (repairPlan, error) {
 	tmp := path + ".repair"
 	// A stale temporary from a crashed repair is meaningless: it is a partial
 	// copy of a file that is still intact. Remove it rather than reuse it.
@@ -642,6 +722,20 @@ func rewriteLog(path string, kind Kind) (repairPlan, error) {
 	if err := bw.Flush(); err != nil {
 		cleanup()
 		return plan, fmt.Errorf("wal: repair %s: flush %s: %w", path, tmp, err)
+	}
+	// CHECKED BEFORE THE RENAME, deliberately. The salvage walk runs twice over
+	// the same bytes -- once to decide, once to copy -- and the whole design
+	// rests on it being a pure function of those bytes. Verifying afterwards
+	// could only ever report the bug; verifying here PREVENTS it, and the
+	// original file is still untouched at this point, so the failure costs
+	// nothing but a temporary file. A disagreement is not damage in the file --
+	// it can only be a bug in recovery itself -- so it is fatal, and the
+	// always-restart policy does not cover it: restarting into a file rewritten
+	// from a decision nothing verified is worse than not starting.
+	if plan.Kept != want.Kept || plan.Rebuilt != want.Rebuilt || plan.Count != want.Count {
+		cleanup()
+		return plan, fmt.Errorf("wal: repair %s: the two salvage passes disagreed (deciding pass kept %d, rebuilt %d, discarded %d; copying pass kept %d, rebuilt %d, discarded %d); this is a bug in recovery, not damage in the file, and the log has NOT been changed",
+			path, want.Kept, want.Rebuilt, want.Count, plan.Kept, plan.Rebuilt, plan.Count)
 	}
 	if err := f.Sync(); err != nil {
 		cleanup()

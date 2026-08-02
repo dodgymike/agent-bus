@@ -12,12 +12,19 @@ import (
 // Repair is the outcome of a RepairLog pass: what, if anything, recovery had to
 // remove or rebuild before the log could be replayed.
 //
-// EVERY field here is also written to the operator log by RepairLog. That is
-// deliberate and it is the contract: after the 2026-08-02 policy change
-// recovery is ALLOWED to discard damaged records, so the thing that keeps the
-// system honest is no longer "we never discard" -- it is "we never discard
-// SILENTLY". A discard that does not appear in the log is a bug, and there are
-// tests that fail if one does not.
+// Every LOSS described here is also written to the operator log by RepairLog.
+// That is the contract: after the 2026-08-02 policy change recovery is ALLOWED
+// to discard damaged records, so the thing that keeps the system honest is no
+// longer "we never discard" -- it is "we never discard SILENTLY". A discard that
+// does not appear in the log is a bug, and there are tests that fail if one
+// does not.
+//
+// Not every FIELD is logged, and the difference matters to anyone reading this
+// to find out what an operator will see: Kept and Rebuilt appear only on the
+// paths that produce them (a rewrite, and a length-field repair respectively),
+// and the quarantine path returns early with only Quarantined, DiscardCount and
+// DiscardedBytes set -- its own ERROR line carries the rest. The exact discard
+// COUNT and BYTE TOTAL are emitted on every repair path without exception.
 type Repair struct {
 	// Path is the file that was examined.
 	Path string
@@ -38,6 +45,12 @@ type Repair struct {
 
 	// NextIndex is the index the next append will use after the repair, which
 	// is one past the highest index that SURVIVED.
+	//
+	// IT IS ONLY MEANINGFUL WHEN A REPAIR HAPPENED. On the paths where nothing
+	// was repaired -- a clean file, a file that does not exist, a zero-length
+	// file -- it is left 0 and the writer establishes the real value itself. The
+	// quarantine path is the one exception that reports a value without a
+	// repair: it sets 1, because a fresh log genuinely does start there.
 	//
 	// ---------------------------------------------------------------------
 	// WHAT REISSUING THAT INDEX DOES AND DOES NOT PROMISE (invariant 1, "ids
@@ -160,7 +173,7 @@ func RepairTail(path string, kind Kind, logger *logging.Logger) (TailRepair, err
 // error, because none of those are damage and "repairing" them would destroy a
 // file that is probably intact.
 //
-// # Damage does not cascade
+// # Damage does not cascade, with ONE bounded exception
 //
 // Discarding the DAMAGED record is sanctioned. Deleting later records that are
 // themselves intact is not, and that distinction is the whole of the difference
@@ -171,6 +184,16 @@ func RepairTail(path string, kind Kind, logger *logging.Logger) (TailRepair, err
 // ends exactly on a record boundary, which is precisely the case recovery does
 // not exist for, and a reviewer's probe showed one flipped bit in a mid-file
 // length field deleting eight committed records because of it.
+//
+// THE EXCEPTION, named here rather than left to be discovered in a field doc:
+// the forward search has a work budget, because the bytes it walks are
+// attacker-influenced. If a region is so dense with frame-like headers that the
+// budget runs out, the search gives up and everything from the damage to the
+// end of the file is discarded -- a cascade, without proof that any of it was
+// unreadable. It is reported in Repair.Exhausted and logged at ERROR twice (the
+// discard itself, marked Severe, and a separate line saying the search was
+// abandoned), and it is the ONLY path by which one damaged record can still
+// cost an intact one.
 //
 // # What it does to the file
 //
@@ -231,6 +254,7 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 			return res, qerr // renaming failed: a filesystem problem, not damage
 		}
 		res.Quarantined = dest
+		res.NextIndex = 1 // a fresh log starts here, and that is not a guess
 		res.DiscardCount = 1
 		res.DiscardedBytes = plan.Size
 		res.Discards = []Discard{{Stage: "framing", Offset: 0, Length: plan.Size,
@@ -268,27 +292,22 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 	switch {
 	case plan.needsRewrite():
 		before := plan.Size
-		after, err := rewriteLog(path, kind)
+		// rewriteLog re-runs the walk and checks it against plan BEFORE it
+		// renames anything, so a disagreement leaves the original file untouched.
+		after, err := rewriteLog(path, kind, plan)
 		if err != nil {
 			return res, err
 		}
-		// The salvage walk runs TWICE over the same bytes -- once to decide,
-		// once to copy -- and the whole design rests on it being a pure function
-		// of those bytes. This pins that. If the two passes ever disagree the
-		// file has just been rewritten from a decision nothing verified, which
-		// is a bug in recovery rather than damage in the file, so say so instead
-		// of reporting numbers from the wrong pass.
-		if after.Kept != plan.Kept || after.Rebuilt != plan.Rebuilt || after.Count != plan.Count {
-			return res, fmt.Errorf("wal: repair %s: the two salvage passes disagreed (deciding pass kept %d, rebuilt %d, discarded %d; copying pass kept %d, rebuilt %d, discarded %d); this is a bug in recovery, not damage in the file",
-				path, plan.Kept, plan.Rebuilt, plan.Count, after.Kept, after.Rebuilt, after.Count)
-		}
 		res.Rewritten = true
-		res.Removed = before - sizeOf(path)
 		res.Reason = firstReason(plan.Discards)
+		nowBytes := sizeOf(path)
+		if nowBytes >= 0 {
+			res.Removed = before - nowBytes
+		}
 		logger.Warn("wal rewrote a damaged log, keeping every intact record",
 			"path", path, "kept", after.Kept, "rebuilt", after.Rebuilt,
 			"discards", plan.Count, "discarded_bytes", plan.Bytes,
-			"was_bytes", before, "now_bytes", sizeOf(path), "next_index", res.NextIndex)
+			"was_bytes", before, "now_bytes", nowBytes, "next_index", res.NextIndex)
 
 	case plan.TailAt >= 0:
 		at := plan.TailAt
@@ -362,12 +381,17 @@ func firstReason(discards []Discard) string {
 	return discards[0].Reason
 }
 
-// sizeOf reports a file's size, or 0 if it cannot be stat'd. It is used only
-// for log lines, never for a decision.
+// sizeOf reports a file's size, or -1 if it cannot be stat'd. It is used only
+// for log lines and for the Removed figure, never for a decision.
+//
+// It returns -1 rather than 0 on failure because the caller subtracts it from
+// the pre-repair size: a 0 would turn "I could not measure the file" into "the
+// entire file was removed", which is the most alarming possible reading of a
+// transient stat error. Callers must treat a negative result as unknown.
 func sizeOf(path string) int64 {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return 0
+		return -1
 	}
 	return fi.Size()
 }

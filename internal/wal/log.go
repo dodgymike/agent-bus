@@ -244,7 +244,7 @@ func Open(opts LogOptions) (*Log, error) {
 	// ---------------------------------------------------------------------
 	repair, err := RepairLog(path, KindWAL, opts.Logger)
 	if err != nil {
-		return nil, err // RepairTail already names the path and the offset
+		return nil, err // RepairLog already names the path and the offset
 	}
 
 	var apply func(Committed) error

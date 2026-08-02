@@ -9,9 +9,9 @@ import (
 )
 
 // ScanAll reads every record in path, strictly: any malformed frame is an
-// error. Nothing is skipped and nothing is truncated -- deciding that a
-// corrupt TAIL is tolerable (and cutting it off) is recovery policy and lives
-// in RepairTail, not here. This function's job is to say precisely where the
+// error. Nothing is skipped and nothing is truncated -- deciding what damage
+// is tolerable, and what to remove, is recovery policy and lives in RepairLog,
+// not here. This function's job is to say precisely where the
 // file stops being trustworthy.
 //
 // It returns the records in file order, the byte offset just past the last
@@ -41,7 +41,7 @@ func ScanAll(path string, kind Kind) ([]Record, int64, error) {
 // kind, calling fn for each record in order. It returns the offset just past
 // the last record it accepted.
 //
-// It is the single parsing path: ScanAll, OpenWriter, Replay and RepairTail all
+// It is the single parsing path: ScanAll, OpenWriter, Replay and RepairLog all
 // go through it, so the writer can never disagree with the reader about where a
 // file ends. fn lets a caller establish the next index without holding an entire
 // log in memory, and is the seam recovery uses for a streaming replay.
@@ -154,7 +154,7 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 	// checksum cannot help here: verifying it needs the payload, and reading
 	// the payload needs a length we are not yet entitled to trust. So the
 	// length is first bounded, then -- because the checksum covers the header
-	// -- proven.
+	// -- checked.
 	if reserved != 0 {
 		return Record{}, damaged("reserved field is %#04x, want 0", reserved)
 	}
@@ -178,8 +178,7 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 		return Record{}, damaged("checksum mismatch: computed %#08x, stored %#08x", sum, stored)
 	}
 
-	// The type is deliberately NOT rejected when unknown: the checksum has
-	// already proven these bytes are exactly what some writer intended. See
-	// Type.Known.
+	// The type is deliberately NOT rejected when unknown: the checksum says
+	// these bytes are what some writer intended. See Type.Known.
 	return Record{Index: index, Type: typ, Payload: payload, Offset: off}, nil
 }

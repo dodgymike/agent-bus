@@ -201,3 +201,88 @@ tightens an already-loose data dir; and startup makes three full passes over the
 **Not applicable:** no `scripts/bus-*.sh` wrapper or `AGENT_PROTOCOL.md` entry (invariant 7), because
 this task adds no agent-facing capability — no route, no flag, no production env var, no header.
 `CONTRACTS.md` gained "The write-ahead log at startup" instead.
+
+---
+
+## 2026-08-02 — DUR-11: recovery always restarts, and every discard is observable
+
+**Task:** DUR-11 (`884d3da4-bceb-4ac2-93a2-e147c77f9dca`). Re-scoped against the user's policy
+reversal of the same day (`DECISIONS.md`, "Availability over retention"): *"always be able to
+restart, prefer to discard messages and/or corruption, with logging"*. The stored description
+predated the reversal and was overridden.
+
+**The rule the whole change is written against:** DAMAGE IS NEVER FATAL. NOT BEING ABLE TO READ THE
+FILE STILL IS. Damage — a torn frame, a flipped bit, a lost sector, a payload that will not decode, a
+record type with no meaning here, a corrupt file header — is discarded, logged with offset/index/
+type/length, and recovery continues. Permission denied, a device I/O error, an audit file where a WAL
+was expected, a format version this binary does not implement, an unknown `Kind`, and the
+replay/open disagreement check all stay fatal, because none of them are damage.
+
+**Verified before changing anything.** The task's finding (a) — that the tail veto only fires when
+the file ends exactly on a record boundary — was ALREADY FIXED by DUR-4 (`dad04aa`). A probe against
+a /tmp copy reproducing the reported shape (mid-file length bit flip + one junk byte at EOF) showed
+the veto firing correctly and REFUSING to start, not deleting eight records. The security probe
+predated the hardening. What (a) actually required under the new policy was the opposite work:
+discard the damaged record and KEEP the intact ones behind it, which no amount of veto can do.
+
+**New:** `internal/wal/salvage.go` — a tolerant walk (`salvage`) that resynchronises past damage by
+searching FORWARD for the next intact record by RECORD INDEX (`resyncFrom`), plus `rewriteLog`
+(temp file + atomic rename, survivors keep their ORIGINAL indices) and `quarantine` (rename aside,
+never delete). `RepairTail` → `RepairLog`; `TailRepair` kept as a type alias. `scanFrom` relaxed
+from a DENSE index sequence to a strictly RISING one, because a repaired log has permanent holes and
+renumbering survivors would reuse ids. `Replay`'s semantic failures became discards. A record whose
+LENGTH FIELD alone is corrupt is now RECOVERED rather than discarded — the old veto check,
+repurposed to lose less.
+
+**Reviewer:** CHANGES-REQUESTED, and it was earned. It passed the implementation ("all three
+judgement calls correct, all in scope"; it independently verified chunk-overlap correctness,
+two-pass determinism and crash-safety) and failed the DOC deliverable, naming four sentences it
+would not sign: "damage does not cascade" stated flatly while `Repair.Exhausted` documents the
+cascade; "a genuine proof" and "only the true length reproduces the stored value", both false for a
+32-bit CRC and forgeable besides; "EVERY field here is also written to the operator log"; and
+"Open logs every entry of Recovered.Discarded" against a 64-entry retention cap. All four rewritten.
+
+**Security:** CHANGES-REQUESTED with a reproduced P0 in the NEW code, and it is the finding of the
+task. `resyncFrom`'s index-DENSITY window bounded a candidate's index by how many records could
+still fit before EOF — which after a large hole is smaller than the real next index. The genuine
+next record was rejected by a cheap filter, the search reported "nothing follows", and recovery
+deleted every committed record to the end of the file WHILE LOGGING THAT IT HAD FOUND A TORN TAIL.
+Measured on indices 1, 2, 50001, 50002 with one flipped length bit: an acknowledged write gone, no
+error. This is the exact cascade the function was written to prevent, arriving through the fix for
+it. The search now runs in TWO STAGES — density window first, then the same scan without it — under
+the rule **a bounded search finding nothing is never on its own grounds for "nothing follows"**.
+`TestWALResyncSurvivesALargeIndexHole` pins it and is mutation-checked: restoring the density bound
+on stage two fails it.
+
+Security also measured `Replay` retaining 8 bytes per PREPARE in the whole FILE (1.76 MB on a
+23.7 MB log, linear) through a side list compacted only from the eviction path, which never runs on
+a healthy log — the documented O(unresolved prepares) bound broken, and at 10 GiB the boot-time OOM
+the eviction exists to avoid. The list is deleted; the victim is now found by scanning the ≤1024
+live entries, which also removed a stranding bug the reviewer had flagged separately.
+
+Its HIGH-2 (forged frames admitted by an unkeyed CRC32C) is real and today unreachable only because
+a frame header contains NUL bytes and every WAL payload goes through `json.Compact`. That was true
+by ACCIDENT and nothing recorded it; it is now written down in `resyncFrom`'s doc and pinned by
+`TestWALPayloadsCannotCarryAFrameHeader`, which fails the moment the payload channel widens to
+arbitrary bytes — making the keyed MAC a blocking precondition for that change rather than a later
+improvement. Not gated on the MAC, on security's own advice.
+
+**Chain:** spec-keeper (orchestrator, task already `in_progress`) → implementer role taken by
+feature-runner directly — recorded here as required, and taken because the design (salvage, resync,
+rewrite-vs-truncate, the fatal boundary) had to be settled from probes rather than described →
+test-engineer → reviewer → security. **`documentation` was NOT run**, deliberately: every remaining
+doc surface (`PROTOCOL.md`, `CONTRACTS.md`, `cmd/agent-bus/main.go`) is OUTSIDE this task's
+file-ownership boundary and is handed to the orchestrator as required follow-up, listed in the
+final report.
+
+**Proof:** `bash scripts/proof-check.sh "go test -race -run 'TestCrashInjection|TestWALRepairTail'
+./internal/wal"` → `verdict=PASS class=test exit=0 tests_run=72 top_level=20 skipped=1 failed=0`
+(the skip is `TestCrashInjectionChild`, the re-exec harness, which only runs as a subprocess).
+`go build ./...`, `go vet ./...`, `gofmt -l` clean, `go test -race -count=1 ./...` green.
+
+**Two process failures worth recording, neither mine to fix:** this task's work was swept into a
+commit titled "AUTH-1: enrolment and session establishment" by a parallel agent committing without a
+pathspec — the one-logical-commit-per-task rule is broken for DUR-11 and the history no longer says
+where this change came from. And a log repaired by this version carries index holes that a
+PRE-DUR-11 binary rejects outright (`reader.go` at `6d792b2` requires a dense sequence), so this is a
+one-way upgrade for any data directory that has been repaired.
