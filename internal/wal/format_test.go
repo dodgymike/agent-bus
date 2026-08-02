@@ -97,10 +97,10 @@ func TestWALFraming(t *testing.T) {
 
 	t.Run("payload round-trip", func(t *testing.T) {
 		payloads := [][]byte{
-			{},                              // zero length
-			{0x00},                          // one byte, and a zero byte at that
+			{},                               // zero length
+			{0x00},                           // one byte, and a zero byte at that
 			bytes.Repeat([]byte{0xa5}, 1024), // ordinary
-			make([]byte, MaxPayloadSize),    // the largest frame the format allows
+			make([]byte, MaxPayloadSize),     // the largest frame the format allows
 		}
 		for i := range payloads[3] {
 			payloads[3][i] = byte(i)
