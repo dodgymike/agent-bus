@@ -1308,11 +1308,15 @@ func TestWALRepairTailDiscardsARegionDenseWithFrameHeaders(t *testing.T) {
 	// to be able to tell them apart.
 	assertLogged(t, out, "ERROR", "wal gave up searching for intact records after damage and discarded the rest of the log",
 		"path="+path, "candidates_budget="+strconv.Itoa(maxResyncCandidates))
-	// The discard line itself is WARN, because the frame header that survived
-	// says the region was a PREPARE -- nothing acknowledged. The ERROR above is
-	// what tells an operator the cut was made without proof; the two lines carry
-	// different facts and both have to be there.
-	assertLogged(t, out, "WARN", "wal discarded a damaged record",
+	// The discard line is ERROR TOO, and deliberately not WARN: the surviving
+	// frame header says "prepare", which on its own would mean nothing
+	// acknowledged went -- but the search gave up, so that header describes only
+	// the FIRST record in an 83 KiB region whose remaining contents are
+	// unknown. Discard.Severe exists for exactly this: a loss recovery could not
+	// bound is severe whatever the one readable header claims. The two ERROR
+	// lines carry different facts (what went, and that it went without proof)
+	// and both have to be there.
+	assertLogged(t, out, "ERROR", "wal discarded a damaged record",
 		"path="+path, "stage=framing",
 		"ran out of its work budget", "WITHOUT proof that it was unreadable")
 }

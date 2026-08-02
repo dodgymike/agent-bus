@@ -272,6 +272,16 @@ func RepairLog(path string, kind Kind, logger *logging.Logger) (Repair, error) {
 		if err != nil {
 			return res, err
 		}
+		// The salvage walk runs TWICE over the same bytes -- once to decide,
+		// once to copy -- and the whole design rests on it being a pure function
+		// of those bytes. This pins that. If the two passes ever disagree the
+		// file has just been rewritten from a decision nothing verified, which
+		// is a bug in recovery rather than damage in the file, so say so instead
+		// of reporting numbers from the wrong pass.
+		if after.Kept != plan.Kept || after.Rebuilt != plan.Rebuilt || after.Count != plan.Count {
+			return res, fmt.Errorf("wal: repair %s: the two salvage passes disagreed (deciding pass kept %d, rebuilt %d, discarded %d; copying pass kept %d, rebuilt %d, discarded %d); this is a bug in recovery, not damage in the file",
+				path, plan.Kept, plan.Rebuilt, plan.Count, after.Kept, after.Rebuilt, after.Count)
+		}
 		res.Rewritten = true
 		res.Removed = before - sizeOf(path)
 		res.Reason = firstReason(plan.Discards)
