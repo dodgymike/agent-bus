@@ -38,14 +38,14 @@ This produces an `agent-bus` binary in the working directory (already covered by
 ## Run
 
 ```sh
-./agent-bus -listen :8080 -data-dir ./data -poll-timeout 30s -log-level info
+./agent-bus -listen 127.0.0.1:8080 -data-dir ./data -poll-timeout 30s -log-level info
 ```
 
 Flags (all optional; see `CONTRACTS.md` for the authoritative table):
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-listen` | `:8080` | TCP address to bind |
+| `-listen` | `127.0.0.1:8080` | TCP address to bind (loopback-only by default; use `:8080` for all interfaces) |
 | `-data-dir` | `./data` | Directory for the durable store + append-only log (created `0700`) |
 | `-poll-timeout` | `30s` | Ceiling on a single long-poll wait |
 | `-log-level` | `info` | `debug`, `warn`, `info`, or `error` |

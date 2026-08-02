@@ -721,3 +721,90 @@ against a remote client but not against an attacker who already has data-directo
 - **A missing `proof_cmd` blocks completion**, at least as hard as a vacuous one.
 - **`done` requires actually running `scripts/proof-check.sh` and quoting its verdict**, not storing
   a bare command.
+
+---
+
+## 2026-08-02 — Authentication is DEFAULT-DENY, and an anonymous caller gets 401 on an unknown path (AUTH-2, folding in AUTH-6)
+
+**Context.** AUTH-2 added the bearer-token middleware. AUTH-6 had separately flagged that routes were
+registered individually on the mux, so the first implementer to write `mux.HandleFunc("/v1/send", …)`
+and forget the auth wrapper would ship a fully unauthenticated route on a message bus **with no
+failing test**. The two were implemented together deliberately: bolting default-deny on afterwards
+would have meant reviewing the enforcement change twice.
+
+**Decision 1 — the middleware wraps the WHOLE mux, with an explicit allow-list.** `authMiddleware`
+sits between `LoggingMiddleware` and the mux, so authentication is what happens *unless* a path is
+on `unauthenticatedRoutes`. Forgetting now means **401, not open**. Opening a route up requires a
+deliberate, visible, reviewable edit to a five-entry map — and a second edit to the golden list in
+`TestEveryRouteRequiresAuth`, which is the point: two signatures to widen the anonymous surface.
+
+**Decision 2 — matching is EXACT string equality on `r.URL.Path`.** No prefix match, no path
+cleaning, no trailing-slash tolerance. `//healthz`, `/healthz/`, `/HEALTHZ` and `/v1/info/` are all
+*not* on the list and are refused. The failure mode of strictness is a 401 on a misspelled probe;
+the failure mode of leniency is a normalisation mismatch between the middleware and `http.ServeMux`,
+which is exactly how allow-list bypasses are built. Security probed this over raw TCP with 27
+request shapes (percent-encoded `%2f`/`%2e%2e`, dot-dot walks, `;`-params, absolute-form
+request-URI, `CONNECT`) and every divergent spelling landed on the deny side. It holds *structurally*
+— both the middleware and `ServeMux.Handler` key off the already-decoded `r.URL.Path`, and all five
+allow-list entries are already `path.Clean`-canonical, so `cleanPath` is the identity on exactly the
+paths that matter. **This strictness is load-bearing and must not be relaxed for convenience.**
+
+**Decision 3 — BOTH session routes are on the allow-list, including `/v1/session/complete`.** The
+obvious four are `/healthz`, `/v1/info`, `/v1/enroll` and `/v1/session/begin`. `session/complete` is
+the one that looks skippable, because its caller *does* hold a token — but that token names a
+**PENDING** session, and `auth.Service.Authenticate` rejects a pending session exactly like an
+unknown one. A bearer requirement there would be **unsatisfiable, not strict**: the only credential
+that could satisfy it is the one the call exists to create. That route is authenticated by the
+Ed25519 signature over the server-chosen token, which `handleSessionComplete` verifies; the token in
+its body is not a credential until that succeeds.
+
+**Decision 4 — an anonymous request to an UNKNOWN path returns 401, not 404.** AUTH-6 explicitly
+required this to be decided rather than fallen into. 401 wins on two grounds. First, it is the only
+answer consistent with one rule: any attempt to 404-before-authenticating means checking route
+existence outside the wrapper, which is itself an unauthenticated code path — precisely the shape
+AUTH-6 exists to forbid. Second, it does not let an anonymous caller enumerate which paths this bus
+serves by reading status codes. A caller holding a **valid token** still gets the honest 404 from the
+mux; that asymmetry is the feature.
+
+*Consequences.* `CORE-8` (JSON 404 catch-all) is now **constrained**: its catch-all must be
+registered INSIDE the wrapper, or it becomes the one unauthenticated route that leaks the surface.
+Two existing `TestHealthzInfo` cases changed from 404 to 401 in the same commit.
+
+**Decision 5 — nil `Options.Auth` serves the allow-list and nothing else.** A server built without an
+auth service can authenticate nobody, so every non-allow-listed path is 401. The `WWW-Authenticate`
+challenge says `invalid_token`, not `invalid_request` — the caller's request may have been perfectly
+well-formed, so `invalid_request` would be a lie, and it has the useful side effect of making a
+no-auth-service build indistinguishable from a normal build handed a bad token. AUTH-1's documented
+behaviour is preserved exactly: the three credential routes stay allow-listed, so they still reach
+the mux and still 404 when unregistered.
+
+**Decision 6 — unknown, pending and expired are BYTE-IDENTICAL to the client.** Status, body and
+`WWW-Authenticate` are the same for all three. Distinguishing them is an enumeration oracle. The LOG
+gets the precise wrapped reason from `internal/auth`; the client gets none of it. There is a test
+whose only job is to fail if someone later makes the message "more helpful".
+
+**Rejected: caching the `Authenticate` result.** Tokens are opaque server-side handles precisely so
+revocation can be immediate (settled 2026-08-02). A per-request cache, however short, is a window in
+which a revoked credential still works. Every request resolves against live session state. The cost
+is one SHA-256 over ≤512 bytes plus an O(1) map lookup — negligible against HTTP parsing.
+
+**Rejected: constant-time token comparison.** Argued for by reflex, wrong here. The session table is
+keyed on `hex(SHA-256(token))`, so a near-miss guess produces an *uncorrelated* hash and a
+non-constant-time bucket compare leaks nothing about the real token. The branches that do differ
+measurably (expired does a map delete plus an RFC3339Nano format) are reachable only by a caller who
+already holds that token. Adding it would be cargo cult, and this is recorded so it is not
+"discovered" as a finding again.
+
+**Known coverage boundary, accepted:** `OPTIONS * HTTP/1.1` never reaches the middleware. Go's
+`net/http` answers it above the application handler with `globalOptionsHandler` (bare 200,
+`Content-Length: 0`). It exposes no application data or state, and
+`http.Server.DisableGeneralOptionsHandler` is go1.20+ while this module is pinned at go1.19. Recorded
+in `authmw.go`'s doc comment rather than worked around.
+
+**Follow-ups this decision creates** (filed separately, no key invented here): per-source rate
+limiting on the unauthenticated routes and the 401 path; `auth.Service.Authenticate` now takes an
+exclusive `sessMu` on every request while the *unauthenticated* `BeginSession` holds the same mutex
+for an O(n) sweep, so an anonymous flood can contend with authenticated traffic in a way it could not
+before; and authentication is evaluated ONCE at request entry, so a long-poll could outlive its
+session — the POLL epic must cap the wait at `min(PollTimeout, time.Until(principal.ExpiresAt))` or
+"revocation is immediate" is quietly false for a poll already in flight.

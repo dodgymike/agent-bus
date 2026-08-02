@@ -9,6 +9,15 @@
 // long-poll can select on r.Context().Done() and be released at shutdown
 // instead of stalling the drain.
 //
-// Currently implemented: GET /healthz and GET /v1/info, both unauthenticated.
-// Enrolment, send, poll and relay routes arrive with their own epics.
+// Authentication is DEFAULT-DENY (see authmw.go). authMiddleware wraps the
+// whole mux, so a route is authenticated by virtue of being registered, not
+// because someone remembered to protect it. Register every route through
+// (*Server).route, and if a new route genuinely must be anonymous, add it to
+// unauthenticatedRoutes AND to the golden list in TestEveryRouteRequiresAuth --
+// two deliberate, reviewable edits, which is the point.
+//
+// Currently implemented: GET /healthz and GET /v1/info (unauthenticated), plus
+// POST /v1/enroll, /v1/session/begin and /v1/session/complete, which are
+// unauthenticated by necessity -- they are how a credential is obtained. Send,
+// poll and relay routes arrive with their own epics, authenticated by default.
 package httpapi

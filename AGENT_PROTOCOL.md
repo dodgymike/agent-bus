@@ -11,6 +11,8 @@ record types); this file summarises how an agent actually drives each wrapper da
 Sections below are added one per capability, in the order the capability ships:
 
 - [Server lifecycle](#server-lifecycle-scripts-bus-servesh) — `scripts/bus-serve.sh` (this doc)
+- [Authentication](#authentication-added-2026-08-02) — applies to every capability below; no wrapper
+  or CLI subcommand ships for the handshake itself yet
 - Enrol — `scripts/bus-enrol.sh` (not yet shipped)
 - List agents — `scripts/bus-list.sh` (not yet shipped)
 - Wait / long-poll — `scripts/bus-wait.sh` (not yet shipped)
@@ -88,3 +90,43 @@ therefore the pidfile) and its own `AGENT_BUS_LISTEN`, e.g.:
 AGENT_BUS_RUN_DIR=/tmp/agent-bus-a AGENT_BUS_LISTEN=127.0.0.1:8081 scripts/bus-serve.sh start
 AGENT_BUS_RUN_DIR=/tmp/agent-bus-b AGENT_BUS_LISTEN=127.0.0.1:8082 scripts/bus-serve.sh start
 ```
+
+## Authentication (added 2026-08-02)
+
+Every route this bus serves requires a credential **except** exactly five: `GET /healthz`,
+`GET /v1/info`, `POST /v1/enroll`, `POST /v1/session/begin`, `POST /v1/session/complete`. Everything
+else — every future capability this file will document as it ships (list, wait, send, relay) —
+answers `401` without `Authorization: Bearer <token>`. This is not opt-in per route: the server
+refuses by default and only the five paths above are carved out, so a new capability is authenticated
+the day it lands whether or not its doc entry mentions the fact.
+
+**How a token is obtained**, end to end:
+
+1. `POST /v1/enroll` — presents a name and an Ed25519 public key, gets back a server-minted, fully
+   qualified `<bus-id>.<agent-id>`.
+2. `POST /v1/session/begin` — asks for a token to sign; the server returns an opaque challenge token.
+3. Sign the exact byte string `agent-bus:session-token:v1:` + that challenge token with the
+   enrolment Ed25519 **private** key.
+4. `POST /v1/session/complete` — presents the signature; on success the server activates the session
+   and returns the same token as a live bearer credential, plus `lifetime_seconds` (3600) and
+   `refresh_after_seconds` (2700).
+
+That bearer token then goes on every subsequent call as `Authorization: Bearer <token>`. A session
+lasts **at most one hour** (`lifetime_seconds`); a well-behaved agent re-runs steps 2–4 at **75% of
+that lifetime** (`refresh_after_seconds`, 2700s at the default), not at the boundary, so a slow retry
+never lands on an already-expired token. Server-side expiry has no clock-skew grace — an agent's own
+clock opinion is never consulted.
+
+**A 401 means re-authenticate, not retry the same request.** The server never distinguishes "unknown
+token" from "expired token" from "pending, never-completed session" in the response (that
+indistinguishability is deliberate — see `CONTRACTS.md`, `## Authentication`), so an agent cannot
+diagnose *which* of those it hit from the response alone; the correct reaction to any 401 on a
+previously-working token is to run the enrol/session handshake again, not to resend the failing
+request with the same credential.
+
+**No wrapper or CLI subcommand ships for enrol or session yet.** Per the amended invariant 7
+(`DECISIONS.md`, "The Go CLI replaces the shell wrappers"), the sanctioned vehicle for this handshake
+is now a Go CLI subcommand, not a `scripts/bus-*.sh` script — and no such subcommand exists in this
+repo as of this writing. There is nothing here an agent can shell out to today to enrol or establish a
+session end to end. Do not treat a hand-written `curl` against `/v1/enroll` or `/v1/session/*` as the
+sanctioned interface just because it would work; it is not documented as one, and it is not one.

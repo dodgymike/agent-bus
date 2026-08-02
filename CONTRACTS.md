@@ -27,7 +27,9 @@ file is where the exact shape lives.
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 405 | any method but `POST`; `Allow: POST` |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 413 | request body exceeds `httpapi.MaxAuthRequestBytes` (8 KiB) |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
-| any | unregistered path | — | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope; must be decided together with AUTH-6's unauthenticated allow-list — whether an unauthenticated request to an unknown path should read 401 or 404). This is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — see the AUTH-1 section below. |
+| any | any path off the five-entry allow-list (`/healthz`, `/v1/info`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
+| any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
+| any | unregistered path, valid bearer token | valid bearer token | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope — because the middleware let the request through and the mux, honestly, has no route there. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope); that catch-all MUST be registered INSIDE the auth wrapper (through `(*Server).route`, so it is itself subject to `authMiddleware`) or it becomes the one unauthenticated route that leaks the surface. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
 
 `HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`.
 
@@ -35,9 +37,12 @@ file is where the exact shape lives.
 `uptime_seconds` only. A test pins the exact field set — do not add data-dir, listen address, peer
 list, or agent roster here without updating that test and recording the decision.
 
-No route currently requires authentication because no authenticated route exists yet. **AUTH-6**
-(filed as a follow-up) flags that routes are registered individually on the mux today, which is a
-fail-open design once authenticated routes are added — read it before adding the next route.
+**Authentication is now default-deny across the whole mux** (AUTH-2, with AUTH-6's fail-open fix
+folded into the same change). `authMiddleware` wraps `s.handler` before any route is dispatched, so a
+route is authenticated the moment it is registered through `(*Server).route` — nobody has to remember
+to protect it individually, which closes the exact risk AUTH-6 flagged (routes wired one at a time,
+easy to forget on the next addition). The allow-list is exactly the five paths named in the routes
+above; see `## Authentication` further down for the full contract.
 
 ## CLI flags (`cmd/agent-bus`)
 
@@ -57,6 +62,8 @@ Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` o
 | Header | Direction | Rule |
 | --- | --- | --- |
 | `X-Request-Id` | in/out | Inbound value accepted only if it matches `[A-Za-z0-9._-]{1,64}` (`httpapi.MaxRequestIDLen = 64`); otherwise replaced with a server-generated id (`crypto/rand` 16 hex chars, falling back to a `seq-<n>` counter). Always echoed on the response. |
+| `Authorization` | in | Required on every route off the five-entry allow-list (`## Authentication`). Exactly one header, form `Bearer <token>` (scheme case-insensitive); `<token>` must be non-empty, contain no space, be no longer than `httpapi.MaxBearerTokenLen` (512), and consist only of the base64url alphabet `[A-Za-z0-9_-]`. Zero headers, more than one, a non-`Bearer` scheme, or a token failing any of those checks is treated as "no usable credential" (401, `error="invalid_request"`) — distinct from a syntactically fine token that simply does not authenticate (401, `error="invalid_token"`). Never logged, echoed, truncated or hashed into any response or log line — only the resulting agent id ever leaves `authMiddleware`. |
+| `WWW-Authenticate` | out | On every 401: `Bearer realm="agent-bus", error="invalid_request"` when no usable credential was presented, or `Bearer realm="agent-bus", error="invalid_token"` when a well-formed token failed to authenticate (unknown, pending, or expired — the three are deliberately indistinguishable to the caller). |
 | `Allow` | out | Set to `GET` on a 405 from `/healthz` or `/v1/info`. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
@@ -365,8 +372,20 @@ default", there is no "unlimited"):
 | --- | --- | --- |
 | `MaxRosterEntries` | 4096 | **Fails closed**: `POST /v1/enroll` returns 503 (`ErrCapacity`, `Retry-After: 5`). Never evicts a roster entry — evicting one would let an already-enrolled agent's id be re-minted out from under it. |
 | `MaxIdempotencyEntries` | 16384 | **Fails closed**: 503, same as above. Never evicts — evicting a remembered key would silently turn the next legitimate retry into a fresh (duplicate) application, exactly what invariant 10 forbids. |
-| `MaxSessions` | 16384 | **Fails closed**: `POST /v1/session/begin` returns 503. Counts pending and active sessions together. Checked BEFORE any per-agent eviction, so a refused call leaves the session table exactly as it found it — an error path never destroys the caller's earlier challenge. |
-| `MaxPendingPerAgent` | 8 | **Evicts the oldest pending challenge for that agent** rather than refusing the new one. This bounds memory without failing an honest client that legitimately retries — and that is the ONLY property it has. **It is NOT a defence against a flooder, and must not be read as one:** the cap is keyed on `agent_id`, which on an unauthenticated route is an attacker-supplied *victim* identifier, so a flooder's challenges land in the victim's bucket and eviction drops the *victim's* own correctly-issued challenge. Refusal is the same lockout by the other route; there is no ordering of a victim-keyed bucket that is not a lockout primitive. The real mitigation is per-source rate limiting (**not implemented** — see the follow-ups below). |
+| `MaxSessions` | 16384 | **Fails closed**: `POST /v1/session/begin` returns 503 (`ErrCapacity`, `Retry-After: 5`). Counts pending and active sessions together. This is now, with `ChallengeTTL` (2 minutes), the ONLY bound on unauthenticated session-table growth — there is deliberately no per-agent cap (see the note below the table). A refusal leaves the table exactly as it found it, so an error path never destroys anyone's earlier challenge. The residual risk is untargeted: a flooder can fill the table to this limit and deny NEW session establishment to EVERYONE until entries expire; already-ACTIVE sessions are unaffected. Mitigation is per-source rate limiting, **not implemented** — task AUTH-1-FU-RATELIMIT. |
+
+**There is deliberately no per-agent pending-challenge cap** (removed in AUTH-1-FU-PENDINGCAP,
+2026-08-02; formerly `MaxPendingPerAgent`, default 8, evicting the oldest pending challenge for that
+agent). It was removed rather than retuned: on the unauthenticated `POST /v1/session/begin` route,
+`agent_id` is an attacker-supplied *victim* identifier, so a bucket keyed on it always lands an
+anonymous flooder's requests in the *victim's* own bucket. Evicting drops the victim's
+correctly-issued challenge; refusing denies the victim its next one — either behaviour at the cap is
+a lockout of a named agent by anyone who merely knows its id, achievable in single-digit anonymous
+requests. There is no ordering of a victim-keyed bucket that is not a lockout primitive, so do not
+re-add one; per-source rate limiting (AUTH-1-FU-RATELIMIT, not implemented) is the correct fix for
+the flooding this cap never actually addressed. What IS guaranteed without it: nothing an
+unauthenticated caller does can destroy a challenge already issued to another agent — a pending
+challenge leaves the session table only by expiring (`ChallengeTTL`) or by being used.
 
 **Nothing here is durable — do not claim otherwise.** The roster (`auth.MemoryRoster`), the
 idempotency-key table, the session table, and the per-name agent-id suffix counters
@@ -392,12 +411,97 @@ routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE 
 - **There is NO per-source rate limiting.** The caps are all GLOBAL, so an anonymous caller can deny
   enrolment bus-wide with `MaxRosterEntries` requests, and deny session establishment with
   `MaxSessions` begins. The caps bound memory; they do not bound an attacker.
-- **A named agent can be locked out of authenticating** by a caller who knows only its `agent_id`, via
-  the `MaxPendingPerAgent` bucket described above.
+- **There is no per-agent pending-challenge cap**, and deliberately so: one existed briefly
+  (`MaxPendingPerAgent`) and was removed (AUTH-1-FU-PENDINGCAP) once analysis showed any such cap is
+  itself a lockout primitive on this unauthenticated route — see the note under the admission-control
+  table above. Nothing an unauthenticated caller does can destroy a challenge already issued to
+  another agent.
 - **Enrolment does not prove possession of the private key.** A caller may bind any public key —
   including someone else's published one — to a fresh, server-minted agent id. The binding that this
   surface does guarantee still holds: an id can never later present a *different* key, and an id
   cannot be used without a signature from the key recorded against it.
-- **No route enforces a session token yet** (AUTH-2). `auth.Service.Authenticate` is the seam and is
-  deliberately not wired into any middleware.
+- **Every route off the allow-list now enforces a session token** (AUTH-2 — see `## Authentication`
+  below). `auth.Service.Authenticate` is the seam `authMiddleware` calls on every request; it is no
+  longer unwired.
 - **There is no revocation** (AUTH-4). A session is valid until it expires, at most one hour.
+
+## Authentication (added 2026-08-02)
+
+AUTH-2 wires `internal/httpapi/authmw.go`'s `authMiddleware` around the WHOLE mux —
+`s.handler = LoggingMiddleware(s.log, s.authMiddleware(mux))` — folding in **AUTH-6**'s fail-open fix
+into the same change rather than as a later retrofit. The middleware is DEFAULT-DENY: every request is
+refused 401 unless its **exact** `r.URL.Path` is on the allow-list, so a route added tomorrow is
+authenticated the instant it is registered through `(*Server).route` — nobody has to remember to wrap
+it, and forgetting is no longer possible for the surface `TestEveryRouteRequiresAuth` can see (below).
+
+**The allow-list is exactly five paths, matched by exact string equality** (no prefix match, no path
+cleaning, no trailing-slash tolerance — `/healthz/`, `//healthz`, `/HEALTHZ` are NOT allow-listed and
+get 401; the cost of being this strict is a 401 on a misspelled-but-harmless probe, the cost of being
+lenient is a normalisation mismatch between this check and the mux, which is how allow-list bypasses
+get built):
+
+- `/healthz` — liveness; a load balancer or orchestrator probe calls it before any agent exists, and it
+  returns no state.
+- `/v1/info` — pre-enrolment discovery; an agent needs the bus id and version to decide whether to
+  enrol at all.
+- `/v1/enroll` — this is where an identity is created; there is by definition no credential yet.
+- `/v1/session/begin` — called with NO session at all; it is the request that asks the server for a
+  token to sign.
+- `/v1/session/complete` — the one that looks skippable. The caller does hold a token here, but it is
+  PENDING, and `auth.Service.Authenticate` rejects a pending session exactly like an unknown one — a
+  bearer requirement on this route would be unsatisfiable, not strict, since it could only ever be
+  satisfied by the very credential the call exists to create. Authentication on this route is the
+  Ed25519 signature over `auth.SessionSigningContext + token` (see "Enrolment and sessions" above),
+  which `handleSessionComplete` verifies directly; the token in the body is not a credential until that
+  succeeds.
+
+**Every other route requires `Authorization: Bearer <token>`**, where `<token>` is the opaque handle
+returned by a COMPLETED `/v1/session/complete` — not a signed claim, so every request re-checks live
+session state, which is what makes revocation and expiry immediate; nothing here is cached. The 401
+body is always the standard `{"error":"..."}` envelope and is one of exactly two strings, deliberately
+never anything more specific:
+
+- `{"error":"authentication required"}` — no usable credential presented: missing `Authorization`
+  header, more than one `Authorization` header (rejected on ambiguity even when both carry the same
+  valid token — a duplicate could be a proxy artefact, and choosing which of two to honour is the
+  ambiguity an attacker exploits to make front and back disagree), a scheme other than `Bearer`
+  (scheme itself case-insensitive per RFC 7235), an empty token, a token containing a space, a token
+  over `MaxBearerTokenLen` (512 bytes), or a token with a byte outside the base64url alphabet
+  `[A-Za-z0-9_-]`. Carries `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`.
+- `{"error":"invalid or expired credential"}` — a syntactically well-formed token that did not
+  authenticate: unknown (never issued), PENDING (challenge never completed), or EXPIRED. These three
+  are deliberately BYTE-IDENTICAL in the response — distinguishing them is an enumeration oracle that
+  would let a caller probe which session handles exist; the LOG line (not the response) names which of
+  the three it was. Carries `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`.
+
+On success the middleware attaches the verified `auth.Principal` to the request context; no principal
+is attached on an allow-listed route. Downstream handlers read it via `httpapi.PrincipalFromContext` /
+`httpapi.AgentIDFromContext` and MUST NOT take an identity from a header, query parameter or body —
+those are client-supplied claims (invariant 1: the server is authoritative on every id).
+
+**Exported Go surface** (`internal/httpapi/authmw.go`, `internal/httpapi/server.go`):
+
+| Symbol | What |
+| --- | --- |
+| `MaxBearerTokenLen` | `512` — the length cap above; two orders of magnitude of headroom over a real 43-character token, and still finite. |
+| `UnauthenticatedRoutes() []string` | The allow-list, sorted, returned as a COPY — the real map is the security boundary of this server and is not exported, so no caller can get a handle that mutates it. |
+| `IsUnauthenticatedRoute(path string) bool` | Exact-match check against the allow-list; what `authMiddleware` itself calls. |
+| `PrincipalFromContext(ctx) (auth.Principal, bool)` | The authenticated identity, or `ok == false` on an allow-listed route (not an error condition — it is the definition of an unauthenticated route). |
+| `AgentIDFromContext(ctx) string` | The fully-qualified `<bus-id>.<agent-id>` (invariant 2) of the caller, or `""` when no principal is attached. |
+| `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. |
+
+**Rule for every future route: register it through `(*Server).route`, never `mux.HandleFunc`
+directly.** A route registered the wrong way is still authenticated — the middleware wraps the whole
+mux regardless of how a pattern got onto it — but it is invisible to `Routes()` and therefore to
+`TestEveryRouteRequiresAuth`'s enumeration, which is a testing gap, not a security hole; do not create
+that gap when a five-minute fix (using the helper) avoids it.
+
+**Caveat from the security audit: `OPTIONS * HTTP/1.1` never reaches this middleware.** Go 1.19's
+`net/http` answers a server-wide `OPTIONS *` request with its own `globalOptionsHandler` (a bare `200`,
+`Content-Length: 0`) ABOVE the application handler entirely — `authMiddleware` and the mux never see
+it. It exposes no application data or state, so this is not a hole in the credential model, but it is a
+real place a blanket "every request is authenticated" claim would be wrong, so it is recorded here
+rather than left for someone to discover by testing it. `net/http.Server.DisableGeneralOptionsHandler`
+would route it through the mux like everything else, but it is go1.20+ and this module is pinned to
+go1.19 (see `CLAUDE.md`, "Runtime target") — not fixable here without a version bump recorded in
+`DECISIONS.md` first.

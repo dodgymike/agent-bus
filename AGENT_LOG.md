@@ -286,3 +286,79 @@ pathspec — the one-logical-commit-per-task rule is broken for DUR-11 and the h
 where this change came from. And a log repaired by this version carries index holes that a
 PRE-DUR-11 binary rejects outright (`reader.go` at `6d792b2` requires a dense sequence), so this is a
 one-way upgrade for any data directory that has been repaired.
+
+---
+
+## 2026-08-02 — AUTH-2: token verification middleware, default-deny (folds in AUTH-6)
+
+**Task.** AUTH-2 (P0, `4b45a6d8`) — validate the bearer token on every route except an explicit
+unauthenticated allow-list, 401 on missing/malformed/forged/expired, attach the verified
+fully-qualified agent id to the request context. AUTH-6 (P1, `1640e0b4`) was folded into the same
+change on the orchestrator's instruction: routes were registered individually on the mux, so a later
+`mux.HandleFunc("/v1/send", …)` without the auth wrapper would have shipped an unauthenticated route
+on a message bus **with no failing test**. Retrofitting default-deny afterwards would have meant
+reviewing the enforcement change twice.
+
+**Shape.** `authMiddleware` wraps the WHOLE mux — `LoggingMiddleware(s.log, s.authMiddleware(mux))`,
+that order being load-bearing so 401s are logged and `RequestIDFromContext` resolves inside the auth
+middleware. Exact-match allow-list of five paths; everything else 401. `auth.Service.Authenticate` is
+consumed unchanged (`internal/auth` was NOT touched — it belongs to a parallel AUTH-3 pass). Tokens
+stay opaque server-side handles: no claim parsing, no caching, so revocation and expiry are immediate.
+A `(*Server).route` registry exists solely because Go 1.19's `http.ServeMux` cannot be enumerated and
+the enumeration test needs to walk the real surface.
+
+**Two design calls, both recorded in `DECISIONS.md`.** BOTH session routes are allow-listed —
+`/v1/session/complete`'s caller holds a token, but it names a PENDING session that `Authenticate`
+rejects exactly like an unknown one, so a bearer requirement there would be *unsatisfiable, not
+strict*; that route is authenticated by the Ed25519 signature instead. And an anonymous request to an
+UNKNOWN path returns **401, not 404** — any 404-before-authenticating means checking route existence
+outside the wrapper, which is itself an unauthenticated code path, i.e. the exact shape AUTH-6 forbids.
+This CONSTRAINS CORE-8: its JSON 404 catch-all must be registered inside the wrapper.
+
+**The reviewer caught a vacuous test, which is the finding worth remembering.**
+`TestEveryRouteRequiresAuth`'s headline loop — the actual AUTH-6 deliverable — passed with **zero
+children**: all five registered routes are allow-listed, so `continue` fired every iteration and the
+body never executed. The existing `len(routes) == 0` guard did not catch it, because the slice is
+non-empty; it is the *filtered* set that was empty. A loop that has never run its body is not evidence
+that the loop works. Fixed by `TestEveryRouteRequiresAuthOnASyntheticRoute`, which rebuilds the stack
+with the real `route`/`authMiddleware`/`LoggingMiddleware` helpers plus one genuinely protected
+`/v1/synthetic` route, and asserts `probed > 0`. That test is the only place AUTH-6's actual claim — *a
+route added later is authenticated because it was registered, not because someone remembered* — is
+exercised until the first real protected route lands. The black-box loop now logs (never fails) when
+it probes nothing, pointing at that test.
+
+**Security (PASS, no P0/P1)** probed the allow-list over raw TCP rather than reasoning from Go source:
+27 request lines (`%2f`/`%2e%2e`, dot-dot walks, `;`-params, absolute-form request-URI, `CONNECT`,
+doubled/trailing slashes) and 10 `Authorization` header shapes. All divergent spellings landed on the
+deny side. Two conclusions worth not re-litigating: the proxy header-folding attack is defeated twice
+independently (no-embedded-space rule, then the base64url alphabet filter, since `,` is outside it);
+and **constant-time token comparison would be cargo cult here** — the table is keyed on
+`hex(SHA-256(token))`, so a near-miss guess yields an uncorrelated hash. One accepted coverage
+boundary: `OPTIONS * HTTP/1.1` never reaches the middleware (Go's `globalOptionsHandler` answers above
+the application handler; `DisableGeneralOptionsHandler` is go1.20+ and we pin go1.19). Written into
+`authmw.go`'s doc comment rather than worked around.
+
+**Chain:** spec-keeper (corrected a VACUOUS `proof_cmd` — it named `./internal/auth` for middleware
+living in `./internal/httpapi`) → implementer → test-engineer → reviewer → security → documentation.
+All six ran; none skipped. The one code edit made by feature-runner directly is the `OPTIONS *`
+comment in `authmw.go`, on security's recommendation.
+
+**Proof:** `bash scripts/proof-check.sh "go test -race -run 'TestAuthMiddleware|TestEveryRouteRequiresAuth' ./internal/httpapi"`
+→ `verdict=PASS class=test exit=0 tests_run=69 top_level=4 skipped=0 failed=0 empty_pkgs=0`.
+`go build ./...`, `go vet ./...`, `gofmt -l .` clean, `go test -race -count=1 ./...` green. ALSO
+exercised against the RUNNING binary via `scripts/bus-serve.sh` on a throwaway `/tmp` data dir: a real
+enrol → session/begin → Ed25519 sign → session/complete handshake, then 401 with no token, 401 with a
+forged token, 401 with a PENDING token, 401 on a non-`Bearer` scheme, and **404 with the valid token**
+— 404 being the proof the middleware passed the request to the mux, since an anonymous caller can never
+reach it. Server log confirmed to contain no token.
+
+**Process failure, and it is the second time this session.** A parallel agent committed this task's
+in-flight files as `ce226a8` while the test-engineer was still editing them — no `git add`/`git commit`
+was run by anyone in this task's chain. The committed content happens to be correct (verified: the
+post-revert `/v1/synthetic` version, not the test-engineer's temporary mutation), but the commit also
+swept in `internal/ids/agentmint_test.go`, which belongs to a different task. That is the
+one-logical-commit-per-task rule broken again, by the same mechanism as the DUR-11 incident recorded
+above: a sweeping `git add` with no pathspec. The docs for this task (`CONTRACTS.md`,
+`AGENT_PROTOCOL.md`, `DECISIONS.md`, this file) were still unwritten at that point, so AUTH-2's
+documentation lands in a SEPARATE commit from its code — the task is split across two commits through
+no choice of its own.
