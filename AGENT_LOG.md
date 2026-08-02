@@ -413,3 +413,141 @@ exist.
 AUTH-1-FU-LISTENADDR (`cmd/agent-bus/main.go`, `README.md`) when this task started. This task's paths
 are disjoint from those and are listed explicitly in its final report so the commit can be split; no
 `git add -A` was used anywhere in this chain, and nothing was committed by it.
+
+## 2026-08-02 — ID-2-WIRING-SCHEMA (80b54ee4): where the message sequence high-water mark lives on disk
+
+**Agent:** feature-runner (opus). **Task:** P0 docs-only decision task blocking the floor derivation.
+**Files changed: `DECISIONS.md` ONLY** (+158/-0, append-only new dated section). No code, no
+reservation taken, no `ondisk-format-version` value consumed. Staged with an explicit pathspec
+(`git add DECISIONS.md`); not committed — the orchestrator commits.
+
+**Outcome: Option A′ chosen.** The message sequence is a top-level cleartext `"seq"` field of the WAL
+message body; `wal` offers every PREPARE to an observer during the replay pass that already happens
+and the *application* decodes it, so `wal` still does not interpret `Body`. No on-disk format change.
+
+**The §4.4 disproof test was RUN and does not fire.** The deep-diver flagged reading the CRYPTO epic
+task bodies as its one bounded gap (§0); this task closed it. No CRYPTO task specifies
+`wal.Entry.Body` for `Kind=="message"` as a bare opaque blob — CRYPTO-5..9 are all `deferred`, and
+CRYPTO-11/CRYPTO-12 say the opposite outright (bodies are cleartext, not encrypted), which is already
+the recorded user decision at `DECISIONS.md:197`. It further does not fire even in the world where
+encryption returns: the superseded ratchet design itself kept a `{ciphertext, ratchet_header, …}`
+envelope; a bare blob is not representable at the WAL layer at all (`Entry.Body` must be valid JSON);
+and DUR-5 plus SIGN-4 independently require the server to read `seq` out of the body.
+
+**Proof:** `bash scripts/proof-check.sh "grep -q 'message sequence high-water mark' DECISIONS.md"` →
+`proof-check: verdict=PASS class=file-assertion exit=0`. Verified RED (0 matches) before the change,
+so the pass is non-vacuous. A tightened, heading-anchored variant also passes:
+`grep -q '^## .* The message sequence high-water mark lives in the WAL message body, read via a replay-time PREPARE observer' DECISIONS.md`.
+
+**Chain justification (CLAUDE.md step 10).** reviewer and security gates SKIPPED: this change is
+documentation only — a single append to `DECISIONS.md`, no executable surface, no route, flag, env
+var or record type touched, and nothing to audit for vulnerabilities. spec-keeper filed the task and
+holds completion (this agent posts notes but never commits, so it cannot supply a `commit_sha`).
+`kind=request`, `kind=report` and `kind=model` notes posted to the task by `feature-runner`.
+
+**Left for others:** the contract sentence this decision implies is reported to the orchestrator
+verbatim rather than written here — `CONTRACTS.md` is mid-split into per-plane files by a concurrent
+agent, so its follow-up task must carry a `proof_cmd` that globs `CONTRACTS*.md`. ID-2-WIRING-OBSERVER
+(c31f6999) is unblocked as specced.
+
+### 2026-08-02 — ID-2-WIRING-SCHEMA addendum (same task, second append)
+
+While finishing, the user's `4110946` ("Five decisions") landed concurrently and swept my staged
+`DECISIONS.md` append into it — there is no standalone commit for this task; the decision text ships
+inside `4110946`. Its decision 3 ("NO id reuse — invariant 1 stands, and the salvage reissue is a
+DEFECT") contradicts the FRAMING of one residual paragraph I had just written, which called the
+quarantine case an accepted invariant-1 narrowing on `e120153b`'s docket. `DECISIONS.md` is
+append-only and the paragraph was already committed, so I appended a reconciliation section rather
+than editing it. The CHOICE is unaffected (the residual was recorded as shared by A′ and B and
+explicitly not a differentiator); what changes is that it is a defect to fix, not a limitation to
+accept — and it is sharper for the sequence than for the record index, because quarantine restarts a
+fresh log at index 1, so a post-quarantine floor of `0` would reissue every sequence ever used.
+Recorded as a required fail-closed behaviour of ID-2-WIRING-STARTUP. Staged: `DECISIONS.md`,
+`AGENT_LOG.md`.
+
+## 2026-08-02 — CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (feature-runner)
+
+Task: `360a2679-b5dc-4b17-863f-fb4462764e6d` (title "CONTRACTS-SPLIT: split CONTRACTS.md into
+per-plane files (pure move) + retarget every proof_cmd", no `<EPIC>-<N>` key invented — created fresh
+this loop, since it did not previously exist in the backlog). Status left `in_progress` with a
+`status_note` of "CODE-COMPLETE, UNCOMMITTED" — feature-runner never commits, so it is not flipped to
+`done` until the orchestrator commits and records the real `commit_sha`.
+
+**What moved.** `CONTRACTS.md` (532 lines) split into 4 new per-plane files as a PURE content move —
+no wording changed, only location:
+- `CONTRACTS-CLI.md` — CLI flags (`cmd/agent-bus`) + env vars.
+- `CONTRACTS-HTTP.md` — routes, headers, enrolment/sessions, authentication.
+- `CONTRACTS-ONDISK.md` — record types/wire protocol versions, on-disk files, WAL at startup. Most
+  in-flux plane (DUR / on-disk format version 2), isolated deliberately.
+- `CONTRACTS-AGENT.md` — agent-facing wrappers (`scripts/bus-*.sh`) + repo tooling scripts.
+`CONTRACTS.md` stays at the old path, rewritten as a short index pointing at the four files above.
+
+**Equivalence proof (mechanical, not eyeballed).** Reassembled the bodies of the 4 new files (each
+stripped only of its new intro header) in the original file's section order and diffed against
+`git show HEAD:CONTRACTS.md | sed -n '8,$p'` (everything after the old intro paragraph) — zero diff,
+byte-for-byte. Command + output are in this task's `kind=report` note.
+
+**Two known-wrong passages moved unchanged, per instruction (not this task's job to fix):**
+- `CONTRACTS-CLI.md`'s `-listen` default row still reads `:8080` (code already reads
+  `127.0.0.1:8080` in `cmd/agent-bus/main.go` — the doc is now the stale side). Owned by `b0a5630b`
+  / `c27f9439`.
+- `CONTRACTS-ONDISK.md`'s WAL-repair section — checked, and found it does NOT actually contain the
+  stale "provably torn tail"/`RepairTail` wording `5b178dde` (DUR-11-FU-CONTRACTS) assumed was still
+  there; it already reads "Recovery ALWAYS reaches a running server ... This supersedes the previous
+  wording, which said those cases 'refuse to start'." That content was apparently already corrected
+  by an earlier commit before this split ran. Flagged on `5b178dde`'s own task notes as possibly
+  stale/already-resolved — did not close or edit that task's status, that is not this task's call.
+
+**Retargeted 7 dependent tasks' `proof_cmd`s/notes** (via spec-keeper) whose descriptions or
+`proof_cmd`s named `CONTRACTS.md` with specific content: `c27f9439`, `b0a5630b` (had no `proof_cmd`
+at all — one added), `5b178dde`, `8c9b6489`, `c31f6999`, `2d92b699`, `a24bb214`. Ran
+`scripts/proof-check.sh` on every retargeted grep-based proof and quoted the verdict rather than
+assuming: `c27f9439`=FAIL (RED, expected — doc still wrong), `b0a5630b`=FAIL (RED, expected),
+`5b178dde`=PASS (GREEN, unexpectedly — see above), `a24bb214`=PASS (unchanged, trivially still valid
+since the index file remains non-empty).
+
+**CLAUDE.md** — two surgical edits only, per instruction to keep this file minimal: the
+"Repository layout" block now lists `CONTRACTS.md` as index + the 4 plane files; workflow step 9 now
+names which `CONTRACTS-*.md` file to update for which surface (flags/env, HTTP, on-disk, agent). Did
+NOT touch CLAUDE.md's "Parallel-agent coordination" single-writer note (still says `CONTRACTS.md`)
+or the illustrative `grep` proof example in the "Verify" section — both are now slightly stale in
+spirit but out of this task's explicit, minimal-and-surgical scope; flagged as follow-ups.
+
+**Left alone / follow-ups for a later task (not fixed, per file-ownership boundary):**
+`README.md:88` and `AGENT_PROTOCOL.md:122` reference `CONTRACTS.md` for content (the record/flag
+table, and the `## Authentication` heading respectively) that no longer lives there post-split —
+both files are outside this task's ownership boundary this loop.
+
+Chain: spec-keeper (task creation + proof_cmd retargeting + status_note) → implementer (the split
+itself, done directly by feature-runner as a mechanical/documentation change) → reviewer/security
+SKIPPED for this task — one-line justification: this is a documentation-only, pure-content-move
+change (zero lines of Go touched, zero routes/flags/behaviour changed, mechanically proven
+byte-identical to the pre-split content) with no security surface; the mandated chain's intent
+(catch behavioural/security regressions) does not apply to a verified no-op content relocation.
+documentation step folded into this same task (feature-runner IS the documentation change here).
+
+## 2026-08-02 — LISTENADDR-FU-CONTRACTS (b0a5630b), feature-runner (sonnet)
+
+Task: fix the stale `-listen` default row in `CONTRACTS-CLI.md` (still showed `:8080`, verbatim-moved
+by the CONTRACTS split, this task's job to fix). Replaced with the agreed wording matching
+`README.md:48`: `| \`-listen\` | \`127.0.0.1:8080\` | TCP address to bind (loopback-only by default;
+use \`:8080\` for all interfaces) |`.
+
+Proof (`bash scripts/proof-check.sh`) before fix: FAIL (exit 1, row still `:8080`). After fix: PASS
+(`ALL_OK`). Re-ran c27f9439 (AUTH-1-FU-LISTENADDR)'s combined proof
+(`defaultListen` in main.go AND the CONTRACTS-CLI.md row) — also PASS (`ALL_OK`), unblocking that
+task's completion.
+
+Checked new invariant 11 (TLS required transport, loopback default bounds exposure not a substitute)
+for consistency: the `-listen` row is orthogonal to TLS (bind address only) and CONTRACTS-CLI.md has
+no TLS flag row yet, so no expansion needed — left alone.
+
+Docs-only, single-row change: reviewer/security skipped per CLAUDE.md step 10 justification (no code
+touched, one grep-anchored table row, verified by proof-check before/after).
+
+File-ownership boundary: CONTRACTS-CLI.md only. Did not touch CONTRACTS-ONDISK.md, CONTRACTS-HTTP.md,
+CONTRACTS-AGENT.md, CONTRACTS.md, CLAUDE.md, README.md, or any internal/** path (per boundary — DUR-12,
+internal/ids, internal/auth, and the backlog agents are concurrently live).
+
+Left task `in_progress` (status_note CODE-COMPLETE/UNCOMMITTED) — feature-runner does not commit;
+orchestrator commits after verification.

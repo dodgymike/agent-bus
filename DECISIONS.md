@@ -1145,3 +1145,46 @@ is free once both exist.
 
 Invite-only enrolment and mTLS compose well: the invite is what authorises a new client certificate
 to be bound to a new agent id in the first place.
+
+---
+
+## 2026-08-02 — Addendum to ID-2-WIRING-SCHEMA: the quarantine residual is a DEFECT, not a narrowing
+
+**Why this is a separate section.** The ID-2-WIRING-SCHEMA entry above and the "Five decisions" entry
+below it were written independently and landed in the same commit (`4110946`). Decision 3 there —
+*"NO id reuse — invariant 1 stands, and the salvage reissue is a DEFECT"* — supersedes the FRAMING of
+one paragraph above. `DECISIONS.md` is append-only, so the correction is recorded here rather than by
+editing a committed line.
+
+**What changes.** The A′ entry's residual paragraph describes the quarantine/discard case as *"the
+message-sequence face of the invariant-1 narrowing already filed for the WAL record index
+(`e120153b`)"*, and parks it on that docket. That is now wrong in kind. The user reaffirmed invariant 1
+**without narrowing**: *"Recovery may not reissue an index it has already handed out, even for a record
+it discards: when recovery discards a record the sequence advances past the hole, it never rewinds"*,
+and *"this makes the current salvage behaviour a bug, not a documented narrowing."* So it is a defect
+to be fixed, not a limitation to be documented and accepted.
+
+**What does NOT change: the choice.** Option A′ still stands, for exactly the reasons given above. The
+residual was explicitly recorded as shared by A′ and B alike and therefore not a differentiator —
+Option B would compute its `Recovered.HighestSequence` in the same pass over the same surviving bytes
+and would lose precisely the same sequences. Reclassifying it from "narrowing" to "defect" changes who
+must fix it and how urgently; it does not change where the number lives.
+
+**What this sharpens, and it is worse for the sequence than for the record index.** Whole-log
+quarantine renames the unreadable log aside and starts a **fresh log at index 1**
+(`internal/wal/recover.go:252-262`). Under "no id reuse" that is not a subtle reissue of one damaged
+tail record — it re-hands-out the entire index space from 1. The message-sequence face is the same and
+is not fixed by anything in the A′ entry: after a quarantine there is no surviving PREPARE for the
+observer to see, so the derived floor is `0`, and a bus that then starts minting sequences from 1 would
+reissue every sequence it has ever used.
+
+**Therefore, a required behaviour of ID-2-WIRING-STARTUP** (stated here so it is not rediscovered
+later): a quarantine event must not be allowed to silently yield floor `0`. The floor derivation must
+distinguish "the log is legitimately empty because this bus is new" from "the log was quarantined and
+its high-water mark is unknown", and in the second case it must refuse to start rather than resume from
+zero — the same fail-closed rule the entry above already imposes for a scan or decode error, and the
+same rule `internal/ids/sequence.go:119-122` states: *a caller that cannot prove its floor MUST refuse
+to start rather than guess.* Where the surviving high-water mark is recorded so a quarantined bus can
+still prove its floor is a durability-plane question that belongs with the quarantine defect, not with
+this schema decision.
+

@@ -155,7 +155,11 @@ scripts/bus-*.sh      the agent-facing wrappers — the ONLY interface agents us
 scripts/spec-cloud.sh authed curl shim for the Spec Server (task state)
 AGENT_PROTOCOL.md     agent-facing instructions: enrol, list, wait, send, relay
 PROTOCOL.md           the wire protocol + on-disk format (human/maintainer facing)
-CONTRACTS.md          every route, flag, env var, record type — updated with each change
+CONTRACTS.md          INDEX only (split 2026-08-02) — see CONTRACTS-*.md for the actual surface:
+CONTRACTS-CLI.md        server/CLI flags + env vars
+CONTRACTS-HTTP.md       HTTP routes, headers, enrolment/sessions, authentication
+CONTRACTS-ONDISK.md     record types, wire protocol versions, on-disk files, WAL at startup
+CONTRACTS-AGENT.md      agent-facing wrappers + repo tooling scripts
 DECISIONS.md          design decisions and their rationale (append-only, dated)
 AGENT_LOG.md          per-task work log (append-only, dated)
 SPEC.md               GENERATED mirror of the Spec Server backlog — never hand-edit
@@ -297,8 +301,11 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
 7. Mark the task done via `complete` (with `commit_sha`, `test_summary`, `proof_cmd`), add any
    discovered follow-ups, refresh the `SPEC.md` mirror, and post the journal notes.
 8. Record decisions in `DECISIONS.md`; append to `AGENT_LOG.md`.
-9. Update `CONTRACTS.md` (every new/changed route, flag, env var, record type) and — if the
-   agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `scripts/bus-*.sh` wrappers.
+9. Update the relevant `CONTRACTS-*.md` plane file for what changed — `CONTRACTS-CLI.md` (flags, env
+   vars), `CONTRACTS-HTTP.md` (routes, headers, enrolment/sessions, auth), `CONTRACTS-ONDISK.md`
+   (record types, wire protocol versions, on-disk files, WAL), `CONTRACTS-AGENT.md` (agent-facing
+   wrappers, repo tooling scripts) — see `CONTRACTS.md` for the full index if unsure which one. And
+   — if the agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `scripts/bus-*.sh` wrappers.
 10. **Tidy-up & git hygiene — a task is NOT complete until ALL of these hold:**
     - `git status --porcelain` is EMPTY. Every file you created or changed, including outside the
       Edit tool (gofmt, chmod, generators, renames), is committed or gitignored. New files MUST be
