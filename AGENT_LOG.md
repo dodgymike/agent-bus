@@ -362,3 +362,54 @@ above: a sweeping `git add` with no pathspec. The docs for this task (`CONTRACTS
 `AGENT_PROTOCOL.md`, `DECISIONS.md`, this file) were still unwritten at that point, so AUTH-2's
 documentation lands in a SEPARATE commit from its code — the task is split across two commits through
 no choice of its own.
+
+## 2026-08-02 — AUTH-1-FU-PENDINGCAP: the per-agent pending cap is removed (P0 lockout)
+
+**Task:** `687ad8c9-b111-4ff9-8411-d01e9ba82383`, dispatched by triage run `triage-20260802-r3`.
+**Chain run:** spec-keeper → test-engineer (RED) → implementer (GREEN) → reviewer → security →
+documentation. All six ran; none skipped.
+
+**One sentence:** `MaxPendingPerAgent` was keyed on `agentID`, which on the unauthenticated
+`/v1/session/begin` route is an attacker-supplied *victim* identifier, so 9 anonymous requests per
+round permanently locked out any named agent — the cap is deleted outright rather than retuned, and
+`MaxSessions` plus expiry now bound the table alone. Full rationale, including why option (a)
+(re-keying on request source) was rejected in favour of option (b), is in `DECISIONS.md` under the
+same date.
+
+**Deliberately RED first.** The adversarial test was written and run against the unfixed code before
+any production line changed, and all three of its subtests failed with
+`unknown or expired session: no session for the presented token` — the victim being unable to complete
+its own challenge. That is the evidence the test exercises the defect rather than merely asserting
+that memory stays bounded, which would have proved nothing here.
+
+**Proof:** `bash scripts/proof-check.sh 'go test -race -run TestSessionBeginNoVictimLockout ./internal/auth'`
+→ `verdict=PASS class=test exit=0 tests_run=4 top_level=1 skipped=0 failed=0 empty_pkgs=0`.
+`go build ./...`, `go vet ./...`, `go test -race ./internal/auth`, `$(go env GOROOT)/bin/gofmt -l internal/auth`
+all clean. Not exercised against a running server: this task changes no route, request, response or
+wrapper — the HTTP surface is byte-identical, and `cmd/` and `internal/httpapi/` never referenced the
+removed option (verified by grep).
+
+**Both gates found real things, and both were folded in rather than deferred.** The reviewer caught
+that the new comment claimed a challenge "leaves this table by exactly two routes" while
+`CompleteSession`'s single-attempt rule is a third, and that "a flooder can *still* fill this table"
+understated the change — global exhaustion got CHEAPER, since pending entries used to be bounded by
+cap × roster size. Security (PASS-WITH-FINDINGS) raised a HIGH: the stated bound "`MaxSessions` plus
+`ChallengeTTL` and nothing else" is wrong for ACTIVE sessions, which are reclaimed only after
+`SessionLifetime`, making a cheaper and hour-long outage reachable by an attacker that enrols its own
+agent. All three corrections landed in `internal/auth/session.go` and `CONTRACTS.md` before
+completion. This mattered more than usual: this package was bitten once already by a comment that
+described a lockout primitive as a defence, and a comment that justifies REMOVING a control while
+understating what remains is the same defect wearing the opposite hat.
+
+**Follow-ups filed:** `AUTH-1-FU-ACTIVECAP` (`2d92b699-818a-4fd0-bbb7-76c06449756b`, P1) for the
+uncapped active-session gap — the one place an agent-id-keyed cap IS safe, because an active session
+requires proving possession of the private key. A three-point rider was posted to
+`AUTH-1-FU-SESSIONSCALE` (`067b80cf-…`): its planned evict-globally-oldest-pending policy reintroduces
+this same class, it will fail an existing subtest that must be honoured rather than rewritten, and two
+of the three O(n) scans it was written to fix (`countPendingLocked`, `oldestPendingLocked`) no longer
+exist.
+
+**Commit hygiene note.** The working tree already held staged work from AUTH-2 (docs) and
+AUTH-1-FU-LISTENADDR (`cmd/agent-bus/main.go`, `README.md`) when this task started. This task's paths
+are disjoint from those and are listed explicitly in its final report so the commit can be split; no
+`git add -A` was used anywhere in this chain, and nothing was committed by it.

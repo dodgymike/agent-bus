@@ -808,3 +808,64 @@ for an O(n) sweep, so an anonymous flood can contend with authenticated traffic 
 before; and authentication is evaluated ONCE at request entry, so a long-poll could outlive its
 session — the POLL epic must cap the wait at `min(PollTimeout, time.Until(principal.ExpiresAt))` or
 "revocation is immediate" is quietly false for a poll already in flight.
+
+## 2026-08-02 — The per-agent pending-challenge cap is REMOVED, not rekeyed (AUTH-1-FU-PENDINGCAP)
+
+**Decision.** `auth.Options.MaxPendingPerAgent` / `auth.DefaultMaxPendingPerAgent` (8) and the
+eviction loop they drove in `Service.BeginSession` are deleted outright. The session table is bounded
+by the global `MaxSessions` cap alone, drained by expiry — `ChallengeTTL` (2 minutes) for pending
+challenges, `SessionLifetime` (1 hour) for active ones. The helpers `countPendingLocked` and
+`oldestPendingLocked` go with it; nothing else used them.
+
+**The defect.** The cap was keyed on `agentID`. `POST /v1/session/begin` is UNAUTHENTICATED by
+necessity — it is one of the calls that ISSUES the credential — so `agentID` there is not a subject,
+it is an **attacker-supplied victim identifier**. Anyone who merely knows a real agent's id makes
+their `BeginSession` calls land in **that agent's** bucket, and eviction under the cap then deletes
+the **victim's** own correctly-issued challenge. Nine anonymous requests per round were enough to
+prevent a named agent from ever completing an authentication, on a bus whose entire purpose is that
+agents can enrol and talk. The attack was also stealthy: the victim's `BeginSession` still *succeeds*,
+and only its `CompleteSession` fails, which reads like a client bug.
+
+**Why we did not simply flip eviction to refusal.** It is the identical lockout arriving by the other
+door: at the cap it is then the victim's own `BeginSession` that is refused. The property that makes
+this unfixable-in-place is not the eviction policy, it is the KEY. There is no ordering, no tie-break
+and no policy for a bucket keyed on the victim that is not a lockout primitive.
+
+**Why option (b) (drop it) and not option (a) (key the cap on the request SOURCE).** Two reasons, in
+order of weight. First, `internal/auth` deliberately has no view of the HTTP request; "source" would
+have to be plumbed down from `internal/httpapi`, and once it is there the thing being built is
+per-source rate limiting — which is already its own task (**AUTH-1-FU-RATELIMIT**), applies to all
+three unauthenticated routes rather than just this one, and needs its own design for what a "source"
+even is behind a proxy. Doing a partial, auth-package-local version of it under this task would have
+produced a second mechanism to reconcile later. Second, the memory argument for keeping *any*
+per-agent cap is weak: a pending session is a handful of words, and `MaxSessions` (16384) plus a
+two-minute `ChallengeTTL` already bound the table. The cap was buying no memory safety that the
+global cap did not already provide, while costing a P0 denial of service.
+
+**What this trade makes worse, stated plainly.** Removing the cap makes the *untargeted* flood
+CHEAPER, not merely no worse: pending entries used to be bounded by cap × roster size, so filling the
+table first required enrolling enough distinct ids, whereas it is now directly reachable with
+`MaxSessions` begins naming one known agent — roughly 140 sustained requests per second to hold it.
+We accept that: it trades a targeted, permanent, stealthy, 9-request lockout of a chosen victim for an
+untargeted, unamplified, self-healing, high-traffic outage that is obvious in any request-rate metric.
+It does raise the priority of AUTH-1-FU-RATELIMIT, which is the only mechanism that can charge the
+flooder rather than the victim.
+
+**What is now guaranteed, and the one place a per-agent cap would still be SAFE.** Nothing an
+unauthenticated caller does can DESTROY a challenge already issued to another agent; a challenge
+leaves the table only by expiring, by being completed, or by a failed completion attempt — and that
+last route requires holding the 32-byte `crypto/rand` token, so the token's unguessability is now
+load-bearing in a way it was not before (there is no TLS in this server, so an on-path observer is a
+real threat model on any non-loopback listener). Separately, the security gate established that
+ACTIVE sessions are uncapped per agent and are reclaimed only after `SessionLifetime`, which is a
+cheaper and longer-lasting outage than the pending flood; that is PRE-EXISTING (the removed cap
+counted only pending entries) and is filed as **AUTH-1-FU-ACTIVECAP**. The distinction worth
+preserving: an ACTIVE-session cap keyed on agent id is safe precisely because an active session can
+only be created by proving possession of that agent's private key. The key is a PROVEN identity, not
+an attacker-supplied one. That, and only that, is what made the pending cap unsalvageable.
+
+**Constraint this places on AUTH-1-FU-SESSIONSCALE.** That task plans to change the full-table policy
+from refuse to "evict the globally-oldest PENDING session". That reintroduces cross-tenant challenge
+destruction — far less severe (16384 begins inside a victim's round trip, versus 9 per round) but the
+same class — and it will fail the `session_test.go` subtest asserting `ErrCapacity`. That failure is a
+constraint to honour, not a test to update; a rider to this effect is recorded on the task.

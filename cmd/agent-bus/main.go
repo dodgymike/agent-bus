@@ -234,15 +234,18 @@ func run(cfg Config) error {
 	// goes with it.
 	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg})
 	if err != nil {
-		// FATAL, and deliberately so: run() returning non-nil makes main() print
-		// the error and exit 1. A log we cannot open or replay means we do not
-		// know what the accepted history is, and serving from an empty store
-		// would silently present a bus with no memory of durable, acknowledged
-		// writes. Never degrade to that. The one damage case that is survivable
-		// -- a provably torn tail, bytes whose write never completed an fsync --
-		// is already repaired inside wal.Open/RepairTail, so anything reaching
-		// here is damage that recovery has refused to guess about; there is no
-		// second-guessing it at this layer.
+		// FATAL, but this is now a NARROW case, not the general one. Under the
+		// always-restart decision (2026-08-02) recovery repairs or QUARANTINES
+		// damaged records and the bus starts -- see the quarantine fields logged
+		// below. So reaching here does not mean "the log is damaged"; it means
+		// recovery could not even complete, e.g. the file is unreadable or the
+		// quarantine itself failed.
+		//
+		// An earlier version of this comment claimed the one survivable case was
+		// "a provably torn tail, bytes whose write never completed an fsync".
+		// Every clause of that is now false: damage does NOT imply the write was
+		// incomplete (media rot damages fully-written, fsynced, acknowledged
+		// records), and torn tails are no longer the only thing survived.
 		return fmt.Errorf("opening the write-ahead log in %q: %w", cfg.DataDir, err)
 	}
 	// Registered AFTER the lock's deferred Release so LIFO runs them in the

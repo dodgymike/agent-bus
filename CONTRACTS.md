@@ -280,19 +280,29 @@ agent-bus: opening the write-ahead log in "<data-dir>": <wal error>
 ```
 where `<wal error>` is whatever `internal/wal` reports — for example a corrupt file header reads
 `wal: <data-dir>/bus.wal: corrupt at offset 0: bad magic "XXXXXXXX", want "AGNTBUSW"` (the exact
-wording is set by `internal/wal/format.go`'s `corruptf`, not by `cmd/agent-bus`). The only damage
-`wal.Open` repairs automatically is a provably torn tail — a frame whose checksum failed because a
-crash landed mid-append (`RepairTail`, truncating back to the last verified-good record and
-fsyncing that). Anything else — a bad magic, a wrong format version, a commit naming no open
-prepare, a payload that will not decode — refuses to start and leaves the file byte-for-byte
-unchanged; there is no silent empty start, and no second-guessing the repair decision at the
-`cmd/agent-bus` layer.
+wording is set by `internal/wal/format.go`'s `corruptf`, not by `cmd/agent-bus`). **Recovery ALWAYS reaches a running server** (decision of 2026-08-02, invariant 6).
+Damaged records are repaired in place where possible, and otherwise QUARANTINED — the unusable log
+is moved aside with its bytes preserved on disk, and the bus starts. A bad magic, a wrong format
+version, a commit naming no open prepare, or a payload that will not decode no longer refuse to
+start; they are discarded, loudly.
+
+This supersedes the previous wording, which said those cases "refuse to start". The absolute
+requirement that replaced it is that **every discard is logged** — a silent discard is the actual
+defect (rated P0), not the discard itself, because a server quietly serving an empty bus after
+eating a log is indistinguishable to an operator from one that had nothing to serve. Reaching the
+fatal path above now means recovery could not complete at all (an unreadable file, a failed
+quarantine), not merely that the log was damaged.
 
 **New INFO log line, asserted on by tests — treat its shape as part of this contract.** After a
 successful open, `run()` logs one line naming what recovery found:
 ```
-msg="write-ahead log opened" data_dir=<dir> path=<dir>/bus.wal records_replayed=<n> applied=<n> aborted=<n> dangling=<n> next_index=<n> repaired=<bool> repaired_bytes=<n>
+msg="write-ahead log opened" data_dir=<dir> path=<dir>/bus.wal records_replayed=<n> applied=<n> aborted=<n> dangling=<n> next_index=<n> repaired=<bool> repaired_bytes=<n> quarantined=<bool> discard_count=<n> discarded_bytes=<n>
 ```
+The last three fields are load-bearing, not decoration: without them a whole-log QUARANTINE prints
+`repaired=false next_index=1`, which is byte-identical to a brand-new empty bus — an operator could
+not tell "your log was eaten" from "you have not sent anything yet". That was a P0. Any change
+that drops them reintroduces silent data loss at the outermost layer.
+
 This fires even for a brand-new, empty log (all-zero fields, `next_index=1`), so its presence is
 proof a replay ran before the process served anything. `wal.Open` itself additionally emits its own
 `msg="wal replayed"` line (only when the file held ≥1 record) plus a `WARN` per discarded dangling
@@ -372,7 +382,7 @@ default", there is no "unlimited"):
 | --- | --- | --- |
 | `MaxRosterEntries` | 4096 | **Fails closed**: `POST /v1/enroll` returns 503 (`ErrCapacity`, `Retry-After: 5`). Never evicts a roster entry — evicting one would let an already-enrolled agent's id be re-minted out from under it. |
 | `MaxIdempotencyEntries` | 16384 | **Fails closed**: 503, same as above. Never evicts — evicting a remembered key would silently turn the next legitimate retry into a fresh (duplicate) application, exactly what invariant 10 forbids. |
-| `MaxSessions` | 16384 | **Fails closed**: `POST /v1/session/begin` returns 503 (`ErrCapacity`, `Retry-After: 5`). Counts pending and active sessions together. This is now, with `ChallengeTTL` (2 minutes), the ONLY bound on unauthenticated session-table growth — there is deliberately no per-agent cap (see the note below the table). A refusal leaves the table exactly as it found it, so an error path never destroys anyone's earlier challenge. The residual risk is untargeted: a flooder can fill the table to this limit and deny NEW session establishment to EVERYONE until entries expire; already-ACTIVE sessions are unaffected. Mitigation is per-source rate limiting, **not implemented** — task AUTH-1-FU-RATELIMIT. |
+| `MaxSessions` | 16384 | **Fails closed**: `POST /v1/session/begin` returns 503 (`ErrCapacity`, `Retry-After: 5`). Counts pending and active sessions together. This is now the ONLY bound on unauthenticated session-table growth — there is deliberately no per-agent cap (see the note below the table) — and expiry is what drains it. A refusal leaves the table exactly as it found it, so an error path never destroys anyone's earlier challenge. The residual risk is untargeted: a flooder can fill the table to this limit and deny NEW session establishment to EVERYONE; already-ACTIVE sessions keep authenticating. **How long that outage lasts depends on which state the table is full of, and the two differ by 30x:** pending challenges drain after `ChallengeTTL` (2 minutes), but ACTIVE sessions are reclaimed only after `SessionLifetime` (1 hour), and nothing caps active sessions per agent while enrolment is itself unauthenticated — so an attacker that enrols its own agent can hold the outage for an hour past the flood at far less traffic. That gap pre-dates this row and is filed as AUTH-1-FU-ACTIVECAP. Mitigation for the flood itself is per-source rate limiting, **not implemented** — task AUTH-1-FU-RATELIMIT. |
 
 **There is deliberately no per-agent pending-challenge cap** (removed in AUTH-1-FU-PENDINGCAP,
 2026-08-02; formerly `MaxPendingPerAgent`, default 8, evicting the oldest pending challenge for that
@@ -383,9 +393,24 @@ correctly-issued challenge; refusing denies the victim its next one — either b
 a lockout of a named agent by anyone who merely knows its id, achievable in single-digit anonymous
 requests. There is no ordering of a victim-keyed bucket that is not a lockout primitive, so do not
 re-add one; per-source rate limiting (AUTH-1-FU-RATELIMIT, not implemented) is the correct fix for
-the flooding this cap never actually addressed. What IS guaranteed without it: nothing an
-unauthenticated caller does can destroy a challenge already issued to another agent — a pending
-challenge leaves the session table only by expiring (`ChallengeTTL`) or by being used.
+the flooding this cap never actually addressed.
+
+Be precise about the trade, because removing the cap made the *untargeted* flood **cheaper**, not
+merely no worse: pending entries used to be bounded by cap × roster size, so exhausting the table
+first meant enrolling enough distinct ids, whereas it is now directly reachable with `MaxSessions`
+begins naming one known agent. That is still clearly the right trade — roughly
+`MaxSessions`/`ChallengeTTL` ≈ 140 sustained requests per second buys an untargeted, unamplified,
+self-healing outage, against nine requests per round for a targeted, permanent, stealthy one — but it
+does raise the priority of AUTH-1-FU-RATELIMIT.
+
+What IS guaranteed without the cap: nothing an unauthenticated caller does can destroy a challenge
+already issued to another agent. A challenge leaves the session table by exactly three routes, and
+the third requires the token — it expires (`ChallengeTTL`), it is completed, or a completion attempt
+against it fails verification (`CompleteSession`'s single-attempt-per-pending-challenge rule). The
+token is 32 bytes of `crypto/rand` and the table is keyed on its SHA-256, so that third route is
+reachable only by whoever holds the token: the agent itself, or someone who observed it in flight.
+**There is no TLS in this server**, so that observer is a real threat model on any non-loopback
+listener, and the token's unguessability is load-bearing now that no other per-agent bound exists.
 
 **Nothing here is durable — do not claim otherwise.** The roster (`auth.MemoryRoster`), the
 idempotency-key table, the session table, and the per-name agent-id suffix counters
