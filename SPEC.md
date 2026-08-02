@@ -79,7 +79,7 @@
 - [ ] CORE-10 · CORE-10: .gitignore has no secret patterns while the stop hook stages with `git add -A` — core, P2
   Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. LATENT, NOT A LIVE LEAK -- nothing sensitive is currently tracked, and the spec-cloud credentials correctly live outside the repo. The risk is mechanical: .claude/hooks/commit-on-stop.sh stages with `git add -A`, and its guards cover file size and conflict markers but NOTHING for credentials, so any key material an agent or a human drops into the working tree is auto-staged and committed without anyone deciding to. Add secret patterns to .gitignore: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env`, `.env.*`, `*credentials*`, `*-creds*`, `id_rsa*`, `*.token`. Cheap, permanent, and it becomes materially more important once the CRYPTO epic starts putting agent private keys on disk. Verify with `git check-ignore` against a sample of each pattern; do not commit the sample files.
   _Proof: git check-ignore -q test.pem test.key .env id_rsa my-creds.json && echo ok_
-- [~] CORE-2 · CORE-2: cmd/agent-bus main entrypoint + config/flags — core, P0, in progress
+- [x] CORE-2 · CORE-2: cmd/agent-bus main entrypoint + config/flags — core, P0
   cmd/agent-bus/main.go wires flag parsing (listen addr, data-dir, bus-id override for testing, long-poll timeout, log level) into a Config struct; server binds the listener and shuts down cleanly on SIGINT/SIGTERM. No routes yet beyond a bare mux. NOTE: -bus-id is a TEST-ONLY affordance -- invariant 1 says the server is authoritative on ids, so this override exists purely to make tests deterministic and must never be relied on by production callers.
   _Proof: go build ./... && ./agent-bus -h_
 - [ ] CORE-13 · CORE-13: Middleware implements Flusher/Hijacker unconditionally and drops io.ReaderFrom (untested) — core, P3
@@ -97,13 +97,13 @@
 - [ ] CORE-12 · CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 — core, P2
   Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. defaultListen is ":8080", which binds every interface, over plain HTTP, with no authentication implemented yet. Defaults are sticky: this one persists straight through the AUTH epic, and in the window before AUTH-2's middleware lands, anyone on the network can reach the bus. Change the default to "127.0.0.1:8080" and keep the flag/env var so binding wider is an explicit, deliberate operator choice rather than the path of least resistance. Update CONTRACTS.md and any README/AGENT_PROTOCOL.md example that assumes the old default, and check scripts/bus-serve.sh (AGENTIF-1) agrees.
   _Proof: go test -race -run TestDefaultListen ./internal/httpapi_
-- [~] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0, in progress
+- [x] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0
   GET /healthz returns 200 {"status":"ok"} once the server is accepting connections (liveness only, no auth). GET /v1/info returns bus id, server version/build info, and uptime (also unauthenticated -- needed for pre-enrolment discovery). Both registered on the main mux. The bus id is served through a small interface with a placeholder implementation until the ID epic lands (see invariant 1: the server is authoritative on ids).
   _Proof: go test -race -run TestHealthzInfo ./internal/httpapi_
-- [~] CORE-4 · CORE-4: Structured logging + request middleware — core, P0, in progress
+- [x] CORE-4 · CORE-4: Structured logging + request middleware — core, P0
   A small INTERNAL structured logger built over stdlib log (no third-party dependency, per invariant 8), wired as HTTP middleware logging method/path/status/latency/request-id for every route. Level configurable via the -log-level flag. Note: log/slog landed in go1.21 and is NOT available on this box's go1.19.4 toolchain (verified: log/slog absent from GOROOT/src/log and go list std), so it cannot be used here; the decision is recorded in DECISIONS.md.
   _Proof: go test -race -run TestLoggingMiddleware ./internal/httpapi_
-- [~] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0, in progress
+- [x] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0
   Initialize go.mod (module github.com/dodgymike/agent-bus, go1.19 toolchain pin), create the internal/ package layout (ids, store, wal, hub, auth, httpapi, relay) as packages with doc.go stubs, and the cmd/agent-bus/ dir. The HTTP package is named `httpapi`, NOT `http`: naming it `http` would shadow stdlib net/http in every file that imports both, which is a needless papercut. .gitignore already covers build artifacts and /data/ -- verify, do not duplicate. No server logic yet -- this is the scaffold every other task builds on.
   _Proof: go build ./... && test -z "$(gofmt -l .)"_
 - [ ] CORE-6 · CORE-6: logging maxValueLen=1024 truncates panic stack traces (exempt `stack` or raise to 8192) — core, P2
@@ -179,7 +179,7 @@
 - [ ] DOCS-2 · DOCS-2: PROTOCOL.md -- wire protocol + on-disk format — docs, P1
   Every HTTP route (method, path, auth requirement, request/response shape) and the on-disk format (WAL record framing, audit log format, roster/counter file layouts) -- maintainer-facing, kept current as routes land.
   _Proof: test -s PROTOCOL.md_
-- [~] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0, in progress
+- [x] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0
   README.md -- what agent-bus is, quickstart (build, run one bus, enrol two agents, exchange a message via the wrappers). DECISIONS.md -- seeded with its append-only-dated-entry convention and a placeholder for the enrolment signing-scheme decision. Written early so later tasks have somewhere to record decisions.
   _Proof: test -s README.md && test -s DECISIONS.md_
 - [ ] DOCS-3 · DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table — docs, P1
