@@ -81,9 +81,16 @@ where you dispatched nothing. A lock you forget to release blocks every future p
 
 ```bash
 bash scripts/spec-cloud.sh -s -X PATCH /api/v1/projects/agent-bus/tasks/<public_id> \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' -H 'If-Match: "v<version>"' \
   -d '{"status":"done","status_note":"released by <your-unique-run-id>"}'
 ```
+
+**The `If-Match` on RELEASE is not optional, and its absence caused a real bug** (2026-08-02): an
+unconditional release silently clobbered another holder's lock write. Re-read the lock to get the
+current `version` immediately before releasing, and send it. If you get **412 on release**, you are
+NOT the current holder — someone else acquired it while you ran, which means your pass overlapped
+another. Do NOT retry and do NOT force: report it, because it means the mutex was already violated
+and the useful information is that fact, not a tidy release.
 
 Do NOT use the `/complete` endpoint on the lock — it is a mutex, not a unit of work, and completion
 metadata (`commit_sha`, `proof_cmd`) is meaningless for it. Do NOT delete the task.

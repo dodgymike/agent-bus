@@ -1,0 +1,308 @@
+package hub_test
+
+import (
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+	"testing"
+
+	"github.com/dodgymike/agent-bus/internal/hub"
+)
+
+// ---------------------------------------------------------------------------
+// MSG-4 — history, pagination and the opaque cursor
+//
+// The load-bearing claim in this file is the LAST one: a cursor carries a
+// POSITION and nothing else, so forging one can never widen what its holder is
+// allowed to see. Everything above it is the pagination contract that makes the
+// cursor usable in the first place.
+// ---------------------------------------------------------------------------
+
+func TestMessageHistoryCursor(t *testing.T) {
+	t.Run("EmptyCursorIsPositionZeroAndYieldsEverything", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		const n = 5
+		var want []string
+		for i := 0; i < n; i++ {
+			res, err := h.Broadcast(hub.BroadcastRequest{
+				Sender:         a,
+				Body:           []byte(fmt.Sprintf("m%d", i)),
+				IdempotencyKey: fmt.Sprintf("k-empty-%d", i),
+			})
+			if err != nil {
+				t.Fatalf("Broadcast %d: %v", i, err)
+			}
+			want = append(want, res.MessageID)
+		}
+
+		pos, err := hub.DecodeCursor(b, "")
+		if err != nil {
+			t.Fatalf("DecodeCursor(%q, \"\"): %v", b, err)
+		}
+		if pos != 0 {
+			t.Fatalf("an empty cursor decoded to %d, want 0", pos)
+		}
+
+		batch := h.History(b, pos, hub.MaxBatchLimit)
+		if len(batch.Messages) != n {
+			t.Fatalf("history from an empty cursor returned %d messages, want %d", len(batch.Messages), n)
+		}
+		for i, m := range batch.Messages {
+			if m.ID != want[i] {
+				t.Fatalf("history[%d] = %s, want %s", i, m.ID, want[i])
+			}
+		}
+	})
+
+	t.Run("PaginationNeverSkipsAndNeverRepeats", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		const n = 5
+		var published []string
+		for i := 0; i < n; i++ {
+			res, err := h.Broadcast(hub.BroadcastRequest{
+				Sender:         a,
+				Body:           []byte(fmt.Sprintf("page-%d", i)),
+				IdempotencyKey: fmt.Sprintf("k-page-%d", i),
+			})
+			if err != nil {
+				t.Fatalf("Broadcast %d: %v", i, err)
+			}
+			published = append(published, res.MessageID)
+		}
+
+		wantSizes := []int{2, 2, 1}
+		wantMore := []bool{true, true, false}
+
+		cursor := ""
+		var got []string
+		for round, size := range wantSizes {
+			pos, err := hub.DecodeCursor(b, cursor)
+			if err != nil {
+				t.Fatalf("round %d: DecodeCursor: %v", round, err)
+			}
+			batch := h.History(b, pos, 2)
+			if len(batch.Messages) != size {
+				t.Fatalf("round %d returned %d messages, want %d", round, len(batch.Messages), size)
+			}
+			if batch.More != wantMore[round] {
+				t.Fatalf("round %d: More = %v, want %v (batch of %d, limit 2)", round, batch.More, wantMore[round], len(batch.Messages))
+			}
+			for _, m := range batch.Messages {
+				got = append(got, m.ID)
+			}
+			cursor = hub.EncodeCursor(b, batch.Cursor)
+		}
+		if len(got) != n {
+			t.Fatalf("pagination yielded %d messages over %d rounds, want %d", len(got), len(wantSizes), n)
+		}
+		seen := map[string]int{}
+		for i, id := range got {
+			if id != published[i] {
+				t.Fatalf("paginated[%d] = %s, want %s (full: %v)", i, id, published[i], got)
+			}
+			seen[id]++
+		}
+		for id, count := range seen {
+			if count != 1 {
+				t.Fatalf("message %s was delivered %d times across the pages", id, count)
+			}
+		}
+	})
+
+	t.Run("EmptyBatchLeavesTheCursorByteIdentical", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("only one"), IdempotencyKey: "k-tail"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+		caughtUp := hub.EncodeCursor(b, res.Seq)
+
+		pos, err := hub.DecodeCursor(b, caughtUp)
+		if err != nil {
+			t.Fatalf("DecodeCursor: %v", err)
+		}
+		batch := h.History(b, pos, 10)
+		if len(batch.Messages) != 0 {
+			t.Fatalf("a caught-up reader got %d messages, want 0", len(batch.Messages))
+		}
+		if batch.More {
+			t.Fatal("an empty batch reported More")
+		}
+		if batch.Cursor != pos {
+			t.Fatalf("an empty batch moved the cursor from %d to %d", pos, batch.Cursor)
+		}
+		if again := hub.EncodeCursor(b, batch.Cursor); again != caughtUp {
+			t.Fatalf("re-encoding the cursor of an empty batch gave %q, want the byte-identical %q", again, caughtUp)
+		}
+	})
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha")
+		a := agentID(t, h.BusID(), "alpha")
+
+		positions := []uint64{0, 1, 42, math.MaxUint64}
+		if len(positions) == 0 {
+			t.Fatal("the round-trip table is empty")
+		}
+		checked := 0
+		for _, n := range positions {
+			enc := hub.EncodeCursor(a, n)
+			if len(enc) > hub.MaxCursorLen {
+				t.Fatalf("EncodeCursor(%q, %d) is %d bytes, over MaxCursorLen %d", a, n, len(enc), hub.MaxCursorLen)
+			}
+			got, err := hub.DecodeCursor(a, enc)
+			if err != nil {
+				t.Fatalf("DecodeCursor(%q, EncodeCursor(%q, %d)): %v", a, a, n, err)
+			}
+			if got != n {
+				t.Fatalf("round trip of %d gave %d", n, got)
+			}
+			checked++
+		}
+		if checked != len(positions) {
+			t.Fatalf("round-tripped %d positions, want %d", checked, len(positions))
+		}
+	})
+
+	t.Run("Forgery", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		cases := []struct {
+			name   string
+			cursor string
+		}{
+			{"IssuedToAnotherAgent", hub.EncodeCursor(a, 5)},
+			{"NotBase64URL", "!!!not base64!!!"},
+			{"StandardBase64Padding", base64.StdEncoding.EncodeToString([]byte("v1|" + b + "|5"))},
+			{"WrongFieldCountTooFew", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b))},
+			{"WrongFieldCountTooMany", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|5|extra"))},
+			{"UnknownVersion", base64.RawURLEncoding.EncodeToString([]byte("v2|" + b + "|5"))},
+			{"EmptyVersion", base64.RawURLEncoding.EncodeToString([]byte("|" + b + "|5"))},
+			{"LeadingZeroPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|007"))},
+			{"SignedPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|+7"))},
+			{"NegativePosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|-7"))},
+			{"EmptyPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|"))},
+			{"NonNumericPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|seven"))},
+			{"PositionOverflowsUint64", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|18446744073709551616"))},
+			{"Oversized", strings.Repeat("A", hub.MaxCursorLen+1)},
+		}
+		if len(cases) == 0 {
+			t.Fatal("the forgery table is empty")
+		}
+		for _, c := range cases {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				pos, err := hub.DecodeCursor(b, c.cursor)
+				if !errors.Is(err, hub.ErrInvalidCursor) {
+					t.Fatalf("DecodeCursor(%q, <%s>) = (%d, %v), want ErrInvalidCursor", b, c.name, pos, err)
+				}
+				if pos != 0 {
+					t.Fatalf("a rejected cursor still returned position %d; a caller that ignores the error must not get a usable position", pos)
+				}
+				// The untrusted value must never be echoed back into an error
+				// that lands in a log line.
+				if len(c.cursor) > 8 && strings.Contains(err.Error(), c.cursor) {
+					t.Fatalf("the error echoes the attacker-supplied cursor: %v", err)
+				}
+			})
+		}
+		// A cursor this agent really was issued still decodes, so the rejections
+		// above are discrimination rather than a blanket refusal.
+		if _, err := hub.DecodeCursor(b, hub.EncodeCursor(b, 5)); err != nil {
+			t.Fatalf("a legitimate cursor for %s was rejected: %v", b, err)
+		}
+	})
+
+	t.Run("AForgedCursorCannotWidenVisibility", func(t *testing.T) {
+		// THE POINT OF THE WHOLE FILE. The filter is the authenticated
+		// principal, never the cursor: rewinding to position 0 replays only what
+		// the holder was always entitled to see.
+		h, _, _ := newTestHub(t, "alpha", "beta", "gamma")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+		g := agentID(t, h.BusID(), "gamma")
+
+		dm, err := h.Send(hub.SendRequest{Sender: g, To: a, Body: []byte("for alpha's eyes"), IdempotencyKey: "k-secret"})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: g, Body: []byte("for everyone"), IdempotencyKey: "k-public"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+
+		// Beta hand-builds a cursor for itself at position 0 — the widest read it
+		// can ask for.
+		rewound := hub.EncodeCursor(b, 0)
+		pos, err := hub.DecodeCursor(b, rewound)
+		if err != nil {
+			t.Fatalf("DecodeCursor of a self-issued position-0 cursor: %v", err)
+		}
+		batch := h.History(b, pos, hub.MaxBatchLimit)
+
+		if len(batch.Messages) == 0 {
+			t.Fatal("beta's rewound history is empty, so this test proves nothing about filtering")
+		}
+		sawBroadcast := false
+		for _, m := range batch.Messages {
+			if m.ID == dm.MessageID {
+				t.Fatalf("beta read DM %s, which is addressed to %s", dm.MessageID, a)
+			}
+			if m.ID == bc.MessageID {
+				sawBroadcast = true
+			}
+		}
+		if !sawBroadcast {
+			t.Fatalf("beta cannot see broadcast %s, so the absence of the DM is not evidence of filtering", bc.MessageID)
+		}
+
+		// And presenting ALPHA's cursor does not help either: it is refused
+		// outright, and even the position it carries buys nothing.
+		if _, err := hub.DecodeCursor(b, hub.EncodeCursor(a, 0)); !errors.Is(err, hub.ErrInvalidCursor) {
+			t.Fatalf("beta decoded a cursor issued to alpha: err = %v", err)
+		}
+	})
+
+	t.Run("LimitIsClampedOnHistory", func(t *testing.T) {
+		// Observable behaviour only: limit <= 0 must behave as
+		// hub.DefaultBatchLimit, which is provable with DefaultBatchLimit+1
+		// visible messages.
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		total := hub.DefaultBatchLimit + 1
+		for i := 0; i < total; i++ {
+			if _, err := h.Broadcast(hub.BroadcastRequest{
+				Sender:         a,
+				Body:           []byte(fmt.Sprintf("clamp-%d", i)),
+				IdempotencyKey: fmt.Sprintf("k-clamp-%d", i),
+			}); err != nil {
+				t.Fatalf("Broadcast %d: %v", i, err)
+			}
+		}
+
+		for _, limit := range []int{0, -1, -1000} {
+			batch := h.History(b, 0, limit)
+			if len(batch.Messages) != hub.DefaultBatchLimit {
+				t.Fatalf("History with limit %d returned %d messages, want DefaultBatchLimit (%d)", limit, len(batch.Messages), hub.DefaultBatchLimit)
+			}
+			if !batch.More {
+				t.Fatalf("History with limit %d cut the batch short but did not report More", limit)
+			}
+		}
+	})
+}
