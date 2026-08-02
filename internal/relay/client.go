@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
@@ -69,7 +70,22 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if log == nil {
 		log = logging.New(io.Discard, logging.LevelError)
 	}
-	return &Client{busID: cfg.BusID, localRoster: cfg.LocalRoster, httpClient: cfg.HTTPClient, log: log}, nil
+
+	// A handshake NEVER follows a redirect. Go's default policy would replay
+	// the POST — bus id and full roster — at whatever host a 3xx names, over
+	// whatever scheme it names, on a fresh connection whose identity was never
+	// checked. That defeats the https requirement below (which only ever sees
+	// the URL we were given) and would defeat MTLS-RELAYGUARD in advance, since
+	// the redirect target's certificate was never the one we meant to pin.
+	// Returning ErrUseLastResponse surfaces the 3xx as an ordinary refusal.
+	//
+	// The caller's client is COPIED rather than mutated: it belongs to the
+	// caller, is likely shared, and silently rewriting its redirect policy
+	// would be a side effect on somebody else's object.
+	hc := *cfg.HTTPClient
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	return &Client{busID: cfg.BusID, localRoster: cfg.LocalRoster, httpClient: &hc, log: log}, nil
 }
 
 // Enroll performs the handshake against peerBaseURL and returns the VALIDATED
@@ -81,12 +97,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // (invariant 11), and a bus id plus a full roster is exactly the material an
 // on-path observer would want.
 //
-// idempotencyKey makes the call safe to retry (invariant 10). A retried
+// idempotencyKey is sent in the idem.HeaderName header — the one canonical
+// carrier (internal/idem, IDEM-10) — and makes the call safe to retry
+// (invariant 10). A retried
 // handshake is the steady state in a cyclic peer topology, not an exception, so
 // the caller should reuse ONE key for the retries of one logical enrolment and
 // mint a new one only for a new enrolment.
 func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string) (PeerRoster, error) {
-	if err := ValidateIdempotencyKey(idempotencyKey); err != nil {
+	if err := idem.ValidateKey(idempotencyKey); err != nil {
 		return PeerRoster{}, err
 	}
 	endpoint, err := peerEnrollURL(peerBaseURL)
@@ -99,9 +117,8 @@ func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string)
 	}
 
 	body, err := json.Marshal(PeerEnrollRequest{
-		BusID:          c.busID,
-		IdempotencyKey: idempotencyKey,
-		Agents:         roster,
+		BusID:  c.busID,
+		Agents: roster,
 	})
 	if err != nil {
 		return PeerRoster{}, fmt.Errorf("relay: encoding peer handshake: %w", err)
@@ -120,6 +137,9 @@ func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// The ONE canonical carrier for the key (internal/idem): a header, never a
+	// body field, and never both.
+	req.Header.Set(idem.HeaderName, idempotencyKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -148,6 +168,14 @@ func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string)
 	var decoded PeerEnrollResponse
 	if err := decodeStrict(buf, &decoded); err != nil {
 		return PeerRoster{}, fmt.Errorf("decoding peer handshake response from %s: %w", endpoint, err)
+	}
+
+	if decoded.Count != len(decoded.Agents) {
+		// Count exists so a truncated or mis-assembled response is caught
+		// rather than quietly federating a short roster — an agent missing
+		// from a roster is an agent whose messages misroute until someone
+		// notices. A field nobody checks would be decoration.
+		return PeerRoster{}, fmt.Errorf("%w: %s reported count=%d for %d agents", ErrInvalidRoster, endpoint, decoded.Count, len(decoded.Agents))
 	}
 
 	peer, err := ValidatePeerEnrollResponse(c.busID, decoded)
@@ -180,7 +208,7 @@ func peerEnrollURL(base string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return "", fmt.Errorf("relay: peer base URL %q must be a bare origin: no query, no fragment, no userinfo", base)
 	}
-	return strings.TrimSuffix(u.String(), "/") + PeerEnrollPath, nil
+	return strings.TrimRight(u.String(), "/") + PeerEnrollPath, nil
 }
 
 // peerErrorCode extracts the peer's stable error code from an error body, for

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
@@ -140,6 +141,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The idempotency key is read and validated BEFORE the body, which is the
+	// reason internal/idem puts it in a header: an oversized or malformed key
+	// is refused by the transport-level check without a byte of a possibly
+	// large JSON body being read into memory (invariant 10, idem doc point 1).
+	idempotencyKey := r.Header.Get(idem.HeaderName)
+	if err := idem.ValidateKey(idempotencyKey); err != nil {
+		h.fail(w, http.StatusBadRequest, ErrorCode(err), err)
+		return
+	}
+
 	req, err := h.decodeRequest(r.Body)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -150,9 +161,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peer, err := ValidatePeerEnrollRequest(h.busID, req)
+	peer, err := ValidatePeerEnrollRequest(h.busID, idempotencyKey, req)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, ErrorCode(err), err)
+		// Everything the peer can get wrong here is a 400, including a roster
+		// over MaxRosterAgents: 413 would tell the peer to send fewer BYTES,
+		// when the limit it hit is a COUNT and its body may be a fraction of
+		// the byte cap. The stable code says which limit it was.
+		//
+		// A CodeInternal here is OUR bug (a local bus id that stopped
+		// validating), not the peer's, so it must not be reported as a bad
+		// request: a peer told "400" would stop retrying a fault it did not
+		// cause and cannot fix.
+		status := http.StatusBadRequest
+		code := ErrorCode(err)
+		if code == CodeInternal {
+			status = http.StatusInternalServerError
+		}
+		h.fail(w, status, code, err)
 		return
 	}
 

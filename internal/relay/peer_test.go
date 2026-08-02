@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
@@ -33,6 +35,7 @@ func TestValidateRoster(t *testing.T) {
 		{name: "oversized id", peerBus: peerBus, agents: []string{peerBus + "." + strings.Repeat("a", ids.MaxAgentIDLen) + "-1"}, want: ErrInvalidRoster},
 		{name: "empty bus id", peerBus: "", want: ErrInvalidBusID},
 		{name: "bus id with a dot", peerBus: "bus.x", want: ErrInvalidBusID},
+		{name: "oversized bus id", peerBus: strings.Repeat("b", MaxPeerBusIDLen+1), want: ErrInvalidBusID},
 	}
 
 	for _, tc := range cases {
@@ -111,43 +114,14 @@ func TestMaxHandshakeBytesFitsAMaximumRoster(t *testing.T) {
 		}
 	}
 	body, err := json.Marshal(PeerEnrollRequest{
-		BusID:          peerBus,
-		IdempotencyKey: strings.Repeat("k", MaxIdempotencyKeyLen),
-		Agents:         agents,
+		BusID:  peerBus,
+		Agents: agents,
 	})
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
 	}
 	if len(body) > MaxHandshakeBytes {
 		t.Fatalf("a maximum-size roster encodes to %d bytes, over the %d byte cap; the caps contradict each other", len(body), MaxHandshakeBytes)
-	}
-}
-
-func TestValidateIdempotencyKey(t *testing.T) {
-	cases := []struct {
-		name string
-		key  string
-		ok   bool
-	}{
-		{name: "typical", key: "relay-1.handshake_2", ok: true},
-		{name: "at the cap", key: strings.Repeat("k", MaxIdempotencyKeyLen), ok: true},
-		{name: "empty", key: ""},
-		{name: "over the cap", key: strings.Repeat("k", MaxIdempotencyKeyLen+1)},
-		{name: "space", key: "a b"},
-		{name: "newline", key: "a\nb"},
-		{name: "slash", key: "a/b"},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateIdempotencyKey(tc.key)
-			if tc.ok && err != nil {
-				t.Fatalf("ValidateIdempotencyKey(%q) = %v, want nil", tc.key, err)
-			}
-			if !tc.ok && !errors.Is(err, ErrInvalidIdempotencyKey) {
-				t.Fatalf("ValidateIdempotencyKey(%q) = %v, want one wrapping ErrInvalidIdempotencyKey", tc.key, err)
-			}
-		})
 	}
 }
 
@@ -198,7 +172,8 @@ func TestErrorCodeIsStable(t *testing.T) {
 		{fmt.Errorf("wrapped: %w", ErrInvalidBusID), CodeInvalidBusID},
 		{fmt.Errorf("wrapped: %w", ErrRosterTooLarge), CodeRosterTooLarge},
 		{fmt.Errorf("wrapped: %w", ErrInvalidRoster), CodeInvalidRoster},
-		{fmt.Errorf("wrapped: %w", ErrInvalidIdempotencyKey), CodeInvalidIdempotencyKey},
+		{fmt.Errorf("wrapped: %w", idem.ErrMissingKey), CodeInvalidIdempotencyKey},
+		{fmt.Errorf("wrapped: %w", idem.ErrInvalidKey), CodeInvalidIdempotencyKey},
 		{fmt.Errorf("wrapped: %w", ErrInvalidRequest), CodeInvalidRequest},
 		{errors.New("something else"), CodeInternal},
 	}
@@ -218,13 +193,19 @@ func TestErrorBodiesNeverEchoPeerInput(t *testing.T) {
 	// An uppercase agent name is rejected by ids.ValidateAgentName, and the
 	// resulting error quotes the offending id — so the marker IS in the error
 	// we log, and the question is only whether it reaches the wire.
-	req := PeerEnrollRequest{BusID: marker + "-bus", IdempotencyKey: "k", Agents: []string{marker + "-bus.Bad-1"}}
+	req := PeerEnrollRequest{BusID: marker + "-bus", Agents: []string{marker + "-bus.Bad-1"}}
 
 	buf, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
 	}
-	resp, err := remote.srv.Client().Post(remote.srv.URL+PeerEnrollPath, "application/json", strings.NewReader(string(buf)))
+	httpReq, err := http.NewRequest(http.MethodPost, remote.srv.URL+PeerEnrollPath, strings.NewReader(string(buf)))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(idem.HeaderName, "canary-key")
+	resp, err := remote.srv.Client().Do(httpReq)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -239,5 +220,46 @@ func TestErrorBodiesNeverEchoPeerInput(t *testing.T) {
 	}
 	if !strings.Contains(string(body[:n]), CodeInvalidRoster) {
 		t.Fatalf("error body %q does not carry the stable %q code", string(body[:n]), CodeInvalidRoster)
+	}
+}
+
+// TestOversizedBusIDIsNotEchoed proves the length check runs BEFORE
+// ids.ValidateBusID, whose message quotes the id it rejects. A peer must not be
+// able to choose the size of the line we log about refusing it.
+func TestOversizedBusIDIsNotEchoed(t *testing.T) {
+	huge := strings.Repeat("z", 200_000)
+	err := ValidatePeerBusID(localBus, huge)
+	if !errors.Is(err, ErrInvalidBusID) {
+		t.Fatalf("error = %v, want one wrapping ErrInvalidBusID", err)
+	}
+	if strings.Contains(err.Error(), huge[:1000]) {
+		t.Fatalf("the error echoes the oversized bus id (%d bytes of message)", len(err.Error()))
+	}
+	if len(err.Error()) > 500 {
+		t.Fatalf("error message is %d bytes; an oversized claim must not size the log line", len(err.Error()))
+	}
+}
+
+// TestPeerFingerprintDistinguishesPayloads proves the fingerprint carried on a
+// PeerRoster is usable for invariant 10's same-key-different-payload rule: it
+// must differ whenever the payload differs, including by roster ORDER, and be
+// domain-separated from other operations.
+func TestPeerFingerprintDistinguishesPayloads(t *testing.T) {
+	base := peerFingerprint(peerBus, []string{peerBus + ".a-1", peerBus + ".b-1"})
+
+	same := peerFingerprint(peerBus, []string{peerBus + ".a-1", peerBus + ".b-1"})
+	if base != same {
+		t.Fatal("the same payload produced two different fingerprints; a legitimate retry would be treated as a violation")
+	}
+
+	for _, other := range []idem.Fingerprint{
+		peerFingerprint(peerBus, []string{peerBus + ".b-1", peerBus + ".a-1"}),  // order
+		peerFingerprint(peerBus, []string{peerBus + ".a-1"}),                    // fewer
+		peerFingerprint(thirdBus, []string{peerBus + ".a-1", peerBus + ".b-1"}), // different claimant
+		idem.ComputeFingerprint([]byte(idem.OpSend), []byte(peerBus), []byte(peerBus+".a-1"), []byte(peerBus+".b-1")),
+	} {
+		if base == other {
+			t.Fatal("two different payloads share a fingerprint; a changed retry would be accepted as identical")
+		}
 	}
 }

@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
@@ -80,7 +82,7 @@ func (r *responder) acceptedRosters() []PeerRoster {
 
 // postRaw sends a body the Client would never construct, which is exactly what
 // a hostile peer sends.
-func (r *responder) postRaw(t *testing.T, contentType string, body []byte) (int, string) {
+func (r *responder) postRaw(t *testing.T, contentType, key string, body []byte) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, r.srv.URL+PeerEnrollPath, strings.NewReader(string(body)))
 	if err != nil {
@@ -89,16 +91,25 @@ func (r *responder) postRaw(t *testing.T, contentType string, body []byte) (int,
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	if key != "" {
+		req.Header.Set(idem.HeaderName, key)
+	}
 	return r.do(t, req)
 }
 
+// postJSON sends payload with a valid idempotency key in the canonical header.
 func (r *responder) postJSON(t *testing.T, payload interface{}) (int, string) {
+	t.Helper()
+	return r.postJSONWithKey(t, "valid-key", payload)
+}
+
+func (r *responder) postJSONWithKey(t *testing.T, key string, payload interface{}) (int, string) {
 	t.Helper()
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshalling payload: %v", err)
 	}
-	return r.postRaw(t, "application/json", buf)
+	return r.postRaw(t, "application/json", key, buf)
 }
 
 func (r *responder) do(t *testing.T, req *http.Request) (int, string) {
@@ -214,81 +225,91 @@ func TestPeerEnrollment(t *testing.T) {
 
 		cases := []struct {
 			name    string
+			key     string // empty means "a valid key in the canonical header"
 			req     PeerEnrollRequest
 			code    string
 			because string
 		}{
 			{
 				name:    "claims our bus id",
-				req:     PeerEnrollRequest{BusID: localBus, IdempotencyKey: "k1"},
+				req:     PeerEnrollRequest{BusID: localBus},
 				code:    CodeBusIDCollision,
 				because: "a peer asserting our bus id would own our whole namespace",
 			},
 			{
 				name:    "claims our bus id in a different case",
-				req:     PeerEnrollRequest{BusID: strings.ToUpper(localBus), IdempotencyKey: "k2"},
+				req:     PeerEnrollRequest{BusID: strings.ToUpper(localBus)},
 				code:    CodeBusIDCollision,
 				because: "ASCII case-confusables are removed at the door, as ids.ValidateAgentName does",
 			},
 			{
 				name:    "lists an agent inside our namespace",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k3", Agents: []string{localBus + ".alpha-1"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{localBus + ".alpha-1"}},
 				code:    CodeBusIDCollision,
 				because: "a peer minting ids in our namespace could impersonate our agents to us",
 			},
 			{
 				name:    "lists an agent inside our namespace in a different case",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k4", Agents: []string{strings.ToUpper(localBus) + ".alpha-1"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{strings.ToUpper(localBus) + ".alpha-1"}},
 				code:    CodeBusIDCollision,
 				because: "case-folding the bus half must not open the namespace back up",
 			},
 			{
 				name:    "lists a third bus's agent",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k5", Agents: []string{thirdBus + ".delta-1"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{thirdBus + ".delta-1"}},
 				code:    CodeInvalidRoster,
 				because: "a peer speaks for its own agents only; transitive federation is not a handshake side effect",
 			},
 			{
 				name:    "sends a bare unqualified name",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k6", Agents: []string{"beta-1"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{"beta-1"}},
 				code:    CodeInvalidRoster,
 				because: "an unqualified id has no bus half and cannot be routed (invariant 2)",
 			},
 			{
 				name:    "sends a malformed id",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k7", Agents: []string{peerBus + ".beta"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{peerBus + ".beta"}},
 				code:    CodeInvalidRoster,
 				because: "a bare name with no server-minted suffix is not an agent id (invariant 1)",
 			},
 			{
 				name:    "repeats an id",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k8", Agents: []string{peerBus + ".beta-1", peerBus + ".beta-1"}},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: []string{peerBus + ".beta-1", peerBus + ".beta-1"}},
 				code:    CodeInvalidRoster,
 				because: "a roster is a set; a duplicate is a bug or an attempt to inflate it",
 			},
 			{
 				name:    "sends an oversized roster",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "k9", Agents: bigRoster},
+				req:     PeerEnrollRequest{BusID: peerBus, Agents: bigRoster},
 				code:    CodeRosterTooLarge,
 				because: "the length is refused before any per-entry parsing is done",
 			},
 			{
 				name:    "sends a malformed bus id",
-				req:     PeerEnrollRequest{BusID: "bus.with.dots", IdempotencyKey: "k10"},
+				req:     PeerEnrollRequest{BusID: "bus.with.dots"},
 				code:    CodeInvalidBusID,
 				because: "'.' is the qualification separator and may not appear in a bus id",
 			},
 			{
-				name:    "omits the idempotency key",
+				name:    "omits the idempotency key header",
+				key:     "-",
 				req:     PeerEnrollRequest{BusID: peerBus},
 				code:    CodeInvalidIdempotencyKey,
 				because: "peer-enrol is a mutating call and must be safe to retry (invariant 10)",
 			},
 			{
 				name:    "sends an idempotency key with an illegal byte",
-				req:     PeerEnrollRequest{BusID: peerBus, IdempotencyKey: "key with spaces"},
+				key:     "key.with.a.slash/",
+				req:     PeerEnrollRequest{BusID: peerBus},
 				code:    CodeInvalidIdempotencyKey,
-				because: "the key alphabet is pinned to the hub's so it can be carried into the applied-key table",
+				because: "the key charset is idem.KeyCharset, so one key can travel into the applied-key table unchanged",
+			},
+			{
+				name:    "sends an oversized idempotency key",
+				key:     strings.Repeat("k", idem.MaxKeyLen+1),
+				req:     PeerEnrollRequest{BusID: peerBus},
+				code:    CodeInvalidIdempotencyKey,
+				because: "the key is bounded before the body is read at all",
 			},
 		}
 
@@ -296,7 +317,14 @@ func TestPeerEnrollment(t *testing.T) {
 			tc := tc
 			t.Run(tc.name, func(t *testing.T) {
 				remote := newResponder(t, localBus, nil, nil)
-				status, code := remote.postJSON(t, tc.req)
+				key := tc.key
+				switch key {
+				case "":
+					key = "valid-key"
+				case "-": // the case that wants NO header at all
+					key = ""
+				}
+				status, code := remote.postJSONWithKey(t, key, tc.req)
 				if status != http.StatusBadRequest {
 					t.Errorf("status = %d, want %d (%s)", status, http.StatusBadRequest, tc.because)
 				}
@@ -324,27 +352,27 @@ func TestPeerEnrollment(t *testing.T) {
 		})
 
 		t.Run("wrong content type", func(t *testing.T) {
-			if status, code := remote.postRaw(t, "text/plain", []byte(`{"bus_id":"bus-peer"}`)); status != http.StatusUnsupportedMediaType || code != CodeUnsupportedMediaType {
+			if status, code := remote.postRaw(t, "text/plain", "valid-key", []byte(`{"bus_id":"bus-peer"}`)); status != http.StatusUnsupportedMediaType || code != CodeUnsupportedMediaType {
 				t.Errorf("text/plain gave %d/%q, want %d/%q", status, code, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType)
 			}
 		})
 
 		t.Run("missing content type", func(t *testing.T) {
-			if status, code := remote.postRaw(t, "", []byte(`{"bus_id":"bus-peer"}`)); status != http.StatusUnsupportedMediaType || code != CodeUnsupportedMediaType {
+			if status, code := remote.postRaw(t, "", "valid-key", []byte(`{"bus_id":"bus-peer"}`)); status != http.StatusUnsupportedMediaType || code != CodeUnsupportedMediaType {
 				t.Errorf("no Content-Type gave %d/%q, want %d/%q", status, code, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType)
 			}
 		})
 
 		t.Run("unknown field", func(t *testing.T) {
-			body := []byte(`{"bus_id":"bus-peer","idempotency_key":"k","agents":[],"trust_me":true}`)
-			if status, code := remote.postRaw(t, "application/json", body); status != http.StatusBadRequest || code != CodeInvalidRequest {
+			body := []byte(`{"bus_id":"bus-peer","agents":[],"trust_me":true}`)
+			if status, code := remote.postRaw(t, "application/json", "valid-key", body); status != http.StatusBadRequest || code != CodeInvalidRequest {
 				t.Errorf("unknown field gave %d/%q, want %d/%q", status, code, http.StatusBadRequest, CodeInvalidRequest)
 			}
 		})
 
 		t.Run("trailing data", func(t *testing.T) {
-			body := []byte(`{"bus_id":"bus-peer","idempotency_key":"k","agents":[]}{"bus_id":"bus-peer"}`)
-			if status, code := remote.postRaw(t, "application/json", body); status != http.StatusBadRequest || code != CodeInvalidRequest {
+			body := []byte(`{"bus_id":"bus-peer","agents":[]}{"bus_id":"bus-peer"}`)
+			if status, code := remote.postRaw(t, "application/json", "valid-key", body); status != http.StatusBadRequest || code != CodeInvalidRequest {
 				t.Errorf("trailing data gave %d/%q, want %d/%q", status, code, http.StatusBadRequest, CodeInvalidRequest)
 			}
 		})
@@ -353,8 +381,8 @@ func TestPeerEnrollment(t *testing.T) {
 			// The bound is enforced on BYTES READ, before any decoding, and
 			// without believing Content-Length: this body is syntactically fine
 			// and simply too long.
-			body := []byte(`{"bus_id":"bus-peer","idempotency_key":"` + strings.Repeat("a", 600) + `"}`)
-			if status, code := remote.postRaw(t, "application/json", body); status != http.StatusRequestEntityTooLarge || code != CodePayloadTooLarge {
+			body := []byte(`{"bus_id":"bus-peer","agents":["bus-peer.` + strings.Repeat("a", 600) + `-1"]}`)
+			if status, code := remote.postRaw(t, "application/json", "valid-key", body); status != http.StatusRequestEntityTooLarge || code != CodePayloadTooLarge {
 				t.Errorf("oversized body gave %d/%q, want %d/%q", status, code, http.StatusRequestEntityTooLarge, CodePayloadTooLarge)
 			}
 		})
@@ -382,7 +410,7 @@ func TestPeerEnrollment(t *testing.T) {
 		remote := newResponder(t, peerBus, nil, nil)
 		remote.rejectWith(errors.New("the durable peer table is unavailable"))
 
-		status, code := remote.postJSON(t, PeerEnrollRequest{BusID: localBus, IdempotencyKey: "boom"})
+		status, code := remote.postJSON(t, PeerEnrollRequest{BusID: localBus})
 		if status != http.StatusServiceUnavailable || code != CodeUnavailable {
 			t.Errorf("got %d/%q, want %d/%q: a peer must be able to tell 'not now' from 'never'", status, code, http.StatusServiceUnavailable, CodeUnavailable)
 		}
@@ -394,7 +422,7 @@ func TestPeerEnrollment(t *testing.T) {
 		// not have; the handshake fails instead, and no peer is recorded.
 		remote := newResponder(t, peerBus, []string{thirdBus + ".ghost-1"}, nil)
 
-		status, code := remote.postJSON(t, PeerEnrollRequest{BusID: localBus, IdempotencyKey: "selfcheck"})
+		status, code := remote.postJSON(t, PeerEnrollRequest{BusID: localBus})
 		if status != http.StatusServiceUnavailable || code != CodeUnavailable {
 			t.Errorf("got %d/%q, want %d/%q", status, code, http.StatusServiceUnavailable, CodeUnavailable)
 		}
@@ -442,8 +470,13 @@ func TestPeerEnrollment(t *testing.T) {
 			tc := tc
 			t.Run(tc.name, func(t *testing.T) {
 				srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// A real hostile responder sends a self-consistent
+					// message; making Count agree keeps this test aimed at
+					// the id claims rather than at the count check.
+					body := tc.body
+					body.Count = len(body.Agents)
 					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(tc.body)
+					_ = json.NewEncoder(w).Encode(body)
 				}))
 				defer srv.Close()
 
@@ -538,5 +571,56 @@ func TestClientRefusesToPublishABrokenLocalRoster(t *testing.T) {
 	}
 	if reached != 0 {
 		t.Errorf("the peer was contacted %d times despite the local roster being invalid, want 0", reached)
+	}
+}
+
+// TestClientRejectsACountMismatch gives PeerEnrollResponse.Count its purpose: a
+// response whose count disagrees with its roster is truncated or mis-assembled,
+// and federating a short roster misroutes the messages of every agent missing
+// from it.
+func TestClientRejectsACountMismatch(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(PeerEnrollResponse{
+			BusID:  peerBus,
+			Agents: []string{peerBus + ".beta-1"},
+			Count:  7,
+		})
+	}))
+	defer srv.Close()
+
+	local := newInitiator(t, localBus, nil, srv)
+	if _, err := local.Enroll(context.Background(), srv.URL, "count-mismatch"); !errors.Is(err, ErrInvalidRoster) {
+		t.Fatalf("Enroll error = %v, want one wrapping ErrInvalidRoster", err)
+	}
+}
+
+// TestClientNeverFollowsARedirect is the regression test for the exfiltration
+// route a security audit found: Go's default redirect policy would replay the
+// handshake POST — our bus id and our whole roster — at whatever host a 3xx
+// names, over whatever scheme it names, on a connection nobody validated. The
+// https check only ever sees the URL we were handed, so it cannot catch this,
+// and mutual TLS would not either: the redirect target gets a fresh connection.
+func TestClientNeverFollowsARedirect(t *testing.T) {
+	var leaked int32
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&leaked, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(PeerEnrollResponse{BusID: "bus-evil", Agents: []string{"bus-evil.impostor-1"}, Count: 1})
+	}))
+	defer sink.Close()
+
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+PeerEnrollPath, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	local := newInitiator(t, localBus, []string{localBus + ".secretagent-1"}, redirector)
+	_, err := local.Enroll(context.Background(), redirector.URL, "redirect-bait")
+	if !errors.Is(err, ErrPeerRefused) {
+		t.Fatalf("Enroll error = %v, want one wrapping ErrPeerRefused: a 3xx is a refusal, never an instruction", err)
+	}
+	if n := atomic.LoadInt32(&leaked); n != 0 {
+		t.Fatalf("the redirect target received %d handshake(s); the roster was exfiltrated", n)
 	}
 }

@@ -30,6 +30,18 @@ const FormatVersion = 1
 // to the same bytes. A fixed, documented, length-prefixed ASCII prefix is
 // framing — it is not a cryptographic construction, and nothing about the
 // signature scheme depends on its content.
+//
+// Version 1 is bound EXCLUSIVELY to Ed25519 (RATCHET-7). The algorithm is not a
+// negotiable field of the format: changing it is a new Context string, so no
+// verifier can be talked into a weaker algorithm by anything on the wire.
+//
+// It is also disjoint from every other signing input in this codebase, which is
+// what stops one signature being replayed as another. The only other input the
+// same key signs today is auth.SessionSigningContext
+// ("agent-bus:session-token:v1:" + token), and the two languages differ in
+// their FIRST byte: a canonical message always begins with the 0x00 of a uint32
+// length, a session challenge always begins with 'a' (0x61). Any future
+// artefact signed with an agent's key must preserve that disjointness.
 const Context = "agent-bus/msg-sig/1"
 
 // MaxBodyLen bounds the message body the format will encode: 1 MiB, matching
@@ -37,6 +49,20 @@ const Context = "agent-bus/msg-sig/1"
 // format change (a new FormatVersion), not a tuning knob. The send path may of
 // course impose a smaller limit of its own.
 const MaxBodyLen = 1 << 20
+
+// MaxRecipients bounds the recipient set at 4096.
+//
+// Without it the body is bounded and the recipient list is not, so untrusted
+// input could ask for canonical bytes of unbounded size — the whole point of
+// bounding the body. 4096 is derived rather than picked: a fully-qualified
+// agent id is at most ids.MaxAgentIDLen (150) bytes and costs four more for its
+// length prefix, so 4096 recipients cap the recipient block at about 616 KiB —
+// the same order as MaxBodyLen, and comfortably inside the WAL's 1 MiB record.
+//
+// Like MaxBodyLen this is a property OF THE FORMAT: raising it is a new
+// FormatVersion. A bus that outgrows it should fan a broadcast out over several
+// messages rather than quietly widen the format.
+const MaxRecipients = 4096
 
 // ErrInvalid wraps every failure of Canonicalize. Callers that must fail closed
 // on a malformed message — SIGN-6's ingest policy in particular — can match it
@@ -160,8 +186,11 @@ func Canonicalize(m Message) ([]byte, error) {
 	for _, r := range recipients {
 		out = appendLenPrefixed(out, []byte(r))
 	}
-	// int64 -> uint64 is a defined two's-complement reinterpretation in Go, so
-	// a negative timestamp (a clock before 1970) encodes and decodes exactly.
+	// The timestamp is encoded as a two's-complement int64 — the field is signed
+	// in the LAYOUT so the format never needs a version bump to admit a
+	// pre-1970 clock. validate() nevertheless rejects a non-positive value as an
+	// unset field, so this branch of the encoding is a property of the format
+	// rather than a reachable case.
 	out = appendUint64(out, uint64(m.TimestampUnixMilli))
 	out = appendLenPrefixed(out, m.Body)
 	return out, nil
@@ -232,8 +261,8 @@ func validate(m Message) ([]string, error) {
 	if len(m.Recipients) == 0 {
 		return nil, fmt.Errorf("%w: a message has at least one recipient; an empty recipient set would sign an audience of nobody", ErrInvalid)
 	}
-	if len(m.Recipients) > math.MaxUint32 {
-		return nil, fmt.Errorf("%w: %d recipients does not fit the uint32 recipient count", ErrInvalid, len(m.Recipients))
+	if len(m.Recipients) > MaxRecipients {
+		return nil, fmt.Errorf("%w: %d recipients, but the canonical format carries at most %d", ErrInvalid, len(m.Recipients), MaxRecipients)
 	}
 	recipients := make([]string, len(m.Recipients))
 	copy(recipients, m.Recipients)

@@ -64,6 +64,43 @@ func TestCanonicalizeHandComputedLayout(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeHandComputedLayoutSortsRecipients is the second hand-written
+// anchor, and it exists because the first one has a single recipient: with only
+// one, the SORT ORDER of the recipient block is pinned by nothing but the
+// vector file and the test file's own reference encoder, which could be flipped
+// to descending together without any hand-computed expectation objecting. Here
+// the recipients are supplied carol-then-bob and the expected bytes — written
+// out by hand from PROTOCOL.md §8.3 — spell bob first.
+func TestCanonicalizeHandComputedLayoutSortsRecipients(t *testing.T) {
+	m := Message{
+		MessageID:          "bus-a-2",
+		Sequence:           2,
+		Sender:             "bus-a.alice-1",
+		Recipients:         []string{"bus-a.carol-1", "bus-a.bob-2"},
+		TimestampUnixMilli: 2,
+		Body:               []byte("ok"),
+	}
+
+	const want = "" +
+		"00000013" + "6167656e742d6275732f6d73672d7369672f31" + // context
+		"00000007" + "6275732d612d32" + // "bus-a-2"
+		"0000000000000002" + // sequence
+		"0000000d" + "6275732d612e616c6963652d31" + // "bus-a.alice-1"
+		"00000002" + // two recipients
+		"0000000b" + "6275732d612e626f622d32" + // "bus-a.bob-2"   — sorted FIRST
+		"0000000d" + "6275732d612e6361726f6c2d31" + // "bus-a.carol-1" — sorted SECOND
+		"0000000000000002" + // timestamp
+		"00000002" + "6f6b" // "ok"
+
+	got, err := Canonicalize(m)
+	if err != nil {
+		t.Fatalf("Canonicalize: %v", err)
+	}
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("canonical bytes do not match the hand-computed layout\n got %s\nwant %s", hex.EncodeToString(got), want)
+	}
+}
+
 // TestCanonicalizeContextSpellsTheFormatVersion pins the single version
 // indicator: FormatVersion and the version inside Context can never disagree,
 // because a mismatch here fails the build's tests rather than shipping two
@@ -447,6 +484,7 @@ func TestCanonicalizeRejects(t *testing.T) {
 		{"timestamp unset", func(m *Message) { m.TimestampUnixMilli = 0 }},
 		{"timestamp negative", func(m *Message) { m.TimestampUnixMilli = -1 }},
 		{"body over the format limit", func(m *Message) { m.Body = make([]byte, MaxBodyLen+1) }},
+		{"recipients over the format limit", func(m *Message) { m.Recipients = manyRecipients(MaxRecipients + 1) }},
 	}
 
 	for _, c := range cases {
@@ -467,14 +505,30 @@ func TestCanonicalizeRejects(t *testing.T) {
 		})
 	}
 
-	// The boundary itself is accepted: exactly MaxBodyLen is legal, one more is
-	// not. Without this the limit test above would also pass if the encoder
-	// rejected every body.
+	// The boundaries themselves are accepted: exactly MaxBodyLen and exactly
+	// MaxRecipients are legal, one more of either is not. Without these the
+	// limit cases above would also pass if the encoder rejected every body or
+	// every recipient list.
 	m := valid
 	m.Body = make([]byte, MaxBodyLen)
 	if _, err := Canonicalize(m); err != nil {
 		t.Fatalf("a body of exactly MaxBodyLen must be accepted: %v", err)
 	}
+
+	m = valid
+	m.Recipients = manyRecipients(MaxRecipients)
+	if _, err := Canonicalize(m); err != nil {
+		t.Fatalf("exactly MaxRecipients recipients must be accepted: %v", err)
+	}
+}
+
+// manyRecipients builds n distinct, well-formed fully-qualified recipient ids.
+func manyRecipients(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("bus-a.r%d-1", i)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

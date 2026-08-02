@@ -45,6 +45,30 @@
 // fact — and the roster length is checked before any per-entry parsing. See the
 // Max* constants in peer.go for each cap and why it was chosen.
 //
+// Retries. The idempotency key that makes peer-enrol safe to retry
+// (invariant 10) travels in the idem.HeaderName header — internal/idem's one
+// canonical carrier, no body field and no fallback — and a validated PeerRoster
+// carries both the key and an idem.ComputeFingerprint of the payload, which is
+// what lets the eventual registration site tell a legitimate retry (same key,
+// same payload) from a protocol violation (same key, different payload).
+//
+// # What the gating tasks must not forget
+//
+// Three properties this package cannot provide from where it sits, each of
+// which becomes load-bearing the moment the handler is served:
+//
+//   - AcceptPeer is the ONLY thing between an anonymous POST and our whole
+//     roster. The invite check belongs in front of the handler or inside that
+//     callback — never after it.
+//   - Two DIFFERENT peers whose bus ids collide only by ASCII case both
+//     validate here, because ValidatePeerBusID case-folds against OUR id alone.
+//     The peer registry must refuse a bus id that case-collides with a peer it
+//     already knows, for the reason ids.ValidateAgentName refuses uppercase
+//     names: a confusable in the routing subject is a social-engineering
+//     surface.
+//   - There is no rate limit, no per-request read deadline and no cap on
+//     concurrent handshakes here; those belong to the serving layer.
+//
 // # No wire protocol version field, on purpose
 //
 // The handshake payload deliberately carries NO version number. Wire protocol

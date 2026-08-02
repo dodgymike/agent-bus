@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
@@ -39,21 +40,23 @@ const (
 	//
 	// It is DERIVED, not guessed: MaxRosterAgents ids of at most
 	// ids.MaxAgentIDLen bytes, each costing two quotes and a comma in JSON, is
-	// 1024 * (150 + 3) = 156,672 bytes, plus a bus id, an idempotency key and
-	// the field names. 256 KiB leaves ~1.6x headroom, so a legal maximum-size
+	// 1024 * (150 + 3) = 156,672 bytes, plus a bus id and the field names.
+	// 256 KiB leaves ~1.6x headroom, so a legal maximum-size
 	// roster can always be encoded and can never be rejected by this cap —
 	// while an unbounded stream still stops at a quarter of a megabyte.
 	MaxHandshakeBytes = 256 << 10
 
-	// MaxIdempotencyKeyLen bounds the peer-supplied idempotency key that makes
-	// peer-enrol safe to retry (invariant 10).
+	// MaxPeerBusIDLen bounds a CLAIMED bus id before it is validated.
 	//
-	// 128 is pinned to hub.MaxIdempotencyKeyLen / store.MaxIdempotencyKeyLen /
-	// auth.MaxIdempotencyKeyLen. This package deliberately re-states the rule
-	// instead of importing hub: one shape of idempotency key across the whole
-	// server is the point, and a test pins this constant to that value so the
-	// duplication cannot drift silently.
-	MaxIdempotencyKeyLen = 128
+	// ids.ValidateBusID would reject an over-long id anyway — its pattern caps
+	// at 64 — but its error message quotes the offending id with %q, and %q
+	// expands a control byte to four characters. A peer sending a 200 KiB
+	// "bus id" would therefore choose the size of the line we log about
+	// rejecting it. This check refuses it first, without echoing it, exactly as
+	// ids.ParseAgentID refuses an oversized agent id before quoting anything.
+	// 64 is ids.BusIDPattern's own upper bound, so this rejects nothing that
+	// could otherwise have been valid.
+	MaxPeerBusIDLen = 64
 )
 
 // Handshake failures. These are the categories a caller — or the responder's
@@ -78,9 +81,6 @@ var (
 	// ErrRosterTooLarge reports a roster longer than MaxRosterAgents.
 	ErrRosterTooLarge = errors.New("relay: peer roster too large")
 
-	// ErrInvalidIdempotencyKey reports a missing or malformed idempotency key.
-	ErrInvalidIdempotencyKey = errors.New("relay: invalid idempotency key")
-
 	// ErrPayloadTooLarge reports a body that exceeded MaxHandshakeBytes.
 	ErrPayloadTooLarge = errors.New("relay: handshake payload too large")
 )
@@ -92,14 +92,18 @@ var (
 // redemption (INVITE-PEERGUARD) and the TLS client certificate
 // (MTLS-RELAYGUARD), both of which gate this handler and neither of which
 // exists yet.
+//
+// The idempotency key that makes peer-enrol safe to retry (invariant 10) is
+// deliberately NOT a field here: it travels in the idem.HeaderName request
+// header, which internal/idem (IDEM-10) defines as the one canonical carrier —
+// no body field, no fallback, because a key able to arrive by two routes
+// eventually disagrees with itself on a retry. The header also lets an
+// oversized key be refused before a byte of body is read. Strict decoding means
+// a peer that puts the key in the body here gets a 400 rather than having it
+// silently ignored.
 type PeerEnrollRequest struct {
 	// BusID is the initiator's claimed bus id.
 	BusID string `json:"bus_id"`
-
-	// IdempotencyKey makes peer-enrol safe to retry (invariant 10). Peer
-	// topologies are cyclic and delivery is at-least-once, so a repeated
-	// handshake is the steady state, not an edge case.
-	IdempotencyKey string `json:"idempotency_key"`
 
 	// Agents is the initiator's roster: fully-qualified "<bus-id>.<agent-id>"
 	// ids (invariant 2), all inside the initiator's OWN namespace. May be
@@ -139,11 +143,42 @@ type PeerRoster struct {
 	// freshly allocated and never aliases the decoded payload.
 	Agents []string
 
-	// IdempotencyKey is the key the initiator supplied, carried through so the
-	// registration site can hand it to the durable applied-key table
-	// (invariant 10) when this handler is finally gated and wired. It is empty
-	// on a roster derived from a RESPONSE, which carries no key.
+	// IdempotencyKey is the key the initiator supplied in the idem.HeaderName
+	// header, carried through so the registration site can build an
+	// idem.Scope with idem.OpPeerEnrol and hand it to the durable applied-key
+	// table (invariant 10) when this handler is finally gated and wired. It is
+	// empty on a roster derived from a RESPONSE, which carries no key.
 	IdempotencyKey string
+
+	// Fingerprint is the canonical fingerprint of the VALIDATED payload this
+	// roster came from, computed with idem.ComputeFingerprint over the field
+	// list documented at peerFingerprint.
+	//
+	// It exists because invariant 10's central distinction cannot be made
+	// without it: same key + same payload is a legitimate retry that must
+	// return the original result, while same key + DIFFERENT payload is a
+	// protocol violation that must be rejected and disconnect the caller. A
+	// registration site handed only the key could not tell those apart, and
+	// would have to re-derive the fingerprint from a payload it no longer has.
+	// Zero on a roster derived from a RESPONSE.
+	Fingerprint idem.Fingerprint
+}
+
+// peerFingerprint computes the canonical fingerprint of a peer-enrol payload.
+//
+// The field list is FIXED and ordered, as idem.ComputeFingerprint requires
+// every call site to document: the operation name (domain separation, so a
+// peer-enrol fingerprint can never equal a send's), then the claimed bus id,
+// then each validated agent id in the order the peer sent them. Order is part
+// of the payload: two rosters differing only in order are different requests,
+// and treating them as equal would let a retry quietly carry new content.
+func peerFingerprint(busID string, agents []string) idem.Fingerprint {
+	fields := make([][]byte, 0, len(agents)+2)
+	fields = append(fields, []byte(idem.OpPeerEnrol), []byte(busID))
+	for _, a := range agents {
+		fields = append(fields, []byte(a))
+	}
+	return idem.ComputeFingerprint(fields...)
 }
 
 // ValidatePeerBusID checks a peer's claimed bus id against our own.
@@ -166,6 +201,12 @@ func ValidatePeerBusID(localBusID, peerBusID string) error {
 		// anyway so a misconfigured local bus id can never make the collision
 		// test below vacuous.
 		return fmt.Errorf("relay: local bus id is invalid, so no peer claim can be judged against it: %w", err)
+	}
+	if len(peerBusID) > MaxPeerBusIDLen {
+		// Refused BEFORE ids.ValidateBusID, whose message quotes the id: see
+		// MaxPeerBusIDLen. The peer chooses this string; it must not get to
+		// choose the size of the line we log about rejecting it.
+		return fmt.Errorf("%w: %d bytes, but a bus id is at most %d; the claimed id is not echoed here because it is oversized", ErrInvalidBusID, len(peerBusID), MaxPeerBusIDLen)
 	}
 	if err := ids.ValidateBusID(peerBusID); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidBusID, err)
@@ -260,50 +301,22 @@ func validateLocalRoster(localBusID string, roster []string) ([]string, error) {
 	return out, nil
 }
 
-// ValidateIdempotencyKey enforces the shape of a peer-supplied idempotency key:
-// non-empty, at most MaxIdempotencyKeyLen bytes, [A-Za-z0-9._-] only.
-//
-// The alphabet is pinned to hub's so one key can be carried unchanged from the
-// peer handshake into the durable applied-key table when this handler is gated
-// and wired. It excludes everything that would need escaping in a log line or a
-// storage key, which is why the error may quote the offending byte safely.
-func ValidateIdempotencyKey(key string) error {
-	if key == "" {
-		return fmt.Errorf("%w: an idempotency key is required on every mutating call — including peer-enrol — so a retry after a lost acknowledgement cannot be applied twice (invariant 10)", ErrInvalidIdempotencyKey)
-	}
-	if len(key) > MaxIdempotencyKeyLen {
-		return fmt.Errorf("%w: %d bytes, but an idempotency key is at most %d; the key is not echoed here because it is oversized", ErrInvalidIdempotencyKey, len(key), MaxIdempotencyKeyLen)
-	}
-	for i := 0; i < len(key); i++ {
-		if !isIdempotencyKeyByte(key[i]) {
-			return fmt.Errorf("%w: byte %d is %q, but an idempotency key must contain only [A-Za-z0-9._-]", ErrInvalidIdempotencyKey, i, key[i:i+1])
-		}
-	}
-	return nil
-}
-
-func isIdempotencyKeyByte(c byte) bool {
-	switch {
-	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		return true
-	case c == '.', c == '_', c == '-':
-		return true
-	default:
-		return false
-	}
-}
-
 // ValidatePeerEnrollRequest validates a decoded request against our own bus id
 // and returns what we may believe about the initiator.
-func ValidatePeerEnrollRequest(localBusID string, req PeerEnrollRequest) (PeerRoster, error) {
-	if err := ValidateIdempotencyKey(req.IdempotencyKey); err != nil {
+func ValidatePeerEnrollRequest(localBusID, idempotencyKey string, req PeerEnrollRequest) (PeerRoster, error) {
+	if err := idem.ValidateKey(idempotencyKey); err != nil {
 		return PeerRoster{}, err
 	}
 	agents, err := ValidateRoster(localBusID, req.BusID, req.Agents)
 	if err != nil {
 		return PeerRoster{}, err
 	}
-	return PeerRoster{BusID: req.BusID, Agents: agents, IdempotencyKey: req.IdempotencyKey}, nil
+	return PeerRoster{
+		BusID:          req.BusID,
+		Agents:         agents,
+		IdempotencyKey: idempotencyKey,
+		Fingerprint:    peerFingerprint(req.BusID, agents),
+	}, nil
 }
 
 // ValidatePeerEnrollResponse validates a decoded response with exactly the
@@ -341,7 +354,7 @@ func ErrorCode(err error) string {
 		return CodeRosterTooLarge
 	case errors.Is(err, ErrInvalidRoster):
 		return CodeInvalidRoster
-	case errors.Is(err, ErrInvalidIdempotencyKey):
+	case errors.Is(err, idem.ErrMissingKey), errors.Is(err, idem.ErrInvalidKey):
 		return CodeInvalidIdempotencyKey
 	case errors.Is(err, ErrInvalidRequest):
 		return CodeInvalidRequest

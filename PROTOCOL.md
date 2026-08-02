@@ -321,6 +321,18 @@ check their own implementations against.
 3. **Bodies are opaque bytes.** JSON cannot carry arbitrary bytes without a second encoding layer
    (base64), which is one more place two implementations can disagree.
 
+**Version 1 is bound exclusively to Ed25519.** The algorithm is not a negotiable field: there is no
+"algorithm" slot in the layout, so nothing on the wire can talk a verifier into a weaker one, and
+changing algorithm means a new context string and a new version.
+
+**The context string is also what keeps signing inputs disjoint.** An agent's key already signs one
+other thing: `auth.SessionSigningContext` + token (`"agent-bus:session-token:v1:"`, see
+`CONTRACTS-HTTP.md`). The two languages differ in their **first byte** — a canonical message always
+starts with the `0x00` of a `uint32` length, a session challenge always starts with `'a'` (0x61) —
+so neither can be replayed as the other, and `/v1/session/begin` cannot be used as a signing oracle
+for message signatures. Any future artefact signed with an agent's key must preserve that
+disjointness.
+
 Length prefixes are **framing, not a cryptographic construction** — the distinction invariant 9
 turns on. Nothing here hashes, pads, derives or mixes anything: the bytes below are handed to
 `crypto/ed25519` (RFC 8032, Go stdlib, chosen by RATCHET-7) and to `crypto/sha256`, and to nothing
@@ -369,10 +381,23 @@ make it **fail closed** — it returns an error and *no bytes*, never a best-eff
 - **Recipients are sorted by the encoder, not by the caller**, so two implementations cannot disagree
   about ordering. Duplicates are **rejected, not collapsed** — collapsing would change the audience
   the sender believed it signed.
-- **At least one recipient.** An empty set signs an audience of nobody.
+- **At least one recipient, and at most 4096** (`MaxRecipients`). The upper bound is derived, not
+  picked: an id is at most 150 bytes plus a 4-byte prefix, so 4096 caps the recipient block at about
+  616 KiB — the same order as the body bound. Without it the body would be bounded and the recipient
+  list would not, which is a size amplifier reachable from untrusted input.
 - **Sequence 0 and timestamp ≤ 0 are refused** as unset fields, the same posture `internal/ids` takes.
+  The timestamp is nevertheless a *signed* int64 in the layout, so admitting a pre-1970 clock later
+  would not need a new field width.
 - **Body ≤ 1 MiB** (`MaxBodyLen`, matching `MaxPayloadSize`). A zero-length body is legal and encodes
   as a length prefix of 0 — an empty field, never an absent one.
+
+**Which key verifies it.** The verification key MUST be resolved from this bus's roster using the
+fully-qualified **`sender` field inside the signed bytes**, and from nothing else — never a key id,
+key, hint or sender name carried beside the signature in the envelope. There is deliberately no key
+identifier in the layout: a self-describing signature is one an attacker can point at a key of its
+choosing, and the sender field is already covered, so binding to it is free. Cross-bus key trust —
+whether bus B may attest a key for bus A's agent — is unresolved and is SIGN-7's to settle
+(`CONTRACTS-HTTP.md`, enrolment).
 
 **Versioning.** The format version is a **reserved** number, allocated through the Spec Server
 `signing-format-version` namespace (value **1**, reserved 2026-08-02 for SIGN-1). It is spelled
@@ -408,6 +433,20 @@ An assignment that is never submitted simply leaves a hole in the sequence. That
 not be "fixed": indices are identities and are never reused, and the sequence advances past a hole
 rather than rewinding (invariant 1).
 
+**But the mint must be DURABLE, and this is the sharp edge of option (a).** `internal/ids`
+(`sequence.go`) derives its resume floor from *the highest sequence number ever written to disk* —
+prepared, committed, aborted or dangling alike. A number handed to a client in step 1 and never
+submitted appears in **no disk record at all**, so a restart would hand that same number to a
+different message. Two distinct, validly signed messages would then bear the same origin message id,
+each with a signature that verifies — which is precisely the equivocation option (a) exists to
+prevent, and a straight breach of invariant 1's "never reused, including across restarts".
+
+So step 1 is not a bare `Sequence.Next()`. The assignment must reach disk before it is returned to
+the client, bound to the idempotency key that asked for it (invariant 10, so a retry gets the same
+assignment rather than burning another), and the recovery floor must count **assigned-but-unsubmitted**
+sequences, not merely those carried by an accepted message. SIGN-2 implements this; it is stated here
+because a SIGN-2 that skips it is silently wrong in a way no signature test detects.
+
 ### 8.5 Relay: the origin's numbers are signed, the receiving bus's are not
 
 This is the collision SIGN-7 raised, and this is its resolution. The signed bytes carry the **origin
@@ -428,6 +467,16 @@ What is deliberately **not** covered, stated so nobody assumes otherwise:
   the sender produced them; SIGN-6's mandatory-signature ingest rule applies to the relay ingest path
   exactly as it applies to a client send, so a stripped or re-signed message is rejected rather than
   silently downgraded.
+
+**Verify the bytes you are about to ACT on — never a blob that arrived beside them.** A verifier MUST
+re-derive the canonical bytes with `Canonicalize` from the exact field values it will route, deliver,
+attribute and log, and check the signature over *those*. It must not verify a pre-serialised byte
+string supplied by the sender or a relay while taking its routing fields from separately-supplied
+envelope JSON: that split re-opens the entire hole §8.1 exists to close — every covered field becomes
+forgeable under a signature that still verifies, because the two copies are never compared. If an
+implementation does transmit the canonical bytes as an opaque blob, it MUST parse the blob and use
+only the parsed contents; the envelope's copy of a covered field is then decoration, and any
+disagreement is a rejection.
 
 ### 8.6 One byte sequence, two consumers — DUR-5 must not fork it
 

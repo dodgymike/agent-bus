@@ -66,7 +66,11 @@ func TestHandshakeHandlerIsNotWiredIntoAnyMux(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(src), `"`+modulePath+`"`) {
+		// Both the package itself AND any subpackage of it: a hypothetical
+		// internal/relay/mount that re-exported Handler would otherwise bridge
+		// this package onto a mux without tripping the guard.
+		text := string(src)
+		if strings.Contains(text, `"`+modulePath+`"`) || strings.Contains(text, `"`+modulePath+`/`) {
 			rel, relErr := filepath.Rel(root, path)
 			if relErr != nil {
 				rel = path
@@ -120,15 +124,31 @@ func TestPackageDocNamesTheGatingTasks(t *testing.T) {
 	}
 }
 
-// TestIdempotencyKeyCapMatchesTheRestOfTheServer pins the duplicated constant.
+// TestIdempotencyKeyCarrierIsTheCanonicalHeader pins relay to internal/idem
+// rather than to a second, drifting copy of the key rules.
 //
-// relay deliberately re-states the key rule instead of importing hub, so one
-// key can travel from a peer handshake into the durable applied-key table
-// unchanged (invariant 10). Duplication that is allowed to drift is worse than
-// coupling, so the value is asserted here; hub.MaxIdempotencyKeyLen,
-// store.MaxIdempotencyKeyLen and auth.MaxIdempotencyKeyLen are all 128.
-func TestIdempotencyKeyCapMatchesTheRestOfTheServer(t *testing.T) {
-	if MaxIdempotencyKeyLen != 128 {
-		t.Fatalf("MaxIdempotencyKeyLen = %d, want 128 to match hub/store/auth", MaxIdempotencyKeyLen)
+// This package used to re-state the 128-byte cap and the charset. It no longer
+// does: IDEM-10 defines ONE carrier (a header, no body field, no fallback) and
+// one validator, and a peer-enrol key has to reach the applied-key table
+// unchanged (invariant 10). The assertion is behavioural — the handler must
+// take the key from idem.HeaderName and nowhere else — so it fails if anyone
+// reintroduces a body field as a "convenience".
+func TestIdempotencyKeyCarrierIsTheCanonicalHeader(t *testing.T) {
+	remote := newResponder(t, localBus, nil, nil)
+
+	// The key in the body, where it used to live, is now an unknown field.
+	body := []byte(`{"bus_id":"` + peerBus + `","idempotency_key":"in-the-body","agents":[]}`)
+	if status, code := remote.postRaw(t, "application/json", "", body); status != 400 || code != CodeInvalidIdempotencyKey {
+		t.Errorf("a body-carried key gave %d/%q, want 400/%q: there is no body carrier and no fallback", status, code, CodeInvalidIdempotencyKey)
+	}
+
+	// The same request with the key in the canonical header is accepted.
+	ok := []byte(`{"bus_id":"` + peerBus + `","agents":[]}`)
+	if status, code := remote.postRaw(t, "application/json", "canonical-key", ok); status != 200 {
+		t.Errorf("a header-carried key gave %d/%q, want 200", status, code)
+	}
+	accepted := remote.acceptedRosters()
+	if len(accepted) != 1 || accepted[0].IdempotencyKey != "canonical-key" {
+		t.Fatalf("accepted rosters = %+v, want one carrying the header key", accepted)
 	}
 }
