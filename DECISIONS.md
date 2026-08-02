@@ -157,3 +157,78 @@ any of those would hand an unauthenticated caller information it has no business
 asserts the exact field set on `InfoResponse`, so adding a field there fails the test rather than
 silently expanding what an unauthenticated caller learns; a deliberate expansion must update the
 test and be justified here.
+
+---
+
+## 2026-08-02 — NEVER write our own crypto; always use a standard library that wraps the problem
+
+**Context.** The project was heading toward Signal-style end-to-end encryption. `CRYPTO_DEEPDIVE.md`
+established that Signal's own libsignal has no Go binding, that the best available Go option
+(`go.mau.fi/libsignal`) needs a toolchain bump, and — the finding that mattered — that the
+go1.19-compatible alternative, `status-im/doubleratchet`, **accepts replayed ciphertexts by default**
+(reproduced in four configurations). A 2019 beta library with no mutexes was the only thing that fit
+the constraints, and it was quietly broken.
+
+**Decision.** Two standing rules, promoted to **invariant 9** in `CLAUDE.md`:
+
+1. **Never write our own crypto.** No implementing or "adapting" a cipher, hash, MAC, KDF, signature
+   scheme, key exchange, or ratchet; no hand-rolled padding, nonce, or IV schemes; no bespoke
+   constructions assembled from otherwise-good primitives.
+2. **Always use a well-known, standard, audited library, and prefer the one that wraps as much of
+   the problem as possible** — a high-level, misuse-resistant sign/verify or sealed-box API over
+   assembling primitives ourselves.
+
+This **overrides invariant 8** (stdlib-first, justify dependencies). Where the two conflict, take the
+audited crypto dependency.
+
+**Consequences.** The reason this outranks our other preferences is that broken crypto fails
+*silently*: it still encrypts, it still verifies, and it provides none of the protection it appears
+to. No ordinary test suite detects it, so "our tests pass" is never evidence that a crypto change is
+correct — which is why known-answer tests against published vectors (RFC 8032 for Ed25519) and
+explicit negative tests (tampered body, swapped sender, replayed message, wrong key, truncated
+signature) are mandatory rather than nice-to-have. A verifier that accepts everything passes every
+positive test ever written.
+
+When no suitable library exists, the answer is to change the requirement or stop and ask the user —
+never to write it ourselves.
+
+---
+
+## 2026-08-02 — Message auth/integrity only (libsodium-style signatures); encryption deferred
+
+**Context.** Full Signal semantics (X3DH + Double Ratchet + PFS) carried a large complexity and
+supply-chain cost for a bus whose immediate need is "can I trust this message came from that agent,
+unmodified". Complexity is itself a security risk here.
+
+**Decision.** User instruction, verbatim: *"ok, let's keep it simple and just use standard message
+auth/integrity using libsodium. encryption can come later"*. So:
+
+- **No encryption, no X3DH, no Double Ratchet, no forward secrecy** for now. The ratchet direction in
+  `CRYPTO_DEEPDIVE.md` is **superseded** — its recommendation must not be actioned.
+- Messages carry an **Ed25519 detached signature** (libsodium's `crypto_sign`) over a canonical
+  serialisation of the message, made with the sender's **messaging** private key.
+- The **auth** keypair and the **messaging** keypair stay separate. This matters more without
+  encryption, not less: the bus verifies auth keys, but a message signature is verified by the
+  **recipient**, so a compromised or malicious bus still cannot forge a message from agent A.
+- Verification happens on the receive path **and** in the `scripts/bus-*.sh` wrapper, so an agent
+  never acts on an unverified message.
+
+**Consequences.**
+
+- **Every message body is readable by the bus and by any relay peer it traverses.** That is now an
+  accepted property of the system, not an oversight. It must be stated plainly in `AGENT_PROTOCOL.md`
+  and `PROTOCOL.md` so nobody assumes confidentiality the bus does not provide.
+- **A signature alone does not stop replay.** A valid signed message can be resent verbatim; freshness
+  comes from the server-minted monotonic sequence plus recipient-side cursor, and needs its own test.
+- **Canonical serialisation is the sharp edge.** If signer and verifier serialise differently,
+  verification fails intermittently, or worse, a field outside the signed bytes becomes silently
+  forgeable. The exact signed bytes and their order are specified as their own task.
+- The audit log stays metadata-and-routing-only (invariant 6); its content hash now pairs with the
+  signature to make a message non-repudiable.
+- **No toolchain bump is needed for this.** `crypto/ed25519` — the same Ed25519 primitive libsodium's
+  `crypto_sign` implements, behind an equally high-level API — has been in the Go stdlib since 1.13
+  and works on go1.19.4. Whether to use stdlib `crypto/ed25519` or a cgo libsodium binding is left to
+  the implementing task; both satisfy invariant 9, and the cgo binding's cost is a C library in the
+  container image.
+- Encryption is deferred, not cancelled. Revisit it as a fresh decision rather than reviving the
+  superseded ratchet plan.

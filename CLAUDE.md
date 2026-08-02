@@ -40,6 +40,19 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its wrapper is not done.
 8. **Simple beats clever.** Go stdlib first. A third-party dependency needs a justification in
    `DECISIONS.md`.
+9. **NEVER write your own crypto.** This is absolute and overrides every other preference in this
+   file, including invariant 8's stdlib-first bias and any argument from simplicity, elegance,
+   dependency count, or performance. Always use a well-known, standard, audited crypto library, and
+   pick the one that **wraps as much of the problem as possible** — prefer a high-level,
+   misuse-resistant API (`crypto_sign`-style sign/verify, sealed boxes) over assembling primitives
+   yourself. Specifically forbidden without explicit user consent recorded in `DECISIONS.md`:
+   implementing or "adapting" a cipher, hash, MAC, KDF, signature scheme, key exchange, or ratchet;
+   hand-rolling a padding, nonce, or IV scheme; inventing a bespoke construction out of otherwise-
+   good primitives. The reason this outranks everything else is that broken crypto **fails
+   silently** — it still encrypts, it still verifies, it simply provides none of the protection it
+   appears to. No ordinary test suite detects it, so "our tests pass" is not evidence. When no
+   suitable library exists, the answer is to change the requirement or stop and ask — never to
+   write it yourself.
 
 ## Repository layout
 
