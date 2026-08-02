@@ -285,18 +285,25 @@ func TestWALFramingCorruption(t *testing.T) {
 			wantReason: "file is empty",
 		},
 		{
-			name: "whole record lost from the middle",
+			// A record RESURRECTED in place, or written twice: the index goes
+			// BACKWARDS. Every frame still checksums, so nothing but the sequence
+			// rule catches it, and it is still corruption -- replaying it would
+			// apply history out of order.
+			//
+			// Note what is NOT here any more: a record MISSING from the middle,
+			// which leaves a rising-but-sparse sequence. That used to be in this
+			// table and is now legal (see TestWALFramingAcceptsAnIndexHole): the
+			// 2026-08-02 recovery policy discards damaged records and deliberately
+			// does not renumber the survivors, so a repaired log has permanent
+			// HOLES and a reader that insisted on density would refuse to read the
+			// file recovery had just produced.
+			name: "a record resurrected in place",
 			mutate: func(t *testing.T, p string, r []Record) {
-				// Cut record 2 out entirely. Every remaining frame still
-				// checksums; only the index sequence gives it away.
-				b := readFile(t, p)
-				cut := append(append([]byte{}, b[:r[1].Offset]...), b[r[2].Offset:]...)
-				if err := os.WriteFile(p, cut, 0600); err != nil {
-					t.Fatalf("WriteFile: %v", err)
-				}
+				// Overwrite record 2's frame with a re-encoding of record 1.
+				patch(t, p, r[1].Offset, encodeFrame(r[0].Index, r[1].Type, r[1].Payload))
 			},
 			wantOffset: -1,
-			wantReason: "out of sequence",
+			wantReason: "does not follow the previous record",
 		},
 	}
 
@@ -346,6 +353,51 @@ func TestWALFramingCorruption(t *testing.T) {
 				t.Errorf("ScanAll returned %d records before the corruption, want %d", len(got), wantRecs)
 			}
 		})
+	}
+}
+
+// TestWALFramingAcceptsAnIndexHole pins the rule that changed on 2026-08-02:
+// the index sequence must be STRICTLY INCREASING, not dense.
+//
+// Recovery is now required to discard damaged records so that the bus always
+// restarts (DECISIONS.md, "Availability over retention"), and it deliberately
+// does NOT renumber the survivors -- renumbering would reuse ids, which
+// invariant 1 forbids outright. So a repaired log has permanent HOLES, and a
+// reader that demanded a dense sequence would refuse to read the very file the
+// repair pass had just written. This test is the reader's half of that contract;
+// it used to assert the opposite ("whole record lost from the middle" was a
+// corruption case) and the change is deliberate.
+//
+// A hole is not corruption HERE. It is still a LOSS, and it is still reported:
+// Replay counts every gap into Recovered.MissingRecords and Open logs it on
+// every start, which is asserted in TestWALReplayReportsIndexHoles.
+func TestWALFramingAcceptsAnIndexHole(t *testing.T) {
+	path, recs := writeGoodLog(t)
+
+	// Cut record 2 out entirely. Every remaining frame still checksums, and the
+	// indices now run 1, 3 -- rising, but with a hole where record 2 was.
+	b := readFile(t, path)
+	cut := append(append([]byte{}, b[:recs[1].Offset]...), b[recs[2].Offset:]...)
+	if err := os.WriteFile(path, cut, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, end, err := ScanAll(path, KindWAL)
+	if err != nil {
+		t.Fatalf("ScanAll over a log with an index hole: %v: a hole is what a repair LEAVES, so the reader must accept it", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ScanAll returned %d records, want 2", len(got))
+	}
+	if got[0].Index != recs[0].Index || got[1].Index != recs[2].Index {
+		t.Errorf("ScanAll returned indices %d and %d, want %d and %d: survivors keep their ORIGINAL indices",
+			got[0].Index, got[1].Index, recs[0].Index, recs[2].Index)
+	}
+	if !bytes.Equal(got[1].Payload, recs[2].Payload) {
+		t.Errorf("the record after the hole came back as %q, want %q", got[1].Payload, recs[2].Payload)
+	}
+	if size := fileSize(t, path); end != size {
+		t.Errorf("ScanAll ended at %d but the file is %d bytes", end, size)
 	}
 }
 

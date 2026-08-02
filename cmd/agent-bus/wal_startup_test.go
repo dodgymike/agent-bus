@@ -1,18 +1,18 @@
 package main
 
 // Tests for DUR-9: run() must open AND replay the write-ahead log strictly
-// after the data-dir lock and strictly before the listener binds, must refuse
-// to start (non-zero exit, no listener) when the log cannot be opened, and must
-// close the log without damaging it on shutdown.
+// after the data-dir lock and strictly before the listener binds, must come up
+// and stay up even when the log on disk is unreadable (quarantining it loudly
+// and starting a fresh one -- see DUR-11 below), and must close the log without
+// damaging it on shutdown.
 //
 // These run the server in a SUBPROCESS -- os.Args[0] re-executed with
 // envRunServer set, which TestMain routes into run() -- for two reasons that a
-// same-process test cannot cover: the refusal path has to prove a real non-zero
-// PROCESS exit (run() returning an error is only half of the claim; main()
-// turning it into os.Exit(1) is the other half), and the happy path has to
-// exercise the real signal handler installed by run(), which a test that
-// injects into waitAndShutdown deliberately bypasses (see
-// TestShutdownReleasesLongPoll in main_test.go).
+// same-process test cannot cover: only a real process proves the exit CODE
+// (run() returning nil is half the claim; main() turning that into exit 0 is
+// the other half), and the happy path has to exercise the real signal handler
+// installed by run(), which a test that injects into waitAndShutdown
+// deliberately bypasses (see TestShutdownReleasesLongPoll in main_test.go).
 //
 // The harness lives entirely in this file: no production code exists or is
 // shaped to support it.
@@ -286,15 +286,33 @@ func TestServerOpensWALOnStart(t *testing.T) {
 	})
 }
 
-// TestServerOpensWALOnStartRefusesACorruptLog covers the fatal path. The name
-// deliberately shares the TestServerOpensWALOnStart prefix so the proof's
-// unanchored -run regex covers it too.
+// TestServerQuarantinesACorruptLogAndStartsAnyway covers the damaged-log path.
+// The name deliberately shares the TestServerOpensWAL... family's subject so it
+// reads next to the happy-path test; it is matched by name, not by prefix.
 //
-// The seeded damage is a garbage FILE HEADER, which recovery must refuse rather
-// than treat as a truncatable torn tail: a torn tail is bytes whose write never
-// completed, but a bad header is damage to bytes that were fully written, and
-// guessing there would risk discarding acknowledged history (invariant 6).
-func TestServerOpensWALOnStartRefusesACorruptLog(t *testing.T) {
+// POLICY (DECISIONS.md 2026-08-02, "Availability over retention: the bus ALWAYS
+// restarts" -- this REVERSES what this test used to assert). Faced with a log it
+// cannot interpret, the server does NOT refuse to start. It moves the damaged
+// file aside, says so loudly, starts a fresh log and serves. Invariant 4 is
+// narrowed to match: acknowledged data may be discarded when it is found
+// corrupt. This test therefore asserts the OPPOSITE of the "exit 1, nothing
+// listens" contract it enforced before 2026-08-02 -- if a future change makes
+// the server refuse again, that is a reverted decision, not a bug fix, and this
+// test is where it must be argued.
+//
+// The seeded damage is a garbage FILE HEADER with no salvageable record behind
+// it -- the one class recovery can make nothing at all of, and so the only class
+// that reaches quarantine (a torn tail or an isolated bad record is repaired in
+// place instead, and is covered in internal/wal).
+//
+// The load-bearing assertion here is NOT that the server survives; it is that
+// the discard is OBSERVABLE. A SILENT discard is the P0 defect the decision
+// calls out by name ("the defect was never that data was discarded; it is that
+// the discard was SILENT"), and a server that quietly serves an empty bus after
+// eating a log is indistinguishable, to an operator, from one that had nothing
+// to serve. So: a loud level, the original path, the path it was moved to, and
+// how many bytes went -- plus the bytes themselves still on disk.
+func TestServerQuarantinesACorruptLogAndStartsAnyway(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, wal.WALFileName)
 
@@ -306,44 +324,103 @@ func TestServerOpensWALOnStartRefusesACorruptLog(t *testing.T) {
 
 	proc := startServer(t, dir)
 
-	// Exit code 1 exactly: main() maps any run() error to os.Exit(1), and a
-	// regression that logs the failure and carries on serving would exit 0 (or
-	// not exit at all, tripping the timeout below).
-	code := proc.awaitExit(t, startupTimeout)
-	if code != 1 {
-		t.Fatalf("exit code with a corrupt %q = %d, want 1\n%s", wal.WALFileName, code, proc.stderr())
+	// (1) IT STARTS. awaitServerStarted fails loudly if the child exits first,
+	// so this alone catches a regression back to refuse-to-start -- and it
+	// catches it in milliseconds rather than by waiting out a timeout.
+	addr := proc.awaitServerStarted(t)
+
+	// (2) THE DISCARD IS LOGGED, LOUDLY AND SPECIFICALLY.
+	quarantineLine := proc.line(t, msgWALQuarantined)
+	qf := parseLogfmt(quarantineLine)
+
+	// Loud: an operator filtering at warn or above must still see it. info or
+	// debug here would be the silent-discard defect wearing a log line.
+	if lvl := qf["level"]; lvl != "error" {
+		t.Errorf("quarantine line level = %q, want %q; a discarded log is not routine news\nline: %s", lvl, "error", quarantineLine)
+	}
+	// Specific: WHICH log, WHERE the bytes went, HOW MANY. All three are what
+	// makes the line actionable instead of merely present.
+	if got := qf["path"]; got != walPath {
+		t.Errorf("quarantine line path = %q, want %q; the line must name the log that was discarded\nline: %s", got, walPath, quarantineLine)
+	}
+	movedTo := qf["moved_to"]
+	if movedTo == "" {
+		t.Errorf("quarantine line has no moved_to= field; an operator cannot find the evidence\nline: %s", quarantineLine)
+	}
+	if want := strconv.Itoa(len(corrupt)); qf["bytes"] != want {
+		t.Errorf("quarantine line bytes = %q, want %q; the line must say how much was discarded\nline: %s", qf["bytes"], want, quarantineLine)
 	}
 
-	stderr := proc.stderr()
-	const wantPrefix = "agent-bus: opening the write-ahead log in"
-	if !strings.Contains(stderr, wantPrefix) {
-		t.Errorf("stderr does not contain %q; the operator must be told WHICH stage refused\n%s", wantPrefix, stderr)
+	// (3) THE BYTES SURVIVE. Quarantine is a rename, never a delete: this code
+	// failing to read a file does not prove nobody can, and an operator with a
+	// hex editor is owed the original. Found by glob rather than by trusting
+	// moved_to, then cross-checked against it, so a line that names a path
+	// nothing was written to cannot pass.
+	matches, err := filepath.Glob(walPath + ".corrupt-*")
+	if err != nil {
+		t.Fatalf("globbing for the quarantine file: %v", err)
 	}
-	if !strings.Contains(stderr, dir) {
-		t.Errorf("stderr does not name the data dir %q; a refusal that hides the path is not actionable\n%s", dir, stderr)
+	if len(matches) != 1 {
+		t.Fatalf("found %d files matching %q, want exactly 1; the damaged log must be preserved beside the fresh one: %v\n%s",
+			len(matches), walPath+".corrupt-*", matches, proc.stderr())
+	}
+	if matches[0] != movedTo {
+		t.Errorf("quarantine line says moved_to=%q but the file on disk is %q; the log must name the real destination", movedTo, matches[0])
+	}
+	if quarantined := mustReadFile(t, matches[0]); string(quarantined) != string(before) {
+		t.Errorf("quarantined file %q is %d bytes and does not match the original %d bytes; the damaged data must be preserved verbatim",
+			matches[0], len(quarantined), len(before))
 	}
 
-	// Nothing was served. Both checks matter: no "server started" line, and no
-	// addr= field anywhere, so a regression cannot satisfy the first by simply
-	// renaming the message.
-	if strings.Contains(stderr, msgServerStarted) {
-		t.Errorf("stderr contains %q after a failed WAL open; the listener must never bind on this path\n%s", msgServerStarted, stderr)
+	// (4) IT CAME UP ON A FRESH LOG, and is not half-serving the corrupt one.
+	// records_replayed=0 with next_index=1 is the signature of a log with no
+	// history at all; anything else here would mean recovery kept, or invented,
+	// something out of 64 bytes of "X".
+	openedLine := proc.line(t, msgWALOpened)
+	of := parseLogfmt(openedLine)
+	for _, c := range []struct{ key, want, why string }{
+		{"path", walPath, "the fresh log must take the canonical name back"},
+		{"records_replayed", "0", "nothing in a quarantined log may be replayed"},
+		{"applied", "0", "no transaction may be recovered from a log that could not be read"},
+		{"next_index", "1", "a fresh log starts its indices at 1"},
+	} {
+		if got := of[c.key]; got != c.want {
+			t.Errorf("%q field %s = %q, want %q: %s\nline: %s", msgWALOpened, c.key, got, c.want, c.why, openedLine)
+		}
 	}
-	if strings.Contains(stderr, " addr=") {
-		t.Errorf("stderr reports a listen address after a failed WAL open; nothing may listen\n%s", stderr)
+	// The fresh log is a real, distinct file: created (wal.Open writes the file
+	// header) and emphatically not the corrupt bytes left in place.
+	fresh := mustReadFile(t, walPath)
+	if len(fresh) == 0 {
+		t.Errorf("%q is empty after the quarantine; a fresh log must still be created and headered", walPath)
+	}
+	if string(fresh) == string(before) {
+		t.Errorf("%q still holds the corrupt bytes; the damaged log must be MOVED, not left in place", walPath)
 	}
 
-	// A REFUSAL MUST NOT REPAIR. The corrupt bytes are still there, unchanged
-	// and un-truncated, so an operator can take a copy and diagnose it; a
-	// recovery pass that "fixed" a bad header by cutting the file would destroy
-	// the evidence and, on a real log, the history behind it.
-	after := mustReadFile(t, walPath)
-	if len(after) != len(before) {
-		t.Fatalf("corrupt %q changed size across the refused start: %d -> %d bytes; a refusal must never truncate",
-			wal.WALFileName, len(before), len(after))
+	// The discard is reported BEFORE anything is served, so the log record
+	// exists even if the process dies a moment after coming up.
+	if qIdx, sIdx := proc.lineIndex(t, msgWALQuarantined), proc.lineIndex(t, msgServerStarted); qIdx >= sIdx {
+		t.Errorf("quarantine logged at line %d but the server started at line %d; the discard must be recorded before we serve\n%s",
+			qIdx, sIdx, proc.stderr())
 	}
-	if string(after) != string(before) {
-		t.Fatalf("corrupt %q changed contents across the refused start; a refusal must never rewrite the log", wal.WALFileName)
+
+	// (1, continued) IT STAYS UP AND SERVES. "Started" is not "serving": this
+	// is the assertion that the always-restart policy actually delivers a
+	// usable bus rather than a process that logs a banner and sits there.
+	mustGetHealthz(t, addr)
+
+	// And it is a normal server in every other respect: SIGTERM is a clean
+	// exit 0. Notably NOT the exit 1 this test demanded before the policy
+	// changed -- a non-zero exit anywhere on this path is the regression.
+	proc.signal(t, syscall.SIGTERM)
+	if code := proc.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("exit code after SIGTERM = %d, want 0; a server that quarantined a log is still a healthy server\n%s", code, proc.stderr())
+	}
+
+	// Shutdown must not eat the evidence either.
+	if q := mustReadFile(t, matches[0]); string(q) != string(before) {
+		t.Errorf("quarantined file %q changed across shutdown; the preserved bytes must be immutable", matches[0])
 	}
 }
 
@@ -355,6 +432,10 @@ const (
 	msgServerStarted = `msg="server started"`
 	msgWALClosed     = `msg="write-ahead log closed"`
 	msgLockReleased  = `msg="data directory lock released"`
+	// Emitted by internal/wal, not by run(), but it is startup-visible operator
+	// contract all the same: it is the ONLY record that acknowledged data was
+	// thrown away (DECISIONS.md 2026-08-02). Renaming it silently is the defect.
+	msgWALQuarantined = `msg="wal quarantined an unreadable log and started a fresh one"`
 )
 
 // serverProc is a running (or finished) child server: its captured stderr, and

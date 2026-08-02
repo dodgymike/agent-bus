@@ -12,9 +12,24 @@ file is where the exact shape lives.
 | `GET` | `/healthz` | none | 200 | `{"status":"ok"}` |
 | `GET` | `/v1/info` | none | 200 | `{"bus_id":"...","version":"...","uptime_seconds":0.0}` |
 | other | `/healthz`, `/v1/info` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET` |
-| any | unregistered path | — | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope; must be decided together with AUTH-6's unauthenticated allow-list — whether an unauthenticated request to an unknown path should read 401 or 404). |
+| `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
+| `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
+| `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key` than its first use — a protocol violation, not a retry (invariant 10); response carries `Connection: close` (see `## Headers`) |
+| `POST` | `/v1/enroll` | none | 503 | the roster (default 4096 entries) or the idempotency table (default 16384 entries) is at capacity; `Retry-After: 5` |
+| `POST` | `/v1/session/begin` | none (issues the challenge; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","token":"...","challenge_expires_at":"<RFC3339Nano UTC>"}` |
+| `POST` | `/v1/session/begin` | none | 404 | `agent_id` is malformed **or** well-formed but not on this bus's roster — the two cases are deliberately indistinguishable to the caller |
+| `POST` | `/v1/session/begin` | none | 503 | the session table (default 16384 entries, pending + active together) is at capacity; `Retry-After: 5` |
+| `POST` | `/v1/session/complete` | none (activates the credential; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","expires_at":"<RFC3339Nano UTC>","lifetime_seconds":3600,"refresh_after_seconds":2700}` |
+| `POST` | `/v1/session/complete` | none | 400 | `signature` is not valid base64; also returned if the roster holds a corrupt (wrong-length) public key for the agent (defence in depth — see `internal/auth/session.go`) |
+| `POST` | `/v1/session/complete` | none | 401 | the signature does not verify against the agent's enrolled public key, or is not exactly the 64-byte Ed25519 signature size |
+| `POST` | `/v1/session/complete` | none | 404 | `token` names no session (never existed, already expired, or was dropped after a prior failed verification), or a pending/active session has passed its deadline — again deliberately indistinguishable to the caller |
+| `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 400 | malformed JSON, an unrecognised field, or trailing content after the one JSON value the body must contain |
+| `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 405 | any method but `POST`; `Allow: POST` |
+| `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 413 | request body exceeds `httpapi.MaxAuthRequestBytes` (8 KiB) |
+| `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
+| any | unregistered path | — | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope; must be decided together with AUTH-6's unauthenticated allow-list — whether an unauthenticated request to an unknown path should read 401 or 404). This is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — see the AUTH-1 section below. |
 
-`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`.
+`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`.
 
 `/v1/info`'s payload is deliberately minimal (see `DECISIONS.md`, 2026-08-02): `bus_id`, `version`,
 `uptime_seconds` only. A test pins the exact field set — do not add data-dir, listen address, peer
@@ -45,6 +60,11 @@ Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` o
 | `Allow` | out | Set to `GET` on a 405 from `/healthz` or `/v1/info`. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
+| `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201 when the response was replayed from the idempotency table rather than freshly applied. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied nothing. |
+| `Connection` | out | `close` on `POST /v1/enroll`'s 409 (idempotency key reused with a different payload). Invariant 10: same key + different payload is a protocol violation, and the server disconnects the offending client. Contrast the same-key/same-payload case, which is a legitimate retry, returns the original 201 unchanged, and is never disconnected or otherwise punished. |
+| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit). Short deliberately: every cap in `internal/auth` is a live in-memory bound that a departing agent or an expiring session can relieve within seconds. |
+| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, or `/v1/session/complete`. |
+| `Cache-Control` | out | `no-store` on `POST /v1/session/begin` only. That response body carries a LIVE credential (the session token); the other two auth responses carry none, so the header is deliberately not set on them and its presence stays meaningful. |
 
 ## Env vars
 
@@ -282,3 +302,102 @@ does not add an entry to the "Env vars" section above, which remains empty.
 
 No new HTTP route, CLI flag, production env var, header, or on-disk record type was introduced by
 this change.
+
+## Enrolment and sessions (added 2026-08-02)
+
+AUTH-1 adds the three credential-issuing routes documented in `## Routes` and `## Headers` above:
+`POST /v1/enroll`, `POST /v1/session/begin`, `POST /v1/session/complete`. This section is the prose
+that does not fit a table row. No `scripts/bus-*.sh` wrapper and no `AGENT_PROTOCOL.md` entry are
+added by this task — invariant 7 was amended so a Go CLI replaces the shell wrappers, and wiring
+these routes to that agent-facing surface is a separate, later task. Do not infer a wrapper or CLI
+subcommand exists for enrolment or sessions from this document.
+
+**`Options.Auth` gates route registration, not route behaviour.** `internal/httpapi.Options.Auth`
+(`*auth.Service`) has no default and is `nil` unless the caller supplies one. When it is `nil`, `New`
+does not register `/v1/enroll`, `/v1/session/begin`, or `/v1/session/complete` on the mux at all —
+they 404 through the same `net/http.ServeMux` catch-all as any other unknown path, not a 503. That is
+deliberate: a route that exists and refuses is a claim that the capability is present, and a server
+built without an auth service does not have it. `cmd/agent-bus`'s `run()` always constructs one
+(`auth.NewService(auth.Options{Minter: minter})`), so the shipped binary always registers these three
+routes; a `nil` `Options.Auth` is reachable only by a caller of the `httpapi` package directly (tests,
+or a future build that intentionally omits the auth surface).
+
+**The signing contract — load-bearing for any future client.** `POST /v1/session/complete`'s
+`signature` field is an Ed25519 signature over the exact byte string:
+
+```
+auth.SessionSigningContext + token
+```
+
+where `SessionSigningContext = "agent-bus:session-token:v1:"` (quote it exactly — it is a Go string
+constant in `internal/auth/session.go`, concatenated directly onto `token` with no separator) and
+`token` is the literal string returned as `token` in the `/v1/session/begin` response. A future client
+implementation **must pin `SessionSigningContext` as a compile-time constant** and must **not** learn
+it from the wire: the `/v1/session/begin` response deliberately does not echo this prefix anywhere in
+its body, precisely so a man-in-the-middle who could choose what gets signed cannot turn the agent's
+key into a signing oracle for arbitrary bytes. `public_key` (on `/v1/enroll`) and `signature` (on
+`/v1/session/complete`) are both `base64.StdEncoding` — the **standard, padded** alphabet, decoded
+`Strict()` server-side so a value has exactly one valid spelling. (The `token` value itself uses a
+different encoding, `base64.RawURLEncoding` — unpadded, URL-safe — since it is minted server-side and
+only ever needs to round-trip, never to be independently re-encoded by a client.)
+
+**Session lifetime constants** (`internal/auth/session.go`):
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `SessionLifetime` | 1 hour | How long an ACTIVE session is valid, from the instant its challenge was completed. A **ceiling**, not a default to raise — the whole argument for a bearer token in place of per-request signing rests on a stolen token going stale soon. |
+| `SessionRefreshFraction` | 0.75 | Where in a session's life a well-behaved client should begin its next challenge: 75% of `SessionLifetime`, leaving a quarter of the lifetime as slack. Surfaced on the wire as `refresh_after_seconds` (2700 at the default lifetime) in the `/v1/session/complete` response — advice only, not enforced. |
+| `ChallengeTTL` | 2 minutes | How long an issued-but-unsigned token stays completable; surfaced as `challenge_expires_at` in the `/v1/session/begin` response. |
+| `TokenRandBytes` | 32 | Bytes of `crypto/rand` entropy in a session token. |
+
+**Server-side expiry is authoritative, with NO clock-skew grace.** `auth.Service.Authenticate` (the
+seam AUTH-2's middleware will wrap; nothing enforces it on any route yet) checks `ExpiresAt` against
+the server's own clock on every call — a client's opinion of the time never enters into it, because a
+grace window is just a longer lifetime with a less honest name. `ExpiresAt` is set exactly **once**,
+at the first successful `POST /v1/session/complete`, and is **never** extended by re-completing an
+already-active session: a repeat completion re-verifies the signature and returns the identical
+`expires_at`, so a client cannot hold one session open indefinitely off a single signature.
+
+**Admission-control caps** (`internal/auth/service.go` `Options`, all overridable, `0` means "use the
+default", there is no "unlimited"):
+
+| Cap | Default | Behaviour at the cap |
+| --- | --- | --- |
+| `MaxRosterEntries` | 4096 | **Fails closed**: `POST /v1/enroll` returns 503 (`ErrCapacity`, `Retry-After: 5`). Never evicts a roster entry — evicting one would let an already-enrolled agent's id be re-minted out from under it. |
+| `MaxIdempotencyEntries` | 16384 | **Fails closed**: 503, same as above. Never evicts — evicting a remembered key would silently turn the next legitimate retry into a fresh (duplicate) application, exactly what invariant 10 forbids. |
+| `MaxSessions` | 16384 | **Fails closed**: `POST /v1/session/begin` returns 503. Counts pending and active sessions together. Checked BEFORE any per-agent eviction, so a refused call leaves the session table exactly as it found it — an error path never destroys the caller's earlier challenge. |
+| `MaxPendingPerAgent` | 8 | **Evicts the oldest pending challenge for that agent** rather than refusing the new one. This bounds memory without failing an honest client that legitimately retries — and that is the ONLY property it has. **It is NOT a defence against a flooder, and must not be read as one:** the cap is keyed on `agent_id`, which on an unauthenticated route is an attacker-supplied *victim* identifier, so a flooder's challenges land in the victim's bucket and eviction drops the *victim's* own correctly-issued challenge. Refusal is the same lockout by the other route; there is no ordering of a victim-keyed bucket that is not a lockout primitive. The real mitigation is per-source rate limiting (**not implemented** — see the follow-ups below). |
+
+**Nothing here is durable — do not claim otherwise.** The roster (`auth.MemoryRoster`), the
+idempotency-key table, the session table, and the per-name agent-id suffix counters
+(`ids.NewNameSuffixes()`, wired fresh in `cmd/agent-bus`) are **all in-memory only**. Enrolment is
+**NOT crash-safe**: every enrolled agent, every remembered idempotency key, and every session is lost
+on process restart, and suffixes restart at 1 for every name until AUTH-3 lands durable enrolment and
+recovery through the WAL. This is a known, deliberately-scoped gap, not an oversight — see the doc
+comments on `auth.Service.Enrol` and `auth.Roster`. Sessions specifically are **not** a durability gap
+to close later: not surviving a restart is a settled design decision (a lost session costs one
+challenge/response round trip), independent of AUTH-3. `cmd/agent-bus`'s `run()` logs this at `WARN`
+on every start:
+
+```
+msg="enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe, the roster and all sessions are LOST on restart, and agent id suffixes restart from 1 for every name. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery" bus_id=<id> follow_up=AUTH-3
+```
+
+No on-disk record type, WAL frame, or wire protocol version was introduced by this change — the
+`## Record types / wire protocol versions` section above remains the complete index.
+
+**Known gaps in this surface (recorded so nobody assumes a protection that is absent).** All three
+routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE the credential — and:
+
+- **There is NO per-source rate limiting.** The caps are all GLOBAL, so an anonymous caller can deny
+  enrolment bus-wide with `MaxRosterEntries` requests, and deny session establishment with
+  `MaxSessions` begins. The caps bound memory; they do not bound an attacker.
+- **A named agent can be locked out of authenticating** by a caller who knows only its `agent_id`, via
+  the `MaxPendingPerAgent` bucket described above.
+- **Enrolment does not prove possession of the private key.** A caller may bind any public key —
+  including someone else's published one — to a fresh, server-minted agent id. The binding that this
+  surface does guarantee still holds: an id can never later present a *different* key, and an id
+  cannot be used without a signature from the key recorded against it.
+- **No route enforces a session token yet** (AUTH-2). `auth.Service.Authenticate` is the seam and is
+  deliberately not wired into any middleware.
+- **There is no revocation** (AUTH-4). A session is valid until it expires, at most one hour.

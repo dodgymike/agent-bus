@@ -224,24 +224,25 @@ func Open(opts LogOptions) (*Log, error) {
 	// made. Nothing else in this package makes an entry visible, so an
 	// uncommitted prepare cannot survive a restart.
 	//
-	// A replay failure is a REFUSAL TO START, deliberately. Either the log
-	// cannot be interpreted, or the Applier rejected an entry the log says was
-	// accepted; in both cases memory cannot be rebuilt from disk, and serving
-	// anyway would mean serving a state that is not a prefix of accepted
-	// history.
+	// RECOVERY ALWAYS REACHES A RUNNING SERVER (DECISIONS.md, 2026-08-02,
+	// "Availability over retention": "always be able to restart, prefer to
+	// discard messages and/or corruption, with logging"). Damage is discarded
+	// and LOGGED -- never silently, and never by deleting intact records that
+	// happen to sit behind the damage. What still refuses the start is being
+	// unable to READ the file at all: permission denied, an I/O error from the
+	// device, an audit file where a WAL was expected, a format version this
+	// binary does not implement, or a data directory another process is writing
+	// to. None of those are damage.
 	//
-	// Corrupt-tail policy runs FIRST, in RepairTail, before a single entry is
-	// handed to the Applier. It is a framing-only pass: if the file ends in a
-	// torn frame -- the signature of a crash mid-append -- it cuts the file back
-	// to the end of the last verified-good record and fsyncs that, so the replay
-	// below sees a file that is a clean prefix of accepted history. Nothing that
-	// was ever acknowledged is inside the discarded region, because Append only
-	// returns after its fsync. Damage anywhere but the tail, and damage in a
-	// frame whose checksum verified, is NOT repaired: RepairTail returns the
-	// error and Open refuses to start. That is the only truncation this package
-	// performs (invariant 6).
+	// RepairLog runs FIRST, before a single entry is handed to the Applier. It
+	// is a framing-only pass: it truncates damage at the end of the file,
+	// rewrites the file to drop damage in the middle while keeping every intact
+	// record behind it, rebuilds a damaged file header, and -- if the file
+	// cannot be interpreted at all -- moves it aside so startup can continue
+	// with a fresh log. It then PROVES its own result by re-scanning, so Replay
+	// below always sees a file that parses end to end.
 	// ---------------------------------------------------------------------
-	repair, err := RepairTail(path, KindWAL, opts.Logger)
+	repair, err := RepairLog(path, KindWAL, opts.Logger)
 	if err != nil {
 		return nil, err // RepairTail already names the path and the offset
 	}
@@ -282,8 +283,15 @@ func Open(opts LogOptions) (*Log, error) {
 	if rec.Records > 0 {
 		opts.Logger.Info("wal replayed",
 			"path", path, "records", rec.Records, "applied", rec.Applied,
-			"aborted", rec.Aborted, "dangling", len(rec.Dangling), "next_index", rec.NextIndex)
+			"aborted", rec.Aborted, "dangling", len(rec.Dangling),
+			"discarded", rec.DiscardCount, "missing_records", rec.MissingRecords,
+			"next_index", rec.NextIndex)
 	}
+	// EVERY replay-stage discard reaches the operator log. Replay has no logger
+	// of its own -- that is what keeps it usable as a read-only fsck -- so this
+	// loop is where the "nothing is discarded silently" contract is actually
+	// kept, and there are tests that fail if a discard does not appear here.
+	logDiscards(opts.Logger, path, rec.Discarded, rec.DiscardCount)
 	// Worth an operator's attention: a dangling prepare is what a crash between
 	// the prepare fsync and the commit fsync looks like, and the client that was
 	// waiting on that write never got an answer. Only the first few are named --

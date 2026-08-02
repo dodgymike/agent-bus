@@ -1,9 +1,9 @@
-// Package wal will own the append-only write-ahead/audit log.
+// Package wal owns the append-only write-ahead/audit log.
 //
 // Every message is written to this log (invariant 6). It is append-only in the
-// strict sense: no in-place edits and no truncation except a verified-corrupt
-// tail during recovery. Recovery must yield a prefix of the accepted history --
-// no torn records, no acknowledged-but-lost messages.
+// strict sense during NORMAL operation: no in-place edits, and nothing is ever
+// rewritten by the write path. Recovery is the exception, and the size of that
+// exception changed on 2026-08-02 -- see "Recovery policy" below.
 //
 // On-disk layout (format version 1). All integers are big-endian so a hex dump
 // reads left to right, and every checksum is CRC-32 Castagnoli.
@@ -22,86 +22,117 @@
 //	  [20:...] payload, opaque to this package
 //
 // The checksum covers the length and the index as well as the payload, so a
-// corrupted length is detected rather than acted on.
+// corrupted length is detected rather than acted on. CRC32C is an
+// error-detecting code and NOT an integrity primitive: it is unkeyed, so a
+// client who can get a chosen payload into the log can put bytes in it that
+// recovery will accept as a record. Replacing it with a keyed MAC is a separate,
+// reserved piece of work; until then, treat every checksum-based claim in this
+// package as holding against ACCIDENT, not against an adversary.
 //
 // Writer is the append-only writer: its Append does not return until the bytes
 // are fsynced (invariant 4). ScanAll is the strict reader: any malformed frame
-// is an error, because deciding that a corrupt TAIL may be truncated is
-// recovery policy and does not belong in the framing layer. Replay is the
-// recovery layer built on top of ScanAll: it turns a raw frame stream into
+// is an error, because deciding what to do about damage is recovery policy and
+// does not belong in the framing layer. Replay turns a raw frame stream into
 // accepted history.
 //
-// # Recovery
+// # Recovery policy: the bus always restarts
 //
-// On start Open runs two passes over the file, in this order, both before the
-// writer is opened, so nothing can be appended ahead of recovery.
+// The user's decision of 2026-08-02 (DECISIONS.md, "Availability over
+// retention") is: "always be able to restart, prefer to discard messages and/or
+// corruption, with logging". It REVERSED what this package used to do, which
+// was to refuse to start on most damage. The rule now is:
 //
-// First RepairTail: a framing-only check that verifies the file header and
-// every frame, and truncates the file back to the end of the last verified-good
-// record if -- and only if -- the damage is provably a torn tail, meaning a
-// single incomplete frame at the very end with nothing after it. Two
-// independent things have to agree before a byte is cut: the damage must have
-// the SHAPE of a torn tail, and the bytes that would be discarded must be
-// inspected and found to hold neither a complete record nor a frame whose own
-// checksum verifies over the bytes present. The second check is not
-// belt-and-braces -- a corrupted length field makes a mid-file record produce
-// exactly the shape of a torn tail, and without the inspection that alone would
-// delete every committed record behind it.
+// DAMAGE IS NEVER FATAL. NOT BEING ABLE TO READ THE FILE STILL IS.
 //
-// The dividing line is "provably incomplete", not "damaged". A frame whose
-// declared extent ends exactly at the end of the file has every byte it needs,
-// so a failed checksum there is damage to bytes that were fully written and may
-// have been fsynced and acknowledged; that is a refusal to start, not a repair.
-// Bytes are discarded only when those checks can find no evidence that they
-// were ever complete -- and because every one of those checks is a CHECKSUM
-// proof, what they establish is a SINGLE-FAULT guarantee: against one crash
-// mid-append, or one region of corruption, nothing acknowledged is lost and the
-// index high-water mark never moves backwards over anything a client could have
-// seen. An exhaustive single-fault sweep found no case that broke it. TWO
-// faults in the same final frame do break it, and this is measured rather than
-// hypothesised: corrupt that frame's LENGTH field and ALSO flip a bit of its
-// payload, and both proofs fail together -- the stored checksum matches the
-// bytes at no boundary, and no complete record survives in the region to be
-// found -- so the frame is cut, an acknowledged COMMIT can be lost, and Open
-// returns no error. That hole is open; the format offers nothing left to check
-// a doubly-corrupted frame against. See RepairTail. That
-// truncation is fsynced, and it is the ONLY truncation this package ever
-// performs: invariant 6 allows exactly one exception to append-only, "a
-// verified-corrupt tail during recovery", and this is it. Absent that second
-// fault, nothing acknowledged can be lost by it, because Append returns only
-// after its fsync, so a frame the checks cannot prove complete is one whose
-// write never succeeded and whose contents were never visible to anybody.
-// Corruption ANYWHERE ELSE -- in a frame whose checksum
-// verified, in the file header, or anywhere with intact records after it -- is
-// a refusal to start, not a repair. See RepairTail for the classification rules
-// and for the deliberately conservative cases it declines to touch.
+//   - DAMAGE -- a torn frame, a flipped bit, a lost sector, a payload that no
+//     longer decodes, a record type with no meaning here, a corrupt file header
+//     -- is DISCARDED, LOGGED with its offset, record index, type and length,
+//     and recovery continues to a running server.
+//   - CANNOT READ -- permission denied, an I/O error from the device, an audit
+//     file where a WAL was expected, a format version this binary does not
+//     implement, or a data directory another process is writing to -- still
+//     refuses the start. None of those are damage, and "repairing" them would
+//     destroy a file that is probably intact.
 //
-// Then Replay, from the beginning (see Replay). A COMMIT record makes its entry
-// visible; a COMMIT is paired to the PREPARE it names BY INDEX, never by
-// adjacency, since nothing in the format requires them to be neighbours. A
-// prepare with no commit is discarded -- the
-// ordinary crash artefact, since Append fsyncs whole frames, so the usual
-// artefact is a complete, uncommitted prepare rather than a torn record -- and
-// so is a prepare followed by an ABORT; either way an uncommitted prepare is
-// never visible after a restart.
+// The thing that keeps this honest is no longer "we never discard". It is
+// "WE NEVER DISCARD SILENTLY". Every discarded region is reported in
+// Repair.Discards or Recovered.Discarded and written to the operator log by
+// RepairLog and Open -- at ERROR when what was lost had been acknowledged (a
+// commit record) or cannot be identified, WARN otherwise. A discard that does
+// not reach the log is a bug, and the crash-injection tests fail when one does
+// not.
+//
+// # Damage does not cascade
+//
+// Discarding the DAMAGED record is sanctioned. Deleting later records that are
+// themselves intact is not. After damage, recovery searches FORWARD for the
+// next intact record by RECORD INDEX and resumes there (resyncFrom); it does
+// not treat the first damage it meets as the end of the log. Anchoring that
+// search on the index rather than on the end of the file is load-bearing: an
+// end-of-file anchor only fires when the file ends exactly on a record
+// boundary, which is precisely the case recovery does not exist for, and with
+// one a reviewer's probe showed a single flipped bit in a mid-file length field
+// deleting eight committed records.
+//
+// # What recovery does to the file, in order (see Open)
+//
+// First RepairLog, a framing-only pass:
+//
+//   - nothing, when the file scans clean -- the fast path, and the normal one;
+//   - a TRUNCATION, when the only damage runs to the end of the file;
+//   - a REWRITE, when damage sits in the middle, or the file header needs
+//     rebuilding, or a record's length field was restored: surviving frames are
+//     copied to a temporary file and renamed over the original, atomically, so
+//     a crash mid-repair leaves the original untouched;
+//   - a QUARANTINE, when the file cannot be interpreted at all and nothing can
+//     be salvaged: it is RENAMED aside -- never deleted -- and startup
+//     continues with a fresh log.
+//
+// Survivors KEEP THEIR ORIGINAL INDICES through a repair. Renumbering would
+// reuse ids, which invariant 1 forbids, so a repaired log has permanent HOLES
+// in its index sequence and scanFrom accepts a rising index rather than a dense
+// one. Every hole is counted into Recovered.MissingRecords and logged on EVERY
+// start, so a record lost to a bad sector cannot become a quiet startup.
+//
+// Then Replay, from the beginning. A COMMIT record makes its entry visible; a
+// COMMIT is paired to the PREPARE it names BY INDEX, never by adjacency, since
+// nothing in the format requires them to be neighbours. A prepare with no
+// commit is discarded -- the ordinary crash artefact, since Append fsyncs whole
+// frames, so the usual artefact is a complete, uncommitted prepare rather than a
+// torn record -- and so is a prepare followed by an ABORT; either way an
+// uncommitted prepare is never visible after a restart. Records whose CONTENT
+// cannot be interpreted are discarded and reported rather than stopping the
+// replay.
 //
 // Entries are replayed in COMMIT order, not prepare order, which is the order
 // they were applied to memory before the crash, so the post-restart Apply
-// sequence is identical to the pre-crash one. The high-water index reported by
-// replay is above every index ever written, including one burned by a
-// discarded prepare, so an index is never reissued -- a reused index would let
-// two different messages share an id.
+// sequence is identical to the pre-crash one.
 //
-// Replay is strict: a record it cannot interpret stops recovery and refuses
-// the start, rather than silently skipping it and serving a state that might
-// be missing an acknowledged write. The corrupt-tail policy -- verifying and
-// truncating a torn tail -- is NOT implemented here: it is RepairTail, and it
-// has already run, before replay. A torn tail therefore does not reach Replay
-// through Open at all; when Replay is called directly on one it still fails, and
-// reports the offset where the good prefix ends.
-// That offset is where a torn tail would be cut, but it is NOT a licence to
-// truncate on its own: most replay failures are damage in a frame whose
-// checksum verified, which can sit anywhere in the file with committed records
-// after it, and cutting there would delete accepted history. CorruptError
-// carries FrameIntact and FrameEnd so recovery can tell the two apart.
+// # The guarantee, stated narrowly enough to be true
+//
+// This package used to claim that a discarded frame was "only ever discarded
+// when its fsync provably never completed", and called its checks "a proof
+// rather than a heuristic". Both reviewer and security flagged that as false,
+// and it is now false by policy as well as in fact. The honest statement:
+//
+//   - Nothing is lost through THIS PACKAGE'S OWN WRITE PATH. Append returns
+//     only after its fsync, one frame is in flight at a time, and a failed
+//     write poisons the Writer, so an acknowledged record is always fully on
+//     disk before anyone hears about it.
+//   - Recovery WILL discard acknowledged data when it finds that data damaged.
+//     A single flipped bit in the payload of a complete, fsynced, acknowledged
+//     final record is byte-indistinguishable from a torn write, and nothing in
+//     this format can separate them. That record is discarded, its index is
+//     reissued, and both facts are logged at ERROR. Invariant 4 is narrowed
+//     accordingly and deliberately: the bus will not be held hostage to damaged
+//     media.
+//   - What is still protected is what invariant 1 protects: an id that was
+//     OBSERVED is not handed out twice while the record carrying it survives,
+//     because survivors are never renumbered. The exposure is bounded to the
+//     tail -- a damaged record with an intact record behind it does not move
+//     the high-water mark, because the search resumes at the survivor.
+//   - A record whose LENGTH FIELD alone is corrupt is RECOVERED, not discarded:
+//     its own checksum over the bytes actually present proves the payload is all
+//     there. That is a genuine proof, and it is the one place the word is still
+//     used in this package.
 package wal

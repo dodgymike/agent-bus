@@ -40,36 +40,51 @@ import (
 // live process made before it. Prepare order would be a different, and
 // sometimes wrong, story about what happened.
 //
+// # What it does with a record it cannot interpret: DISCARD AND CONTINUE
+//
+// Until 2026-08-02 this function was STRICT: an undecodable payload, a COMMIT
+// naming no open prepare, or a record type with no meaning in a WAL stopped the
+// replay and refused the start. The user reversed that policy (DECISIONS.md,
+// "Availability over retention"): "always be able to restart, prefer to discard
+// messages and/or corruption, with logging".
+//
+// So each of those is now DISCARDED and RECORDED in Recovered.Discarded, and
+// the replay continues. Nothing is discarded silently: Open logs every entry of
+// Recovered.Discarded, with its offset, record index and type, at ERROR when
+// what was lost had been acknowledged (a commit record) and WARN otherwise.
+// A discard that does not reach the log is a bug, and there are tests that fail
+// when one does not.
+//
+// The honest consequence, stated rather than buried: a COMMIT record whose
+// prepare was discarded is an ACKNOWLEDGED WRITE THAT IS NOW LOST. It is
+// reported at ERROR with the record index. The alternative -- the previous
+// behaviour -- was a bus that would not start at all, and the user chose the
+// restart.
+//
+// # Gaps in the index sequence
+//
+// A repaired log has HOLES: recovery discards damaged records and deliberately
+// does not renumber the survivors, because renumbering would reuse ids
+// (invariant 1). Replay counts every hole into Recovered.MissingRecords and
+// records it in Discarded, on EVERY start rather than only the one that made
+// it, so a record lost to a bad sector cannot become a clean, quiet startup.
+//
 // # Errors
 //
-// Replay is STRICT. A record it cannot interpret -- an undecodable payload, a
-// COMMIT or ABORT naming something that is not an open prepare, a record type
-// that has no meaning in a WAL -- stops the replay and is reported as a
-// CorruptError (errors.Is(err, ErrCorrupt)). It is never skipped: a skipped
-// record is a silent guess about what history was accepted, and the safe answer
-// to "I do not understand this record" is to refuse to start, not to serve a
-// state that might be missing an acknowledged write.
+// What remains an error here is FRAMING damage -- a file header or a frame that
+// does not parse -- reported as a CorruptError (errors.Is(err, ErrCorrupt)).
+// Through Open that is unreachable: RepairLog runs first and hands Replay a
+// file it has verified scans end to end. It is still reported when Replay is
+// called directly on a damaged file, which is what makes Replay usable as a
+// read-only fsck.
+//
+// On such an error the returned Recovered is DIAGNOSTIC ONLY -- fn may already
+// have received entries from the good prefix, and the caller must discard
+// whatever it built rather than serve from it.
 //
 // Every CorruptError Replay itself mints carries FrameIntact -- by the time a
 // record reaches this layer its checksum has already verified, so a partial
-// write cannot explain the damage and the record must never be treated as a
-// truncatable tail. See Recovered.EndOffset.
-//
-// On ANY error the returned Recovered is DIAGNOSTIC ONLY -- fn may already have
-// received entries from the good prefix, and the caller must discard whatever
-// it built rather than serve from it. Recovered.EndOffset marks the end of the
-// last record Replay accepted; read its doc before treating that as a place to
-// truncate, because most replay failures are NOT torn tails and truncating at
-// one would destroy committed records.
-//
-// A torn tail from a crash mid-write is likewise an error here, NOT a tolerated
-// condition: this function reports precisely where the file stops making sense,
-// and the policy question of whether that tail may be truncated belongs to
-// RepairTail, which runs BEFORE this replay (see Open) and is the only thing in
-// this package that ever shortens a file. Note the common case
-// is not a torn tail at all -- Append fsyncs whole frames, so the usual crash
-// artefact is a complete, uncommitted PREPARE record, which Replay handles by
-// discarding it.
+// write cannot explain the damage. See Recovered.EndOffset.
 //
 // A file that does not exist, and a zero-length file, are both reported as an
 // empty log rather than as corruption: neither can contain a record, so
@@ -110,62 +125,101 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 	// open holds every PREPARE that has not yet been committed or aborted,
 	// keyed by its index -- which is also its transaction id (see Log).
 	// openBytes tracks what those entries are retaining, so the bound below is
-	// on MEMORY and not merely on a count.
+	// on MEMORY and not merely on a count. openOrder holds the same indices in
+	// file order so the OLDEST can be evicted when a bound is hit.
 	open := make(map[uint64]Entry)
 	openBytes := int64(0)
+	var openOrder []uint64
+	orderHead := 0
+
+	expectIndex := uint64(1)
 
 	end, err := scanFrom(f, path, KindWAL, func(rec Record) error {
+		// A hole in the index sequence is a record that is not in the file:
+		// discarded by an earlier recovery, or lost from the media. It is not
+		// an error -- a repaired log has holes by design, because survivors are
+		// never renumbered -- but it IS a loss, and it is reported on every
+		// start for as long as it exists. Silence here is what let a lost
+		// sector look like a clean boot.
+		if rec.Index > expectIndex {
+			r.MissingRecords += rec.Index - expectIndex
+			r.addDiscard(Discard{Stage: "replay", Offset: rec.Offset, Length: 0,
+				Index: expectIndex, TypeKnown: false,
+				Reason: fmt.Sprintf("records %d..%d are missing from the index sequence: lost from the file, or discarded by an earlier recovery which -- correctly -- did not renumber the survivors",
+					expectIndex, rec.Index-1)})
+		}
+		expectIndex = rec.Index + 1
+
 		r.Records++
-		// The high-water mark counts every index EVER WRITTEN, including one
-		// burned by a prepare that is about to be discarded. An index is never
-		// reused: reissuing one would let two different messages share an id.
+		// The high-water mark counts every index EVER SEEN, including one burned
+		// by a prepare that is about to be discarded. An index is never reused:
+		// reissuing one would let two different messages share an id.
 		r.NextIndex = rec.Index + 1
 
 		switch rec.Type {
 		case TypePrepare:
 			// Decoded eagerly, even though the entry may never commit: a
 			// prepare payload that does not decode means the file no longer
-			// says what it recorded, and that is worth failing on where it is
-			// found rather than at some later restart.
+			// says what it recorded.
 			e, _, err := DecodePrepare(path, rec)
 			if err != nil {
-				return err
+				r.discardRecord(rec, "the prepare payload does not decode, so what this record reserved cannot be known: "+reasonOf(err))
+				return nil
 			}
 			if _, dup := open[rec.Index]; dup {
-				// Unreachable while indices are unique, which scanFrom
-				// enforces; checked anyway so a future change to the sequence
-				// rule cannot silently drop an entry.
-				return frameCorruptf(path, rec, "record %d: a prepare with this index is already open", rec.Index)
+				// Unreachable while indices rise, which scanFrom enforces;
+				// handled anyway so a future change to the sequence rule cannot
+				// silently drop an entry.
+				r.discardRecord(rec, "a prepare with this index is already open")
+				return nil
 			}
-			// The open set is bounded because it is built from a file that
-			// recovery has no reason to trust yet. Log serialises transactions,
-			// so a file this code wrote never holds more than one unresolved
-			// prepare; a file holding thousands is either damaged or was not
-			// written by this server, and either way the answer is to fail the
-			// start rather than to let recovery allocate until the kernel kills
-			// it -- a boot-time OOM would survive every restart, which is the
-			// worst failure mode available. The bounds are generous and may be
-			// raised (with a test) if the write path ever batches prepares.
+			// The open set is bounded because it is built from a file recovery
+			// has no reason to trust yet. Log serialises transactions, so a file
+			// this code wrote never holds more than one unresolved prepare; a
+			// file holding thousands is either damaged or was not written by
+			// this server. Before 2026-08-02 hitting the bound refused the
+			// start; a boot-time OOM would have survived every restart, so
+			// failing was better than allocating. Under the always-restart
+			// policy neither is acceptable, so the OLDEST unresolved prepares
+			// are EVICTED instead. That loses nothing that was acknowledged --
+			// an unresolved prepare never committed -- and it keeps the memory
+			// bound exactly as tight as it was.
 			openBytes += int64(len(e.Kind)) + int64(len(e.Body))
-			if len(open) >= maxOpenPrepares || openBytes > maxOpenPrepareBytes {
-				// Both figures are reported, and both limits with them, so the
-				// message says which bound was hit instead of implying the
-				// count one always was.
-				return frameCorruptf(path, rec,
-					"record %d: too many unresolved prepares: %d open, %d bytes retained, limits are %d prepares and %d bytes; the write path resolves one transaction at a time, so this file was not written by this server",
-					rec.Index, len(open)+1, openBytes, maxOpenPrepares, maxOpenPrepareBytes)
-			}
 			open[rec.Index] = e
+			openOrder = append(openOrder, rec.Index)
+			for len(open) > maxOpenPrepares || openBytes > maxOpenPrepareBytes {
+				victim, ok := oldestOpen(open, openOrder, &orderHead)
+				if !ok || victim == rec.Index {
+					break
+				}
+				ev := open[victim]
+				delete(open, victim)
+				openBytes -= int64(len(ev.Kind)) + int64(len(ev.Body))
+				r.addDiscard(Discard{Stage: "replay", Offset: -1, Length: 0,
+					Index: victim, Type: TypePrepare, TypeKnown: true,
+					Reason: fmt.Sprintf("evicted the oldest unresolved prepare to stay inside recovery's memory bounds (%d prepares, %d bytes): this file holds more open transactions than the write path can produce, so it was not written by this server",
+						maxOpenPrepares, maxOpenPrepareBytes)})
+			}
+			if orderHead > maxOpenPrepares && orderHead*2 >= len(openOrder) {
+				openOrder = append(openOrder[:0], openOrder[orderHead:]...)
+				orderHead = 0
+			}
 			return nil
 
 		case TypeCommit:
 			prepareIndex, err := DecodeCommit(path, rec)
 			if err != nil {
-				return err
+				r.discardRecord(rec, "the commit payload does not decode, so the prepare it accepted cannot be identified: "+reasonOf(err))
+				return nil
 			}
 			e, ok := open[prepareIndex]
 			if !ok {
-				return danglingRefError(path, rec, prepareIndex)
+				// An ACKNOWLEDGED WRITE IS LOST HERE. The commit record is
+				// durable, so a client was told this entry was accepted, but
+				// the prepare carrying the entry is gone -- discarded as damage
+				// earlier in this recovery, or already resolved.
+				r.discardRecord(rec, danglingRefReason(rec, prepareIndex))
+				return nil
 			}
 			delete(open, prepareIndex)
 			openBytes -= int64(len(e.Kind)) + int64(len(e.Body))
@@ -175,22 +229,27 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 			}
 			c := Committed{PrepareIndex: prepareIndex, CommitIndex: rec.Index, Entry: e}
 			if err := fn(c); err != nil {
-				// Wrapped, not returned bare, so the failure is attributable to
-				// a record -- and deliberately NOT a CorruptError: the log is
-				// fine, the caller rejected an entry the log says was accepted.
-				return fmt.Errorf("wal: replay %s: applying committed entry (prepare %d, commit %d, kind %q): %w",
-					path, prepareIndex, rec.Index, elide(e.Kind, maxValueChars), err)
+				// The log is fine; the caller rejected an entry the log says was
+				// accepted. Refusing the start here was the old policy; now the
+				// entry is dropped from the rebuilt memory state and reported as
+				// the acknowledged loss it is.
+				r.Applied--
+				r.discardRecord(rec, fmt.Sprintf("the applier rejected this committed entry (prepare %d, kind %q), so it is durable on disk but absent from the rebuilt memory state: %s",
+					prepareIndex, elide(e.Kind, maxValueChars), reasonOf(err)))
+				return nil
 			}
 			return nil
 
 		case TypeAbort:
 			prepareIndex, _, err := DecodeAbort(path, rec)
 			if err != nil {
-				return err
+				r.discardRecord(rec, "the abort payload does not decode: "+reasonOf(err))
+				return nil
 			}
 			e, ok := open[prepareIndex]
 			if !ok {
-				return danglingRefError(path, rec, prepareIndex)
+				r.discardRecord(rec, danglingRefReason(rec, prepareIndex))
+				return nil
 			}
 			delete(open, prepareIndex)
 			openBytes -= int64(len(e.Kind)) + int64(len(e.Body))
@@ -199,16 +258,13 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 
 		default:
 			// scanFrom accepts an unknown type on purpose (its checksum proves
-			// some writer meant those exact bytes; see Type.Known). Replay is
-			// where that forward compatibility ends: a record whose effect on
-			// accepted history is unknown cannot be ignored, because ignoring
-			// it is indistinguishable from losing whatever it recorded.
-			// TypeAuditMessage lands here too -- audit records belong to the
-			// audit file, and one in a WAL means these are not the bytes we
-			// think they are.
-			return frameCorruptf(path, rec,
-				"record %d: %s records have no meaning in a write-ahead log, and replay will not guess whether one affects accepted history",
-				rec.Index, rec.Type)
+			// some writer meant those exact bytes; see Type.Known). Replay
+			// cannot know what such a record did to accepted history, so it
+			// discards it and says so. TypeAuditMessage lands here too -- audit
+			// records belong to the audit file, and one in a WAL means these are
+			// not the bytes we think they are.
+			r.discardRecord(rec, fmt.Sprintf("%s records have no meaning in a write-ahead log, and replay will not guess whether one affects accepted history", rec.Type))
+			return nil
 		}
 	})
 
@@ -226,21 +282,78 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 	return r, nil
 }
 
-// danglingRefError reports a COMMIT or ABORT whose prepare_index does not name
-// an open prepare.
+// danglingRefReason describes a COMMIT or ABORT whose prepare_index does not
+// name an open prepare.
 //
 // DecodeCommit and DecodeAbort have already rejected index 0 and forward
-// references, and scanFrom has already proven the index sequence has no holes,
-// so the referenced record certainly EXISTS in this file. What is wrong is one
-// of: it is not a PREPARE record at all, or it is a prepare that some earlier
-// record already committed or aborted. Distinguishing those would cost a table
-// of every index in the file, and the answer is the same either way -- the log
-// does not describe a history this code can reconstruct -- so the error names
-// all three possibilities rather than paying O(file) memory to pick one.
-func danglingRefError(path string, rec Record, prepareIndex uint64) *CorruptError {
-	return frameCorruptf(path, rec,
-		"record %d: %s references prepare index %d, which is not an open prepare (it is not a prepare record, or it was already committed or aborted)",
-		rec.Index, rec.Type, prepareIndex)
+// references. What is wrong is one of: the referenced record was DISCARDED as
+// damage earlier in this same recovery, or it was lost from the file, or it is
+// not a PREPARE record at all, or it is a prepare that some earlier record
+// already resolved. Distinguishing those would cost a table of every index in
+// the file, and the consequence is the same either way, so the reason names
+// them rather than paying O(file) memory to pick one.
+func danglingRefReason(rec Record, prepareIndex uint64) string {
+	return fmt.Sprintf("%s references prepare index %d, which is not an open prepare (it was discarded as damage, lost from the file, is not a prepare record, or was already committed or aborted); if this is a commit, an acknowledged write is lost here",
+		rec.Type, prepareIndex)
+}
+
+// reasonOf renders an underlying error for a Discard reason, bounded like every
+// other file-derived text in this package (see elide).
+//
+// For a CorruptError it takes the REASON alone, not the rendered error: the
+// rendered form re-embeds the path and offset, which the log line already
+// carries as its own fields, and on a long data-directory path that prefix ate
+// the whole of the length bound and elided the actual diagnosis away.
+func reasonOf(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ce *CorruptError
+	if errors.As(err, &ce) {
+		s := ce.Reason
+		if ce.Err != nil {
+			s += ": " + ce.Err.Error()
+		}
+		return elide(s, maxCauseChars)
+	}
+	return elide(err.Error(), maxCauseChars)
+}
+
+// oldestOpen finds the earliest prepare still unresolved, advancing head past
+// entries that have already been committed or aborted. Indices rise through the
+// file, so openOrder is sorted and the front is the oldest.
+func oldestOpen(open map[uint64]Entry, order []uint64, head *int) (uint64, bool) {
+	for *head < len(order) {
+		idx := order[*head]
+		*head++
+		if _, ok := open[idx]; ok {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+// addDiscard records one loss, keeping the counts exact while capping the
+// detail list -- a file that is damage from end to end must not be able to make
+// recovery hold it all in memory as error text.
+func (r *Recovered) addDiscard(d Discard) {
+	r.DiscardCount++
+	if len(r.Discarded) < maxDiscardsRetained {
+		r.Discarded = append(r.Discarded, d)
+	}
+}
+
+// discardRecord records a whole record thrown away at the replay stage.
+func (r *Recovered) discardRecord(rec Record, reason string) {
+	r.addDiscard(Discard{
+		Stage:     "replay",
+		Offset:    rec.Offset,
+		Length:    rec.frameSize(),
+		Index:     rec.Index,
+		Type:      rec.Type,
+		TypeKnown: true,
+		Reason:    reason,
+	})
 }
 
 // Bounds on the unresolved-prepare set Replay retains while it walks a file.
@@ -277,18 +390,11 @@ type Recovered struct {
 	// be positioned after.
 	//
 	// After a FAILURE it is only where replay stopped, and it is NOT on its own
-	// a licence to truncate. Most of the ways a replay fails are damage in a
-	// frame whose checksum verified -- a payload that will not decode, a commit
-	// naming no open prepare, a record type with no meaning here -- and those
-	// can sit anywhere in the file, with committed records after them. Cutting
-	// at EndOffset there would delete accepted history to tidy up a file that
-	// is fully readable.
-	//
-	// A corrupt-tail truncation qualifies the error first, and RepairTail is
-	// where that happens: only a *CorruptError with FrameIntact false, whose
-	// declared FrameEnd reaches or passes the end of the file (or is 0, meaning
-	// the frame header itself was short), can be a torn tail. Anything else is
-	// fatal where it sits.
+	// a licence to truncate: damage can sit anywhere in the file with committed
+	// records after it, and cutting there would delete accepted history to tidy
+	// up a file that is mostly readable. Deciding what to remove is RepairLog's
+	// job, and RepairLog searches forward for the next intact record rather than
+	// treating the first damage as the end of the log.
 	EndOffset int64
 
 	// Records is the number of records read, of every type.
@@ -311,9 +417,26 @@ type Recovered struct {
 	// signature of a write that a client may have been waiting on.
 	Dangling []uint64
 
-	// Repaired describes a corrupt tail that was truncated by the recovery pass
-	// BEFORE this replay ran. It is zero (Truncated false) when nothing was
-	// repaired. Replay itself never truncates anything and never sets this;
-	// Open fills it in from RepairTail.
-	Repaired TailRepair
+	// Discarded is what this replay THREW AWAY: records whose frames were
+	// intact but whose content could not be turned into history, prepares
+	// evicted to stay inside recovery's memory bounds, and holes in the index
+	// sequence. It is capped at maxDiscardsRetained entries; DiscardCount is
+	// exact.
+	//
+	// Replay does not log these itself -- it has no logger, which keeps it
+	// usable as a pure fsck -- but Open DOES, one line each, and that logging is
+	// part of the contract rather than a nicety. Discarding is sanctioned
+	// behaviour now; discarding without a log record is the bug.
+	Discarded    []Discard
+	DiscardCount int
+
+	// MissingRecords is how many record indices are absent from the file: the
+	// size of the holes a previous repair (or a bad sector) left behind. It is
+	// reported on every start, not only the one that made the hole.
+	MissingRecords uint64
+
+	// Repaired describes what the recovery pass removed or rebuilt BEFORE this
+	// replay ran. It is zero when nothing was repaired. Replay itself never
+	// changes a file and never sets this; Open fills it in from RepairLog.
+	Repaired Repair
 }

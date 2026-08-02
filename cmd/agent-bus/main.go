@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/ids"
@@ -283,6 +284,44 @@ func run(cfg Config) error {
 		"repaired_bytes", rec.Repaired.Removed,
 	)
 
+	// The enrolment and session authority. It is built AFTER the bus id is
+	// resolved (every agent id it mints is qualified with that id, invariant 2)
+	// and after the WAL is open, so the order here already matches the one
+	// AUTH-3 needs when enrolment starts writing through the two-phase path.
+	//
+	// ids.NewNameSuffixes() -- a FRESH counter, every name starting at suffix 1
+	// -- is correct ONLY because nothing in this path writes an agent id to
+	// disk. No enrolment is durable, so no suffix is ever burned on disk, so
+	// there is nothing a restarted counter could collide with (point 2 of the
+	// ids.NameSuffixes doc: a suffix that never reached disk may safely be
+	// reissued).
+	//
+	// AUTH-3 MUST replace this with ids.ResumeNameSuffixes, or with RaiseFloor
+	// folded over the replay stream, seeded from the HIGHEST SUFFIX EVER
+	// WRITTEN TO DISK for each name -- prepared or committed, still enrolled or
+	// long departed. Read "What a DURABLE implementation must guarantee" on
+	// ids.NameSuffixes first: deriving those floors from the committed roster
+	// is the obvious wiring and is WRONG, because it misses both dangling
+	// prepares and departed agents, and the failure mode is a NEW agent holding
+	// a DIFFERENT keypair inheriting a previous agent's identity.
+	alloc := ids.NewNameSuffixes()
+	minter, err := ids.NewAgentIDMinter(busID, alloc)
+	if err != nil {
+		return fmt.Errorf("creating the agent id minter: %w", err)
+	}
+	authSvc, err := auth.NewService(auth.Options{Minter: minter})
+	if err != nil {
+		return fmt.Errorf("creating the auth service: %w", err)
+	}
+
+	// Operator-visible, at WARN, on every start. This is not boilerplate: the
+	// bus is NOT yet durable for auth, and the honest signal belongs in the log
+	// where an operator sees it, not only in a doc comment.
+	lg.Warn("enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe, the roster and all sessions are LOST on restart, and agent id suffixes restart from 1 for every name. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery",
+		"bus_id", busID,
+		"follow_up", "AUTH-3",
+	)
+
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
 	// to every connection, so each request context descends from it: cancelling
 	// it releases handlers parked on a long-poll instead of leaving them
@@ -301,6 +340,9 @@ func run(cfg Config) error {
 		// that land later write through it (invariant 4) instead of minting a
 		// second write path. No handler reads it in this task.
 		Durable: walLog,
+		// Registers /v1/enroll, /v1/session/begin and /v1/session/complete.
+		// It authenticates NO other route -- that is AUTH-2.
+		Auth: authSvc,
 	})
 
 	srv := &http.Server{

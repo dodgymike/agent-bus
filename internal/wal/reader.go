@@ -71,7 +71,7 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 	}
 
 	off := int64(FileHeaderSize)
-	wantIndex := uint64(1)
+	lastIndex := uint64(0)
 	for {
 		rec, err := readFrame(br, path, off)
 		if err == io.EOF { // clean end of file, exactly on a frame boundary
@@ -81,14 +81,27 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 			return off, err
 		}
 		// The checksum proves the frame is intact; the sequence check proves
-		// the FILE is intact. A whole frame lost to a bad sector, or an old
-		// frame resurrected underneath us, leaves every individual checksum
-		// happy and only shows up as a hole in the index sequence.
-		if rec.Index != wantIndex {
-			e := corruptf(path, off, "record index %d out of sequence, want %d", rec.Index, wantIndex)
-			// The frame itself checksummed, so recovery must not mistake this
-			// for a torn tail even when it IS the last frame. See
-			// CorruptError.FrameIntact.
+		// the RECORDS ARE IN ORDER. An old frame resurrected underneath us, or
+		// the same record written twice, leaves every individual checksum happy
+		// and shows up only here.
+		//
+		// The rule is STRICTLY INCREASING, not dense, and that changed on
+		// 2026-08-02. Recovery is now required to discard damaged records so
+		// that the bus always restarts (DECISIONS.md, "Availability over
+		// retention"), and it deliberately does NOT renumber the survivors --
+		// renumbering would reuse ids, which invariant 1 forbids outright. So a
+		// repaired log has HOLES in its index sequence, permanently, and a
+		// reader that insisted on density would refuse to read the very file
+		// recovery just produced.
+		//
+		// A hole is therefore not corruption here. It is still a LOSS, and it
+		// is still reported: Replay counts every gap and Open logs it on every
+		// start, so "records 41..43 are missing" is visible for as long as the
+		// hole exists rather than only on the start that made it.
+		if rec.Index <= lastIndex {
+			e := corruptf(path, off, "record index %d does not follow the previous record (index %d): a record was resurrected in place or written twice", rec.Index, lastIndex)
+			// The frame itself checksummed, so a partial write cannot explain
+			// this. See CorruptError.FrameIntact.
 			e.FrameIntact = true
 			e.FrameEnd = off + rec.frameSize()
 			return off, e
@@ -96,7 +109,7 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 		if err := fn(rec); err != nil {
 			return off, err
 		}
-		wantIndex++
+		lastIndex = rec.Index
 		off += rec.frameSize()
 	}
 }

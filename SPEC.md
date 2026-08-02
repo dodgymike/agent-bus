@@ -27,6 +27,7 @@
   _Proof: go test -race -run TestSafeVerify ./... ; go test -race -run TestEnroll_MalformedPublicKey ./internal/auth ; go test -race -run TestVerify_MalformedPublicKey ./internal/... -- all pass with no panic on wrong-size/nil public keys_
 - [ ] None · PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes when a proof_cmd nests another proof-check.sh invocation of a go-test command — tooling, P2
   Discovered 2026-08-02 during bookkeeping verification of the Proof-command guard task (84b76d5e). Composing `bash scripts/proof-check.sh --quiet "<a command that itself calls bash scripts/proof-check.sh --quiet 'go test ...'">` causes runaway recursive shim processes: the outer invocation's PATH-prepended go-shim directory persists into the nested bash -c subshell, so the inner proof-check.sh installs its OWN shim ahead of the outer one, the inner go test call resolves to a shim that itself re-invokes go test, and this recurses/forks until killed. Observed live: dozens of `/tmp/proof-check.*/bin/go test ...` and `tee -a .../gotest.log` processes accumulating; had to pkill -9 -f proof-check to recover. No repo file was touched, no lasting damage, but on a shared box this is a resource-exhaustion foot-gun for any agent that tries to write a self-checking or meta proof_cmd. Suggested direction (not investigated in depth): proof-check.sh should strip its own shim dir(s) from PATH before invoking a nested shell, or refuse/detect recursive invocation via a marker env var (e.g. if PROOF_CHECK_ACTIVE is already set, run the proof verbatim without installing a second shim). Reproduce: bash scripts/proof-check.sh --quiet 'bash scripts/proof-check.sh --quiet "go test -run TestNoSuchTest ./internal/wal"' (kill it within a few seconds, do not let it run to completion).
+  _Proof: timeout 60 bash scripts/proof-check.sh 'bash scripts/proof-check.sh "true"'; test $? -ne 124_
 - [ ] None · os.MkdirAll(cfg.DataDir, 0o700) at main.go:157 never tightens an ALREADY-LOOSE pre-existing data dir — durability, P1
   cmd/agent-bus/main.go:157 -- `if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil { ... }`. The comment above it (main.go:155-156) says "0o700: the store holds agent credentials", but os.MkdirAll's mode argument is ONLY applied when it actually creates the directory; per the Go stdlib doc and POSIX mkdir(2) semantics, MkdirAll on a directory that already exists is a no-op with respect to permissions -- it does not chmod it. So a data dir that pre-exists with a looser mode (world-readable/writable -- left over from a bad deploy script, an operator `cp -r` that didn't preserve modes, a container image built with a permissive umask, or a restore from backup) silently KEEPS that loose mode forever. Every subsequent invariant this project cares about (agent credentials in AUTH's roster store, the WAL itself) then lives inside a directory that is not actually 0700, contradicting the comment's own stated intent.
   
@@ -39,22 +40,39 @@
 - [x] None · Proof-command guard: a `-run` pattern that matches no test must FAIL, not pass vacuously — process, P0
   TRAP FOUND 2026-08-02 by backlog-triage. `go test -race -run TestCorruptTailTruncation ./internal/wal` prints "ok ... [no tests to run]" and EXITS 0. Every proof_cmd in this backlog is of that shape, so a task can be flipped to done with a proof command that proves literally nothing. Verified: DUR-4 and DUR-6 proofs both exit 0 today with zero tests run. Verified also that NO completed task is currently affected -- all 13 done tasks' proofs were re-run and each executes >0 tests -- so this is a PREVENTIVE guard, not a cleanup of existing corruption. Deliverable: (1) scripts/proof-check.sh -- runs a proof command and FAILS unless it can show at least one test actually ran (parse `-v` RUN/PASS output or `[no tests to run]`), while still supporting the non-Go proofs already in the backlog (test -s FILE, grep -q, scripts/bus-*.sh invocations) -- those must remain valid and must not be forced into a test-count check. (2) A sweep report of all ~70 proof_cmd values classifying each as test-based / file-assertion / wrapper-based / unverifiable, posted as a task note. (3) CONTRACTS.md entry for the script. Policy question to ANSWER in the deliverable: should completion require proof-check.sh rather than a bare command?
   _Proof: test -x scripts/proof-check.sh && bash -n scripts/proof-check.sh && grep -q "scripts/proof-check.sh" CONTRACTS.md_
-- [ ] None · ESCALATED TO USER, AWAITING A PRODUCT DECISION -- CRC32C tail-repair proofs are remotely forgeable (client-supplied payload => permanent refuse-to-start, no operator override exists) — durability, P1
-  DO NOT PICK THIS UP AS AN IMPLEMENTER TASK. This needs a product/design decision first (see "DECISION NEEDED" below); it is filed so the finding is not lost, mirroring how DUR-11 was rescued from a closed task's journal.
+- [-] None · [RESOLVED 2026-08-02 -- SUPERSEDED] CRC32C tail-repair proofs are remotely forgeable => permanent refuse-to-start, no operator override — durability, P1
+  RESOLVED. THE USER ANSWERED BOTH HALVES OF THIS ESCALATION ON 2026-08-02, AND EACH ANSWER KILLS THE
+  FINDING BY A DIFFERENT ROUTE. Superseded rather than done, because nothing was implemented here.
   
-  THE MECHANISM. internal/wal/recover.go's tail-repair logic (RepairTail -> truncatableTail -> inspectTail, recover.go:150-465) decides whether a damaged tail is a genuine crash-torn write (safe to cut) or something that must refuse to start, using ONLY checksum proofs: does a candidate frame boundary's CRC32C verify (recover.go:432-456, the "complete record still sitting in the bytes the cut would take" search), or does the damaged frame's own checksum verify once its length is corrected (lengthOnlyDamage). The doc comment on TailRepair.NextIndex (recover.go:73-77) already states the residual exposure in its own words: "these are CHECKSUM proofs, so they hold against random corruption, not against someone with write access to the data directory who can recompute a CRC32C at will." inspectTail's own comment at recover.go:427 independently flags "the region is attacker-influenced."
+  This task asked three questions. All three are answered:
   
-  But CRC32C is not just forgeable by someone with filesystem access -- it is GF(2)-LINEAR, and the PAYLOAD bytes that end up in a WAL frame are exactly the body of an ordinary message an ordinary ENROLLED AGENT sends through the normal API (wal.Entry.Body, canonicalBody -> encodePrepare -> Writer.Append). Linearity means an agent who controls nothing but their own message content can choose payload bytes such that, when embedded in a frame, a chosen header+payload region reproduces a target CRC32C at a chosen candidate boundary -- i.e. craft ordinary, fully-authorized message content that plants what inspectTail's search (1) at recover.go:432-456 will read as "a complete record whose checksum verifies" sitting inside whatever region a LATER, unrelated crash tears off. When that later crash happens (any ordinary crash mid-append, not attacker-caused), RepairTail's second gate finds the planted fake boundary, concludes "this is damage with accepted history AFTER it" (recover.go:455), and REFUSES TO REPAIR -- which is fatal: RepairTail's error propagates out of wal.Open unchanged (recover.go:170-175, "Fatal where it sits"), so the whole server permanently refuses to start on every subsequent boot until an operator manually edits the WAL file by hand.
+   (1) "Does an operator override belong here at all?" -- MOOT. The bus ALWAYS restarts (DECISIONS.md,
+       2026-08-02, section 1): damaged records are discarded, logged loudly and specifically, and the
+       server keeps running. There is no permanent refuse-to-start state left to override. The decision
+       says so in terms: "This also removes the permanent-refuse-to-start DoS, and with it the need for
+       the operator escape hatch that was previously recommended: always-restart *is* the escape hatch."
+       => carried by DUR-11 (884d3da4), in flight.
   
-  So the shape of the vulnerability is: an ordinary enrolled agent's message body -- content it is always allowed to submit -- can be crafted (offline, using CRC32C's linearity to solve for the needed bytes) so that if the log ever crashes mid-write ANYWHERE after that message, recovery deterministically refuses to start, forever, with no way back in short of hand-editing the binary log. This is a stronger and more concerning claim than DUR-11's findings (884d3da4), which are about accidental single/double-bit corruption producing silent data loss or an accidental refusal; this is about a REMOTE, UNPRIVILEGED, IN-BAND input (a normal message payload) being usable to engineer a GUARANTEED, PERMANENT denial of service the next time the process merely restarts after any ordinary crash -- and crucially:
+   (2) "Is the right fix instead upstream -- authenticate WAL frames?" -- YES, DECIDED, and it is the
+       chosen fix. Section 3: CRC32C is replaced by an HMAC-SHA256 keyed MAC, precisely because
+       "CRC32C is an error-detecting code, not an integrity primitive: it is unkeyed and GF(2)-linear,
+       which is precisely why security demonstrated that an ordinary remote client could craft a payload
+       making a torn tail look like a complete record. A keyed MAC eliminates that attack by
+       construction -- a client cannot compute a MAC over a key it does not hold."
+       => carried by DUR-12 (reserved ondisk-format-version=2), BLOCKED on where the MAC key lives.
   
-  THERE IS NO OPERATOR OVERRIDE. Confirmed this pass: `go run ./cmd/agent-bus -h` lists exactly six flags (-bus-id, -data-dir, -listen, -log-level, -poll-timeout) and none of them, nor anything else in cmd/agent-bus/main.go or internal/wal, offers a way to force a start past a RepairTail refusal. An operator's only recourse today is manual binary surgery on the WAL file.
+   (3) "Is a self-inflicted DoS via one's own future crash an acceptable trust boundary?" -- MOOT for
+       the same reason as (1): under always-restart there is no denial of service to inflict.
   
-  DECISION NEEDED (record in DECISIONS.md once made): (1) Does an operator override belong here at all, given invariant 6 (append-only, no silent truncation) and invariant 4 (nothing acknowledged before durable)? If yes: what does it log, does it require an explicit flag AND an interactive confirmation, and does it get its own audit trail entry documenting exactly what was discarded and by whom? (2) Is the right fix instead upstream of overrides -- e.g. authenticating WAL frames (already flagged as out of scope by recover.go:75-76's own comment, "a WAL is not authenticated; that is a separate problem") so a forged in-band collision is no longer constructible by an ordinary agent, which would need its own epic and is a much larger change? (3) Is a self-inflicted DoS via one's own future crash an acceptable trust boundary for an already-enrolled, credentialed agent, given invariant 3's signed-credential model -- i.e. is this a MUST-FIX or an accepted-risk-with-mitigations?
+  THE ONE THING THAT SURVIVES, and it is DUR-12's, not this task's: a key stored beside the WAL defends
+  against the REMOTE CLIENT in this finding but NOT against an attacker who already has
+  data-directory write access. That residual is stated in the decision and is DUR-12's open blocker.
   
-  This is exploratory/investigative until that decision lands; no code should change here before it does.
+  DO NOT PICK THIS UP. Work DUR-11 and DUR-12.
   
-  proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- no flag anywhere in `agent-bus -h` mentions repair/force/override. This is the narrow, checkable part of the finding (absence of an override); it intentionally does NOT attempt to prove the CRC-collision construction itself as an automated check, since that is exactly the part gated on the decision above, not on an implementer picking up a fix.
+  --- ORIGINAL ESCALATION retained below for the mechanism, which is a good record of how the finding
+  --- was constructed (Gaussian elimination over the 32 CRC columns, printable-ASCII JSON payload). See
+  --- the DUR-10 security kind=response of 2026-08-02T15:23 for the end-to-end reproduction.
   _Proof: go run ./cmd/agent-bus -h 2>&1 | grep -qiE "repair|force-start|allow-corrupt-tail"_
 - [x] None · scripts/spec-cloud.sh leaks SPEC_CLOUD_PASSWORD on the `aws` argv (readable via /proc/*/cmdline) — tooling, P2
   PRE-EXISTING, and outside the CORE-1..4 change wave -- filed here because the reviewer/security pass over that wave noticed it, not because that wave introduced it. scripts/spec-cloud.sh authenticates to Cognito by passing `PASSWORD=$SPEC_CLOUD_PASSWORD` as an element of the `aws` command's ARGV. Process arguments are world-readable on Linux via /proc/<pid>/cmdline, so for the lifetime of that aws invocation ANY local user on the box can read the plaintext Spec Server password -- a plain `ps auxww` or a tight loop over /proc is enough. It may also land in shell history, audit logs, or a process accounting record.
@@ -82,13 +100,43 @@
   _Proof: test "$(bash scripts/spec-cloud.sh -s '/api/v1/projects/agent-bus/tasks?limit=500' | jq '[.[] | select(.proof_cmd == null and (.status != "cancelled" and .status != "superseded"))] | length')" = "0"_
 ### EPIC AGENTIF — Agent-facing surface (shell wrappers + protocol doc)
 
-- [ ] AGENTIF-2 · AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry — agentif, P0
+- [-] AGENTIF-2 · AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry — agentif, P0
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's enrolment work is carried by **CLI-2**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for POST /v1/enroll -- generates/loads local key material, submits it, stores the returned token+agent-id locally for subsequent wrapper calls. Pairs with the enroll-endpoint task; per invariant 7 they ship together.
   _Proof: scripts/bus-enrol.sh --name testagent_
-- [ ] AGENTIF-6 · AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry — agentif, P1
+- [-] AGENTIF-6 · AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry — agentif, P1
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's long-poll wait work is carried by **CLI-3**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for GET /v1/wait, looping the cursor forward across calls and printing new messages as they arrive. Pairs with the long-poll endpoint task; per invariant 7 they ship together.
   _Proof: scripts/bus-wait.sh --timeout 5_
-- [ ] AGENTIF-8 · AGENTIF-8: scripts/bus-peer.sh + AGENT_PROTOCOL.md entry — agentif, P2
+- [-] AGENTIF-8 · AGENTIF-8: scripts/bus-peer.sh + AGENT_PROTOCOL.md entry — agentif, P2
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's peer add/list/remove work is carried by **CLI-7**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for the peer-enrolment handshake (add/list/remove a peer bus). Pairs with the peer-enrolment task; per invariant 7 they ship together.
   _Proof: scripts/bus-peer.sh add http://peer-host:8081_
 - [-] None · AGENTIF-9: Envelope/schema validation in scripts/bus-*.sh before accepting a server response — agentif, P1, cancelled
@@ -105,29 +153,58 @@
 - [x] AGENTIF-1 · AGENTIF-1: scripts/bus-serve.sh + AGENT_PROTOCOL.md entry — agentif, P0
   Wrapper to start/stop/status a local agent-bus server (foreground or backgrounded with a pidfile) plus its AGENT_PROTOCOL.md section. Pairs with the main-entrypoint task -- needed first since every other wrapper assumes a running server to talk to. Per invariant 7 the wrapper and doc entry land in the SAME task/commit as the feature it fronts.
   _Proof: scripts/bus-serve.sh start && scripts/bus-serve.sh status && scripts/bus-serve.sh stop_
-- [ ] AGENTIF-7 · AGENTIF-7: scripts/bus-leave.sh + AGENT_PROTOCOL.md entry — agentif, P1
+- [-] AGENTIF-7 · AGENTIF-7: scripts/bus-leave.sh + AGENT_PROTOCOL.md entry — agentif, P1
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's leave / logout work is carried by **CLI-2**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for POST /v1/leave, clearing the locally stored token afterward. Pairs with the leave/revocation task; per invariant 7 they ship together.
   _Proof: scripts/bus-leave.sh_
-- [ ] AGENTIF-3 · AGENTIF-3: scripts/bus-agents.sh + AGENT_PROTOCOL.md entry — agentif, P1
+- [-] AGENTIF-3 · AGENTIF-3: scripts/bus-agents.sh + AGENT_PROTOCOL.md entry — agentif, P1
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's roster listing work is carried by **CLI-5**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for GET /v1/agents. Pairs with the roster-listing task; per invariant 7 they ship together.
   _Proof: scripts/bus-agents.sh_
-- [ ] AGENTIF-4 · AGENTIF-4: scripts/bus-broadcast.sh + AGENT_PROTOCOL.md entry — agentif, P1
+- [-] AGENTIF-4 · AGENTIF-4: scripts/bus-broadcast.sh + AGENT_PROTOCOL.md entry — agentif, P1
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's broadcast work is carried by **CLI-4**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for POST /v1/broadcast. Pairs with the broadcast task; per invariant 7 they ship together.
   _Proof: scripts/bus-broadcast.sh "hello bus"_
-- [ ] AGENTIF-5 · AGENTIF-5: scripts/bus-send.sh + AGENT_PROTOCOL.md entry — agentif, P1
+- [-] AGENTIF-5 · AGENTIF-5: scripts/bus-send.sh + AGENT_PROTOCOL.md entry — agentif, P1
+  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
+  
+  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
+  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
+  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
+  subcommand, not `scripts/bus-*.sh`.
+  
+  This task's direct message work is carried by **CLI-4**. Do not write the shell wrapper.
+  
+  --- ORIGINAL DESCRIPTION ---
   Wrapper for POST /v1/send (DM). Pairs with the direct-message task; per invariant 7 they ship together.
   _Proof: scripts/bus-send.sh <agent-id> "hello"_
-- [ ] AGENTIF-9 · AGENTIF-9: Envelope/schema validation in scripts/bus-*.sh before accepting a server response — agentif, P1
-  Origin: user instruction 2026-08-02, "add a mechanism to validate messages in the agent script before accepting them" -- split into two layers. CRYPTO-10 covers the CRYPTO-verification layer (MAC/decrypt, wired in once the CRYPTO epic lands). THIS task covers the layer underneath that and independent of it: basic envelope/schema validation of what a shell wrapper accepts from the server BEFORE it hands the payload to the calling agent, needed from day one (AGENTIF-3/4/5/6/7/8 all parse server JSON today with no such check specified).
-  
-  A shell wrapper (bash + jq/curl) that trusts server JSON blindly is fragile and, on a compromised/misbehaving/relay-hopped bus (invariant 2: multiple buses relay to each other -- a message may have crossed a bus you don't directly trust), a foot-gun: a malformed or unexpected-shaped response fed straight into `msg=$(...)`, `eval`, or interpolated into a follow-up curl call can corrupt state or worse. Scope, for every scripts/bus-*.sh wrapper that consumes a server response (bus-agents.sh, bus-broadcast.sh, bus-send.sh, bus-wait.sh, bus-leave.sh, bus-peer.sh):
-  - Validate the response is well-formed JSON before doing anything else with it (a wrapper must not treat a non-2xx or non-JSON body as if it were data).
-  - Validate the expected top-level shape/required fields are present and are the expected JSON type (e.g. `id` is a string, `messages` is an array) before extracting and printing/using any field -- reject with a clear non-zero exit and a stderr message on anything else, printing nothing usable to stdout on failure (same "fail loud, fail closed" contract CRYPTO-10 uses for the crypto layer, so the two layers compose instead of conflicting).
-  - Cap/guard against absurd sizes (a pathological huge response should not be slurped unbounded into a bash variable).
-  - Document the validation contract (accepted shape, exit codes) in AGENT_PROTOCOL.md per invariant 7 -- ships in the same task as the wrapper behaviour it documents.
-  
-  Does NOT cover cryptographic verification, decryption, or replay/sender-identity checks -- that is CRYPTO-10, layered on top of this once it lands. This task is not gated on the CRYPTO epic and should land first since every wrapper needs it regardless of whether E2E crypto is ever enabled.
-  _Proof: bash scripts/bus-wait.sh (against a throwaway server) fed a malformed/truncated response -- exits non-zero, prints nothing usable to stdout_
 
 ### EPIC AUTH — Enrolment & authentication
 
@@ -146,18 +223,80 @@
 - [ ] AUTH-2 · AUTH-2: Token verification middleware — auth, P0
   Middleware that validates the bearer token on every route except /healthz, /v1/info, and /v1/enroll (invariant 3) -- rejects missing/malformed/forged/expired tokens with 401, and attaches the verified fully-qualified agent id to the request context for downstream handlers.
   _Proof: go test -race -run TestAuthMiddleware ./internal/auth_
-- [ ] AUTH-1 · AUTH-1: POST /v1/enroll -- signed credential issuance — auth, P0
-  Agent submits a name plus a client-generated AUTH keypair's PUBLIC half. This is an ASYMMETRIC keypair, not a shared secret -- a symmetric option (HMAC-SHA256 over agent-id+key with a persisted bus secret) is NO LONGER acceptable and must not be implemented: the server must never hold material that would let it forge an agent's calls, only material that lets it VERIFY them. Use Ed25519 (stdlib crypto/ed25519 -- present since Go 1.13, so available on this box's go1.19 toolchain; no third-party dependency needed for this task). The agent generates/holds the private key; the server stores and persists only the public key against the roster entry (AUTH-3).
+- [~] AUTH-1 · AUTH-1: POST /v1/enroll -- signed credential issuance — auth, P0, in progress
+  CORRECTED 2026-08-02 (spec-keeper) -- STATUS UNTOUCHED, a feature-runner is in flight. THREE PARTS OF
+  THIS TASK'S PREVIOUS TEXT WERE STALE AND HAVE BEEN REMOVED. They are listed here so nobody restores
+  them from an older copy.
   
-  This AUTH keypair is DISTINCT from the MESSAGING identity keypair minted in CRYPTO-3 -- they are two separate keypairs serving two separate purposes (per-request authentication vs. E2E message encryption) and must never be conflated or reused across the two roles. CRYPTO-3 depends on this task for the roster/enrolment shape it extends.
+   REMOVED (1) THE "OPEN QUESTION" ON BEARER-VS-PER-REQUEST SIGNING. It is ANSWERED, do not re-open it
+   and do not spend a DECISIONS.md entry deciding it. The settled design (DECISIONS.md 2026-08-02):
+   enrolment records the public key; then the CLIENT ASKS FOR A SESSION, THE **SERVER** PROVIDES THE
+   TOKEN VALUE, AND THE CLIENT **SIGNS** IT with its enrolment private key; the server verifies against
+   the recorded public key and thereafter accepts that session. Signing happens ONCE PER SESSION, NOT
+   PER REQUEST, so the hot path (long-poll, send) is a cheap credential check. The token is
+   server-provided so the client never chooses the value it signs -- a client-chosen challenge would
+   allow pre-computation and prove far less.
   
-  Server mints the agent id (invariant 1 -- ids are server-authoritative, never client-supplied), then SIGNS the agent's public key + minted id together into the returned credential (invariants 1+3): the credential binds the server-minted id to the presented public key, so a caller cannot later present a different key under the same id. Persists a bus signing secret (generated once, like the bus-id task) used to sign credentials. The whole enrolment (roster entry + credential) goes through the two-phase write path -- a client never gets a token for an enrolment that isn't durable.
+   REMOVED (2) "THE SERVER SIGNS THE PUBLIC KEY + MINTED ID INTO THE CREDENTIAL USING A PERSISTED BUS
+   SIGNING SECRET." THAT IS THE OLD DESIGN AND IT IS SUPERSEDED. **Tokens are OPAQUE SERVER-SIDE
+   HANDLES, not signed claims** (decision, 2026-08-02). That is precisely what makes IMMEDIATE
+   revocation possible -- a stateless signed claim cannot be revoked. So: DO NOT generate or persist a
+   bus signing secret for credential issuance, and do not put claims in the token. The server keeps the
+   session state; the token is a lookup key into it.
   
-  CONSTRAINT: the agent-facing side of this (scripts/bus-enrol.sh, AGENTIF-2, shipped in the same task per invariant 7) has to generate the keypair and do its enrolment round-trip using only tooling available on this box -- bash + openssl (openssl can generate/handle Ed25519 keys: `openssl genpkey -algorithm ed25519`). Confirm this works before assuming it in the design.
+   REMOVED (3) THE CONSTRAINT MANDATING `scripts/bus-enrol.sh` + AGENTIF-2 IN THE SAME TASK. Invariant 7
+   was AMENDED on 2026-08-02: the compiled Go CLI replaces the shell wrappers. AGENTIF-2 is SUPERSEDED
+   and its work is CLI-2. There is no openssl-in-bash keypair requirement any more -- the CLI generates
+   and stores the key. AUTH-1 is therefore SERVER-SIDE ONLY. The pairing rule itself survives in
+   amended form: this endpoint is not "done" for an agent until CLI-2 ships, so keep them cross-linked.
   
-  OPEN QUESTION -- DO NOT DECIDE IN THIS TASK, RECORD AS A REQUIRED DECISIONS.md ENTRY: does the agent prove possession of the AUTH private key ONCE at enrolment (server then issues a bearer token used as-is on every subsequent call, like today) or PER-REQUEST (agent signs each request/a challenge with the AUTH private key, no bearer token, or a bearer token that itself must be re-signed)? This materially changes scripts/bus-*.sh wrapper complexity (a bearer token is a trivial header; per-request signing means every wrapper must shell out to `openssl` or a helper to sign on every call) and the threat model (bearer token = stealable from the token file; per-request signing = the private key must be protected instead, but a stolen bearer token grants full access until revoked while a stolen-and-then-rotated-out key does not). The implementer must pick one, justify it in a dated DECISIONS.md entry before writing code, and file a follow-up task if the choice turns out to need its own atomic task (e.g. per-request signing warranting a distinct challenge/response endpoint) rather than growing this one.
+  WHAT AUTH-1 IS, AS IT NOW STANDS.
   
-  ACCEPTANCE CRITERION ADDED 2026-08-02 (RATCHET-7 fallout, verified first-hand by backlog-triage by reading this box's own stdlib source at crypto/ed25519/ed25519.go under GOROOT): ed25519.Verify PANICS (does not return false) when len(publicKey) != ed25519.PublicKeySize -- this is a remote DoS trap, and it is asymmetric with malformed-signature handling (a bad signature safely returns false), so a call site that only checks the signature looks correct and is not. The public key presented at enrolment here is client-supplied, untrusted input by definition (invariant 1). REQUIRED: length-check the presented public key against ed25519.PublicKeySize BEFORE any ed25519.Verify call in this task's enrolment/credential-issuance path, returning a normal validation error on mismatch, never panicking. REQUIRED TEST: a negative test that feeds a wrong-size public key and a nil/empty public key through the enrolment path and asserts a clean rejection, not a panic/crash. See also the standalone cross-cutting task filed to track this trap across all Verify call sites (AUTH-1, CRYPTO-10, SIGN-2, and any roster-reload-from-disk path).
+  POST /v1/enroll. The agent submits a desired short name plus the PUBLIC half of a client-generated
+  Ed25519 AUTH keypair. This is an ASYMMETRIC keypair, not a shared secret -- a symmetric option
+  (HMAC over agent-id+key with a persisted bus secret) is NOT acceptable and must not be implemented:
+  the server must never hold material that would let it FORGE an agent's calls, only material that lets
+  it VERIFY them. Use stdlib `crypto/ed25519` (invariant 9: standard, audited, high-level sign/verify;
+  never assemble primitives). The agent holds the private key; the server stores only the public key
+  against the roster entry.
+  
+  The server MINTS the agent id (invariant 1 -- ids are server-authoritative, never client-supplied;
+  ID-3 provides the `<bus-id>.<name>-<n>` minting). The roster entry binds the minted id to the
+  presented public key, so a caller cannot later present a different key under the same id.
+  
+  THIS AUTH KEYPAIR IS DISTINCT FROM THE MESSAGING IDENTITY KEYPAIR minted in CRYPTO-3 -- two keypairs,
+  two purposes (authentication vs E2E message encryption), never conflated or reused. CRYPTO-3 depends
+  on this task for the roster/enrolment shape it extends.
+  
+  DURABILITY -- AND THE DEPENDENCY THAT MAKES IT SHIPPABLE NOW. A client must never get a credential for
+  an enrolment that is not durable: the roster entry goes through the two-phase prepare->commit write
+  path (invariant 4). **THE PERSISTENCE ITSELF IS DELIVERED BY AUTH-3 (roster persistence & recovery),
+  NOT BY THIS TASK.** AUTH-1 therefore ships against an INJECTED PERSISTENCE INTERFACE -- define the
+  narrow interface AUTH-1 needs, take it as a dependency, and let AUTH-3 supply the durable
+  implementation. Do not inline a bespoke roster file here; do not block on AUTH-3 either.
+  
+  NOTE FOR THE SESSION WORK (AUTH-2/AUTH-4, not this task, but the shape is decided): sessions last AT
+  MOST ONE HOUR; the client refreshes at 75% of lifetime; server-side expiry is authoritative and an
+  expired token is rejected even if the client believes otherwise; **SESSIONS DO NOT SURVIVE A SERVER
+  RESTART** (they are expired on restart, the CLI re-authenticates); and **REVOCATION IS IMMEDIATE** --
+  /v1/leave invalidates outstanding sessions at once, not at the <=1h boundary.
+  
+  ACCEPTANCE CRITERION (RATCHET-7 fallout, verified first-hand by reading this box's stdlib source at
+  crypto/ed25519/ed25519.go under GOROOT): **ed25519.Verify PANICS -- it does not return false -- when
+  len(publicKey) != ed25519.PublicKeySize.** This is a remote DoS trap, and it is ASYMMETRIC with
+  malformed-signature handling (a bad signature safely returns false), so a call site that only checks
+  the signature looks correct and is not. The public key presented here is client-supplied, untrusted
+  input by definition. REQUIRED: length-check the presented public key against ed25519.PublicKeySize
+  BEFORE any ed25519.Verify call in this path, returning a normal validation error on mismatch, never
+  panicking. REQUIRED TEST: a negative test feeding a wrong-size public key and a nil/empty public key
+  through the enrolment path, asserting clean rejection rather than a panic. See the standalone
+  cross-cutting task (4eb903f8) tracking this trap across all Verify call sites (AUTH-1, CRYPTO-10,
+  SIGN-2, and any roster-reload-from-disk path).
+  
+  IDEMPOTENCY (invariant 10): enrol carries a client-supplied idempotency key and is safe to retry --
+  same key + same payload returns the ORIGINAL result and must NOT mint a second id; same key +
+  different payload is a protocol violation. IDEM-13 owns the full treatment; do not design enrol in a
+  way that makes it impossible.
   _Proof: go test -race -run TestEnroll ./internal/auth_
 - [ ] AUTH-4 · AUTH-4: POST /v1/leave -- leave / revocation — auth, P1
   Lets an enrolled agent durably remove itself from the roster; its token is rejected by the auth middleware on every call afterward, including after a restart (the revocation itself goes through the two-phase write path).
@@ -168,24 +307,368 @@
 
 ### EPIC CLI — Human CLI interface to the bus
 
-- [ ] CLI-1 · CLI-1: CLI-1 design + subcommand skeleton — cli, P1
-  Decide and record (DECISIONS.md) whether the human CLI is a SEPARATE binary (cmd/busctl) or a subcommand tree on the existing agent-bus binary. Recommendation to evaluate: a separate cmd/busctl, so the server binary stays minimal and a human client is never accidentally shipped into the server image. Build the subcommand skeleton, global flags (--bus URL, --identity path, --json, --timeout), config-file/env resolution order, and exit-code conventions. NO business logic yet.
-- [ ] CLI-4 · CLI-4: CLI-4 send + broadcast, incl. stdin and interactive — cli, P1
-  Send a DM to a fully-qualified agent id, or broadcast to the roster. Body from an argument, from a file, or piped on stdin (so it composes with other tools). Refuse ambiguous or empty sends with a clear error rather than sending nothing. Depends on the MSG epic.
-- [ ] CLI-2 · CLI-2: CLI-2 identity: enrol, whoami, use, logout — cli, P1
-  Human-facing identity management against the AUTH surface. Enrol as a named human operator, store the credential under the user's config dir with 0600 perms (NEVER in the repo, never world-readable), show the active identity, switch between identities for multiple buses, and log out (revoking via /v1/leave). Depends on the AUTH epic. Must use the SAME enrolment protocol as agents -- a human is just another enrolled participant, with no special server-side privilege.
-- [ ] CLI-6 · CLI-6: CLI-6 log: read the append-only audit log — cli, P2
-  Read the audit log -- which under invariant 6 is METADATA AND ROUTING INFO ONLY (id, sequence, sender, recipients, bus path, timestamp, size, content hash), never bodies. Support filtering by sender, recipient, time range and sequence range, and --follow to tail it. The CLI must not imply message bodies are retrievable from the log; make its absence explicit in the output and help text so an operator is never misled.
-- [ ] CLI-3 · CLI-3: CLI-3 watch: live human-readable message tail — cli, P1
-  The headline command. Drives the long-poll wait endpoint in a loop and renders messages as a readable live feed (timestamp, sender, recipient/scope, body), advancing its cursor across reconnects. Handles Ctrl-C cleanly, reconnects with backoff on transient failure, and never busy-loops. --json emits one JSON object per line for piping. Depends on the POLL epic.
-- [ ] CLI-5 · CLI-5: CLI-5 agents: roster listing — cli, P2
-  List the enrolled roster as an aligned human-readable table (id, name, bus, enrolled-at, last-seen), with --json for scripting. Make the fully-qualified <bus-id>.<agent-id> readable without truncating the part that matters for routing.
-- [ ] CLI-9 · CLI-9: CLI-9 shell completion + man/usage polish — cli, P3
-  Bash/zsh completion for subcommands, flags, and where cheaply possible enrolled agent ids. Usage text good enough that --help answers the common questions without opening a doc.
-- [ ] CLI-8 · CLI-8: CLI-8 doctor: diagnose a broken setup — cli, P2
-  One command that checks the common failure modes end to end: server reachable, /healthz green, identity present and non-expired, token accepted, clock skew within tolerance, data-dir writable, audit log readable. Prints a specific remedy per failure rather than a generic error. This is the command that stops a human from hand-writing curl to work out what is wrong.
-- [ ] CLI-7 · CLI-7: CLI-7 peers: relay topology and health — cli, P2
-  Show configured peer buses, their reachability, last successful exchange, and pending relay backlog -- the operator's answer to 'is federation actually working?'. Depends on the RELAY epic.
+- [ ] CLI-1 · CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single client that replaces the shell wrappers — cli, P0
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  THE DECISION THAT IS ALREADY MADE AND MUST NOT BE RE-LITIGATED: **"embed" is the load-bearing word.**
+  The CLI is a THIN SHELL over a REUSABLE GO CLIENT PACKAGE, and that package **CANNOT LIVE UNDER
+  `internal/`** -- Go would forbid any other module importing it, which defeats the entire requirement.
+  Decided 2026-08-02 precisely because deciding it late would be expensive. Put it at a top-level
+  importable path (e.g. `client/`), and treat its exported surface as a PUBLIC API subject to
+  compatibility care. The binary is a separate `cmd/` (e.g. `cmd/agent-bus-cli`) so the server image
+  never accidentally ships the client, and the client package must NOT import anything under
+  `internal/`.
+  
+  STILL TO DECIDE AND RECORD IN DECISIONS.md (the original CLI-1 question, narrowed): the exact package
+  path and binary name. NOT still open: whether the package is importable (it is), and whether one
+  binary serves both humans and agents (it does).
+  
+  SCOPE.
+   - The client package: transport, base URL, timeouts, retry/backoff, credential handling, cursor
+     management, and typed errors. NO business logic beyond what later CLI tasks need.
+   - Subcommand skeleton and global flags: --bus URL, --identity path, --json, --timeout.
+     Config/env resolution order, documented, deterministic.
+   - EXIT-CODE CONVENTIONS, fixed now and treated as contract: distinct codes for usage error,
+     auth/credential failure, network/unreachable, server-side error, and "nothing to report" so an
+     agent can branch without parsing text. Put them in CONTRACTS.md.
+   - **THE LONG-POLL SUBCOMMAND STREAMS NEWLINE-DELIMITED JSON (NDJSON)** -- one JSON object per line,
+     flushed as it arrives, so a consumer can process incrementally rather than buffering to
+     completion. Establish that convention here even though CLI-3 implements the command.
+   - NO interactive prompts anywhere, and no TTY-dependent credential input. An agent shelling out has
+     no TTY.
+   - CONTRACTS.md gains the CLI's flags, exit codes and JSON shapes -- the binary now has a second
+     consumer with a compatibility expectation.
+  
+  NOT IN SCOPE: any actual endpoint call (CLI-2..CLI-8 own those), and rewriting AGENT_PROTOCOL.md
+  against subcommands (its own task).
+  
+  PROOF. `go build ./... && go test -race ./client/... && go vet ./... && go run ./cmd/agent-bus-cli --help 2>&1 | grep -q 'enrol' && ! go list -deps ./cmd/agent-bus-cli | grep -q 'agent-bus/internal/'`
+  The last clause is the load-bearing one: it MECHANICALLY ENFORCES that the client binary (and hence
+  the client package) does not depend on `internal/`, which is the requirement most likely to be broken
+  by accident. FAILS TODAY by construction -- neither the package nor the binary exists. Adjust the
+  paths to whatever DECISIONS.md settles, but KEEP the internal/-dependency clause.
+  _Proof: go build ./... && go test -race ./client/... && go vet ./... && go run ./cmd/agent-bus-cli --help 2>&1 | grep -q 'enrol' && ! go list -deps ./cmd/agent-bus-cli | grep -q 'agent-bus/internal/'_
+- [ ] CLI-4 · CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadcast.sh) — cli, P1
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  REPLACES AGENTIF-4 (`scripts/bus-broadcast.sh`) and AGENTIF-5 (`scripts/bus-send.sh`), both superseded.
+  
+  Send a DM to a fully-qualified agent id, or broadcast to the roster. Body from an argument, from a
+  file, or piped on stdin (so it composes with other tools). Refuse ambiguous or empty sends with a
+  clear error rather than sending nothing.
+  
+  **IDEMPOTENCY IS THIS COMMAND'S HARD REQUIREMENT (invariant 10).** The client generates the
+  idempotency key ONCE and REUSES IT ON EVERY RETRY of the same logical send. Generating a fresh key per
+  attempt turns the retry that idempotency exists to make safe into a duplicate message. The named test
+  in the proof exists specifically to pin that. Note the two cases must not be collapsed: same key +
+  same payload is a LEGITIMATE RETRY (server returns the original result); same key + DIFFERENT payload
+  is a PROTOCOL VIOLATION (server rejects and disconnects) -- the CLI must never produce the second by
+  mutating a body between attempts. Idempotency keys are retained for a BOUNDED window and FAIL CLOSED,
+  so a retry arriving after the window is rejected rather than silently re-applied: surface that as a
+  specific, actionable error, not a generic failure.
+  
+  DEPENDS ON: MSG epic, IDEM epic, CLI-1, CLI-2.
+  
+  PROOF. FAILS TODAY by construction. See IDEM-18 (wrappers generate the key once) -- that task is
+  re-scoped to this client.
+  _Proof: go test -race -run 'TestCLISend|TestCLIBroadcast' ./client/... ./cmd/agent-bus-cli/... && go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-bus-cli/..._
+- [ ] CLI-2 · CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.sh) — cli, P0
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  **THIS TASK ABSORBS AGENTIF-2 ("scripts/bus-enrol.sh"), which is SUPERSEDED.** AGENTIF-2 was a P0
+  telling someone to write a shell wrapper; that is exactly the instruction the 2026-08-02 amendment
+  retires, and leaving it would have had two agents build two enrolment clients. There is ONE
+  enrolment client and it is this subcommand.
+  
+  SCOPE -- identity, for humans AND agents, against the AUTH surface.
+   - `enrol` -- generate the Ed25519 AUTH keypair locally, submit ONLY the public half, receive the
+     SERVER-MINTED fully-qualified id `<bus-id>.<agent-id>` (invariant 1 -- the client never chooses
+     its id), and store the credential.
+   - SESSION HANDLING, per the 2026-08-02 auth decision: the client asks for a session, the SERVER
+     provides the token value, the client SIGNS it with its enrolment private key, and the server
+     verifies against the recorded public key. The session lasts AT MOST ONE HOUR and the client
+     REFRESHES AT 75% OF LIFETIME (server expiry is authoritative; do not refresh at the boundary).
+     Tokens are OPAQUE server-side handles, not signed claims. **SESSIONS DO NOT SURVIVE A SERVER
+     RESTART** -- the CLI must re-authenticate transparently rather than surfacing a confusing failure.
+   - `whoami`, `use` (switch identity/bus), `logout` (calls /v1/leave AND clears the local credential).
+     **Revocation is IMMEDIATE** -- /leave invalidates outstanding sessions at once, not at expiry.
+   - Credential storage under the user's config dir at 0600, NEVER in the repo, never world-readable.
+     No interactive prompt and no TTY-dependent input -- an agent shelling out has no TTY.
+   - A human is just another enrolled participant with no special server-side privilege.
+  
+  DEPENDS ON: AUTH-1 (enrol, in flight), AUTH-2 (token middleware), AUTH-4 (leave/revocation), CLI-1.
+  
+  PROOF. Unit tests plus a REAL end-to-end enrolment against a server brought up through
+  scripts/bus-serve.sh on an isolated run dir and port -- because "the subcommand is written" is not the
+  same as "an agent can enrol". FAILS TODAY by construction (neither the CLI nor /v1/enroll exists).
+  Do NOT complete this on the unit-test clause alone.
+  _Proof: go test -race -run TestCLIEnrol ./client/... ./cmd/agent-bus-cli/... && rm -rf /tmp/agent-bus-cli2 && AGENT_BUS_RUN_DIR=/tmp/agent-bus-cli2 AGENT_BUS_LISTEN=127.0.0.1:8092 bash scripts/bus-serve.sh start && go run ./cmd/agent-bus-cli enrol --bus http://127.0.0.1:8092 --name testagent --json | grep -q '"agent_id"' && AGENT_BUS_RUN_DIR=/tmp/agent-bus-cli2 AGENT_BUS_LISTEN=127.0.0.1:8092 bash scripts/bus-serve.sh stop_
+- [ ] CLI-6 · CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper idea from the dissolved DUR-4-FU-TOOLING) — cli, P2
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  Read the audit log -- which under invariant 6 is **METADATA AND ROUTING INFO ONLY** (id, sequence,
+  sender, recipients, bus path, timestamp, size, content hash), NEVER bodies. That is a deliberate
+  2026-08-02 decision so the audit trail stays compatible with end-to-end encrypted, forward-secret
+  payloads. Support filtering by sender, recipient, time range and sequence range, and --follow to tail
+  it. **The CLI must not imply message bodies are retrievable from the log; make their absence EXPLICIT
+  in the output and in --help**, so an operator is never misled into thinking a body was lost. The proof
+  greps --help for that statement precisely because it is the kind of thing that quietly goes missing.
+  
+  ABSORBED FROM THE DISSOLVED DUR-4-FU-TOOLING (superseded 2026-08-02 by the always-restart decision):
+  a read-only frame-level view of the WAL -- offset, record index, record type, length, MAC-ok, one line
+  per frame -- so an operator can see what is on disk without writing a throwaway Go program. It is now
+  an ORDINARY diagnostic rather than an emergency tool, because the bus always restarts. Ship it here or
+  under CLI-8 doctor, but ship it somewhere.
+  
+  DEPENDS ON: DUR-5 (the audit log itself), CLI-1. PROOF fails today by construction.
+  _Proof: go test -race -run 'TestCLILog' ./client/... ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli log --help 2>&1 | grep -qi 'metadata only'_
+- [ ] CLI-3 · CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replaces bus-wait.sh) — cli, P1
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  REPLACES AGENTIF-6 (`scripts/bus-wait.sh`), which is superseded.
+  
+  The headline command. Drives the long-poll wait endpoint in a loop and renders messages as a readable
+  live feed (timestamp, sender, recipient/scope, body), advancing its cursor across reconnects. Handles
+  Ctrl-C cleanly, reconnects with backoff on transient failure, and never busy-loops.
+  
+  **--json STREAMS NDJSON: one JSON object per line, FLUSHED AS IT ARRIVES.** This is the requirement
+  that makes the command usable by an embedding or shelling-out agent at all -- a long-poll that buffers
+  to completion is useless, because it never completes. The test named in the proof must assert
+  INCREMENTAL delivery (a reader sees line 1 before the stream ends), not merely that the output parses.
+  
+  **DELIVERY IS AT-LEAST-ONCE** (decision, 2026-08-02). Duplicates are the NORMAL steady state, not an
+  edge case. The watch loop must not present a duplicate as an error, and the help text must say so, so
+  an agent author writes an idempotent handler instead of assuming exactly-once. Freshness comes from
+  the server-minted monotonic sequence plus the recipient-side cursor.
+  
+  Session refresh (75% of lifetime) and transparent re-authentication after a server restart must be
+  invisible here -- a watch that dies when the bus restarts is a watch nobody can rely on.
+  
+  DEPENDS ON: POLL epic, CLI-1, CLI-2.
+  
+  PROOF. FAILS TODAY by construction. The second clause is deliberately a SEPARATE named test for the
+  incremental-streaming property, because a --json flag that buffers would pass a naive shape test.
+  _Proof: go test -race -run 'TestCLIWatch' ./client/... ./cmd/agent-bus-cli/... && go test -race -run TestCLIWatchStreamsNDJSONIncrementally ./cmd/agent-bus-cli/..._
+- [ ] CLI-5 · CLI-5: agents -- roster listing (replaces bus-agents.sh) — cli, P1
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  REPLACES AGENTIF-3 (`scripts/bus-agents.sh`), superseded. Raised P2 -> P1 to match the AGENTIF-3 it
+  absorbs.
+  
+  List the enrolled roster as an aligned human-readable table (id, name, bus, enrolled-at, last-seen),
+  with --json for scripting. **Make the fully-qualified `<bus-id>.<agent-id>` readable WITHOUT
+  TRUNCATING the part that matters for routing** (invariant 2) -- eliding the bus prefix to fit a
+  terminal is exactly the wrong end to cut, because that prefix is what disambiguates a cross-bus id.
+  If the terminal is narrow, wrap or drop a less important column; never the qualified id.
+  
+  DEPENDS ON: MSG-1 (GET /v1/agents), CLI-1, CLI-2. PROOF fails today by construction.
+  _Proof: go test -race -run 'TestCLIAgents' ./client/... ./cmd/agent-bus-cli/..._
+- [ ] CLI-9 · CLI-9: shell completion + man/usage polish — cli, P3
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  Bash/zsh completion for subcommands, flags, and where cheaply possible enrolled agent ids. Usage text
+  good enough that --help answers the common questions without opening a doc.
+  
+  Post-2026-08-02 additions: --help must state the AT-LEAST-ONCE delivery guarantee (duplicates are the
+  normal steady state) and the exit-code table, because an agent author reads --help, not PROTOCOL.md.
+  Completion must not require a TTY or an interactive prompt to generate.
+  
+  DEPENDS ON: CLI-1..CLI-8. PROOF fails today by construction.
+  _Proof: go test -race -run 'TestCLIHelp' ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli completion bash | grep -q 'complete '_
+- [ ] CLI-10 · CLI-10: Rewrite AGENT_PROTOCOL.md against CLI subcommands (it currently documents shell wrappers that are being retired) — docs, P1
+  FILED 2026-08-02. The decision that retired the shell wrappers says in terms: "AGENT_PROTOCOL.md must be
+  rewritten against CLI subcommands rather than shell scripts." No task carried that, so it is filed
+  here rather than smuggled into a CLI subcommand task.
+  
+  WHY IT NEEDS ITS OWN TASK: AGENT_PROTOCOL.md is THE agent-facing document -- it is what an agent reads
+  to learn how to use the bus. Leaving it describing `scripts/bus-*.sh` while the binary grows
+  subcommands means every new agent is onboarded onto a retired interface. And spreading the rewrite
+  across CLI-2..CLI-8 guarantees it ends up written eight different ways.
+  
+  SCOPE.
+   - Rewrite every capability entry against a CLI subcommand: enrol/whoami/use/logout, watch, send,
+     broadcast, agents, log, peers, doctor. Keep the shape agents rely on -- one section per capability,
+     copy-pasteable invocation, exact output shape.
+   - Document the AGENT-FACING contract explicitly, because agents are now a first-class consumer:
+     `--json`, the EXIT-CODE TABLE, NO interactive prompts, NO TTY-dependent credential input, and the
+     fact that the long-poll subcommand streams NDJSON (one object per line, flushed as it arrives).
+   - **STATE AT-LEAST-ONCE DELIVERY.** Required by the decision by name ("Must be stated in PROTOCOL.md
+     and AGENT_PROTOCOL.md"). Duplicates are the NORMAL steady state; the agent's handler must be
+     idempotent; freshness comes from the server-minted monotonic sequence plus the recipient cursor,
+     not from a signature.
+   - State that the client generates its idempotency key ONCE and reuses it across retries, and what
+     happens if a key is reused with a DIFFERENT payload (protocol violation -> disconnect).
+   - State the session model an agent will actually hit: sessions last <=1h, refresh is automatic at 75%
+     of lifetime, sessions DO NOT survive a bus restart (the CLI re-authenticates), and /leave revokes
+     IMMEDIATELY.
+   - Mention the embedding path -- the importable client package -- for agents that would rather link
+     than shell out.
+   - KEEP `scripts/bus-serve.sh`: it is an operator/server-lifecycle tool, not an agent protocol call,
+     it is the only surviving wrapper, and it is load-bearing in several proof_cmds. Say so, so nobody
+     deletes it during the wrapper cull.
+  
+  SEQUENCING: written incrementally as CLI subcommands land; the final sweep after CLI-8. Do not write
+  entries for subcommands that do not exist -- an AGENT_PROTOCOL.md documenting vapour is worse than one
+  documenting a wrapper.
+  
+  PROOF. `! grep -q 'scripts/bus-{enrol,send,wait,agents,broadcast,leave,peer}.sh' AGENT_PROTOCOL.md && grep -q 'at-least-once' AGENT_PROTOCOL.md`
+  -- the negative clause proves the retired wrappers are GONE from the doc (the actual deliverable) and
+  the positive clause pins the one statement the decision mandates by name. Deliberately does NOT
+  mention bus-serve.sh, which is allowed to remain.
+  _Proof: ! grep -q 'scripts/bus-enrol.sh\|scripts/bus-send.sh\|scripts/bus-wait.sh\|scripts/bus-agents.sh\|scripts/bus-broadcast.sh\|scripts/bus-leave.sh\|scripts/bus-peer.sh' AGENT_PROTOCOL.md && grep -q 'at-least-once' AGENT_PROTOCOL.md_
+- [ ] CLI-8 · CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure — cli, P2
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  One command that checks the common failure modes end to end: server reachable, /healthz green,
+  identity present and non-expired, session token accepted, CLOCK SKEW within tolerance (server expiry
+  is authoritative and the client refreshes at 75% of lifetime -- skew is a real, diagnosable failure),
+  data-dir writable, audit log readable. **Prints a SPECIFIC REMEDY per failure rather than a generic
+  error.** This is the command that stops a human from hand-writing curl to work out what is wrong --
+  which is the whole point of invariant 7.
+  
+  Add, post-2026-08-02: a check for the "sessions do not survive restart" case, so an agent whose token
+  stopped working after a bus restart gets told that rather than "unauthorized"; and a role check
+  (endpoint vs relay -- never both).
+  
+  PROOF: the second clause asserts doctor EXITS NON-ZERO against an unreachable bus. A diagnostic that
+  exits 0 when everything is broken is worse than no diagnostic, and that is the regression a shape-only
+  test would miss. Fails today by construction.
+  
+  DEPENDS ON: CLI-1, CLI-2.
+  _Proof: go test -race -run 'TestCLIDoctor' ./client/... ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli doctor --bus http://127.0.0.1:1 --json; test $? -ne 0_
+- [ ] AGENTIF-9 · CLI-VALIDATE: envelope/schema validation in the CLIENT before a message is handed to the caller (was AGENTIF-9, was a bash+jq check) — agentif, P1
+  RE-SCOPED 2026-08-02 FROM A SHELL-WRAPPER CHECK TO A CLIENT-PACKAGE CHECK. The user's original
+  instruction stands verbatim -- "add a mechanism to validate messages in the agent script before
+  accepting them" -- but the "agent script" is now the Go CLI and its reusable client package
+  (DECISIONS.md 2026-08-02: the Go CLI replaces the .sh files; invariant 7 amended). Moved to the CLI
+  epic.
+  
+  WHY THIS GETS *EASIER* AND MUST NOT BE DROPPED: the original framing worried about `bash` + `jq`
+  trusting server JSON blindly and feeding it into `eval`/interpolation. A typed Go client removes the
+  shell-injection half of that outright -- but NOT the half that actually matters: a malformed,
+  truncated, or unexpectedly-shaped response from a MISBEHAVING OR RELAY-HOPPED BUS must be rejected
+  before it reaches the calling agent. Under invariant 2 a message may have crossed a bus you do not
+  directly trust, and under the 2026-08-02 relay decision relay auth is bi-directional precisely because
+  an intermediate bus is not automatically trusted.
+  
+  REQUIRED: strict decoding (reject unknown/missing fields rather than zero-valuing them), bounds on
+  every length, validation that the fully-qualified `<bus-id>.<agent-id>` parses and that the claimed
+  sender is well-formed, and a typed error the caller can branch on. FAIL CLOSED: on a validation
+  failure return an error and NOTHING usable, never a partially-populated message. Applies on every
+  inbound path -- watch/long-poll, message history, roster listing, peer exchange.
+  
+  LAYERING, unchanged: CRYPTO-10 covers the CRYPTOGRAPHIC verification layer (signature/MAC/decrypt),
+  wired in once the CRYPTO epic lands. THIS task is the layer underneath it and INDEPENDENT of it --
+  needed from day one, and still needed after CRYPTO-10 exists, because a signature over a malformed
+  envelope is still a malformed envelope.
+  
+  PROOF. `go test -race -run 'TestClientRejectsMalformedEnvelope' ./client/...` -- table-driven over
+  truncated JSON, wrong types, missing required fields, oversized fields, and an unparseable qualified
+  id; each case must yield an error AND no partially-populated result. FAILS TODAY by construction (the
+  client package does not exist). The OLD proof_cmd was prose, not a command
+  ("bash scripts/bus-wait.sh (against a throwaway server) fed a malformed/truncated response -- exits
+  non-zero, prints nothing usable to stdout"), so it could not have been run by proof-check.sh at all.
+  
+  --- ORIGINAL DESCRIPTION ---
+  Origin: user instruction 2026-08-02, "add a mechanism to validate messages in the agent script before accepting them" -- split into two layers. CRYPTO-10 covers the CRYPTO-verification layer (MAC/decrypt, wired in once the CRYPTO epic lands). THIS task covers the layer underneath that and independent of it: basic envelope/schema validation of what a shell wrapper accepts from the server BEFORE it hands the payload to the calling agent, needed from day one (AGENTIF-3/4/5/6/7/8 all parse server JSON today with no such check specified).
+  
+  A shell wrapper (bash + jq/curl) that trusts server JSON blindly is fragile and, on a compromised/misbehaving/relay-hopped bus (invariant 2: multiple buses relay to each other -- a message may have crossed a bus you don't directly trust), a foot-gun: a malformed or unexpected-shaped response fed straight into `msg=$(...)`, `eval`, or interpolated into a follow-up curl call can corrupt state or worse. Scope, for every scripts/bus-*.sh wrapper that consumes a server response (bus-agents.sh, bus-broadcast.sh, bus-send.sh, bus-wait.sh, bus-leave.sh, bus-peer.sh):
+  - Validate the response is well-formed JSON before doing anything else with it (a wrapper must not treat a non-2xx or non-JSON body as if it were data).
+  - Validate the expected top-level shape/required fields are present and are the expected JSON type (e.g. `id` is a string, `messages` is an array) before extracting and printing/using any field -- reject with a clear non-zero exit and a stderr message on anything else, printing nothing usable to stdout on failure (same "fail loud, fail closed" contract CRYPTO-10 uses for the crypto layer, so the two layers compose instead of conflicting).
+  - Cap/guard against absurd sizes (a pathological huge response should not be slurped unbounded into a bash variable).
+  - Document the validation contract (accepted shape, exit codes) in AGENT_PROTOCOL.md per invariant 7 -- ships in the same task as the wrapper behaviour it documents.
+  
+  Does NOT cover cryptographic verification, decryption, or replay/sender-identity checks -- that is CRYPTO-10, layered on top of this once it lands. This task is not gated on the CRYPTO epic and should land first since every wrapper needs it regardless of whether E2E crypto is ever enabled.
+  _Proof: go test -race -run 'TestClientRejectsMalformedEnvelope' ./client/..._
+- [ ] CLI-7 · CLI-7: peers -- relay topology and health (replaces bus-peer.sh) — cli, P2
+  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
+  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
+  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
+  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
+  wrapper. A feature without its CLI subcommand is still not done.
+  
+  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
+  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
+  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
+  
+  REPLACES AGENTIF-8 (`scripts/bus-peer.sh`), superseded. Covers add/list/remove a peer bus as well as
+  health.
+  
+  Show configured peer buses, their reachability, last successful exchange, and pending relay backlog --
+  the operator's answer to "is federation actually working?".
+  
+  TWO DECIDED CONSTRAINTS THIS COMMAND MUST REFLECT (2026-08-02): **relay auth is BI-DIRECTIONAL and
+  uses the SAME scheme as clients**; and **a node is EITHER a client endpoint OR a relay, NEVER both** --
+  that exclusivity is a routing and trust simplification and is to be ENFORCED, not merely documented.
+  So this command must surface a node's role, and must make a misconfigured both-roles node visibly
+  wrong rather than silently working.
+  
+  DEPENDS ON: RELAY epic, CLI-1, CLI-2. PROOF fails today by construction.
+  _Proof: go test -race -run 'TestCLIPeers' ./client/... ./cmd/agent-bus-cli/..._
 
 ### EPIC CORE — Repo skeleton & server bootstrap
 
@@ -216,13 +699,22 @@
 - [ ] CORE-9 · CORE-9: Set IdleTimeout + MaxHeaderBytes on http.Server -- and deliberately leave Read/WriteTimeout UNSET — core, P2
   Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. The http.Server is constructed without resource bounds. Set explicit IdleTimeout (bounds idle keep-alive connections) and MaxHeaderBytes (bounds header memory per connection). DELIBERATELY LEAVE BOTH WriteTimeout AND ReadTimeout UNSET, and write a comment at the construction site saying WHY: either one is an absolute deadline on the whole request/response, so once the POLL epic lands, a 30s long-poll (defaultPollTimeout) is killed mid-flight by any timeout shorter than it -- and 'add a sensible timeout' is exactly the well-intentioned change a later contributor makes without realising it breaks the product's core mechanic. The comment is the guardrail. Request BODY size is bounded separately and per-handler with http.MaxBytesReader inside the JSON-decode helper that the ENROL/SEND epics (AUTH-1, MSG-2, MSG-3) introduce -- that is security finding P1-2, currently UNREACHABLE because both routes 405 before the body is ever touched, which is why it is filed here as a constraint on those tasks rather than as a fix to today's code. Add a note to AUTH-1/MSG-3 so the helper ships with the limit from day one.
   _Proof: go test -race -run TestServerTimeouts ./internal/httpapi_
-- [ ] CORE-12 · CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 — core, P2
+- [ ] CORE-12 · CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 — core, P1
+  SETTLED 2026-08-02 BY USER DECISION -- no longer a proposal to weigh. "**The default listen address is
+  localhost.**" (DECISIONS.md, 2026-08-02, answers 8-11.) Raised P2 -> P1 because it is now a decided
+  default that the shipped binary contradicts, not a suggestion. Change defaultListen to 127.0.0.1:8080
+  and record the flag/env override in CONTRACTS.md; a deployment that needs a wider bind says so
+  explicitly. Note DEPLOY-1/DEPLOY-2 (container + Compose) must set the bind explicitly, because a
+  container that listens only on 127.0.0.1 inside its own namespace is unreachable from outside it --
+  that is the one place this default needs an override, and it should be an explicit, commented one.
+  
+  --- ORIGINAL DESCRIPTION ---
   Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. defaultListen is ":8080", which binds every interface, over plain HTTP, with no authentication implemented yet. Defaults are sticky: this one persists straight through the AUTH epic, and in the window before AUTH-2's middleware lands, anyone on the network can reach the bus. Change the default to "127.0.0.1:8080" and keep the flag/env var so binding wider is an explicit, deliberate operator choice rather than the path of least resistance. Update CONTRACTS.md and any README/AGENT_PROTOCOL.md example that assumes the old default, and check scripts/bus-serve.sh (AGENTIF-1) agrees.
   _Proof: go test -race -run TestDefaultListen ./internal/httpapi_
 - [x] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0
   GET /healthz returns 200 {"status":"ok"} once the server is accepting connections (liveness only, no auth). GET /v1/info returns bus id, server version/build info, and uptime (also unauthenticated -- needed for pre-enrolment discovery). Both registered on the main mux. The bus id is served through a small interface with a placeholder implementation until the ID epic lands (see invariant 1: the server is authoritative on ids).
   _Proof: go test -race -run TestHealthzInfo ./internal/httpapi_
-- [ ] None · Re-verify CORE-1's gofmt proof with the corrected ($(go env GOROOT)/bin/gofmt) invocation -- its recorded proof_cmd never actually ran gofmt on this box — process, P1
+- [x] None · Re-verify CORE-1's gofmt proof with the corrected ($(go env GOROOT)/bin/gofmt) invocation -- its recorded proof_cmd never actually ran gofmt on this box — process, P1
   CORE-1's recorded proof_cmd is `go build ./... && test -z "$(gofmt -l .)"` (see the task's own record, public_id eea035e4-92de-4ca3-95ed-fa8073cd6a81). VERIFIED THIS SESSION: `gofmt` is NOT on PATH on this box -- only `$(go env GOROOT)/bin/gofmt` (currently /usr/local/go/bin/gofmt) is. A bare `gofmt` invocation fails to launch (exit 127), and critically `test -z "$(gofmt -l .)"` still PASSES in that case, because a command substitution whose command fails to even exec produces EMPTY stdout, and `test -z ""` is true. So CORE-1's proof_cmd, run literally as recorded on THIS box, never actually ran gofmt at all -- it recorded a PASS that proves nothing, i.e. it is VACUOUS in the exact sense scripts/proof-check.sh exists to catch (see task 84b76d5e, "a `-run` pattern that matches no test must FAIL, not pass vacuously" -- this is the same failure class one level up the stack: a whole tool silently absent rather than a test silently unmatched).
   
   This is not hypothetical for CORE-1 specifically: reviewer and security's notes on CORE-1 (see its journal) both separately report running gofmt via `$GOROOT/bin/gofmt` or equivalent and finding the repo clean -- so the SUBSTANCE was very likely fine -- but the recorded proof_cmd itself, taken literally, is not evidence of that; it is evidence of nothing.
@@ -239,8 +731,27 @@
   A small INTERNAL structured logger built over stdlib log (no third-party dependency, per invariant 8), wired as HTTP middleware logging method/path/status/latency/request-id for every route. Level configurable via the -log-level flag. Note: log/slog landed in go1.21 and is NOT available on this box's go1.19.4 toolchain (verified: log/slog absent from GOROOT/src/log and go list std), so it cannot be used here; the decision is recorded in DECISIONS.md.
   _Proof: go test -race -run TestLoggingMiddleware ./internal/httpapi_
 - [x] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0
+  PROOF_CMD CORRECTED 2026-08-02 (spec-keeper). The recorded proof was
+  `go build ./... && test -z "$(gofmt -l .)"`. **On this box that never ran gofmt at all**: `gofmt` is
+  NOT on PATH (only `$(go env GOROOT)/bin/gofmt` is), a command substitution whose command fails to exec
+  produces EMPTY stdout, and `test -z ""` is TRUE -- so the clause PASSED by failing to launch. That is
+  the same vacuity class scripts/proof-check.sh exists to catch, one level up the stack: a whole TOOL
+  silently absent rather than a test silently unmatched.
+  
+  NOT REOPENED, and here is the evidence for that call rather than an assertion. The CORRECTED command
+  was RE-RUN against the current tree on 2026-08-02 through scripts/proof-check.sh:
+  `verdict=PASS class=file-assertion,toolchain exit=0` -- `go build ./...` succeeds and the REAL gofmt
+  binary reports zero files needing formatting. CORE-1's substance was fine; only its evidence was
+  worthless. Reviewer and security notes on this task independently recorded running gofmt via
+  $GOROOT/bin and finding the repo clean, which agrees.
+  
+  STANDING RULE, now in CLAUDE.md: never use a bare `gofmt`; use `go fmt ./...` or
+  `"$(go env GOROOT)/bin/gofmt" -l .`. See task c0a5bdb6 for the full write-up and fc8cd234 for the
+  sweep of every other proof_cmd containing a bare gofmt call.
+  
+  --- ORIGINAL DESCRIPTION ---
   Initialize go.mod (module github.com/dodgymike/agent-bus, go1.19 toolchain pin), create the internal/ package layout (ids, store, wal, hub, auth, httpapi, relay) as packages with doc.go stubs, and the cmd/agent-bus/ dir. The HTTP package is named `httpapi`, NOT `http`: naming it `http` would shadow stdlib net/http in every file that imports both, which is a needless papercut. .gitignore already covers build artifacts and /data/ -- verify, do not duplicate. No server logic yet -- this is the scaffold every other task builds on.
-  _Proof: go build ./... && test -z "$(gofmt -l .)"_
+  _Proof: go build ./... && test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"_
 - [ ] CORE-6 · CORE-6: logging maxValueLen=1024 truncates panic stack traces (exempt `stack` or raise to 8192) — core, P2
   Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. internal/logging caps every field value at maxValueLen=1024, which silently truncates the `stack` field of a panic log line -- exactly the field whose tail (the deepest frames, i.e. where the panic actually happened) matters most. Measured: a real net/http request path produces a 1238-byte stack, so production loses the tail. The existing test does NOT catch this because it drives the handler through httptest, whose shorter call stack measures 962 bytes -- under the cap -- so the test passes while production truncates. Fix: either exempt the `stack` key from the cap or raise the cap to 8192 (state which and why; a cap still exists to stop an attacker-controlled header blowing up the log). CRUCIALLY, also fix the TEST so it exercises a stack long enough to trip the old cap -- otherwise the same blind spot reappears the next time the limit is tuned. Keep the cap on all other fields.
   _Proof: go test -race -run TestPanicStackNotTruncated ./internal/logging ./internal/httpapi_
@@ -346,9 +857,37 @@
 
 ### EPIC DOCS — Documentation
 
-- [ ] DOCS-2 · DOCS-2: PROTOCOL.md -- wire protocol + on-disk format — docs, P1
+- [ ] DOCS-2 · DOCS-2: PROTOCOL.md -- wire protocol + on-disk format — docs, P0
+  RAISED P1 -> P0 2026-08-02. **PROTOCOL.md DOES NOT EXIST.** Verified first-hand this pass: CLAUDE.md's
+  repository-layout section lists it as a tracked contract document ("PROTOCOL.md -- the wire protocol +
+  on-disk format") and there is no such file in the repo. THREE OTHER TASKS ARE WRITTEN AS THOUGH IT
+  DOES and grep it in their proof commands -- DUR-4-FU-DOCS (0b6d5c11, now P0), the unknown-record-type
+  docs task (804fa84c), and CLI/CONTRACTS work -- so its absence is now BLOCKING, not merely a gap.
+  This task OWNS CREATING THE FILE; those tasks own sections within it.
+  
+  MANDATED CONTENT ADDED BY THE 2026-08-02 DECISIONS -- the user's decision text says these MUST be
+  stated in PROTOCOL.md, so they are not discretionary:
+   - **AT-LEAST-ONCE DELIVERY.** "Duplicates are the normal steady state, which is what invariant 10's
+     idempotency exists to absorb. Must be stated in PROTOCOL.md and AGENT_PROTOCOL.md."
+   - **THE NARROWED INVARIANT 4.** Acknowledged data may be discarded when found corrupt: "The
+     narrowing is deliberate and must be stated in PROTOCOL.md, not left implicit." Likewise the
+     narrowed invariant 6 (truncation no longer restricted to a verified-corrupt tail).
+   - **THE AUDIT LOG IS METADATA AND ROUTING INFO ONLY** -- id, sequence, sender, recipients, bus path,
+     timestamp, size, content hash. NEVER bodies. A deliberate 2026-08-02 decision so the trail stays
+     compatible with E2E-encrypted, forward-secret payloads.
+   - Retention: 1 day or 1 GB, whichever comes first. Default listen address: localhost.
+   - Sessions: server-provided token, client-signed, <=1h, opaque handle, DO NOT survive restart;
+     revocation via /leave is IMMEDIATE.
+   - On-disk format: FormatVersion 1 today; ondisk-format-version=2 is RESERVED for DUR-12's
+     CRC32C -> HMAC-SHA256 change. Say what is current and what is reserved.
+  
+  PROOF. `test -s PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'metadata' PROTOCOL.md`
+  -- FAILS TODAY at clause 1 (the file does not exist), correctly and non-vacuously. The previous
+  proof (`test -s PROTOCOL.md`) was fine but did not pin the two mandated statements.
+  
+  --- ORIGINAL DESCRIPTION ---
   Every HTTP route (method, path, auth requirement, request/response shape) and the on-disk format (WAL record framing, audit log format, roster/counter file layouts) -- maintainer-facing, kept current as routes land.
-  _Proof: test -s PROTOCOL.md_
+  _Proof: test -s PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'metadata' PROTOCOL.md_
 - [x] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0
   README.md -- what agent-bus is, quickstart (build, run one bus, enrol two agents, exchange a message via the wrappers). DECISIONS.md -- seeded with its append-only-dated-entry convention and a placeholder for the enrolment signing-scheme decision. Written early so later tasks have somewhere to record decisions.
   _Proof: test -s README.md && test -s DECISIONS.md_
@@ -358,12 +897,129 @@
 
 ### EPIC DUR — Durability: WAL, two-phase commit, recovery, audit log
 
-- [ ] None · DUR-4-FU-DOCS: CONTRACTS.md/PROTOCOL.md do not document the WAL recovery surface (RepairTail/TailRepair/corrupt-tail policy) — docs, P1
-  CONTRACTS.md gained a WAL section in commit 6f22a99 but does not cover RepairTail, TailRepair, Recovered.Repaired, or the corrupt-tail policy in internal/wal/recover.go; PROTOCOL.md has no account of recovery/truncation semantics at all. Needs: (1) CONTRACTS.md entries for the RepairTail(path, kind, logger) function signature and the TailRepair{Path,Truncated,At,Removed,NextIndex,Reason} struct it returns, and for Recovered.Repaired; (2) a PROTOCOL.md section describing WHEN truncation is permitted (a single, provably-incomplete frame at EOF -- never more than one cut per start) and the operator-facing statement that ANY OTHER corruption (mid-file, or a complete-but-checksum-bad final frame) is a REFUSAL TO START, not a repair. RELATED, DO NOT DUPLICATE: task 804fa84c-e97b-4737-8866-801f87468da4 (docs, P1) already covers documenting the general startup-refusal-on-unknown-record behaviour from DUR-3, and bd3cc650-da3f-483d-a48d-321ab2a8d1dd (docs, P2) already covers fixing the stale CONTRACTS.md:55 record-type list -- read both first; this task is specifically the RepairTail/TailRepair API surface and truncation policy that neither of those covers. NOTE: internal/wal/recover.go is still under active review (see DUR-10, DUR-11) -- confirm the final shape of RepairTail/inspectTail against the current working tree before writing the docs, not against commit 6f22a99, since the API has already been rewritten once (laterRecordInTail -> inspectTail).
-- [ ] None · DUR-4-FU-DECISIONS: DECISIONS.md -- record the corrupt-tail truncation policy — durability, P1
-  Invariant 6 (append-only log) permits exactly one truncation per start, and DUR-4/DUR-10/DUR-11 made three judgement calls that CLAUDE.md requires be recorded in DECISIONS.md but which currently exist only in task journal notes: (1) truncation is permitted ONLY for a provably-incomplete frame at EOF -- a full-length frame that fails its own checksum is a FATAL STARTUP ERROR, not a repair, even though a naive read would call both cases a torn tail; (2) a NUL tail longer than one frame length is refused, not truncated; (3) the tail-safety proofs (inspectTail's index-window search and checksum-over-plausible-boundary check) are CRC-based, so they hold against random/media corruption but explicitly do NOT hold against an attacker with write access to the data directory -- a deliberate scope limit, not an oversight. Flagged independently by reviewer, security, and reliability-reviewer during the DUR-4 review chain (see DUR-4 task notes, and DUR-11's own text: "DESIGN CALL REQUIRED (record it in DECISIONS.md)"). Write this once DUR-10/DUR-11 land so the decision reflects the code that actually shipped, not an interim version.
-- [ ] None · DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start — durability, P2
-  "Refuse to start" is now the designed answer to several WAL damage classes (see internal/wal/recover.go, DUR-4/DUR-10/DUR-11) and there is no runbook or tooling to diagnose it. Needs: (1) a read-only WAL dumper (offset / index / record-type / length / CRC-ok, one line per frame) so an operator facing a refused start can see what is actually on disk without writing a throwaway Go program; (2) metrics/log counters for tail-repaired, repair-refused, and commit-records-discarded-by-repair, so a repair is visible in whatever the server already logs/exposes; (3) an alarm-worthy signature: a bus that repairs its tail on EVERY boot is the signature of failing media, and that pattern should be detectable from the counters in (2), not just from reading logs by hand. Ship as a scripts/bus-*.sh wrapper per invariant 7 (agents/operators never hand-construct this). Depends on DUR-9 (wiring wal.Open into the server) landing first, since there is no running-server surface to attach metrics/wrappers to yet.
+- [ ] None · DUR-4-FU-DOCS: document the WAL recovery surface AND the narrowed invariants 4 and 6 AND at-least-once delivery in PROTOCOL.md/CONTRACTS.md — docs, P0
+  GROWN 2026-08-02 BY THE USER DECISIONS. This task now carries THREE documentation obligations the
+  2026-08-02 decisions create, not just the original RepairTail API surface. Two of them the decision
+  text says explicitly must be documented -- so they are not optional.
+  
+  NOTE FIRST: **PROTOCOL.md DOES NOT EXIST.** Verified 2026-08-02 -- CLAUDE.md's repository layout lists
+  it as a tracked contract document ("PROTOCOL.md — the wire protocol + on-disk format") and there is no
+  such file in the repo. Three separate tasks (this one, 804fa84c, and DOCS-2) are written as though it
+  does. DOCS-2 owns CREATING it; this task owns the RECOVERY section within it. If DOCS-2 has not landed
+  when this is picked up, create the file with only the sections this task owns and let DOCS-2 fill the
+  rest -- do not block, and do not write the wire protocol here.
+  
+  (1) THE NARROWED INVARIANTS -- REQUIRED BY THE DECISION, NOT OPTIONAL.
+      Invariant 4 ("nothing is acknowledged before it is durable") is NARROWED: acknowledged data may
+      now be DISCARDED when it is found corrupt. The decision says in terms: "The narrowing is
+      deliberate and must be stated in PROTOCOL.md, not left implicit." Say it honestly -- we do not
+      lose acknowledged data through our OWN write path, but we will not hold the bus hostage to
+      damaged media.
+      Invariant 6 is NARROWED: truncation is no longer restricted to a verified-corrupt TAIL; damaged
+      records anywhere may be discarded, with a log entry each.
+      Document the operator-facing consequence: the bus ALWAYS restarts on damage, and every discard is
+      logged loudly and specifically. Non-damage errors (permission denied, I/O failure, dirlock held)
+      still refuse to start.
+  
+  (2) AT-LEAST-ONCE DELIVERY -- ALSO REQUIRED BY THE DECISION.
+      "Delivery is AT-LEAST-ONCE. Duplicates are the normal steady state, which is what invariant 10's
+      idempotency exists to absorb. Must be stated in PROTOCOL.md and AGENT_PROTOCOL.md." So state it in
+      BOTH, and state the consequence for an agent author: your handler must be idempotent, and the
+      server-minted monotonic sequence plus your cursor -- not the signature -- is what gives freshness.
+  
+  (3) THE ORIGINAL SCOPE -- the WAL recovery API surface.
+      CONTRACTS.md entries for RepairTail(path, kind, logger), the TailRepair{Path,Truncated,At,Removed,
+      NextIndex,Reason} struct, and Recovered.Repaired. A PROTOCOL.md section describing WHEN records
+      are discarded and what the operator sees.
+      WARNING: the ORIGINAL wording of this task said the policy is "a single, provably-incomplete frame
+      at EOF -- never more than one cut per start" and that anything else "is a REFUSAL TO START". THAT
+      IS THE OLD, REVERSED POLICY. Do not write it. Confirm the FINAL shape against the code after
+      DUR-11 lands -- the API has already been rewritten twice (laterRecordInTail -> inspectTail) and
+      DUR-11 is rewriting the failure modes right now.
+  
+  RELATED, DO NOT DUPLICATE: 804fa84c (P1) covers the unknown-record-type startup behaviour, itself
+  re-scoped to always-restart; bd3cc650 (P2) covers the stale CONTRACTS.md:55 record-type list; DOCS-2
+  owns creating PROTOCOL.md. Read all three first.
+  
+  SEQUENCING: after DUR-11 lands. Raised to P0 because two of the three obligations are explicit
+  "must be stated in PROTOCOL.md" instructions from the user's own decision, and because the currently
+  shipped documentation describes a policy the code no longer follows.
+  
+  PROOF. `test -f PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'always restart' PROTOCOL.md && grep -q 'RepairTail' CONTRACTS.md`
+  -- FAILS TODAY at the first clause (PROTOCOL.md does not exist), which is correct and non-vacuous.
+  _Proof: test -f PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'always restart' PROTOCOL.md && grep -q 'RepairTail' CONTRACTS.md_
+- [ ] None · DUR-4-FU-DECISIONS: record the SHIPPED damage-class taxonomy in DECISIONS.md -- which classes discard, what each logs, and the exact list of non-damage errors that stay FATAL — durability, P1
+  RE-SCOPED 2026-08-02 AFTER VERIFYING WHAT THE NEW DECISIONS.md ENTRY ALREADY COVERS. All THREE of
+  this task's original items are now SATISFIED by the 2026-08-02 user decision (DECISIONS.md,
+  "Sixteen open questions settled"), checked line by line:
+  
+   (1) "truncation is permitted ONLY for a provably-incomplete frame at EOF -- a full-length frame that
+       fails its own checksum is a FATAL STARTUP ERROR" -- REVERSED, not merely recorded. Section 1
+       ("the bus ALWAYS restarts") narrows invariant 6 explicitly: "truncation is no longer restricted
+       to a verified-corrupt *tail*. Damaged records anywhere may be discarded -- with a log entry
+       each." There is nothing left to record; recording the old policy would be actively harmful.
+   (2) "a NUL tail longer than one frame length is refused, not truncated" -- same reversal, subsumed by
+       the general discard-and-log rule.
+   (3) "the tail-safety proofs are CRC-based, so they do NOT hold against an attacker with write access
+       to the data directory" -- RECORDED. Section 3 replaces CRC32C with an HMAC-SHA256 keyed MAC and
+       states the residual verbatim: "storing it beside the WAL defends against a remote client but not
+       against an attacker who already has data-directory write access."
+  
+  WHAT IS GENUINELY STILL MISSING, and is now this task's only scope: the decision states the POLICY,
+  but not the TAXONOMY the code will actually implement. That has to be written down once, or every
+  future maintainer re-derives it from recover.go:
+  
+   A. Enumerate the DAMAGE CLASSES that trigger discard-and-continue -- torn tail, checksum/MAC failure
+      on a complete frame, a length field that overshoots EOF, a NUL run, an unknown record type, a
+      corrupt file header, a mid-file damaged frame -- and for EACH say what is discarded (one frame?
+      to EOF? the whole file?) and what the log line must contain (offset, record index, record type,
+      bytes discarded, reason). "Log loudly and specifically" is the requirement; this is where
+      "specifically" gets defined.
+   B. Enumerate the NON-DAMAGE errors that STAY FATAL: permission denied, I/O failure, data-directory
+      lock already held, missing/unwritable data dir, and (per DUR-12) a missing or wrong MAC key. This
+      list is the thing that stops always-restart from degrading into "silently start empty on an
+      unreadable disk".
+   C. State the honest narrowing of invariants 4 and 6 in the same section, so PROTOCOL.md and
+      AGENT_PROTOCOL.md can quote it rather than paraphrase it.
+  
+  WRITE THIS AFTER DUR-11 LANDS, so it describes the code that actually shipped rather than an interim
+  version. DUR-11 is the task doing the discard/log/continue conversion. Append a NEW dated section --
+  DECISIONS.md is contended; never edit existing lines.
+  
+  PROOF. `grep -q 'damage class' DECISIONS.md && grep -q 'stays fatal' DECISIONS.md` -- verdict FAIL
+  (class=file-assertion, exit 1) TODAY, which is correct and non-vacuous: it fails precisely because
+  the taxonomy is unwritten and flips to PASS when it exists. The written entry must therefore contain
+  both phrases literally.
+  _Proof: grep -q 'damage class' DECISIONS.md && grep -q 'stays fatal' DECISIONS.md_
+- [-] None · DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start — durability, P2
+  DISSOLVED 2026-08-02 BY USER DECISION -- ALWAYS-RESTART IS THE ESCAPE HATCH.
+  
+  This task existed because "refuse to start" was the designed answer to several WAL damage classes and
+  an operator facing a refused boot had no runbook and no tooling. The user has decided the bus ALWAYS
+  restarts (DECISIONS.md, 2026-08-02: *"always be able to restart, prefer to discard messages and/or
+  corruption, with logging"*). The decision text says so explicitly: "This also removes the
+  permanent-refuse-to-start DoS, and with it the need for the operator escape hatch that was previously
+  recommended: always-restart *is* the escape hatch."
+  
+  The premise is gone, so the task is superseded rather than done -- nothing was built.
+  
+  WHAT WAS IN IT THAT IS STILL WANTED, AND WHERE IT WENT -- so this is not a silent loss of three good
+  ideas:
+   - (1) A read-only WAL dumper (offset / index / record-type / length / MAC-ok per frame). Still
+     useful, but as an ORDINARY diagnostic, not an emergency tool. It belongs in the merged CLI epic as
+     a subcommand (see CLI-6 'log' and CLI-8 'doctor'), NOT as a scripts/bus-*.sh wrapper -- invariant 7
+     was amended on 2026-08-02 and the Go CLI replaces the shell wrappers.
+   - (2) Counters for tail-repaired / repair-refused / commit-records-discarded-by-repair. This is now
+     MORE important, not less: under always-restart the discard is the normal path, and the whole point
+     of the decision is that every discard must be OBSERVABLE. It is folded into DUR-11's added scope
+     (discard + SPECIFIC log + continue) and into CORE-5 (metrics/inspect endpoint).
+   - (3) "A bus that repairs its tail on EVERY boot is the signature of failing media." Still true and
+     still worth alarming on; it rides on (2)'s counters and belongs with CORE-5.
+  
+  DO NOT REVIVE THIS TASK. If the dumper is wanted, file it against the CLI epic.
+  
+  --- ORIGINAL DESCRIPTION ---
+  "Refuse to start" is now the designed answer to several WAL damage classes (see internal/wal/recover.go, DUR-4/DUR-10/DUR-11) and there is no runbook or tooling to diagnose it. Needs: (1) a read-only WAL dumper (offset / index / record-type / length / CRC-ok, one line per frame); (2) metrics/log counters for tail-repaired, repair-refused, and commit-records-discarded-by-repair; (3) an alarm-worthy signature: a bus that repairs its tail on EVERY boot is the signature of failing media. Ship as a scripts/bus-*.sh wrapper per invariant 7. Depends on DUR-9.
 - [ ] None · Startup scans the WAL twice (soon three times) -- bound the cost — durability, P2
   Startup replay currently scans the WAL twice: the log.go replay pass and the writer.go open pass. DUR-4 (corrupt-tail detection) adds a third scan. This is fine at small WAL sizes but does not bound startup cost as the log grows. Relates to DUR-7 (snapshot/compaction follow-up), which is the real long-term fix for unbounded replay time -- this task is narrower: either (a) collapse the passes where safe, or (b) explicitly document/measure the cost and defer the real fix to DUR-7, whichever the implementer judges correct after reading the current pass structure post-DUR-4.
   _Proof: go test -bench=BenchmarkWALOpen ./internal/wal_
@@ -371,6 +1027,42 @@
   Implement prepare(record)->commit(id) as two distinct fsynced WAL appends; in-memory state is applied ONLY after the commit record is durable. A response is never sent to the caller until commit-fsync completes (invariant 4). This is the write path every mutating route (enrol, send, broadcast, leave) goes through.
   _Proof: go test -race ./internal/wal/_
 - [ ] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0, blocked
+  POLICY REVERSED 2026-08-02 BY USER DECISION -- READ THIS BEFORE ACTING ON ANY OLDER TEXT HERE.
+  
+  THE SENTENCE THIS TASK WAS FILED ON IS NOW WRONG. It said: "A corrupt record anywhere but the tail is
+  a fatal startup error, not a truncation." The user has decided the opposite (DECISIONS.md, 2026-08-02,
+  "Availability over retention: the bus ALWAYS restarts"): *"always be able to restart, prefer to
+  discard messages and/or corruption, with logging"*. Recovery must ALWAYS reach a running server.
+  Damaged records ANYWHERE may be discarded -- each with its own specific log entry. Invariant 6 is
+  narrowed: truncation is no longer restricted to a verified-corrupt TAIL. Invariant 4 is narrowed:
+  acknowledged data may be discarded when found corrupt (we still never lose it through our OWN write
+  path). The defect was never that data was discarded -- it is that the discard was SILENT. Every
+  discard must be OBSERVABLE.
+  
+  ANYONE IMPLEMENTING FROM THIS TASK MUST NOT BUILD THE OLD POLICY. The line that still holds:
+  NON-DAMAGE errors -- permission denied, I/O failure, the data-directory lock already held -- stay
+  FATAL. Do not turn an unreadable disk into a silently empty bus.
+  
+  WHERE THE REMAINING WORK LIVES. This task's own code shipped at 6f22a99 and has been rewritten twice
+  since (d06c704, dad04aa, c362152). It is kept open only because it was completed over an unresolved
+  reviewer CHANGES-REQUIRED and a security PASS-WITH-CONCERNS. Both of those are now resolved or
+  re-homed:
+    - The reviewer P0 was landed as comment-only corrections at c362152 under DUR-10, which is now DONE
+      (reviewer and security gates both ran; that was the whole point of DUR-10).
+    - Security's two HIGH findings are DUR-11 (884d3da4), IN FLIGHT, re-scoped to the always-restart
+      policy: finding (a) (index-anchored search -- one damaged record must never mass-delete later
+      INTACT records) stands as a real bug; finding (b) is no longer an invariant-4 violation, and its
+      residual is the SILENCE plus the false "provably never fsynced" doc comments.
+    - Security's later MEDIUM (CRC32C is GF(2)-linear, so the completeness "proof" is forgeable by an
+      ordinary remote client) is DUR-12, the CRC32C -> HMAC-SHA256 keyed MAC change, holding reserved
+      ondisk-format-version=2 and BLOCKED on where the MAC key lives.
+    - The "no operator override exists" escalation (c3a27591) is DISSOLVED: always-restart IS the
+      escape hatch.
+  
+  THIS TASK CLOSES WHEN DUR-11 CLOSES. It carries no independent implementation work any more; it is
+  the parent record. Do not dispatch an implementer here -- dispatch to DUR-11.
+  
+  --- ORIGINAL DESCRIPTION, retained for the record. Its last sentence is REVERSED, see above. ---
   During replay, a checksum mismatch or short read at the END of the WAL (the torn record a crash mid-write leaves behind) is detected, logged, and the file is truncated at the last verified-good record boundary -- the ONLY truncation ever permitted (invariant 6). A corrupt record anywhere but the tail is a fatal startup error, not a truncation.
   _Proof: go test -race -run TestWALRepairTail ./internal/wal_
 - [ ] None · wal.OpenWriter/RepairTail open bus.wal without O_NOFOLLOW -- a planted symlink is followed (writer.go:68, recover.go:593/618) — durability, P1
@@ -401,10 +1093,44 @@
   
   Sequencing: BLOCKED until DUR-4 lands. The lock goes in internal/wal/log.go Open, which the DUR-4 agent is editing right now. Do not start this while DUR-4 is in_progress.
   _Proof: go test -race -run "TestDirLock|TestAcquire|TestSecondAcquireFailsFast|TestReadHolderPID|TestBusyError" ./internal/dirlock && go test -race -run TestRunRefusesALockedDataDir ./cmd/agent-bus_
-- [ ] None · Document the new startup-refusal behaviour when WAL replay hits an unknown record — docs, P1
-  DUR-3 introduced a new way for a bus to refuse to boot: a WAL containing a record this code cannot interpret now FAILS STARTUP, where previously the server started with empty memory. That direction is correct (silent data loss is worse than a loud refusal to start), but it is an operator-visible behaviour change and needs to be documented -- PROTOCOL.md and/or the operator-facing notes should say: what triggers it, what the operator sees, and what recovery/remediation looks like. NOTE: CONTRACTS.md is being edited by another agent right now (parallel DUR wave) -- whoever picks this up must re-read CONTRACTS.md fresh before editing anything there to avoid clobbering a concurrent edit.
-  _Proof: grep -n "unknown record\|refuses to start\|startup failure" PROTOCOL.md_
-- [~] DUR-9 · DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose to handlers) — durability, P0, in progress
+- [ ] None · Document what the bus does with an UNKNOWN WAL record type -- the answer is now discard-and-continue, not refuse-to-start (REVERSED 2026-08-02) — docs, P1
+  REVERSED 2026-08-02 BY USER DECISION. THE BEHAVIOUR THIS TASK WAS FILED TO DOCUMENT IS BEING REMOVED,
+  SO DO NOT DOCUMENT IT.
+  
+  The task said: "DUR-3 introduced a new way for a bus to refuse to boot: a WAL containing a record this
+  code cannot interpret now FAILS STARTUP ... That direction is correct (silent data loss is worse than
+  a loud refusal to start)." The user decided the opposite (DECISIONS.md, 2026-08-02): *"always be able
+  to restart, prefer to discard messages and/or corruption, with logging"*. An unknown record type is a
+  DAMAGE class: discard it, log loudly and specifically, keep running. The decision reconciles the two
+  positions -- "The defect was never that data was discarded; it is that the discard was SILENT."
+  
+  WHAT TO DOCUMENT INSTEAD (in PROTOCOL.md, plus the operator-facing notes):
+   - What an unknown record type IS (a record written by a NEWER binary, or a damaged type field --
+     the reader cannot tell them apart, which is exactly why refusing to start was a downgrade trap).
+   - What the bus DOES: discards that record, logs a specific line naming offset, record index, the
+     unrecognised type value and the byte count discarded, and CONTINUES to a serving state.
+   - What the operator SEES and what it means -- in particular that a burst of unknown-type discards
+     after a rollback is the signature of a DOWNGRADE, not of media failure, and the remedy is to run
+     the newer binary again rather than to repair the log.
+   - What is NOT affected: NON-DAMAGE errors still refuse to start (permission denied, I/O failure,
+     data-directory lock held, missing/unwritable data dir).
+  
+  RELATED, DO NOT DUPLICATE: DUR-4-FU-DOCS (now P0) owns the RepairTail/TailRepair API surface, the
+  narrowed invariants 4 and 6, and at-least-once delivery; bd3cc650 owns the stale CONTRACTS.md:55
+  record-type list; DOCS-2 owns CREATING PROTOCOL.md, WHICH DOES NOT EXIST YET (verified 2026-08-02 --
+  this task's original proof_cmd grepped a file that is not in the repo, so it could never have passed).
+  e875182a is the sibling forward-compat problem: internal/wal/log.go's decodePayload uses
+  DisallowUnknownFields, so an unknown FIELD is currently fatal for the same downgrade reason an unknown
+  TYPE was -- reconcile the two answers rather than documenting them differently.
+  
+  SEQUENCING: after DUR-11, which is the task actually converting the refusals into discards.
+  
+  PROOF. `test -f PROTOCOL.md && grep -q 'unknown record type' PROTOCOL.md` -- FAILS TODAY at clause 1,
+  correctly and non-vacuously, because PROTOCOL.md does not exist. The previous proof_cmd
+  (`grep -n "unknown record\|refuses to start\|startup failure" PROTOCOL.md`) named a nonexistent file
+  AND grepped for the retired policy's wording.
+  _Proof: test -f PROTOCOL.md && grep -q 'unknown record type' PROTOCOL.md_
+- [x] DUR-9 · DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose to handlers) — durability, P0
   THE DURABILITY PLANE IS NOT WIRED TO THE SERVER. Verified 2026-08-02: `grep -rn 'internal/wal' cmd/ internal/httpapi/` matches only a COMMENT in cmd/agent-bus/main.go:165 -- there is no import; `wal.Open` has ZERO non-test callers in the whole repo; and internal/httpapi/server.go:101-102 registers exactly two routes (/healthz, /v1/info) beside a well-tested WAL library that no request path touches. DUR-1..DUR-4 are all `done` and NONE of their behaviour is live in the binary. That is the single biggest gap between what the backlog claims and what the process does.
   
   SCOPE (this task only wires what already exists -- do NOT add new WAL features):
@@ -420,16 +1146,76 @@
   
   PROOF NOTES: the proof_cmd is non-vacuous BY CONSTRUCTION and FAILS TODAY (verified: proof-check.sh --quiet -> verdict=FAIL exit=1, stops at clause 1 because main.go has no wal import). Clause 2 is the DUR-3 anti-vacuity guard (assert at least one test actually RUNs before trusting the run). The last clauses are the invariant-7 end-to-end check: a real server brought up through scripts/bus-serve.sh must leave a non-empty bus.wal in its data dir -- 'the handler is written' is not the same as 'a running server does it'. Uses an isolated AGENT_BUS_RUN_DIR/port, never the tracked data/ dir.
   _Proof: grep -q '"github.com/dodgymike/agent-bus/internal/wal"' cmd/agent-bus/main.go && test $(go test -run TestServerOpensWALOnStart -v ./... 2>&1 | grep -c "=== RUN") -gt 0 && go test -race -run TestServerOpensWALOnStart ./... && rm -rf /tmp/agent-bus-dur9 && AGENT_BUS_RUN_DIR=/tmp/agent-bus-dur9 AGENT_BUS_LISTEN=127.0.0.1:8091 bash scripts/bus-serve.sh start && test -s /tmp/agent-bus-dur9/data/bus.wal && AGENT_BUS_RUN_DIR=/tmp/agent-bus-dur9 AGENT_BUS_LISTEN=127.0.0.1:8091 bash scripts/bus-serve.sh stop_
-- [ ] DUR-11 · DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record INDEX, and stop truncating a checksum-failing LAST acknowledged record — durability, P0
+- [~] DUR-11 · DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record INDEX, and stop truncating a checksum-failing LAST acknowledged record — durability, P0, in progress
+  RE-SCOPED 2026-08-02 BY THE USER DECISION "THE BUS ALWAYS RESTARTS" (DECISIONS.md, 2026-08-02, section 1).
+  STATUS DELIBERATELY UNCHANGED -- a feature-runner is in flight against this task under exactly the policy
+  below. Read this whole section before the historical text further down, which was written against the
+  OLD refuse-to-start policy and is retained only as the record of how the findings were discovered.
+  
+  THE POLICY THIS TASK NOW IMPLEMENTS.
+  
+  (a) FINDING (a) STANDS AS A REAL BUG, unchanged and still P0. One damaged record must never cause the
+      MASS DELETION of later records that are themselves INTACT. The veto's forward search must be
+      ANCHORED ON RECORD INDEX, not on end-of-file. Security's probe: one flipped bit in a mid-file
+      length field plus one junk byte at EOF deleted 8 committed records, NextIndex 41 -> 33, silently.
+      Anchoring on EOF gives ZERO protection in precisely the case RepairTail exists for -- a genuine
+      torn tail -- because the veto only fires when the file ends exactly on a record boundary.
+  
+  (b) FINDING (b) IS NO LONGER AN INVARIANT-4 VIOLATION. Discarding a checksum-failing LAST record is
+      now SANCTIONED behaviour: "always be able to restart, prefer to discard messages and/or
+      corruption, with logging". Invariant 4 is narrowed accordingly -- acknowledged data may be
+      discarded when it is found corrupt; we do not lose acknowledged data through our OWN write path,
+      but we will not hold the bus hostage to damaged media.
+      THE REMAINING DEFECT IN (b) IS THE SILENCE AND THE FALSE DOC COMMENTS, NOT THE DISCARD.
+      - Every discard must be OBSERVABLE: a specific log record naming what was discarded (offset,
+        record index, record type, byte count, and why), not a bare boolean or a silent success.
+      - The doc comments that claim the discard is "provably" of a never-fsynced record are FALSE and
+        must go. Reviewer flagged them as P0 on DUR-4; the implementer already narrowed the worst of
+        them at c362152, but the claim must not survive anywhere: "the frame is torn" does NOT imply
+        "its fsync never completed". The code and the comments must agree.
+      There is no longer a design call to make here and no DECISIONS.md entry is owed for it -- the user
+      has decided. Do NOT re-open the refuse-vs-truncate debate.
+  
+  (c) ADDED SCOPE -- CONVERT EVERY DAMAGE-CLASS REFUSAL INTO DISCARD + SPECIFIC LOG + CONTINUE.
+      Recovery must ALWAYS reach a running server. Sweep internal/wal (RepairTail, truncatableTail,
+      inspectTail, and every error path that today propagates out of wal.Open as fatal, plus the
+      fatal-on-repair-refusal handling in cmd/agent-bus/main.go) and turn each DAMAGE-class error into:
+      discard the damaged record(s), log loudly and specifically what was discarded, keep running.
+      Truncation is no longer restricted to a verified-corrupt TAIL (invariant 6 narrowed): damaged
+      records ANYWHERE may be discarded -- with a log entry EACH.
+      THE LINE, AND IT MATTERS: NON-DAMAGE ERRORS STAY FATAL. Permission denied, an I/O failure, the
+      data-directory lock already held, a missing/unwritable data dir -- these are not damaged records
+      and must still refuse to start with a clear operator message and a non-zero exit. Do not turn an
+      unreadable disk into a silently empty bus. Note cmd/agent-bus/wal_startup_test.go currently has
+      TestServerOpensWALOnStartRefusesACorruptLog, which asserts the OLD policy for a garbage file
+      HEADER -- decide explicitly whether a bad file header is damage (discard/reinitialise + log) or a
+      non-damage refusal, say which in the commit message, and make the test assert whichever you chose.
+      This also removes the permanent refuse-to-start DoS, and with it the operator escape hatch that
+      was previously recommended: always-restart IS the escape hatch (DUR-4-FU-TOOLING is superseded).
+  
+  OUT OF SCOPE, EXPLICITLY: the CHECKSUM SCHEME and the ON-DISK FORMAT. CRC32C is being replaced by an
+  HMAC-SHA256 keyed MAC under a separate P0 task holding the reserved ondisk-format-version=2. Do not
+  touch format.go's checksum construction, do not bump FormatVersion, and do not try to fix the
+  GF(2)-linearity forgery here. Expect the torn-tail heuristic to get SIMPLER, not more complex, once a
+  strong MAC can distinguish damage from truth -- so do not build elaborate new heuristics that the MAC
+  task will have to unwind.
+  
+  TESTS. Keep TestCrashInjectionSingleBitCorruptionSweep (internal/wal/crash_injection_test.go) green
+  and EXTEND the net: the torn-tail-PLUS-mid-file-corruption combination that finding (a) exploits has
+  no coverage today, and every new discard path needs a test asserting the SERVER STILL STARTS and the
+  specific log line was emitted. A discard with no log line is the bug, so assert the log, not just the
+  absence of an error. Needs the mandated reviewer AND security gates.
+  
+  --- HISTORICAL TEXT, retained as the discovery record. Its "DESIGN CALL REQUIRED" paragraph and its
+  --- refuse-to-start framing are SUPERSEDED by the policy above. ---
+  
   FILED BY spec-keeper so two DEMONSTRATED, STILL-OPEN silent-data-loss findings are not lost inside a task that is already marked done. Source: the security agent's kind=response on DUR-4 (PASS-WITH-CONCERNS, 2026-08-02T14:13:06), which was posted BEFORE DUR-4 was flipped done and was never resolved or waived. Both findings were reproduced with probes against a /tmp copy, not argued from the code. CRITICALLY, security re-ran its probes against the WORKING-TREE fix (the laterRecordInTail veto that DUR-10 covers) and both holes SURVIVE it -- DUR-10 is a strict improvement but does NOT close these.
   
-  FINDING (a) HIGH -- the veto's anchor is the wrong thing. laterRecordInTail only fires when the file ends EXACTLY on a record boundary, i.e. when there is NO torn tail. That is precisely the case RepairTail does NOT exist for, so the veto gives ZERO protection whenever a genuine torn tail is present -- the normal situation after a crash mid-append. Probe: one flipped bit in a mid-file length field PLUS one junk byte appended at EOF (or one byte truncated off) => 8 committed records deleted, NextIndex 41 -> 33, no error, Open+Replay succeed silently. The doc comment calls this 'two independent faults'; security's objection is that a crash mid-append is not an independent rare fault, it is the trigger. RECOMMENDED FIX (security's): anchor the forward search on the record INDEX, not on end-of-file.
+  FINDING (a) HIGH -- the veto's anchor is the wrong thing. laterRecordInTail only fires when the file ends EXACTLY on a record boundary, i.e. when there is NO torn tail. Probe: one flipped bit in a mid-file length field PLUS one junk byte appended at EOF (or one byte truncated off) => 8 committed records deleted, NextIndex 41 -> 33, no error, Open+Replay succeed silently. RECOMMENDED FIX (security's): anchor the forward search on the record INDEX, not on end-of-file.
   
-  FINDING (b) HIGH -- a checksum-failing LAST record is assumed torn. A single flipped bit in the PAYLOAD of the final record -- a complete, fsynced, ACKNOWLEDGED record -- is byte-indistinguishable from a torn write and is truncated away. Probe: replay applied 2 -> 1, NextIndex 5 -> 4. This is an invariant-4 violation (an acknowledged write was lost). Security's underlying point: 'the frame is torn' does NOT imply 'its fsync never completed' -- a CRC failure at the tail is equally the signature of media corruption in a durable record. The current doc comments assert the stronger claim; reviewer independently flagged the same comments as P0(b) on DUR-4 ('a proof rather than a heuristic' and TailRepair.NextIndex's 'only ever discarded when its fsync provably never completed' are both false). Whatever is decided, the code and the comment must agree.
+  FINDING (b) HIGH -- a checksum-failing LAST record is assumed torn. A single flipped bit in the PAYLOAD of the final record -- a complete, fsynced, ACKNOWLEDGED record -- is byte-indistinguishable from a torn write and is truncated away. Probe: replay applied 2 -> 1, NextIndex 5 -> 4.
   
-  DESIGN CALL REQUIRED (record it in DECISIONS.md): finding (b) has no free lunch -- refusing to start on a bad final CRC turns a 1-bit media error into a permanent startup denial of service, while truncating turns it into silent acknowledged-data loss. Pick deliberately, state the reasoning, and consider whether the answer differs for a frame that is SHORT (length overshoots EOF => genuinely torn) versus one that is COMPLETE but CRC-bad (=> media corruption, likely fatal).
-  
-  SEQUENCING: land DUR-10 first (it is the additive veto already sitting in the tree); this task then hardens that veto's anchor and settles the last-record policy. Needs the mandated reviewer AND security gates, and the fix must keep TestCrashInjectionSingleBitCorruptionSweep (internal/wal/crash_injection_test.go:317) green while gaining sweep coverage for the torn-tail-PLUS-mid-file-corruption combination, which no current test exercises. Proof command validated by scripts/proof-check.sh --quiet on the working tree: verdict=PASS class=test tests_run=40 top_level=14 skipped=1 failed=0 -- it is a real net today, and must be EXTENDED by this task rather than merely kept passing.
+  SEQUENCING: DUR-10 is now DONE (review debt paid; reviewer CHANGES-REQUIRED comment-only, security PASS-WITH-CONCERNS, comment fixes landed at c362152). Proof command validated by scripts/proof-check.sh: verdict=PASS class=test tests_run=60 top_level=17 skipped=1 failed=0 empty_pkgs=0 (re-run 2026-08-02 against HEAD) -- it is a real net today, and must be EXTENDED by this task rather than merely kept passing.
   _Proof: go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal_
 - [ ] DUR-5 · DUR-5: Append-only message audit log — durability, P0
   A second, separate append-only file (distinct from the WAL) that every message (broadcast + DM) is written to as part of the same commit, independent of the WAL's own record-keeping -- the audit trail invariant 6 calls out explicitly. The audit record is METADATA AND ROUTING INFO ONLY -- message id, sequence, sender, recipient(s), bus path traversed, timestamp, size, and a content hash of the body -- and never the message body itself. The WAL is NOT affected by this change: it still carries whatever it needs to reconstruct state on replay, including bodies if replay requires them; only this separate audit log is metadata-only. Rationale: agent-bus is getting Signal-style end-to-end encryption with forward secrecy (CRYPTO epic); an audit log holding plaintext becomes unwritable the moment PFS lands, and one holding ciphertext the bus can never decrypt is dead weight -- so the audit trail is deliberately a routing/provenance record, not a content archive, and the content hash preserves the ability to prove WHAT was sent without retaining it. Never edited or truncated except by the verified-corrupt-tail rule. Forward-compatibility requirement: the record must be shaped so the CRYPTO epic can add an encrypted-envelope descriptor field later WITHOUT an on-disk format break (e.g. reserve/permit additional optional fields in the JSON payload).
@@ -437,7 +1223,20 @@
 - [ ] DUR-7 · DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) — durability, P3
   Low-priority follow-up. As the WAL grows unbounded, startup replay time grows with it; add periodic snapshotting of in-memory state plus safe truncation of the WAL prefix the snapshot covers, so recovery time is bounded by (snapshot load + tail replay) rather than full history. Not required for correctness, only for long-run startup latency.
   _Proof: go test -race -run TestSnapshotCompaction ./internal/wal_
-- [~] DUR-10 · DUR-10: Review the RepairTail truncation veto -- half is already in `main` UNREVIEWED (landed inside DUR-8's commit d06c704) and the rest has been rewritten since — durability, P0, in progress
+- [x] DUR-10 · DUR-10: Review the RepairTail truncation veto -- half is already in `main` UNREVIEWED (landed inside DUR-8's commit d06c704) and the rest has been rewritten since — durability, P0
+  VERDICT 2026-08-02 (spec-keeper): THE REVIEW DEBT IS PAID -- this task is (b) satisfied by the gates that actually ran, and it is being completed on that basis. It is NOT (a) an outstanding gate and NOT (c) obsolete: the gates ran, produced findings, and the findings were landed.
+  
+  EVIDENCE, verified first-hand this pass:
+  - `git log --oneline -- internal/wal/recover.go` -> c362152, dad04aa, d06c704, 6f22a99. d06c704 is the never-gated half; dad04aa is the rewrite; c362152 ("WAL: correct comments that claimed a proof where the code has a heuristic (DUR-10)") is the comment-only landing of the reviewer's P0.
+  - REVIEWER GATE RAN (kind=response, 2026-08-02 15:06): CHANGES-REQUIRED, COMMENT-ONLY -- "the code is approved, it is strictly safer than what d06c704 left in main, and every finding is a comment or a scope/test-coverage nit, not a code defect". It re-probed DUR-11 finding (a) over 35 cases with zero silent losses, and mutation-tested rather than argued.
+  - SECURITY GATE RAN (kind=response, 2026-08-02 15:23): PASS-WITH-CONCERNS, byte-verified against dad04aa, ~345k probe cases. Its NEW MEDIUM finding (CRC32C is GF(2)-linear, so lengthOnlyDamage's completeness "proof" is forgeable by an ordinary remote client) is NOT dropped: it is the direct motivation for the 2026-08-02 decision to replace CRC32C with an HMAC-SHA256 keyed MAC, and it is carried by the MAC task, not by this one.
+  - IMPLEMENTER landed the reviewer's P0/P1 comment corrections at c362152 with ZERO executable lines changed (`git diff -U0` had no non-comment +/- lines).
+  - Every agent that touched this task posted kind=report + kind=model; reviewer and security also posted kind=response.
+  
+  WHAT MOVED OUT OF SCOPE, and where it went. The description below still describes "recovery REFUSES TO START rather than cutting" as the designed failure mode. THAT POLICY IS NOW REVERSED by the user decision of 2026-08-02 ("Availability over retention: the bus ALWAYS restarts" -- DECISIONS.md). Converting every damage-class refusal into discard + specific log + continue is DUR-11's scope (884d3da4), in flight. Replacing the CRC32C checksum with a keyed MAC is the MAC task's scope. Neither is a reason to keep this review-debt task open: the debt was "this code reached main without a reviewer or a security gate", and that is now false.
+  
+  --- ORIGINAL DESCRIPTION FOLLOWS (retained verbatim; read the reversal above before acting on any "refuse to start" language in it) ---
+  
   REVIEW CODE THAT IS ALREADY PARTLY IN `main` AND IS STILL MOVING. This task's premise has been
   CORRECTED TWICE -- read this paragraph before anything else. It was originally filed (by spec-keeper on behalf of
   backlog-triage, pass 4b) as "review-and-land an uncommitted fix". That framing is now WRONG on both halves: the code
@@ -514,6 +1313,80 @@
 - [x] DUR-1 · DUR-1: WAL record framing + writer — durability, P0
   Define the on-disk WAL record format (length-prefixed + CRC32 checksum per record, monotonic record index) in internal/wal, and implement the append-only writer: Append(record) writes framed bytes and fsyncs before returning. The single building block every other DUR task builds on.
   _Proof: go test -race ./internal/wal/_
+- [ ] DUR-12 · DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ondisk-format-version=2) -- BLOCKED on where the MAC key lives — durability, P0, blocked
+  ON-DISK FORMAT CHANGE. THE RESERVED FORMAT VERSION IS **ondisk-format-version = 2**, allocated
+  2026-08-02 from the Spec Server `ondisk-format-version` namespace by spec-keeper (the same namespace
+  internal/wal/format.go:14-19 already cites for FormatVersion = 1). DO NOT PICK A DIFFERENT NUMBER AND
+  DO NOT LET ANOTHER FORMAT CHANGE REUSE IT. Note ID-2-WIRING-SCHEMA may ALSO need a format bump if it
+  chooses Option B -- it must reserve its OWN value. Format changes are ORDERED.
+  
+  BLOCKED -- AND THE BLOCKER IS A QUESTION THE USER HAS NOT ANSWERED.
+  
+    WHERE DOES THE MAC KEY LIVE?
+  
+    A key stored beside the WAL in the data directory defends against the attack that motivated this
+    change -- an ordinary REMOTE CLIENT crafting a payload -- but it does NOT defend against an
+    attacker who already has DATA-DIRECTORY WRITE ACCESS, because that attacker can read the key and
+    recompute any MAC at will. The candidate answers (key file in the data dir at 0600; key outside the
+    data dir; key from an env var / operator-supplied at start; OS keyring; derived from a passphrase)
+    trade off differently on unattended restart, containerised deployment, key rotation and backup, and
+    the choice determines whether a lost key means a bus that cannot read its own log. THIS IS A
+    PRODUCT DECISION, NOT AN IMPLEMENTATION DETAIL. Do not start coding until it is answered and
+    recorded in DECISIONS.md. Also settle, in the same decision: what happens on a MISSING or WRONG key
+    at startup -- under the always-restart policy that is arguably a NON-DAMAGE error (the media is
+    fine, the operator misconfigured it) and should stay FATAL rather than discard the entire log.
+  
+  WHY THIS CHANGE, in one line the implementer must not lose: CRC32C is an error-detecting code, not an
+  integrity primitive -- it is UNKEYED and GF(2)-LINEAR, and security DEMONSTRATED end-to-end (DUR-10
+  kind=response, 2026-08-02) that an ordinary remote client, submitting nothing but printable-ASCII
+  JSON in its own message body, could solve for bytes that make a TORN prefix of its own record satisfy
+  recovery's completeness "proof". A keyed MAC eliminates that BY CONSTRUCTION: a client cannot compute
+  a MAC over a key it does not hold. User decision, 2026-08-02, verbatim: "don't use crc! use a
+  hash/hmac/more modern approach. We're not optimising for efficiency, we're optimising for integrity
+  and security".
+  
+  CONSTRUCTION -- INVARIANT 9 IS ABSOLUTE HERE. Use the Go stdlib's high-level API: `crypto/hmac` +
+  `crypto/sha256`, via hmac.New / hmac.Equal. NEVER hand-roll, "adapt" or assemble a MAC out of
+  primitives; never compare MACs with bytes.Equal or ==. This outranks invariant 8's stdlib-first bias
+  and any argument from performance -- broken crypto fails SILENTLY, so "our tests pass" is not
+  evidence. No third-party dependency is needed or wanted.
+  
+  SCOPE.
+  1. Replace the CRC32C field in the frame with an HMAC-SHA256 tag over the header-plus-payload bytes
+     the CRC covered today (define the covered range EXACTLY, in PROTOCOL.md, and make it unambiguous:
+     the length field MUST be inside the covered range or the length-inflation class of attack survives
+     the change).
+  2. Bump FormatVersion 1 -> 2 in internal/wal/format.go, using the RESERVED value above.
+  3. A RECOVERY PATH FOR LOGS ALREADY WRITTEN IN THE CRC32C FORMAT IS MANDATORY. Format changes are
+     ordered: a version-1 file must be recognised by its header and either read with the old verifier
+     or converted, with the behaviour stated explicitly and tested. Today `verifyFileHeader`
+     (internal/wal/format.go:328) rejects any version != FormatVersion outright, so a naive bump turns
+     every existing bus into one that will not read its own log. Decide and document the upgrade story
+     (read-v1-verify-with-CRC then write v2 going forward, or an explicit one-shot conversion) and
+     whether a v2 reader may ever DOWNGRADE-write v1 (it should not).
+  4. DUR-4's TORN-TAIL HEURISTIC SHOULD GET **SIMPLER**, NOT MORE COMPLEX. Much of inspectTail /
+     lengthOnlyDamage / truncatableTail exists to compensate for a weak, forgeable checksum. Under a
+     strong MAC, "this frame verifies" becomes trustworthy, so the plausible-boundary search and the
+     completeness "proof" should shrink or disappear. Actively look for code to DELETE here; a change
+     that only adds is a sign the opportunity was missed. Coordinate with DUR-11, which is rewriting
+     the same functions for the always-restart policy -- DUR-11 lands FIRST and this task must not
+     collide with it in internal/wal/recover.go.
+  5. Key handling per the decision above, plus rotation: at minimum say what happens when the key
+     changes, even if the answer is "not supported yet, and here is the error you get".
+  6. CONTRACTS.md + PROTOCOL.md updated with the new frame layout, the covered range, the version-2
+     header and the v1 compatibility statement.
+  
+  TESTS REQUIRED. A negative test that a frame whose payload was altered fails verification; a test
+  that a v1 (CRC32C) log is still readable per the chosen compatibility story; a test that a WRONG key
+  does not silently pass; and the crash-injection sweep kept green against the new format. Constant-time
+  comparison must be asserted by CODE REVIEW (hmac.Equal), not by a timing test.
+  
+  PROOF. `go test -race -run 'TestWALFrameMACRejectsAlteredPayload|TestWALReadsFormatVersion1Log' ./internal/wal && go test -race ./internal/wal`
+  VACUOUS TODAY BY CONSTRUCTION -- neither test exists; they are this task's to write, and they are
+  named for the two things that must not be got wrong (forgery rejection, and not bricking existing
+  logs). MUST NOT BE COMPLETED ON A VACUOUS VERDICT: scripts/proof-check.sh must report PASS with
+  tests_run > 0, and its verdict must be quoted in test_summary.
+  _Proof: go test -race -run 'TestWALFrameMACRejectsAlteredPayload|TestWALReadsFormatVersion1Log' ./internal/wal && go test -race ./internal/wal_
 - [ ] None · Shutdown-timeout path can release the data-dir lock while handlers are still running — durability, P2
   In cmd/agent-bus/main.go waitAndShutdown, when srv.Shutdown exceeds shutdownGrace the code calls srv.Close(), which does NOT wait for in-flight handlers to return. run()'s deferred lock.Release() then drops the data-directory flock while a handler may still be running. Harmless TODAY because no handler writes to the data dir -- but it becomes a real hole the moment DUR-9 puts WAL writes behind those handlers: a second server could acquire the lock while the first is still mid-write. Fix direction: hold the lock until every handler has genuinely returned, or make the data-dir writers refuse to run once shutdown has passed the grace period. Also fold in the DUR-8 security pass's remaining P2: internal/dirlock.Acquire could fstat the opened lock file and require S_ISREG, closing the FIFO/directory-at-the-lock-path cases (both already fail closed today -- FIFO via EINVAL on Truncate, directory via EISDIR -- but the flock is taken on the FIFO first, and O_RDWR-on-a-FIFO-not-blocking is Linux-specific).
   
@@ -538,21 +1411,121 @@
   Cross-cutting test (depends on the WAL replay task): enrol several agents and send several messages, kill the process, restart, and assert every counter (sequence, per-name agent suffix) resumes strictly above its last-issued value -- table-driven across several kill points.
   _Proof: go test -race -run TestIDCounterRecovery ./internal/ids_
 - [~] ID-3 · ID-3: Agent id minting `<bus-id>.<name>-<n>` — id, P0, in progress
+  STATUS CORRECTION 2026-08-02 (spec-keeper) -- NOT COMPLETABLE YET, AND THE REASON IS NOT THE CODE.
+  
+  The CODE IS IN `main` and its proof PASSES. But the MANDATED reviewer and security gates NEVER RAN,
+  and there is no justification for the skip in AGENT_LOG.md. Completing it now would repeat exactly
+  the failure DUR-10 exists to record: production code reaching `main` with no gate.
+  
+  VERIFIED FIRST-HAND THIS PASS (commands quoted, nothing taken on the task's word):
+  - `git log --oneline -- internal/ids/agentid.go internal/ids/agentmint.go` -> ONE commit, 10dd7f4
+    "Agent id minting <bus-id>.<name>-<n> (ID-3)": internal/ids/agentid.go +239, agentid_test.go +391,
+    agentmint.go +389, doc.go +14/-2. `git status --porcelain` is EMPTY -- nothing left uncommitted.
+  - `scripts/proof-check.sh 'go test -race -run TestAgentIDMinting ./internal/ids'` ->
+    verdict=PASS class=test exit=0 tests_run=80 top_level=9 skipped=0 failed=0 empty_pkgs=0.
+    NOT vacuous; 9 top-level TestAgentIDMinting* tests exist in internal/ids/agentid_test.go.
+  - Task journal: `main` posted kind=request; spec-keeper posted report+model; implementer posted
+    report+model. THERE IS NO kind=response FROM reviewer AND NONE FROM security, and no
+    reviewer/test-engineer/security note of any kind. `grep -n 'ID-3' AGENT_LOG.md` -> NO MATCHES, so
+    the skip is not justified there either. The likely cause is the session-token kill recorded in
+    this task's own first spec-keeper note; the dispatched chain did not survive to its gates.
+  
+  REMAINING SCOPE OF THIS TASK -- pay the gate debt on ALREADY-COMMITTED code (10dd7f4). No rewrite.
+  1. REVIEWER GATE on internal/ids/agentid.go, agentmint.go and doc.go as committed at 10dd7f4.
+     Focus: is the `<bus-id>.<name>-<n>` grammar unambiguous under every input the parser accepts
+     (invariant 2 -- the '.' separator is what makes cross-bus routing parseable); is the per-name
+     counter genuinely durable and monotonic across restart (invariant 1 -- ids are never reused,
+     including across restarts); is the suffix spelling pinned to the sequence spelling so the two
+     cannot drift.
+  2. SECURITY GATE. The short name is UNTRUSTED CLIENT INPUT that ends up inside a routing identifier.
+     Focus: id spoofing / separator injection (can a crafted name make one agent's id parse as
+     another's, or as a bus-qualified id it does not own), length bounds and the oversized-id
+     non-echo path, and any Unicode/normalisation trick that makes two distinct names collide.
+  3. AGENT_LOG.md entry for ID-3 (there is none), recording the outcome and the fact that the gates
+     ran after the commit rather than before it.
+  4. If either gate finds a defect, fix it in a SEPARATE follow-up commit -- do not amend 10dd7f4.
+  
+  COMPLETION BAR: this task may be completed once both gates have posted kind=response (plus
+  kind=report + kind=model) and AGENT_LOG.md carries an ID-3 entry. commit_sha will be 10dd7f4 plus
+  any follow-up sha. The proof_cmd below is already validated PASS and does not need to change.
+  
+  --- ORIGINAL DESCRIPTION (delivered by 10dd7f4) ---
   Server mints the fully-qualified agent id at enrolment: client submits a desired short name, server appends a durable per-name counter suffix (-1, -2, ...) so a reused name never collides with a previous holder, and prefixes the bus id. Client never chooses its own id (invariant 1).
+  
+  SCOPE NOTE carried forward: CODE-ONLY, like ID-2. No enrolment wiring -- AUTH-1 owns that and is
+  in flight separately. Nothing in production calls the minting code yet.
   _Proof: go test -race -run TestAgentIDMinting ./internal/ids_
-- [~] None · ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed history — id, P0, in progress
+- [ ] ID-2-WIRING-SCHEMA · ID-2-WIRING-SCHEMA: DECIDE and record where the message sequence high-water mark lives on disk (blocks the floor derivation) — durability, P0
+  SPLIT OUT OF ID-2-WIRING (838677e6). This is a DECISION task -- docs only, no code -- and it is the thing actually blocking the floor derivation. See ID2_WIRING_DEEPDIVE.md sec 3.5, 4.2 and 4.4 (committed 2f89fc1) for the ranked options and the disproof test.
+  
+  THE PROBLEM. ids.Resume(floor) needs the highest sequence EVER WRITTEN TO DISK -- committed, aborted AND dangling. Today the sequence lives inside the caller-written PREPARE body (wal.Entry.Body), the WAL deliberately does not interpret Body, wal.Replay hands its callback COMMITTED entries only, and Recovered exposes no message-sequence high-water mark (Recovered.NextIndex is the WAL RECORD index, a different counter). So there is no way to derive the floor without first deciding WHERE the number lives.
+  
+  THE DECISION (record it in DECISIONS.md, dated, appended -- the file is contended, add a new section rather than editing lines):
+    Option A' -- the WAL offers every PREPARE to an observer during the EXISTING replay pass; the sequence stays in the caller's body and the ids/msg layer decodes it. No on-disk format change; also removes the third startup scan before it is ever added (see task 2a961fcc).
+    Option B  -- promote the sequence to a WAL-level field (Entry.Seq / preparePayload.Seq, Recovered.HighestSequence). This IS an on-disk format change and therefore REQUIRES a reservation from the `ondisk-format-version` namespace (NEVER pick the number) plus a downgrade note.
+  Record the chosen option, the rejected ones, and the sec-4.4 disproof test.
+  
+  ORDERING WARNING: the CRC32C -> HMAC-SHA256 MAC task is ALSO an on-disk format change and has ALREADY reserved ondisk-format-version=2. If this task chooses Option B it must reserve its OWN value; format changes are ORDERED and two agents must never share one version number.
+  
+  BLOCKS: ID-2-WIRING (838677e6) and ID-2-WIRING-OBSERVER.
+  
+  PROOF. `grep -q 'message sequence high-water mark' DECISIONS.md` -- verdict=FAIL class=file-assertion exit=1 TODAY, which is correct and non-vacuous: it fails precisely because the decision is unrecorded, and flips to PASS when it is written. The chosen wording must therefore contain that exact phrase.
+  _Proof: grep -q 'message sequence high-water mark' DECISIONS.md_
+- [ ] None · ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed history — id, P0, blocked
+  RE-SCOPED 2026-08-02 (spec-keeper) AFTER THE DEEP-DIVE. This task is now T4 of the deep-dive's own breakdown -- 'derive, prove and SEAL the sequence floor in main' -- and it is BLOCKED, not in progress.
+  
+  WHY. The deep-diver (dispatched as DESIGN INVESTIGATION ONLY) produced ID2_WIRING_DEEPDIVE.md, committed at 2f89fc1, and its verdict is: THE PREMISE IS CONFIRMED BUT THE TASK AS ORIGINALLY FILED CANNOT BE IMPLEMENTED YET, AND IS NOT EXPLOITABLE TODAY. The sequence number lives in the caller-written PREPARE body, no message-body schema exists, and nothing in production mints a sequence at all -- so there is no code path to harden. Implementing as specced would either invent the MSG-epic body schema or change the prepare payload format, and the backlog settles neither. It becomes a genuine P0 the instant the first MSG write path lands.
+  
+  VERIFIED FIRST-HAND BY SPEC-KEEPER before re-scoping: `git log --oneline -- ID2_WIRING_DEEPDIVE.md` -> 2f89fc1 ("ID2_WIRING_DEEPDIVE.md: the task as filed cannot be implemented yet"), and `git status --porcelain` is EMPTY -- so the INVESTIGATION is committed and NO production code was written, exactly as dispatched. The task's own code deliverable is therefore NOT delivered, which is why this is blocked rather than done.
+  
+  IT ALSO HAD NO proof_cmd AT ALL, which under the 2026-08-02 process decision ("a missing proof_cmd blocks completion, at least as hard as a vacuous one") made it uncompletable by definition. One is now recorded -- see PROOF below.
+  
+  THE WORK WAS SPLIT. Three sibling tasks now carry the separable parts; this task is the last of the four and depends on the other three:
+    ID-2-WIRING-SEAL     P0 -- Sequence refuses to issue from an unsealed floor. internal/ids only. NO dependencies; startable NOW.
+    ID-2-WIRING-SCHEMA   P0 -- DECIDE and record where the sequence high-water mark lives on disk. Docs only. THIS IS THE BLOCKER.
+    ID-2-WIRING-OBSERVER P0 -- wal offers every prepare (incl. dangling) to an observer in the existing replay pass. Depends on SCHEMA choosing Option A'.
+  
+  REMAINING SCOPE OF THIS TASK (T4). In cmd/agent-bus/main.go, after wal.Open, fold the observer over EVERY prepare, construct ids.Resume(floor), RaiseFloor from any other source, then Seal() -- and return a NON-NIL ERROR from run() on ANY failure: the scan errored, a message prepare's body had no seq or a zero seq, RaiseFloor returned non-nil, or Seal() returned non-nil. Log the derived floor at INFO beside the existing "write-ahead log opened" line.
+  
+  THE LANDMINE THIS TASK MUST COVER: a scan that FAILED must not be indistinguishable from an EMPTY log. Floor 0 from a failed derivation must refuse to start, not resume as a fresh bus. Note this is a NON-DAMAGE error (a derivation we cannot prove), so it stays FATAL and is NOT touched by the 2026-08-02 always-restart decision, which sanctions discarding DAMAGED RECORDS -- not guessing at an id floor. Reissuing a burned id is silent corruption of the audit trail, not a discarded message.
+  
+  --- ORIGINAL DESCRIPTION (still accurate as the statement of the hazard) ---
   ids.Resume(highestOnDisk) requires the highest sequence EVER WRITTEN TO DISK -- committed, aborted AND dangling. The obvious wiring produces exactly the value that is forbidden: wal.Replay(path, fn) hands fn COMMITTED entries only, and wal.Recovered exposes no message-sequence high-water mark at all (Recovered.NextIndex is the WAL RECORD index, a different counter that also advances for commits and aborts). Concrete break: allocate seq 100, write the PREPARE, fsync it, crash before the COMMIT. 100 is burned and an audit record for it may exist, but replay never surfaces it, the floor comes back 99, and the next send is minted as <bus-id>-100 -- two different messages sharing one id in the append-only audit trail, and any dedup keyed on message id conflates them (invariants 1 and 10). An attacker able to induce crashes in the prepare->commit window chooses what lands on the reissued id.
   
-  Required: derive the floor by scanning EVERY prepare record (committed, aborted and dangling) and decoding its payload -- not from Replay's committed callback. A caller that cannot PROVE its floor >= every sequence ever written MUST refuse to start rather than guess.
+  Cross-reference: ID-2 (a3a5edc4-0a34-4691-b1a6-c1206218ac65, completed CODE-ONLY). internal/ids/sequence.go's doc comment already spells all of this out.
   
-  Second hazard to close in the same task: Sequence.RaiseFloor's loud error is INERT at startup. It only fires once something has been issued (last != 0), so in the window where the floor is actually derived every value -- including one far too low -- is accepted silently. The wiring must therefore prove its floor itself and treat a non-nil RaiseFloor as FATAL (a bare s.RaiseFloor(x) is go vet-clean, so the error is trivially ignorable).
+  PROOF. `go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-bus` -- VACUOUS TODAY BY CONSTRUCTION (the test does not exist; it is this task's to write, modelled on cmd/agent-bus/wal_startup_test.go). MUST NOT BE COMPLETED ON A VACUOUS VERDICT: scripts/proof-check.sh must report PASS with tests_run > 0.
+  _Proof: go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-bus_
+- [ ] ID-2-WIRING-SEAL · ID-2-WIRING-SEAL: Sequence refuses to issue from an UNSEALED floor (the only half implementable today) — ids, P0
+  SPLIT OUT OF ID-2-WIRING (838677e6) on the deep-diver's recommendation -- see ID2_WIRING_DEEPDIVE.md sec 4.1 and sec 5/T1, committed at 2f89fc1. This is the ONLY half of ID-2-WIRING that can start immediately: it touches internal/ids ONLY and depends on nothing.
   
-  Note DUR-4's wal.RepairTail is NOT the hazard: it only cuts a last frame whose fsync provably never completed, so no number it discards was ever observed. The dangerous record is the DANGLING PREPARE, which did fsync and whose sequence stays burned forever.
+  THE DEFECT. internal/ids/sequence.go's RaiseFloor guard is INERT AT STARTUP. It only fires once something has been issued (last != 0), so in exactly the window where the floor is derived, every value -- including one far too low -- is accepted silently. Worse (deep-dive sec 3.4, verified first-hand there): `go vet` CANNOT be made to catch a bare `s.RaiseFloor(x)` that drops the error, so the mistake is invisible to the toolchain.
   
-  Cross-reference: ID-2 (a3a5edc4-0a34-4691-b1a6-c1206218ac65, completed CODE-ONLY -- allocator + message-id format exist but nothing mints ids yet). internal/ids/sequence.go's doc comment already spells all of this out; this task makes the code live up to it by wiring a correct floor derivation and treating RaiseFloor failure as fatal at startup.
+  REQUIRED.
+  - Add Seal(), ErrFloorUnproven and ErrFloorSealed to internal/ids/sequence.go.
+  - Next() returns (0, ErrFloorUnproven) until Seal() has been called. RaiseFloor returns ErrFloorSealed after.
+  - BOTH constructors are born UNSEALED (New and Resume) -- a fresh bus must seal explicitly too, so 'floor 0 because the log was empty' and 'floor 0 because derivation failed' can never be confused.
+  - Update sequence.go's doc comment ('When it may be called') and the 5 existing tests.
+  - Update CONTRACTS.md.
+  
+  NOT IN SCOPE: anything in cmd/agent-bus, anything in internal/wal, and the floor DERIVATION itself (that is ID-2-WIRING, which stays blocked on ID-2-WIRING-SCHEMA).
+  
+  PROOF. `go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids`. VACUOUS TODAY BY CONSTRUCTION -- the named test does not exist yet, which is the point: it is the test this task must write. The deep-diver ran the equivalent test against a scratch prototype and recorded verdict=PASS class=test exit=0 tests_run=5 top_level=1, so the command is executable and non-vacuous the moment the test is written. DO NOT COMPLETE THIS TASK ON A VACUOUS VERDICT; scripts/proof-check.sh must report PASS with tests_run > 0.
+  _Proof: go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids_
 - [x] ID-2 · ID-2: Monotonic sequence allocator (drives message ids) — id, P0
   A durable, strictly monotonic sequence counter (internal/ids) that the WAL commit path advances -- every allocated sequence number is durable before it is handed out. Message ids are `<bus-id>-<seq>`. The counter never re-issues a sequence number: on replay it resumes strictly ABOVE the highest sequence ever written to disk, whether that record reached commit or was only a discarded prepare. Under normal operation (every prepare commits) the committed sequence stream is contiguous; a crash between prepare-fsync and commit-fsync burns one number and leaves a gap in the committed stream -- that gap is expected and correct, not a bug, because reusing the burned number would let two different messages share the same `<bus-id>-<seq>` message id, and the audit log (a superset of committed history) would then contain both under that one id. Counter state is restored by the WAL replay task so a restart never re-issues a previously-issued sequence number.
   _Proof: go test -race ./internal/ids_
+- [ ] ID-2-WIRING-OBSERVER · ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an observer during the existing replay pass — durability, P0
+  SPLIT OUT OF ID-2-WIRING (838677e6). See ID2_WIRING_DEEPDIVE.md sec 5/T3 (committed 2f89fc1).
+  
+  BLOCKED ON ID-2-WIRING-SCHEMA choosing Option A'. If SCHEMA chooses Option B instead, this task is SUPERSEDED and replaced by ID-2-WIRING-HEADER (add Entry.Seq + preparePayload.Seq, expose Recovered.HighestSequence, RESERVE a fresh ondisk-format-version value -- never pick it -- bump FormatVersion, fix replay_test.go:1109's unknown-field fixture, ship a downgrade note; proof `go test -race -run 'TestWALRecoveredHighestSequence|TestWALFormatVersionRefusal' ./internal/wal`).
+  
+  REQUIRED (Option A' shape). Add wal.ReplayWithPrepares(path, fn, onPrepare); Replay delegates with a nil observer so no existing caller changes. onPrepare fires for EVERY prepare in file order -- committed, aborted and dangling -- BEFORE resolution. The wal package still does not interpret Body; it hands the bytes up. Update CONTRACTS.md and PROTOCOL.md.
+  
+  THE ASSERTION THAT MATTERS: the observer must see the DANGLING prepare's entry. That is the whole point -- assert a floor of 100 from a log whose only seq-100 record never committed. A test that only observes committed prepares proves nothing.
+  
+  PROOF. `go test -race -run TestWALReplayObservesEveryPrepare ./internal/wal && go test -race ./internal/wal`. VACUOUS TODAY BY CONSTRUCTION (the test does not exist). The deep-diver's scratch equivalent (TestFloorFromPrepareObserverInOnePass) is proven PASS, so the command is executable once written. DO NOT COMPLETE ON A VACUOUS VERDICT.
+  _Proof: go test -race -run TestWALReplayObservesEveryPrepare ./internal/wal && go test -race ./internal/wal_
 
 ### EPIC IDEM — Duplicate detection and idempotency (invariant 10)
 

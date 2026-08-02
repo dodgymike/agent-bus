@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -81,6 +82,23 @@ type Options struct {
 	// which is worse than a nil the caller has to check.
 	Durable DurableLog
 
+	// Auth is the enrolment and session authority (internal/auth). When it is
+	// non-nil the three credential-issuing routes -- /v1/enroll,
+	// /v1/session/begin and /v1/session/complete -- are registered.
+	//
+	// It may be nil -- the zero Options and every test that does not care about
+	// enrolment leave it so -- and nothing here may panic on that. When it is
+	// nil those routes are NOT REGISTERED AT ALL, so they 404 exactly like any
+	// other path this build does not serve. That is deliberately preferred over
+	// registering them and answering 503: a route that exists and refuses is a
+	// claim that the surface is there, and a server built without an auth
+	// service does not have it.
+	//
+	// There is no default: an auth service needs an id minter, and inventing
+	// one here would mint agent ids from a counter with nothing on disk behind
+	// it (invariant 1 -- see auth.Options.Minter).
+	Auth *auth.Service
+
 	// Now is the clock, overridable so tests can assert on uptime.
 	// Defaults to time.Now.
 	Now func() time.Time
@@ -95,6 +113,7 @@ type Server struct {
 	startedAt   time.Time
 	pollTimeout time.Duration
 	durable     DurableLog
+	auth        *auth.Service
 	now         func() time.Time
 	handler     http.Handler
 }
@@ -109,6 +128,7 @@ func New(opts Options) *Server {
 		startedAt:   opts.StartedAt,
 		pollTimeout: opts.PollTimeout,
 		durable:     opts.Durable,
+		auth:        opts.Auth,
 		now:         opts.Now,
 	}
 	if s.identity == nil {
@@ -131,6 +151,17 @@ func New(opts Options) *Server {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/info", s.handleInfo)
 
+	// Registered only when there is an auth service to serve them; see
+	// Options.Auth. NOTHING here authenticates a token on any other route --
+	// these three are the calls that ISSUE the credential, and enforcing it
+	// elsewhere is AUTH-2's change, kept separate so it is reviewable on its
+	// own. auth.Service.Authenticate is the seam it will wrap.
+	if s.auth != nil {
+		mux.HandleFunc(RouteEnroll, s.handleEnroll)
+		mux.HandleFunc(RouteSessionBegin, s.handleSessionBegin)
+		mux.HandleFunc(RouteSessionComplete, s.handleSessionComplete)
+	}
+
 	s.handler = LoggingMiddleware(s.log, mux)
 	return s
 }
@@ -150,6 +181,12 @@ func (s *Server) PollTimeout() time.Duration { return s.pollTimeout }
 // epics that add writing handlers. It is nil when none was supplied, so a
 // caller must check before writing; no route consumes it yet.
 func (s *Server) Durable() DurableLog { return s.durable }
+
+// Auth returns the enrolment and session authority the server was built with,
+// or nil when none was supplied -- in which case the credential-issuing routes
+// are not registered. AUTH-2 reaches it through here to authenticate the routes
+// that require a token.
+func (s *Server) Auth() *auth.Service { return s.auth }
 
 // HealthResponse is the body of GET /healthz.
 type HealthResponse struct {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,19 +16,40 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RepairTail is the ONLY code in this package that ever shortens a file
-// (invariant 6 permits exactly one exception to append-only: "a verified-corrupt
-// tail during recovery"). So the property these tests exist to defend is not
-// "the torn tail goes away" -- it is the far more important converse:
+// RepairLog (still reachable as RepairTail) is the ONLY code in this package
+// that ever removes bytes from a log.
 //
-//	REPAIRTAIL MUST NEVER SHORTEN A FILE EXCEPT FOR A TORN TAIL.
+// WHAT THESE TESTS ASSERTED UNTIL 2026-08-02, AND WHY THEY NO LONGER DO. The
+// property used to be "RepairTail must never shorten a file except for a torn
+// tail", and every negative case asserted a REFUSAL TO START plus a
+// byte-for-byte unchanged file. The user reversed that policy (DECISIONS.md,
+// "Availability over retention"): "always be able to restart, prefer to discard
+// messages and/or corruption, with logging". The rule is now
 //
-// Every negative case below therefore asserts three things, and the first is the
-// one that matters: the file is BYTE-FOR-BYTE unchanged, the error is fatal, and
-// TailRepair.Truncated is false. Comparing the full bytes rather than the size
-// is deliberate -- a repair pass that rewrote a frame in place would keep the
-// size and would be exactly the silent, permanent data loss this is guarding
-// against.
+//	DAMAGE IS NEVER FATAL. NOT BEING ABLE TO READ THE FILE STILL IS.
+//
+// so the cases that used to prove "this damage is refused" now have to prove
+// something strictly harder, because "it started" on its own is worth nothing:
+//
+//  1. RECOVERY RUNS -- RepairLog returns no error and the log is usable after.
+//  2. DAMAGE DOES NOT CASCADE -- exactly the damaged record goes, and every
+//     intact record BEHIND it is still there, with its ORIGINAL index. The
+//     mid-file cases below all carry committed records after the damage
+//     precisely so that a cascade shows up as a failure.
+//  3. THE DISCARD WAS LOGGED. That is what replaced "we never discard": the
+//     honest promise is now "we never discard SILENTLY". Tests here assert the
+//     specific log line, so deleting the logging fails them.
+//
+// A record whose LENGTH FIELD alone is damaged is RECOVERED rather than
+// discarded (rebuildFrame): its own checksum, recomputed over the bytes actually
+// present, proves the payload is all there. Several cases below used to be
+// refusals for exactly that reason and are now full recoveries -- which is
+// strictly better, since nothing at all is lost.
+//
+// What is STILL fatal, and still asserted as a refusal with the file untouched:
+// an audit file where a WAL was expected, a format version this binary does not
+// implement, and an unknown Kind. None of those are damage, and "repairing" them
+// would destroy a file that is probably intact.
 //
 // The positive cases assert the cut landed where ScanAll says the last good
 // record ends -- computed, never hardcoded, because frame sizes are
@@ -124,6 +146,171 @@ func repairAssertUntouched(t *testing.T, path string, before []byte, res TailRep
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Helpers for the post-2026-08-02 policy: recovery discards damage, so the
+// assertions are about WHAT SURVIVED and WHETHER THE LOSS WAS LOGGED, not about
+// whether the start was refused.
+// ---------------------------------------------------------------------------
+
+// pristineByIndex maps a fixture's records by index, so a survivor can be
+// compared against exactly the record it used to be even after a repair has
+// moved every offset behind it.
+func pristineByIndex(recs []Record) map[uint64]Record {
+	m := make(map[uint64]Record, len(recs))
+	for _, r := range recs {
+		m[r.Index] = r
+	}
+	return m
+}
+
+// assertSurvivors is the anti-cascade assertion, and it is the one that matters
+// most in this file: it re-scans the repaired file and demands that EXACTLY the
+// records named by want are in it, each still carrying its ORIGINAL index, type
+// and payload BYTES.
+//
+// Comparing payload bytes rather than counting records is deliberate. Discarding
+// the damaged record is sanctioned; quietly rewriting a record that was fine, or
+// renumbering a survivor so a hole disappears, is not -- and both would keep the
+// count right.
+func assertSurvivors(t *testing.T, path string, kind Kind, pristine []Record, want []uint64) {
+	t.Helper()
+	got, end, err := ScanAll(path, kind)
+	if err != nil {
+		t.Fatalf("ScanAll after the repair: %v: a repaired file must scan clean end to end", err)
+	}
+	byIndex := pristineByIndex(pristine)
+
+	var gotIdx []uint64
+	for _, r := range got {
+		gotIdx = append(gotIdx, r.Index)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the repaired file holds records %v, want exactly %v: recovery may discard the DAMAGED record and nothing else",
+			gotIdx, want)
+	}
+	for i, r := range got {
+		if r.Index != want[i] {
+			t.Fatalf("the repaired file holds records %v, want exactly %v (survivors keep their original indices, so a repaired log has HOLES)",
+				gotIdx, want)
+		}
+		p, ok := byIndex[r.Index]
+		if !ok {
+			continue // a fixture that was never scanned clean; the index check above is the assertion
+		}
+		if r.Type != p.Type {
+			t.Errorf("surviving record %d is a %s, want a %s: a survivor must come back byte-identical", r.Index, r.Type, p.Type)
+		}
+		if !bytes.Equal(r.Payload, p.Payload) {
+			t.Errorf("surviving record %d has payload %q, want %q: a repair must never rewrite a record it kept",
+				r.Index, r.Payload, p.Payload)
+		}
+	}
+	if size := fileSize(t, path); end != size {
+		t.Errorf("the repaired file scans to %d but is %d bytes: nothing may be left past the last record", end, size)
+	}
+}
+
+// logLinesWith returns every captured log line whose message is msg. One
+// recovery can emit several -- a file with two discards logs two "wal discarded
+// a damaged record" lines -- so the fields, not the message, are what pick one
+// out.
+func logLinesWith(out, msg string) []string {
+	var found []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "msg="+strconv.Quote(msg)) || strings.Contains(line, "msg="+msg) {
+			found = append(found, line)
+		}
+	}
+	return found
+}
+
+// findLogLine reports whether any line carries msg.
+func findLogLine(out, msg string) (string, bool) {
+	lines := logLinesWith(out, msg)
+	if len(lines) == 0 {
+		return "", false
+	}
+	return lines[0], true
+}
+
+// assertLogged demands a log line with the given message, carrying every one of
+// fields, at the given level ("" to accept any). The FIELDS select the line, so
+// a recovery that logged several discards can be checked one at a time.
+//
+// THIS IS THE ASSERTION THAT REPLACED "WE NEVER DISCARD". Discarding damaged
+// records is sanctioned policy now; discarding one without telling an operator
+// is the bug. Every test that provokes a discard calls this, so removing the
+// logging in RepairLog or Open fails them.
+func assertLogged(t *testing.T, out, level, msg string, fields ...string) string {
+	t.Helper()
+	lines := logLinesWith(out, msg)
+	if len(lines) == 0 {
+		t.Fatalf("nothing in the operator log says %q -- A DISCARD THAT IS NOT LOGGED IS THE BUG, since "+
+			"recovery is allowed to throw damage away only because it says so out loud:\n%s", msg, out)
+	}
+	for _, line := range lines {
+		matched := true
+		for _, f := range fields {
+			if !strings.Contains(line, f) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if level != "" && !strings.Contains(line, "level="+strings.ToLower(level)) {
+			t.Errorf("the %q line carrying %v is not at level=%s -- the LEVEL is the difference between "+
+				"\"an uncommitted prepare went\" and \"an acknowledged write went\", so it is part of the contract:\n%s",
+				msg, fields, strings.ToLower(level), line)
+		}
+		return line
+	}
+	t.Fatalf("no %q line carries all of %v, so an operator cannot tell what was lost. Lines found:\n%s",
+		msg, fields, strings.Join(lines, "\n"))
+	return ""
+}
+
+// assertNotLogged is the negative half: a message that must NOT appear.
+func assertNotLogged(t *testing.T, out, msg string) {
+	t.Helper()
+	if line, ok := findLogLine(out, msg); ok {
+		t.Errorf("the operator log says %q, and it must not here:\n%s", msg, line)
+	}
+}
+
+// captureRepair runs RepairLog with a capturing logger at the most verbose
+// level and returns the repair, the log text and the error.
+func captureRepair(t *testing.T, path string, kind Kind) (Repair, string, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	res, err := RepairLog(path, kind, logging.New(&buf, logging.LevelDebug))
+	return res, buf.String(), err
+}
+
+// openCapturing starts a Log the way a server does, with a capturing logger, and
+// returns what the Applier saw, the recovery record and the log text. It is how
+// the replay-stage discard tests get at both halves of the contract at once:
+// the server STARTED, and the loss reached the operator log.
+func openCapturing(t *testing.T, dir string) ([]Committed, Recovered, string, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	app := &testApplier{}
+	l, err := Open(LogOptions{Dir: dir, Applier: app, Logger: logging.New(&buf, logging.LevelDebug)})
+	if err != nil {
+		return nil, Recovered{}, buf.String(), err
+	}
+	rec := l.Recovered()
+	got := make([]Committed, app.count())
+	for i := range got {
+		got[i] = app.at(i)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("openCapturing: Close: %v", err)
+	}
+	return got, rec, buf.String(), nil
+}
+
 // TestWALRepairTailTruncatesTornTail is the positive half of the matrix: the
 // shapes a crash mid-append can actually leave behind, all of which are a strict
 // PREFIX of a single frame at the very end of the file (Append issues one write
@@ -138,62 +325,73 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 		// sizePreserved marks the cases where the damage does NOT shorten the
 		// file, so the "torn tail" is a whole frame that fails its checksum.
 		sizePreserved bool
-		wantReason    string
+		// wantRecordType is what the discard's log line must say was lost.
+		// "unreadable" is the honest answer when fewer than a frame header's
+		// worth of bytes survived -- there is then nothing in the file that says
+		// what the record was, and pretending otherwise would be a lie in an
+		// audit trail.
+		wantRecordType  string
+		wantRecordIndex string
 	}{
 		{
-			// (a) The classic: the frame header landed, the payload did not.
+			// (a) The classic: the frame header landed, the payload did not. The
+			// header survived, so the log can name the record that went.
 			name: "torn payload with an intact frame header",
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, recs[len(recs)-1].Offset+FrameHeaderSize+2)
 			},
-			wantReason: "truncated payload: have 2 of",
+			wantRecordType:  "commit",
+			wantRecordIndex: "4",
 		},
 		{
 			// (b) Fewer than 20 bytes of the final frame reached the disk. That
-			// can only happen at end of file, so nothing can follow it.
+			// can only happen at end of file, so nothing can follow it -- and
+			// nothing survives to say what was in it either.
 			name: "torn frame header, two bytes in",
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, recs[len(recs)-1].Offset+2)
 			},
-			wantReason: "truncated frame header: have 2 of 20 bytes",
+			wantRecordType:  "unreadable",
+			wantRecordIndex: "unknown",
 		},
 		{
 			// (c) The three boundaries around the frame header: one byte in, one
 			// byte short of a whole header, and exactly a whole header. The first
-			// two report a short header (FrameEnd 0, so the "nothing follows"
-			// proof is "fewer than a header's worth of bytes remain"); the third
-			// reports a short PAYLOAD, because the header parsed and declared an
-			// extent that runs past the end of the file. Different errors, same
-			// verdict: a torn tail.
+			// two leave too little to read a header at all; the third leaves a
+			// header that parsed and declared an extent running past the end of
+			// the file. Same verdict either way: a torn tail, discarded, logged.
 			name: "exactly one byte of the last frame",
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, recs[len(recs)-1].Offset+1)
 			},
-			wantReason: "truncated frame header: have 1 of 20 bytes",
+			wantRecordType:  "unreadable",
+			wantRecordIndex: "unknown",
 		},
 		{
 			name: "one byte short of a whole frame header",
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, recs[len(recs)-1].Offset+FrameHeaderSize-1)
 			},
-			wantReason: "truncated frame header: have 19 of 20 bytes",
+			wantRecordType:  "unreadable",
+			wantRecordIndex: "unknown",
 		},
 		{
 			name: "exactly a frame header and none of the payload",
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, recs[len(recs)-1].Offset+FrameHeaderSize)
 			},
-			wantReason: "truncated payload: have 0 of",
+			wantRecordType:  "commit",
+			wantRecordIndex: "4",
 		},
 	}
 	// NOTE ON WHAT IS *NOT* IN THIS TABLE. Damage that leaves the file its full
 	// length -- a flipped payload bit in a complete final frame, or a length field
-	// corrupted in a record whose bytes are all present -- is NOT a torn tail and
-	// lives in the refusal table below. Both were once asserted here as
-	// truncations, and both were wrong: an interrupted append leaves FEWER bytes
-	// than the header declares, never exactly enough, so a full-length frame was
-	// fully written and may have been fsynced and acknowledged. Discarding one
-	// loses accepted history and rolls the index high-water mark backwards.
+	// corrupted in a record whose bytes are all present -- is not a torn write:
+	// an interrupted append leaves FEWER bytes than the header declares, never
+	// wrong ones. Those shapes live in TestWALRepairTailDiscardsDamageThatIsNotATornTail
+	// below, where a corrupt length is RECOVERED (the record's own checksum proves
+	// it complete) and a corrupt payload in the last record is discarded and
+	// logged at ERROR as the acknowledged loss it may be.
 
 	for _, tc := range cases {
 		tc := tc
@@ -221,7 +419,7 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 				t.Fatalf("Replay of the damaged file = %v, want ErrCorrupt: the tail is not actually torn", err)
 			}
 
-			res, err := RepairTail(path, KindWAL, nil)
+			res, out, err := captureRepair(t, path, KindWAL)
 			if err != nil {
 				t.Fatalf("RepairTail on a torn tail: %v, want a repair", err)
 			}
@@ -242,10 +440,26 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 				t.Errorf("TailRepair.NextIndex = %d, want %d: the next append reissues the index the discarded frame carried",
 					res.NextIndex, wantNextIndex)
 			}
-			if !strings.Contains(res.Reason, tc.wantReason) {
-				t.Errorf("TailRepair.Reason = %q, want it to contain %q: the operator log must say WHY the tail went",
-					res.Reason, tc.wantReason)
+			if !strings.Contains(res.Reason, "no intact record follows it anywhere in the file") {
+				t.Errorf("TailRepair.Reason = %q, want it to say the search for a record behind the damage found nothing: "+
+					"a cut is only a TAIL when there is provably nothing after it", res.Reason)
 			}
+			if res.DiscardCount != 1 {
+				t.Errorf("TailRepair.DiscardCount = %d, want exactly 1: one torn frame was thrown away", res.DiscardCount)
+			}
+			if res.Rewritten || res.HeaderRepaired || res.Quarantined != "" || res.Exhausted {
+				t.Errorf("TailRepair = %+v, want a plain truncation: a torn tail needs no rewrite, no header repair and no quarantine", res)
+			}
+			// THE DISCARD REACHED THE OPERATOR LOG. This is the whole of what
+			// replaced "recovery never discards", so a test that only checked the
+			// bytes would now be checking the easy half.
+			assertLogged(t, out, "ERROR", "wal discarded a damaged record",
+				"path="+path, "stage=framing",
+				"record_type="+tc.wantRecordType, "record_index="+tc.wantRecordIndex)
+			assertLogged(t, out, "WARN", "wal truncated damage at the end of the log",
+				"path="+path, "at="+strconv.FormatInt(res.At, 10), "removed="+strconv.FormatInt(res.Removed, 10))
+			assertNotLogged(t, out, "wal rewrote a damaged log, keeping every intact record")
+
 			if got := fileSize(t, path); got != res.At {
 				t.Fatalf("the file is %d bytes after the repair, want exactly At = %d", got, res.At)
 			}
@@ -275,16 +489,34 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 	}
 }
 
-// TestWALRepairTailRefusesDamageThatIsNotATornTail is the half that keeps the
-// data. Every case here is damage that a partial write CANNOT have produced, or
-// damage with records after it, or damage in the file header -- and for each,
-// truncating would delete records that are sitting on disk perfectly intact.
-// The verdict is a refusal to start, which an operator can recover from; a
-// silent truncation is not.
-func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
+// TestWALRepairTailDiscardsDamageThatIsNotATornTail is the half that keeps the
+// data -- and after 2026-08-02 it keeps it by RECOVERING rather than by
+// refusing.
+//
+// Every case here is damage that a partial write CANNOT have produced, or damage
+// with records after it, or damage in the file header. Under the old policy each
+// one was a REFUSAL TO START, on the argument that an operator can recover from a
+// server that will not boot and cannot recover from one that quietly deleted
+// records. The user reversed that (DECISIONS.md, "Availability over retention"),
+// so the argument now has to be carried by the repair itself, and each case
+// asserts all four halves of it:
+//
+//	(i)   RECOVERY RUNS -- no error, and Open starts on the result;
+//	(ii)  EXACTLY the damaged record goes, named by index;
+//	(iii) every intact record BEHIND the damage is still there, byte for byte,
+//	      with its ORIGINAL index -- records 5 and 6 of the fixture are a
+//	      prepare/commit pair (acknowledged, accepted history) sitting after every
+//	      middle-of-file case precisely so that a cascade fails the test;
+//	(iv)  THE DISCARD WAS LOGGED, with its offset, index and type.
+//
+// Several cases that used to be refusals now lose NOTHING AT ALL: when only a
+// record's LENGTH FIELD is damaged, its own checksum recomputed over the bytes
+// actually present proves the payload is complete, so the record is rebuilt. Those
+// carry wantRebuilt and assert that all six records survive.
+func TestWALRepairTailDiscardsDamageThatIsNotATornTail(t *testing.T) {
 	// Six records: three complete transactions. Records 5 and 6 are a
 	// prepare/commit pair -- ACCEPTED HISTORY, already acknowledged to a client
-	// -- that sits after every middle-of-file case below, so any truncation here
+	// -- that sits after every middle-of-file case below, so any cascade here
 	// would be real, permanent data loss.
 	sixOps := []walOp{
 		opPrepare("message", `{"n":1}`), // 1
@@ -294,38 +526,20 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 		opPrepare("message", `{"n":3}`), // 5
 		opCommit(5),                     // 6
 	}
+	allSix := []uint64{1, 2, 3, 4, 5, 6}
 
-	// The four vetoes in truncatableTail, named. Asserting WHICH one fired is
-	// what stops a case passing for an accidental reason -- and vetoIllegalExtent
-	// in particular is the one that is easy to lose, because the damage there
-	// DOES declare an extent past the end of the file and a naive "the extent
-	// reaches EOF, so it is a tail" rule would truncate it.
-	const (
-		vetoFileHeader    = "the damage is in the file header, so a cut would be at offset 0"
-		vetoFrameIntact   = "the frame's checksum verified, so a partial write cannot explain it"
-		vetoRecordsFollow = "the frame's declared extent ends before EOF, so records follow the damage"
-		vetoIllegalExtent = "the declared extent is not a frame this writer could have produced"
-		vetoRecordsInTail = "a complete record is still sitting inside the region the cut would discard"
-		vetoCompleteFrame = "the frame's declared extent ends exactly at EOF, so every byte it needs is present"
-		vetoLengthOnly    = "the frame is complete and only its length field is corrupt"
-	)
-
-	// overshootLength corrupts the length field of the record at recs[i] to a
-	// value that is still LEGAL (at most MaxPayloadSize) but runs past the end of
-	// the file. It is the damage that defeats every shape-only test: the frame's
-	// own header now lies about how long it is, and the error it produces --
-	// "truncated payload", declared extent past EOF -- is byte-for-byte the error
-	// a genuine torn tail produces.
-	// bitFlipLength is the same damage in its most realistic form: ONE bit
-	// flipped in a length field, the way a bad sector or a cosmic ray delivers it.
-	// Setting bit 16 of a two-digit payload length yields ~65 KiB -- comfortably
-	// legal, comfortably past the end of a small log.
+	// bitFlipLength is the damage that defeats every shape-only test in its most
+	// realistic form: ONE bit flipped in a length field, the way a bad sector or a
+	// cosmic ray delivers it. Setting bit 16 of a two-digit payload length yields
+	// ~65 KiB -- comfortably legal, comfortably past the end of a small log -- so
+	// the error it produces ("truncated payload", extent past EOF) is
+	// byte-for-byte the error a genuine torn tail produces.
 	bitFlipLength := func(i int) func(*testing.T, string, []Record, int64) {
 		return func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 			t.Helper()
 			flipped := uint32(len(recs[i].Payload)) ^ 0x00010000
 			if flipped > MaxPayloadSize {
-				t.Fatalf("the flipped length %d is over MaxPayloadSize; this case must reach the tail inspection", flipped)
+				t.Fatalf("the flipped length %d is over MaxPayloadSize; this case must reach the salvage walk", flipped)
 			}
 			if int64(flipped) <= cleanEnd-recs[i].Offset-FrameHeaderSize {
 				t.Fatalf("the flipped length %d does not overshoot the end of the file; this case would not look like a tail", flipped)
@@ -336,12 +550,13 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 		}
 	}
 
+	// overshootLength is the same lie told deliberately rather than by one bit.
 	overshootLength := func(i int) func(*testing.T, string, []Record, int64) {
 		return func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 			t.Helper()
 			overshoot := cleanEnd - recs[i].Offset - FrameHeaderSize + 64
 			if overshoot > MaxPayloadSize {
-				t.Fatalf("the overshoot length %d is over MaxPayloadSize, so this case would be caught by the extent bound instead",
+				t.Fatalf("the overshoot length %d is over MaxPayloadSize, so this case would be classified by the extent bound instead",
 					overshoot)
 			}
 			var b [4]byte
@@ -356,238 +571,272 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 		build func(t *testing.T) string
 		// damage mutates it. recs describes the pristine file.
 		damage func(t *testing.T, path string, recs []Record, cleanEnd int64)
-		// wantVeto is the rule that must be the reason this is not a tail.
-		wantVeto string
-		wantMsg  string
-		wantNote string // why this must be fatal, printed on failure
+
+		// wantFatal marks the cases that are NOT damage but "I cannot read this
+		// file at all". Those still refuse, and still leave the bytes untouched.
+		wantFatal  bool
+		wantErrMsg string
+
+		// wantSurvivors is the record INDEX of everything that must still be in
+		// the file afterwards -- the anti-cascade assertion. A gap in it is a
+		// permanent hole, which is correct: survivors are never renumbered,
+		// because renumbering would reuse an id (invariant 1).
+		wantSurvivors []uint64
+		// wantDiscards is the exact number of regions thrown away.
+		wantDiscards int
+		// wantRebuilt is how many records were RECOVERED because their checksum
+		// proved that only their length field was damaged.
+		wantRebuilt uint64
+
+		// How the file was changed. Exactly one of these is expected per case
+		// (or none, for a file that needed no repair at all).
+		wantTruncated   bool
+		wantRewritten   bool
+		wantQuarantined bool
+		wantNoRepair    bool
+		wantHeaderFixed bool
+
+		// The discard's log line: its level, and the record it names.
+		wantLogLevel  string
+		wantLogType   string
+		wantLogIndex  string
+		wantReasonHas string
+
+		wantNote string // why this shape matters, printed on failure
 	}{
 		{
 			// (e) THE FLAGSHIP DATA-LOSS CASE. One flipped bit in an early
-			// record, with committed records after it.
+			// record's PAYLOAD, with committed records after it. The payload is
+			// what is wrong, so no checksum can rescue this record -- but the
+			// declared length is still right, which means the next record starts
+			// exactly where the header says and the damage costs ONE record.
 			name:  "checksum mismatch in a middle record",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				flipByte(t, path, recs[1].Offset+FrameHeaderSize+1)
 			},
-			wantVeto: vetoRecordsFollow,
-			wantMsg:  "checksum mismatch",
-			wantNote: "the frame declares an extent that ends well before the end of the file, so records follow it",
+			wantSurvivors: []uint64{1, 3, 4, 5, 6},
+			wantDiscards:  1,
+			wantRewritten: true,
+			wantLogLevel:  "ERROR", // a COMMIT record: a client was told this was durable
+			wantLogType:   "commit",
+			wantLogIndex:  "2",
+			wantReasonHas: "the next intact record was found at offset",
+			wantNote:      "one bad bit in one payload must cost exactly one record, not the four committed records behind it",
 		},
 		{
-			// (f) Without the upper bound in truncatableTail this one truncates
-			// away everything after it: readFrame reports an absurd payloadLen
-			// with a gigantic FrameEnd, which sails past the ">= size" test.
+			// (f) An absurd length field -- 4 GiB -- in a middle record. Under the
+			// old policy this was refused. It is now RECOVERED: nothing but the
+			// length is wrong, the true end of the frame is where the next
+			// surviving record begins, and rewriting the length to that reproduces
+			// the stored checksum. Only the true length can do that, so the match
+			// is a proof and not a guess.
 			name:  "absurd length field in a middle record",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, recs[1].Offset, []byte{0xff, 0xff, 0xff, 0xff})
 			},
-			wantVeto: vetoIllegalExtent,
-			wantMsg:  "rejected without allocating",
-			wantNote: "a 4 GiB declared extent must not be mistaken for a frame that reaches the end of the file",
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "a 4 GiB declared extent over a complete record loses nothing: the record's own checksum says so",
 		},
 		{
-			// (g) The same corruption in the LAST record. Still fatal: the
-			// declared extent is not a legal frame, so nothing about it is
-			// verifiable as a torn tail.
+			// (g) The same corruption in the LAST record: the true end is then the
+			// end of the file, and the proof works just as well.
 			name:  "absurd length field in the last record",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, recs[len(recs)-1].Offset, []byte{0xff, 0xff, 0xff, 0xff})
 			},
-			wantVeto: vetoIllegalExtent,
-			wantMsg:  "rejected without allocating",
-			wantNote: "being at the end of the file does not make an illegal frame a torn tail",
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "the LAST record is where a torn tail lives, so a complete record there must still be recovered rather than cut",
 		},
 		{
-			// The exact boundary of the one-frame rule, one byte the wrong side
-			// of it. MaxPayloadSize is repairable (see the truncation table);
-			// MaxPayloadSize+1 is a length no writer could have produced.
+			// The exact boundary of the legal-frame rule, one byte the wrong side
+			// of it: a length no writer could have produced. Still only the length.
 			name:  "length field one byte over the maximum in the last record",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, recs[len(recs)-1].Offset, []byte{0x00, 0x10, 0x00, 0x01}) // 1 MiB + 1
 			},
-			wantVeto: vetoIllegalExtent,
-			wantMsg:  "exceeds the 1048576-byte maximum",
-			wantNote: "the declared extent must be a frame the writer could actually have produced",
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "an illegal declared length is still only a length: the bytes of the record are all present",
 		},
 		{
-			// A COMPLETE final frame whose checksum fails. The file is not short at
-			// all: the frame's declared extent lands exactly on the end of the file,
-			// so every byte the record needs is present and the append that wrote it
-			// ran to completion. A crash mid-append cannot produce this -- it leaves
-			// fewer bytes, not wrong ones -- so this is media rot in a record that
-			// may have been fsynced and ACKNOWLEDGED. Truncating it would lose
-			// accepted history and roll the high-water mark back, which is precisely
-			// what TailRepair.NextIndex's invariant-1 argument promises never
-			// happens. Refusing to start is the price of keeping that promise true.
+			// A COMPLETE final frame whose PAYLOAD checksum fails. The file is not
+			// short at all, so a crash mid-append cannot have produced this -- it
+			// is media rot in a record that may have been fsynced and ACKNOWLEDGED.
+			// Under the old policy that was a refusal; the availability decision
+			// says discard it instead, and the honesty that replaces the old
+			// promise is that it goes at ERROR, naming the commit that was lost.
 			name:  "complete final frame with a flipped payload bit",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				flipByte(t, path, recs[len(recs)-1].Offset+FrameHeaderSize+1)
 			},
-			wantVeto: vetoCompleteFrame,
-			wantMsg:  "checksum mismatch",
-			wantNote: "a full-length final frame was fully written, so it may have been acknowledged",
+			wantSurvivors: []uint64{1, 2, 3, 4, 5},
+			wantDiscards:  1,
+			wantTruncated: true,
+			wantLogLevel:  "ERROR",
+			wantLogType:   "commit",
+			wantLogIndex:  "6",
+			wantReasonHas: "no intact record follows it anywhere in the file",
+			wantNote:      "an acknowledged COMMIT lost to bit rot must be discarded LOUDLY -- at ERROR, by index",
 		},
 		{
-			// The same principle reached through the LENGTH field: every byte of the
-			// last record is present, and only its declared length is wrong. The
-			// writer's own checksum proves it -- recomputed against the bytes
-			// actually there, it matches -- so the record is complete and must not be
-			// discarded. This case previously truncated.
+			// The same principle reached through the LENGTH field: every byte of
+			// the last record is present and only its declared length is wrong.
+			// The writer's own checksum, recomputed against the bytes actually
+			// there, matches -- so the record is complete and is kept.
 			name:  "length field corrupted in a last record whose bytes are all present",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, recs[len(recs)-1].Offset, []byte{0x00, 0x10, 0x00, 0x00}) // 1 MiB
 			},
-			wantVeto: vetoLengthOnly,
-			wantMsg:  "only its length is corrupt",
-			wantNote: "the checksum proves every byte of the record is on disk, so it is not a torn write",
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "the checksum proves every byte of the record is on disk, so nothing may be lost here",
 		},
 		{
-			// THE THIRD FLAGSHIP CASE, and the one that defeats a shape-only
-			// classifier. Record 4's length is corrupted to a legal value that
-			// overshoots the end of the file, so the error it produces is
-			// INDISTINGUISHABLE from a torn tail by shape alone -- FrameIntact
-			// false, extent past EOF, extent well inside MaxPayloadSize. Records 5
-			// and 6 (a prepare/commit pair -- acknowledged, accepted history) are
-			// sitting intact in the bytes the cut would take. This exact file was
-			// demonstrated eating those two records before the tail inspection
-			// (inspectTail) existed.
-			name:     "length field overshooting EOF with committed records behind it",
-			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
-			damage:   overshootLength(3),
-			wantVeto: vetoRecordsInTail,
-			wantMsg:  "a complete record whose checksum verifies begins here",
-			wantNote: "records 5 and 6 are intact, committed history sitting inside the region a cut would discard",
+			// THE CASE THAT DEFEATS A SHAPE-ONLY CLASSIFIER. Record 4's length is
+			// corrupted to a legal value that overshoots the end of the file, so
+			// the error is INDISTINGUISHABLE from a torn tail by shape alone.
+			// Records 5 and 6 -- acknowledged, accepted history -- sit in the bytes
+			// a naive cut would take. This exact file was demonstrated eating them.
+			name:          "length field overshooting EOF with committed records behind it",
+			build:         func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:        overshootLength(3),
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "records 5 and 6 are intact committed history sitting inside the region a naive cut would discard",
 		},
 		{
 			// The same hole reached by a SINGLE FLIPPED BIT rather than a crafted
-			// value, which is what makes it a durability bug and not just an attack:
-			// no adversary is required, one bad bit in a length field is enough.
-			// Independently reproduced by DUR-4's reviewer against the pre-fix code,
-			// where it deleted two of three committed messages and then let Open and
-			// Replay succeed with no error at all -- silent, permanent loss.
-			name:     "one flipped bit in a middle length field",
-			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
-			damage:   bitFlipLength(2),
-			wantVeto: vetoRecordsInTail,
-			wantMsg:  "a complete record whose checksum verifies begins here",
-			wantNote: "one bad bit must not be able to delete every committed record after it",
+			// value, which is what makes it a durability bug and not just an
+			// attack: no adversary is required. Independently reproduced by DUR-4's
+			// reviewer against the pre-fix code, where it deleted two of three
+			// committed messages and then let Open and Replay succeed with no error
+			// at all -- silent, permanent loss.
+			name:          "one flipped bit in a middle length field",
+			build:         func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:        bitFlipLength(2),
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "one bad bit must not be able to delete every committed record after it",
 		},
 		{
 			// The same lie told by the SECOND-TO-LAST record, so exactly one record
-			// follows the damage. The anchor that finds it is "a following record
-			// ends exactly at the end of the file", and with one follower that is
-			// the tightest case there is.
-			name:     "length field overshooting EOF with a single record behind it",
-			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
-			damage:   overshootLength(4),
-			wantVeto: vetoRecordsInTail,
-			wantMsg:  "a complete record whose checksum verifies begins here",
-			wantNote: "record 6 is intact and would be deleted by a cut at record 5",
+			// follows the damage: the tightest version of the forward search.
+			name:          "length field overshooting EOF with a single record behind it",
+			build:         func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:        overshootLength(4),
+			wantSurvivors: allSix,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantNote:      "record 6 is intact and would be deleted by a cut at record 5",
 		},
 		{
 			// THE EVASION THE FIRST FIX MISSED, found by DUR-4's security audit. A
-			// mid-file length flip AND a torn tail: the corruption's region no longer
-			// ends on a record boundary, so the original "a following record ends
-			// exactly at EOF" anchor found nothing and the cut went ahead, deleting
-			// eight committed records. The audit's point was the one that mattered --
-			// a torn tail is not a rare independent second fault, it is the NORMAL
-			// state of every file this code is called on, so any rule that assumes
-			// the file ends cleanly is assuming away the whole problem. The index
-			// window does not care where the file ends.
+			// mid-file length flip AND a torn tail: the damaged region no longer
+			// ends on a record boundary, so any rule anchored on "a following record
+			// ends exactly at EOF" finds nothing and cuts, deleting eight committed
+			// records in the reviewer's probe. The audit's point was the one that
+			// mattered -- a torn tail is not a rare independent second fault, it is
+			// the NORMAL state of every file this code is called on. The forward
+			// search is anchored on the record INDEX and does not care where the
+			// file ends, so record 3 is rebuilt and only the junk byte goes.
 			name:  "length flip in a middle record with a torn tail after it",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				bitFlipLength(2)(t, path, recs, cleanEnd)
 				appendBytes(t, path, []byte{0x7b}) // a partial frame's worth of junk
 			},
-			wantVeto: vetoRecordsInTail,
-			wantMsg:  "a complete record whose checksum verifies begins here",
-			wantNote: "records after the damage must be found even when the file does not end on a record boundary",
+			wantSurvivors: allSix,
+			wantDiscards:  1, // the junk byte, and nothing else
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantLogLevel:  "ERROR", // too few bytes to say what was lost
+			wantLogType:   "unreadable",
+			wantLogIndex:  "unknown",
+			wantNote:      "records after the damage must be found even when the file does not end on a record boundary",
 		},
 		{
-			// The same evasion reached by SHORTENING rather than extending: the file
-			// ends one byte inside the final record.
+			// The same evasion reached by SHORTENING rather than extending: the
+			// file ends one byte inside the final record. Record 3 is rebuilt;
+			// record 6 is genuinely incomplete and is the only thing discarded.
 			name:  "length flip in a middle record with the last record cut short",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				bitFlipLength(2)(t, path, recs, cleanEnd)
 				truncate(t, path, cleanEnd-1)
 			},
-			wantVeto: vetoRecordsInTail,
-			wantMsg:  "a complete record whose checksum verifies begins here",
-			wantNote: "a record before the torn tail is still committed history and must not be cut away with it",
+			wantSurvivors: []uint64{1, 2, 3, 4, 5},
+			wantDiscards:  1,
+			wantRebuilt:   1,
+			wantRewritten: true,
+			wantLogLevel:  "ERROR",
+			wantLogType:   "commit",
+			wantLogIndex:  "6",
+			wantNote:      "a record BEFORE the torn tail is committed history and must not be cut away with it",
 		},
 		{
-			// (h) THE SECOND FLAGSHIP CASE. The frame is at the very end of the
-			// file and its CRC verifies -- which a partial write cannot produce.
-			// So a record was lost from, or resurrected in, the file, and that is
-			// fatal even at the tail.
-			name: "index out of sequence at the tail",
-			build: func(t *testing.T) string {
-				_, p, _, _ := buildWAL(t, repairTornOps()...)
-				payload, err := encodePrepare("message", jsonBody(`{"n":9}`), time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC))
-				if err != nil {
-					t.Fatalf("encodePrepare: %v", err)
-				}
-				// Index 6 where 5 is due: a whole record is missing before it.
-				appendRawFrame(t, p, 6, TypePrepare, payload)
-				return p
-			},
-			damage:   func(t *testing.T, path string, recs []Record, cleanEnd int64) {},
-			wantVeto: vetoFrameIntact,
-			wantMsg:  "out of sequence",
-			wantNote: "the checksum verified, so a torn write cannot explain it, so it is not a tail no matter where it sits",
-		},
-		{
-			// (i) A bad FILE header. The cut would be at offset 0 and would
-			// delete the entire log.
+			// (i) A bad FILE MAGIC. The magic is not the other kind of log and not
+			// a version this binary cannot read -- it is simply wrong, which is
+			// what damage in a fixed 16-byte preamble looks like. There is nothing
+			// in a file header to RECOVER, only 16 constant bytes to rewrite, and
+			// refusing to start over a flipped bit there would throw away an
+			// entirely readable log.
 			name:  "bad file magic",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, 0, []byte("XGNTBUSW"))
 			},
-			wantVeto: vetoFileHeader,
-			wantMsg:  "bad magic",
-			wantNote: "damage at offset 0 is never a tail: cutting there deletes the whole file",
+			wantSurvivors:   allSix,
+			wantRewritten:   true,
+			wantHeaderFixed: true,
+			wantNote:        "every record behind a damaged header is intact, so the header is rebuilt and nothing is lost",
 		},
 		{
+			// STILL FATAL. A version number under OUR magic is not damage: this
+			// binary does not implement that layout, and guessing at it is how a
+			// downgrade eats a log.
 			name:  "unknown format version",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, 8, []byte{0x00, 0x00, 0x00, 0x02})
 			},
-			wantVeto: vetoFileHeader,
-			wantMsg:  "format version 2, want 1",
-			wantNote: "a file whose layout this code does not know must never be edited by it",
+			wantFatal:  true,
+			wantErrMsg: "format version 2, want 1",
+			wantNote:   "a file whose layout this code does not know must never be edited by it",
 		},
 		{
-			// The case that makes the file-header veto load-bearing rather than
-			// belt-and-braces. A file with FEWER than 16 bytes is a short read at
-			// offset 0 with no declared extent -- which is, structurally, the exact
-			// signature of a torn frame header ("fewer than a header's worth of
-			// bytes remain, so nothing can follow"). Only the "damage below
-			// FileHeaderSize is never a tail" rule tells them apart; without it the
-			// cut would be at offset 0 and the file would be emptied.
+			// A file with FEWER than 16 bytes: the header cannot be verified and
+			// there is not one record anywhere behind it. That is not a log this
+			// code can make anything of, so it is QUARANTINED -- renamed aside,
+			// never deleted -- and startup continues with a fresh log.
 			name:  "truncated file header",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				truncate(t, path, 9)
 			},
-			wantVeto: vetoFileHeader,
-			wantMsg:  "truncated file header: have 9 of 16 bytes",
-			wantNote: "a short FILE header must never be mistaken for a short FRAME header; the cut would be at offset 0",
+			wantQuarantined: true,
+			wantDiscards:    1,
+			wantNote:        "an uninterpretable file is moved aside, not deleted, and not allowed to block the start for ever",
 		},
 		{
-			// (j) THE DELIBERATE CONSERVATIVE GAP, pinned so it stays deliberate.
-			// A NUL tail longer than one frame is what some filesystems expose for
-			// a write that never landed. It is NOT truncated: a zero length field
-			// declares a 20-byte frame, which does not reach the end of the file,
-			// so the region is unverifiable and the answer is to refuse to start.
+			// (j) A NUL tail longer than one frame is what some filesystems expose
+			// for a write that never landed. It used to be the DELIBERATE
+			// CONSERVATIVE GAP -- unverifiable, so refused. It is now discarded as
+			// what it is: unreadable bytes at the end of the file with no record
+			// anywhere in them.
 			name:  "a NUL tail longer than one frame",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
@@ -600,21 +849,31 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 					t.Fatalf("appending NULs: %v", err)
 				}
 			},
-			wantVeto: vetoRecordsFollow,
-			wantMsg:  "corrupt at offset",
-			wantNote: "200 NUL bytes are more than one frame, so the region cannot be proven to be a single torn frame",
+			wantSurvivors: allSix,
+			wantDiscards:  1,
+			wantTruncated: true,
+			wantReasonHas: "no intact record follows it anywhere in the file",
+			wantNote:      "200 NUL bytes hold no record, so they are a tail; the six records in front of them are untouched",
 		},
 		{
-			// (k) reserved != 0 in a middle frame: structurally impossible for
-			// this writer, and there are records after it.
+			// (k) reserved != 0 in a middle frame: structurally impossible for this
+			// writer, so not even the frame header can be trusted to say what the
+			// record was. It is discarded at ERROR with the type "unreadable",
+			// because "I do not know what I just deleted" is worse news than "I
+			// deleted a prepare", and the log must say which of the two it is.
 			name:  "non-zero reserved field in a middle frame",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
 				patch(t, path, recs[1].Offset+14, []byte{0x00, 0x01})
 			},
-			wantVeto: vetoRecordsFollow,
-			wantMsg:  "reserved field",
-			wantNote: "the declared extent ends before the end of the file, so committed records follow",
+			wantSurvivors: []uint64{1, 3, 4, 5, 6},
+			wantDiscards:  1,
+			wantRewritten: true,
+			wantLogLevel:  "ERROR",
+			wantLogType:   "unreadable",
+			wantLogIndex:  "unknown",
+			wantReasonHas: "the next intact record was found at offset",
+			wantNote:      "the four committed records behind an unreadable frame header must survive it",
 		},
 	}
 
@@ -624,160 +883,164 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 			path := tc.build(t)
 			recs, cleanEnd, err := ScanAll(path, KindWAL)
 			if err != nil {
-				// The out-of-sequence case is damaged by build, not by damage, so
-				// its fixture does not scan -- that is the point of it.
-				recs, cleanEnd = nil, 0
+				t.Fatalf("the fixture is not well framed before it is damaged: %v", err)
 			}
 			tc.damage(t, path, recs, cleanEnd)
-
 			before := readFile(t, path)
-			res, err := RepairTail(path, KindWAL, nil)
-			if err == nil {
-				t.Fatalf("RepairTail returned no error (%+v) for damage that is not a torn tail: %s", res, tc.wantNote)
-			}
-			if !errors.Is(err, ErrCorrupt) {
-				t.Errorf("RepairTail err = %v, want errors.Is(err, ErrCorrupt)", err)
-			}
-			if !strings.Contains(err.Error(), tc.wantMsg) {
-				t.Errorf("RepairTail err = %q, want it to contain %q", err, tc.wantMsg)
-			}
-			if !strings.Contains(err.Error(), path) {
-				t.Errorf("RepairTail err = %q, does not name the file", err)
-			}
-			repairAssertUntouched(t, path, before, res)
 
-			// WHICH rule saved the file. Asserting the veto, not merely the
-			// refusal, is what keeps a case honest: without it, a case could pass
-			// because the classifier happened to reject it for an unrelated
-			// reason, and would go on passing after the rule it was written to
-			// defend had been deleted.
-			var ce *CorruptError
-			if !errors.As(err, &ce) {
-				t.Fatalf("RepairTail err = %v, want a *CorruptError", err)
-			}
-			size := int64(len(before))
-			switch tc.wantVeto {
-			case vetoFileHeader:
-				if ce.Offset >= FileHeaderSize {
-					t.Errorf("CorruptError.Offset = %d, want it inside the %d-byte file header: %s",
-						ce.Offset, FileHeaderSize, tc.wantVeto)
-				}
-			case vetoFrameIntact:
-				if !ce.FrameIntact {
-					t.Errorf("CorruptError.FrameIntact = false, want true: %s", tc.wantVeto)
-				}
-				// And it really is the LAST frame, which is the whole point: this
-				// damage sits exactly where a torn tail would, and is still fatal.
-				if ce.FrameEnd < size {
-					t.Errorf("CorruptError.FrameEnd = %d, want it at the end of the %d-byte file: "+
-						"the case is meant to put intact-frame damage AT the tail", ce.FrameEnd, size)
-				}
-			case vetoRecordsFollow:
-				if ce.FrameIntact {
-					t.Errorf("CorruptError.FrameIntact = true, want false for %q", tc.name)
-				}
-				if ce.FrameEnd == 0 || ce.FrameEnd >= size {
-					t.Errorf("CorruptError.FrameEnd = %d in a %d-byte file, want a declared extent that ends BEFORE "+
-						"the end of the file: %s", ce.FrameEnd, size, tc.wantVeto)
-				}
-			case vetoIllegalExtent:
-				if ce.FrameIntact {
-					t.Errorf("CorruptError.FrameIntact = true, want false for %q", tc.name)
-				}
-				// THE HAZARD, stated as an assertion: the declared extent DOES
-				// reach past the end of the file, so a rule that only asked
-				// "does anything follow the damage?" would have truncated here --
-				// in the middle-record cases, taking every committed record after
-				// it. Only the upper bound on the extent stops that.
-				if ce.FrameEnd < size {
-					t.Errorf("CorruptError.FrameEnd = %d in a %d-byte file: this case is meant to declare an extent "+
-						"that runs past the end of the file", ce.FrameEnd, size)
-				}
-				if max := ce.Offset + FrameHeaderSize + MaxPayloadSize; ce.FrameEnd <= max {
-					t.Errorf("CorruptError.FrameEnd = %d, want it past the largest legal frame end %d: %s",
-						ce.FrameEnd, max, tc.wantVeto)
-				}
-			case vetoCompleteFrame:
-				// The frame declares an extent that lands EXACTLY on the end of the
-				// file. Nothing follows it -- so a rule that only asked "does anything
-				// follow the damage?" would truncate here -- and yet every byte the
-				// record needs is present, which is what makes it not a torn write.
-				if ce.FrameEnd != size {
-					t.Errorf("CorruptError.FrameEnd = %d, want exactly the file size %d: this case is meant to be a "+
-						"COMPLETE final frame", ce.FrameEnd, size)
-				}
-			case vetoLengthOnly:
-				if !ce.FrameIntact {
-					t.Errorf("CorruptError.FrameIntact = false, want true: the record's own checksum verified over the "+
-						"bytes present, so a partial write cannot explain it: %s", tc.wantVeto)
-				}
-				if ce.FrameEnd <= size {
-					t.Errorf("CorruptError.FrameEnd = %d in a %d-byte file: this case is meant to declare an extent "+
-						"past the end of the file, i.e. to LOOK like a torn tail", ce.FrameEnd, size)
-				}
-			case vetoRecordsInTail:
-				// This is the case shape-only classification CANNOT tell from a torn
-				// tail, so the assertions here are the mirror image of the positive
-				// table: the damage looks exactly like a tail, and is refused anyway
-				// because a record was found in the region behind it.
-				if ce.FrameEnd < size {
-					t.Errorf("CorruptError.FrameEnd = %d in a %d-byte file: this case is meant to look like a torn tail",
-						ce.FrameEnd, size)
-				}
-				if max := ce.Offset + FrameHeaderSize + MaxPayloadSize; ce.FrameEnd > max {
-					t.Errorf("CorruptError.FrameEnd = %d, want it within the largest legal frame end %d: "+
-						"this case must be refused by the tail INSPECTION, not by the extent bound", ce.FrameEnd, max)
-				}
-				if !ce.FrameIntact {
-					t.Errorf("CorruptError.FrameIntact = false, want true: a partial write cannot leave a complete "+
-						"record behind the damage, so the flag that vetoes truncation must be set: %s", tc.wantVeto)
-				}
-			default:
-				t.Fatalf("case %q has no wantVeto", tc.name)
-			}
+			res, out, err := captureRepair(t, path, KindWAL)
 
-			// And the refusal reaches an operator: Open fails and STILL leaves the
-			// bytes alone. This is the assertion that would catch a future change
-			// wiring truncation in somewhere other than RepairTail.
-			dir := filepath.Dir(path)
-			if filepath.Base(path) == WALFileName {
-				app := &testApplier{}
-				if l, err := Open(LogOptions{Dir: dir, Applier: app}); err == nil {
+			if tc.wantFatal {
+				// The "I cannot read this file at all" class. Not damage, so the
+				// bytes are left exactly as they are for an operator to inspect.
+				if err == nil {
+					t.Fatalf("RepairLog returned no error (%+v): %s", res, tc.wantNote)
+				}
+				if !errors.Is(err, ErrCorrupt) {
+					t.Errorf("RepairLog err = %v, want errors.Is(err, ErrCorrupt)", err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrMsg) {
+					t.Errorf("RepairLog err = %q, want it to contain %q", err, tc.wantErrMsg)
+				}
+				if !strings.Contains(err.Error(), path) {
+					t.Errorf("RepairLog err = %q, does not name the file", err)
+				}
+				repairAssertUntouched(t, path, before, res)
+
+				dir := filepath.Dir(path)
+				if l, err := Open(LogOptions{Dir: dir, Applier: &testApplier{}}); err == nil {
 					_ = l.Close()
-					t.Fatalf("Open succeeded on damage that is not a torn tail: %s", tc.wantNote)
+					t.Fatalf("Open succeeded on a file it cannot read: %s", tc.wantNote)
 				}
 				if after := readFile(t, path); !bytes.Equal(before, after) {
 					t.Fatalf("a failed Open changed the WAL: %d bytes before, %d after", len(before), len(after))
 				}
+				return
 			}
+
+			// (i) RECOVERY RUNS. Damage is never fatal.
+			if err != nil {
+				t.Fatalf("RepairLog refused to repair damage: %v\nDamage is never fatal now (DECISIONS.md 2026-08-02): %s", err, tc.wantNote)
+			}
+
+			if tc.wantQuarantined {
+				if res.Quarantined == "" {
+					t.Fatalf("Repair = %+v, want the unreadable file moved aside: %s", res, tc.wantNote)
+				}
+				// RENAMED, NEVER DELETED: the original bytes must still exist under
+				// the new name, because a file this code cannot read is not
+				// necessarily a file NOBODY can read.
+				kept, rerr := os.ReadFile(res.Quarantined)
+				if rerr != nil {
+					t.Fatalf("the quarantined file %s cannot be read back: %v: quarantine RENAMES, it never deletes", res.Quarantined, rerr)
+				}
+				if !bytes.Equal(kept, before) {
+					t.Fatalf("the quarantined file holds %d bytes, want the original %d: an operator is owed the bytes verbatim",
+						len(kept), len(before))
+				}
+				if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+					t.Errorf("%s still exists after a quarantine (stat err = %v); startup must continue with a FRESH log", path, serr)
+				}
+				assertLogged(t, out, "ERROR", "wal quarantined an unreadable log and started a fresh one",
+					"path="+path, "moved_to="+res.Quarantined)
+			} else {
+				// (ii) and (iii): exactly the damaged record went, everything
+				// behind it survived byte for byte with its original index.
+				assertSurvivors(t, path, KindWAL, recs, tc.wantSurvivors)
+			}
+
+			if res.DiscardCount != tc.wantDiscards {
+				t.Errorf("Repair.DiscardCount = %d, want %d (discards: %+v): %s", res.DiscardCount, tc.wantDiscards, res.Discards, tc.wantNote)
+			}
+			if res.Rebuilt != tc.wantRebuilt {
+				t.Errorf("Repair.Rebuilt = %d, want %d: a record whose LENGTH FIELD alone is damaged is recovered, not discarded",
+					res.Rebuilt, tc.wantRebuilt)
+			}
+			if res.Truncated != tc.wantTruncated || res.Rewritten != tc.wantRewritten || res.HeaderRepaired != tc.wantHeaderFixed {
+				t.Errorf("Repair = {Truncated:%v Rewritten:%v HeaderRepaired:%v}, want {%v %v %v}",
+					res.Truncated, res.Rewritten, res.HeaderRepaired, tc.wantTruncated, tc.wantRewritten, tc.wantHeaderFixed)
+			}
+			if res.Exhausted {
+				t.Errorf("Repair.Exhausted = true: none of these files should exhaust the forward search's work budget")
+			}
+			if tc.wantReasonHas != "" && !strings.Contains(res.Reason, tc.wantReasonHas) {
+				t.Errorf("Repair.Reason = %q, want it to contain %q", res.Reason, tc.wantReasonHas)
+			}
+
+			// (iv) THE DISCARD WAS LOGGED. Delete the logging in RepairLog and this
+			// fails: that is the point of asserting the level and the fields rather
+			// than merely that something was written.
+			if tc.wantLogLevel != "" {
+				assertLogged(t, out, tc.wantLogLevel, "wal discarded a damaged record",
+					"path="+path, "stage=framing",
+					"record_type="+tc.wantLogType, "record_index="+tc.wantLogIndex)
+			}
+			if tc.wantDiscards > 0 && !tc.wantQuarantined {
+				assertLogged(t, out, "WARN", "wal recovery discarded damaged regions",
+					"discards="+strconv.Itoa(tc.wantDiscards))
+			}
+			if tc.wantDiscards == 0 && !tc.wantQuarantined {
+				assertNotLogged(t, out, "wal discarded a damaged record")
+			}
+			if tc.wantRebuilt > 0 {
+				assertLogged(t, out, "WARN", "wal restored records whose length field was corrupt but whose checksum proved them complete",
+					"path="+path, "records="+strconv.FormatUint(tc.wantRebuilt, 10))
+			}
+			if tc.wantHeaderFixed {
+				assertLogged(t, out, "ERROR", "wal rebuilding a damaged file header", "path="+path)
+			}
+
+			// (i) again, at the level a server actually sees it: Open starts, and
+			// the log it starts on is still appendable.
+			dir := filepath.Dir(path)
+			l, err := Open(LogOptions{Dir: dir, Applier: &testApplier{}})
+			if err != nil {
+				t.Fatalf("Open after the repair: %v: recovery must always reach a running server", err)
+			}
+			if _, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"after":"repair"}`)}); err != nil {
+				_ = l.Close()
+				t.Fatalf("Write after the repair: %v: a repaired log must be one a server can go on writing to", err)
+			}
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			assertIndicesUnique(t, path)
 		})
 	}
 }
 
-// TestWALRepairTailRefusesDamageToACompleteFinalRecord is the matrix that keeps
-// the LAST acknowledged record alive, and it is the one that took three rounds of
-// review to get right.
+// TestWALRepairTailDiscardsDamageToACompleteFinalRecord is the matrix over the
+// LAST record of a log, and it is the one that took three rounds of review to get
+// right.
 //
-// The last record in a log is the most dangerous place for damage, because it is
-// where a torn tail also lives -- so every rule that decides "this is a tail"
-// gets its hardest test here. The two axes are:
+// The last record is the most dangerous place for damage, because it is where a
+// torn tail also lives. The two axes are:
 //
 //   - WHAT IS CORRUPT in a record whose bytes are all on disk: a payload byte,
 //     a byte of the stored checksum, or the length field;
 //   - WHAT FOLLOWS IT, because the ordinary state of a crashed log is a torn
-//     frame on the end, and every "nothing follows, so it is a tail" shortcut
-//     is wrong exactly when something does.
+//     frame on the end.
 //
-// Every cell must REFUSE and leave the file byte-for-byte intact. Each of these
-// records was fully written, so its Append returned, so it was fsynced and may
-// have been acknowledged to a client -- discarding one loses accepted history and
-// rolls the index high-water mark backwards, which is the thing
-// TailRepair.NextIndex's invariant-1 argument promises cannot happen.
+// Until 2026-08-02 every cell REFUSED TO START, on the argument that each of
+// these records was fully written, so its Append returned, so it was fsynced and
+// may have been acknowledged. The availability decision reversed that: the record
+// is discarded so the bus restarts, and the argument is carried instead by (a)
+// discarding EXACTLY that record, never the five acknowledged entries in front of
+// it, and (b) logging the loss at ERROR with the record's index and type.
 //
-// The cell {length field, torn next frame} is not hypothetical: it was found by
-// review against an implementation that tested only the hypothesis "the record
-// ends at the end of the file", and it silently deleted an acknowledged COMMIT.
-func TestWALRepairTailRefusesDamageToACompleteFinalRecord(t *testing.T) {
+// The LENGTH-FIELD row is the interesting one, and it splits:
+//
+//   - with NOTHING after the record, the true end of the frame is the end of the
+//     file, so the checksum recomputed over the bytes present proves the record
+//     complete and it is RECOVERED. Nothing is lost at all.
+//   - with anything after it, the true end is unknown -- the trailing bytes are
+//     indistinguishable from payload -- so the proof cannot be run and the record
+//     is discarded with them.
+//
+// That second half is a real, accepted loss and it is asserted deliberately
+// rather than glossed: it is the price of the availability decision, and it is
+// bounded to the tail.
+func TestWALRepairTailDiscardsDamageToACompleteFinalRecord(t *testing.T) {
 	sixOps := []walOp{
 		opPrepare("message", `{"n":1}`), // 1
 		opCommit(1),                     // 2
@@ -788,8 +1051,11 @@ func TestWALRepairTailRefusesDamageToACompleteFinalRecord(t *testing.T) {
 	}
 
 	corruptions := []struct {
-		name   string
-		damage func(t *testing.T, path string, last Record)
+		name string
+		// lengthOnly marks the row where the record's own bytes are all intact
+		// and only its declared length is wrong.
+		lengthOnly bool
+		damage     func(t *testing.T, path string, last Record)
 	}{
 		{
 			name: "a payload byte",
@@ -804,10 +1070,11 @@ func TestWALRepairTailRefusesDamageToACompleteFinalRecord(t *testing.T) {
 			},
 		},
 		{
-			// The length field is the dangerous one: it is the single field whose
-			// corruption makes a COMPLETE record produce the error shape of a torn
-			// one, because every judgement about "where does this frame end" reads it.
-			name: "the length field",
+			// The length field is the one whose corruption makes a COMPLETE record
+			// produce the error shape of a torn one, because every judgement about
+			// "where does this frame end" reads it.
+			name:       "the length field",
+			lengthOnly: true,
 			damage: func(t *testing.T, path string, last Record) {
 				var b [4]byte
 				binary.BigEndian.PutUint32(b[:], uint32(len(last.Payload))^0x00000400)
@@ -819,7 +1086,7 @@ func TestWALRepairTailRefusesDamageToACompleteFinalRecord(t *testing.T) {
 	trailers := []struct {
 		name    string
 		append  func(t *testing.T, path string)
-		wantEnd bool // the damaged frame is the end of the file
+		wantEnd bool // nothing follows the damaged frame
 	}{
 		{name: "nothing after it", append: func(*testing.T, string) {}, wantEnd: true},
 		{
@@ -869,45 +1136,82 @@ func TestWALRepairTailRefusesDamageToACompleteFinalRecord(t *testing.T) {
 
 				c.damage(t, path, last)
 				tr.append(t, path)
-				before := readFile(t, path)
 
-				res, err := RepairTail(path, KindWAL, nil)
-				if err == nil {
-					t.Fatalf("RepairTail returned no error (%+v): record 6 is COMPLETE on disk -- every byte it declares is "+
-						"present -- so its Append returned, it was fsynced, and it may have been acknowledged", res)
-				}
-				if !errors.Is(err, ErrCorrupt) {
-					t.Errorf("RepairTail err = %v, want errors.Is(err, ErrCorrupt)", err)
-				}
-				repairAssertUntouched(t, path, before, res)
+				// A length-only corruption with NOTHING after it is provably
+				// complete and must be recovered in full; every other cell loses
+				// exactly record 6 and nothing else.
+				recovered := c.lengthOnly && tr.wantEnd
 
-				// And the refusal survives the trip through Open, which is where a
-				// server would have served the truncated log.
+				res, out, err := captureRepair(t, path, KindWAL)
+				if err != nil {
+					t.Fatalf("RepairLog on damage in the final record: %v: damage is never fatal", err)
+				}
+
+				if recovered {
+					assertSurvivors(t, path, KindWAL, recs, []uint64{1, 2, 3, 4, 5, 6})
+					if res.Rebuilt != 1 || res.DiscardCount != 0 {
+						t.Fatalf("Repair = %+v, want exactly one REBUILT record and no discards: every byte of record 6 is on "+
+							"disk, and its own checksum over those bytes proves it", res)
+					}
+					assertLogged(t, out, "WARN", "wal restored records whose length field was corrupt but whose checksum proved them complete",
+						"path="+path, "records=1")
+					assertNotLogged(t, out, "wal discarded a damaged record")
+				} else {
+					// Record 6 goes. The five entries in front of it were
+					// acknowledged too, and they are the assertion that matters:
+					// damage in the last record must not cascade backwards.
+					assertSurvivors(t, path, KindWAL, recs, []uint64{1, 2, 3, 4, 5})
+					if res.DiscardCount != 1 {
+						t.Errorf("Repair.DiscardCount = %d, want exactly 1: only the damaged final record may go", res.DiscardCount)
+					}
+					if res.NextIndex != 6 {
+						t.Errorf("Repair.NextIndex = %d, want 6: the highest surviving index is 5", res.NextIndex)
+					}
+					// AT ERROR, NAMING THE COMMIT. A discarded commit record is an
+					// acknowledged write that is now lost, and the only thing that
+					// makes discarding it acceptable is that an operator is told.
+					assertLogged(t, out, "ERROR", "wal discarded a damaged record",
+						"path="+path, "stage=framing", "record_type=commit", "record_index=6")
+				}
+
+				// And the server starts, either way, and can go on writing.
 				app := &testApplier{}
-				if l, err := Open(LogOptions{Dir: dir, Applier: app}); err == nil {
+				l, err := Open(LogOptions{Dir: dir, Applier: app})
+				if err != nil {
+					t.Fatalf("Open after the repair: %v: recovery must always reach a running server", err)
+				}
+				wantApplied := 2
+				if recovered {
+					wantApplied = 3
+				}
+				if app.count() != wantApplied {
 					_ = l.Close()
-					t.Fatalf("Open SUCCEEDED on a damaged but complete final record: it would have served %d of 3 "+
-						"acknowledged entries and rolled the high-water mark back", app.count())
+					t.Fatalf("Open applied %d entries, want %d", app.count(), wantApplied)
 				}
-				if after := readFile(t, path); !bytes.Equal(before, after) {
-					t.Fatalf("a failed Open changed the WAL: %d bytes before, %d after", len(before), len(after))
+				if _, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"after":"repair"}`)}); err != nil {
+					_ = l.Close()
+					t.Fatalf("Write after the repair: %v", err)
 				}
+				if err := l.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				assertIndicesUnique(t, path)
 			})
 		}
 	}
 }
 
-// TestWALRepairTailRefusesAZeroPayloadFinalRecord is the boundary of the
+// TestWALRepairTailRecoversAZeroPayloadFinalRecord is the boundary of the
 // completeness proof: a record with an EMPTY payload is exactly FrameHeaderSize
 // bytes, so the region a cut would discard is exactly one frame header. An
-// inspection that treats "only a header's worth of bytes" as too small to bother
-// with would skip the proof and truncate a complete record.
+// implementation that treated "only a header's worth of bytes" as too small to
+// bother with would skip the proof and throw away a complete record.
 //
 // The WAL write path emits no empty payloads today -- every prepare, commit and
 // abort payload is JSON -- but Writer.Append has an upper bound on payload size
 // and no lower one, and DUR-5's audit records go through the same writer. The
 // proof must not rest on a property of today's callers.
-func TestWALRepairTailRefusesAZeroPayloadFinalRecord(t *testing.T) {
+func TestWALRepairTailRecoversAZeroPayloadFinalRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 	w, err := OpenWriter(path, KindAudit)
@@ -927,44 +1231,45 @@ func TestWALRepairTailRefusesAZeroPayloadFinalRecord(t *testing.T) {
 	if got := fileSize(t, path) - last.Offset; got != FrameHeaderSize {
 		t.Fatalf("the final record occupies %d bytes, want exactly the %d-byte header", got, FrameHeaderSize)
 	}
+	pristine, _ := repairScanClean(t, path, KindAudit, 2)
 
 	// Corrupt only its length, so it declares an extent past the end of the file
 	// and looks exactly like a torn tail.
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], 0x00000400)
 	patch(t, path, last.Offset, b[:])
-	before := readFile(t, path)
 
-	res, err := RepairTail(path, KindAudit, nil)
-	if err == nil {
-		t.Fatalf("RepairTail returned no error (%+v): the record is complete, its payload is simply empty", res)
+	res, out, err := captureRepair(t, path, KindAudit)
+	if err != nil {
+		t.Fatalf("RepairLog: %v: damage is never fatal", err)
 	}
-	if !errors.Is(err, ErrCorrupt) {
-		t.Errorf("RepairTail err = %v, want errors.Is(err, ErrCorrupt)", err)
+	if res.Rebuilt != 1 || res.DiscardCount != 0 {
+		t.Fatalf("Repair = %+v, want one REBUILT record and no discards: the record is complete, its payload is simply empty", res)
 	}
-	if !strings.Contains(err.Error(), "only its length is corrupt") {
-		t.Errorf("RepairTail err = %q, want the completeness proof to be what refused it", err)
-	}
-	repairAssertUntouched(t, path, before, res)
+	assertSurvivors(t, path, KindAudit, pristine, []uint64{1, 2})
+	assertLogged(t, out, "WARN", "wal restored records whose length field was corrupt but whose checksum proved them complete",
+		"path="+path, "records=1")
+	assertNotLogged(t, out, "wal discarded a damaged record")
 }
 
-// TestWALRepairTailRefusesARegionDenseWithFrameHeaders defends the checksum
-// budget. The bytes a cut would discard are attacker-influenced -- they are the
-// partly-written tail of a record whose payload carries a client-supplied message
-// body -- so the inspection cannot be allowed unbounded verification work. When
-// the budget runs out the answer is a REFUSAL, not a cut: a region dense with
-// things that look like records is not what a torn tail looks like, and recovery
-// must not discard bytes it did not finish checking.
+// TestWALRepairTailDiscardsARegionDenseWithFrameHeaders defends the forward
+// search's work budget. The bytes it walks are attacker-influenced -- they are
+// the partly-written tail of a record whose payload carries a client-supplied
+// message body -- so the search cannot be allowed unbounded verification work.
 //
-// Without this test the budget is invisible: it can be deleted and every other
-// test still passes.
-func TestWALRepairTailRefusesARegionDenseWithFrameHeaders(t *testing.T) {
+// Running out of budget is the ONE way damage can still cascade: records after
+// the exhaustion point are discarded WITHOUT proof that they were unreadable. It
+// is not refused (nothing is, now), but it is reported in Repair.Exhausted and
+// logged at ERROR in its own words, so an operator can tell "we tidied up a torn
+// tail" from "we gave up looking and cut". Without this test the budget is
+// invisible: it can be deleted and every other test still passes.
+func TestWALRepairTailDiscardsARegionDenseWithFrameHeaders(t *testing.T) {
 	_, path, _, _ := buildWAL(t, repairTornOps()...)
 	recs, cleanEnd := repairScanClean(t, path, KindWAL, 4)
 	wantIndex := recs[len(recs)-1].Index + 1
 
 	// A frame header declaring far more than will follow: the shape of a torn
-	// tail, so the first gate lets it through to the inspection.
+	// tail, so the walk reaches the forward search.
 	var hdr [FrameHeaderSize]byte
 	binary.BigEndian.PutUint32(hdr[0:4], 900000)
 	binary.BigEndian.PutUint64(hdr[4:12], wantIndex)
@@ -978,20 +1283,38 @@ func TestWALRepairTailRefusesARegionDenseWithFrameHeaders(t *testing.T) {
 	binary.BigEndian.PutUint32(plant[0:4], 0)
 	binary.BigEndian.PutUint64(plant[4:12], wantIndex+1)
 	binary.BigEndian.PutUint16(plant[12:14], uint16(TypePrepare))
-	appendBytes(t, path, bytes.Repeat(plant[:], maxTailCandidates+64))
-	before := readFile(t, path)
+	appendBytes(t, path, bytes.Repeat(plant[:], maxResyncCandidates+64))
 
-	if got := int64(len(before)) - cleanEnd; got <= 0 {
+	if got := fileSize(t, path) - cleanEnd; got <= 0 {
 		t.Fatalf("the planted region is %d bytes, want a positive size", got)
 	}
-	res, err := RepairTail(path, KindWAL, nil)
-	if err == nil {
-		t.Fatalf("RepairTail returned no error (%+v): it must not cut a region it could not finish checking", res)
+
+	res, out, err := captureRepair(t, path, KindWAL)
+	if err != nil {
+		t.Fatalf("RepairLog: %v: even a region built to exhaust the search must not stop the server starting", err)
 	}
-	if !strings.Contains(err.Error(), "checksum budget") {
-		t.Errorf("RepairTail err = %q, want the exhausted-budget refusal", err)
+	if !res.Exhausted {
+		t.Fatalf("Repair.Exhausted = false (%+v), want true: %d planted candidates must run the search out of its %d-candidate budget, "+
+			"and a budget nothing reports is a budget nobody can audit", res, maxResyncCandidates+64, maxResyncCandidates)
 	}
-	repairAssertUntouched(t, path, before, res)
+	// The four real records in front of the planted region are untouched: giving
+	// up on the search must not become an excuse to cut backwards.
+	assertSurvivors(t, path, KindWAL, recs, []uint64{1, 2, 3, 4})
+	if !res.Truncated || res.At != cleanEnd {
+		t.Errorf("Repair = %+v, want a truncation at %d (the end of the last real record)", res, cleanEnd)
+	}
+	// LOGGED IN ITS OWN WORDS. "We discarded a damaged record" and "we stopped
+	// looking and discarded the rest" are different facts and an operator needs
+	// to be able to tell them apart.
+	assertLogged(t, out, "ERROR", "wal gave up searching for intact records after damage and discarded the rest of the log",
+		"path="+path, "candidates_budget="+strconv.Itoa(maxResyncCandidates))
+	// The discard line itself is WARN, because the frame header that survived
+	// says the region was a PREPARE -- nothing acknowledged. The ERROR above is
+	// what tells an operator the cut was made without proof; the two lines carry
+	// different facts and both have to be there.
+	assertLogged(t, out, "WARN", "wal discarded a damaged record",
+		"path="+path, "stage=framing",
+		"ran out of its work budget", "WITHOUT proof that it was unreadable")
 }
 
 // TestWALRepairTailNoOp covers the three shapes that need no repair at all --
@@ -1144,6 +1467,11 @@ func TestWALRepairTailKinds(t *testing.T) {
 		if err == nil {
 			t.Fatalf("RepairTail succeeded (%+v) for an unknown kind", res)
 		}
+		// The check is UP FRONT, before the file is opened, and the sentinel says
+		// so. That placement is the point: RepairLog can now REWRITE a file, and
+		// a rewrite driven by a kind this package has no magic for would stamp a
+		// meaningless header onto a perfectly good log. A caller who does not
+		// know what kind of file this is must never get as far as editing it.
 		if !errors.Is(err, ErrUnknownKind) {
 			t.Errorf("err = %v, want ErrUnknownKind", err)
 		}
@@ -1248,38 +1576,64 @@ func TestWALRepairTailToHeaderOnly(t *testing.T) {
 	}
 }
 
-// TestWALRepairTailLogsTheCut: the task is "detected, LOGGED, and truncated".
-// The warning is emitted BEFORE the cut, so that a crash during the truncate
-// still leaves an operator a record of what was about to be discarded, and the
-// confirmation after it. Both must name the file, the offset and the reason.
+// TestWALRepairTailLogsTheCut: the task is "detected, LOGGED, and truncated",
+// and after the 2026-08-02 policy change the LOGGED half is the one carrying the
+// whole argument. Recovery is allowed to throw damage away only because it says
+// out loud what it threw away, so this pins the ordering and the fields:
+//
+//   - the DISCARD is logged BEFORE the file is changed, so a crash during the
+//     truncate still leaves an operator a record of what was about to go;
+//   - it names the file, the offset, the byte count, and the record's index and
+//     type -- everything needed to say WHAT was lost;
+//   - the confirmation of the cut comes after it.
 func TestWALRepairTailLogsTheCut(t *testing.T) {
 	_, path, _, _ := buildWAL(t, repairTornOps()...)
 	recs, _ := repairScanClean(t, path, KindWAL, 4)
-	truncate(t, path, recs[len(recs)-1].Offset+FrameHeaderSize+2)
+	last := recs[len(recs)-1]
+	truncate(t, path, last.Offset+FrameHeaderSize+2)
 
-	var buf bytes.Buffer
-	res, err := RepairTail(path, KindWAL, logging.New(&buf, logging.LevelDebug))
+	res, out, err := captureRepair(t, path, KindWAL)
 	if err != nil {
-		t.Fatalf("RepairTail: %v", err)
+		t.Fatalf("RepairLog: %v", err)
 	}
-	out := buf.String()
-	for _, want := range []string{
-		"wal truncating a corrupt tail", // before
-		"wal truncated a corrupt tail",  // after
-		path,
-		"truncated payload",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the repair log does not mention %q:\n%s", want, out)
-		}
+	if !res.Truncated {
+		t.Fatalf("Repair = %+v, want Truncated true", res)
 	}
-	if i, j := strings.Index(out, "truncating"), strings.Index(out, "wal truncated"); i < 0 || j < 0 || i > j {
-		t.Errorf("the warning must be logged BEFORE the cut is confirmed:\n%s", out)
+
+	// WHAT was discarded, in full. Removing any one of these fields from
+	// RepairLog fails this test, which is the point: a discard an operator cannot
+	// identify is barely better than a silent one.
+	assertLogged(t, out, "ERROR", "wal discarded a damaged record",
+		"path="+path,
+		"stage=framing",
+		"offset="+strconv.FormatInt(last.Offset, 10),
+		"bytes="+strconv.FormatInt(res.Removed, 10),
+		"record_index="+strconv.FormatUint(last.Index, 10),
+		"record_type=commit",
+		"discarded as a torn tail")
+	assertLogged(t, out, "WARN", "wal recovery discarded damaged regions", "path="+path, "discards=1")
+	assertLogged(t, out, "WARN", "wal truncated damage at the end of the log",
+		"path="+path, "at="+strconv.FormatInt(res.At, 10), "removed="+strconv.FormatInt(res.Removed, 10),
+		"next_index="+strconv.FormatUint(res.NextIndex, 10))
+
+	// ORDER: the loss is reported before the file is touched.
+	i := strings.Index(out, "wal discarded a damaged record")
+	j := strings.Index(out, "wal truncated damage at the end of the log")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("the discard must be logged BEFORE the cut is confirmed (discard at %d, cut at %d):\n%s", i, j, out)
 	}
+
 	// A nil Logger is the common case in tests and in a server started without
 	// one; it must not panic and must repair identically.
-	if !res.Truncated {
-		t.Fatalf("TailRepair = %+v, want Truncated true", res)
+	_, path2, _, _ := buildWAL(t, repairTornOps()...)
+	recs2, _ := repairScanClean(t, path2, KindWAL, 4)
+	truncate(t, path2, recs2[len(recs2)-1].Offset+FrameHeaderSize+2)
+	res2, err := RepairTail(path2, KindWAL, nil)
+	if err != nil {
+		t.Fatalf("RepairTail with a nil Logger: %v", err)
+	}
+	if !res2.Truncated || res2.At != res.At || res2.Removed != res.Removed || res2.NextIndex != res.NextIndex {
+		t.Errorf("a nil Logger repaired differently: %+v vs %+v", res2, res)
 	}
 }
 
@@ -1395,20 +1749,31 @@ func TestWALRepairTailThroughOpen(t *testing.T) {
 	assertIndicesUnique(t, path)
 }
 
-// TestWALRepairTailNotReachableFromSemanticDamage is the integration-level proof
-// that truncation is unreachable from a SEMANTIC failure.
+// TestWALSemanticDamageIsDiscardedNotTruncated is the integration-level proof
+// that TRUNCATION is unreachable from a SEMANTIC failure -- which survived the
+// 2026-08-02 policy change intact, even though the refusal it used to prove did
+// not.
 //
-// The file below is perfectly framed -- every checksum verifies, the index
-// sequence has no holes -- and the damage is in the LAST record: a second COMMIT
-// of prepare 1, which names something that is no longer an open prepare. Replay
-// rejects it. If that rejection could reach the truncation path, recovery would
-// cut a fully readable log; and because the damage happens to be at the end
-// here, this is precisely the case where a naive "the error is at the tail, so
-// truncate" rule would fire.
+// The file below is perfectly framed -- every checksum verifies, every index
+// rises -- and the damage is in the LAST record: a second COMMIT of prepare 1,
+// which names something that is no longer an open prepare. Two rules meet here,
+// and both matter:
 //
-// RepairTail must see nothing wrong at all (framing is fine), and Open must fail
-// with the file untouched.
-func TestWALRepairTailNotReachableFromSemanticDamage(t *testing.T) {
+//   - RepairLog is a FRAMING-ONLY pass. It looks at frames, not at what they
+//     mean, so it must see nothing wrong at all and must not touch one byte. A
+//     semantic failure that could reach the truncation path would let recovery
+//     cut a fully readable log -- and because this damage sits at the END, this
+//     is exactly where a naive "the error is at the tail, so truncate" rule
+//     fires.
+//   - Replay no longer REFUSES the start over it (DECISIONS.md, "Availability
+//     over retention"). The record is DISCARDED, reported in
+//     Recovered.Discarded, and logged at ERROR -- at ERROR because a COMMIT
+//     record is a client having been told a write was durable, so a discarded
+//     one is an acknowledged write that is now lost.
+//
+// The file keeps its bytes either way: a replay-stage discard drops the record
+// from the rebuilt MEMORY state and does not rewrite the log.
+func TestWALSemanticDamageIsDiscardedNotTruncated(t *testing.T) {
 	dir, path, _, _ := buildWAL(t,
 		opPrepare("message", `{"n":1}`), // 1
 		opCommit(1),                     // 2
@@ -1419,32 +1784,41 @@ func TestWALRepairTailNotReachableFromSemanticDamage(t *testing.T) {
 	// The framing pass has no opinion: it looks at frames, not at what they mean.
 	res, err := RepairTail(path, KindWAL, nil)
 	if err != nil {
-		t.Fatalf("RepairTail on a well-framed file: %v, want no error: it is a framing-only pass", err)
+		t.Fatalf("RepairLog on a well-framed file: %v, want no error: it is a framing-only pass", err)
 	}
 	repairAssertUntouched(t, path, before, res)
 
-	// The refusal comes from Replay, and it is fatal.
-	app := &testApplier{}
-	l, err := Open(LogOptions{Dir: dir, Applier: app})
-	if err == nil {
-		_ = l.Close()
-		t.Fatal("Open succeeded on a semantically damaged log; recovery must be a refusal to start")
+	got, rec, out, err := openCapturing(t, dir)
+	if err != nil {
+		t.Fatalf("Open on a semantically damaged log: %v: damage is never fatal now, it is discarded and logged", err)
 	}
-	if !errors.Is(err, ErrCorrupt) {
-		t.Errorf("Open err = %v, want ErrCorrupt", err)
+
+	// The one real transaction still recovers; the duplicate commit does not
+	// re-apply it.
+	want := []Committed{wantC(1, 2, "message", `{"n":1}`)}
+	if !sameCommitted(got, want) {
+		t.Fatalf("Open applied %s, want %s: a duplicate commit must be discarded, never applied twice", showCommitted(got), showCommitted(want))
 	}
-	var ce *CorruptError
-	if !errors.As(err, &ce) {
-		t.Fatalf("Open err = %v, want a *CorruptError", err)
+	if rec.Applied != 1 || rec.DiscardCount != 1 {
+		t.Fatalf("Recovered = %+v, want Applied 1 and exactly one discard (record 3)", rec)
 	}
-	if !ce.FrameIntact {
-		t.Errorf("CorruptError.FrameIntact = false, want true: this frame checksummed, so it is not a torn tail")
+	d := rec.Discarded[0]
+	if d.Stage != "replay" || d.Index != 3 || d.Type != TypeCommit || !d.TypeKnown {
+		t.Errorf("Recovered.Discarded[0] = %+v, want the replay-stage loss of COMMIT record 3", d)
 	}
-	if !strings.Contains(err.Error(), "not an open prepare") {
-		t.Errorf("Open err = %q, want it to name the semantic failure", err)
+	if !strings.Contains(d.Reason, "not an open prepare") {
+		t.Errorf("the discard reason is %q, want it to name the semantic failure", d.Reason)
 	}
+
+	// LOGGED, at ERROR, naming the commit. Delete the logDiscards call in Open
+	// and this line goes with it.
+	assertLogged(t, out, "ERROR", "wal discarded a damaged record",
+		"path="+path, "stage=replay", "record_index=3", "record_type=commit", "not an open prepare")
+
+	// And the bytes are still there. A replay-stage discard changes what is in
+	// MEMORY, never what is on disk.
 	if after := readFile(t, path); !bytes.Equal(before, after) {
-		t.Fatalf("a failed Open changed the WAL: %d bytes before, %d after: a semantic error must never truncate",
+		t.Fatalf("Open changed the WAL: %d bytes before, %d after: a semantic failure must never truncate",
 			len(before), len(after))
 	}
 }
