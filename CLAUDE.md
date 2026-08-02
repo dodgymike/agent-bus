@@ -54,6 +54,29 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    suitable library exists, the answer is to change the requirement or stop and ask — never to
    write it yourself.
 
+10. **Duplicate detection and idempotency, everywhere.** Every mutating operation — enrol, send,
+    broadcast, leave, peer-enrol, relay — carries a client-supplied idempotency key and is safe to
+    retry. The server durably remembers which keys it has already applied, and that memory survives
+    restart (it is part of the recovered state, not an in-memory cache). No operation may be applied
+    twice.
+
+    **The distinction that makes this correct, and must not be collapsed:**
+    - **Same key + same payload = a legitimate retry.** The ack was probably lost in flight. Return
+      the ORIGINAL result, do not re-apply, do not error, and do NOT disconnect. This is the whole
+      point of idempotency: it exists so a well-behaved client can safely retry, and punishing that
+      would break exactly the clients doing the right thing.
+    - **Same key + DIFFERENT payload = a protocol violation.** The client is reusing a key for new
+      content, which is either a serious bug or an attack. Reject it, log it, and **disconnect the
+      offending client.**
+    - **Replay of an already-accepted signed message** (by a peer, a relay, or a third party) is
+      rejected outright and disconnects the sender. A signature does not stop replay — a valid signed
+      message can be resent verbatim — so freshness comes from the server-minted monotonic sequence
+      plus recipient-side cursor, not from the signature.
+
+    Relay is where this earns its keep: a cyclic peer topology plus at-least-once delivery means
+    duplicates are not an edge case but the normal steady state, and loop-prevention via the traversed
+    bus path is a *complement* to idempotency, never a substitute for it.
+
 ## Repository layout
 
 ```
