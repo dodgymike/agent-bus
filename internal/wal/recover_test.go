@@ -454,8 +454,8 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 			// false, extent past EOF, extent well inside MaxPayloadSize. Records 5
 			// and 6 (a prepare/commit pair -- acknowledged, accepted history) are
 			// sitting intact in the bytes the cut would take. This exact file was
-			// demonstrated eating those two records before laterRecordInTail
-			// existed.
+			// demonstrated eating those two records before the tail inspection
+			// (inspectTail) existed.
 			name:     "length field overshooting EOF with committed records behind it",
 			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage:   overshootLength(3),

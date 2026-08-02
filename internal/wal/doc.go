@@ -52,15 +52,26 @@
 // declared extent ends exactly at the end of the file has every byte it needs,
 // so a failed checksum there is damage to bytes that were fully written and may
 // have been fsynced and acknowledged; that is a refusal to start, not a repair.
-// Only bytes that are demonstrably MISSING are ever discarded, which is what
-// makes it true that nothing acknowledged is lost and that the index high-water
-// mark never moves backwards over anything a client could have seen. That
+// Bytes are discarded only when those checks can find no evidence that they
+// were ever complete -- and because every one of those checks is a CHECKSUM
+// proof, what they establish is a SINGLE-FAULT guarantee: against one crash
+// mid-append, or one region of corruption, nothing acknowledged is lost and the
+// index high-water mark never moves backwards over anything a client could have
+// seen. An exhaustive single-fault sweep found no case that broke it. TWO
+// faults in the same final frame do break it, and this is measured rather than
+// hypothesised: corrupt that frame's LENGTH field and ALSO flip a bit of its
+// payload, and both proofs fail together -- the stored checksum matches the
+// bytes at no boundary, and no complete record survives in the region to be
+// found -- so the frame is cut, an acknowledged COMMIT can be lost, and Open
+// returns no error. That hole is open; the format offers nothing left to check
+// a doubly-corrupted frame against. See RepairTail. That
 // truncation is fsynced, and it is the ONLY truncation this package ever
 // performs: invariant 6 allows exactly one exception to append-only, "a
-// verified-corrupt tail during recovery", and this is it. Nothing acknowledged
-// can be lost by it, because Append returns only after its fsync, so a torn
-// frame is one whose write never succeeded and whose contents were never
-// visible to anybody. Corruption ANYWHERE ELSE -- in a frame whose checksum
+// verified-corrupt tail during recovery", and this is it. Absent that second
+// fault, nothing acknowledged can be lost by it, because Append returns only
+// after its fsync, so a frame the checks cannot prove complete is one whose
+// write never succeeded and whose contents were never visible to anybody.
+// Corruption ANYWHERE ELSE -- in a frame whose checksum
 // verified, in the file header, or anywhere with intact records after it -- is
 // a refusal to start, not a repair. See RepairTail for the classification rules
 // and for the deliberately conservative cases it declines to touch.

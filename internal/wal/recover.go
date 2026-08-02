@@ -76,11 +76,33 @@ type TailRepair struct {
 	// is not authenticated (see format.go); that is a separate problem and not
 	// one this function can solve.
 	//
-	// Every COMPLETE frame therefore survives the repair -- including a
-	// dangling PREPARE, which is durable, was potentially observable, and
-	// still burns its index for good (Replay discards its ENTRY but still
-	// counts its index in the high-water mark). The high-water mark can only
-	// be lowered across bytes that never completed an fsync.
+	// Under a SINGLE fault -- one crash mid-append, or one region of
+	// corruption in one frame -- every COMPLETE frame therefore survives the
+	// repair, including a dangling PREPARE, which is durable, was potentially
+	// observable, and still burns its index for good (Replay discards its
+	// ENTRY but still counts its index in the high-water mark). That is
+	// measured, not asserted: an exhaustive single-fault sweep run for DUR-10
+	// (~345k cases) produced no silent loss, and the committed evidence is
+	// TestCrashInjectionSingleBitCorruptionSweep and
+	// TestCrashInjectionTruncationPrefixSweep, which quantify over every
+	// offset in a fixture log and accept only "recovered in full" or "refused
+	// to start".
+	//
+	// TWO faults in the SAME final frame are NOT covered, and that gap is
+	// demonstrated rather than theoretical. Corrupt the last frame's LENGTH
+	// field and ALSO flip a bit of its payload, and both proofs above fail for
+	// the same reason -- they are CHECKSUM proofs, and a damaged payload no
+	// longer reproduces the stored checksum at any hypothesised boundary --
+	// while there is no later complete record to find either. The frame is
+	// then cut, an acknowledged COMMIT can be lost, the high-water mark rolls
+	// back over it, and Open returns no error at all.
+	//
+	// So the honest statement of the guarantee is the narrower one: the
+	// high-water mark is never lowered across bytes that completed an fsync,
+	// PROVIDED a single fault damaged them. Closing the two-fault case is not
+	// a matter of a better check here -- once both the length field and the
+	// payload are wrong there is nothing left in the format to check a
+	// doubly-corrupted frame against.
 	//
 	// This package does not mint application ids; internal/ids does, from the
 	// recovered high-water mark. Nothing there changes.
@@ -102,7 +124,7 @@ type TailRepair struct {
 //
 // A cut requires BOTH gates to agree: truncatableTail, which says the damage has
 // the shape of a torn tail (a single incomplete frame whose declared extent
-// reaches the end of the file), and laterRecordInTail, which says the bytes that
+// reaches the end of the file), and inspectTail, which says the bytes that
 // cut would discard do not still contain a complete record. The second gate is
 // there because the first one reasons from a frame header that damage may have
 // falsified.
@@ -223,7 +245,7 @@ func RepairTail(path string, kind Kind, logger *logging.Logger) (TailRepair, err
 // reasons about comes from the damaged frame's own header -- its offset, its
 // declared extent -- and a corrupted length field is exactly the damage that
 // makes that self-description false. RepairTail therefore also inspects the bytes
-// the cut would discard (laterRecordInTail) before cutting anything. Do not call
+// the cut would discard (inspectTail) before cutting anything. Do not call
 // this alone and act on the answer.
 //
 // It answers NO unless the damage is provably confined to a single frame at the
@@ -331,18 +353,18 @@ const maxTailCandidates = 4096
 // SINGLE FLIPPED BIT, deleting committed messages and then letting Open and Replay
 // succeed with no error at all.
 //
-// Two independent proofs are applied, in order:
+// Two independent proofs are applied, and the order they are listed in below is
+// the order the CODE runs them in. That order is load-bearing, not incidental:
+// both searches spend the SAME checksum budget (maxTailCandidates, shared via
+// the candidates counter), so whichever runs first is the one that can exhaust
+// it. The region scan goes first deliberately, because it is the proof that
+// protects COMMITTED RECORDS SITTING BEHIND THE DAMAGE -- the case that actually
+// destroyed accepted history -- so it is the one that must get the budget.
+// Exhausting the budget is itself a refusal in both searches, so no ordering can
+// turn a budget overrun into a silent cut; what the ordering decides is which
+// evidence a region dense with frame-like headers is allowed to hide.
 //
-//  1. IS THE DAMAGED FRAME ACTUALLY COMPLETE? Hypothesise that the frame ends
-//     exactly at the end of the file -- that its true payload length is the bytes
-//     remaining -- and recompute its checksum on that basis. If it matches, every
-//     byte the record needs IS present and the only thing wrong is the length
-//     field itself. A crash cannot produce that (an interrupted append leaves
-//     fewer bytes, not a mangled header), the record may well have been fsynced
-//     and acknowledged, and truncating it would destroy accepted history. This is
-//     a proof, not a heuristic: it is the writer's own checksum agreeing.
-//
-//  2. IS THERE A COMPLETE RECORD IN THE REGION? Any frame lying inside the bytes
+//  1. IS THERE A COMPLETE RECORD IN THE REGION? Any frame lying inside the bytes
 //     to be discarded whose checksum verifies and whose index continues the file's
 //     sequence is a record that a cut would delete. The index window is what makes
 //     this cheap AND sensitive: indices are dense, so a genuine follower's index
@@ -351,6 +373,21 @@ const maxTailCandidates = 4096
 //     EOF" is deliberate -- the earlier end-of-file anchor found nothing whenever
 //     the file ALSO had a torn tail, and "the file has a torn tail" is the normal
 //     state of every file this function is called on, not a rare second fault.
+//
+//  2. IS THE DAMAGED FRAME ACTUALLY COMPLETE? Hypothesise that the frame ends
+//     exactly at the end of the file -- that its true payload length is the bytes
+//     remaining -- and recompute its checksum on that basis. If it matches, every
+//     byte the record needs IS present and the only thing wrong is the length
+//     field itself. A crash cannot produce that (an interrupted append leaves
+//     fewer bytes, not a mangled header), the record may well have been fsynced
+//     and acknowledged, and truncating it would destroy accepted history. This is
+//     a proof, not a heuristic: it is the writer's own checksum agreeing.
+//
+// Both are checksum proofs, which bounds what they can establish: a frame whose
+// length field AND payload are both corrupt reproduces its checksum at no
+// boundary and leaves no complete record behind it, so it passes both proofs and
+// is cut. See the invariant-1 note on TailRepair.NextIndex for that residual
+// two-fault hole; it is not closed here.
 //
 // Cost is O(region) integer work with a checksum only for candidates that pass
 // both the index window and the length check, capped by maxTailCandidates.
