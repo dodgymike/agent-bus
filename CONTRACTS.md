@@ -199,3 +199,78 @@ committed; a data dir at a non-default, non-ignored path is the operator's own r
 
 No new route, CLI flag, env var, or header was introduced by this change — see the sections above,
 which remain the complete index.
+
+## The write-ahead log at startup (added 2026-08-02)
+
+`cmd/agent-bus`'s `run()` now opens `internal/wal` with
+`wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg})`, creating `<data-dir>/bus.wal` (mode
+`0o600`, a 16-byte file header) on first start. This is wiring only: the on-disk WAL format itself
+is unchanged (see `PROTOCOL.md`) — this task connects the already-existing library to the server
+binary, it does not add a record type or bump a format version.
+
+**Startup order, which is the contract:** `os.MkdirAll(-data-dir, 0o700)` → `dirlock.Acquire`
+(`bus.lock`, see above) → `ids.LoadOrCreateBusID` (`bus-id`) → `wal.Open` (which REPLAYS the file
+before returning) → `net.Listen` → serve. `wal.Open` must run after the lock, because replay reads
+the file and a torn-tail repair truncates bytes a second server could otherwise be appending to —
+opening the log before locking would defeat the lock entirely. It must run before the listener
+binds, because `wal.Open` does not return until replay has finished, so no request is ever served
+from an unreplayed store (invariant 5: disk is the truth, memory is only the serving copy).
+
+**Honest limit of what "replay" means right now:** the `Applier` passed to `wal.Open` is `nil`.
+There is no in-memory serving copy yet — `internal/store` is still a stub — so there is nothing for
+a committed entry to be applied to. Replay today is a durability fsck: it verifies every frame,
+resolves each prepare against its commit or discards it, and establishes the next-index high-water
+mark, but it rebuilds no application state, because none exists. When the store lands it is passed
+here as the `Applier`, and this line changes with it.
+
+The opened `*wal.Log` is held for the process lifetime and passed to the HTTP layer as
+`httpapi.Options.Durable` (new field; interface `httpapi.DurableLog`, one method,
+`Write(wal.Entry) (wal.Committed, error)`; accessor `func (s *Server) Durable() DurableLog`, which
+may return `nil`). **No handler and no route reads it yet** — `/healthz` and `/v1/info` are
+unaffected — it is wired through now so the epics that add writing handlers have exactly one write
+path to reach for (invariant 4), rather than each minting its own.
+
+On shutdown the log is `Close()`d via a `defer` registered *after* the lock's own deferred release,
+so Go's LIFO ordering closes the WAL (flushing and releasing its file handle) while the data
+directory is still locked, and only releases the lock afterward — the reverse order would open a
+window where a second `agent-bus` could acquire the directory while this process still held the WAL
+open. A `Close` error does not change the process exit code but is logged at `ERROR` with the
+`data_dir`, `path`, and the error, since it is a durability signal an operator should see.
+
+**Failure mode: any open-or-replay failure is FATAL.** `run()` returns a non-nil error, `main()`
+prints it to stderr prefixed `agent-bus: ` and exits `1`, and nothing binds a listener — the same
+"fail fast, never degrade to an empty store" shape as the `bus.lock` failure above. The message is:
+```
+agent-bus: opening the write-ahead log in "<data-dir>": <wal error>
+```
+where `<wal error>` is whatever `internal/wal` reports — for example a corrupt file header reads
+`wal: <data-dir>/bus.wal: corrupt at offset 0: bad magic "XXXXXXXX", want "AGNTBUSW"` (the exact
+wording is set by `internal/wal/format.go`'s `corruptf`, not by `cmd/agent-bus`). The only damage
+`wal.Open` repairs automatically is a provably torn tail — a frame whose checksum failed because a
+crash landed mid-append (`RepairTail`, truncating back to the last verified-good record and
+fsyncing that). Anything else — a bad magic, a wrong format version, a commit naming no open
+prepare, a payload that will not decode — refuses to start and leaves the file byte-for-byte
+unchanged; there is no silent empty start, and no second-guessing the repair decision at the
+`cmd/agent-bus` layer.
+
+**New INFO log line, asserted on by tests — treat its shape as part of this contract.** After a
+successful open, `run()` logs one line naming what recovery found:
+```
+msg="write-ahead log opened" data_dir=<dir> path=<dir>/bus.wal records_replayed=<n> applied=<n> aborted=<n> dangling=<n> next_index=<n> repaired=<bool> repaired_bytes=<n>
+```
+This fires even for a brand-new, empty log (all-zero fields, `next_index=1`), so its presence is
+proof a replay ran before the process served anything. `wal.Open` itself additionally emits its own
+`msg="wal replayed"` line (only when the file held ≥1 record) plus a `WARN` per discarded dangling
+prepare (a prepare that was fsynced but never committed — the signature of a crash between the two
+phases) — see `internal/wal/log.go`. Both log lines are internal library output, not routes or
+headers, but an operator relying on this file to confirm "the WAL loaded" should look for the
+`cmd/agent-bus` line above.
+
+**Test-only env vars, not supported configuration:** `cmd/agent-bus/wal_startup_test.go` reads
+`AGENT_BUS_TEST_RUN_SERVER`, `AGENT_BUS_TEST_DATA_DIR`, `AGENT_BUS_TEST_LISTEN`, and
+`AGENT_BUS_TEST_LOG_LEVEL` in its own `TestMain`, to re-exec the test binary as a real server for a
+startup/crash test. The server binary (`cmd/agent-bus/main.go`) does not read any of them. This
+does not add an entry to the "Env vars" section above, which remains empty.
+
+No new HTTP route, CLI flag, production env var, header, or on-disk record type was introduced by
+this change.

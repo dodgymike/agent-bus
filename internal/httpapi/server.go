@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
 // Identity supplies the bus's own id to the HTTP layer.
@@ -19,6 +20,21 @@ import (
 type Identity interface {
 	// BusID returns the id of this bus. It is stable for the process lifetime.
 	BusID() string
+}
+
+// DurableLog is the HTTP layer's view of the two-phase durable write path
+// (internal/wal). *wal.Log satisfies it.
+//
+// It is one method on purpose, in the same spirit as Identity above: Write is
+// the whole of invariant 4 as a handler needs it -- hand over an entry, get
+// back a Committed only once the change is prepared, committed and fsynced --
+// and a handler has no business calling Begin, Close or Recovered, which belong
+// to the process lifecycle that main owns. Narrowing it here also keeps the
+// tests of this package free of a real log on disk.
+type DurableLog interface {
+	// Write durably records e and does not return until it is committed and
+	// fsynced. Nothing may be acknowledged to a client before it returns.
+	Write(wal.Entry) (wal.Committed, error)
 }
 
 // DefaultBusID is the placeholder bus id used when no identity is supplied.
@@ -53,6 +69,18 @@ type Options struct {
 	// handlers can read it off the Server; nothing consumes it yet.
 	PollTimeout time.Duration
 
+	// Durable is the two-phase durable write path, opened and replayed by main
+	// before the listener binds and held for the process lifetime. It is
+	// carried here so the epics that add writing handlers have exactly one
+	// write path to reach for; NO handler and NO route uses it in this task,
+	// and neither /healthz nor /v1/info is affected by it.
+	//
+	// It may be nil -- the zero Options and every test that does not care about
+	// durability leave it so -- and nothing here may panic on that. There is no
+	// default: a no-op stand-in would be a write path that silently loses data,
+	// which is worse than a nil the caller has to check.
+	Durable DurableLog
+
 	// Now is the clock, overridable so tests can assert on uptime.
 	// Defaults to time.Now.
 	Now func() time.Time
@@ -66,6 +94,7 @@ type Server struct {
 	version     string
 	startedAt   time.Time
 	pollTimeout time.Duration
+	durable     DurableLog
 	now         func() time.Time
 	handler     http.Handler
 }
@@ -79,6 +108,7 @@ func New(opts Options) *Server {
 		version:     opts.Version,
 		startedAt:   opts.StartedAt,
 		pollTimeout: opts.PollTimeout,
+		durable:     opts.Durable,
 		now:         opts.Now,
 	}
 	if s.identity == nil {
@@ -115,6 +145,11 @@ func (s *Server) BusID() string { return s.identity.BusID() }
 
 // PollTimeout returns the configured long-poll ceiling, for the POLL epic.
 func (s *Server) PollTimeout() time.Duration { return s.pollTimeout }
+
+// Durable returns the durable write path the server was built with, for the
+// epics that add writing handlers. It is nil when none was supplied, so a
+// caller must check before writing; no route consumes it yet.
+func (s *Server) Durable() DurableLog { return s.durable }
 
 // HealthResponse is the body of GET /healthz.
 type HealthResponse struct {

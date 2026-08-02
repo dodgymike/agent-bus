@@ -24,6 +24,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
 // version is the reported build version. Override at build time with
@@ -200,6 +201,73 @@ func run(cfg Config) error {
 		lg.Warn("TEST-ONLY -bus-id override in use; the server is authoritative on ids, do not use this in production", "bus_id", busID)
 	}
 
+	// Open the durable write path, and REPLAY it, here: strictly after the
+	// exclusive lock above and strictly before the listener below.
+	//
+	// After the lock, because replay reads and RepairTail may truncate the very
+	// bytes a second server would be appending to; opening the log first and
+	// locking second would defeat the lock entirely. Nothing may move
+	// dirlock.Acquire later for the same reason -- a refused start must not have
+	// touched the data dir at all beyond bus.lock.
+	//
+	// Before net.Listen, because wal.Open does not return until the log has been
+	// replayed, so binding afterwards is what guarantees no request is ever
+	// served from an unreplayed store (invariant 5: disk is the truth, memory is
+	// only the serving copy).
+	//
+	// The Applier is deliberately nil, and that is an honest statement of where
+	// this project is: there is no in-memory serving copy yet (internal/store is
+	// still a doc.go stub), so there is nothing for committed entries to be
+	// applied TO. The replay is therefore a durability fsck -- it verifies every
+	// frame, resolves prepares against commits, and establishes the high-water
+	// index -- and it rebuilds no state, because there is no state to rebuild.
+	// When the store lands, it is passed here as the Applier and this comment
+	// goes with it.
+	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg})
+	if err != nil {
+		// FATAL, and deliberately so: run() returning non-nil makes main() print
+		// the error and exit 1. A log we cannot open or replay means we do not
+		// know what the accepted history is, and serving from an empty store
+		// would silently present a bus with no memory of durable, acknowledged
+		// writes. Never degrade to that. The one damage case that is survivable
+		// -- a provably torn tail, bytes whose write never completed an fsync --
+		// is already repaired inside wal.Open/RepairTail, so anything reaching
+		// here is damage that recovery has refused to guess about; there is no
+		// second-guessing it at this layer.
+		return fmt.Errorf("opening the write-ahead log in %q: %w", cfg.DataDir, err)
+	}
+	// Registered AFTER the lock's deferred Release so LIFO runs them in the
+	// right order: close the log (flushing and releasing its file handle) while
+	// the data dir is still locked, and only then drop the lock. The reverse
+	// would leave a window where another server may acquire the dir while this
+	// one still holds the WAL open.
+	defer func() {
+		// Reported, never swallowed -- a failing Close is a durability signal.
+		// It does not overwrite run()'s return value: by this point the process
+		// is already on its way out, and the reason it is leaving is more useful
+		// to an operator than a close error is.
+		if err := walLog.Close(); err != nil {
+			lg.Error("closing the write-ahead log failed", "data_dir", cfg.DataDir, "path", walLog.Path(), "err", err)
+		}
+	}()
+
+	// One line, at INFO, naming what recovery found. wal.Open already logs its
+	// own "wal replayed" line when the file held records (and warns per dangling
+	// prepare), so this is the startup-visible summary that also fires for an
+	// empty log: proof in the operator's log that a replay ran before we served.
+	rec := walLog.Recovered()
+	lg.Info("write-ahead log opened",
+		"data_dir", cfg.DataDir,
+		"path", rec.Path,
+		"records_replayed", rec.Records,
+		"applied", rec.Applied,
+		"aborted", rec.Aborted,
+		"dangling", len(rec.Dangling),
+		"next_index", rec.NextIndex,
+		"repaired", rec.Repaired.Truncated,
+		"repaired_bytes", rec.Repaired.Removed,
+	)
+
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
 	// to every connection, so each request context descends from it: cancelling
 	// it releases handlers parked on a long-poll instead of leaving them
@@ -214,6 +282,10 @@ func run(cfg Config) error {
 		Version:     version,
 		StartedAt:   time.Now(),
 		PollTimeout: cfg.PollTimeout,
+		// The HTTP layer holds the log for the process lifetime so the handlers
+		// that land later write through it (invariant 4) instead of minting a
+		// second write path. No handler reads it in this task.
+		Durable: walLog,
 	})
 
 	srv := &http.Server{
