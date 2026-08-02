@@ -1250,3 +1250,55 @@ requirement on the implementation, not a recommendation.
 Not answered: (a) is there genuinely no plaintext escape hatch for tests and local development, or
 is one permitted; (b) may certificates be operator-supplied as well as self-generated? Invariant 11
 currently says no plaintext anywhere; that stands until decided otherwise.
+
+---
+
+## 2026-08-02 — E7: no plaintext escape hatch; tests use REAL TLS; operator certs allowed
+
+**Decision (user).** *"do the best thing for testing that keeps prod secure"* — delegated. Resolved
+as follows.
+
+### There is NO plaintext escape hatch. Not a flag, not an env var, not a build tag.
+
+Invariant 11 stands unqualified. The reasoning is that every plausible hatch fails the same way:
+
+- **A flag** (`-insecure`, `-no-tls`) is one typo or one copied command from being in production, and
+  a bus started with it looks identical to one that was not.
+- **An env var** is worse — it is invisible in the command line and inherited by children.
+- **A build tag** seems safer but is not: a binary built with the wrong tag is
+  indistinguishable from a correct one after the fact, and "which tags was this built with?" is
+  exactly the question nobody can answer during an incident.
+
+All three share the deeper flaw: **they make the tested path different from the production path.**
+A test suite that runs without TLS does not exercise the TLS code, so the one configuration that
+actually ships is the one least covered — and the failure surfaces in production, where certificate
+and handshake bugs are hardest to diagnose.
+
+### Tests use real TLS, with certificates minted at test time
+
+Tests generate a genuine self-signed keypair into `t.TempDir()` (stdlib `crypto/x509` +
+`tls.X509KeyPair`), start the real TLS listener, and connect with the real client pinning the real
+fingerprint. The production trust path — fingerprint delivered in the invite, no TOFU — is what the
+tests exercise, because it is the only path that exists.
+
+**The accommodation that makes this stick is ergonomic, not a weakening:** ship a test helper that
+mints a short-lived cert and returns a configured client in one call, so writing a TLS test is no
+harder than writing a plaintext one. The reason people add insecure hatches is friction; removing the
+friction removes the motive. If writing a TLS test is painful, that is a bug in the helper, not an
+argument for a hatch.
+
+**`InsecureSkipVerify` must appear nowhere in the tree**, including tests. Worth a grep in CI: it is
+the single clearest signal that verification was disabled to make something pass.
+
+### Operator-supplied certificates ARE allowed
+
+`-tls-cert` / `-tls-key` flags, alongside the self-signed default. This is a legitimate need for
+anyone with existing PKI, and it weakens nothing: self-signed-plus-pinning remains the default, and
+the fingerprint-in-invite mechanism is indifferent to who issued the certificate — the client pins
+whatever the bus actually serves.
+
+### Known follow-on work
+
+`scripts/bus-serve.sh:54` (`HEALTH_URL="http://${LISTEN}/healthz"`), `CLI-2`'s `proof_cmd` (enrols
+over `http://127.0.0.1:8092`), and DEPLOY-1/DEPLOY-2 all assume plaintext and must be updated as the
+mTLS epic lands.
