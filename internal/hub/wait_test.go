@@ -485,25 +485,35 @@ func TestWaiterWakeup(t *testing.T) {
 
 func TestPollConcurrency(t *testing.T) {
 	t.Run("VanishedClientsLeakNothing", func(t *testing.T) {
-		h, _, _ := newTestHub(t, "alpha", "beta")
-		b := agentID(t, h.BusID(), "beta")
+		// One agent PER PARKED POLL. hub.MaxWaitersPerAgent caps a single agent at
+		// 32 concurrent long polls, so parking 50 for one id would be refused with
+		// ErrCapacity and this would stop being a leak test at all. The cap itself
+		// is asserted in PerAgentWaiterCapFailsClosed below; here the point is
+		// that a vanished client releases its waiter and its goroutine, which is a
+		// per-connection property and is unchanged by how the ids are spread.
+		const n = 50
+		names := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			names = append(names, fmt.Sprintf("v%d", i))
+		}
+		h, _, _ := newTestHub(t, names...)
 
 		// Settle first: the race detector and the WAL open path leave short-lived
 		// goroutines about, and a baseline taken too early reads as a leak later.
 		settleGoroutines()
 		baseline := runtime.NumGoroutine()
 
-		const n = 50
 		cancels := make([]context.CancelFunc, n)
 		var wg sync.WaitGroup
 		errs := make(chan error, n)
 		for i := 0; i < n; i++ {
+			who := agentID(t, h.BusID(), fmt.Sprintf("v%d", i))
 			ctx, cancel := context.WithCancel(context.Background())
 			cancels[i] = cancel
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if _, err := h.Wait(ctx, b, 0, 10, 60*time.Second); !errors.Is(err, context.Canceled) {
+				if _, err := h.Wait(ctx, who, 0, 10, 60*time.Second); !errors.Is(err, context.Canceled) {
 					errs <- fmt.Errorf("Wait returned err = %v, want context.Canceled", err)
 				}
 			}()
@@ -539,6 +549,107 @@ func TestPollConcurrency(t *testing.T) {
 				t.Fatalf("goroutine count did not return to baseline: %d now, %d before parking %d waiters (tolerance %d)", got, baseline, n, tolerance)
 			}
 			time.Sleep(10 * time.Millisecond)
+		}
+	})
+
+	t.Run("PerAgentWaiterCapFailsClosed", func(t *testing.T) {
+		// hub.MaxWaitersPerAgent bounds how many long polls ONE agent may have
+		// parked at once. The cost it bounds is notify's scan, which runs under
+		// writeMu on the critical path of every send — so without it one agent
+		// parking thousands of polls slows every OTHER agent's durable write.
+		//
+		// The two halves both matter. It must FAIL CLOSED (refuse the new poll),
+		// and it must EVICT NOTHING: evicting would let one connection of an agent
+		// kill another's, so the already-parked polls have to come back normally.
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		a := agentID(t, h.BusID(), "alpha")
+		b := agentID(t, h.BusID(), "beta")
+
+		if hub.MaxWaitersPerAgent <= 0 {
+			t.Fatalf("hub.MaxWaitersPerAgent = %d; there is no cap to test", hub.MaxWaitersPerAgent)
+		}
+
+		type outcome struct {
+			batch hub.Batch
+			err   error
+		}
+		out := make(chan outcome, hub.MaxWaitersPerAgent)
+		var wg sync.WaitGroup
+		for i := 0; i < hub.MaxWaitersPerAgent; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				batch, err := h.Wait(context.Background(), b, 0, 10, 20*time.Second)
+				out <- outcome{batch, err}
+			}()
+		}
+		waitForWaiters(t, h, hub.MaxWaitersPerAgent, "the agent must fill its bucket to exactly the cap")
+
+		// One over. It is refused BEFORE it parks, so it returns immediately.
+		start := time.Now()
+		batch, err := h.Wait(context.Background(), b, 0, 10, 20*time.Second)
+		elapsed := time.Since(start)
+		if !errors.Is(err, hub.ErrCapacity) {
+			t.Fatalf("the %dth concurrent poll for one agent gave err = %v, want ErrCapacity", hub.MaxWaitersPerAgent+1, err)
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("the refused poll took %v; it parked instead of failing closed", elapsed)
+		}
+		if len(batch.Messages) != 0 || batch.TimedOut {
+			t.Fatalf("a refused poll returned %+v, want an empty non-timeout batch", batch)
+		}
+		if batch.Cursor != 0 {
+			t.Fatalf("a refused poll returned cursor %d, want the cursor it was given (0)", batch.Cursor)
+		}
+		// EVICTS NOTHING: the parked waiters are all still there.
+		if got := h.WaiterCount(); got != hub.MaxWaitersPerAgent {
+			t.Fatalf("after the refusal WaiterCount() = %d, want the %d already-parked waiters untouched", got, hub.MaxWaitersPerAgent)
+		}
+
+		// A DIFFERENT agent is unaffected — the bucket is per-agent, so a flooder
+		// can only fill its own.
+		if _, err := h.Wait(context.Background(), a, 0, 10, 50*time.Millisecond); err != nil {
+			t.Fatalf("another agent's poll was refused while %s was at its cap: %v", b, err)
+		}
+
+		// And the already-parked waiters are UNDISTURBED: one broadcast still
+		// wakes every one of them, normally.
+		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("still working"), IdempotencyKey: "k-cap"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("the capped agent's parked waiters were never woken; %d are still parked", h.WaiterCount())
+		}
+		close(out)
+
+		woken := 0
+		for got := range out {
+			if got.err != nil {
+				t.Fatalf("a parked waiter returned err = %v after the cap was hit", got.err)
+			}
+			if got.batch.TimedOut {
+				t.Fatal("a waiter parked before the cap was hit timed out; the refusal disturbed it")
+			}
+			if len(got.batch.Messages) != 1 || got.batch.Messages[0].ID != res.MessageID {
+				t.Fatalf("a woken waiter got %v, want exactly %s", got.batch.Messages, res.MessageID)
+			}
+			woken++
+		}
+		if woken != hub.MaxWaitersPerAgent {
+			t.Fatalf("%d of %d parked waiters were woken", woken, hub.MaxWaitersPerAgent)
+		}
+		if got := h.WaiterCount(); got != 0 {
+			t.Fatalf("after the herd returned, WaiterCount() = %d, want 0", got)
+		}
+		// The bucket drains, so the cap is a CONCURRENCY bound and not a lifetime
+		// quota: the same agent can poll again.
+		if _, err := h.Wait(context.Background(), b, res.Seq, 10, 50*time.Millisecond); err != nil {
+			t.Fatalf("after its waiters drained, %s was still refused: %v", b, err)
 		}
 	})
 

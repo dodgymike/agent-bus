@@ -39,6 +39,16 @@ import (
 // rebuilt from one. The roster is not durable yet (see hub.NoteEnrolment), so
 // recovery re-enrols the same names — which is also what a restarted server
 // does today.
+//
+// Both runs enrol at fixtureEnrolledAt, which PRECEDES every fixture message.
+// That is not a convenience to keep the assertions non-empty: it is what the
+// durable roster AUTH-3 will provide, namely each agent's ORIGINAL enrolment
+// instant. Re-enrolling at time.Now() instead would put every recovered message
+// before the epoch and this whole sweep would assert nothing — and would be
+// modelling a bus that had FORGOTTEN when its agents joined rather than one that
+// remembers. The case where an id really is reused by a NEW keypair after a
+// restart, and must therefore see none of the previous holder's traffic, is
+// TestEnrolmentEpoch/AReusedAgentIDAfterARestartInheritsNoTraffic.
 var crashAgents = []string{"alpha", "beta", "gamma"}
 
 // publishedMsg is one message the fixture accepted, remembered in full so
@@ -207,11 +217,21 @@ func crashAt(t *testing.T, f crashFixture, n int64) string {
 }
 
 // historyOf drains everything agent can see, in sequence order.
-func historyOf(h *hub.Hub, agent string) []store.Message {
+//
+// A read error is FATAL: every caller passes an agent this test re-enrolled on
+// the recovered hub, and History fails closed with ErrUnknownSender otherwise.
+// Swallowing that would make "the message did not survive" indistinguishable
+// from "the roster was never rebuilt", which is precisely the distinction this
+// file exists to make.
+func historyOf(t *testing.T, h *hub.Hub, agent string) []store.Message {
+	t.Helper()
 	var out []store.Message
 	after := uint64(0)
 	for {
-		b := h.History(agent, after, hub.MaxBatchLimit)
+		b, err := h.History(agent, after, hub.MaxBatchLimit)
+		if err != nil {
+			t.Fatalf("History(%q, %d) on the recovered hub: %v", agent, after, err)
+		}
 		out = append(out, b.Messages...)
 		if !b.More {
 			return out
@@ -301,7 +321,7 @@ func TestMessagingCrashRecovery(t *testing.T) {
 			// What each agent can see after recovery.
 			views := map[string][]store.Message{}
 			for _, who := range f.agents {
-				views[who] = historyOf(h, who)
+				views[who] = historyOf(t, h, who)
 			}
 
 			var survivingSeqs []uint64

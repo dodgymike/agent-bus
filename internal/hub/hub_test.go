@@ -6,6 +6,7 @@ package hub_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -26,6 +27,26 @@ import (
 // A literal rather than ids.GenerateBusID() so a failure message names the same
 // bus every run and the fixtures a crash sweep produces are byte-reproducible.
 const testBusID = "testbus"
+
+// fixtureEnrolledAt is the enrolment instant every agent enrolled by enrolAll is
+// given, for the whole test binary.
+//
+// It is ONE HOUR IN THE PAST, and that is load-bearing rather than arbitrary.
+// store.Message.VisibleTo refuses to deliver a message sent BEFORE the reading
+// agent enrolled (the enrolment epoch, added by the 2026-08-02 security audit),
+// so a roster whose EnrolledAt sat after the fixture traffic would make every
+// read in this package return nothing and every assertion below vacuous.
+//
+// It is also what makes the RECOVERY fixtures honest. The roster is not durable
+// yet (AUTH-3), so a rebuilt hub has to be re-enrolled by hand; re-enrolling it
+// at time.Now() would model a bus that has forgotten when its agents joined,
+// which is not what AUTH-3 will deliver. Pinning one instant that precedes the
+// fixture messages and using it in BOTH runs is the honest simulation of the
+// durable roster that will restore each agent's ORIGINAL enrolment instant.
+//
+// A single package-level value, not a function, so the two runs of a recovery
+// test cannot drift apart.
+var fixtureEnrolledAt = time.Now().Add(-time.Hour)
 
 // agentID builds the fully-qualified "<bus-id>.<name>-1" every enrolled test
 // agent uses (invariant 2). Suffix 1 because ids.AgentID rejects 0.
@@ -79,28 +100,39 @@ func newHubOver(t *testing.T, lg *wal.Log, busID string, agents ...string) *hub.
 // path while replay still comes off the real file.
 func newHubOverDurable(t *testing.T, durable hub.DurableLog, lg *wal.Log, busID string, agents ...string) *hub.Hub {
 	t.Helper()
+	h := openHubOverDurable(t, durable, lg, busID, nil)
+	enrolAll(t, h, busID, agents...)
+	return h
+}
+
+// openHubOverDurable opens a Hub and enrols NOBODY, so a caller that needs to
+// choose each agent's enrolment epoch (TestEnrolmentEpoch) can do so itself.
+// now may be nil, in which case the hub uses the real clock.
+func openHubOverDurable(t *testing.T, durable hub.DurableLog, lg *wal.Log, busID string, now func() time.Time) *hub.Hub {
+	t.Helper()
 	path := lg.Path()
 	h, err := hub.Open(hub.Options{
 		BusID:     busID,
 		Durable:   durable,
 		Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
 		NextIndex: lg.Recovered().NextIndex,
+		Now:       now,
 	})
 	if err != nil {
 		t.Fatalf("hub.Open: %v", err)
 	}
-	enrolAll(t, h, busID, agents...)
 	return h
 }
 
-// enrolAll registers one agent per name on the hub's roster view.
+// enrolAll registers one agent per name on the hub's roster view, all at
+// fixtureEnrolledAt. See that variable for why the instant is in the past.
 func enrolAll(t *testing.T, h *hub.Hub, busID string, agents ...string) {
 	t.Helper()
-	for i, name := range agents {
+	for _, name := range agents {
 		h.NoteEnrolment(hub.Agent{
 			AgentID:    agentID(t, busID, name),
 			Name:       name,
-			EnrolledAt: time.Date(2026, 8, 2, 9, 0, i, 0, time.UTC),
+			EnrolledAt: fixtureEnrolledAt,
 		})
 	}
 }
@@ -142,11 +174,19 @@ func findByID(msgs []store.Message, id string) (store.Message, bool) {
 }
 
 // historyIDs is the ordered list of message ids agentID can see from position 0.
-func historyIDs(h *hub.Hub, agent string) []string {
+//
+// A read error is FATAL here: every caller passes an enrolled agent, and
+// History fails closed with ErrUnknownSender for anyone else — swallowing that
+// would turn a roster bug into an empty list that reads like "saw nothing".
+func historyIDs(t *testing.T, h *hub.Hub, agent string) []string {
+	t.Helper()
 	var out []string
 	after := uint64(0)
 	for {
-		b := h.History(agent, after, hub.MaxBatchLimit)
+		b, err := h.History(agent, after, hub.MaxBatchLimit)
+		if err != nil {
+			t.Fatalf("History(%q, %d): %v", agent, after, err)
+		}
 		for _, m := range b.Messages {
 			out = append(out, m.ID)
 		}
@@ -155,6 +195,16 @@ func historyIDs(h *hub.Hub, agent string) []string {
 		}
 		after = b.Cursor
 	}
+}
+
+// mustHistory is History for a caller that expects it to succeed.
+func mustHistory(t *testing.T, h *hub.Hub, agent string, after uint64, limit int) hub.Batch {
+	t.Helper()
+	b, err := h.History(agent, after, limit)
+	if err != nil {
+		t.Fatalf("History(%q, %d, %d): %v", agent, after, limit, err)
+	}
+	return b
 }
 
 // contains reports membership, so a failure message can say which list.
@@ -388,7 +438,7 @@ func TestBroadcastSend(t *testing.T) {
 		// The recipients. The counter makes an empty loop impossible to pass.
 		seen := 0
 		for _, recipient := range []string{b, g} {
-			seenIDs := historyIDs(h, recipient)
+			seenIDs := historyIDs(t, h, recipient)
 			if !contains(seenIDs, res.MessageID) {
 				t.Fatalf("%s cannot see broadcast %s; its history is %v", recipient, res.MessageID, seenIDs)
 			}
@@ -400,7 +450,7 @@ func TestBroadcastSend(t *testing.T) {
 
 		// The sender. store.Message.VisibleTo excludes it, and that is a stated
 		// contract rather than an accident — pin it.
-		if got := historyIDs(h, a); contains(got, res.MessageID) {
+		if got := historyIDs(t, h, a); contains(got, res.MessageID) {
 			t.Fatalf("the SENDER %s sees its own broadcast %s; VisibleTo excludes the sender by contract. History: %v", a, res.MessageID, got)
 		}
 	})
@@ -454,7 +504,7 @@ func TestBroadcastSend(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Broadcast body %d (%d bytes): %v", i, len(body), err)
 			}
-			batch := h.History(b, res.Seq-1, 1)
+			batch := mustHistory(t, h, b, res.Seq-1, 1)
 			if len(batch.Messages) != 1 {
 				t.Fatalf("body %d: History returned %d messages, want 1", i, len(batch.Messages))
 			}
@@ -694,14 +744,14 @@ func TestDirectMessageSend(t *testing.T) {
 			t.Fatalf("Result.Recipients = %v, want [%s]", res.Recipients, b)
 		}
 
-		if got := historyIDs(h, b); !contains(got, res.MessageID) {
+		if got := historyIDs(t, h, b); !contains(got, res.MessageID) {
 			t.Fatalf("the recipient %s cannot see DM %s; history %v", b, res.MessageID, got)
 		}
 
 		// The third party and the sender. Counted so the loop cannot be empty.
 		excluded := 0
 		for _, who := range []string{g, a} {
-			got := historyIDs(h, who)
+			got := historyIDs(t, h, who)
 			if contains(got, res.MessageID) {
 				t.Fatalf("%s can see DM %s addressed to %s; history %v", who, res.MessageID, b, got)
 			}
@@ -735,11 +785,17 @@ func TestDirectMessageSend(t *testing.T) {
 		if !bytes.Equal(m.Body, body) {
 			t.Fatalf("the durable record for %s carries body %q, want %q", res.MessageID, m.Body, body)
 		}
-		if !m.VisibleTo(b) {
+		// Read back with the SAME enrolment epoch the roster holds, never the
+		// zero time: a zero epoch disables the enrolment-epoch filter, so
+		// asserting visibility with it would assert less than the read path does.
+		if !m.VisibleTo(b, fixtureEnrolledAt) {
 			t.Fatalf("the durable record for %s is not visible to its recipient %s", res.MessageID, b)
 		}
-		if m.VisibleTo(a) {
+		if m.VisibleTo(a, fixtureEnrolledAt) {
 			t.Fatalf("the durable record for %s is visible to its own sender %s", res.MessageID, a)
+		}
+		if m.VisibleTo(b, m.SentAt.Add(time.Nanosecond)) {
+			t.Fatalf("the durable record for %s is visible to a %s that enrolled AFTER it was sent", res.MessageID, b)
 		}
 	})
 
@@ -829,7 +885,7 @@ func TestDirectMessageSend(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Send to self: %v", err)
 		}
-		if got := historyIDs(h, a); contains(got, res.MessageID) {
+		if got := historyIDs(t, h, a); contains(got, res.MessageID) {
 			t.Fatalf("a self-addressed message %s is visible to its sender; history %v", res.MessageID, got)
 		}
 	})
@@ -883,4 +939,322 @@ func TestDirectMessageSend(t *testing.T) {
 			t.Fatalf("a directed send reusing a broadcast's key gave err = %v, want ErrIdempotencyKeyReused", err)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// THE ENROLMENT EPOCH — the P0 closed by the 2026-08-02 security audit.
+//
+// A message sent BEFORE an agent enrolled is never delivered to it, whatever it
+// is addressed to. The hole it closes is specific and is worth restating here,
+// because a future reader will otherwise be tempted to relax it:
+//
+//	Message records are durable and they NAME agent ids. Enrolment is not
+//	durable yet (AUTH-3), so the per-name suffix counter restarts at 1 on every
+//	boot — after a restart, whoever enrols the name "alpha" is minted the id
+//	"<bus>.alpha-1" the PREVIOUS alpha held, and without the epoch could read a
+//	full retention window of that agent's direct messages. The bus cannot tell
+//	the two apart by ID, because an id is exactly what is being reused. It CAN
+//	tell them apart by TIME.
+//
+// Both halves are asserted below, and both are needed: the recovered messages
+// are NOT DELIVERED, and they ARE STILL THERE. Durability is intact; delivery
+// is refused. A test that checked only the first half would pass just as well
+// against a bus that had lost them.
+// ---------------------------------------------------------------------------
+
+func TestEnrolmentEpoch(t *testing.T) {
+	// A clock pinned in the past, so a message can be published with a SentAt
+	// that PRECEDES an enrolment the test performs afterwards. Without it there
+	// is no way to publish "before" an agent that already exists.
+	pinned := time.Now().Add(-time.Hour)
+	pinnedNow := func() time.Time { return pinned }
+
+	t.Run("HistoryRefusesTrafficThatPredatesTheReader", func(t *testing.T) {
+		dir := t.TempDir()
+		lg := openTestLog(t, dir, true)
+		h := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
+
+		a := agentID(t, testBusID, "alpha")
+		early := agentID(t, testBusID, "early")
+		late := agentID(t, testBusID, "late")
+
+		h.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
+		h.NoteEnrolment(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
+		// LATE enrols one minute after the messages below are sent.
+		h.NoteEnrolment(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
+
+		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("before late existed"), IdempotencyKey: "k-epoch-bc"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+		// Addressed to LATE BY NAME, and still not deliverable: the epoch is not
+		// a broadcast-only rule.
+		dm, err := h.Send(hub.SendRequest{Sender: a, To: late, Body: []byte("a DM late must not read"), IdempotencyKey: "k-epoch-dm"})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+
+		// An agent enrolled BEFORE the traffic receives it, so the refusal below
+		// is discrimination on the epoch and not an empty bus.
+		earlySees := historyIDs(t, h, early)
+		if !contains(earlySees, bc.MessageID) {
+			t.Fatalf("%s enrolled before the broadcast but cannot see %s; history %v", early, bc.MessageID, earlySees)
+		}
+
+		lateSees := historyIDs(t, h, late)
+		if len(lateSees) != 0 {
+			t.Fatalf("%s enrolled AFTER every message on the bus but its history is %v; a message sent before an agent existed is never delivered to it", late, lateSees)
+		}
+		if contains(lateSees, dm.MessageID) {
+			t.Fatalf("%s read DM %s, which was sent before it enrolled", late, dm.MessageID)
+		}
+
+		// Both messages are still RETAINED. The epoch refuses delivery; it does
+		// not delete, and it does not make the bus lose data.
+		count, _, _, head, dropped := h.Store().Stats()
+		if count != 2 || head != dm.Seq || dropped != 0 {
+			t.Fatalf("Stats = (count %d, head %d, dropped %d), want (2, %d, 0) — the epoch must refuse delivery, not drop messages", count, head, dropped, dm.Seq)
+		}
+	})
+
+	t.Run("AParkedPollIsNotWokenByTrafficThatPredatesTheReader", func(t *testing.T) {
+		// This is the half that proves NOTIFY filters on the epoch and not only
+		// the batch read. A waiter woken and then handed nothing would still
+		// "pass" a history-only test, while burning a wake-up on every send.
+		dir := t.TempDir()
+		lg := openTestLog(t, dir, true)
+		h := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
+
+		a := agentID(t, testBusID, "alpha")
+		early := agentID(t, testBusID, "early")
+		late := agentID(t, testBusID, "late")
+
+		h.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
+		h.NoteEnrolment(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
+		h.NoteEnrolment(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
+
+		type outcome struct {
+			batch hub.Batch
+			err   error
+		}
+		const lateTimeout = 700 * time.Millisecond
+		lateOut := make(chan outcome, 1)
+		earlyOut := make(chan outcome, 1)
+		go func() {
+			batch, err := h.Wait(context.Background(), late, 0, 10, lateTimeout)
+			lateOut <- outcome{batch, err}
+		}()
+		go func() {
+			batch, err := h.Wait(context.Background(), early, 0, 10, 20*time.Second)
+			earlyOut <- outcome{batch, err}
+		}()
+
+		waitForWaiters(t, h, 2, "both readers must park before the broadcast")
+
+		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("wake only the eligible"), IdempotencyKey: "k-epoch-wake"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+
+		// The eligible reader IS woken. Without this the timeout below could be
+		// explained by a broadcast that never reached the waiter registry at all.
+		select {
+		case got := <-earlyOut:
+			if got.err != nil {
+				t.Fatalf("%s: Wait: %v", early, got.err)
+			}
+			if got.batch.TimedOut {
+				t.Fatalf("%s enrolled before the broadcast and was not woken by it", early)
+			}
+			if len(got.batch.Messages) != 1 || got.batch.Messages[0].ID != res.MessageID {
+				t.Fatalf("%s got %v, want exactly %s", early, got.batch.Messages, res.MessageID)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s never returned", early)
+		}
+
+		select {
+		case got := <-lateOut:
+			if got.err != nil {
+				t.Fatalf("%s: Wait: %v", late, got.err)
+			}
+			if !got.batch.TimedOut {
+				t.Fatalf("%s's poll returned before its deadline: it was WOKEN by %s, which was sent before %s enrolled — notify is not filtering on the enrolment epoch", late, res.MessageID, late)
+			}
+			if len(got.batch.Messages) != 0 {
+				t.Fatalf("%s received %v, all of it sent before it enrolled", late, got.batch.Messages)
+			}
+			if got.batch.Cursor != 0 {
+				t.Fatalf("%s's cursor moved to %d without a delivery", late, got.batch.Cursor)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s never returned", late)
+		}
+	})
+
+	t.Run("AReusedAgentIDAfterARestartInheritsNoTraffic", func(t *testing.T) {
+		// THE ATTACK THE EPOCH EXISTS FOR. The suffix counter restarts at 1 on
+		// every boot, so a stranger who enrols the name "beta" is minted the id
+		// the previous beta held. It must read none of that agent's traffic — and
+		// the traffic must still be on the bus, or this would be proving that
+		// recovery lost it.
+		dir := t.TempDir()
+
+		// --- Run 1: the ORIGINAL beta receives a DM and a broadcast.
+		lg1 := openTestLog(t, dir, false)
+		h1 := newHubOver(t, lg1, testBusID, "alpha", "beta")
+		a := agentID(t, testBusID, "alpha")
+		b := agentID(t, testBusID, "beta")
+
+		dm, err := h1.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("the previous beta's private mail"), IdempotencyKey: "k-reuse-dm"})
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		bc, err := h1.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("the previous beta's bus traffic"), IdempotencyKey: "k-reuse-bc"})
+		if err != nil {
+			t.Fatalf("Broadcast: %v", err)
+		}
+		if got := historyIDs(t, h1, b); len(got) != 2 {
+			t.Fatalf("before the restart the original %s sees %v, want both %s and %s", b, got, dm.MessageID, bc.MessageID)
+		}
+		if err := lg1.Close(); err != nil {
+			t.Fatalf("closing the first log: %v", err)
+		}
+
+		// --- Run 2: a DIFFERENT keypair enrols the same name and is minted the
+		// same id. Its enrolment instant is NOW, after everything on disk.
+		lg2 := openTestLog(t, dir, false)
+		h2 := openHubOverDurable(t, lg2, lg2, testBusID, nil)
+		h2.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: time.Now()})
+		h2.NoteEnrolment(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: time.Now()})
+
+		// NOT DELIVERED — via history…
+		if got := historyIDs(t, h2, b); len(got) != 0 {
+			t.Fatalf("the NEW holder of %s read %v after a restart; that is the previous holder's traffic", b, got)
+		}
+		// …and via the long poll, which must TIME OUT rather than be woken.
+		batch, err := h2.Wait(context.Background(), b, 0, 10, 300*time.Millisecond)
+		if err != nil {
+			t.Fatalf("Wait on the recovered hub: %v", err)
+		}
+		if !batch.TimedOut || len(batch.Messages) != 0 {
+			t.Fatalf("the NEW holder of %s was handed %+v by a long poll", b, batch)
+		}
+
+		// STILL PRESENT. Read through the store directly with the ZERO epoch —
+		// the roster-less, audit-tool read — which is the one caller allowed to
+		// disable the filter. This is what distinguishes "not delivered" from
+		// "lost".
+		count, _, _, head, dropped := h2.Store().Stats()
+		if count != 2 || head != bc.Seq || dropped != 0 {
+			t.Fatalf("the recovered store holds (count %d, head %d, dropped %d), want (2, %d, 0) — the messages must survive the restart, the epoch only refuses to DELIVER them", count, head, dropped, bc.Seq)
+		}
+		audit, _, _ := h2.Store().Since(b, time.Time{}, 0, 100)
+		if len(audit) != 2 {
+			t.Fatalf("a roster-less audit read of the recovered store returned %d messages, want the 2 that were written", len(audit))
+		}
+		found := map[string]bool{}
+		for _, m := range audit {
+			found[m.ID] = true
+		}
+		if !found[dm.MessageID] || !found[bc.MessageID] {
+			t.Fatalf("the recovered store is missing %s or %s: it holds %v", dm.MessageID, bc.MessageID, found)
+		}
+		if err := lg2.Close(); err != nil {
+			t.Fatalf("closing the second log: %v", err)
+		}
+
+		// --- Run 3: the SAME id re-enrolled with its ORIGINAL instant — what the
+		// durable roster of AUTH-3 will restore — reads its history back in full.
+		// Without this the refusal above is consistent with a recovered hub that
+		// simply serves nobody anything.
+		lg3 := openTestLog(t, dir, true)
+		h3 := openHubOverDurable(t, lg3, lg3, testBusID, nil)
+		h3.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: fixtureEnrolledAt})
+		h3.NoteEnrolment(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: fixtureEnrolledAt})
+		got := historyIDs(t, h3, b)
+		if len(got) != 2 || !contains(got, dm.MessageID) || !contains(got, bc.MessageID) {
+			t.Fatalf("a genuinely continuous %s (re-enrolled at its ORIGINAL instant) sees %v, want both %s and %s", b, got, dm.MessageID, bc.MessageID)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Both read paths FAIL CLOSED for an agent that is not on the roster.
+//
+// The alternative — reading with a zero enrolment epoch — disables the epoch
+// filter (see store.Message.VisibleTo), so an empty roster would serve
+// EVERYTHING to ANYONE rather than nothing to nobody. The dangerous shape is a
+// nil error with an empty batch, which every caller would read as "you are up to
+// date"; it is asserted against explicitly below.
+// ---------------------------------------------------------------------------
+
+func TestReadPathsFailClosedForAnUnknownAgent(t *testing.T) {
+	h, _, _ := newTestHub(t, "alpha", "beta")
+	a := agentID(t, h.BusID(), "alpha")
+	b := agentID(t, h.BusID(), "beta")
+
+	res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("visible to the enrolled"), IdempotencyKey: "k-failclosed"})
+	if err != nil {
+		t.Fatalf("Broadcast: %v", err)
+	}
+	// There IS something to read, so an empty result below is a refusal and not
+	// an empty bus.
+	if got := historyIDs(t, h, b); !contains(got, res.MessageID) {
+		t.Fatalf("the enrolled %s cannot see %s; history %v", b, res.MessageID, got)
+	}
+
+	strangers := []struct {
+		name string
+		id   string
+	}{
+		{"NeverEnrolled", agentID(t, h.BusID(), "ghost")},
+		{"EmptyAgentID", ""},
+		{"MalformedAgentID", "not-an-agent-id"},
+		{"ForeignBusQualifier", "otherbus.alpha-1"},
+		{"RightNameWrongSuffix", testBusID + ".alpha-2"},
+	}
+	if len(strangers) == 0 {
+		t.Fatal("the unknown-agent table is empty")
+	}
+	checked := 0
+	const after = uint64(7)
+	for _, s := range strangers {
+		s := s
+		t.Run(s.name, func(t *testing.T) {
+			batch, err := h.History(s.id, after, 10)
+			if !errors.Is(err, hub.ErrUnknownSender) {
+				t.Fatalf("History(%q) = (%+v, %v), want ErrUnknownSender — a silent empty batch reads to every caller as \"you are up to date\"", s.id, batch, err)
+			}
+			if len(batch.Messages) != 0 {
+				t.Fatalf("History(%q) refused AND returned %d messages", s.id, len(batch.Messages))
+			}
+			if batch.Cursor != after {
+				t.Fatalf("History(%q) moved the cursor from %d to %d", s.id, after, batch.Cursor)
+			}
+
+			start := time.Now()
+			wbatch, werr := h.Wait(context.Background(), s.id, after, 10, 20*time.Second)
+			elapsed := time.Since(start)
+			if !errors.Is(werr, hub.ErrUnknownSender) {
+				t.Fatalf("Wait(%q) = (%+v, %v), want ErrUnknownSender", s.id, wbatch, werr)
+			}
+			if elapsed > 5*time.Second {
+				t.Fatalf("Wait(%q) took %v; an unknown agent must be refused before it parks", s.id, elapsed)
+			}
+			if len(wbatch.Messages) != 0 || wbatch.TimedOut {
+				t.Fatalf("Wait(%q) refused but returned %+v", s.id, wbatch)
+			}
+			if wbatch.Cursor != after {
+				t.Fatalf("Wait(%q) moved the cursor from %d to %d", s.id, after, wbatch.Cursor)
+			}
+			if got := h.WaiterCount(); got != 0 {
+				t.Fatalf("a refused Wait(%q) left %d waiters registered", s.id, got)
+			}
+		})
+		checked++
+	}
+	if checked != len(strangers) {
+		t.Fatalf("checked %d unknown agents, want %d", checked, len(strangers))
+	}
 }

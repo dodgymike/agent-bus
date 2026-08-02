@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
+	"github.com/dodgymike/agent-bus/internal/hub"
 )
 
 // The three routes that ISSUE a credential. All are POST, all take and return
@@ -144,6 +145,25 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		// noise at best.
 		s.writeAuthError(w, r, "enrol", err, "name", body.Name)
 		return
+	}
+
+	// The hub keeps its OWN roster view, because auth.Roster exposes no listing
+	// and internal/auth is outside this epic's ownership — see
+	// hub.(*Hub).NoteEnrolment for the full argument, and in particular for why
+	// the two views are equivalent today (both are in memory only and both are
+	// lost on restart) and why this must be replaced when AUTH-3 makes
+	// enrolment durable.
+	//
+	// It runs on the REPLAY path too, and must: a retry whose original
+	// acknowledgement was lost is the same enrolment, and an agent that
+	// disappeared from the agent list because it retried would be a bug that
+	// only shows up under packet loss. NoteEnrolment is idempotent.
+	if s.hub != nil {
+		s.hub.NoteEnrolment(hub.Agent{
+			AgentID:    res.AgentID,
+			Name:       res.Name,
+			EnrolledAt: res.EnrolledAt,
+		})
 	}
 
 	if res.Replayed {
@@ -347,28 +367,37 @@ func (s *Server) requirePOST(w http.ResponseWriter, r *http.Request) bool {
 //   - Trailing content after the JSON value is REJECTED, so there is exactly
 //     one request per body and no room for a smuggled second object.
 func (s *Server) decodeAuthRequest(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	return s.decodeJSONRequest(w, r, dst, MaxAuthRequestBytes)
+}
+
+// decodeJSONRequest is decodeAuthRequest with the byte bound as a parameter, so
+// the messaging routes — whose bodies legitimately carry a 64 KiB payload —
+// share ONE strict decoder with the auth routes rather than growing a second,
+// subtly different one. Every rule documented on decodeAuthRequest applies here
+// and is enforced here; that doc comment is the canonical description.
+func (s *Server) decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst interface{}, limit int64) bool {
 	if !s.requireJSONContentType(w, r) {
 		return false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, MaxAuthRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(dst); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			s.log.Debug("auth request body too large",
+			s.log.Debug("request body too large",
 				"request_id", RequestIDFromContext(r.Context()),
 				"path", r.URL.Path,
-				"limit_bytes", MaxAuthRequestBytes,
+				"limit_bytes", limit,
 			)
 			s.writeJSON(w, r, http.StatusRequestEntityTooLarge, ErrorResponse{
-				Error: fmt.Sprintf("request body exceeds %d bytes", MaxAuthRequestBytes),
+				Error: fmt.Sprintf("request body exceeds %d bytes", limit),
 			})
 			return false
 		}
-		s.log.Debug("auth request body rejected",
+		s.log.Debug("request body rejected",
 			"request_id", RequestIDFromContext(r.Context()),
 			"path", r.URL.Path,
 			"err", err,
@@ -381,7 +410,7 @@ func (s *Server) decodeAuthRequest(w http.ResponseWriter, r *http.Request, dst i
 
 	// Exactly one JSON value per body.
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		s.log.Debug("auth request body has trailing content",
+		s.log.Debug("request body has trailing content",
 			"request_id", RequestIDFromContext(r.Context()),
 			"path", r.URL.Path,
 		)
@@ -434,4 +463,12 @@ func (s *Server) decodeBase64Field(w http.ResponseWriter, r *http.Request, field
 // about the server's local zone.
 func formatInstant(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// encodeBase64 renders opaque bytes for the wire, the exact inverse of
+// decodeBase64Field: STANDARD encoding, padded. One spelling in each direction,
+// so a body a client sends and the body it reads back are byte-identical
+// strings as well as byte-identical bytes.
+func encodeBase64(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
 }

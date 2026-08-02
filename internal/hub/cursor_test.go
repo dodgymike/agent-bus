@@ -48,7 +48,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 			t.Fatalf("an empty cursor decoded to %d, want 0", pos)
 		}
 
-		batch := h.History(b, pos, hub.MaxBatchLimit)
+		batch := mustHistory(t, h, b, pos, hub.MaxBatchLimit)
 		if len(batch.Messages) != n {
 			t.Fatalf("history from an empty cursor returned %d messages, want %d", len(batch.Messages), n)
 		}
@@ -88,7 +88,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("round %d: DecodeCursor: %v", round, err)
 			}
-			batch := h.History(b, pos, 2)
+			batch := mustHistory(t, h, b, pos, 2)
 			if len(batch.Messages) != size {
 				t.Fatalf("round %d returned %d messages, want %d", round, len(batch.Messages), size)
 			}
@@ -132,7 +132,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DecodeCursor: %v", err)
 		}
-		batch := h.History(b, pos, 10)
+		batch := mustHistory(t, h, b, pos, 10)
 		if len(batch.Messages) != 0 {
 			t.Fatalf("a caught-up reader got %d messages, want 0", len(batch.Messages))
 		}
@@ -251,7 +251,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DecodeCursor of a self-issued position-0 cursor: %v", err)
 		}
-		batch := h.History(b, pos, hub.MaxBatchLimit)
+		batch := mustHistory(t, h, b, pos, hub.MaxBatchLimit)
 
 		if len(batch.Messages) == 0 {
 			t.Fatal("beta's rewound history is empty, so this test proves nothing about filtering")
@@ -296,7 +296,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		}
 
 		for _, limit := range []int{0, -1, -1000} {
-			batch := h.History(b, 0, limit)
+			batch := mustHistory(t, h, b, 0, limit)
 			if len(batch.Messages) != hub.DefaultBatchLimit {
 				t.Fatalf("History with limit %d returned %d messages, want DefaultBatchLimit (%d)", limit, len(batch.Messages), hub.DefaultBatchLimit)
 			}

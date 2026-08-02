@@ -300,6 +300,58 @@ func TestDecodeRejects(t *testing.T) {
 			},
 			wantSub: "the limit is",
 		},
+		{
+			// Bounded HERE as well as at the handler, because this decoder is the
+			// boundary for records THIS process did not validate. The key is
+			// reflected into the server log, so an unbounded one off disk is an
+			// unbounded log line.
+			name: "OversizedIdempotencyKey",
+			base: broadcast,
+			mangle: func(r store.Record) store.Record {
+				r.IdempotencyKey = strings.Repeat("k", store.MaxIdempotencyKeyLen+1)
+				return r
+			},
+			wantSub: "idempotency key is",
+		},
+		{
+			// BusPath is echoed verbatim to every client that reads the message
+			// and is what the RELAY epic makes loop-prevention decisions from, so
+			// an unbounded hop list off disk is attacker-chosen response content.
+			name: "BusPathTooLong",
+			base: broadcast,
+			mangle: func(r store.Record) store.Record {
+				r.BusPath = busPath(store.MaxBusPath + 1)
+				return r
+			},
+			wantSub: "hops, the limit is",
+		},
+		{
+			name: "BusPathHopIsNotAValidBusID",
+			base: broadcast,
+			mangle: func(r store.Record) store.Record {
+				r.BusPath = []string{testBusID, "not a bus id!"}
+				return r
+			},
+			wantSub: "bus path hop 1",
+		},
+		{
+			name: "BusPathFirstHopIsNotAValidBusID",
+			base: broadcast,
+			mangle: func(r store.Record) store.Record {
+				r.BusPath = []string{"bus.with.dots"}
+				return r
+			},
+			wantSub: "bus path hop 0",
+		},
+		{
+			name: "BusPathHopIsEmpty",
+			base: broadcast,
+			mangle: func(r store.Record) store.Record {
+				r.BusPath = []string{testBusID, ""}
+				return r
+			},
+			wantSub: "bus path hop 1",
+		},
 	}
 	if len(cases) == 0 {
 		t.Fatal("the Decode rejection table is empty")
@@ -324,6 +376,73 @@ func TestDecodeRejects(t *testing.T) {
 	t.Run("NotJSON", func(t *testing.T) {
 		if _, err := store.Decode(json.RawMessage(`{not json`)); !errors.Is(err, store.ErrInvalidMessage) {
 			t.Fatalf("Decode of malformed JSON = %v, want ErrInvalidMessage", err)
+		}
+	})
+
+	t.Run("ValuesExactlyAtTheLimitStillDecode", func(t *testing.T) {
+		// Without this the rejections above are consistent with a blanket refusal
+		// of any idempotency key or any bus path at all.
+		boundaries := []struct {
+			name   string
+			mangle func(store.Record) store.Record
+			check  func(*testing.T, store.Message)
+		}{
+			{
+				name: "IdempotencyKeyExactlyAtTheLimit",
+				mangle: func(r store.Record) store.Record {
+					r.IdempotencyKey = strings.Repeat("k", store.MaxIdempotencyKeyLen)
+					return r
+				},
+				check: func(t *testing.T, m store.Message) {
+					if len(m.IdempotencyKey) != store.MaxIdempotencyKeyLen {
+						t.Fatalf("decoded idempotency key is %d bytes, want %d", len(m.IdempotencyKey), store.MaxIdempotencyKeyLen)
+					}
+				},
+			},
+			{
+				name: "BusPathExactlyAtTheLimit",
+				mangle: func(r store.Record) store.Record {
+					r.BusPath = busPath(store.MaxBusPath)
+					return r
+				},
+				check: func(t *testing.T, m store.Message) {
+					if len(m.BusPath) != store.MaxBusPath {
+						t.Fatalf("decoded bus path has %d hops, want %d", len(m.BusPath), store.MaxBusPath)
+					}
+				},
+			},
+			{
+				// An ABSENT bus path is filled in from the message id, which is
+				// what a record written before the field existed looks like.
+				name: "EmptyBusPathIsFilledFromTheMessageID",
+				mangle: func(r store.Record) store.Record {
+					r.BusPath = nil
+					return r
+				},
+				check: func(t *testing.T, m store.Message) {
+					if len(m.BusPath) != 1 || m.BusPath[0] != testBusID {
+						t.Fatalf("decoded bus path = %v, want [%s]", m.BusPath, testBusID)
+					}
+				},
+			},
+		}
+		if len(boundaries) == 0 {
+			t.Fatal("the Decode boundary table is empty")
+		}
+		checked := 0
+		for _, bc := range boundaries {
+			bc := bc
+			t.Run(bc.name, func(t *testing.T) {
+				got, err := store.Decode(encodeRecord(t, bc.mangle(recordOf(t, broadcast))))
+				if err != nil {
+					t.Fatalf("Decode rejected a record at the limit: %v", err)
+				}
+				bc.check(t, got)
+			})
+			checked++
+		}
+		if checked != len(boundaries) {
+			t.Fatalf("checked %d boundary records, want %d", checked, len(boundaries))
 		}
 	})
 
@@ -417,33 +536,56 @@ func TestMessageVisibleTo(t *testing.T) {
 		t.Fatalf("NewMessage: %v", err)
 	}
 
+	// Every fixture message above carries SentAt == now. `enrolled` precedes all
+	// of them, so the addressing rows below are not silently answered by the
+	// enrolment epoch; the epoch has its own rows at the bottom of the table.
+	enrolled := now.Add(-time.Hour)
+
 	cases := []struct {
-		name  string
-		m     store.Message
-		agent string
-		want  bool
+		name       string
+		m          store.Message
+		agent      string
+		enrolledAt time.Time
+		want       bool
 	}{
-		{"BroadcastSenderExcluded", broadcast, a, false},
-		{"BroadcastVisibleToOthers", broadcast, b, true},
-		{"BroadcastVisibleToAThirdParty", broadcast, g, true},
-		{"BroadcastNeverVisibleToTheEmptyID", broadcast, "", false},
-		{"DMVisibleToTheNamedRecipient", dm, b, true},
-		{"DMNotVisibleToAThirdParty", dm, g, false},
-		{"DMNotVisibleToItsSender", dm, a, false},
-		{"DMNeverVisibleToTheEmptyID", dm, "", false},
-		{"MultiRecipientFirst", multi, b, true},
-		{"MultiRecipientSecond", multi, g, true},
-		{"MultiRecipientNotTheSender", multi, a, false},
-		{"SelfAddressedIsStillInvisibleToItsSender", selfDM, a, false},
-		{"UnknownAgentSeesNoDM", dm, agentIDFor(t, "nobody"), false},
+		{"BroadcastSenderExcluded", broadcast, a, enrolled, false},
+		{"BroadcastVisibleToOthers", broadcast, b, enrolled, true},
+		{"BroadcastVisibleToAThirdParty", broadcast, g, enrolled, true},
+		{"BroadcastNeverVisibleToTheEmptyID", broadcast, "", enrolled, false},
+		{"DMVisibleToTheNamedRecipient", dm, b, enrolled, true},
+		{"DMNotVisibleToAThirdParty", dm, g, enrolled, false},
+		{"DMNotVisibleToItsSender", dm, a, enrolled, false},
+		{"DMNeverVisibleToTheEmptyID", dm, "", enrolled, false},
+		{"MultiRecipientFirst", multi, b, enrolled, true},
+		{"MultiRecipientSecond", multi, g, enrolled, true},
+		{"MultiRecipientNotTheSender", multi, a, enrolled, false},
+		{"SelfAddressedIsStillInvisibleToItsSender", selfDM, a, enrolled, false},
+		{"UnknownAgentSeesNoDM", dm, agentIDFor(t, "nobody"), enrolled, false},
+
+		// THE ENROLMENT EPOCH (the P0 from the 2026-08-02 security audit): you do
+		// not receive mail sent before you existed, whatever it is addressed to.
+		{"EpochBlocksABroadcastSentBeforeEnrolment", broadcast, b, now.Add(time.Nanosecond), false},
+		{"EpochBlocksADMSentBeforeEnrolment", dm, b, now.Add(time.Nanosecond), false},
+		{"EpochBlocksTheWholeRetentionWindow", multi, g, now.Add(24 * time.Hour), false},
+		// The boundary has exactly one spelling: SentAt.Before(enrolledAt), so a
+		// message sent AT the enrolment instant is delivered.
+		{"SentAtExactlyTheEnrolmentInstantIsVisible", broadcast, b, now, true},
+		{"SentOneNanosecondAfterEnrolmentIsVisible", broadcast, b, now.Add(-time.Nanosecond), true},
+		// A ZERO epoch disables the check. That is for a roster-less caller — an
+		// operator dump, an audit tool — and never for a request path.
+		{"ZeroEpochDisablesTheCheck", broadcast, b, time.Time{}, true},
+		// …but disabling the epoch never WIDENS addressing: a zero epoch still
+		// does not hand a DM to a third party or echo a message to its sender.
+		{"ZeroEpochStillDoesNotWidenAddressing", dm, g, time.Time{}, false},
+		{"ZeroEpochStillExcludesTheSender", broadcast, a, time.Time{}, false},
 	}
 	if len(cases) == 0 {
 		t.Fatal("the VisibleTo table is empty")
 	}
 	checked := 0
 	for _, c := range cases {
-		if got := c.m.VisibleTo(c.agent); got != c.want {
-			t.Fatalf("%s: VisibleTo(%q) = %v, want %v", c.name, c.agent, got, c.want)
+		if got := c.m.VisibleTo(c.agent, c.enrolledAt); got != c.want {
+			t.Fatalf("%s: VisibleTo(%q, %v) = %v, want %v", c.name, c.agent, c.enrolledAt, got, c.want)
 		}
 		checked++
 	}
@@ -472,6 +614,16 @@ func TestContentHash(t *testing.T) {
 			t.Fatalf("ContentHash(%q) = %q, want %q", c.body, got, c.want)
 		}
 	}
+}
+
+// busPath builds n distinct well-formed bus ids, so a "path too long" case is
+// rejected for its LENGTH and not because a hop is malformed.
+func busPath(n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, fmt.Sprintf("bus-%d", i))
+	}
+	return out
 }
 
 // repeatAgent builds n distinct well-formed recipient ids from a template, so a

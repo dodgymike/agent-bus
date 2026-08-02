@@ -30,7 +30,43 @@ below this header is unchanged from the prior single-file `CONTRACTS.md`, verbat
 | any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
 | any | unregistered path, valid bearer token | valid bearer token | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope — because the middleware let the request through and the mux, honestly, has no route there. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope); that catch-all MUST be registered INSIDE the auth wrapper (through `(*Server).route`, so it is itself subject to `authMiddleware`) or it becomes the one unauthenticated route that leaks the surface. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
 
-`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`.
+### Messaging routes (added 2026-08-02 — MSG-1…5, POLL-1…3)
+
+Registered **only when the server has a hub** (`Options.Hub != nil`, or one that `httpapi.New` built
+for itself — see `## Messaging` below). When there is no hub they are not registered at all and 404
+like any other path this build does not serve, exactly as the three auth routes do without
+`Options.Auth`. **Every one of them authenticates**: none is on the allow-list, and none may ever be
+added to it.
+
+| Method | Path | Auth | Status | Response |
+| --- | --- | --- | --- | --- |
+| `GET` | `/v1/agents` | bearer | 200 | `{"agents":[{"agent_id":"<bus>.<name>-<n>","name":"...","enrolled_at":"<RFC3339Nano UTC>"}],"count":N}` — sorted by `agent_id`. Carries **no key material**. |
+| `POST` | `/v1/broadcast` | bearer | 201 | `{"message_id":"<bus-id>-<seq>","seq":N,"from":"<authenticated sender>","broadcast":true,"to":[],"sent_at":"<RFC3339Nano UTC>","content_sha256":"<hex>"}` — returned **only after the message is committed and fsynced** (invariant 4). Body request: `{"body":"<standard base64>","idempotency_key":"..."}`. |
+| `POST` | `/v1/send` | bearer | 201 | Same body shape with `"broadcast":false` and `"to":["<recipient>"]`. Request: `{"to":"<bus>.<agent>","body":"<standard base64>","idempotency_key":"..."}`. |
+| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 400 | `body` missing/empty, not standard base64, or over `store.MaxBodyBytes` (64 KiB decoded); `idempotency_key` empty, over 128 bytes, or containing a byte outside `[A-Za-z0-9._-]`; `to` not a well-formed fully-qualified `<bus-id>.<agent-id>` |
+| `POST` | `/v1/send` | bearer | 404 | `{"error":"unknown recipient"}` — `to` is well-formed but not enrolled on this bus. Nothing is written. (A recipient on ANOTHER bus is also 404 until the RELAY epic lands.) |
+| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 409 | `idempotency_key` reused with a **different** payload — a protocol violation, not a retry (invariant 10). Carries `Connection: close`. |
+| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on the roster. 403 rather than 401: the credential is fine and re-authenticating will not help. |
+| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 405 / 413 / 415 | any method but `POST` (`Allow: POST`); body over `httpapi.MaxMessageRequestBytes` (128 KiB); `Content-Type` not `application/json` |
+| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 503 | applied-key table at `hub.MaxIdempotencyEntries` (65536) — `Retry-After: 5`; **or** the hub cannot durably accept messages (`hub.ErrNotDurable` / `hub.ErrPoisoned`) — **no** `Retry-After`, because that is not transient |
+| `GET` | `/v1/messages` | bearer | 200 | `{"messages":[<message>...],"cursor":"<opaque>","more":false,"timed_out":false}` — history from a cursor; never parks. Query: `?cursor=<opaque>&limit=<1..256>` |
+| `GET` | `/v1/wait` | bearer | 200 | Same body. Parks until a visible message arrives or the deadline passes. Query: `?cursor=<opaque>&limit=<1..256>&timeout=<1..300 seconds>` |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 200 | **A long-poll timeout is a 200**, with `"messages":[]`, `"timed_out":true` and the **same `cursor` that was sent**. It is never an error status: a quiet bus is the steady state. |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 400 | `cursor` malformed, not base64url, an unknown cursor version, or **bound to a different agent**; `limit` not a positive integer or over 256; `timeout` not a positive whole number of seconds or over 300 |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on this bus's roster. The read paths **fail closed** rather than returning an empty batch; see the enrolment epoch below for why an unknown reader must never be read with no epoch. |
+| `GET` | `/v1/wait` | bearer | 503 | this agent already has `hub.MaxWaitersPerAgent` (32) long polls parked; `Retry-After: 5` |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 405 | any method but `GET`; `Allow: GET` |
+| `GET` | `/v1/wait` | bearer | (none) | A **cancelled request context** (client hung up, or server shutting down) writes no response at all — there is nobody to write to. Distinct from a timeout, which is a 200. |
+
+A `<message>` on the read path is:
+
+```json
+{"message_id":"<bus-id>-<seq>","seq":42,"from":"<bus>.<agent>","broadcast":true,
+ "to":[],"bus_path":["<bus-id>"],"sent_at":"<RFC3339Nano UTC>","size":11,
+ "content_sha256":"<hex sha256 of the decoded body>","body":"<standard base64>"}
+```
+
+`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`. `AgentsResponseBody` / `BroadcastRequestBody` / `SendRequestBody` / `SendResponseBody` / `WireMessage` / `BatchResponseBody` live in `internal/httpapi/messages.go`.
 
 `/v1/info`'s payload is deliberately minimal (see `DECISIONS.md`, 2026-08-02): `bus_id`, `version`,
 `uptime_seconds` only. A test pins the exact field set — do not add data-dir, listen address, peer
@@ -43,6 +79,134 @@ to protect it individually, which closes the exact risk AUTH-6 flagged (routes w
 easy to forget on the next addition). The allow-list is exactly the five paths named in the routes
 above; see `## Authentication` further down for the full contract.
 
+## Messaging: delivery guarantee, cursors, retention (added 2026-08-02)
+
+### Delivery is AT-LEAST-ONCE. It is not exactly-once and must not be described as such.
+
+A message may be delivered to a recipient **more than once** — after a client retry, a reconnect with
+a stale cursor, or (once the RELAY epic lands) a cyclic peer topology. What the bus guarantees is:
+
+- **No acknowledged message is lost through our own write path.** `POST /v1/send` and
+  `POST /v1/broadcast` return 201 only after the message is committed through the two-phase
+  prepare→commit path and fsynced (invariant 4). A crash before the 201 may leave the message absent;
+  a crash after it may not.
+- **Every message is delivered whole or not at all.** Recovery never serves a torn record: a
+  message that survives carries its original sender, recipients, body and content hash, and the hash
+  is re-verified on the way back off disk.
+- **The order is total and stable.** Every message has a server-minted sequence (invariant 1) and is
+  read back in ascending sequence order.
+
+Duplicates are absorbed by invariant 10 on the WRITE side (idempotency keys) and are expected to be
+tolerated by the reader. A client that must not act twice on one message should key on `message_id`.
+
+### The cursor
+
+Opaque, versioned, base64url. It encodes a **position and nothing else**, and it is **bound to the
+agent it was issued to**: presenting agent A's cursor as agent B is a 400.
+
+- An **absent or empty** `cursor` means position 0 — "I have seen nothing" — so a fresh agent reads
+  back through the whole retained window, paginated.
+- A **non-empty batch** returns the sequence of its last message as the next cursor.
+- An **empty batch returns the cursor unchanged**, byte for byte. This is what makes a long-poll
+  timeout resumable, and it is the safe direction: a cursor is never advanced past messages the
+  caller was not handed.
+- The cursor is **not signed**, deliberately. Forging one for yourself replays or skips your own
+  messages (self-inflicted, and at-least-once already permits the replay); forging one for another
+  agent gains nothing, because **visibility is filtered with the authenticated principal, never with
+  the cursor**. A MAC would protect a value whose integrity buys no security property (invariants 8
+  and 9).
+
+### Visibility
+
+| Message | Visible to |
+| --- | --- |
+| broadcast | every agent **except the sender** |
+| direct (`/v1/send`) | the named recipient only — **not** the sender, **not** anyone else |
+| any message sent **before** the reader's own enrolment | **nobody** — see the enrolment epoch below |
+
+The sender is excluded from its own message on purpose: an agent polling its own bus does not want
+its traffic echoed back into the loop, and it already holds the `message_id` from the 201.
+
+#### The enrolment epoch: you do not receive mail sent before you existed (added 2026-08-02)
+
+**A message whose `sent_at` precedes the reader's own `enrolled_at` is never delivered**, whatever it
+is addressed to. This closes a hole the messaging epic itself opened, found by the security gate:
+
+Message records are durable and they name agent ids. Enrolment is **not** durable yet (AUTH-3), so
+the per-name suffix counter restarts at 1 on every boot — after a restart, anyone who reaches the
+unauthenticated `/v1/enroll` and guesses the name `alpha` is minted `<bus>.alpha-1`, the id the
+*previous* alpha held, and would otherwise read a full retention window of that agent's direct
+messages. The bus cannot tell the two apart **by id**, because an id is exactly what is being reused.
+It can tell them apart **by time**, and no legitimate agent needs traffic that predates its own
+enrolment.
+
+Consequences a client must know:
+- After a restart, no agent receives pre-restart history — every enrolment is newer than every
+  recovered message. The messages are still **retained and auditable**; they are not delivered.
+- An agent that enrols after a broadcast does not receive that broadcast. Join, then listen.
+- An agent not on this bus's roster gets **403** from `/v1/messages` and `/v1/wait`, not an empty
+  batch. Failing closed matters: reading with no epoch would disable the filter entirely.
+
+The rule stays correct once AUTH-3 lands — a durable roster restores each agent's **original**
+enrolment instant, so a genuinely continuous agent keeps seeing everything sent since it enrolled.
+Nothing here has to be undone. Identity *continuity* (a new keypair inheriting an id with a prior
+history, and future messages attributed to it) is **not** fixed by the epoch; it is logged at ERROR
+by the hub and carried by follow-up `MSG-FU-SUFFIXFLOOR`.
+
+### Retention: 1 day or 1 GiB, whichever comes first
+
+`store.DefaultMaxAge` = 24h, `store.DefaultMaxBytes` = 1 GiB (bodies only). Both bounds are enforced
+together and the tighter wins; retention drops whole messages from the **oldest end only**, never
+from the middle. A cursor that has fallen behind the retained window resumes at the **oldest
+retained message** — the messages in between are gone. That is what a retention window means; it is
+stated here rather than hidden, and it is the one case where at-least-once becomes at-most-once.
+
+The **applied-key table follows message retention**: a key is forgotten when the message it produced
+ages out. `hub.MaxIdempotencyEntries` (65536) is a memory backstop above that, and it **fails closed**
+(503) rather than evicting — evicting a remembered key under pressure silently turns the next retry
+of it into a second message, which is the double-apply invariant 10 forbids.
+
+Be precise about what that does and does not promise, because `DECISIONS.md` item 9 (2026-08-02) is
+stricter on one axis: a retry arriving **after the retention window** — more than a day after its
+send — is treated as a **fresh send and produces a second message**. It is not rejected. That is a
+deliberate, dated narrowing recorded in `DECISIONS.md` under the MSG/POLL wave: fail-closed is
+honoured on the axis that matters (**never evict under pressure**), while the *window* is set to
+message retention, which is orders of magnitude beyond any plausible client retry. Rejecting a
+day-old key would require remembering every key ever used, for ever, which is the unbounded growth
+the cap exists to prevent. `IDEM-11` owns the cross-cutting layer and may revisit it.
+
+### Long polling
+
+| Symbol | Value | Meaning |
+| --- | --- | --- |
+| `hub.DefaultPollTimeout` | 30s | Used when the client sends no `timeout` and the server was configured with none. |
+| `hub.MaxPollTimeout` | 5m | Hard ceiling. A `timeout` above it is **refused with 400**, not silently clamped — a client that asked for an hour and got five minutes would conclude the request was dropped. |
+| `hub.DefaultBatchLimit` | 64 | Batch size when `limit` is absent. |
+| `hub.MaxBatchLimit` | 256 | Ceiling on `limit`; above it is a 400. |
+| `store.MaxBatchBytes` | 1 MiB | Ceiling on one batch in **body bytes**, enforced alongside `limit`. Count alone is the wrong unit: 256 × 64 KiB is 16 MiB of body, which is then base64-encoded and marshalled, so one request would cost ~45 MiB of live allocation. **At least one message is always returned** even if it alone exceeds the budget, so a large message can never become undeliverable to a client that pages politely. Hitting it sets `more: true`. |
+| `hub.MaxWaitersPerAgent` | 32 | Concurrent parked long polls per agent. A 33rd gets **503** with `Retry-After: 5`. Fails closed, evicts nothing. The bound is not really about memory — a waiter is a few words — it is that the wake loop runs on the critical path of *every* send, so an agent parking thousands of polls would slow every **other** agent's durable write. Keyed on the agent id, which is safe here for the same reason `auth.MaxActiveSessionsPerAgent` is: this route is authenticated, so the key is a proven identity and a flooder can only fill its own bucket. |
+
+A parked poll holds **no goroutine of its own** — it parks the request's own goroutine on a select
+over the request context, the deadline, and its wake channel. A client that vanishes mid-wait
+releases within one scheduling turn, and `(*hub.Hub).WaiterCount()` returns to zero.
+
+**The wake happens only after the commit is durable and applied** (POLL-2). A waiter is woken only
+for a message it is entitled to see, and N messages arriving before it runs coalesce into ONE wake,
+after which it re-reads the store and returns them all in one batch — so one broadcast wakes every
+eligible waiter exactly once, with no duplicates and no misses.
+
+### Where the hub comes from (transitional — 2026-08-02)
+
+`httpapi.Options.Hub` is the intended wiring. Until `cmd/agent-bus` sets it, `httpapi.New` builds one
+itself whenever `Options.Durable` also satisfies `Path() string` + `Recovered() wal.Recovered`
+(i.e. it is a real `*wal.Log`). Two honest costs of that arrangement, both to be removed when main
+passes the hub as the WAL's `Applier`:
+
+- the durable log is **replayed twice** at startup (once as an fsck by `wal.Open`, once read-only to
+  rebuild the store);
+- a rebuild **failure cannot be fatal**, because `New` returns no error — it is logged at ERROR and
+  the messaging routes are simply not registered, rather than serving a store disk does not justify.
+
 ## Headers
 
 | Header | Direction | Rule |
@@ -50,13 +214,13 @@ above; see `## Authentication` further down for the full contract.
 | `X-Request-Id` | in/out | Inbound value accepted only if it matches `[A-Za-z0-9._-]{1,64}` (`httpapi.MaxRequestIDLen = 64`); otherwise replaced with a server-generated id (`crypto/rand` 16 hex chars, falling back to a `seq-<n>` counter). Always echoed on the response. |
 | `Authorization` | in | Required on every route off the five-entry allow-list (`## Authentication`). Exactly one header, form `Bearer <token>` (scheme case-insensitive); `<token>` must be non-empty, contain no space, be no longer than `httpapi.MaxBearerTokenLen` (512), and consist only of the base64url alphabet `[A-Za-z0-9_-]`. Zero headers, more than one, a non-`Bearer` scheme, or a token failing any of those checks is treated as "no usable credential" (401, `error="invalid_request"`) — distinct from a syntactically fine token that simply does not authenticate (401, `error="invalid_token"`). Never logged, echoed, truncated or hashed into any response or log line — only the resulting agent id ever leaves `authMiddleware`. |
 | `WWW-Authenticate` | out | On every 401: `Bearer realm="agent-bus", error="invalid_request"` when no usable credential was presented, or `Bearer realm="agent-bus", error="invalid_token"` when a well-formed token failed to authenticate (unknown, pending, or expired — the three are deliberately indistinguishable to the caller). |
-| `Allow` | out | Set to `GET` on a 405 from `/healthz` or `/v1/info`. |
+| `Allow` | out | Set to `GET` on a 405 from `/healthz`, `/v1/info`, `/v1/agents`, `/v1/messages` or `/v1/wait`. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
-| `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201 when the response was replayed from the idempotency table rather than freshly applied. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied nothing. |
-| `Connection` | out | `close` on `POST /v1/enroll`'s 409 (idempotency key reused with a different payload). Invariant 10: same key + different payload is a protocol violation, and the server disconnects the offending client. Contrast the same-key/same-payload case, which is a legitimate retry, returns the original 201 unchanged, and is never disconnected or otherwise punished. |
-| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit). Short deliberately: every cap in `internal/auth` is a live in-memory bound that a departing agent or an expiring session can relieve within seconds. |
-| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, or `/v1/session/complete`. |
+| `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, and on `POST /v1/broadcast`'s and `POST /v1/send`'s 201, when the response was replayed from the applied-key table rather than freshly applied. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied nothing. |
+| `Connection` | out | `close` on the 409 from `POST /v1/enroll`, `POST /v1/broadcast` and `POST /v1/send` (idempotency key reused with a different payload). Invariant 10: same key + different payload is a protocol violation, and the server disconnects the offending client. Contrast the same-key/same-payload case, which is a legitimate retry, returns the original 201 unchanged, and is never disconnected or otherwise punished. |
+| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit), and on a 503 from `/v1/broadcast` or `/v1/send` caused by the applied-key table being at capacity. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. |
+| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/broadcast` or `/v1/send`. |
 | `Cache-Control` | out | `no-store` on `POST /v1/session/begin` only. That response body carries a LIVE credential (the session token); the other two auth responses carry none, so the header is deliberately not set on them and its presence stays meaningful. |
 
 ## Enrolment and sessions (added 2026-08-02)
@@ -253,6 +417,13 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `PrincipalFromContext(ctx) (auth.Principal, bool)` | The authenticated identity, or `ok == false` on an allow-listed route (not an error condition — it is the definition of an unauthenticated route). |
 | `AgentIDFromContext(ctx) string` | The fully-qualified `<bus-id>.<agent-id>` (invariant 2) of the caller, or `""` when no principal is attached. |
 | `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. |
+| `RouteAgents` / `RouteBroadcast` / `RouteSend` / `RouteMessages` / `RouteWait` | `/v1/agents`, `/v1/broadcast`, `/v1/send`, `/v1/messages`, `/v1/wait` — the messaging surface. Registered only when the server has a hub; **never** on the allow-list. |
+| `MaxMessageRequestBytes` | `128 << 10` — the request-body cap on `/v1/broadcast` and `/v1/send`. The real payload limit is `store.MaxBodyBytes` (64 KiB decoded); this one only stops an unbounded stream reaching the decoder. |
+| `(*Server).Hub() *hub.Hub` | The messaging hub, or `nil` when the messaging routes are not registered. |
+| `hub.EncodeCursor(agentID, after) string` / `hub.DecodeCursor(agentID, cursor) (uint64, error)` | The cursor codec. `DecodeCursor` rejects a cursor bound to a different agent with `hub.ErrInvalidCursor`. `MaxCursorLen` is 512. |
+| `store.Message.VisibleTo(agentID string, enrolledAt time.Time) bool` | The **one** authorization boundary of the read path. Applied on all four read paths (history, the long-poll fast path, its post-registration re-read, and its wake re-read) and by the wake filter itself, always with the AUTHENTICATED principal and that agent's roster entry — never with anything taken from a cursor. A zero `enrolledAt` disables the epoch check and exists only for roster-less callers (an audit tool); it must never be reached from a request path. |
+| `hub.Result` / `hub.Batch` | What a send returns and what a read returns; see `internal/hub/hub.go` and `internal/hub/wait.go`. |
+| `store.RecordKind` / `store.RecordVersion` | `"message"` / `1` — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
 
 **Rule for every future route: register it through `(*Server).route`, never `mux.HandleFunc`
 directly.** A route registered the wrong way is still authenticated — the middleware wraps the whole
