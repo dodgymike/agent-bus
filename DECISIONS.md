@@ -543,3 +543,59 @@ and the reviewer proved by mutation that deleting the whole defer left the suite
 the observable event; the test additionally requires it to precede
 `msg="data directory lock released"`, which pins the LIFO close-then-unlock order. Deleting it as
 "log noise" silently removes the only guard on scope item 4.
+
+---
+
+## 2026-08-02 — Auth: client signs a short-lived, server-provided session token (settles AUTH-1)
+
+**Context.** AUTH-1 had been consent-gated on how an agent proves possession of its enrolment key:
+sign every request (safe, but hostile to a shell client) or hold a bearer token indefinitely (simple,
+but a stolen token is valid forever). AUTH-1 blocked AUTH-2/3, all of MSG, POLL and the agent-facing
+surface — i.e. the entire path to a usable bus.
+
+**Decision (user, verbatim).** *"I want the client to sign a new server-provided session token that
+lasts at most an hour. The client library/interface is a compiled go cli that does all the heavy
+lifting, including waiting/long-polling for new messages to arrive."*
+
+So:
+
+1. **Enrolment** mints the server-authoritative agent id and records the agent's Ed25519 **public**
+   key (invariants 1 and 3; the auth keypair stays distinct from the messaging keypair).
+2. **Session establishment**: the client asks for a session; the **server** provides the token value;
+   the client **signs it** with its enrolment private key; the server verifies against the recorded
+   public key and thereafter accepts that session.
+3. **The session lasts at most one hour.** After that the client repeats step 2 for a fresh
+   server-provided token.
+
+**Why this shape.** It is a middle path, and each half earns its place:
+- The token is **server-provided**, so the client never chooses the value it signs. A
+  client-chosen challenge would allow pre-computation and would make the signature prove far less.
+- Signing happens **once per session, not per request**, so the client stays simple and the hot path
+  (long-poll, send) is a cheap credential check rather than a signature verification.
+- The **one-hour cap** bounds the blast radius of a leaked token, which is the failure a
+  never-expiring bearer token cannot survive.
+
+**Consequences — things this commits us to.**
+
+- **Revocation is now time-bounded, not immediate.** `POST /v1/leave` and any future revoke must
+  invalidate *outstanding sessions*, not merely stop new ones. Without that, a revoked or compromised
+  agent stays live for up to an hour. This must be explicit in AUTH-4 and tested.
+- **Expiry needs a clock-skew policy.** Server-side expiry is authoritative; the client must refresh
+  early rather than at the boundary, and the server must reject an expired token even if the client
+  believes it is valid. Say what the tolerance is rather than leaving it implicit.
+- **Session state must survive restart** (invariant 5) or every bus restart forcibly re-authenticates
+  every agent. Decide deliberately which of those two we want; it is not obvious that persisting
+  sessions is right, and expiring them on restart may be the safer default.
+- **The compiled Go CLI becomes the agent interface**, doing key generation and storage, session
+  refresh, long-poll with cursor management, reconnect/backoff, and verification of inbound messages.
+  This is a change to **invariant 7**, which currently requires a `scripts/bus-*.sh` wrapper per
+  capability: the requirement is unchanged in spirit (an agent never constructs an HTTP call) but the
+  vehicle is now a CLI subcommand. The AGENTIF epic's eight shell-wrapper tasks need re-scoping, and
+  the CLI epic (filed for a *human* client) should be reconciled with this — most likely one binary
+  serving both, since the heavy lifting is identical.
+- Signing a server-provided value is a standard challenge-response; per invariant 9 it must be built
+  from the stdlib's `crypto/ed25519` sign/verify API, never assembled from primitives.
+
+**Open, deliberately not decided here:** the token's format and whether it carries claims or is an
+opaque server-side handle; whether sessions persist across restart; the exact skew tolerance; and
+whether one binary serves both agents and humans.
