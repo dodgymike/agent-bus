@@ -15,12 +15,17 @@
 # that hole: it classifies the proof, applies the check that shape deserves,
 # and reports one of PASS / FAIL / VACUOUS / UNVERIFIABLE.
 #
+# A THIRD variant, and the reason exit status alone is never enough: `A ; B`
+# exits with B's status, and `|| true` swallows failure outright. So a proof
+# can exit 0 with a RED test suite behind it. This script counts `--- FAIL`
+# and reports FAIL regardless of the command's exit code.
+#
 # The boundary is the whole job. A guard that false-POSITIVES is worse than no
 # guard (it launders vacuous proofs as evidence). A guard that false-NEGATIVES
 # blocks every completion and gets switched off within a day. So:
-#   * the ONLY thing enforced on a Go proof is "at least one test actually ran,
-#     and not every one of them skipped" — the minimum that makes the proof
-#     mean anything at all;
+#   * the ONLY things enforced on a Go proof are "at least one test actually
+#     ran", "not every one of them skipped", and "none of them failed" — the
+#     minimum that makes the proof mean anything at all;
 #   * non-Go proofs (`test -s FILE`, `grep -q ...`, `scripts/bus-*.sh ...`,
 #     `docker compose ...`) are LEGITIMATE and are judged purely on their exit
 #     status. They are never forced through a test-count check;
@@ -80,12 +85,18 @@
 # TRUST BOUNDARY — read before using --task
 # ---------------------------------------------------------------------------
 # A proof_cmd is EXECUTABLE INPUT. This script runs it verbatim, with your
-# privileges, in the repo root — exactly as if you had pasted it into a shell.
-# With --task the string comes from the Spec Server, so anyone who can edit
-# that backlog can choose a command that runs on your machine. Only use --task
-# against a project whose backlog you trust, and read the `proof:` line this
-# script echoes before it executes. Use --classify to inspect a command
-# statically without running anything.
+# privileges and your full environment, in the repo root — exactly as if you
+# had pasted it into a shell. With --task the string comes from the Spec
+# Server, so anyone who can edit that backlog can choose a command that runs on
+# your machine. Only use --task against a project whose backlog you trust, and
+# read the `proof:` line this script echoes before it executes (non-printable
+# bytes are replaced with '?' there, so the line cannot be repainted by ANSI
+# escapes to hide what will actually run). Use --classify to inspect a command
+# statically — it executes no part of the proof command.
+#
+# The proof's own output is written to STDERR. stdout carries only this
+# script's single verdict line, so a proof cannot print a convincing forgery of
+# it. Even so: the EXIT CODE is authoritative, not the text.
 #
 # ---------------------------------------------------------------------------
 # Usage:
@@ -96,9 +107,12 @@
 #
 # Options:
 #   --task <id>   fetch proof_cmd from the Spec Server (task key or public_id)
-#                 via scripts/spec-cloud.sh, then check it. Needs jq.
-#   --classify    static classification only; runs NOTHING. Always exits 0
-#                 unless the command is UNVERIFIABLE (3) or usage is bad (2).
+#                 via scripts/spec-cloud.sh, then check it. Needs jq. NOTE this
+#                 does make a network call (and mints a bearer) before it
+#                 classifies — it just never executes the proof.
+#   --classify    static classification only; executes no part of the proof
+#                 command. Always exits 0 unless the command is UNVERIFIABLE
+#                 (3) or usage is bad (2).
 #   --strict      additionally require every package listed in a `go test`
 #                 invocation to contribute at least one test.
 #   --quiet       suppress the proof command's own output; print only the verdict.
@@ -137,16 +151,29 @@ EXIT_UNVERIFIABLE=3
 EXIT_VACUOUS=4
 
 usage() {
-  sed -n '2,140p' "${BASH_SOURCE[0]}" | sed -n '/^# Usage:/,/^# Known limitation/p' >&2
+  cat >&2 <<'EOF'
+usage: proof-check.sh [--task <id>] [--classify] [--strict] [--quiet] '<proof command>'
+
+  --task <id>  fetch proof_cmd from the Spec Server, then check it (needs jq)
+  --classify   static classification only; executes no part of the proof command
+  --strict     require EVERY package listed in a `go test` to contribute a test
+  --quiet      suppress the proof's own output; print only the verdict
+
+exit: 0 PASS · 1 FAIL · 2 usage · 3 UNVERIFIABLE · 4 VACUOUS
+Full rationale, the trust boundary, and the completion policy are in the
+comment block at the top of this file.
+EOF
 }
 
 say() { printf 'proof-check: %s\n' "$*" >&2; }
 
-# verdict CLASS VERDICT EXIT TESTS TOP SKIPPED EMPTY — the one machine-readable
-# line, on stdout so it can be captured while human output goes to stderr.
+# verdict_line CLASS VERDICT EXIT TESTS TOP SKIPPED EMPTY FAILED — the one
+# machine-readable line. It is the ONLY thing written to stdout (all human
+# output, and all of the proof's own output, go to stderr), so a proof cannot
+# forge a line that a caller reading stdout would mistake for this one.
 verdict_line() {
-  printf 'proof-check: verdict=%s class=%s exit=%s tests_run=%s top_level=%s skipped=%s empty_pkgs=%s\n' \
-    "$2" "$1" "$3" "$4" "$5" "$6" "$7"
+  printf 'proof-check: verdict=%s class=%s exit=%s tests_run=%s top_level=%s skipped=%s failed=%s empty_pkgs=%s\n' \
+    "$2" "$1" "$3" "$4" "$5" "$6" "${8:-0}" "$7"
 }
 
 # ---------------------------------------------------------------------------
@@ -157,8 +184,8 @@ verdict_line() {
 # stay single segments.
 # ---------------------------------------------------------------------------
 split_segments() {
-  printf '%s' "$1" | awk '
-    BEGIN { RS = "\0"; q = ""; depth = 0 }
+  printf '%s' "$1" | awk -v only_semi="${2:-0}" '
+    BEGIN { RS = "\0"; q = ""; depth = 0; bt = 0 }
     {
       s = $0; n = length(s); i = 1; out = ""
       while (i <= n) {
@@ -171,16 +198,51 @@ split_segments() {
         if (c == "\\")                    { out = out c substr(s, i+1, 1); i += 2; continue }
         if (c == "\047" || c == "\"")     { q = c; out = out c; i++; continue }
         if (c == "$" && substr(s, i+1, 1) == "(") { depth++; out = out "$("; i += 2; continue }
-        if (c == "`")                     { depth = (depth > 0 ? depth - 1 : depth + 1); out = out c; i++; continue }
+        # Backticks are their own toggle. Folding them into the $( ) depth
+        # counter made a leading backtick DECREMENT it, mis-splitting
+        # `echo $(foo ` + "`" + `bar && baz` + "`" + `) && ls`.
+        if (c == "`")                     { bt = !bt; out = out c; i++; continue }
         if (c == ")" && depth > 0)        { depth--; out = out c; i++; continue }
-        if (depth > 0)                    { out = out c; i++; continue }
-        if (c == "&" && substr(s, i+1, 1) == "&") { out = out "\n"; i += 2; continue }
-        if (c == "|" && substr(s, i+1, 1) == "|") { out = out "\n"; i += 2; continue }
-        if (c == ";" || c == "|" || c == "\n")    { out = out "\n"; i++; continue }
+        if (depth > 0 || bt)              { out = out c; i++; continue }
+        if (c == ";")                             { out = out "\n"; i++; continue }
+        if (c == "&" && substr(s, i+1, 1) == "&") { out = out (only_semi ? "&&" : "\n"); i += 2; continue }
+        if (c == "|" && substr(s, i+1, 1) == "|") { out = out (only_semi ? "||" : "\n"); i += 2; continue }
+        if (c == "|" || c == "\n")                { out = out (only_semi ? c : "\n"); i++; continue }
         out = out c; i++
       }
       printf "%s\n", out
     }'
+}
+
+# mask_quoted CMD — echoes CMD with the CONTENTS of every quoted region
+# replaced by 'x', preserving length and the quotes themselves. Used so that
+# lexical shape-matching sees only what the shell would treat as code.
+mask_quoted() {
+  printf '%s' "$1" | awk '
+    BEGIN { RS = "\0"; q = "" }
+    {
+      s = $0; n = length(s); i = 1; out = ""
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (q == "") {
+          if (c == "\047" || c == "\"") { q = c; out = out c; i++; continue }
+          if (c == "\\") { out = out c substr(s, i+1, 1); i += 2; continue }
+          out = out c; i++; continue
+        }
+        if (q == "\"" && c == "\\") { out = out "xx"; i += 2; continue }
+        if (c == q) { q = ""; out = out c; i++; continue }
+        out = out "x"; i++
+      }
+      printf "%s", out
+    }'
+}
+
+# sanitise_display S — S with non-printable bytes replaced by '?'. The trust
+# boundary rests on the operator READING the echoed proof before it runs, so a
+# proof_cmd containing CR / ANSI cursor-movement escapes must not be able to
+# repaint that line and show something other than what will execute.
+sanitise_display() {
+  printf '%s' "$1" | LC_ALL=C tr -c '[:print:]\t' '?'
 }
 
 # head_token SEGMENT — first word, with `NAME=value` env prefixes, a leading
@@ -188,8 +250,13 @@ split_segments() {
 # pure comment.
 head_token() {
   local seg="$1" tok
+  # `set -f` first: without it the unquoted expansion below GLOBS, so a segment
+  # starting with `*` would resolve to a filename in the caller's cwd (and a
+  # pathological pattern could stall). We want words, not matches.
+  set -f
   # shellcheck disable=SC2086
   set -- $seg
+  set +f
   while (( $# > 0 )); do
     tok="$1"
     case "$tok" in
@@ -230,14 +297,20 @@ classify() {
   local trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
   trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
 
-  # --- shape tags (purely lexical; independent of runnability) --------------
+  # --- shape tags -----------------------------------------------------------
+  # Matched against the command with QUOTED regions blanked out, so that a
+  # documentation proof like `grep -q 'go test -race' CONTRACTS.md` is not
+  # mistaken for one that RUNS go test (which would have it judged VACUOUS for
+  # running no tests — a false negative on a perfectly good proof).
+  local masked
+  masked="$(mask_quoted "$trimmed")"
   local tags=()
-  [[ "$trimmed" =~ (^|[^[:alnum:]_])go[[:space:]]+test([^[:alnum:]_]|$) ]] && { tags+=("test"); HAS_GO_TEST=1; }
-  [[ "$trimmed" == *"scripts/"*".sh"* ]] && tags+=("wrapper")
-  [[ "$trimmed" =~ (^|[^[:alnum:]_])(test[[:space:]]+-[sfdez]|grep[[:space:]]|git[[:space:]]+check-ignore) ]] && tags+=("file-assertion")
-  [[ "$trimmed" =~ (^|[^[:alnum:]_])(docker|make)([^[:alnum:]_]|$) ]] && tags+=("build")
-  [[ "$trimmed" =~ (^|[^[:alnum:]_])go[[:space:]]+(build|vet|list)([^[:alnum:]_]|$) ]] && tags+=("toolchain")
-  [[ "$trimmed" == *"gofmt"* ]] && tags+=("toolchain")
+  [[ "$masked" =~ (^|[^[:alnum:]_])go[[:space:]]+test([^[:alnum:]_]|$) ]] && { tags+=("test"); HAS_GO_TEST=1; }
+  [[ "$masked" == *"scripts/"*".sh"* ]] && tags+=("wrapper")
+  [[ "$masked" =~ (^|[^[:alnum:]_])(test[[:space:]]+-[sfdez]|grep[[:space:]]|git[[:space:]]+check-ignore) ]] && tags+=("file-assertion")
+  [[ "$masked" =~ (^|[^[:alnum:]_])(docker|make)([^[:alnum:]_]|$) ]] && tags+=("build")
+  [[ "$masked" =~ (^|[^[:alnum:]_])go[[:space:]]+(build|vet|list)([^[:alnum:]_]|$) ]] && tags+=("toolchain")
+  [[ "$masked" == *"gofmt"* ]] && tags+=("toolchain")
 
   # --- unverifiable checks, cheapest and most decisive first ----------------
   if [[ -z "$trimmed" ]]; then
@@ -249,7 +322,9 @@ classify() {
     return
   fi
   # An unfilled placeholder: <word...> with no space before the closing '>'.
-  if [[ "$trimmed" =~ \<[A-Za-z][^\<\>]*[^[:space:]\<\>]\> ]]; then
+  # The no-trailing-space rule keeps real redirections (`cmd <in >out`) from
+  # being flagged; the second alternative catches a single-char one like <n>.
+  if [[ "$trimmed" =~ \<[A-Za-z][^\<\>]*[^[:space:]\<\>]\>|\<[A-Za-z]\> ]]; then
     CLASS="${CLASS:-}placeholder"
     UNVERIFIABLE_REASON="contains an unfilled <placeholder> — the proof is a template, not a command"
     return
@@ -316,6 +391,13 @@ done
 if [[ -n "$TASK_ID" ]]; then
   if [[ -n "$CMD" ]]; then say "give --task OR a command, not both"; exit "$EXIT_USAGE"; fi
   if ! command -v jq >/dev/null 2>&1; then say "--task needs jq installed"; exit "$EXIT_USAGE"; fi
+  # The id is interpolated into a URL carrying a bearer token. Without this,
+  # `--task ../../../projects/other/export` is collapsed by curl and the token
+  # is sent to a different endpoint than the one intended.
+  if [[ ! "$TASK_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    say "refusing task id '$(sanitise_display "$TASK_ID")' — expected [A-Za-z0-9._-]+"
+    exit "$EXIT_USAGE"
+  fi
   task_json="$(bash "${SCRIPT_DIR}/spec-cloud.sh" -s "/api/v1/projects/${PROJECT_SLUG}/tasks/${TASK_ID}" 2>/dev/null)"
   if [[ -z "$task_json" ]] || ! printf '%s' "$task_json" | jq -e . >/dev/null 2>&1; then
     say "could not fetch task ${TASK_ID} from the Spec Server"
@@ -327,9 +409,17 @@ fi
 
 if [[ -z "$CMD" && -z "$TASK_ID" ]]; then usage; exit "$EXIT_USAGE"; fi
 
-say "proof: ${CMD:-<empty>}"
+say "proof: $(sanitise_display "${CMD:-<empty>}")"
 classify "$CMD"
 say "class: ${CLASS}"
+
+# A top-level `;` does NOT propagate failure: `A ; B` exits with B's status, so
+# A can fail (or not exist at all) and the proof still reads green. Warn even
+# when everything else checks out.
+if (( $(split_segments "$CMD" 1 | grep -c '[^[:space:]]') > 1 )); then
+  say "warning: the proof joins commands with ';', which DISCARDS the exit status of"
+  say "  everything before the last one. Prefer '&&' so a failure actually fails."
+fi
 
 if [[ -n "$UNVERIFIABLE_REASON" ]]; then
   say "UNVERIFIABLE — ${UNVERIFIABLE_REASON}"
@@ -343,8 +433,17 @@ if (( CLASSIFY_ONLY )); then
   exit "$EXIT_PASS"
 fi
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/proof-check.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# If mktemp fails, WORK would be "" and every derived path would become
+# ABSOLUTE: `mkdir -p "${WORK}/bin"` is `mkdir -p /bin` (which succeeds), and
+# the shim would be written to /bin/go. There is no `set -e` here, so this must
+# be checked explicitly rather than assumed.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/proof-check.XXXXXX")" || WORK=""
+if [[ -z "$WORK" || ! -d "$WORK" ]]; then
+  say "UNVERIFIABLE — could not create a temp dir under ${TMPDIR:-/tmp}"
+  verdict_line "$CLASS" UNVERIFIABLE - 0 0 0 0 0
+  exit "$EXIT_UNVERIFIABLE"
+fi
+trap '[[ -n "${WORK:-}" && -d "${WORK:-}" ]] && rm -rf "$WORK"' EXIT INT TERM HUP
 
 GOTEST_LOG="${WORK}/gotest.log"
 : > "$GOTEST_LOG"
@@ -356,13 +455,14 @@ GOTEST_LOG="${WORK}/gotest.log"
 # proof's shell operators. Letting the real shell run the proof verbatim is
 # what keeps `&&` short-circuiting, `$(...)`, and quoting exactly right; we do
 # not reimplement shell semantics.
-if (( HAS_GO_TEST )); then
-  REAL_GO="$(command -v go 2>/dev/null || true)"
-  if [[ -z "$REAL_GO" ]]; then
+REAL_GO="$(command -v go 2>/dev/null || true)"
+if [[ -z "$REAL_GO" ]]; then
+  if (( HAS_GO_TEST )); then
     say "UNVERIFIABLE — proof runs 'go test' but no go toolchain is on PATH"
-    verdict_line "$CLASS" UNVERIFIABLE - 0 0 0 0
+    verdict_line "$CLASS" UNVERIFIABLE - 0 0 0 0 0
     exit "$EXIT_UNVERIFIABLE"
   fi
+else
   mkdir -p "${WORK}/bin"
   cat > "${WORK}/bin/go" <<'SHIM'
 #!/usr/bin/env bash
@@ -380,34 +480,50 @@ done
 "$real" test "${inject[@]+"${inject[@]}"}" "$@" 2>&1 | tee -a "$log"
 exit "${PIPESTATUS[0]}"
 SHIM
-  chmod 0755 "${WORK}/bin/go"
+  chmod 0700 "${WORK}/bin/go"
   export PROOF_CHECK_REAL_GO="$REAL_GO"
   export PROOF_CHECK_GOTEST_LOG="$GOTEST_LOG"
   export PATH="${WORK}/bin:${PATH}"
 fi
 
+# The proof's own output goes to STDERR, never stdout. stdout is reserved for
+# the single verdict line, so a proof cannot print a forged
+# `proof-check: verdict=PASS ...` that a caller doing `... | grep -m1 verdict=`
+# would read instead of ours.
 say "running (cwd ${REPO_ROOT})..."
 if (( QUIET )); then
   ( cd "$REPO_ROOT" && bash -c "$CMD" ) >/dev/null 2>&1
 else
-  ( cd "$REPO_ROOT" && bash -c "$CMD" )
+  ( cd "$REPO_ROOT" && bash -c "$CMD" ) >&2
 fi
 RC=$?
 
 TESTS_RUN=0; TOP_LEVEL=0; SKIPPED=0; PASSED=0; FAILED=0; EMPTY_PKGS=0
 EMPTY_PKG_NAMES=""
 
-if (( HAS_GO_TEST )) && [[ -s "$GOTEST_LOG" ]]; then
+# Decide on EVIDENCE, not on a lexical guess: the shim is installed
+# unconditionally, so a non-empty log means Go tests really ran — however
+# indirectly they were invoked (through a wrapper script, a Makefile, whatever).
+# A lexical `go test` match is only used to notice the reverse case below,
+# where the string names go test but nothing was captured.
+SAW_GO_TESTS=0
+if [[ -s "$GOTEST_LOG" ]]; then
+  SAW_GO_TESTS=1
   if grep -q '"Action":"run"' "$GOTEST_LOG" 2>/dev/null; then
-    TESTS_RUN="$(grep -c '"Action":"run"' "$GOTEST_LOG")"
+    # `go test -json`: the same events, minus the --- PASS/FAIL/SKIP markers.
+    # Package-level events carry no "Test" field, so require one.
+    TESTS_RUN="$(grep -c '"Action":"run"[^}]*"Test":' "$GOTEST_LOG" || true)"
     TOP_LEVEL="$TESTS_RUN"
+    PASSED="$(grep -c '"Action":"pass"[^}]*"Test":' "$GOTEST_LOG" || true)"
+    FAILED="$(grep -c '"Action":"fail"[^}]*"Test":' "$GOTEST_LOG" || true)"
+    SKIPPED="$(grep -c '"Action":"skip"[^}]*"Test":' "$GOTEST_LOG" || true)"
   else
     TESTS_RUN="$(grep -c '^=== RUN' "$GOTEST_LOG" || true)"
     TOP_LEVEL="$(grep -cE '^=== RUN[[:space:]]+[^/]+$' "$GOTEST_LOG" || true)"
+    PASSED="$(grep -cE '^--- PASS:' "$GOTEST_LOG" || true)"
+    FAILED="$(grep -cE '^--- FAIL:' "$GOTEST_LOG" || true)"
+    SKIPPED="$(grep -cE '^--- SKIP:' "$GOTEST_LOG" || true)"
   fi
-  PASSED="$(grep -cE '^--- PASS:' "$GOTEST_LOG" || true)"
-  FAILED="$(grep -cE '^--- FAIL:' "$GOTEST_LOG" || true)"
-  SKIPPED="$(grep -cE '^--- SKIP:' "$GOTEST_LOG" || true)"
   # A test binary that produced result lines but no RUN lines (unusual, but
   # possible if output interleaved badly) still counts as having run tests.
   if (( TESTS_RUN == 0 )); then TESTS_RUN=$(( PASSED + FAILED + SKIPPED )); fi
@@ -421,39 +537,62 @@ fi
 
 if (( RC != 0 )); then
   say "FAIL — proof command exited ${RC}"
-  (( HAS_GO_TEST )) && say "  (tests run: ${TESTS_RUN}, passed ${PASSED}, failed ${FAILED}, skipped ${SKIPPED})"
-  verdict_line "$CLASS" FAIL "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS"
+  (( SAW_GO_TESTS )) && say "  (tests run: ${TESTS_RUN}, passed ${PASSED}, failed ${FAILED}, skipped ${SKIPPED})"
+  verdict_line "$CLASS" FAIL "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
   exit "$EXIT_FAIL"
 fi
 
-if (( HAS_GO_TEST )); then
+# A RED test suite behind a GREEN exit code. `;` does not propagate failure and
+# `|| true` swallows it outright, so exit 0 is NOT evidence the tests passed —
+# only that something after them did. Trusting RC alone here would certify a
+# failing suite as proof, which is the same class of lie this script exists to
+# stop, just louder.
+if (( FAILED > 0 )); then
+  say "FAIL — the proof exited 0 but ${FAILED} test(s) FAILED."
+  say "  Something in the command masked the failure (a ';' or an '|| true')."
+  verdict_line "$CLASS" FAIL "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
+  exit "$EXIT_FAIL"
+fi
+
+if (( SAW_GO_TESTS )); then
   if (( TESTS_RUN == 0 )); then
     say "VACUOUS — the proof exited 0 but ZERO tests ran."
     say "  The -run pattern matched nothing, so this command proves nothing."
     [[ -n "$EMPTY_PKG_NAMES" ]] && say "  empty packages: ${EMPTY_PKG_NAMES}"
-    verdict_line "$CLASS" VACUOUS "$RC" 0 0 0 "$EMPTY_PKGS"
+    verdict_line "$CLASS" VACUOUS "$RC" 0 0 0 "$EMPTY_PKGS" 0
     exit "$EXIT_VACUOUS"
   fi
-  if (( PASSED == 0 && FAILED == 0 && SKIPPED > 0 )); then
+  if (( PASSED == 0 && SKIPPED > 0 )); then
     say "VACUOUS — ${SKIPPED} test(s) ran and EVERY ONE of them skipped."
     say "  Exit 0 here means 'not exercised', not 'verified'."
-    verdict_line "$CLASS" VACUOUS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS"
+    verdict_line "$CLASS" VACUOUS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
     exit "$EXIT_VACUOUS"
   fi
   if (( EMPTY_PKGS > 0 )); then
     if (( STRICT )); then
-      say "FAIL (--strict) — these listed packages contributed no test: ${EMPTY_PKG_NAMES}"
-      verdict_line "$CLASS" VACUOUS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS"
+      say "VACUOUS (--strict) — these listed packages contributed no test: ${EMPTY_PKG_NAMES}"
+      verdict_line "$CLASS" VACUOUS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
       exit "$EXIT_VACUOUS"
     fi
     say "warning: ${EMPTY_PKGS} listed package(s) ran no test: ${EMPTY_PKG_NAMES}"
-    say "  (allowed by default — see the -run/multi-package note at the top of this script)"
+    say "  (allowed by default — see the -run/multi-package note at the top of this script.)"
+    say "  READ THIS LINE before completing: if the test THIS task claims to add is in one"
+    say "  of those packages, the proof did not exercise it."
   fi
   say "PASS — ${TESTS_RUN} test(s) ran (${TOP_LEVEL} top-level), ${PASSED} passed, ${SKIPPED} skipped."
+elif (( HAS_GO_TEST )); then
+  # The string names `go test` (outside quotes) yet the shim captured nothing:
+  # it was invoked by an absolute path, or through something that scrubbed PATH.
+  # The vacuity check never applied, so this cannot be called a pass.
+  say "UNVERIFIABLE — the proof names 'go test' but no test output was captured."
+  say "  It was invoked by absolute path or with a scrubbed PATH, so the"
+  say "  zero-tests-ran check could NOT be applied. Exit status was 0."
+  verdict_line "$CLASS" UNVERIFIABLE "$RC" 0 0 0 0 0
+  exit "$EXIT_UNVERIFIABLE"
 else
   say "PASS — proof command exited 0."
   say "  Not a Go test proof (class=${CLASS}); its exit status IS the whole check."
 fi
 
-verdict_line "$CLASS" PASS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS"
+verdict_line "$CLASS" PASS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
 exit "$EXIT_PASS"
