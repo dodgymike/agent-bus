@@ -95,6 +95,27 @@
   The agent roster (id, name, public key/verifier material, enrolled-at) is rebuilt on startup by WAL replay, not held only in memory -- an agent enrolled before a restart is still authenticated and listed after one, with no re-enrolment required.
   _Proof: go test -race -run TestRosterRecovery ./internal/auth_
 
+### EPIC CLI — Human CLI interface to the bus
+
+- [ ] CLI-1 · CLI-1: CLI-1 design + subcommand skeleton — cli, P1
+  Decide and record (DECISIONS.md) whether the human CLI is a SEPARATE binary (cmd/busctl) or a subcommand tree on the existing agent-bus binary. Recommendation to evaluate: a separate cmd/busctl, so the server binary stays minimal and a human client is never accidentally shipped into the server image. Build the subcommand skeleton, global flags (--bus URL, --identity path, --json, --timeout), config-file/env resolution order, and exit-code conventions. NO business logic yet.
+- [ ] CLI-4 · CLI-4: CLI-4 send + broadcast, incl. stdin and interactive — cli, P1
+  Send a DM to a fully-qualified agent id, or broadcast to the roster. Body from an argument, from a file, or piped on stdin (so it composes with other tools). Refuse ambiguous or empty sends with a clear error rather than sending nothing. Depends on the MSG epic.
+- [ ] CLI-2 · CLI-2: CLI-2 identity: enrol, whoami, use, logout — cli, P1
+  Human-facing identity management against the AUTH surface. Enrol as a named human operator, store the credential under the user's config dir with 0600 perms (NEVER in the repo, never world-readable), show the active identity, switch between identities for multiple buses, and log out (revoking via /v1/leave). Depends on the AUTH epic. Must use the SAME enrolment protocol as agents -- a human is just another enrolled participant, with no special server-side privilege.
+- [ ] CLI-6 · CLI-6: CLI-6 log: read the append-only audit log — cli, P2
+  Read the audit log -- which under invariant 6 is METADATA AND ROUTING INFO ONLY (id, sequence, sender, recipients, bus path, timestamp, size, content hash), never bodies. Support filtering by sender, recipient, time range and sequence range, and --follow to tail it. The CLI must not imply message bodies are retrievable from the log; make its absence explicit in the output and help text so an operator is never misled.
+- [ ] CLI-3 · CLI-3: CLI-3 watch: live human-readable message tail — cli, P1
+  The headline command. Drives the long-poll wait endpoint in a loop and renders messages as a readable live feed (timestamp, sender, recipient/scope, body), advancing its cursor across reconnects. Handles Ctrl-C cleanly, reconnects with backoff on transient failure, and never busy-loops. --json emits one JSON object per line for piping. Depends on the POLL epic.
+- [ ] CLI-5 · CLI-5: CLI-5 agents: roster listing — cli, P2
+  List the enrolled roster as an aligned human-readable table (id, name, bus, enrolled-at, last-seen), with --json for scripting. Make the fully-qualified <bus-id>.<agent-id> readable without truncating the part that matters for routing.
+- [ ] CLI-9 · CLI-9: CLI-9 shell completion + man/usage polish — cli, P3
+  Bash/zsh completion for subcommands, flags, and where cheaply possible enrolled agent ids. Usage text good enough that --help answers the common questions without opening a doc.
+- [ ] CLI-8 · CLI-8: CLI-8 doctor: diagnose a broken setup — cli, P2
+  One command that checks the common failure modes end to end: server reachable, /healthz green, identity present and non-expired, token accepted, clock skew within tolerance, data-dir writable, audit log readable. Prints a specific remedy per failure rather than a generic error. This is the command that stops a human from hand-writing curl to work out what is wrong.
+- [ ] CLI-7 · CLI-7: CLI-7 peers: relay topology and health — cli, P2
+  Show configured peer buses, their reachability, last successful exchange, and pending relay backlog -- the operator's answer to 'is federation actually working?'. Depends on the RELAY epic.
+
 ### EPIC CORE — Repo skeleton & server bootstrap
 
 - [ ] CORE-5 · CORE-5: Observability: metrics/inspect endpoint (follow-up) — observability, P3
@@ -325,6 +346,25 @@
 - [ ] POLL-2 · POLL-2: Wake-on-new-message wiring — poll, P1
   The hub notifies every parked waiter whose cursor is behind a newly committed message -- wiring between the two-phase commit path and the waiter registry, so wake-up happens only after the write is durable, never before.
   _Proof: go test -race -run TestWaiterWakeup ./internal/hub_
+
+### EPIC RATCHET — Ratchet crypto: adopt, do not invent
+
+- [ ] RATCHET-4 · RATCHET-4: Broadcast fan-out under pairwise ratchets — crypto, P1
+  A double ratchet is inherently 1:1, but MSG-2 broadcasts to the whole roster. Evaluate the real options -- N pairwise ratchet sends, a sender-key/group-messaging construction, or a per-message symmetric key wrapped per recipient -- with cost, forward-secrecy and complexity for each. Sender-key schemes are a KNOWN sharp edge: getting one wrong silently loses PFS. Recommend, and say explicitly what an implementer must NOT improvise.
+- [ ] RATCHET-8 · RATCHET-8: Record the decision, then gate the CRYPTO epic on it — crypto, P1
+  Turn the deep dive's recommendation into a dated DECISIONS.md entry (library, version, what we implement, what we explicitly never implement, the fan-out approach, the state-durability rule), update CRYPTO-1/2 to reference it rather than re-deciding, and confirm with spec-keeper that no CRYPTO implementation task starts before this lands. The point of the gate is that the expensive, dangerous work is not begun on an assumption.
+- [ ] RATCHET-7 · RATCHET-7: Supply-chain review of the chosen crypto dependency — security, P1
+  Invariant 8 requires a justification in DECISIONS.md for any third-party dependency; a CRYPTO dependency needs more. Review provenance, release signing, transitive dependency footprint, cgo/native build requirements against the Docker image, vulnerability history, and what our exposure is if it is abandoned. Pin the exact version and record how we learn about advisories.
+- [ ] RATCHET-2 · RATCHET-2: Threat model: what the ratchet is actually defending against — crypto, P1
+  Write down the adversary before choosing a mechanism. Who is the attacker -- a compromised bus, a compromised peer bus, a network observer, another enrolled agent, someone who later obtains the disk? What does PFS buy us against each, and what does it NOT buy? State plainly which threats are OUT of scope. Without this the library choice is unfalsifiable, and 'we used Signal' becomes a slogan rather than a security property.
+- [ ] RATCHET-3 · RATCHET-3: Do we need full Signal semantics? -- the cheaper-alternative check — crypto, P1
+  Deliberate devil's advocate against the whole epic, so the decision is made on merit. Full X3DH + double ratchet buys asynchronous session setup, PFS, and post-compromise recovery. Agent-bus may not need all three. Compare against simpler, well-audited options (static keypairs + NaCl box, or an AEAD with scheduled rekeying) on security delivered per unit of complexity, and against the fact that complexity ITSELF is a security risk here. Recommend. It is entirely legitimate for this task to conclude the full ratchet is warranted -- but the case must be made, not assumed.
+- [ ] RATCHET-1 · RATCHET-1: DEEP DIVE -- how to get a double ratchet WITHOUT writing our own crypto — crypto, P0
+  THE GATING TASK. Produce RATCHET_DEEPDIVE.md. Governing constraint, stated up front and never relaxed: we do not implement primitives, X3DH, or the ratchet ourselves. Rolling your own is the single highest-risk thing this project could do -- the failure mode is silent (it still encrypts, it still decrypts, it is simply broken), and no ordinary test suite detects it. REQUIRED CONTENT: (1) an explicit survey of the ACTUAL options for Go -- official libsignal (Rust) via cgo/FFI, maintained pure-Go double-ratchet implementations, age/NaCl-style alternatives, and the honest question of whether full Signal semantics are needed at all versus a simpler audited AEAD scheme with periodic rekeying; (2) for EACH option: maintenance status, audit history, API misuse-resistance, licence, cgo/build implications for the Docker image, and what it does NOT give us; (3) a clear recommendation with the runner-up and the conditions under which we would switch; (4) what we would still have to write ourselves under each option -- session storage, key lifecycle, fan-out -- since that glue is where implementations usually fail even with a good library; (5) an explicit list of things we will NEVER hand-roll. NO CODE. The output is evidence and a recommendation for the user to accept.
+- [ ] RATCHET-5 · RATCHET-5: Ratchet state durability vs invariants 4/5 -- the key-reuse trap — crypto, P1
+  Ratchet state is mutable and MUST NOT be replayed: rewinding it can cause key/nonce reuse, which is catastrophic and total for AEAD confidentiality. This collides head-on with invariant 5 (rebuild memory by replaying the durable store). Determine the safe pattern -- ratchet state as a durably-checkpointed side-store that is never rewound by WAL replay, monotonic counters that only advance, and what recovery does when state is lost or ambiguous (fail closed and force a new session, never guess). This must be settled BEFORE any ratchet code is written.
+- [ ] RATCHET-6 · RATCHET-6: Known-answer tests and cross-implementation vectors — crypto, P1
+  Whatever library is chosen, we must be able to prove our INTEGRATION is correct, not just that it compiles. Identify published test vectors / KATs for the chosen construction and wire them into the test suite, plus a cross-check against a reference implementation where one exists. 'It round-trips with itself' is not evidence -- a wholly broken implementation round-trips with itself perfectly.
 
 ### EPIC RELAY — Bus-to-bus federation
 
