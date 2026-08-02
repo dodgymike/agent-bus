@@ -218,40 +218,40 @@
 
 ### EPIC DUR — Durability: WAL, two-phase commit, recovery, audit log
 
-- [ ] DUR-2 · DUR-2: Two-phase prepare->commit write path — durability, P0
+- [~] DUR-2 · DUR-2: Two-phase prepare->commit write path — durability, P0, in progress
   Implement prepare(record)->commit(id) as two distinct fsynced WAL appends; in-memory state is applied ONLY after the commit record is durable. A response is never sent to the caller until commit-fsync completes (invariant 4). This is the write path every mutating route (enrol, send, broadcast, leave) goes through.
   _Proof: go test -race -run TestPrepareCommit ./internal/wal_
-- [ ] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0
+- [~] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0, in progress
   During replay, a checksum mismatch or short read at the END of the WAL (the torn record a crash mid-write leaves behind) is detected, logged, and the file is truncated at the last verified-good record boundary -- the ONLY truncation ever permitted (invariant 6). A corrupt record anywhere but the tail is a fatal startup error, not a truncation.
   _Proof: go test -race -run TestCorruptTailTruncation ./internal/wal_
-- [ ] DUR-5 · DUR-5: Append-only message audit log — durability, P0
+- [~] DUR-5 · DUR-5: Append-only message audit log — durability, P0, in progress
   A second, separate append-only file (distinct from the WAL) that every message (broadcast + DM) is written to as part of the same commit, independent of the WAL's own record-keeping -- the audit trail invariant 6 calls out explicitly. Never edited or truncated except by the verified-corrupt-tail rule.
   _Proof: go test -race -run TestAuditLog ./internal/wal_
 - [ ] DUR-7 · DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) — durability, P3
   Low-priority follow-up. As the WAL grows unbounded, startup replay time grows with it; add periodic snapshotting of in-memory state plus safe truncation of the WAL prefix the snapshot covers, so recovery time is bounded by (snapshot load + tail replay) rather than full history. Not required for correctness, only for long-run startup latency.
   _Proof: go test -race -run TestSnapshotCompaction ./internal/wal_
-- [ ] DUR-1 · DUR-1: WAL record framing + writer — durability, P0
+- [~] DUR-1 · DUR-1: WAL record framing + writer — durability, P0, in progress
   Define the on-disk WAL record format (length-prefixed + CRC32 checksum per record, monotonic record index) in internal/wal, and implement the append-only writer: Append(record) writes framed bytes and fsyncs before returning. The single building block every other DUR task builds on.
   _Proof: go test -race -run TestWALFraming ./internal/wal_
-- [ ] DUR-6 · DUR-6: Crash-injection test suite for the write path — durability, P0
+- [~] DUR-6 · DUR-6: Crash-injection test suite for the write path — durability, P0, in progress
   A test harness that writes, then simulates a crash (kill / truncate / corrupt the file at a chosen byte offset) at each stage of the two-phase write path -- before prepare fsync, between prepare and commit, mid-commit-write, after commit fsync -- and asserts recovery always yields a valid PREFIX of the accepted history: nothing acknowledged is ever lost, nothing unacknowledged is ever visible. The load-bearing evidence for invariants 4/5.
   _Proof: go test -race -run TestCrashInjection ./internal/wal_
-- [ ] DUR-3 · DUR-3: Replay/recovery on start — durability, P0
+- [~] DUR-3 · DUR-3: Replay/recovery on start — durability, P0, in progress
   On startup, replay the WAL from the beginning, reconstructing in-memory state (roster, sequence counters, message store) by applying only records that reached commit -- any prepare without a matching commit is discarded. Uncommitted prepares must never be visible after a restart.
   _Proof: go test -race -run TestWALReplay ./internal/wal_
 
 ### EPIC ID — Server-authoritative id minting
 
-- [ ] ID-1 · ID-1: Bus id minting + persistence — id, P0
+- [~] ID-1 · ID-1: Bus id minting + persistence — id, P0, in progress
   On first start with an empty data-dir, generate a bus id (opaque random/ULID-style string), persist it to a file in data-dir, and load the SAME id on every subsequent restart rather than regenerating. Exposed via GET /v1/info. This is the root of invariant 2's `<bus-id>.<agent-id>` namespacing.
   _Proof: go test -race -run TestBusIDPersistence ./internal/ids_
-- [ ] ID-4 · ID-4: Id-counter recovery property test — id, P1
+- [~] ID-4 · ID-4: Id-counter recovery property test — id, P1, in progress
   Cross-cutting test (depends on the WAL replay task): enrol several agents and send several messages, kill the process, restart, and assert every counter (sequence, per-name agent suffix) resumes strictly above its last-issued value -- table-driven across several kill points.
   _Proof: go test -race -run TestIDCounterRecovery ./internal/ids_
-- [ ] ID-3 · ID-3: Agent id minting `<bus-id>.<name>-<n>` — id, P0
+- [~] ID-3 · ID-3: Agent id minting `<bus-id>.<name>-<n>` — id, P0, in progress
   Server mints the fully-qualified agent id at enrolment: client submits a desired short name, server appends a durable per-name counter suffix (-1, -2, ...) so a reused name never collides with a previous holder, and prefixes the bus id. Client never chooses its own id (invariant 1).
   _Proof: go test -race -run TestAgentIDMinting ./internal/ids_
-- [ ] ID-2 · ID-2: Monotonic sequence allocator (drives message ids) — id, P0
+- [~] ID-2 · ID-2: Monotonic sequence allocator (drives message ids) — id, P0, in progress
   A durable, gap-free monotonic counter (internal/ids) that the WAL commit path advances -- every allocated sequence number is durable before it is handed out. Message ids are `<bus-id>-<seq>`. Counter state is restored by the WAL replay task so a restart never re-issues a previously-issued sequence number.
   _Proof: go test -race -run TestSequenceAllocator ./internal/ids_
 
