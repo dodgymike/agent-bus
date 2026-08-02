@@ -1,0 +1,26 @@
+# Keep the build context small and keep host-only artifacts out of the image.
+#
+# The durable data directory is the big one: it holds the WAL, the bus id, the
+# dirlock and (once DUR-12 lands) the MAC key -- none of that belongs baked
+# into an image layer, and it is excluded from git for the same reason (see
+# .gitignore).
+/data/
+*.wal
+*.log
+
+# Local build output / scratch -- rebuilt inside the image by the builder
+# stage, never copied in from the host.
+/agent-bus
+/bin/
+*.test
+
+# VCS and editor/agent metadata -- irrelevant to the build and often large.
+.git/
+.claude/
+.claude/settings.local.json
+
+# Docs and Spec Server bookkeeping -- large, churn frequently, never needed to
+# build or run the binary. Keeping them out of the context keeps `docker
+# build`'s context-upload step fast.
+*.md
+!README.md

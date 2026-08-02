@@ -1,0 +1,116 @@
+# docker-compose.yml -- DEPLOY-2, single bus.
+#
+# Usage:
+#   docker compose up -d        start the bus, detached
+#   docker compose logs -f      follow its structured stderr log
+#   docker compose ps           status; "healthy" once /healthz answers
+#   docker compose down         stop and remove the CONTAINER only -- the
+#                                named volume (and therefore the WAL, the bus
+#                                id, the dirlock and the MAC key) survives.
+#                                `docker compose down -v` is what destroys it;
+#                                never run that against a bus you care about.
+#
+# ---------------------------------------------------------------------------
+# SECURITY CONSTRAINT -- READ BEFORE TOUCHING `command:` OR ADDING `ports:`.
+#
+# This service is deliberately UNREACHABLE from outside its own container.
+# `command:` below repeats the binary's own loopback-only default
+# (-listen=127.0.0.1:8080) rather than omitting the flag, specifically so the
+# constraint is visible here and not just inherited silently. No `ports:`
+# section is declared: publishing 127.0.0.1:8080 would map nothing, because
+# a published port connects to the CONTAINER's interface, and this process
+# never binds it -- only its own loopback, inside its own network namespace.
+# That is not a bug in this file; it is invariant 11 (CLAUDE.md) enforced at
+# the deployment layer: enrolment and session material cross the wire in
+# CLEARTEXT today (no TLS -- the mTLS epic is in_progress as of 2026-08-02),
+# so nothing may reach this bus except a process that can already get inside
+# the container (`docker compose exec`), until mutual TLS ships.
+#
+# CONSEQUENCE, STATED PLAINLY: as shipped, no other container and no host
+# process can talk to this bus. That is the price of the constraint, not an
+# oversight -- this compose file's job in DEPLOY-2 is to prove the built
+# image starts, stays healthy, and its data volume survives a container
+# replace, which it does. Making the bus reachable by OTHER agents is
+# DEPLOY-3's job (a peered multi-bus profile) and is explicitly out of scope
+# here because non-loopback binding has a hard sequencing dependency on mTLS
+# landing first.
+#
+# TO OPT IN ANYWAY (test/dev only, own the risk, never for anything holding
+# real agent traffic): overriding `-listen` is a BIGGER step than it looks,
+# and binding the HOST side of `ports:` to loopback does NOT fully contain
+# it --
+#   command: ["-listen=0.0.0.0:8080", "-data-dir=/data", "-log-level=info"]
+#   ports:
+#     - "127.0.0.1:8080:8080"   # binds the HOST side to loopback -- stops a
+#                                # LAN neighbour reaching it via the host --
+#                                # but this does NOT stop container-to-
+#                                # container reach: -listen=0.0.0.0 makes the
+#                                # bus answer on its container's address on
+#                                # the shared compose bridge network, so EVERY
+#                                # OTHER SERVICE on this same docker-compose
+#                                # network (now or added later) can reach it
+#                                # over cleartext regardless of what `ports:`
+#                                # says, because bridge-network traffic never
+#                                # goes through the published-port mapping at
+#                                # all. `ports:` only ever gates HOST access.
+#                                # There is no `command:`/`ports:` combination
+#                                # that fully re-establishes the loopback-only
+#                                # guarantee once -listen is widened -- that
+#                                # is exactly why the default above leaves it
+#                                # untouched, and why this is documented as a
+#                                # deliberate, informed opt-in and not a "safe
+#                                # flag flip."
+#
+# TLS SEAM (do not implement yet): once the server speaks TLS with a
+# self-signed cert (invariant 11), the healthcheck below must switch from
+# plain `wget http://` to a TLS-aware probe that trusts that certificate, and
+# this file will need a way to hand the container certificate material (a
+# secret or a mounted volume) -- tracked, not solved, here.
+# ---------------------------------------------------------------------------
+
+services:
+  agent-bus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Override at build time: docker compose build --build-arg VERSION=$(git describe --tags --always)
+        VERSION: dev
+    image: agent-bus:local
+    container_name: agent-bus
+    restart: unless-stopped
+
+    # No new configuration surface: every flag here already exists on the
+    # binary (see `agent-bus -h` / cmd/agent-bus/main.go). -listen is repeated
+    # at its own default deliberately -- see the constraint above.
+    command:
+      - "-listen=127.0.0.1:8080"
+      - "-data-dir=/data"
+      - "-poll-timeout=30s"
+      - "-log-level=info"
+
+    volumes:
+      # Named volume, not a bind mount: survives `compose down` (without -v)
+      # and a container replace, which is the whole point (invariants 4/5/6
+      # -- the WAL, the bus id, the dirlock and the MAC key all live here).
+      - agent-bus-data:/data
+
+    healthcheck:
+      # Runs INSIDE the container's network namespace (same mechanism as
+      # `docker compose exec`), so it reaches the loopback-bound server even
+      # though nothing outside the container can. Mirrors the Dockerfile's
+      # own HEALTHCHECK; repeated here so `docker compose ps` and
+      # `depends_on: condition: service_healthy` (for a future DEPLOY-3
+      # profile) are meaningful without relying on image-level defaults.
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  agent-bus-data:
+    # Default local driver: the volume lives on this Docker host. Fine for a
+    # single-bus dev/test deployment; a production deployment on a different
+    # storage backend would override the driver here, not change the service
+    # definition above.

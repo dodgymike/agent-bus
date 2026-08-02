@@ -1302,3 +1302,55 @@ whatever the bus actually serves.
 `scripts/bus-serve.sh:54` (`HEALTH_URL="http://${LISTEN}/healthz"`), `CLI-2`'s `proof_cmd` (enrols
 over `http://127.0.0.1:8092`), and DEPLOY-1/DEPLOY-2 all assume plaintext and must be updated as the
 mTLS epic lands.
+
+---
+
+## 2026-08-02 — DEPLOY-1/DEPLOY-2: container image base, digest pinning, and the loopback-only default
+
+**Builder image pinned by TAG *and* DIGEST**, not `:latest` or a bare tag:
+`golang:1.19.4-alpine@sha256:86d32cc0dfc04757fd8aeebb86308e6d1e3de60c73cb59e0f99c7b2ef77416b6`. A tag
+alone can be re-pushed to point at different bytes; the digest is the only thing that actually pins
+the toolchain the image builds with. Must be re-pinned when DEPLOY-4 bumps `go.mod`'s toolchain
+version — this Dockerfile currently tracks `go 1.19` (go1.19.4, the ambient version on this box)
+deliberately, per DEPLOY-1's description, and is NOT gated on the crypto/toolchain work.
+
+**Runtime base: Alpine (`alpine:3.19.1`, also digest-pinned), not distroless.** Invariant 8
+(stdlib-first / third-party deps need justification) is read here to cover base-image choice, not
+just Go packages. `distroless/static` is smaller and shell-less, but DEPLOY-2 requires a working
+`docker-compose.yml` healthcheck against the existing `/healthz` route, and distroless/static has
+neither a shell nor an HTTP client to run one with — the alternative is shipping a second static
+binary purpose-built to answer "is the server up." Alpine's busybox already provides `wget` (for the
+healthcheck) and `adduser`/`addgroup` (for the non-root user), keeping both to a couple of `RUN`
+lines. That is simple-beats-clever, not a shortcut around it: the image is ~19MB, a few MB over what
+distroless/static would give, in exchange for meaningfully less machinery.
+
+**Non-root user is a fixed, explicit UID/GID (`10001:10001`)**, not `adduser`'s next-available
+default, so a data volume's on-disk ownership is stable and predictable across image rebuilds — an
+operator inspecting the named volume from the host sees the same owner every time, and the ownership
+is set on `/data` in the image *before* `VOLUME` is declared, which is what lets Docker seed a fresh
+named volume with the right permissions on first use.
+
+**The compose service is deliberately unreachable from outside its own container, by design, and
+this is a real design decision, not an oversight left for later.** `docker-compose.yml`'s `command:`
+repeats the binary's own loopback default (`-listen=127.0.0.1:8080`) explicitly rather than omitting
+the flag, and no `ports:` section is declared. This is a direct reading of CLAUDE.md invariant 11 and
+the explicit brief for this wave: *"The default listen address is 127.0.0.1:8080 (loopback), and the
+bus MUST NOT be exposed on a non-loopback interface until mutual TLS ships."* Because each container
+gets its own network namespace, a server that binds only its own loopback cannot be reached even by a
+published port (Docker's port-publish path connects to the container's external interface, which
+nothing here is listening on) — so the honest consequence, stated in the compose file itself, is that
+no other container and no host process can talk to this bus as shipped. That is the intended trade for
+this wave: DEPLOY-2's job is to prove the built image starts, reports healthy, and its data volume
+survives a container replace (all three verified by execution — see AGENT_LOG.md), not to make the bus
+reachable by other agents. Making it reachable is DEPLOY-3's job (a peered multi-bus profile), which
+CLAUDE.md explicitly sequences *after* mutual TLS. The compose file documents an explicit,
+loudly-commented opt-in override (`-listen=0.0.0.0:8080` plus a loopback-bound host-side `ports:`
+entry) for an operator who wants to accept that risk locally, but that is not the default and must
+never become the default before mTLS lands.
+
+**Verified by execution, not just inspection** (both binaries invoked directly — see the AGENT_LOG.md
+entry for why `docker` on PATH needed a workaround): `docker build` + `docker run -h` (proof-check
+verdict PASS); `docker compose up -d` reaching `(healthy)` via `docker compose ps`; `/healthz`
+answered from inside the container; the bus id surviving a real `docker compose down` (no `-v`)
+followed by `up -d`, proving the named volume — not just the container — carries the durable state
+across a replace, which is the whole point of invariants 4/5/6 reaching the deployment layer.

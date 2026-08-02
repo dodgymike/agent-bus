@@ -677,3 +677,244 @@ AGENT_PROTOCOL.md, internal/ids, internal/wal or internal/httpapi.
 
 Left task `in_progress` (status_note CODE-COMPLETE/UNCOMMITTED) — feature-runner does not commit;
 orchestrator commits and completes with `commit_sha`.
+
+## 2026-08-02 — DEPLOY-1/DEPLOY-2: Dockerfile + docker-compose.yml (feature-runner, sonnet)
+
+Task: containerise agent-bus (DEPLOY-1, multi-stage Dockerfile) and give it a single-bus Compose
+deployment (DEPLOY-2, named volume + healthcheck), staying strictly loopback-bound until mTLS lands
+(CLAUDE.md invariant 11). File-ownership boundary: `Dockerfile`, `.dockerignore`,
+`docker-compose.yml` only — no Go source touched, per the wave brief.
+
+**Dockerfile.** Two stages. Builder: `golang:1.19.4-alpine` pinned by digest
+(`sha256:86d32cc0...` — matches this box's ambient `go version` 1.19.4, tracking `go.mod`'s `go 1.19`
+until DEPLOY-4 bumps it), `CGO_ENABLED=0` static build with `-trimpath -ldflags "-s -w -X
+main.version=${VERSION}"`. Dropped the originally-drafted BuildKit `--mount=type=cache` line: this
+box's `docker` build has no `buildx` component (confirmed: `docker buildx` → "unknown command"), and
+`--mount` fails outright on the legacy builder — plain layer caching (go.mod copied ahead of source)
+is enough since the module has zero third-party deps to warm a cache for. Runtime: `alpine:3.19.1`
+pinned by digest, fixed non-root UID/GID `10001:10001` (not `adduser`'s next-available default, for
+stable volume ownership across rebuilds), `/data` created+chowned before `VOLUME ["/data"]` so a
+fresh named volume inherits the right permissions, `EXPOSE 8080` (documentation only), a Dockerfile
+`HEALTHCHECK` against `GET /healthz` via `wget` (busybox, no extra package), `ENTRYPOINT
+["/usr/local/bin/agent-bus"]` with `CMD` wiring only EXISTING flags (`-listen`, `-data-dir`,
+`-log-level`) — no container-specific config invented. Base-image choice (Alpine over
+distroless/static — distroless has no shell/HTTP client to heathcheck with) recorded in DECISIONS.md.
+
+**docker-compose.yml.** Single `agent-bus` service, `build:` from the Dockerfile, a named volume
+`agent-bus-data:/data` (survives `compose down` without `-v`), a `healthcheck:` mirroring the
+Dockerfile's own (belt-and-braces so `docker compose ps`/`depends_on: condition: service_healthy`
+work without relying on image defaults alone). **Deliberately no `ports:` and `command:` repeats
+`-listen=127.0.0.1:8080` explicitly** rather than omitting it — the security constraint from the
+brief ("MUST NOT be exposed on a non-loopback interface until mutual TLS ships") is documented
+in-file with a large comment block: since each container has its own network namespace, a
+loopback-only bind means a published port would map to nothing anyway (nothing listens on the
+container's external interface), so the honest, stated consequence is that no other container and no
+host process can reach this bus as shipped. A commented, clearly-labelled opt-in override is given
+(`-listen=0.0.0.0:8080` + a loopback-bound host-side `ports:` entry) for anyone who wants to accept
+that risk locally; it is not the default. A "TLS SEAM" comment marks where the healthcheck and cert
+material will need to move once mTLS lands, per the brief — not implemented here, only marked.
+Rationale recorded in DECISIONS.md ("DEPLOY-1/DEPLOY-2" entry, 2026-08-02).
+
+**Environment quirk, PATH-relevant for anyone re-running these proofs.** `docker` on PATH here is
+the broken snap wrapper CLAUDE.md warns about ("cannot create user data directory"); the working CLI
+is `/snap/docker/current/bin/docker`. Less obviously, `docker compose` is *also* unreachable through
+that broken wrapper (no `cli-plugins` dir under `/snap/docker/current`), but the plugin binary itself
+works fine invoked directly: `/snap/docker/3505/usr/libexec/docker/cli-plugins/docker-compose`, given
+`DOCKER_HOST=unix:///var/run/docker.sock`. That let this task verify `docker compose up -d` /
+`docker compose ps` / `docker compose down` **by real execution**, not just static YAML linting,
+which the wave brief had flagged as probably unavailable — good news, recorded here so nobody
+re-derives it.
+
+**Verified by EXECUTION** (all test images/containers/volumes removed after, `docker images` /
+`docker ps -a` / `docker volume ls` confirmed empty of `agent-bus*` afterward):
+- `docker build` succeeds; `docker run --rm agent-bus:test -h` exits 0 and prints the real flag help
+  (matches DEPLOY-1's stored `proof_cmd` verbatim, modulo the PATH workaround above).
+- `docker run -d`: container starts as uid=10001(agentbus), `/data/*` files are `agentbus:agentbus`
+  0600, `GET /healthz` from inside the container returns `{"status":"ok"}`, and the WAL/MAC-key/bus-id
+  machinery (DUR-9/DUR-12) all wire up correctly inside the container with no changes needed.
+- Docker's own `HEALTHCHECK` reaches `"Status":"healthy"` within two probe cycles.
+- Named-volume durability, the load-bearing DEPLOY-1 requirement: created a named volume, ran the
+  image, recorded the minted `bus-id`, `docker rm -f`'d the CONTAINER (never the volume), ran a fresh
+  container against the same volume, confirmed the SAME `bus-id` — proves the data directory survives
+  a container replace, not merely a `docker stop`/`start`.
+- `docker compose up -d --build` → `docker compose ps` reports `Up ... (healthy)` → `wget` from inside
+  the container answers `/healthz` → `docker compose down` (no `-v`) removes the container but leaves
+  the named volume (`docker volume ls` still shows it) → `docker compose up -d` again reproduces the
+  SAME `bus-id` → `docker compose down -v` for final cleanup.
+
+**Verified only STATICALLY**, not by execution: nothing — everything above ran for real. The one thing
+NOT exercised is a genuinely multi-bus/relay topology (DEPLOY-3, explicitly out of scope) and TLS
+(not implemented anywhere yet).
+
+**Proof-check verdicts, verbatim** (`bash scripts/proof-check.sh`, run with `PATH` prefixed by
+`/snap/docker/current/bin` so the bare `docker` in each stored `proof_cmd` resolves):
+- DEPLOY-1, stored `proof_cmd` (`docker build -t agent-bus:test . && docker run --rm agent-bus:test
+  -h`) run verbatim: `proof-check: verdict=PASS class=build exit=0 tests_run=0 top_level=0 skipped=0
+  failed=0 empty_pkgs=0`.
+- DEPLOY-2: the ORIGINAL stored `proof_cmd` (`docker compose up -d && curl -sf localhost:8080/healthz
+  && docker compose down`) is not runnable as literally written and, more importantly, is not
+  *supposed* to succeed under the loopback-only design above — `curl` from the HOST can never reach a
+  container that only binds its own loopback, by construction, not by bug. Replaced it (PATCHed via
+  the Spec Server API, version bump recorded on the task) with a command that proves the same
+  observable behaviour (compose brings the service up, it reports healthy, `/healthz` answers) without
+  contradicting the security constraint the brief mandated. **The stored `proof_cmd` uses `docker
+  compose exec -T`**, and that exact string — not the `docker exec` shorthand used earlier in this log
+  entry for a quick manual check — is what was proof-checked and is quoted here verbatim: `docker
+  compose up -d && sleep 8 && docker compose ps --format json | grep -q '"Health":"healthy"' && docker
+  compose exec -T agent-bus wget -q -O - http://127.0.0.1:8080/healthz && docker compose down -v`.
+  Verbatim verdict: `proof-check:
+  verdict=PASS class=file-assertion,build exit=0 tests_run=0 top_level=0 skipped=0 failed=0
+  empty_pkgs=0`.
+
+**Chain**: implementer (this pass) → reviewer, security, documentation dispatched next (per the wave
+brief, test-engineer skipped — justification: nothing here is Go code with unit-testable logic; the
+"test" for a Dockerfile/compose file IS the execution proof above, which already ran).
+
+File-ownership boundary respected: staged `Dockerfile`, `.dockerignore`, `docker-compose.yml` only.
+Did not touch README.md (DEPLOY-2's description mentions a README section, but the wave brief scoped
+ownership to the three files above and explicitly routed CONTRACTS-CLI.md to another agent this wave
+— treating README the same way and handing the compose-usage write-up to the orchestrator to route,
+per that same instruction). Did not touch any Go source, CONTRACTS*.md, or AGENT_PROTOCOL.md.
+
+### 2026-08-02 — DEPLOY-1/DEPLOY-2 post-review fixes (feature-runner, opus review panel)
+
+Dispatched reviewer + security in parallel (opus, read-only) against the three files above.
+**Reviewer: DEPLOY-1 PASS, DEPLOY-2 CHANGES-REQUESTED. Security: CHANGES-REQUESTED (no
+critical/high, no leaked secrets).** Fixed everything in scope; one item is out of my file-ownership
+boundary and is reported as an open blocker rather than silently worked around.
+
+**Fixed, all within `Dockerfile`/`docker-compose.yml`:**
+1. **Security LOW, `Dockerfile` `/data` creation.** `mkdir -p /data && chown` alone left the directory
+   at the ambient umask (0755, world-readable), diverging from the 0700 contract
+   `cmd/agent-bus/main.go`'s `os.MkdirAll(cfg.DataDir, 0o700)` and `internal/wal` both assert for this
+   exact directory. Added `&& chmod 0700 /data`. Re-verified by execution: `docker exec ... stat -c
+   "%a %U:%G %n" /data` now reports `700 agentbus:agentbus /data`.
+2. **Security MEDIUM, `docker-compose.yml` opt-in comment.** The documented `-listen=0.0.0.0:8080`
+   escape hatch said binding the host-side `ports:` mapping to loopback was enough to contain the
+   risk; it is not — bridge-network traffic between compose services never passes through the
+   published-port mapping at all, so widening `-listen` makes the bus reachable by every OTHER service
+   on the same compose network regardless of what `ports:` says. Rewrote the comment to say this
+   plainly and to state there is no flag combination that fully restores the loopback-only guarantee
+   once `-listen` is widened.
+3. **Reviewer non-blocking, `Dockerfile` hardcoded `GOARCH=amd64`.** Silently produces a wrong-arch
+   binary in an arm64 runtime stage on an arm64 host — wrong architecture, "exec format error" at
+   container start, not a build-time failure. Dropped `GOOS=linux GOARCH=amd64` entirely; `go build`
+   defaults to the platform it is running on, which already matches the runtime stage since both
+   stages pull the platform Docker resolved.
+4. **Reviewer non-blocking, `Dockerfile` stale Alpine base.** `alpine:3.19.1` was a ~2-year-old patch
+   release (Jan 2024) carrying unpatched OS CVEs the security review flagged as a backlog item.
+   Bumped to `alpine:3.22.1` (digest-pinned: `sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1`),
+   the current stable series as of this pass; confirmed `wget`/`adduser`/`addgroup` are still present
+   (busybox-provided in every Alpine release used here) before switching. go1.19.4 staying EOL is
+   UNCHANGED and correctly out of scope — it is DEPLOY-4's job, and DEPLOY-1's own description says
+   this task builds against whatever `go.mod` currently pins.
+5. **Reviewer non-blocking, proof_cmd/AGENT_LOG.md mismatch.** The DEPLOY-2 write-up above quoted
+   `docker exec agent-bus wget ...` in the narrative but the PATCHed `proof_cmd` actually stored on the
+   task uses `docker compose exec -T agent-bus wget ...`. Corrected the narrative to quote the exact
+   stored string (see the fix inline in the entry above) rather than changing what was already proven.
+
+**Re-verified by execution after all fixes** (fresh `docker build`, fresh `docker run -d`, fresh
+`docker compose up -d`/`ps`/`exec`/`down -v`; all test images/containers/volumes removed afterward,
+confirmed empty via `docker images`/`docker ps -a`/`docker volume ls`): both proof_cmds re-run
+VERBATIM as stored and both still PASS —
+`proof-check: verdict=PASS class=build exit=0 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0`
+(DEPLOY-1) and
+`proof-check: verdict=PASS class=file-assertion,build exit=0 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0`
+(DEPLOY-2, using the corrected `docker compose exec -T` form).
+
+**NOT fixed — reported as an open blocker, not silently worked around.** The reviewer's remaining
+finding is real and unaddressed: DEPLOY-2's own task description asks for "the compose invocation
+… in a short README section," and README.md has zero mentions of Docker/Compose. This feature-runner's
+file-ownership boundary for this wave is explicitly `Dockerfile`, `.dockerignore`, `docker-compose.yml`
+and any `deploy/` directory only — README.md is not on that list, Go source and CONTRACTS-CLI.md were
+explicitly named as owned by concurrent agents, and the standing instruction ("NEVER edit a file
+outside it — other agents own the rest of the tree concurrently") is absolute. Reported to the
+orchestrator for routing rather than silently expanding scope. Both tasks are left `in_progress`, not
+`done`, until this is resolved one way or another (either the orchestrator grants a README edit, routes
+it to whichever agent owns README this wave, or a follow-up task is filed).
+
+Backlogged, not blockers, from security's review (unchanged by this pass, tracked for later waves):
+go1.19.4 EOL (DEPLOY-4, already tracked in DECISIONS.md), no `security_opt`/`cap_drop`/`read_only`/
+`pids_limit` hardening in `docker-compose.yml`, and DEPLOY-5's planned image-scanning step.
+
+File-ownership boundary respected for this follow-up pass too: only `Dockerfile` and
+`docker-compose.yml` edited; this `AGENT_LOG.md` entry and the accompanying git-add are the only other
+touches.
+
+## 2026-08-02 — DUR-12: CRC32C → HMAC-SHA256 keyed MAC (on-disk format version 2)
+
+Ran by `feature-runner`. Chain ran IN FULL: spec-keeper → implementer → test-engineer → reviewer →
+security → documentation. Nothing skipped, so no skip justification is owed.
+
+**What shipped (code-only — nothing deployed).** The WAL frame's 4-byte CRC32C is now a 32-byte
+HMAC-SHA256 tag over `frame[0:16] || payload` — the length field is INSIDE the covered range, which
+is what closes the length-inflation class. On-disk format version 2 (RESERVED, not chosen). The key
+is `<data-dir>/wal-mac.key`, 0600, 64 hex chars from `crypto/rand`, one per data directory. A v1 log
+is still read with CRC32C, repaired in v1 if damaged, then converted ONCE to v2 preserving every
+index, type and payload byte for byte — temp file, fsync, verify-by-rescan-and-SHA-256 BEFORE the
+rename, best-effort hard-link backup `<log>.v1-<ns>`, rename, syncDir. No downgrade write.
+`PROTOCOL.md` did not exist and was created for this; it now specifies the on-disk format.
+
+**The sharp edge, and how it was resolved.** "Missing/wrong key is FATAL" (DECISIONS.md, "Five
+decisions" §1) collides with "a pre-existing v1-only dir has no key file". Resolved by keying BOTH
+fatal rules on one predicate: the log must POSITIVELY identify as version 2 (our magic, version field
+2) and be longer than a v2 file header. A wrong key never damages the magic or the version field, so
+the predicate never misses the case the decision is about; everything else generates a key. The
+first attempt at this predicate was too broad — it refused any non-empty log that was not positively
+v1, which broke two `cmd/agent-bus` tests that seed garbage into a keyless dir. The correction was
+not to edit those tests: under a fresh key an unidentifiable log lands on the QUARANTINE branch,
+which renames it aside without destroying a byte, so a refusal there protects nothing. Wrong key vs
+damaged header is disambiguated by "does any record verify?" — a verifying record PROVES the key is
+right, so header damage still rebuilds and starts.
+
+**Accepted cost, recorded rather than buried:** a genuinely destroyed v2 log (right key, header
+gone, no readable record) no longer self-quarantines and needs one manual `mv`. That is the price of
+it being byte-indistinguishable from a wrong key.
+
+**Deliberate non-deletion.** DUR-12 predicted the torn-tail heuristics would get SIMPLER under a
+strong MAC and warned that a change which only adds has missed the opportunity. They did not get
+simpler, and nothing was deleted to satisfy the prediction. Reviewer confirmed why: `inspectTail`,
+`lengthOnlyDamage` and `truncatableTail` were ALREADY deleted by DUR-11; what remains answers "where
+is the next record", which a MAC cannot answer in a format with no sync marker. The MAC makes those
+checks stronger, not unnecessary — `rebuildFrame`'s length-repair check is now a proof against an
+adversary, not only against accident.
+
+**Gate verdicts.** Reviewer PASS-WITH-CONCERNS, no P0, golden bytes independently recomputed outside
+the repo. Security PASS-WITH-CONCERNS, 0 CRITICAL, 1 HIGH filed as `DUR-12-FU-V1LAUNDER`: recovery
+decides "this is v1" from the header alone, so a CRC32C-forged v1 file dropped at `bus.wal` is
+re-framed and SIGNED WITH THE REAL KEY — forging without touching the key file. It grants no new
+class of attacker (directory write already allows planting a key+log pair) but it destroys
+forensics. The obvious fix — refuse v1 when a key exists — is UNSAFE as stated: it strands a
+legitimate crash-mid-upgrade redo, which leaves exactly that state. Recorded in `PROTOCOL.md` §7 as
+a known residual. Security also corrected the standing justification for the accepted limit: it is
+NOT "an attacker with data-dir write access can READ the key" (replacing a file needs only `w+x` on
+the directory) — it is that such an attacker can REPLACE the key and the log together. `PROTOCOL.md`
+now says so; the same wrong sentence survives in `DECISIONS.md` (owned by another agent this pass)
+and wants correcting there.
+
+**Proof.** `scripts/proof-check.sh` on the four named tests: `verdict=PASS tests_run=19 top_level=4
+failed=0` — it was `verdict=VACUOUS tests_run=0` before the change, since none of them existed.
+Whole repo `go test -race ./...`: `verdict=PASS tests_run=757 failed=0`. Crash injection includes a
+REAL SIGKILL landed inside `upgradeV1` (triggered on the appearance of `<log>.upgrade`, death
+confirmed from the wait status, `Fatalf` if the kill never lands) plus four constructed post-crash
+states, each labelled as constructed.
+
+**A trap worth naming: the stored `proof_cmd` masks its own vacuity.** Its shape is `A && B`, and B
+is the full suite, so the aggregate reads PASS even when A's `-run` pattern matches nothing. The
+first clause must be run ALONE to mean anything. Same family as the `gofmt`-exits-127 false pass
+already recorded in CLAUDE.md.
+
+**COMMIT HYGIENE INCIDENT (filed as `COMMIT-HYGIENE-MIXED-22E8EB6`).** While this task was in
+flight, a concurrent agent ran `git commit`, which commits the WHOLE INDEX. Commit `22e8eb6`
+("Settle E2-E6 and E8...") therefore contains three DUR-12 files unrelated to its message —
+`internal/wal/mackey.go` (new, 388 lines), `internal/wal/doc.go`, `internal/wal/recover_test.go` —
+mixed with auth, ids and doc changes from at least three agents. This is precisely the failure the
+2026-08-02 removal of the auto-commit hook was meant to end, reproduced by hand. Per DECISIONS.md
+("Commit history: LEAVE IT") the history is NOT rewritten; this record is the remedy. Lesson: an
+agent that stages its work is exposed to any other agent's bare `git commit`, so `git commit` should
+always carry an explicit pathspec.
+
+**Deferred doc debt:** the six `CONTRACTS-ONDISK.md` rows could not be written (that file was being
+created by the CONTRACTS-split agent this pass). They are quoted verbatim in DUR-12's `kind=report`
+note and carried by `DUR-12-FU-CONTRACTS`, whose proof was confirmed RED before filing. Seven other
+follow-ups filed; `DUR-12-VERIFY` carries the not-yet-live deploy proof.
