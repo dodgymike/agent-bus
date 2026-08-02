@@ -29,9 +29,13 @@ one needs an explicit decision recorded in `DECISIONS.md`.
 5. **Memory is the serving copy; disk is the truth.** State is held in memory for speed and rebuilt
    by replaying the durable store on start. A crash at any point must recover to a state that is a
    prefix of the accepted history — no torn records, no acknowledged-but-lost messages.
-6. **Every message is also written to an append-only log.** The log is the audit trail. It is
-   append-only in the strict sense: no in-place edits, no truncation except a verified-corrupt tail
-   during recovery.
+6. **Every message is also written to an append-only log — METADATA AND ROUTING INFO ONLY.** The log
+   is the audit trail: message id, sequence, sender, recipient(s), bus path traversed, timestamp,
+   size, and content hash. It does **not** record message bodies. That is a deliberate decision
+   (2026-08-02) taken so the audit trail stays compatible with end-to-end encrypted, forward-secret
+   payloads — a log holding plaintext would be unwritable the moment PFS lands, and a log holding
+   ciphertext it can never decrypt would be dead weight. The log is append-only in the strict sense:
+   no in-place edits, no truncation except a verified-corrupt tail during recovery.
 7. **Agents never hand-write HTTP.** Every capability ships with a `scripts/bus-*.sh` wrapper and an
    `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its wrapper is not done.
 8. **Simple beats clever.** Go stdlib first. A third-party dependency needs a justification in

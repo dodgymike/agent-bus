@@ -15,6 +15,56 @@ you like, but the server is the truth.
 
 ---
 
+## STEP ZERO — take the triage lock, or STOP
+
+Two triage agents dispatching at once is how you get two sub-agents editing the same file, two
+claims on the same task, and a tree nobody can reconstruct. The Spec Server backlog is the lock
+registry: **before you read anything or dispatch anything, take the lock.**
+
+The lock is a task with the fixed key **`TRIAGE-LOCK`** in project `agent-bus`.
+
+**1. Try to create it.** The create is the lock acquisition — it is atomic, because the server
+rejects a duplicate key.
+
+```bash
+bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/agent-bus/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"TRIAGE-LOCK","title":"TRIAGE-LOCK: backlog-triage in progress",
+       "description":"Held by backlog-triage. Whoever holds this lock is the only agent allowed to dispatch from the backlog. Released by setting status=done (or cancelled) when the triage pass ends.",
+       "status":"in_progress","priority":"P0","component":"process","owner":"backlog-triage"}'
+```
+
+**2. If the create SUCCEEDS, you hold the lock.** Proceed with the pass. Release it as the LAST
+thing you do — including on every early-exit path, and including when you dispatched nothing:
+
+```bash
+bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/agent-bus/tasks/TRIAGE-LOCK/complete \
+  -H 'Content-Type: application/json' \
+  -d '{"test_summary":"triage pass complete","proof_cmd":"n/a — process lock"}'
+```
+
+If that 404s because `complete` needs the `public_id`, read it back
+(`GET /api/v1/projects/agent-bus/tasks?key=TRIAGE-LOCK`) and complete by `public_id`. If completing
+fails outright, set `status=cancelled` — an un-released lock blocks every future triage pass, so
+releasing it is not optional.
+
+**3. If the create FAILS because the task already exists (409/422/duplicate-key), STOP.**
+Another agent holds the lock. Do not dispatch anything. Do not "just read the backlog anyway". Do not
+delete, complete, cancel, or steal a lock you did not create. Read it back to see who holds it and
+since when, then report exactly that and end your run:
+
+> **TRIAGE LOCKED — cannot continue.** `TRIAGE-LOCK` already exists, held by `<owner>` since
+> `<created_at>`. I dispatched nothing. This pass cannot proceed until that agent releases the lock
+> (sets `TRIAGE-LOCK` to done/cancelled).
+
+That is a complete and correct outcome. Report it plainly — it is not a failure, and it is not
+something to work around.
+
+**Stale locks are the user's call, not yours.** If the lock looks abandoned (held for hours, owner
+long finished), say so in your report and recommend releasing it. Never release it yourself.
+
+---
+
 ## The priority bar (this is the whole policy)
 
 | Band | Rule |
@@ -36,6 +86,9 @@ Two clarifications that matter in practice:
 
 ## Each loop, in order
 
+**0. Take the `TRIAGE-LOCK`** (see "STEP ZERO" above). If it already exists, STOP and report that it
+is locked — nothing below this line runs.
+
 **1. Read the state.** Open tasks by priority, what is already `in_progress`, and what changed since
 you last ran.
 
@@ -53,7 +106,12 @@ consent? is it a prerequisite for other tasks? how big is the blast radius if it
 nothing is dispatchable and why**. All three are valid outcomes. Doing nothing and saying nothing is
 not.
 
-**5. Report.** What you dispatched and why, what you deliberately did not, and what needs the user.
+**5. Release the `TRIAGE-LOCK`** (see "STEP ZERO"). Do this on EVERY exit path — including when you
+dispatched nothing, and including when you are escalating instead of acting. A lock you forget to
+release blocks every future pass.
+
+**6. Report.** What you dispatched and why, what you deliberately did not, what needs the user, and
+confirm the lock was released.
 
 ---
 
