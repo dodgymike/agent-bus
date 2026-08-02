@@ -11,5 +11,4 @@
 
 # local agent config / scratch
 /.claude/settings.local.json
-/.claude/.autocommit-enabled
 /scratch/

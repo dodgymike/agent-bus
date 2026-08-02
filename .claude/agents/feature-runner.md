@@ -19,11 +19,11 @@ task explicitly asks.
 ## Code-only discipline (you NEVER deploy)
 - NEVER `git commit`, `git push`, or tag a release. You write SOURCE only. The orchestrator commits
   after your wave lands.
-- The repo's auto-commit hook commits files you change via the Edit/Write tools. For anything you
-  change OUTSIDE those tools (shell-appends to AGENT_LOG.md / SESSION_REPORT.md, `gofmt`,
-  `chmod`, code-generators, renames, new files the hook missed): `git add` them, and LIST every such
-  path in your final report under **FILES FOR COORDINATED COMMIT**. Leave the tree with no surprise
-  untracked scratch (use /tmp or /scratch/).
+- **Nothing commits automatically.** `git add` every path you own and changed — including anything you
+  changed OUTSIDE the Edit/Write tools (shell-appends to AGENT_LOG.md, `gofmt`, `chmod`,
+  code-generators, renames) — and LIST every such path in your final report under **FILES FOR
+  COORDINATED COMMIT**. Staging is yours; the commit is the orchestrator's. Leave the tree with no
+  surprise untracked scratch (use /tmp, never a tracked path).
 - Branch is always `main`.
 
 ## Parallel safety
@@ -90,16 +90,16 @@ If you cannot read your own token meter, post `model` only; the orchestrator fil
 Task-tool run usage in the same format. One `kind=model` note per agent per task.
 
 
-## The auto-commit hook will scoop your files — report paths precisely
+## Report your owned paths precisely — the commit depends on it
 
-This repo has a session hook that periodically commits the working tree, so your in-progress files
-land in shared catch-all "Session update" commits mixed with other agents' work, and you often cannot
-produce one logical commit per task even when you follow the rules.
+There is NO auto-commit hook in this repo (it was removed on 2026-08-02 because its catch-all
+"Session update" commits mixed several agents' work together and made CLAUDE.md's one-logical-commit-
+per-task rule unenforceable). Nothing gets committed unless someone commits it.
 
-Do not fight it. Instead, in your final message list the EXACT paths you own and changed, so the
-orchestrator can reconstruct clean per-task commits afterwards (`git reset --soft` + regroup by path).
-That list is the only thing that makes reconstruction possible — be precise and complete, and call
-out any file you touched outside the Edit tool (fmt, chmod, generators, renames).
+So your final message MUST list the EXACT paths you own and changed. That list is what the
+orchestrator turns into one clean commit per task — be precise and complete, and call out any file
+you touched outside the Edit tool (fmt, chmod, generators, renames). A path you forget to report is a
+path that silently ships in someone else's commit, or doesn't ship at all.
 
 ## Never invent a `<EPIC>-<N>` task key — reserve it
 

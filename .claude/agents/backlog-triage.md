@@ -178,8 +178,9 @@ Fold these into how you dispatch and how you read reports.
   tested against) a recovery path for logs written by the previous format — never the other way round.
 - **Durability claims need a kill test.** "The 2PC code is written" is not evidence. `kill -9`
   mid-write plus a clean restart is.
-- **The auto-commit hook batches work across agents.** Tell sub-agents to report their exact owned
-  paths so per-task commits can be reconstructed.
+- **Nothing commits automatically.** There is no auto-commit hook (removed 2026-08-02). Tell every
+  sub-agent to `git add` its owned paths and report them exactly, so the orchestrator can make one
+  clean commit per task. Unreported work does not ship.
 
 ---
 
