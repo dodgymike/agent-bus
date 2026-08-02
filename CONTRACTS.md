@@ -159,3 +159,43 @@ bytes replaced with `?`, so ANSI escapes cannot repaint it to hide what will run
 bare command — a proof that only runs inside our harness is a worse artifact than one anyone can
 paste into a shell. Nothing in the tool can enforce this; its value is an auditable verdict line.
 Full rationale and tradeoffs are in the comment block at the top of the script.
+
+## On-disk files in the data directory (added 2026-08-02)
+
+`<data-dir>/bus.lock` (mode `0o600`, inside the `0o700` `-data-dir`) — an exclusive advisory lock
+(`syscall.Flock(LOCK_EX|LOCK_NB)`, `internal/dirlock`) taken by `cmd/agent-bus`'s `run()` immediately
+after `os.MkdirAll(cfg.DataDir, 0o700)` and BEFORE `ids.LoadOrCreateBusID` or anything else reads or
+writes the data dir — so a WAL replay always happens inside the lock. Held for the process's
+lifetime, released on clean shutdown (`Lock.Release`, deferred) and by the KERNEL on any death
+(SIGKILL, panic, OOM kill) — the flock lives on the open file description, not on the path. Named
+`bus.lock`, deliberately **not** `*.log`: `wal.log` is the WAL and `.gitignore` ignores `*.log`, so a
+`.log`-suffixed lock file would be one typo/glob away from being mistaken for log data. It is NOT
+durable state and NOT a record store — replay never reads it. Its only contents are a single
+`<pid>\n` line, written (and fsynced) only AFTER the lock is held, so a refusal can name a probable
+holder.
+
+**Operator-facing failure mode:** a second `agent-bus` on the same `-data-dir` fails FAST — never
+blocks, never proceeds — with exit code `1` and:
+```
+agent-bus: locking the data directory: dirlock: data directory "<dir>" is locked by another agent-bus process (pid N, best-effort: read from <dir>/bus.lock after the lock failed, so it may be stale); refusing to start — two servers on one data directory destroy the write-ahead log
+```
+`pid N` is best-effort/advisory only — read from the lock file *after* our own flock failed, so the
+named process may already be gone. Treat it as a hint for `ps`, never as proof of a live holder.
+
+**Stale locks: there are none.** A crash leaves the lock FILE but no LOCK (the kernel drops the
+flock when the process dies), so the next start acquires it normally and simply overwrites the pid
+line. `Release`/the package deliberately NEVER unlinks `bus.lock` — unlinking would let a starter
+lock a fresh inode at the same path while another process still holds the old one, i.e. two
+holders on one data directory, the exact failure this file exists to prevent. Operators must never
+manually delete `bus.lock`, and never need to when no server is running against that directory.
+
+**Limits:** advisory only — it excludes other processes that `flock` the same file (in practice,
+other `agent-bus` servers), not `rm`, `cp`, an editor, or a backup job. Unreliable on NFS before
+Linux 2.6.12 and on some network filesystems; a data dir on such a mount gets NO protection from
+this lock.
+
+`.gitignore` already ignores the default `./data/` dir wholesale, so `bus.lock` there is never
+committed; a data dir at a non-default, non-ignored path is the operator's own responsibility.
+
+No new route, CLI flag, env var, or header was introduced by this change — see the sections above,
+which remain the complete index.
