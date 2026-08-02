@@ -88,9 +88,16 @@ bash scripts/spec-cloud.sh -s -X PATCH /api/v1/projects/agent-bus/tasks/<public_
 Do NOT use the `/complete` endpoint on the lock — it is a mutex, not a unit of work, and completion
 metadata (`commit_sha`, `proof_cmd`) is meaningless for it. Do NOT delete the task.
 
-**Stale locks are the user's call, not yours.** If the lock looks abandoned (held for hours, holder
-long finished), say so in your report and recommend releasing it. Never break it yourself — "it looks
-abandoned" is exactly the judgement that turns a mutex back into a race.
+**Judge staleness by the SERVER's `updated_at`, never by the holder's own `status_note`.** The
+`acquired=` timestamp inside the note is a string the holder typed; it is not verified and it can be
+wrong. Observed 2026-08-02: a holder wrote `acquired=2026-08-02T20:15:00Z` on a record the server
+stamped `updated_at=2026-08-02T20:01:21Z` — a self-report **14 minutes in the future**. An agent
+trusting that field could conclude a fresh lock was stale, or vice versa. `updated_at` is set by the
+server on every write and is the only trustworthy clock here.
+
+**Stale locks are the user's call, not yours.** If the lock looks abandoned (`updated_at` hours old,
+holder long finished), say so in your report and recommend releasing it. Never break it yourself —
+"it looks abandoned" is exactly the judgement that turns a mutex back into a race.
 
 ---
 
