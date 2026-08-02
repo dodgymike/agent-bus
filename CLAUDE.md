@@ -107,6 +107,24 @@ one needs an explicit decision recorded in `DECISIONS.md`.
     duplicates are not an edge case but the normal steady state, and loop-prevention via the traversed
     bus path is a *complement* to idempotency, never a substitute for it.
 
+11. **TLS is the required transport. There is no plaintext listener.** Decided 2026-08-02. Every
+    HTTP surface — client and bus-to-bus relay — is served over TLS, and the server refuses to
+    start rather than fall back to plaintext. This is not defence in depth layered on something
+    already safe: without it the session token, which is a **bearer credential**, crosses the wire
+    in clear, and an on-path observer can read it or kill a pending challenge. The loopback default
+    (invariant: `-listen 127.0.0.1:8080`) stays — it bounds exposure, it does not replace TLS, and a
+    bus deliberately exposed on a real interface needs both.
+
+    Consequences that must be designed, not assumed:
+    - **Certificate provisioning is the hard part for a local tool**, and it is what decides whether
+      this is usable. A bus that demands a CA-issued certificate to run on a laptop will simply be
+      run with verification disabled, which is worse than no TLS because it looks secure.
+    - **The CLI must make the trusted path the easy path.** Whatever the scheme, `bus enrol` against
+      a fresh bus has to work without the user hand-editing a trust store.
+    - Never disable certificate verification to make something work, and never ship a flag that
+      does it silently. Per invariant 9 the TLS stack is stdlib `crypto/tls` — configured, never
+      reimplemented, and never with `InsecureSkipVerify` on a path a user can reach by accident.
+
 ## Repository layout
 
 ```

@@ -869,3 +869,47 @@ from refuse to "evict the globally-oldest PENDING session". That reintroduces cr
 destruction — far less severe (16384 begins inside a victim's round trip, versus 9 per round) but the
 same class — and it will fail the `session_test.go` subtest asserting `ErrCapacity`. That failure is a
 constraint to honour, not a test to update; a rider to this effect is recorded on the task.
+
+---
+
+## 2026-08-02 — TLS is the required transport (new invariant 11)
+
+**Context.** The server had no TLS at all. A review pass flagged it while noting that, with the
+per-agent session bound removed, the opacity of the session token had become load-bearing — and an
+on-path observer could both read that token and kill a pending challenge by racing the single-attempt
+rule.
+
+**Decision (user).** *"add tls as the required transport"*. TLS on every HTTP surface — client and
+bus-to-bus relay. **No plaintext listener exists**; the server refuses to start rather than degrade.
+
+**Why this is not merely hardening.** The session token is a **bearer credential**: possession is
+sufficient to act as the agent for up to an hour. The whole auth design — the client signing a
+server-provided challenge, opaque revocable handles — establishes *who* holds the credential, and all
+of it is undone if the credential itself crosses the wire in clear. TLS is what makes the rest of the
+auth work worth anything.
+
+The loopback default is unaffected and stays. It bounds exposure; it does not substitute for TLS, and
+a bus deliberately exposed on a real interface needs both.
+
+**Consequences, and the open questions this raises.**
+
+- **Certificate provisioning decides whether this is usable at all.** This is a local developer tool.
+  If running a bus requires obtaining a CA-issued certificate, people will run it with verification
+  disabled — which is *worse* than no TLS, because it looks secure and is not. The design must make
+  the trusted path the easy path.
+- **A self-signed certificate plus fingerprint pinning fits what already exists.** Enrolment is
+  already a trust-establishing moment, and the design already uses TOFU pinning for messaging keys.
+  Binding the bus's certificate fingerprint at enrolment reuses that machinery rather than inventing
+  a second trust model. NOT YET DECIDED — see the open questions.
+- **Never disable certificate verification to make something work.** No `InsecureSkipVerify` on any
+  path a user can reach by accident, and no flag that silently does it. Per invariant 9, stdlib
+  `crypto/tls`, configured and never reimplemented.
+- Relay is bus-to-bus and the peers authenticate bi-directionally; mutual TLS is the obvious fit but
+  is not yet decided.
+- This changes the CLI's job: it must handle trust establishment, not just HTTP.
+
+**Open — needs a decision before implementation:**
+1. How certificates are provisioned: self-signed generated on first start with fingerprint pinning at
+   enrolment, operator-supplied cert/key paths, or both.
+2. Whether plaintext is permitted *anywhere*, including tests and local development, or truly never.
+3. Whether relay peers use mutual TLS in addition to the session-token scheme.
