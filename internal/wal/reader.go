@@ -85,7 +85,13 @@ func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64
 		// frame resurrected underneath us, leaves every individual checksum
 		// happy and only shows up as a hole in the index sequence.
 		if rec.Index != wantIndex {
-			return off, corruptf(path, off, "record index %d out of sequence, want %d", rec.Index, wantIndex)
+			e := corruptf(path, off, "record index %d out of sequence, want %d", rec.Index, wantIndex)
+			// The frame itself checksummed, so recovery must not mistake this
+			// for a torn tail even when it IS the last frame. See
+			// CorruptError.FrameIntact.
+			e.FrameIntact = true
+			e.FrameEnd = off + rec.frameSize()
+			return off, e
 		}
 		if err := fn(rec); err != nil {
 			return off, err
@@ -119,16 +125,28 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 	reserved := binary.BigEndian.Uint16(hdr[14:16])
 	stored := binary.BigEndian.Uint32(hdr[16:20])
 
+	// From here on the header has been read in full, so the frame DECLARES an
+	// extent. Every error below carries it (see CorruptError.FrameEnd) --
+	// including the absurd-length and non-zero-reserved cases, where the
+	// declared length is not to be trusted but is still what the bytes say and
+	// is the only evidence there is about where this frame was meant to end.
+	frameEnd := off + int64(FrameHeaderSize) + int64(payloadLen)
+	damaged := func(format string, args ...interface{}) *CorruptError {
+		e := corruptf(path, off, format, args...)
+		e.FrameEnd = frameEnd
+		return e
+	}
+
 	// Both structural checks happen BEFORE the payload is allocated. The
 	// checksum cannot help here: verifying it needs the payload, and reading
 	// the payload needs a length we are not yet entitled to trust. So the
 	// length is first bounded, then -- because the checksum covers the header
 	// -- proven.
 	if reserved != 0 {
-		return Record{}, corruptf(path, off, "reserved field is %#04x, want 0", reserved)
+		return Record{}, damaged("reserved field is %#04x, want 0", reserved)
 	}
 	if payloadLen > MaxPayloadSize {
-		return Record{}, corruptf(path, off, "payload length %d exceeds the %d-byte maximum (frame rejected without allocating)",
+		return Record{}, damaged("payload length %d exceeds the %d-byte maximum (frame rejected without allocating)",
 			payloadLen, MaxPayloadSize)
 	}
 
@@ -136,14 +154,15 @@ func readFrame(r io.Reader, path string, off int64) (Record, error) {
 	if n, err := io.ReadFull(r, payload); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return Record{}, &CorruptError{Path: path, Offset: off,
-				Reason: fmt.Sprintf("truncated payload: have %d of %d bytes", n, payloadLen),
-				Err:    io.ErrUnexpectedEOF}
+				Reason:   fmt.Sprintf("truncated payload: have %d of %d bytes", n, payloadLen),
+				Err:      io.ErrUnexpectedEOF,
+				FrameEnd: frameEnd}
 		}
 		return Record{}, fmt.Errorf("wal: read %s payload at offset %d: %w", path, off+FrameHeaderSize, err)
 	}
 
 	if sum := frameChecksum(hdr[0:16], payload); sum != stored {
-		return Record{}, corruptf(path, off, "checksum mismatch: computed %#08x, stored %#08x", sum, stored)
+		return Record{}, damaged("checksum mismatch: computed %#08x, stored %#08x", sum, stored)
 	}
 
 	// The type is deliberately NOT rejected when unknown: the checksum has

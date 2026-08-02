@@ -178,6 +178,28 @@ type CorruptError struct {
 	// Err is the underlying cause, when there is one (io.ErrUnexpectedEOF for
 	// a short read, for instance). It is exposed through Unwrap.
 	Err error
+
+	// FrameEnd is the byte offset just past the frame that failed --
+	// Offset+FrameHeaderSize+payloadLen -- for the cases where the 20-byte
+	// frame header was fully readable and therefore DECLARED a length. It is 0
+	// when the header itself could not be read, and for a bad file header.
+	//
+	// It exists so that recovery can answer one question, and only that
+	// question: is there anything in the file AFTER the damage? A declared
+	// extent that reaches or passes the end of the file proves nothing follows;
+	// an extent that ends strictly before the end of the file proves something
+	// does, which means the damage is not a torn tail and must never be
+	// truncated away. The length is used even when it is absurd or when the
+	// frame is otherwise malformed, because it is still what the bytes on disk
+	// say and the point is to locate the damage, not to trust it.
+	FrameEnd int64
+
+	// FrameIntact reports a frame whose CHECKSUM VERIFIED but which is in the
+	// wrong place -- an index out of sequence. It is the one signature a torn
+	// write cannot produce: a partially written frame does not checksum. So it
+	// means a record was lost from, or resurrected in, the middle of the file,
+	// and recovery must treat it as fatal no matter where in the file it sits.
+	FrameIntact bool
 }
 
 func (e *CorruptError) Error() string {
