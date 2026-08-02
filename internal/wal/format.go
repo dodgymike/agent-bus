@@ -221,6 +221,25 @@ func corruptf(path string, off int64, format string, args ...interface{}) *Corru
 	return &CorruptError{Path: path, Offset: off, Reason: fmt.Sprintf(format, args...)}
 }
 
+// frameCorruptf reports damage found in a record whose FRAME WAS ALREADY
+// VERIFIED -- a payload that will not decode, a reference that names no open
+// prepare, a record type with no meaning here. The bytes arrived exactly as
+// some writer wrote them; what is wrong is what they SAY.
+//
+// It exists so that this class of damage is never mistaken for a torn tail.
+// The distinction is not cosmetic: a torn tail may be truncated away during
+// recovery, and truncating at a semantic error would throw away committed
+// records that are sitting there perfectly intact. FrameIntact says "the
+// checksum verified, so a partial write cannot explain this" and FrameEnd says
+// where the frame ended, which together let recovery see that the file
+// continues past the damage.
+func frameCorruptf(path string, rec Record, format string, args ...interface{}) *CorruptError {
+	e := corruptf(path, rec.Offset, format, args...)
+	e.FrameIntact = true
+	e.FrameEnd = rec.Offset + rec.frameSize()
+	return e
+}
+
 // Record is one framed record as it exists on disk.
 type Record struct {
 	// Index is the record's position in the file's monotonic sequence. The

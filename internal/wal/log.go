@@ -43,6 +43,9 @@ type Log struct {
 	logger  *logging.Logger
 	now     func() time.Time
 
+	// recovered is what the replay at Open found. It is immutable after Open.
+	recovered Recovered
+
 	// mu serialises TRANSACTIONS, not just appends. Begin acquires it and
 	// Commit or Abort releases it, so at most one transaction is in flight and
 	// the WAL can never interleave two prepares -- which is what lets a
@@ -112,10 +115,18 @@ type Committed struct {
 
 // Applier applies a committed entry to the in-memory serving copy.
 //
-// Apply is called with the Log's transaction lock held and ONLY after the
-// entry's COMMIT record has been fsynced. It must therefore be quick and it
-// must not call back into the Log. Returning an error is a hard failure: see
-// ErrDiverged.
+// Apply is called in exactly two situations, and it cannot tell them apart --
+// which is the point, because memory must end up the same either way:
+//
+//   - during a live write, with the Log's transaction lock held and ONLY after
+//     the entry's COMMIT record has been fsynced;
+//   - during recovery at Open, once per committed entry in the durable log, in
+//     commit order, before Open returns.
+//
+// It must therefore be quick and it must not call back into the Log. Returning
+// an error is a hard failure: from a live write it poisons the Log (see
+// ErrDiverged), and from recovery it makes Open fail, because a memory state
+// that cannot be rebuilt from disk must not be served.
 type Applier interface {
 	Apply(Committed) error
 }
@@ -125,9 +136,11 @@ type LogOptions struct {
 	// Dir is the data directory; the WAL is Dir/bus.wal. It is created 0700 if
 	// it does not exist.
 	Dir string
-	// Applier receives every committed entry. It may be nil, in which case
-	// changes are recorded durably and applied nowhere -- useful for tests and
-	// for a server that only wants the durable record.
+	// Applier receives every committed entry: first every entry already in the
+	// durable log, replayed in commit order at Open, then every entry written
+	// afterwards. It may be nil, in which case changes are recorded durably and
+	// applied nowhere -- useful for tests and for a server that only wants the
+	// durable record.
 	Applier Applier
 	// Logger receives divergence and lifecycle events. It may be nil.
 	Logger *logging.Logger
@@ -175,7 +188,19 @@ var (
 	ErrInvalidKind = errors.New("wal: entry kind is empty")
 )
 
-// Open opens (or creates) the write-ahead log in opts.Dir.
+// Open opens (or creates) the write-ahead log in opts.Dir, REPLAYING it first:
+// every entry that reached commit is handed to opts.Applier, in commit order,
+// before Open returns, so a Log is never serving from a memory state that disk
+// does not justify. Prepares that never committed are discarded and their
+// indices are never reissued. See Replay, and Log.Recovered for what the
+// replay found.
+//
+// IF OPEN RETURNS AN ERROR, THE APPLIER MAY HAVE BEEN PARTIALLY REBUILT: replay
+// applies entries as it walks the file, so a failure part-way leaves the caller
+// holding a fragment of the durable state. That fragment is not a prefix of
+// anything and must be thrown away -- discard the Applier along with the failed
+// Log, and never retry Open onto the same one, or the surviving entries will be
+// applied twice.
 func Open(opts LogOptions) (*Log, error) {
 	if opts.Dir == "" {
 		return nil, errors.New("wal: open log: Dir is empty")
@@ -190,26 +215,93 @@ func Open(opts LogOptions) (*Log, error) {
 	path := filepath.Join(opts.Dir, WALFileName)
 
 	// ---------------------------------------------------------------------
-	// DUR-3 REPLAY SEAM. Recovery hooks in HERE, before the writer starts
-	// appending: scan the existing file, pair every COMMIT with the PREPARE it
-	// names, discard prepares that never committed and those explicitly
-	// aborted, and hand each surviving Entry to opts.Applier in index order so
-	// that memory is rebuilt from disk (invariant 5). DecodePrepare,
-	// DecodeCommit and DecodeAbort below are the decoders it will use.
+	// RECOVERY (invariant 5: disk is the truth, memory is the serving copy).
+	// Replay runs BEFORE the writer is opened and before anything can be
+	// appended: it walks the existing file, pairs every COMMIT with the PREPARE
+	// it names, discards prepares that never committed and those explicitly
+	// aborted, and hands each surviving entry to opts.Applier in commit order,
+	// so the Apply sequence after a restart is the one the previous process
+	// made. Nothing else in this package makes an entry visible, so an
+	// uncommitted prepare cannot survive a restart.
 	//
-	// Until DUR-3 lands, Open relies on OpenWriter's strict scan, which
-	// establishes the next index and the append offset but applies NOTHING: a
-	// Log opened on a non-empty WAL starts with an empty in-memory state.
+	// A replay failure is a REFUSAL TO START, deliberately. Either the log
+	// cannot be interpreted, or the Applier rejected an entry the log says was
+	// accepted; in both cases memory cannot be rebuilt from disk, and serving
+	// anyway would mean serving a state that is not a prefix of accepted
+	// history.
 	//
 	// Corrupt-tail policy (truncate a verified-corrupt tail, or refuse to
-	// start) is DUR-4 and must run BEFORE this replay, since a strict scan
-	// currently fails outright on a torn tail.
+	// start) is DUR-4 and must run BEFORE this replay: a strict scan fails
+	// outright on a torn tail, and Replay reports EndOffset so that the
+	// truncation point is known.
 	// ---------------------------------------------------------------------
+	var apply func(Committed) error
+	if opts.Applier != nil {
+		apply = opts.Applier.Apply
+	}
+	rec, err := Replay(path, apply)
+	if err != nil {
+		return nil, err // Replay already names the path and the offset
+	}
+
 	w, err := OpenWriter(path, KindWAL)
 	if err != nil {
 		return nil, err // OpenWriter already names the path
 	}
-	return &Log{w: w, applier: opts.Applier, logger: opts.Logger, now: now}, nil
+	// Replay and OpenWriter read the same file in two passes, so they must agree
+	// about where it ends. If they do not, the file changed between the passes
+	// and the writer is about to append at an offset computed from a file that
+	// no longer exists as it was read -- so this is fatal rather than a warning.
+	// (EndOffset 0 means the file did not exist at replay time and OpenWriter
+	// created it, which is not a disagreement.)
+	//
+	// THIS IS NOT A LOCK, and must not be mistaken for one. It only catches a
+	// change inside the window between the two passes; two servers started on
+	// the same data directory can both replay the same bytes, both agree, and
+	// then both append at the same offsets, which destroys the log. Excluding a
+	// second process needs a real lock on the data directory (an flock held for
+	// the Log's lifetime) and is a follow-up, not something this check does.
+	if w.NextIndex() != rec.NextIndex || (rec.EndOffset != 0 && w.Size() != rec.EndOffset) {
+		wErr := w.Close()
+		return nil, fmt.Errorf("wal: open log %s: the file changed between replay and open: replay ended at index %d offset %d, the writer sees index %d offset %d; another process may be writing to this data directory (close: %v)",
+			path, rec.NextIndex, rec.EndOffset, w.NextIndex(), w.Size(), wErr)
+	}
+
+	if rec.Records > 0 {
+		opts.Logger.Info("wal replayed",
+			"path", path, "records", rec.Records, "applied", rec.Applied,
+			"aborted", rec.Aborted, "dangling", len(rec.Dangling), "next_index", rec.NextIndex)
+	}
+	// Worth an operator's attention: a dangling prepare is what a crash between
+	// the prepare fsync and the commit fsync looks like, and the client that was
+	// waiting on that write never got an answer. Only the first few are named --
+	// the count above is the complete figure, and a damaged file must not be
+	// able to turn one restart into thousands of log lines.
+	for i, prepareIndex := range rec.Dangling {
+		if i == maxDanglingLogged {
+			opts.Logger.Warn("wal replay discarded further uncommitted prepares",
+				"path", path, "not_logged", len(rec.Dangling)-maxDanglingLogged)
+			break
+		}
+		opts.Logger.Warn("wal replay discarded an uncommitted prepare",
+			"path", path, "prepare_index", prepareIndex)
+	}
+
+	return &Log{w: w, applier: opts.Applier, logger: opts.Logger, now: now, recovered: rec}, nil
+}
+
+// maxDanglingLogged bounds how many discarded prepares Open names individually.
+const maxDanglingLogged = 8
+
+// Recovered reports what the replay at Open found. It is set once, before Open
+// returns, and never changes: the Dangling slice is copied out, so a caller
+// cannot reach back through it and edit the Log's record of its own recovery.
+func (l *Log) Recovered() Recovered {
+	r := l.recovered
+	if r.Dangling != nil {
+		r.Dangling = append([]uint64(nil), r.Dangling...)
+	}
+	return r
 }
 
 // Path returns the WAL file the Log appends to.
@@ -498,14 +590,15 @@ func DecodePrepare(path string, rec Record) (Entry, time.Time, error) {
 		return Entry{}, time.Time{}, err
 	}
 	if p.Kind == "" {
-		return Entry{}, time.Time{}, corruptf(path, rec.Offset,
+		return Entry{}, time.Time{}, frameCorruptf(path, rec,
 			"record %d: prepare payload has an empty kind", rec.Index)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, p.TS)
 	if err != nil {
-		return Entry{}, time.Time{}, &CorruptError{Path: path, Offset: rec.Offset,
-			Reason: fmt.Sprintf("record %d: prepare payload timestamp %q is not RFC3339Nano", rec.Index, p.TS),
-			Err:    err}
+		e := frameCorruptf(path, rec, "record %d: prepare payload timestamp %q is not RFC3339Nano",
+			rec.Index, elide(p.TS))
+		e.Err = err
+		return Entry{}, time.Time{}, e
 	}
 	body := p.Body
 	if len(body) == 0 || string(body) == "null" {
@@ -546,11 +639,11 @@ func DecodeAbort(path string, rec Record) (uint64, string, error) {
 // produce.
 func checkPrepareRef(path string, rec Record, prepareIndex uint64) error {
 	if prepareIndex == 0 {
-		return corruptf(path, rec.Offset,
+		return frameCorruptf(path, rec,
 			"record %d: %s payload has prepare_index 0, but indices start at 1", rec.Index, rec.Type)
 	}
 	if prepareIndex >= rec.Index {
-		return corruptf(path, rec.Offset,
+		return frameCorruptf(path, rec,
 			"record %d: %s payload references prepare index %d, which is not earlier in the file",
 			rec.Index, rec.Type, prepareIndex)
 	}
@@ -560,18 +653,36 @@ func checkPrepareRef(path string, rec Record, prepareIndex uint64) error {
 // decodePayload strictly decodes a record payload of an expected type into v.
 func decodePayload(path string, rec Record, want Type, v interface{}) error {
 	if rec.Type != want {
-		return corruptf(path, rec.Offset, "record %d is a %s record, want %s", rec.Index, rec.Type, want)
+		return frameCorruptf(path, rec, "record %d is a %s record, want %s", rec.Index, rec.Type, want)
 	}
 	dec := json.NewDecoder(bytes.NewReader(rec.Payload))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return &CorruptError{Path: path, Offset: rec.Offset,
-			Reason: fmt.Sprintf("record %d: %s payload does not decode", rec.Index, want),
-			Err:    err}
+		// The decoder's message can quote a field NAME straight out of the
+		// payload, so it is elided like every other file-derived string: a
+		// corrupt log must not be able to write megabytes into the server's
+		// logs. The payload itself is never included.
+		e := frameCorruptf(path, rec, "record %d: %s payload does not decode: %s",
+			rec.Index, want, elide(err.Error()))
+		e.Err = err
+		return e
 	}
 	if dec.More() {
-		return corruptf(path, rec.Offset, "record %d: %s payload has trailing data after the JSON object",
+		return frameCorruptf(path, rec, "record %d: %s payload has trailing data after the JSON object",
 			rec.Index, want)
 	}
 	return nil
+}
+
+// elide bounds a string that came off disk before it is formatted into an error
+// or a log line. A record's payload is attacker-influenced (message bodies are
+// client-supplied) and may be up to MaxPayloadSize, and an error message is not
+// a place to paste a megabyte of it. Nothing here is a security boundary on its
+// own -- %q already neutralises control characters -- it is a size bound.
+func elide(s string) string {
+	const max = 64
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[elided]"
 }

@@ -27,5 +27,34 @@
 // Writer is the append-only writer: its Append does not return until the bytes
 // are fsynced (invariant 4). ScanAll is the strict reader: any malformed frame
 // is an error, because deciding that a corrupt TAIL may be truncated is
-// recovery policy and does not belong in the framing layer.
+// recovery policy and does not belong in the framing layer. Replay is the
+// recovery layer built on top of ScanAll: it turns a raw frame stream into
+// accepted history.
+//
+// # Recovery
+//
+// On start the log is replayed from the beginning (see Replay), and Open runs
+// that replay before it opens the writer, so nothing can be appended ahead of
+// recovery. A COMMIT record makes its entry visible; a COMMIT is paired to the
+// PREPARE it names BY INDEX, never by adjacency, since nothing in the format
+// requires them to be neighbours. A prepare with no commit is discarded -- the
+// ordinary crash artefact, since Append fsyncs whole frames, so the usual
+// artefact is a complete, uncommitted prepare rather than a torn record -- and
+// so is a prepare followed by an ABORT; either way an uncommitted prepare is
+// never visible after a restart.
+//
+// Entries are replayed in COMMIT order, not prepare order, which is the order
+// they were applied to memory before the crash, so the post-restart Apply
+// sequence is identical to the pre-crash one. The high-water index reported by
+// replay is above every index ever written, including one burned by a
+// discarded prepare, so an index is never reissued -- a reused index would let
+// two different messages share an id.
+//
+// Replay is strict: a record it cannot interpret stops recovery and refuses
+// the start, rather than silently skipping it and serving a state that might
+// be missing an acknowledged write. The corrupt-tail policy -- verifying and
+// truncating a torn tail -- is NOT implemented here; it is a separate
+// recovery-policy task (DUR-4) that must run BEFORE replay. Today a torn tail
+// makes Open fail, and Replay reports the offset where the good prefix ends so
+// a future truncation knows where to cut.
 package wal
