@@ -17,11 +17,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"syscall"
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/httpapi"
+	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
 
@@ -62,8 +62,10 @@ type Config struct {
 	// Invariant 1: the SERVER is authoritative on every id. An operator- or
 	// client-supplied bus id is input to be validated, never an identity to be
 	// trusted. This field exists solely so tests get a deterministic bus id;
-	// it is not a supported production knob, and when the ID epic lands the
-	// real id comes from internal/ids, not from here.
+	// it is not a supported production knob. The real id is minted and
+	// persisted by internal/ids (ids.LoadOrCreateBusID); this override only
+	// seeds that on a first start with an empty -data-dir, or must match what
+	// is already persisted there.
 	BusID string
 }
 
@@ -132,38 +134,15 @@ func (c Config) validate() error {
 	if c.PollTimeout <= 0 {
 		return fmt.Errorf("-poll-timeout must be positive, got %s", c.PollTimeout)
 	}
-	// Invariant 1: a supplied bus id is input to be VALIDATED. The same rule is
-	// applied to the placeholder default so there is exactly one definition of a
-	// legal bus id.
-	if err := validateBusID(c.resolveBusID()); err != nil {
-		if c.BusID != "" {
+	// Invariant 1: a supplied bus id is input to be VALIDATED, fail fast at
+	// flag-parse time rather than deep inside run(). ids.ValidateBusID is the
+	// ONE definition of a legal bus id, shared with ids.LoadOrCreateBusID.
+	// The real (non-override) bus id comes from the data dir, so there is no
+	// placeholder left to validate here when -bus-id is unset.
+	if c.BusID != "" {
+		if err := ids.ValidateBusID(c.BusID); err != nil {
 			return fmt.Errorf("invalid -bus-id: %w", err)
 		}
-		return fmt.Errorf("invalid default bus id: %w", err)
-	}
-	return nil
-}
-
-// resolveBusID returns the bus id the server will run with: the -bus-id
-// override when set, otherwise the placeholder default.
-func (c Config) resolveBusID() string {
-	if c.BusID != "" {
-		return c.BusID
-	}
-	return httpapi.DefaultBusID
-}
-
-// busIDPattern is the legal shape of a bus id. '.' is deliberately excluded:
-// invariant 2 qualifies every agent as "<bus-id>.<agent-id>", so a dot inside a
-// bus id would make that qualification ambiguous and silently corrupt routing.
-var busIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-
-func validateBusID(id string) error {
-	if id == "" {
-		return errors.New("must not be empty")
-	}
-	if !busIDPattern.MatchString(id) {
-		return fmt.Errorf("%q must match %s; in particular '.' is not allowed because it is the \"<bus-id>.<agent-id>\" qualification separator (invariant 2)", id, busIDPattern)
 	}
 	return nil
 }
@@ -177,9 +156,13 @@ func run(cfg Config) error {
 		return fmt.Errorf("preparing -data-dir %q: %w", cfg.DataDir, err)
 	}
 
-	// PLACEHOLDER identity. The ID epic replaces this with server-minted,
-	// persisted ids from internal/ids; -bus-id only feeds the placeholder.
-	busID := cfg.resolveBusID()
+	// The server mints and persists its own bus id on first start, and loads
+	// the identical id on every subsequent start (invariant 1). -bus-id only
+	// seeds that on an empty data dir, or must match what is already there.
+	busID, err := ids.LoadOrCreateBusID(cfg.DataDir, cfg.BusID)
+	if err != nil {
+		return fmt.Errorf("resolving bus id: %w", err)
+	}
 	if cfg.BusID != "" {
 		// Runtime signal, not just a doc comment: the server is authoritative
 		// on every id (invariant 1), so an operator forcing one is a test-only
@@ -196,7 +179,7 @@ func run(cfg Config) error {
 	defer cancelRoot()
 
 	handler := httpapi.New(httpapi.Options{
-		Identity:    httpapi.StaticIdentity(busID),
+		Identity:    ids.BusIdentity(busID),
 		Logger:      lg,
 		Version:     version,
 		StartedAt:   time.Now(),

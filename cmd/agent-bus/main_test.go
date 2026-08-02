@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
 
@@ -154,18 +153,17 @@ func TestParseFlagsHelp(t *testing.T) {
 	}
 }
 
-// TestValidateDefaultBusID pins that the placeholder default obeys the same rule
-// as an operator-supplied one, so the two can never drift.
-func TestValidateDefaultBusID(t *testing.T) {
+// TestValidateNoBusIDOverride pins that validate() no longer validates a
+// placeholder default id: with the ID epic wired in (internal/ids), the real
+// bus id is minted and persisted from the data dir at run() time, so an
+// unset -bus-id has nothing to validate here. This replaces the old
+// TestValidateDefaultBusID, which asserted validateBusID(httpapi.DefaultBusID)
+// and Config.resolveBusID() — both removed now that main.go delegates id
+// validation to ids.ValidateBusID and no longer needs a placeholder resolver.
+func TestValidateNoBusIDOverride(t *testing.T) {
 	t.Parallel()
 
-	if err := validateBusID(httpapi.DefaultBusID); err != nil {
-		t.Fatalf("validateBusID(%q) = %v, want nil: the default must satisfy the same rule as -bus-id", httpapi.DefaultBusID, err)
-	}
 	cfg := Config{Listen: defaultListen, DataDir: defaultDataDir, PollTimeout: defaultPollTimeout}
-	if got := cfg.resolveBusID(); got != httpapi.DefaultBusID {
-		t.Fatalf("resolveBusID() with no override = %q, want %q", got, httpapi.DefaultBusID)
-	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("validate() with no -bus-id = %v, want nil", err)
 	}

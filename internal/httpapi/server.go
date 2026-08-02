@@ -13,9 +13,9 @@ import (
 // Identity supplies the bus's own id to the HTTP layer.
 //
 // It is an interface on purpose: invariant 1 makes the SERVER authoritative on
-// every id, so the real implementation belongs to the ID epic (internal/ids),
-// which will mint and persist the bus id. Until then StaticIdentity stands in
-// and httpapi never has to know which of the two it is talking to.
+// every id, so the real implementation is ids.BusIdentity (internal/ids),
+// which mints and persists the bus id. StaticIdentity below is retained for
+// tests only; httpapi never has to know which of the two it is talking to.
 type Identity interface {
 	// BusID returns the id of this bus. It is stable for the process lifetime.
 	BusID() string
@@ -24,9 +24,9 @@ type Identity interface {
 // DefaultBusID is the placeholder bus id used when no identity is supplied.
 const DefaultBusID = "bus-local"
 
-// StaticIdentity is a PLACEHOLDER Identity that returns a fixed id. It is what
-// the test-only -bus-id flag feeds. It is not id minting and must be replaced
-// by internal/ids when the ID epic lands.
+// StaticIdentity is a fixed-id Identity, retained for tests only. Production
+// code uses ids.BusIdentity (internal/ids), which mints and persists the real
+// bus id; StaticIdentity is not id minting.
 type StaticIdentity string
 
 // BusID implements Identity.
