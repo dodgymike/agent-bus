@@ -20,9 +20,18 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    validated, never an identity to be trusted. Ids are never reused, including across restarts.
 2. **Every agent id is fully qualified: `<bus-id>.<agent-id>`.** That namespacing is what makes
    cross-bus routing and agent-list exchange unambiguous. Buses have ids for the same reason.
-3. **Enrolment issues a signed credential.** The agent presents a key at enrolment; the server signs
-   it and returns a token the agent authenticates with on every subsequent call. Every route except
-   enrolment authenticates.
+3. **The CLIENT signs a SERVER-PROVIDED session token.** Note the direction — an earlier wording had
+   this backwards ("the server signs the agent's key"), which is neither the decision nor the code.
+   At enrolment the agent presents its Ed25519 **public** key and the server records it. To get a
+   credential the agent asks for a session, the **server** provides the token value, the agent
+   **signs that value** with its private key, and the server verifies against the recorded public
+   key. The client never chooses the bytes it signs — a client-chosen challenge permits
+   pre-computation and proves far less. Sessions last **at most one hour**; the client refreshes at
+   75% of lifetime. Tokens are **opaque server-side handles, not signed claims**, which is precisely
+   what makes immediate revocation possible — stateless claims cannot be revoked before they expire.
+   Sessions do NOT survive a restart. Every route authenticates EXCEPT the three that necessarily
+   cannot: enrolment, session-begin and session-complete (they are how a credential is obtained),
+   plus `/healthz` and `/v1/info`.
 4. **Nothing is acknowledged before it is durable.** A send returns success only after the message
    is committed via the two-phase (prepare → commit) write path and fsynced. Never trade that for
    latency. **Narrowing (2026-08-02):** this guarantees we never lose acknowledged data through our
