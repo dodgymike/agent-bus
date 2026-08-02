@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -306,7 +307,48 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 		vetoFrameIntact   = "the frame's checksum verified, so a partial write cannot explain it"
 		vetoRecordsFollow = "the frame's declared extent ends before EOF, so records follow the damage"
 		vetoIllegalExtent = "the declared extent is not a frame this writer could have produced"
+		vetoRecordsInTail = "a complete record is still sitting inside the region the cut would discard"
 	)
+
+	// overshootLength corrupts the length field of the record at recs[i] to a
+	// value that is still LEGAL (at most MaxPayloadSize) but runs past the end of
+	// the file. It is the damage that defeats every shape-only test: the frame's
+	// own header now lies about how long it is, and the error it produces --
+	// "truncated payload", declared extent past EOF -- is byte-for-byte the error
+	// a genuine torn tail produces.
+	// bitFlipLength is the same damage in its most realistic form: ONE bit
+	// flipped in a length field, the way a bad sector or a cosmic ray delivers it.
+	// Setting bit 16 of a two-digit payload length yields ~65 KiB -- comfortably
+	// legal, comfortably past the end of a small log.
+	bitFlipLength := func(i int) func(*testing.T, string, []Record, int64) {
+		return func(t *testing.T, path string, recs []Record, cleanEnd int64) {
+			t.Helper()
+			flipped := uint32(len(recs[i].Payload)) ^ 0x00010000
+			if flipped > MaxPayloadSize {
+				t.Fatalf("the flipped length %d is over MaxPayloadSize; this case must reach the tail inspection", flipped)
+			}
+			if int64(flipped) <= cleanEnd-recs[i].Offset-FrameHeaderSize {
+				t.Fatalf("the flipped length %d does not overshoot the end of the file; this case would not look like a tail", flipped)
+			}
+			var b [4]byte
+			binary.BigEndian.PutUint32(b[:], flipped)
+			patch(t, path, recs[i].Offset, b[:])
+		}
+	}
+
+	overshootLength := func(i int) func(*testing.T, string, []Record, int64) {
+		return func(t *testing.T, path string, recs []Record, cleanEnd int64) {
+			t.Helper()
+			overshoot := cleanEnd - recs[i].Offset - FrameHeaderSize + 64
+			if overshoot > MaxPayloadSize {
+				t.Fatalf("the overshoot length %d is over MaxPayloadSize, so this case would be caught by the extent bound instead",
+					overshoot)
+			}
+			var b [4]byte
+			binary.BigEndian.PutUint32(b[:], uint32(overshoot))
+			patch(t, path, recs[i].Offset, b[:])
+		}
+	}
 
 	cases := []struct {
 		name string
@@ -369,6 +411,49 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 			wantVeto: vetoIllegalExtent,
 			wantMsg:  "exceeds the 1048576-byte maximum",
 			wantNote: "the declared extent must be a frame the writer could actually have produced",
+		},
+		{
+			// THE THIRD FLAGSHIP CASE, and the one that defeats a shape-only
+			// classifier. Record 4's length is corrupted to a legal value that
+			// overshoots the end of the file, so the error it produces is
+			// INDISTINGUISHABLE from a torn tail by shape alone -- FrameIntact
+			// false, extent past EOF, extent well inside MaxPayloadSize. Records 5
+			// and 6 (a prepare/commit pair -- acknowledged, accepted history) are
+			// sitting intact in the bytes the cut would take. This exact file was
+			// demonstrated eating those two records before laterRecordInTail
+			// existed.
+			name:     "length field overshooting EOF with committed records behind it",
+			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:   overshootLength(3),
+			wantVeto: vetoRecordsInTail,
+			wantMsg:  "a complete record whose checksum verifies begins at offset",
+			wantNote: "records 5 and 6 are intact, committed history sitting inside the region a cut would discard",
+		},
+		{
+			// The same hole reached by a SINGLE FLIPPED BIT rather than a crafted
+			// value, which is what makes it a durability bug and not just an attack:
+			// no adversary is required, one bad bit in a length field is enough.
+			// Independently reproduced by DUR-4's reviewer against the pre-fix code,
+			// where it deleted two of three committed messages and then let Open and
+			// Replay succeed with no error at all -- silent, permanent loss.
+			name:     "one flipped bit in a middle length field",
+			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:   bitFlipLength(2),
+			wantVeto: vetoRecordsInTail,
+			wantMsg:  "a complete record whose checksum verifies begins at offset",
+			wantNote: "one bad bit must not be able to delete every committed record after it",
+		},
+		{
+			// The same lie told by the SECOND-TO-LAST record, so exactly one record
+			// follows the damage. The anchor that finds it is "a following record
+			// ends exactly at the end of the file", and with one follower that is
+			// the tightest case there is.
+			name:     "length field overshooting EOF with a single record behind it",
+			build:    func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
+			damage:   overshootLength(4),
+			wantVeto: vetoRecordsInTail,
+			wantMsg:  "a complete record whose checksum verifies begins at offset",
+			wantNote: "record 6 is intact and would be deleted by a cut at record 5",
 		},
 		{
 			// (h) THE SECOND FLAGSHIP CASE. The frame is at the very end of the
@@ -544,6 +629,23 @@ func TestWALRepairTailRefusesDamageThatIsNotATornTail(t *testing.T) {
 				if max := ce.Offset + FrameHeaderSize + MaxPayloadSize; ce.FrameEnd <= max {
 					t.Errorf("CorruptError.FrameEnd = %d, want it past the largest legal frame end %d: %s",
 						ce.FrameEnd, max, tc.wantVeto)
+				}
+			case vetoRecordsInTail:
+				// This is the case shape-only classification CANNOT tell from a torn
+				// tail, so the assertions here are the mirror image of the positive
+				// table: the damage looks exactly like a tail, and is refused anyway
+				// because a record was found in the region behind it.
+				if ce.FrameEnd < size {
+					t.Errorf("CorruptError.FrameEnd = %d in a %d-byte file: this case is meant to look like a torn tail",
+						ce.FrameEnd, size)
+				}
+				if max := ce.Offset + FrameHeaderSize + MaxPayloadSize; ce.FrameEnd > max {
+					t.Errorf("CorruptError.FrameEnd = %d, want it within the largest legal frame end %d: "+
+						"this case must be refused by the tail INSPECTION, not by the extent bound", ce.FrameEnd, max)
+				}
+				if !ce.FrameIntact {
+					t.Errorf("CorruptError.FrameIntact = false, want true: a partial write cannot leave a complete "+
+						"record behind the damage, so the flag that vetoes truncation must be set: %s", tc.wantVeto)
 				}
 			default:
 				t.Fatalf("case %q has no wantVeto", tc.name)

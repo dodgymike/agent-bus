@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -155,6 +156,35 @@ func run(cfg Config) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return fmt.Errorf("preparing -data-dir %q: %w", cfg.DataDir, err)
 	}
+
+	// Take the exclusive lock on the data dir BEFORE anything reads or writes
+	// it -- before the bus id is loaded, and so before any future WAL replay,
+	// which is the whole point: replay must happen inside the lock. Two servers
+	// on one data directory both replay the same bytes, both agree, and then
+	// both append at the same offsets, destroying the log; the agreement check
+	// in internal/wal/log.go explicitly says it "IS NOT A LOCK" and names this
+	// as the follow-up. Non-blocking: a second server fails fast and loudly
+	// here rather than blocking or, worse, proceeding.
+	//
+	// The lock is advisory and held for the process's lifetime. It is released
+	// by the kernel if we die, so a crash leaves a lock FILE but no LOCK and the
+	// next start just works; Release never unlinks the file, because unlinking
+	// races two starters into two holders (see internal/dirlock).
+	lock, err := dirlock.Acquire(cfg.DataDir)
+	if err != nil {
+		// No %q of the dir here: every dirlock error already names it, and
+		// repeating the path twice in one line makes the refusal harder to read,
+		// not clearer.
+		return fmt.Errorf("locking the data directory: %w", err)
+	}
+	lg.Debug("data directory locked", "data_dir", cfg.DataDir, "lock_file", lock.Path())
+	defer func() {
+		if err := lock.Release(); err != nil {
+			lg.Error("releasing data directory lock failed", "data_dir", cfg.DataDir, "err", err)
+			return
+		}
+		lg.Debug("data directory lock released", "data_dir", cfg.DataDir)
+	}()
 
 	// The server mints and persists its own bus id on first start, and loads
 	// the identical id on every subsequent start (invariant 1). -bus-id only

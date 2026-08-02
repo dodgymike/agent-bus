@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
 
@@ -260,5 +261,60 @@ func TestShutdownReleasesLongPoll(t *testing.T) {
 	case <-reqDone:
 	case <-time.After(bound):
 		t.Fatal("client request never completed")
+	}
+}
+
+// TestRunRefusesALockedDataDir is the regression guard for the wiring in run():
+// dirlock.Acquire must happen AFTER os.MkdirAll but BEFORE ids.LoadOrCreateBusID
+// (DUR-8). It holds the lock itself, then calls run() and asserts run() fails
+// fast with ErrLocked instead of blocking or proceeding. run() never reaches
+// net.Listen here, so this cannot hang and binds no port.
+func TestRunRefusesALockedDataDir(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	lock, err := dirlock.Acquire(dir)
+	if err != nil {
+		t.Fatalf("dirlock.Acquire(%q) = %v, want a held lock to provoke run()'s refusal", dir, err)
+	}
+	defer lock.Release()
+
+	cfg := Config{
+		Listen:      "127.0.0.1:0",
+		DataDir:     dir,
+		PollTimeout: time.Second,
+		LogLevel:    logging.LevelError,
+	}
+
+	err = run(cfg)
+	if err == nil {
+		t.Fatalf("run() with a pre-locked -data-dir %q = nil, want an error", dir)
+	}
+	if !errors.Is(err, dirlock.ErrLocked) {
+		t.Fatalf("run() error = %v, want errors.Is(err, dirlock.ErrLocked)", err)
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("run() error %q does not name the data dir %q", err.Error(), dir)
+	}
+
+	// Regression guard for DUR-9's "lock before wal.Open" ordering: if run()
+	// ever moves the Acquire call after any data-dir I/O (e.g. after
+	// ids.LoadOrCreateBusID or a future wal.Open), that I/O would happen before
+	// the (correctly still-failing) lock check and leave extra files behind
+	// even though we hold the lock throughout. The ONLY entry a refused run()
+	// may have touched is the lock file itself, which already existed because
+	// we created it above by acquiring the lock.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("os.ReadDir(%q) = %v", dir, err)
+	}
+	if len(entries) != 1 || entries[0].Name() != dirlock.LockFileName {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("data dir %q contains %v after a refused run(), want only %q; "+
+			"a regression here means the data directory is read/written OUTSIDE the lock",
+			dir, names, dirlock.LockFileName)
 	}
 }

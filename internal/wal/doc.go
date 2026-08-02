@@ -39,7 +39,13 @@
 // First RepairTail: a framing-only check that verifies the file header and
 // every frame, and truncates the file back to the end of the last verified-good
 // record if -- and only if -- the damage is provably a torn tail, meaning a
-// single incomplete frame at the very end with nothing after it. That
+// single incomplete frame at the very end with nothing after it. Two
+// independent things have to agree before a byte is cut: the damage must have
+// the SHAPE of a torn tail, and the bytes that would be discarded must be
+// inspected and found to contain no complete record. The second check is not
+// belt-and-braces -- a corrupted length field makes a mid-file record produce
+// exactly the shape of a torn tail, and without the inspection that alone would
+// delete every committed record behind it. That
 // truncation is fsynced, and it is the ONLY truncation this package ever
 // performs: invariant 6 allows exactly one exception to append-only, "a
 // verified-corrupt tail during recovery", and this is it. Nothing acknowledged

@@ -194,11 +194,23 @@ type CorruptError struct {
 	// say and the point is to locate the damage, not to trust it.
 	FrameEnd int64
 
-	// FrameIntact reports a frame whose CHECKSUM VERIFIED but which is in the
-	// wrong place -- an index out of sequence. It is the one signature a torn
-	// write cannot produce: a partially written frame does not checksum. So it
-	// means a record was lost from, or resurrected in, the middle of the file,
-	// and recovery must treat it as fatal no matter where in the file it sits.
+	// FrameIntact means A PARTIAL WRITE CANNOT EXPLAIN THIS DAMAGE, and therefore
+	// that recovery must treat it as fatal no matter where in the file it sits.
+	// It is set for three things, all of which share that property:
+	//
+	//   - a frame whose CHECKSUM VERIFIED but which is in the wrong place, i.e.
+	//     an index out of sequence: a record was lost from, or resurrected in,
+	//     the middle of the file, and a partially written frame does not
+	//     checksum;
+	//   - damage found ABOVE the framing layer (see frameCorruptf) -- a payload
+	//     that will not decode, a reference to no open prepare, a record type
+	//     with no meaning here -- where the frame's checksum has already been
+	//     verified before the record was ever interpreted;
+	//   - damage with a complete, verifying record still sitting AFTER it (see
+	//     tailHasRecordsAfterIt): a crash mid-append leaves a prefix of one frame
+	//     and nothing beyond it, so bytes beyond the damage mean it is not a tail.
+	//
+	// Truncation policy reads this flag as an absolute veto; see RepairTail.
 	FrameIntact bool
 }
 
