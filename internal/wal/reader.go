@@ -18,6 +18,11 @@ import (
 // good record (which, on success, is the end of the file, and on failure is
 // where a recovery pass would truncate), and the error.
 func ScanAll(path string, kind Kind) ([]Record, int64, error) {
+	// Checked before the open: a caller asking for a kind that does not exist
+	// should hear about that, not about whatever the filesystem says.
+	if kind.magic() == "" {
+		return nil, 0, fmt.Errorf("wal: scan %s: %w: %s", path, ErrUnknownKind, kind)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("wal: open %s: %w", path, err)
