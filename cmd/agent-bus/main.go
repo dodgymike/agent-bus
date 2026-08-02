@@ -271,6 +271,19 @@ func run(cfg Config) error {
 	// own "wal replayed" line when the file held records (and warns per dangling
 	// prepare), so this is the startup-visible summary that also fires for an
 	// empty log: proof in the operator's log that a replay ran before we served.
+	//
+	// quarantined/discard_count/discarded_bytes are ALWAYS present here, not only
+	// on the quarantine path, because DiscardCount/DiscardedBytes are exact on
+	// every repair outcome (see wal.Repair) and "0" on the truncate/rewrite
+	// paths is itself informative. This is deliberately in addition to, not
+	// instead of, wal's own ERROR-level "wal quarantined..." line: that line is
+	// what an operator grepping for "quarantin" finds, this one is what an
+	// operator reading ONLY the startup summary must not be able to miss. Before
+	// this fix a whole-log quarantine (Quarantined/DiscardCount/DiscardedBytes
+	// set, Truncated left false) printed repaired=false repaired_bytes=0 here --
+	// indistinguishable from a clean start with nothing replayed. See
+	// DECISIONS.md 2026-08-02 ("Availability over retention"): the defect was
+	// never the discard, it was the silence.
 	rec := walLog.Recovered()
 	lg.Info("write-ahead log opened",
 		"data_dir", cfg.DataDir,
@@ -282,6 +295,9 @@ func run(cfg Config) error {
 		"next_index", rec.NextIndex,
 		"repaired", rec.Repaired.Truncated,
 		"repaired_bytes", rec.Repaired.Removed,
+		"quarantined", rec.Repaired.Quarantined,
+		"discard_count", rec.Repaired.DiscardCount,
+		"discarded_bytes", rec.Repaired.DiscardedBytes,
 	)
 
 	// The enrolment and session authority. It is built AFTER the bus id is

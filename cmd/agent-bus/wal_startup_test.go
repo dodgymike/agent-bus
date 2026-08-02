@@ -424,6 +424,84 @@ func TestServerQuarantinesACorruptLogAndStartsAnyway(t *testing.T) {
 	}
 }
 
+// TestStartupSummaryLogsQuarantineFields is the proof for the fix: the
+// startup summary line (msgWALOpened) must itself say a quarantine happened,
+// not only wal's own separate ERROR line (msgWALQuarantined, already asserted
+// by TestServerQuarantinesACorruptLogAndStartsAnyway above).
+//
+// Before the fix, msgWALOpened carried only repaired/repaired_bytes -- fields
+// that stay false/0 on the quarantine path, because wal.Repair.Truncated and
+// .Removed are never set there (see wal.Repair's doc comment: "the quarantine
+// path returns early with only Quarantined, DiscardCount and DiscardedBytes
+// set"). So an operator reading ONLY the startup summary -- the common case,
+// since it is the one line every start emits -- saw repaired=false
+// repaired_bytes=0, indistinguishable from a clean start that replayed
+// nothing. DECISIONS.md 2026-08-02 ("Availability over retention") is
+// explicit that the defect is the SILENCE, not the discard.
+//
+// This test seeds the same "unsalvageable file header" damage the sibling
+// test above uses (the one class of damage that reaches quarantine rather
+// than a truncate/rewrite repair) and asserts the startup summary line names
+// the quarantine destination and the exact discard totals.
+func TestStartupSummaryLogsQuarantineFields(t *testing.T) {
+	dir := t.TempDir() // throwaway data dir; never the tracked ./data
+	walPath := filepath.Join(dir, wal.WALFileName)
+
+	corrupt := []byte(strings.Repeat("X", 64))
+	if err := os.WriteFile(walPath, corrupt, 0o600); err != nil {
+		t.Fatalf("writing the corrupt log %q: %v", walPath, err)
+	}
+
+	proc := startServer(t, dir)
+	addr := proc.awaitServerStarted(t)
+
+	// Cross-check against wal's own quarantine line so this test's expectation
+	// is derived from what actually happened, not guessed: the startup summary
+	// must agree with moved_to and bytes that msgWALQuarantined already reports.
+	quarantineLine := proc.line(t, msgWALQuarantined)
+	qf := parseLogfmt(quarantineLine)
+	wantMovedTo := qf["moved_to"]
+	wantBytes := qf["bytes"]
+	if wantMovedTo == "" || wantBytes == "" {
+		t.Fatalf("quarantine line missing moved_to/bytes, cannot derive expectations: %s", quarantineLine)
+	}
+
+	openedLine := proc.line(t, msgWALOpened)
+	of := parseLogfmt(openedLine)
+
+	if got := of["quarantined"]; got != wantMovedTo {
+		t.Errorf("%q field quarantined = %q, want %q (the quarantine destination); the startup summary must say a whole log was eaten, not just wal's separate ERROR line\nline: %s",
+			msgWALOpened, got, wantMovedTo, openedLine)
+	}
+	if got := of["discard_count"]; got != "1" {
+		t.Errorf("%q field discard_count = %q, want %q (a whole-log quarantine is exactly one discard)\nline: %s",
+			msgWALOpened, got, "1", openedLine)
+	}
+	if got := of["discarded_bytes"]; got != wantBytes {
+		t.Errorf("%q field discarded_bytes = %q, want %q (must match wal's own byte count for the discarded file)\nline: %s",
+			msgWALOpened, got, wantBytes, openedLine)
+	}
+	// repaired/repaired_bytes must NOT falsely claim a repair happened: the
+	// quarantine path never sets Truncated/Removed (see wal.Repair doc), and a
+	// regression that started reporting Truncated=true here would be a
+	// different bug (misclassifying quarantine as a truncation repair).
+	if got := of["repaired"]; got != "false" {
+		t.Errorf("%q field repaired = %q, want %q; quarantine is not a truncation repair\nline: %s",
+			msgWALOpened, got, "false", openedLine)
+	}
+	if got := of["repaired_bytes"]; got != "0" {
+		t.Errorf("%q field repaired_bytes = %q, want %q; quarantine never sets Repair.Removed\nline: %s",
+			msgWALOpened, got, "0", openedLine)
+	}
+
+	mustGetHealthz(t, addr)
+
+	proc.signal(t, syscall.SIGTERM)
+	if code := proc.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("exit code after SIGTERM = %d, want 0\n%s", code, proc.stderr())
+	}
+}
+
 // Log messages the assertions above key on. They are the operator-visible
 // contract of run(); renaming one in main.go must fail these tests.
 const (
