@@ -53,18 +53,18 @@
 
 - [ ] CORE-5 · CORE-5: Observability: metrics/inspect endpoint (follow-up) — observability, P3
   Low-priority follow-up. Add a GET /v1/debug (or /metrics) endpoint exposing in-process counters (messages sent, active waiters, WAL bytes, roster size, relay peer status) as plain JSON -- stdlib-first, no Prometheus dependency needed initially. Depends on MSG/POLL/RELAY existing to have something worth reporting.
-  _Proof: go test -race -run TestInspectEndpoint ./internal/http_
-- [ ] CORE-2 · CORE-2: cmd/agent-bus main entrypoint + config/flags — core, P0
-  cmd/agent-bus/main.go wires flag parsing (listen addr, data-dir, bus-id override for testing, long-poll timeout, log level) into a Config struct; server binds the listener and shuts down cleanly on SIGINT/SIGTERM. No routes yet beyond a bare mux.
+  _Proof: go test -race -run TestInspectEndpoint ./internal/httpapi_
+- [~] CORE-2 · CORE-2: cmd/agent-bus main entrypoint + config/flags — core, P0, in progress
+  cmd/agent-bus/main.go wires flag parsing (listen addr, data-dir, bus-id override for testing, long-poll timeout, log level) into a Config struct; server binds the listener and shuts down cleanly on SIGINT/SIGTERM. No routes yet beyond a bare mux. NOTE: -bus-id is a TEST-ONLY affordance -- invariant 1 says the server is authoritative on ids, so this override exists purely to make tests deterministic and must never be relied on by production callers.
   _Proof: go build ./... && ./agent-bus -h_
-- [ ] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0
-  GET /healthz returns 200 {"status":"ok"} once the server is accepting connections (liveness only, no auth). GET /v1/info returns bus id, server version/build info, and uptime (also unauthenticated -- needed for pre-enrolment discovery). Both registered on the main mux.
-  _Proof: go test -race -run TestHealthzInfo ./internal/http_
-- [ ] CORE-4 · CORE-4: Structured logging + request middleware — core, P0
-  log/slog-based structured logger (stdlib, no third-party dep per invariant 8), wired as HTTP middleware logging method/path/status/latency/request-id for every route. Configurable level via the -log-level flag.
-  _Proof: go test -race -run TestLoggingMiddleware ./internal/http_
-- [ ] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0
-  Initialize go.mod (module path, go1.19 toolchain pin), create the internal/ package layout (ids, store, wal, hub, http, relay, auth) as empty packages with doc.go stubs, cmd/agent-bus/ dir, and a .gitignore for build artifacts and the data/ dir. No server logic yet -- this is the scaffold every other task builds on.
+- [~] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0, in progress
+  GET /healthz returns 200 {"status":"ok"} once the server is accepting connections (liveness only, no auth). GET /v1/info returns bus id, server version/build info, and uptime (also unauthenticated -- needed for pre-enrolment discovery). Both registered on the main mux. The bus id is served through a small interface with a placeholder implementation until the ID epic lands (see invariant 1: the server is authoritative on ids).
+  _Proof: go test -race -run TestHealthzInfo ./internal/httpapi_
+- [~] CORE-4 · CORE-4: Structured logging + request middleware — core, P0, in progress
+  A small INTERNAL structured logger built over stdlib log (no third-party dependency, per invariant 8), wired as HTTP middleware logging method/path/status/latency/request-id for every route. Level configurable via the -log-level flag. Note: log/slog landed in go1.21 and is NOT available on this box's go1.19.4 toolchain (verified: log/slog absent from GOROOT/src/log and go list std), so it cannot be used here; the decision is recorded in DECISIONS.md.
+  _Proof: go test -race -run TestLoggingMiddleware ./internal/httpapi_
+- [~] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0, in progress
+  Initialize go.mod (module github.com/dodgymike/agent-bus, go1.19 toolchain pin), create the internal/ package layout (ids, store, wal, hub, auth, httpapi, relay) as packages with doc.go stubs, and the cmd/agent-bus/ dir. The HTTP package is named `httpapi`, NOT `http`: naming it `http` would shadow stdlib net/http in every file that imports both, which is a needless papercut. .gitignore already covers build artifacts and /data/ -- verify, do not duplicate. No server logic yet -- this is the scaffold every other task builds on.
   _Proof: go build ./... && test -z "$(gofmt -l .)"_
 
 ### EPIC DOCS — Documentation
@@ -72,7 +72,7 @@
 - [ ] DOCS-2 · DOCS-2: PROTOCOL.md -- wire protocol + on-disk format — docs, P1
   Every HTTP route (method, path, auth requirement, request/response shape) and the on-disk format (WAL record framing, audit log format, roster/counter file layouts) -- maintainer-facing, kept current as routes land.
   _Proof: test -s PROTOCOL.md_
-- [ ] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0
+- [~] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0, in progress
   README.md -- what agent-bus is, quickstart (build, run one bus, enrol two agents, exchange a message via the wrappers). DECISIONS.md -- seeded with its append-only-dated-entry convention and a placeholder for the enrolment signing-scheme decision. Written early so later tasks have somewhere to record decisions.
   _Proof: test -s README.md && test -s DECISIONS.md_
 - [ ] DOCS-3 · DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table — docs, P1
