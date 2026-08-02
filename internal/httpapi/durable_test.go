@@ -5,10 +5,12 @@ package httpapi_test
 // the zero Options, and every existing test in this package -- changes nothing
 // about the two routes that exist today.
 //
-// Deliberately no real log on disk here: DurableLog is a one-method interface
-// precisely so this package's tests never have to open one, and a test that
-// reached for internal/wal would couple the HTTP layer's tests to the
-// durability layer's on-disk format.
+// Deliberately no real log ON DISK here: DurableLog is a one-method interface
+// precisely so this package's tests never have to open one. The wal package is
+// imported only for its wire types (wal.Entry, wal.Committed) -- the values the
+// interface traffics in -- while the log itself is a fake, so these tests stay
+// independent of the durability layer's on-disk format, its fsync cost and its
+// recovery behaviour. Those belong to internal/wal's own tests.
 
 import (
 	"encoding/json"

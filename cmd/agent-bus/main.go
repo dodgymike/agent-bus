@@ -202,18 +202,25 @@ func run(cfg Config) error {
 	}
 
 	// Open the durable write path, and REPLAY it, here: strictly after the
-	// exclusive lock above and strictly before the listener below.
+	// exclusive lock above and strictly before the server begins serving.
 	//
 	// After the lock, because replay reads and RepairTail may truncate the very
 	// bytes a second server would be appending to; opening the log first and
 	// locking second would defeat the lock entirely. Nothing may move
-	// dirlock.Acquire later for the same reason -- a refused start must not have
-	// touched the data dir at all beyond bus.lock.
+	// dirlock.Acquire later for the same reason: a start refused AT THE LOCK has
+	// then touched nothing in the data dir beyond bus.lock, which is exactly what
+	// TestRunRefusesALockedDataDir asserts. (A start refused LATER -- here, say,
+	// on an unreplayable log -- has legitimately written <data-dir>/bus-id
+	// already, because ids.LoadOrCreateBusID runs above. That is fine; it is the
+	// lock-refusal case that must stay clean.)
 	//
-	// Before net.Listen, because wal.Open does not return until the log has been
-	// replayed, so binding afterwards is what guarantees no request is ever
-	// served from an unreplayed store (invariant 5: disk is the truth, memory is
-	// only the serving copy).
+	// Before the server serves, because wal.Open does not return until the log
+	// has been replayed, and every path that can answer a request -- srv.Serve
+	// below -- is started after this call returns. That is what guarantees no
+	// request is ever served from an unreplayed store (invariant 5: disk is the
+	// truth, memory is only the serving copy). Note the guarantee is about
+	// SERVING, not about binding: nothing here promises the socket is unbound
+	// during replay, only that nothing answers on it.
 	//
 	// The Applier is deliberately nil, and that is an honest statement of where
 	// this project is: there is no in-memory serving copy yet (internal/store is
@@ -248,7 +255,15 @@ func run(cfg Config) error {
 		// to an operator than a close error is.
 		if err := walLog.Close(); err != nil {
 			lg.Error("closing the write-ahead log failed", "data_dir", cfg.DataDir, "path", walLog.Path(), "err", err)
+			return
 		}
+		// NOT noise, do not delete: this line is the only OBSERVABLE proof that
+		// Close actually ran on the shutdown path, and that it ran BEFORE the
+		// lock's "data directory lock released" line (the LIFO close-then-unlock
+		// order the comment above claims). Without it, deleting the whole defer
+		// leaves every test green, because the kernel closes the fd at process
+		// exit and the log file looks identical either way.
+		lg.Debug("write-ahead log closed", "data_dir", cfg.DataDir, "path", walLog.Path())
 	}()
 
 	// One line, at INFO, naming what recovery found. wal.Open already logs its

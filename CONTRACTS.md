@@ -214,7 +214,10 @@ before returning) → `net.Listen` → serve. `wal.Open` must run after the lock
 the file and a torn-tail repair truncates bytes a second server could otherwise be appending to —
 opening the log before locking would defeat the lock entirely. It must run before the listener
 binds, because `wal.Open` does not return until replay has finished, so no request is ever served
-from an unreplayed store (invariant 5: disk is the truth, memory is only the serving copy).
+from an unreplayed store (invariant 5: disk is the truth, memory is only the serving copy). Read that
+guarantee precisely: what is enforced (and asserted) is that nothing is ever **answered** before
+replay — `srv.Serve` starts after `wal.Open` returns. Nothing promises the socket is unbound during
+replay; a listener that is bound but not yet served answers nothing.
 
 **Honest limit of what "replay" means right now:** the `Applier` passed to `wal.Open` is `nil`.
 There is no in-memory serving copy yet — `internal/store` is still a stub — so there is nothing for
@@ -235,7 +238,12 @@ so Go's LIFO ordering closes the WAL (flushing and releasing its file handle) wh
 directory is still locked, and only releases the lock afterward — the reverse order would open a
 window where a second `agent-bus` could acquire the directory while this process still held the WAL
 open. A `Close` error does not change the process exit code but is logged at `ERROR` with the
-`data_dir`, `path`, and the error, since it is a durability signal an operator should see.
+`data_dir`, `path`, and the error, since it is a durability signal an operator should see. A
+SUCCESSFUL close logs, at `DEBUG`, `msg="write-ahead log closed" data_dir=<dir> path=<dir>/bus.wal`.
+That line is not decoration and must not be deleted as noise: it is the only observable proof the
+close ran at all (the kernel closes the descriptor at process exit, so `bus.wal` is byte-identical
+either way), and the tests assert it appears BEFORE `msg="data directory lock released"`, which is
+what pins the close-then-unlock order described above.
 
 **Failure mode: any open-or-replay failure is FATAL.** `run()` returns a non-nil error, `main()`
 prints it to stderr prefixed `agent-bus: ` and exits `1`, and nothing binds a listener — the same

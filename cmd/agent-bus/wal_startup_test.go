@@ -34,7 +34,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -56,9 +55,8 @@ const (
 )
 
 // TestMain doubles as the server entry point for the child process. With
-// envRunServer set it calls run() exactly as main() does -- same error text,
-// same exit code -- so the child is the real startup path and not a
-// re-implementation of it.
+// envRunServer set it calls main() itself, so the child is the real startup
+// path and not a re-implementation of it.
 func TestMain(m *testing.M) {
 	if os.Getenv(envRunServer) == "1" {
 		os.Exit(runServerChild())
@@ -66,29 +64,35 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// runServerChild mirrors main(): run(cfg), and on error print "agent-bus: <err>"
-// to stderr and exit 1. Keep it identical to main.go's error handling; the
-// corrupt-log test asserts on that exact prefix.
+// runServerChild IS main(): it builds argv from the harness environment and
+// calls main() directly, so the child exercises parseFlags, Config.validate and
+// -- crucially -- main()'s own error-to-exit-code mapping, instead of a copy of
+// them that would keep passing while main() drifted. The corrupt-log test's
+// "exit 1" and "agent-bus: " prefix are therefore assertions about main.go, not
+// about this harness.
+//
+// main() calls os.Exit on every failure path, so reaching the return can only
+// mean a clean run: 0.
 func runServerChild() int {
-	levelName := os.Getenv(envLogLevel)
-	if levelName == "" {
-		levelName = defaultLogLevel
-	}
-	level, err := logging.ParseLevel(levelName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-bus: test harness: %v\n", err)
+	dataDir := os.Getenv(envDataDir)
+	if dataDir == "" {
+		// Never silently inherit main.go's ./data default: the tracked data dir
+		// is not a test fixture and no test may ever write to it.
+		fmt.Fprintf(os.Stderr, "agent-bus: test harness: %s must be set\n", envDataDir)
 		return 2
 	}
-	cfg := Config{
-		Listen:      os.Getenv(envListen),
-		DataDir:     os.Getenv(envDataDir),
-		PollTimeout: defaultPollTimeout,
-		LogLevel:    level,
+	listen := os.Getenv(envListen)
+	if listen == "" {
+		// An empty listen address must never become a bind on every interface.
+		// The harness only ever wants an ephemeral loopback port.
+		listen = "127.0.0.1:0"
 	}
-	if err := run(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-bus: %v\n", err)
-		return 1
+	level := os.Getenv(envLogLevel)
+	if level == "" {
+		level = defaultLogLevel
 	}
+	os.Args = []string{"agent-bus", "-listen", listen, "-data-dir", dataDir, "-log-level", level}
+	main()
 	return 0
 }
 
@@ -115,16 +119,23 @@ func TestServerOpensWALOnStart(t *testing.T) {
 		}
 
 		// THE ORDERING ASSERTION (invariant 5: disk is the truth, memory is only
-		// the serving copy). wal.Open does not return until replay has finished,
-		// so "write-ahead log opened" appearing BEFORE "server started" in the
-		// byte stream is the proof that no request can ever be served from an
-		// unreplayed store. Moving wal.Open after net.Listen in run() -- or
-		// after the "server started" log line -- must fail exactly here.
+		// the serving copy). The three lines pin the whole startup sequence as an
+		// observable order: the data dir is LOCKED, then the log is opened and
+		// replayed inside that lock (wal.Open does not return until replay has
+		// finished), and only then does the server announce itself started --
+		// which run() logs after srv.Serve is running, so nothing can have been
+		// ANSWERED from an unreplayed store.
+		//
+		// What this does NOT claim: where net.Listen sits. A listener bound early
+		// but not yet served answers nothing, so hoisting the bind alone would
+		// (correctly) not fail here; "served after replay" is what matters and is
+		// what is asserted, reinforced by the mustGetHealthz below.
+		lockedIdx := proc.lineIndex(t, msgDirLocked)
 		openedIdx := proc.lineIndex(t, msgWALOpened)
 		startedIdx := proc.lineIndex(t, msgServerStarted)
-		if openedIdx >= startedIdx {
-			t.Fatalf("stderr line order: %q at line %d, %q at line %d; the WAL must be opened and replayed BEFORE the listener binds\n%s",
-				msgWALOpened, openedIdx, msgServerStarted, startedIdx, proc.stderr())
+		if lockedIdx >= openedIdx || openedIdx >= startedIdx {
+			t.Fatalf("stderr line order: %q at %d, %q at %d, %q at %d; want lock < open+replay < serve\n%s",
+				msgDirLocked, lockedIdx, msgWALOpened, openedIdx, msgServerStarted, startedIdx, proc.stderr())
 		}
 
 		// A fresh log has nothing to replay, and the high-water mark starts at
@@ -161,6 +172,26 @@ func TestServerOpensWALOnStart(t *testing.T) {
 		if code := proc.awaitExit(t, shutdownTimeout); code != 0 {
 			t.Fatalf("exit code after SIGTERM = %d, want 0\n%s", code, proc.stderr())
 		}
+
+		// CLOSE ACTUALLY RAN, AND RAN BEFORE THE UNLOCK. The size check below
+		// cannot see a missing Close: the kernel closes the fd at process exit,
+		// so deleting run()'s deferred walLog.Close() leaves bus.wal
+		// byte-identical and every other assertion here green. The "write-ahead
+		// log closed" line is the only observable proof, and requiring it to
+		// precede "data directory lock released" pins the defer-LIFO order
+		// main.go treats as load-bearing: flush and close the log while the data
+		// dir is still locked, and only then drop the lock.
+		//
+		// Both lines are written during process teardown, so they are read from
+		// the FINAL drained snapshot -- awaitExit returns only after the stderr
+		// pipe hit EOF and cmd.Wait() returned, so this cannot race the scanner.
+		closedIdx := proc.lineIndex(t, msgWALClosed)
+		releasedIdx := proc.lineIndex(t, msgLockReleased)
+		if closedIdx >= releasedIdx {
+			t.Fatalf("stderr line order on shutdown: %q at %d, %q at %d; the log must be closed while the data dir is still locked\n%s",
+				msgWALClosed, closedIdx, msgLockReleased, releasedIdx, proc.stderr())
+		}
+
 		after := mustReadFile(t, walPath)
 		if len(after) < len(before) {
 			t.Fatalf("%q shrank across shutdown: %d bytes -> %d bytes; Close must never truncate the log",
@@ -241,6 +272,13 @@ func TestServerOpensWALOnStart(t *testing.T) {
 		if code := proc.awaitExit(t, shutdownTimeout); code != 0 {
 			t.Fatalf("exit code after SIGTERM = %d, want 0\n%s", code, proc.stderr())
 		}
+		// Close ran, and ran before the unlock, on the path that has recovered
+		// history to lose too (see the fresh-dir subtest for why the size check
+		// alone cannot see a deleted Close).
+		if closedIdx, releasedIdx := proc.lineIndex(t, msgWALClosed), proc.lineIndex(t, msgLockReleased); closedIdx >= releasedIdx {
+			t.Fatalf("stderr line order on shutdown: %q at %d, %q at %d; the replayed log must be closed while the data dir is still locked\n%s",
+				msgWALClosed, closedIdx, msgLockReleased, releasedIdx, proc.stderr())
+		}
 		if afterSize := mustFileSize(t, walPath); afterSize < beforeSize {
 			t.Fatalf("seeded log shrank across shutdown: %d -> %d bytes; recovered history must survive a clean stop",
 				beforeSize, afterSize)
@@ -312,8 +350,11 @@ func TestServerOpensWALOnStartRefusesACorruptLog(t *testing.T) {
 // Log messages the assertions above key on. They are the operator-visible
 // contract of run(); renaming one in main.go must fail these tests.
 const (
+	msgDirLocked     = `msg="data directory locked"`
 	msgWALOpened     = `msg="write-ahead log opened"`
 	msgServerStarted = `msg="server started"`
+	msgWALClosed     = `msg="write-ahead log closed"`
+	msgLockReleased  = `msg="data directory lock released"`
 )
 
 // serverProc is a running (or finished) child server: its captured stderr, and

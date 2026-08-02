@@ -111,7 +111,15 @@ Consequences:
 
 ## Go conventions
 
-- `gofmt -l .` must be empty, `go vet ./...` clean, `go build ./...` green before any commit.
+- Formatting must be clean, `go vet ./...` clean, `go build ./...` green before any commit.
+  **Do NOT call bare `gofmt` — it is NOT on PATH on this box** (only `$(go env GOROOT)/bin/gofmt` is).
+  This matters because the idiomatic check is silently self-defeating: `test -z "$(gofmt -l .)"`
+  **passes** when `gofmt` exits 127, because a command that fails to launch prints nothing to stdout.
+  Every "gofmt clean" recorded from a bare call is a false pass. Use one of:
+  ```
+  go fmt ./...                      # reformats in place; prints the files it changed
+  "$(go env GOROOT)/bin/gofmt" -l . # lists unformatted files; empty output = clean
+  ```
 - Tests run with `-race`. Concurrency here is the product; a data race is a P0.
 - Durability and recovery code must have **crash-injection tests** — a test that writes, kills at a
   chosen point in the write path, and asserts what recovery yields. "The code looks right" is not
@@ -121,7 +129,13 @@ Consequences:
 ## Verify — and tell the truth
 
 Run the NARROWEST relevant check: `go test -race -run <Name> ./internal/<pkg>`, `go build ./...`,
-`go vet ./...`, `gofmt -l .`. For anything agent-facing, ALSO exercise it the way an agent would:
+`go vet ./...`, `go fmt ./...` (NOT bare `gofmt` — see the formatting note above).
+
+**A check that runs nothing is not a pass.** `go test -run TestThatDoesNotExist ./pkg` prints
+`ok ... [no tests to run]` and EXITS 0, so a proof command naming a test that was never written
+looks identical to a passing one. Run proof commands through `bash scripts/proof-check.sh '<cmd>'`,
+which reports PASS / FAIL / VACUOUS / UNVERIFIABLE, and quote its verdict rather than a bare exit
+code. A task must never be completed on a VACUOUS proof. For anything agent-facing, ALSO exercise it the way an agent would:
 through `scripts/bus-*.sh` against a running server, not through a hand-written `curl`. If the
 wrapper doesn't work, the feature doesn't work.
 

@@ -475,3 +475,71 @@ than discovered later in a diff.
 - The returned `*Lock` must stay reachable for as long as the lock is wanted. `_, err :=
   dirlock.Acquire(dir)` is a silent bug: the `*os.File` finalizer would close the descriptor at the
   next GC and quietly hand the directory to a second server. Documented at `Acquire`.
+
+---
+
+## 2026-08-02 — DUR-9: the WAL is opened in `run()` with a NIL Applier, and exposed to the HTTP layer as a one-method interface
+
+**Context.** DUR-1..DUR-4 built a complete two-phase durable write path in `internal/wal`, and
+nothing in the server binary called it. DUR-9 wires it in.
+
+**Decision 1 — the WAL is opened from `cmd/agent-bus`'s `run()`, after `dirlock.Acquire` and before
+`srv.Serve`.** Not from inside `internal/httpapi`, and not lazily on the first write.
+
+- After the lock, because replay READS the file and `RepairTail` may TRUNCATE its tail. A WAL opened
+  before the flock is a WAL two processes can be repairing at once, which is precisely the corruption
+  DUR-8 exists to prevent. The ordering is guarded, not merely commented:
+  `TestRunRefusesALockedDataDir` asserts a start refused at the lock leaves `bus.lock` as the ONLY
+  entry in the data dir, and the reviewer confirmed by mutation that swapping the two lines fails it.
+- Before serving, because `wal.Open` does not return until replay has finished (invariant 5). The
+  guarantee is stated carefully: nothing is ANSWERED before replay. It is NOT "the socket is unbound
+  during replay" — a bound-but-unserved listener answers nothing, and a comment claiming the stronger
+  property was found false by mutation and corrected.
+- Not lazily, because "the durable store opens on the first write" means the first write is also the
+  first time the operator learns the store is unusable, long after startup succeeded.
+
+**Decision 2 — a failed open or replay is a FATAL startup error, never a degraded start.** Exit 1,
+the message names the data dir, and no listener binds. The temptation to "start anyway and serve what
+we can" is exactly how an acknowledged write disappears silently: an empty store is
+indistinguishable, to every client, from a bus that never accepted anything. The ONLY self-repair is
+the provably torn tail `RepairTail` already performs (bytes whose `Append` never returned, and so
+were never acknowledged to anyone). Everything else refuses, and leaves the file byte-for-byte
+unchanged so an operator can copy it and diagnose it — asserted by
+`TestServerOpensWALOnStartRefusesACorruptLog`, not assumed.
+
+**Decision 3 — the `Applier` passed to `wal.Open` is `nil`, and this is documented rather than
+hidden.** There is no in-memory serving copy yet: `internal/store` is a `doc.go` stub. Replay today
+verifies every frame, pairs commits with prepares, discards uncommitted prepares and establishes the
+next-index high-water mark — and rebuilds no application state, because none exists.
+
+- The alternative considered and REJECTED: invent a placeholder Applier now. A no-op Applier that
+  swallows every recovered entry would make the code LOOK like it recovers state while recovering
+  nothing, which is worse than an obvious `nil` — it is a claim a future reader would believe. When
+  the store lands it is passed here, and the honesty comment goes with it.
+- Consequence: nobody may read "replay ran" as "state was restored" until the store exists. The log
+  line reports counts of what the DISK contained, not of what memory absorbed.
+
+**Decision 4 — the HTTP layer holds the log as `httpapi.DurableLog`, a ONE-METHOD interface
+(`Write(wal.Entry) (wal.Committed, error)`), not as a `*wal.Log`.**
+
+- One method because `Write` is the whole of invariant 4 as a handler needs it: hand over an entry,
+  get a `Committed` back only once it is fsynced. A handler has no business calling `Begin`, `Close`
+  or `Recovered` — those belong to the process lifecycle `main` owns, and a handler that could
+  `Close` the log is a handler that can take the bus down.
+- An interface rather than the concrete type so this package's own tests never open a real log on
+  disk, and so a future in-memory or relay-backed implementation is a substitution rather than a
+  refactor. `internal/wal` is still imported for the wire types (`Entry`, `Committed`); duplicating
+  those to avoid the import would be cleverness bought at the price of two definitions of one
+  contract (invariant 8). There is no cycle: `wal` does not import `httpapi`.
+- It may be nil, and NOTHING may panic on that. There is deliberately no default: a no-op stand-in
+  write path is silent data loss, which is strictly worse than a nil the caller must check.
+- No handler and no route uses it in this task. It is wired now so that MSG/AUTH/IDEM/SIGN reach for
+  ONE write path instead of each minting its own.
+
+**Decision 5 — the successful close logs a DEBUG line, on purpose.** `msg="write-ahead log closed"`
+exists because the close-on-shutdown requirement was otherwise UNTESTABLE: the kernel closes the
+descriptor at process exit, so `bus.wal` is byte-identical whether or not the deferred `Close` ran,
+and the reviewer proved by mutation that deleting the whole defer left the suite green. The line is
+the observable event; the test additionally requires it to precede
+`msg="data directory lock released"`, which pins the LIFO close-then-unlock order. Deleting it as
+"log noise" silently removes the only guard on scope item 4.

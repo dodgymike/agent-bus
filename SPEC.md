@@ -4,7 +4,7 @@
 
 ## Backlog
 
-- [x] TRIAGE-LOCK · TRIAGE-LOCK: backlog-triage mutex — process, P0
+- [~] TRIAGE-LOCK · TRIAGE-LOCK: backlog-triage mutex — process, P0, in progress
   Reusable mutex. in_progress = held, done = free. Whoever holds it is the only agent allowed to dispatch from the backlog. Acquire = compare-and-set on status via If-Match: "v<version>"; on 412 you lost the race, STOP, do not retry. Release = PATCH {status:done}. Do NOT use /complete on it. NEVER delete this task. Holder identity lives in status_note, never here.
   _Proof: n/a - process lock_
 - [ ] None · SEC: ed25519.Verify panics on wrong-size public key -- remote DoS across AUTH-1/CRYPTO-10/SIGN-2 call sites — security, P1
@@ -25,8 +25,11 @@
   
   This task should land alongside (or ahead of) AUTH-1/CRYPTO-10/SIGN-2's implementation since it is a prerequisite acceptance criterion on each of them, but is filed separately because it is a security trap spanning multiple call sites, not a single-task scope.
   _Proof: go test -race -run TestSafeVerify ./... ; go test -race -run TestEnroll_MalformedPublicKey ./internal/auth ; go test -race -run TestVerify_MalformedPublicKey ./internal/... -- all pass with no panic on wrong-size/nil public keys_
-- [~] None · Proof-command guard: a `-run` pattern that matches no test must FAIL, not pass vacuously — process, P0, in progress
+- [ ] None · PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes when a proof_cmd nests another proof-check.sh invocation of a go-test command — tooling, P2
+  Discovered 2026-08-02 during bookkeeping verification of the Proof-command guard task (84b76d5e). Composing `bash scripts/proof-check.sh --quiet "<a command that itself calls bash scripts/proof-check.sh --quiet 'go test ...'">` causes runaway recursive shim processes: the outer invocation's PATH-prepended go-shim directory persists into the nested bash -c subshell, so the inner proof-check.sh installs its OWN shim ahead of the outer one, the inner go test call resolves to a shim that itself re-invokes go test, and this recurses/forks until killed. Observed live: dozens of `/tmp/proof-check.*/bin/go test ...` and `tee -a .../gotest.log` processes accumulating; had to pkill -9 -f proof-check to recover. No repo file was touched, no lasting damage, but on a shared box this is a resource-exhaustion foot-gun for any agent that tries to write a self-checking or meta proof_cmd. Suggested direction (not investigated in depth): proof-check.sh should strip its own shim dir(s) from PATH before invoking a nested shell, or refuse/detect recursive invocation via a marker env var (e.g. if PROOF_CHECK_ACTIVE is already set, run the proof verbatim without installing a second shim). Reproduce: bash scripts/proof-check.sh --quiet 'bash scripts/proof-check.sh --quiet "go test -run TestNoSuchTest ./internal/wal"' (kill it within a few seconds, do not let it run to completion).
+- [x] None · Proof-command guard: a `-run` pattern that matches no test must FAIL, not pass vacuously — process, P0
   TRAP FOUND 2026-08-02 by backlog-triage. `go test -race -run TestCorruptTailTruncation ./internal/wal` prints "ok ... [no tests to run]" and EXITS 0. Every proof_cmd in this backlog is of that shape, so a task can be flipped to done with a proof command that proves literally nothing. Verified: DUR-4 and DUR-6 proofs both exit 0 today with zero tests run. Verified also that NO completed task is currently affected -- all 13 done tasks' proofs were re-run and each executes >0 tests -- so this is a PREVENTIVE guard, not a cleanup of existing corruption. Deliverable: (1) scripts/proof-check.sh -- runs a proof command and FAILS unless it can show at least one test actually ran (parse `-v` RUN/PASS output or `[no tests to run]`), while still supporting the non-Go proofs already in the backlog (test -s FILE, grep -q, scripts/bus-*.sh invocations) -- those must remain valid and must not be forced into a test-count check. (2) A sweep report of all ~70 proof_cmd values classifying each as test-based / file-assertion / wrapper-based / unverifiable, posted as a task note. (3) CONTRACTS.md entry for the script. Policy question to ANSWER in the deliverable: should completion require proof-check.sh rather than a bare command?
+  _Proof: test -x scripts/proof-check.sh && bash -n scripts/proof-check.sh && grep -q "scripts/proof-check.sh" CONTRACTS.md_
 - [x] None · scripts/spec-cloud.sh leaks SPEC_CLOUD_PASSWORD on the `aws` argv (readable via /proc/*/cmdline) — tooling, P2
   PRE-EXISTING, and outside the CORE-1..4 change wave -- filed here because the reviewer/security pass over that wave noticed it, not because that wave introduced it. scripts/spec-cloud.sh authenticates to Cognito by passing `PASSWORD=$SPEC_CLOUD_PASSWORD` as an element of the `aws` command's ARGV. Process arguments are world-readable on Linux via /proc/<pid>/cmdline, so for the lifetime of that aws invocation ANY local user on the box can read the plaintext Spec Server password -- a plain `ps auxww` or a tight loop over /proc is enough. It may also land in shell history, audit logs, or a process accounting record.
   
@@ -301,13 +304,19 @@
 
 ### EPIC DUR — Durability: WAL, two-phase commit, recovery, audit log
 
+- [ ] None · DUR-4-FU-DOCS: CONTRACTS.md/PROTOCOL.md do not document the WAL recovery surface (RepairTail/TailRepair/corrupt-tail policy) — docs, P1
+  CONTRACTS.md gained a WAL section in commit 6f22a99 but does not cover RepairTail, TailRepair, Recovered.Repaired, or the corrupt-tail policy in internal/wal/recover.go; PROTOCOL.md has no account of recovery/truncation semantics at all. Needs: (1) CONTRACTS.md entries for the RepairTail(path, kind, logger) function signature and the TailRepair{Path,Truncated,At,Removed,NextIndex,Reason} struct it returns, and for Recovered.Repaired; (2) a PROTOCOL.md section describing WHEN truncation is permitted (a single, provably-incomplete frame at EOF -- never more than one cut per start) and the operator-facing statement that ANY OTHER corruption (mid-file, or a complete-but-checksum-bad final frame) is a REFUSAL TO START, not a repair. RELATED, DO NOT DUPLICATE: task 804fa84c-e97b-4737-8866-801f87468da4 (docs, P1) already covers documenting the general startup-refusal-on-unknown-record behaviour from DUR-3, and bd3cc650-da3f-483d-a48d-321ab2a8d1dd (docs, P2) already covers fixing the stale CONTRACTS.md:55 record-type list -- read both first; this task is specifically the RepairTail/TailRepair API surface and truncation policy that neither of those covers. NOTE: internal/wal/recover.go is still under active review (see DUR-10, DUR-11) -- confirm the final shape of RepairTail/inspectTail against the current working tree before writing the docs, not against commit 6f22a99, since the API has already been rewritten once (laterRecordInTail -> inspectTail).
+- [ ] None · DUR-4-FU-DECISIONS: DECISIONS.md -- record the corrupt-tail truncation policy — durability, P1
+  Invariant 6 (append-only log) permits exactly one truncation per start, and DUR-4/DUR-10/DUR-11 made three judgement calls that CLAUDE.md requires be recorded in DECISIONS.md but which currently exist only in task journal notes: (1) truncation is permitted ONLY for a provably-incomplete frame at EOF -- a full-length frame that fails its own checksum is a FATAL STARTUP ERROR, not a repair, even though a naive read would call both cases a torn tail; (2) a NUL tail longer than one frame length is refused, not truncated; (3) the tail-safety proofs (inspectTail's index-window search and checksum-over-plausible-boundary check) are CRC-based, so they hold against random/media corruption but explicitly do NOT hold against an attacker with write access to the data directory -- a deliberate scope limit, not an oversight. Flagged independently by reviewer, security, and reliability-reviewer during the DUR-4 review chain (see DUR-4 task notes, and DUR-11's own text: "DESIGN CALL REQUIRED (record it in DECISIONS.md)"). Write this once DUR-10/DUR-11 land so the decision reflects the code that actually shipped, not an interim version.
+- [ ] None · DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start — durability, P2
+  "Refuse to start" is now the designed answer to several WAL damage classes (see internal/wal/recover.go, DUR-4/DUR-10/DUR-11) and there is no runbook or tooling to diagnose it. Needs: (1) a read-only WAL dumper (offset / index / record-type / length / CRC-ok, one line per frame) so an operator facing a refused start can see what is actually on disk without writing a throwaway Go program; (2) metrics/log counters for tail-repaired, repair-refused, and commit-records-discarded-by-repair, so a repair is visible in whatever the server already logs/exposes; (3) an alarm-worthy signature: a bus that repairs its tail on EVERY boot is the signature of failing media, and that pattern should be detectable from the counters in (2), not just from reading logs by hand. Ship as a scripts/bus-*.sh wrapper per invariant 7 (agents/operators never hand-construct this). Depends on DUR-9 (wiring wal.Open into the server) landing first, since there is no running-server surface to attach metrics/wrappers to yet.
 - [ ] None · Startup scans the WAL twice (soon three times) -- bound the cost — durability, P2
   Startup replay currently scans the WAL twice: the log.go replay pass and the writer.go open pass. DUR-4 (corrupt-tail detection) adds a third scan. This is fine at small WAL sizes but does not bound startup cost as the log grows. Relates to DUR-7 (snapshot/compaction follow-up), which is the real long-term fix for unbounded replay time -- this task is narrower: either (a) collapse the passes where safe, or (b) explicitly document/measure the cost and defer the real fix to DUR-7, whichever the implementer judges correct after reading the current pass structure post-DUR-4.
   _Proof: go test -bench=BenchmarkWALOpen ./internal/wal_
 - [x] DUR-2 · DUR-2: Two-phase prepare->commit write path — durability, P0
   Implement prepare(record)->commit(id) as two distinct fsynced WAL appends; in-memory state is applied ONLY after the commit record is durable. A response is never sent to the caller until commit-fsync completes (invariant 4). This is the write path every mutating route (enrol, send, broadcast, leave) goes through.
   _Proof: go test -race ./internal/wal/_
-- [x] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0
+- [ ] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0, blocked
   During replay, a checksum mismatch or short read at the END of the WAL (the torn record a crash mid-write leaves behind) is detected, logged, and the file is truncated at the last verified-good record boundary -- the ONLY truncation ever permitted (invariant 6). A corrupt record anywhere but the tail is a fatal startup error, not a truncation.
   _Proof: go test -race -run TestWALRepairTail ./internal/wal_
 - [x] DUR-8 · DUR-8: Exclusive lock on the bus data directory (stop two servers destroying one WAL) — durability, P0
@@ -326,7 +335,7 @@
 - [ ] None · Document the new startup-refusal behaviour when WAL replay hits an unknown record — docs, P1
   DUR-3 introduced a new way for a bus to refuse to boot: a WAL containing a record this code cannot interpret now FAILS STARTUP, where previously the server started with empty memory. That direction is correct (silent data loss is worse than a loud refusal to start), but it is an operator-visible behaviour change and needs to be documented -- PROTOCOL.md and/or the operator-facing notes should say: what triggers it, what the operator sees, and what recovery/remediation looks like. NOTE: CONTRACTS.md is being edited by another agent right now (parallel DUR wave) -- whoever picks this up must re-read CONTRACTS.md fresh before editing anything there to avoid clobbering a concurrent edit.
   _Proof: grep -n "unknown record\|refuses to start\|startup failure" PROTOCOL.md_
-- [ ] DUR-9 · DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose to handlers) — durability, P0
+- [~] DUR-9 · DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose to handlers) — durability, P0, in progress
   THE DURABILITY PLANE IS NOT WIRED TO THE SERVER. Verified 2026-08-02: `grep -rn 'internal/wal' cmd/ internal/httpapi/` matches only a COMMENT in cmd/agent-bus/main.go:165 -- there is no import; `wal.Open` has ZERO non-test callers in the whole repo; and internal/httpapi/server.go:101-102 registers exactly two routes (/healthz, /v1/info) beside a well-tested WAL library that no request path touches. DUR-1..DUR-4 are all `done` and NONE of their behaviour is live in the binary. That is the single biggest gap between what the backlog claims and what the process does.
   
   SCOPE (this task only wires what already exists -- do NOT add new WAL features):
@@ -359,20 +368,76 @@
 - [ ] DUR-7 · DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) — durability, P3
   Low-priority follow-up. As the WAL grows unbounded, startup replay time grows with it; add periodic snapshotting of in-memory state plus safe truncation of the WAL prefix the snapshot covers, so recovery time is bounded by (snapshot load + tail replay) rather than full history. Not required for correctness, only for long-run startup latency.
   _Proof: go test -race -run TestSnapshotCompaction ./internal/wal_
-- [ ] DUR-10 · DUR-10: Review and land the non-final-frame truncation veto in RepairTail (silent loss of acknowledged COMMIT records) — durability, P0
-  REVIEW-AND-LAND, NOT WRITE-FROM-SCRATCH. The fix ALREADY EXISTS in the working tree, UNCOMMITTED and unstaged by its author, covered by NO task and seen by NO reviewer or security gate. It must not be swept into another agent's commit unrecorded. This task exists to put the mandated reviewer AND security gates on internal/wal/recover.go and then land it as ONE clean commit.
+- [~] DUR-10 · DUR-10: Review the RepairTail truncation veto -- half is already in `main` UNREVIEWED (landed inside DUR-8's commit d06c704) and the rest has been rewritten since — durability, P0, in progress
+  REVIEW CODE THAT IS ALREADY PARTLY IN `main` AND IS STILL MOVING. This task's premise has been
+  CORRECTED TWICE -- read this paragraph before anything else. It was originally filed (by spec-keeper on behalf of
+  backlog-triage, pass 4b) as "review-and-land an uncommitted fix". That framing is now WRONG on both halves: the code
+  is no longer uncommitted, and what is in the tree is no longer the code that was described. See the kind=response
+  note of 2026-08-02 for the correction and who is responsible for the original error.
   
-  THE BUG (P0 — silent data loss on the append-only log). truncatableTail in internal/wal/recover.go reasons ONLY from the damaged frame's own header. A single flipped bit in a NON-FINAL frame's length field that overshoots EOF but stays <= MaxPayloadSize is byte-for-byte the same shape as a genuine torn tail. Recovery therefore started SUCCESSFULLY and silently deleted checksum-valid COMMIT records. Reproduced against HEAD at 10 single-bit offsets [17 121 160 236 275 276 408 409 447 448]; at offset 17 recovery served 0 of 4 acknowledged entries (RepairTail Truncated:true At:16 Removed:573). This violates invariant 4 (nothing acknowledged is ever lost) and invariant 6 (truncation only of a verified-corrupt tail).
+  WHAT IS ACTUALLY TRUE NOW (each fact verified first-hand by spec-keeper, commands quoted).
   
-  THE FIX (already in the tree). New laterRecordInTail + tailHasRecordsAfterIt in internal/wal/recover.go (currently at lines ~281 and ~334), wired into RepairTail at ~line 136 as a SECOND gate applied ONLY AFTER truncatableTail has already said 'tail-shaped'. If a complete, checksum-verifying record begins inside the region the cut would discard, recovery REFUSES TO START (fatal) instead of cutting.
+  (1) HALF OF IT IS ALREADY IN `main`, COMMITTED WITHOUT ANY REVIEW, UNDER ANOTHER TASK'S TITLE.
+  `git show --stat d06c704` -- a commit titled "Exclusive lock on the bus data directory (DUR-8)" -- includes
+  internal/wal/recover.go (+152), internal/wal/format.go (+22), internal/wal/doc.go (+8),
+  internal/wal/crash_injection_test.go (+616) and internal/wal/recover_test.go (+102). None of that is DUR-8's work.
+  `git log --oneline -- internal/wal/recover.go` returns exactly two commits: 6f22a99 (DUR-4) and d06c704. So the
+  truncation change rode into main under an unrelated task's title. DUR-8's own agents said so: DUR-8's reviewer note
+  records verbatim "Deliberately ignored the in-flight internal/wal/** ... belonging to parallel agents", and DUR-8's
+  security audit lists only internal/dirlock files in its scope. THE PRODUCTION WAL CHANGE IN `main` HAS THEREFORE HAD
+  NO REVIEWER GATE AND NO SECURITY GATE. That -- not "landing a patch" -- is the debt this task exists to pay.
   
-  WHY IT IS SAFE TO LAND. It is strictly MORE CONSERVATIVE: backlog-triage diffed it with comments stripped and confirmed truncatableTail's own return logic has ZERO removed lines — the change is purely additive, a veto. The set of truncated cases is a strict SUBSET of before; no case that previously refused now truncates. internal/wal/format.go and internal/wal/doc.go changes are COMMENT/PROSE ONLY — no on-disk format change (CorruptError is an in-memory error type, not a disk record).
+  (2) IT HAS SINCE BEEN SUBSTANTIALLY REWRITTEN AGAIN, AND THAT REWRITE IS UNCOMMITTED.
+  `git diff --cached --stat internal/wal/` shows a further recover.go +311/-, recover_test.go +141, doc.go +13
+  (staged; `git diff` unstaged for internal/wal is empty, so the working tree == the staged version).
+  The function the original description told a reviewer to look at, `laterRecordInTail`, NO LONGER EXISTS. It has been
+  refactored into `inspectTail` (internal/wal/recover.go:347), with `tailHasRecordsAfterIt` now at :461 and
+  `truncatableTail` at :244; RepairTail is at :118 and calls inspectTail as the second gate at ~:150.
+  A REVIEWER MUST REVIEW THE CURRENT WORKING TREE, NOT MERELY THE DIFF AT d06c704. Reviewing d06c704 alone would
+  review code that has already been replaced.
   
-  EVIDENCE ALREADY GATHERED (green): go test -race -run TestWALRepairTail ./internal/wal ok; go test -race -run TestCrashInjection ./internal/wal ok; full package ok. The permanent regression net is TestCrashInjectionSingleBitCorruptionSweep (internal/wal/crash_injection_test.go:317), which generalises the 3 hand-picked cases to EVERY byte offset.
+  THE BUG BEING FIXED (unchanged, P0 -- silent loss of acknowledged records on the append-only log).
+  truncatableTail decides from the damaged frame's OWN header. A single flipped bit in a NON-FINAL frame's length
+  field that overshoots EOF but stays <= MaxPayloadSize is byte-for-byte the same shape as a genuine torn tail, so
+  recovery started SUCCESSFULLY and silently deleted checksum-valid COMMIT records. Reproduced against the pre-fix
+  sources at 10 single-bit offsets [17 121 160 236 275 276 408 409 447 448]; at offset 17 recovery served 0 of 4
+  acknowledged entries (RepairTail Truncated:true At:16 Removed:573). Violates invariant 4 (nothing acknowledged is
+  ever lost) and invariant 6 (truncation only of a verified-corrupt tail).
   
-  WHAT THIS TASK REQUIRES: (1) reviewer gate on internal/wal/recover.go — confirm the veto is additive and that refusing to start is the right failure mode versus truncating; (2) security gate — a remote-influenced WAL byte must not be able to turn recovery into either data loss OR a permanent denial of service on startup; (3) ONE clean logical commit of the recover.go/format.go/doc.go changes; (4) CONTRACTS.md / PROTOCOL.md touch-up only if the recovery contract's described behaviour moved.
+  THE SHAPE OF THE FIX AS IT NOW STANDS (describes `inspectTail`, the CURRENT code, not the superseded
+  laterRecordInTail). RepairTail applies inspectTail as a SECOND gate, only AFTER truncatableTail has already said
+  "tail-shaped". inspectTail reads the region [at, size) that the cut would discard and applies two proofs:
+  (a) lengthOnlyDamage -- recompute the damaged frame's checksum on the hypothesis that its true payload is the bytes
+  actually present; if it verifies, the record is COMPLETE and only its length field is corrupt, so it may have been
+  fsynced and acknowledged; (b) a forward search for any complete, checksum-verifying record inside the discard region
+  whose INDEX continues the file's sequence. Anchoring (b) on record index rather than on end-of-file is a DELIBERATE
+  change from the earlier version and the code comments say so. A candidate cap (maxTailCandidates=4096) bounds the
+  checksum work because the region is attacker-influenced. Any refusal is logged and returned as a fatal error:
+  recovery REFUSES TO START rather than cutting.
   
-  CROSS-REF: modifies the very file DUR-4 (Corrupt-tail detection & truncation) was completed against at commit 6f22a99; DUR-4's own reviewer note recorded CHANGES-REQUIRED on that commit. Proof verified with scripts/proof-check.sh --quiet: verdict=PASS class=test tests_run=40 top_level=14 skipped=1 failed=0 (NOT vacuous).
+  WHAT THIS TASK REQUIRES (unchanged in substance; the target has moved).
+  (1) REVIEWER GATE on the CURRENT internal/wal/recover.go working tree -- is the veto still strictly additive versus
+  6f22a99, is refusing-to-start the right failure mode versus truncating, and does the rewrite from laterRecordInTail
+  to inspectTail preserve the strict-subset property that justified landing it at all? The "purely additive, zero
+  removed lines in truncatableTail" argument was checked against the FIRST version and MUST BE RE-CHECKED against the
+  +311/- rewrite; do not carry it forward on trust.
+  (2) SECURITY GATE -- a remote-influenced WAL byte must not be able to turn recovery into either data loss OR a
+  permanent startup denial of service. The maxTailCandidates cap and the attacker-influenced-region reasoning in
+  inspectTail's comments are squarely in scope.
+  (3) ONE clean logical commit of the remaining uncommitted recover.go/recover_test.go/doc.go changes, with a message
+  that says plainly that the earlier half landed under DUR-8's title.
+  (4) CONTRACTS.md / PROTOCOL.md touch-up only if the described recovery contract moved.
+  
+  CROSS-REFS. DUR-4 (done at 6f22a99) is the task this file was last completed against, and its reviewer verdict there
+  was CHANGES-REQUIRED, still unresolved. DUR-6 (done at e63ced5) owns the TESTS that ride with this code and
+  explicitly does NOT cover this production change. DUR-11 (884d3da4-bceb-4ac2-93a2-e147c77f9dca) carries two HIGH
+  findings this fix may or may not still leave open -- they were written against laterRecordInTail and must be
+  re-probed against inspectTail. Do not let DUR-10's reviewer re-litigate DUR-11's scope.
+  
+  PROOF RE-VERIFIED against the CURRENT working tree by spec-keeper on 2026-08-02 after the rewrite:
+  scripts/proof-check.sh --quiet "go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal" ->
+  verdict=PASS class=test exit=0 tests_run=42 top_level=14 skipped=1 failed=0 empty_pkgs=0. Not vacuous. The permanent
+  regression net is TestCrashInjectionSingleBitCorruptionSweep in internal/wal/crash_injection_test.go.
   _Proof: go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal_
 - [ ] None · CONTRACTS.md:55 is stale -- says no WAL record types/wire version exist yet, false as of DUR-1/2/3 — docs, P2
   Verified: CONTRACTS.md:55 still reads "None yet -- no durable store, no WAL record types, no wire protocol version exists in this wave," which is false as of DUR-1/DUR-2/DUR-3 landing: record types 1=PREPARE, 2=COMMIT, 3=ABORT, 4=AUDIT, and ondisk-format-version=1 are all reserved (via the reservations API) and in use in the codebase. Update that section to list them accurately. FLAG: CONTRACTS.md is being edited by another agent right now as part of the parallel DUR wave -- re-read the file fresh before editing to avoid clobbering a concurrent change; this is a targeted one-section fix, not a full rewrite.
@@ -385,7 +450,7 @@
   
   Filed by the DUR-8 feature-runner. Related to DUR-9, which will edit the same sequence in run().
   _Proof: TBD by whoever picks this up -- a crash/shutdown-injection test asserting the lock is held until all in-flight handlers return, plus a dirlock test asserting Acquire refuses a non-regular file at the lock path_
-- [~] DUR-6 · DUR-6: Crash-injection test suite for the write path — durability, P0, in progress
+- [x] DUR-6 · DUR-6: Crash-injection test suite for the write path — durability, P0
   A test harness that writes, then simulates a crash (kill / truncate / corrupt the file at a chosen byte offset) at each stage of the two-phase write path -- before prepare fsync, between prepare and commit, mid-commit-write, after commit fsync -- and asserts recovery always yields a valid PREFIX of the accepted history: nothing acknowledged is ever lost, nothing unacknowledged is ever visible. The load-bearing evidence for invariants 4/5.
   _Proof: go test -race -run 'TestCrashInjection|TestWALCrash|TestWALReplayCrash' ./internal/wal_
 - [x] DUR-3 · DUR-3: Replay/recovery on start — durability, P0
