@@ -397,3 +397,81 @@ parts `crypto/ed25519` does *not* wrap:
   cases — irrelevant to our threat model, as noted above.
 - **Always `ed25519.GenerateKey(nil)`** so key generation draws from `crypto/rand`. Never seed from a
   caller-supplied reader.
+
+---
+
+## 2026-08-02 — The data-directory lock is `internal/dirlock`, taken at process startup, NOT inside `wal.Open` (DUR-8)
+
+**Context.** Nothing in code stopped two servers being started on one data directory.
+`internal/wal/log.go`'s replay-vs-open offset agreement check says so in its own words: it "IS NOT A
+LOCK", it only catches a change *inside the window between the two passes*, and two servers "can both
+replay the same bytes, both agree, and then both append at the same offsets, which destroys the log".
+The only protection was a convention line in `CLAUDE.md`, enforced by nothing. The failure mode is
+silent and unrecoverable — it destroys the append-only audit trail that invariants 4, 5 and 6 all
+rest on.
+
+**Decision.** A new stdlib-only package `internal/dirlock` takes an exclusive advisory
+`syscall.Flock(LOCK_EX|LOCK_NB)` on `<data-dir>/bus.lock`, and `cmd/agent-bus`'s `run()` acquires it
+immediately after `os.MkdirAll(cfg.DataDir, 0o700)` and **before** `ids.LoadOrCreateBusID` — before
+any read or write of the data dir whatsoever.
+
+**This deviates from the task text**, which said "the lock goes in `internal/wal/log.go` Open".
+Placing it at process startup instead is strictly stronger and was chosen deliberately:
+
+- `wal.Open` is not the first thing to touch the data directory. `ids.LoadOrCreateBusID` already
+  reads and writes it, and a lock inside `wal.Open` would leave that outside the lock.
+- The guarantee we want is "one server per data directory", which is a property of the PROCESS, not
+  of one file handle. A lock scoped to the WAL would have to be re-reasoned about for every future
+  store that lands in the same directory.
+- It keeps `internal/wal` free of a process-lifetime global, and the lock testable on its own.
+
+Recorded because `CLAUDE.md` step 8 requires a deviation from the spec to be written down rather
+than discovered later in a diff.
+
+**Sub-decisions, each of which is a way this could have gone wrong:**
+
+- **Non-blocking only.** `LOCK_NB`, no blocking variant. Every caller wants "refuse to start"; a bus
+  that waits for another bus to exit is a confusing failure mode, not a feature. Fail fast, exit 1,
+  name the directory and the probable holder pid.
+- **`Release` NEVER unlinks the lock file.** Unlinking races: process B can still hold its descriptor
+  (and its flock) on the now-unlinked inode while process C creates a *fresh* file at the same path
+  and locks that — two holders on one data directory, which is the exact disaster the lock exists to
+  prevent. Leaving the file in place means everyone always locks the same inode. The file persisting
+  forever is correct and intended.
+- **No stale-lock cleanup and no pid liveness probe.** The kernel drops an flock when the holding
+  process dies, by any route including SIGKILL, so a crash leaves a lock FILE but no LOCK. Probing
+  whether a recorded pid is alive and unlinking on "no" is how a locking scheme grows two holders —
+  pids are recycled, and the probe-then-unlink is a race with every other starter. Asserted, not
+  assumed, by `TestDirLockReleasedAfterSIGKILL`.
+- **The recorded pid is advisory and never load-bearing.** It exists so a refusal can say "try
+  `ps 4242`". It is read *after* our own lock failed, so it may be stale; it is never used for
+  control flow, never signalled, and never used to decide whether to unlink.
+- **`bus.lock`, deliberately not `*.log`.** `wal.log` is the WAL and `.gitignore` ignores `*.log`, so
+  a `.log`-suffixed lock file would be one glob away from being read as log data, and invisible in
+  `git status`. It is not durable state; replay never reads it.
+- **`O_NOFOLLOW` on the lock file** (from the security pass). Acquire truncates the file once the
+  lock is its own; without `O_NOFOLLOW` a symlink planted at `<dir>/bus.lock` turns that into a
+  "truncate any file the bus user can write, and create it if missing" primitive whose damage lands
+  outside the data dir. Planting it already requires being the bus user, so no privilege boundary is
+  crossed — the point is to keep the blast radius of a compromised data dir inside that dir, for the
+  cost of one flag.
+- **No build tag on `dirlock.go`**, even though it uses `syscall.Flock` and is therefore Unix-only.
+  A `//go:build unix` tag plus a no-op fallback would mean a non-Unix build silently ships a server
+  with NO data-directory locking. A compile error is the honest outcome; the project targets Linux.
+
+**Consequences.**
+
+- Every future durable store added to the data directory is automatically inside the lock, provided
+  it is opened from `run()` after the acquire. DUR-9 (`wal.Open` in `run()`) must keep that ordering;
+  `TestRunRefusesALockedDataDir` guards it by asserting a refused `run()` leaves `bus.lock` as the
+  *only* entry in the data dir.
+- The lock is **advisory**: it excludes other processes that also flock the file — in practice other
+  `agent-bus` servers — not `rm`, `cp`, an editor or a backup job. It is a guard against the
+  realistic accident, not a mandatory-locking security control.
+- **flock over NFS before Linux 2.6.12, and on some network filesystems, is unreliable.** An operator
+  who puts a data directory on such a mount gets no protection. We deliberately do not try to solve
+  that: the answer is "do not run the durable store on a filesystem whose locking you do not trust",
+  not a cleverer lock (invariant 8).
+- The returned `*Lock` must stay reachable for as long as the lock is wanted. `_, err :=
+  dirlock.Acquire(dir)` is a silent bug: the `*os.File` finalizer would close the descriptor at the
+  next GC and quietly hand the directory to a second server. Documented at `Acquire`.

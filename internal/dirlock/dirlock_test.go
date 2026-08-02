@@ -230,3 +230,75 @@ func TestBusyErrorMessageWithoutPID(t *testing.T) {
 		t.Errorf("BusyError must satisfy errors.Is(err, ErrLocked)")
 	}
 }
+
+// TestAcquireRefusesASymlinkedLockFile pins the O_NOFOLLOW hardening from the
+// DUR-8 security pass.
+//
+// Acquire TRUNCATES the lock file once the lock is its own. Without O_NOFOLLOW,
+// a symlink planted at <dir>/bus.lock would make that a "truncate any file the
+// bus user can write -- and create it if it does not exist" primitive, with the
+// damage landing OUTSIDE the data directory. Planting the symlink already
+// requires being the bus user (the data dir is 0o700, and that user can shred
+// wal.log directly), so no privilege boundary is crossed; the point is to keep
+// the blast radius of a compromised data dir inside the data dir.
+//
+// Both halves matter. The dangling-symlink case is the destructive one: it
+// CREATES the victim file, so a test that only covered an existing target would
+// miss the worse half.
+func TestAcquireRefusesASymlinkedLockFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		dangles bool // the symlink target does not exist yet
+	}{
+		{name: "symlink to an existing file", dangles: false},
+		{name: "dangling symlink", dangles: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			dir := filepath.Join(base, "data")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatalf("mkdir data dir: %v", err)
+			}
+
+			victim := filepath.Join(base, "victim")
+			const victimBody = "PRECIOUS"
+			if !tc.dangles {
+				if err := os.WriteFile(victim, []byte(victimBody), 0o600); err != nil {
+					t.Fatalf("write victim: %v", err)
+				}
+			}
+			if err := os.Symlink(victim, filepath.Join(dir, LockFileName)); err != nil {
+				t.Fatalf("plant symlink: %v", err)
+			}
+
+			lk, err := Acquire(dir)
+			if err == nil {
+				_ = lk.Release()
+				t.Fatalf("Acquire followed a symlink at %s: it must refuse, not write through it", LockFileName)
+			}
+			// It must fail as a lock-file problem, NOT as ErrLocked: nothing is
+			// holding this directory, and reporting a phantom holder would send
+			// an operator hunting a process that does not exist.
+			if errors.Is(err, ErrLocked) {
+				t.Errorf("Acquire = %v, want a lock-file error rather than ErrLocked: nothing holds this dir", err)
+			}
+
+			if tc.dangles {
+				if _, err := os.Stat(victim); !os.IsNotExist(err) {
+					t.Fatalf("Acquire CREATED the dangling symlink's target %s (stat err = %v)", victim, err)
+				}
+				return
+			}
+			body, rerr := os.ReadFile(victim)
+			if rerr != nil {
+				t.Fatalf("read victim: %v", rerr)
+			}
+			if string(body) != victimBody {
+				t.Fatalf("Acquire clobbered %s through a symlink: contents = %q, want %q", victim, body, victimBody)
+			}
+		})
+	}
+}
