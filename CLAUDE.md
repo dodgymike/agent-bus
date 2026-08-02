@@ -165,6 +165,13 @@ Run the NARROWEST relevant check: `go test -race -run <Name> ./internal/<pkg>`, 
 `ok ... [no tests to run]` and EXITS 0, so a proof command naming a test that was never written
 looks identical to a passing one. Run proof commands through `bash scripts/proof-check.sh '<cmd>'`,
 which reports PASS / FAIL / VACUOUS / UNVERIFIABLE, and quote its verdict rather than a bare exit
+code. A task must never be completed on a VACUOUS proof, and **a task with NO `proof_cmd` may not be
+completed at all** — a missing proof is worse than a vacuous one, since it leaves no record of what
+would even count as evidence. Completing a task requires RUNNING `proof-check.sh` and quoting its
+verdict, not storing a command nobody executed. For anything agent-facing, ALSO exercise it the way an agent would:
+through `scripts/bus-*.sh` against a running server, not through a hand-written `curl`. If the
+wrapper doesn't work, the feature doesn't work.
+
 **`grep`-based proofs are the MORE dangerous family, and CLAUDE.md previously warned only about
 tests.** A doc proof like `grep -n '8080' README.md CONTRACTS.md | grep -qi localhost && echo DOCS_OK`
 passes on an INCIDENTAL match somewhere else in the file — in the real case, a pre-existing
@@ -172,13 +179,6 @@ passes on an INCIDENTAL match somewhere else in the file — in the real case, a
 exact file two reviewers had blocked on. A doc proof must pin the specific line it claims to prove
 (the table row, the field name, the artefact name), and you must confirm it is **RED before the fix**.
 A proof that was never observed failing is not evidence that it can fail.
-
-code. A task must never be completed on a VACUOUS proof, and **a task with NO `proof_cmd` may not be
-completed at all** — a missing proof is worse than a vacuous one, since it leaves no record of what
-would even count as evidence. Completing a task requires RUNNING `proof-check.sh` and quoting its
-verdict, not storing a command nobody executed. For anything agent-facing, ALSO exercise it the way an agent would:
-through `scripts/bus-*.sh` against a running server, not through a hand-written `curl`. If the
-wrapper doesn't work, the feature doesn't work.
 
 If a test fails, you are NOT done. Diagnose whether YOUR change caused it or it is pre-existing,
 name the exact failing test, and report the verdict. NEVER hand-wave "pre-existing failures" to
