@@ -1354,3 +1354,304 @@ verdict PASS); `docker compose up -d` reaching `(healthy)` via `docker compose p
 answered from inside the container; the bus id surviving a real `docker compose down` (no `-v`)
 followed by `up -d`, proving the named volume — not just the container — carries the durable state
 across a replace, which is the whole point of invariants 4/5/6 reaching the deployment layer.
+
+---
+
+## 2026-08-02 — The client is `client/` + `cmd/busctl`: six decisions settling CLI-1/CLI-2
+
+CLI-1 left exactly two questions open ("the exact package path and binary name") and CLI-2's
+implementation forced four more. All six are recorded here because each one is cheap now and
+expensive later.
+
+### 1. The package is top-level `client/`; the binary is `cmd/busctl`
+
+`github.com/dodgymike/agent-bus/client`, imported by `cmd/busctl`. The package is **not** under
+`internal/` — that was already decided (invariant 7's third audience is an agent that EMBEDS the
+client, and Go forbids another module importing an `internal/` path), and this only settles the
+name. The binary is separate from `cmd/agent-bus` so the server image never ships the client, and
+CLI-1's proof mechanically enforces the boundary:
+
+```
+! go list -deps ./cmd/busctl | grep -q 'agent-bus/internal/'
+```
+
+**Known collision, flagged not resolved:** `busctl` is also a systemd binary (the D-Bus
+introspection tool) present on most Linux hosts, so `go install ./cmd/busctl` shadows it on `PATH`.
+The directory name was assigned by the orchestrator for this wave and is kept; whether the INSTALLED
+name should differ (`agent-busctl`, `abus`) is a naming question for the user, filed as a follow-up
+rather than decided unilaterally. Nothing in the code depends on the binary's installed name.
+
+### 2. Session tokens are NEVER written to disk
+
+The Ed25519 private key is persisted (it is the identity). The session token is not.
+
+It is a bearer credential, it lasts at most an hour, and it does not survive a bus restart, so
+persisting it would trade "a stealable credential at rest, in a file that outlives the process" for
+"two saved round trips per invocation". Each `busctl` process performs its own
+begin/sign/complete handshake. `client.SessionInfo` therefore has **no token field at all** — not
+even one tagged `json:"-"`, because a field that exists can still be reached by a reflection walk or
+a struct copy into someone else's logging type.
+
+### 3. `--invite` is REJECTED locally, not guessed onto the wire
+
+Enrolment is becoming invite-only (invariant 3) and the CLI needs the seam now. But the invite's
+wire shape is settled by task `ENROL-SHAPE`, and `/v1/enroll` is explicitly UNSTABLE until that,
+certificate binding and POPKEY all land.
+
+So `busctl enrol --invite <blob>` fails immediately, locally, with a remedial message naming
+`ENROL-SHAPE` — it does **not** invent a JSON field called `invite` and send it. Choosing a wire
+field name ahead of the task that owns it is the same mistake as hand-picking an on-disk
+record-type number: **the shape is reserved, not chosen.** The seam is `client.EnrolOptions.Invite`
+plus one construction site in `Enrol`; when ENROL-SHAPE settles, the field name lands in one place.
+
+### 4. Enrolment key material is persisted BEFORE the request, and idempotency records are scoped to (key, bus URL)
+
+Found by smoke-testing the first implementation, which was wrong in a way no unit test of it would
+have caught: `busctl enrol --idempotency-key K` run twice generated a **fresh key pair each time**,
+so the second attempt sent the same key with a different `public_key`. Invariant 10 classifies that
+as "same key + DIFFERENT payload" — a protocol violation for which the server returns 409 **and
+disconnects the client**. The flag as originally shipped could only ever be used incorrectly.
+
+Fixed by ordering the writes the way invariant 4 orders the server's:
+
+- the seed is written to the store as a `pending` record **before** `/v1/enroll` is called, and
+  promoted to a full credential in one locked read-modify-write when the bus answers;
+- a retry with the same key **reuses that key material**, so the payload is byte-identical and the
+  retry is legitimate;
+- the accepted key is **kept on the credential**, so re-running a completed enrolment is answered
+  from the store (`"replayed": true`) with no HTTP request at all;
+- the same key with different content on the same bus is refused **locally**, because the bus's
+  answer costs a connection and teaches the caller nothing the local message does not.
+
+Records are scoped to **(idempotency key, bus URL)**, matching the server's own scoping: a second
+bus has never seen the key, so presenting it there is a fresh enrolment, not a conflict.
+
+This also closes a data-loss window that would otherwise have been documented and lived with: a
+process killed between the bus minting an id and the local save used to lose the private key
+permanently, leaving a roster slot that can never authenticate and cannot be cleaned up until
+AUTH-4's revocation surface exists.
+
+### 5. Exit codes are a contract, and the mapping lives in the PACKAGE
+
+Nine codes (`0` ok, `1` internal, `2` usage, `3` config/identity, `4` auth, `5` network, `6` server,
+`7` rejected, `8` nothing-to-report), enumerated in `CONTRACTS-CLI.md`. `2` is usage to match Go's
+`flag` package and `cmd/agent-bus`.
+
+`client.ExitCode(err)` performs the mapping, in the importable package rather than in `cmd/`, so an
+agent that embeds the client and re-exposes it as its own subprocess produces exactly the documented
+codes without copying a switch statement that will drift. Same reasoning for `client.Kind`: the set
+is CLOSED, and anything that does not fit is `internal` rather than a new member invented at a call
+site.
+
+### 6. The client transport sends nothing through a proxy
+
+`http.Transport.Proxy` is `nil`, not `http.ProxyFromEnvironment`. Every request on this surface
+carries either a bearer token or a signature over a server-chosen challenge, and a proxy terminates
+the connection carrying it. Once certificates are pinned (invariant 11) a proxy would also present a
+certificate the invite never named, so honouring `HTTP_PROXY` could only produce either a confusing
+failure or a weakened check. A bus is reached directly.
+
+`newHTTPClient` is the single seam where any transport or `tls.Config` is constructed, so invariant
+11's pinning lands there and nowhere else. `InsecureSkipVerify` is not set, is not reachable through
+`client.Config`, and a test asserts it appears in no `.go` file under `client/` or `cmd/busctl/`.
+
+**Consequence for `Config.HTTPClient`:** supplying one bypasses that seam, and therefore bypasses
+pinning. It is kept as the escape hatch for embedders who already own an instrumented transport, and
+documented as such — it is explicitly not a supported way to relax verification, and no `Config`
+field will ever be added that is.
+
+## 2026-08-02 — MSG/POLL: the messaging core (four decisions, two of them narrowings)
+
+The wave that turned a durable store into a message bus: `GET /v1/agents`, `POST /v1/broadcast`,
+`POST /v1/send`, `GET /v1/messages`, `GET /v1/wait`. Three of the four items below exist because a
+gate found something; they are recorded here rather than in a comment because two of them narrow a
+standing invariant, which CLAUDE.md requires be dated and argued in this file.
+
+### 1. Delivery is AT-LEAST-ONCE, over ONE ordered stream with a per-agent cursor
+
+Not per-agent queues. A broadcast into N queues has to be copied N times, an agent that enrols later
+cannot read back through the retention window, and "one broadcast wakes every eligible waiter exactly
+once" then depends on N queues agreeing rather than on one order everyone reads with their own
+cursor. One stream plus a cursor is the simpler construction (invariant 8) and it is what makes the
+delivery guarantee statable at all.
+
+The cursor is opaque, versioned, bound to the agent it was issued to — and **deliberately not
+signed**. Forging one for yourself replays or skips your own messages, which at-least-once already
+permits and which is self-inflicted either way; forging one for another agent gains nothing, because
+visibility is filtered with the AUTHENTICATED PRINCIPAL and the filter never consults the cursor. A
+MAC would protect a value whose integrity buys no security property, at the cost of a key to manage
+and rotate. Invariants 8 and 9 both point away from adding it.
+
+### 2. The ENROLMENT EPOCH — a NEW restriction, added because this wave opened a hole
+
+**Decision: a message sent before an agent's own enrolment is never delivered to it.**
+
+The security gate found the hole, and it is worth stating plainly because it is a case of one epic
+invalidating another's written justification. `cmd/agent-bus/main.go` allocates agent-id suffixes
+from a FRESH counter every start, justified by "nothing in this path writes an agent id to disk".
+That was true when it was written. It stopped being true in this wave: `store.Record` persists
+`sender` and `recipients` as fully-qualified agent ids, `hub.publish` writes them through the WAL,
+`hub.Apply` replays them, and the WAL never compacts. So after a restart the counter restarts at 1,
+and anyone who reaches the (still unauthenticated) `/v1/enroll` and guesses the name `alpha` is
+minted `<bus>.alpha-1` — the id the previous alpha held — and would have read a full retention
+window of that agent's direct messages.
+
+The bus cannot tell those two agents apart BY ID, because an id is exactly what is being reused. It
+can tell them apart BY TIME. No legitimate agent needs traffic that predates its own enrolment, and
+after a restart every enrolment is newer than every recovered message, so the hole closes at no cost
+to a correct client.
+
+Three things about this were deliberate:
+
+- **It is not a temporary patch to be undone.** Once AUTH-3 makes enrolment durable, the roster
+  restores each agent's ORIGINAL enrolment instant, and a genuinely continuous agent keeps seeing
+  everything sent since it enrolled. The rule is correct in both worlds.
+- **It does not fix identity CONTINUITY, and is not claimed to.** The new holder of a reused id
+  reads none of the old traffic, but its FUTURE messages are attributed to an id with a prior
+  history. `hub.NoteEnrolment` logs that at ERROR — silence would be the defect — and
+  `MSG-FU-SUFFIXFLOOR` carries the real fix.
+- **The read paths FAIL CLOSED for an unknown agent** (403, not an empty batch). A zero epoch
+  disables the check, so an unknown reader read with no epoch would be served EVERYTHING rather than
+  nothing. The error and the permissive default must not be the same value.
+
+Proved on a running server, not just in tests: seed a DM from alpha to beta, restart, enrol the name
+`beta` with a different keypair, get the id `<bus>.beta-1` back, and read 0 messages — while the log
+reports the message store rebuilt with that message still in it. Not delivered, not lost.
+
+### 3. Idempotency-key retention is the MESSAGE retention window — a narrowing of item 9 above
+
+Item 9 of the 2026-08-02 CLI decisions says keys "are retained for a bounded window and fail closed —
+a retry arriving after the window is rejected, never silently re-applied". The messaging path honours
+the half that carries the weight and narrows the other half, on purpose:
+
+- **HONOURED: never evict under pressure.** At `hub.MaxIdempotencyEntries` the send is REFUSED (503),
+  never accepted by making room. Evicting a remembered key turns the next retry of it into a second
+  message, and a refused send is recoverable where a duplicated one is not. Same posture as
+  `auth.recordIdempotent`.
+- **NARROWED: a key expires with its message.** A retry arriving after the retention window (a day)
+  is treated as a fresh send and produces a second message rather than being rejected. Rejecting it
+  would mean remembering every key ever used, for ever — the unbounded growth the cap exists to
+  prevent — since a key that has been forgotten is indistinguishable from one never seen.
+
+The window is orders of magnitude beyond any plausible client retry, and tying key lifetime to
+message lifetime means the two cannot drift apart. `IDEM-11` owns the cross-cutting layer and may
+revisit this; until then `CONTRACTS-HTTP.md` states the narrowed behaviour explicitly rather than
+letting the stricter sentence stand while the code does something else.
+
+### 4. Message ids may repeat after a WAL QUARANTINE, and after damage deeper than a torn tail
+
+The sequence floor is derived from the durable log's own high-water index
+(`wal.Recovered.NextIndex - 1`). The argument that this bounds every sequence is by counting: each
+message burns ONE sequence and at least TWO WAL indices, so the indices outrun the sequences and the
+gap only widens. `hub.publish` ASSERTS it per message (`PrepareIndex >= seq`) and poisons the hub if
+it ever fails, rather than trusting the counting argument to survive future edits.
+
+The argument depends on the index high-water mark surviving, and there are two cases where it does
+not:
+
+- **Quarantine.** Recovery moves an unreadable log aside and starts a FRESH one whose index restarts
+  near 1, while the quarantined file holds sequences far above it.
+- **Damage deeper than a torn tail.** Measured, not assumed: over a 585-offset truncation sweep of a
+  2523-byte WAL, 70 offsets regressed the sequence — every cut losing more than half the records.
+  Inside the genuine crash window (a tear between two fsyncs) the property HOLDS and is asserted.
+
+This narrows invariant 1, which says ids are never reused including across restarts, and the
+narrowing needs to be recorded rather than implied by invariant 6's availability decision — that
+decision is about DISCARDING RECORDS and says nothing about REUSING IDS. The trade is the same one
+invariant 6 made: a bus held hostage by one bad sector is worse than a bus that has lost something
+and said so. So the bus starts, and `hub.Open` reports the exposure at ERROR naming the quarantine
+path and the resumed floor. **Silence would be the defect; the discard is not.**
+
+The real fix is a separately-persisted, fsynced sequence high-water mark written ahead of the
+sequence it authorises — `MSG-FU-SEQHIGHWATER`, which also needs a RESERVED on-disk record-type
+number. Until it lands, an operator who sees the quarantine line should expect repeated message ids
+and treat the quarantined file as the only record of what came before.
+
+---
+
+## 2026-08-02 — Addendum to the CLI decisions: four more, from the reviewer and security gates
+
+The gates on CLI-1/CLI-2 returned CHANGES-REQUESTED with findings that forced four further
+decisions and one correction. Recorded here rather than folded into the section above, which is
+already dated and appended.
+
+### A. Plaintext `http` is permitted ONLY to a loopback host
+
+Invariant 11 says TLS is required and there is no plaintext listener. The bus does not serve TLS
+yet, so a client that refused `http` outright would not work at all — but accepting it unrestricted
+was worse than it looked: `/v1/session/begin` returns the session token **in the response body**,
+and that token is a **bearer credential**. `busctl whoami --verify --bus http://host:8080` put a
+live credential on the wire in clear, in both directions.
+
+So `parseBusURL` rejects plaintext to a non-loopback host and permits it to `127.0.0.1`, `::1` and
+`localhost`. That is the CLIENT-SIDE half of E8's sequencing constraint ("the bus must NOT be
+exposed on a non-loopback interface before mTLS lands"), and the whole case is deleted when the TLS
+listener ships. Loopback detection is deliberately narrow — literal addresses and the exact name
+`localhost`, with no DNS resolution, because a security check that depends on a resolver is a check
+an attacker can move.
+
+### B. Redirects are never followed
+
+`CheckRedirect` returns `http.ErrUseLastResponse`. Go's default policy copies the `Authorization`
+header across a redirect whenever the target's canonical address matches — and `canonicalAddr`
+includes the port, so `https://bus:8080` → `http://bus:8080` compares EQUAL and the bearer token is
+forwarded in clear. This API never legitimately redirects, so refusing costs nothing and closes a
+credential-downgrade path before there is a caller to walk into it.
+
+### C. The bus is NOT trusted to produce safe text
+
+Two different treatments, and the split is the decision:
+
+- **Free text is SANITISED.** The bus's `{"error":"…"}` string was being rendered verbatim to a
+  terminal. A hostile bus — and invariant 11's threat model explicitly includes being pointed at
+  one, since whoever substitutes an invite chooses the bus — could emit unbounded ESC, CR and BEL:
+  erase the line, print a fabricated `enrolled as bus1.admin`, set the window title, or write the
+  clipboard where OSC 52 is enabled. `safeText` replaces C0, DEL and C1 controls and truncates on a
+  rune boundary. JSON output was never affected (`encoding/json` escapes everything below 0x20), so
+  this was specifically a human-terminal hazard — and a PERSISTENT one, because the same fields are
+  stored and reprinted by every later command.
+- **Id-like fields are REJECTED, not sanitised.** `agent_id`, `bus_id` and `name` are checked
+  against `[A-Za-z0-9._-]{1,256}` and a violation fails the enrolment. Invariant 1 makes the server
+  authoritative on ids; it does not make them unvalidated input. Rewriting an id would leave the
+  local store disagreeing with the bus about who we are, which is worse than refusing.
+
+  The pattern is deliberately BROADER than the real `<bus-id>.<name>-<n>` grammar. This is a safety
+  check, not a second implementation of the server's id rules — a client that re-derived the grammar
+  would reject a legitimate future format, and invariant 1 is precisely the instruction not to keep
+  a competing copy of it.
+
+### D. Correction to §4: "closes the data-loss window" was true only where something was printed
+
+The claim as written was too strong. Persisting the seed before the request does keep the key
+material on disk, but until this addendum the idempotency key that reaches it was revealed only in
+the remedy of a *graceful* failure. A process killed between the write and the answer had printed
+nothing, so the seed sat in the store permanently unreachable while the bus held a roster slot
+nobody could authenticate as — safely stored, and useless.
+
+Two changes make the claim true: `EnrolResult` now REPORTS the idempotency key, and
+`whoami --all` lists every unfinished enrolment with the exact command that resumes it. Recorded
+because "the key is on disk" and "the identity is recoverable" are different properties, and
+conflating them is how a durability claim ends up overstated.
+
+Also corrected in the same pass, all from the same principle — a promise the code did not keep:
+
+- `logout --all` said it destroys the private keys but left `pending` records untouched, so a seed
+  for an enrolment the bus may well have applied survived a wipe the operator believed complete.
+- The 24h pending TTL was enforced only inside `AddPending`, so a store that never enrolled again
+  kept key material forever. Pruning now runs on every write.
+- Abandoned `identities.json.tmp-*` files — each a complete copy of every private key — were never
+  swept.
+- The store lock's stale-break could delete a LIVE holder's lock, losing a whole-file update and
+  therefore a private key. Locks now carry an ownership token and both break and release are
+  conditional on it.
+- The check-then-act around the idempotency key was outside the lock: two concurrent enrolments
+  under one key generated different key pairs, one seed was overwritten, and both sent conflicting
+  payloads under the same key. `ClaimEnrolment` makes the decision in one locked read-modify-write.
+
+### Known follow-up, not fixed here
+
+The transport is constructed in `client.New`, before any credential is resolved. Invariant 11's
+pinning needs a **per-identity client certificate** and a **per-bus fingerprint**, neither of which
+is a function of `Config` alone — so the seam is in the right place but at the wrong TIME, and the
+TLS task will need to build it lazily or key a small cache by `(agentID, busURL)`. Written down now
+because the person doing that work should not have to rediscover it.

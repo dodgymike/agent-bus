@@ -918,3 +918,168 @@ always carry an explicit pathspec.
 created by the CONTRACTS-split agent this pass). They are quoted verbatim in DUR-12's `kind=report`
 note and carried by `DUR-12-FU-CONTRACTS`, whose proof was confirmed RED before filing. Seven other
 follow-ups filed; `DUR-12-VERIFY` carries the not-yet-live deploy proof.
+
+---
+
+## 2026-08-02 — CLI-1 + CLI-2: the client package and the identity subcommands (feature-runner-cli)
+
+**Tasks.** CLI-1 (`0495d133`) client package + CLI subcommand skeleton; CLI-2 (`39318208`) identity —
+enrol, whoami, use, logout. CLI-2 ABSORBS the superseded AGENTIF-2 (`scripts/bus-enrol.sh`): per the
+amended invariant 7 the compiled Go CLI replaces the shell wrappers.
+
+**Chain.** spec-keeper (claim + proof_cmd repair) → implementer (**acted by feature-runner-cli**, see
+note) → test-engineer → reviewer → security → documentation (CONTRACTS-CLI.md + DECISIONS.md, written
+by feature-runner-cli). Reviewer and security BOTH ran and both returned CHANGES-REQUESTED; every P1
+was fixed and a second test-engineer pass pinned the fixes.
+
+*Note on the implementer step:* feature-runner-cli implemented directly rather than delegating. The
+design had a large number of interlocking constraints (importable-not-internal, three audiences, two
+in-flight epics to leave seams for, a fixed exit-code contract) and handing it to a sub-agent would
+have meant specifying the API in as much detail as writing it. Reviewer, security and test-engineer
+all ran as independent agents, so the change was reviewed by someone other than its author.
+
+**Files.** New `client/` (doc, errors, config, store, transport, client, enrol, session, sanitize) —
+top-level and importable, NOT under `internal/`, because invariant 7's third audience is an agent that
+EMBEDS the client and Go forbids another module importing an `internal/` path. New `cmd/busctl/`
+(main, root, output, enrol, whoami, use, logout) — a thin shell with no protocol logic. Rewrote
+`CONTRACTS-CLI.md`; appended two dated sections to `DECISIONS.md`.
+
+**What the gates caught, and why it mattered.** Three findings were the kind that a passing test suite
+would never have surfaced:
+
+1. *A flag that could only ever be used incorrectly.* `enrol --idempotency-key K` run twice generated
+   a FRESH key pair each time, so the retry sent the same key with a different `public_key` — which
+   invariant 10 defines as a protocol violation and the bus answers with 409 **and a disconnect**.
+   Found by smoke-testing the CLI, not by a unit test. Fixed by persisting the key material as a
+   `pending` record BEFORE the request and claiming it under one lock.
+2. *A hostile bus could write to the operator's terminal.* The bus's `{"error":"…"}` string was
+   rendered verbatim: unbounded raw ESC/CR/BEL, enough to erase a line and print a fabricated
+   `enrolled as bus1.admin`. Invariant 11's own threat model includes being pointed at a bus of the
+   attacker's choosing, so "the bus is trusted" did not dismiss it.
+3. *Promises the code did not keep.* `logout --all` said it destroys the private keys and left
+   `pending` seeds behind; the 24h pending TTL only ran inside one function; abandoned temp files (a
+   full copy of every key) were never swept; and the store lock's stale-break could delete a LIVE
+   holder's lock and lose a whole-file update — i.e. a private key.
+
+**Verification.** `go test -race ./client/... ./cmd/busctl/...` green. Both proofs run through
+`scripts/proof-check.sh` and the verdict lines are quoted in the tasks' `test_summary`; CLI-2's proof
+was confirmed RED before the change (`verdict=FAIL … tests_run=0`, the packages did not exist).
+CLI-2's stored `proof_cmd` was REPLACED as part of the task: the old one drove
+`scripts/bus-serve.sh` over `http://127.0.0.1:8092`, which breaks under both the mTLS epic and the
+invite-only enrolment epic. The end-to-end clause was kept but moved inside a Go test that builds and
+runs the REAL `./cmd/agent-bus` binary on an ephemeral port under `t.TempDir()`.
+
+**Scope held.** No file outside `client/**`, `cmd/busctl/**`, `CONTRACTS-CLI.md` and the append-only
+shared docs was touched. `AGENT_PROTOCOL.md` was deliberately NOT rewritten — CLI-1 puts that in its
+own task. `/v1/leave` does not exist, so `logout` is local-only and says so in `--help` and in the
+`server_notified: false` field rather than implying a revocation it cannot perform.
+
+## 2026-08-02 — MSG-1…5 + POLL-1…3: the messaging core (feature-runner, opus)
+
+**What landed.** The bus can now be talked over. Five authenticated routes — `GET /v1/agents`,
+`POST /v1/broadcast`, `POST /v1/send`, `GET /v1/messages`, `GET /v1/wait` — over two new packages
+(`internal/store`, `internal/hub`, previously doc-only stubs). One ordered message stream, a
+per-agent opaque cursor, at-least-once delivery, retention of 1 day or 1 GiB whichever comes first,
+and a long poll that parks the request's own goroutine (no goroutine per waiter) and is woken only
+after the commit is durable.
+
+**Chain:** implementer (this agent) → test-engineer (opus, two passes) → reviewer (opus) → security
+(opus) → documentation (this agent). Both gates returned CHANGES-REQUESTED; everything they raised is
+either fixed below or filed.
+
+**Ownership note.** `cmd/**` was outside this wave, so `httpapi.New` builds the hub itself when
+`Options.Durable` also satisfies `Path()`+`Recovered()`. That is transitional and documented as such
+in `openHub`: it costs a second (read-only) replay at startup and it cannot make a rebuild failure
+fatal. `MSG-FU-MAINWIRING` carries the proper wiring.
+
+### The P0 the security gate found — one epic invalidating another's written justification
+
+`cmd/agent-bus/main.go` allocates agent-id suffixes from a FRESH counter every start, justified by
+"nothing in this path writes an agent id to disk". True when written; **false as of this wave**,
+because `store.Record` persists `sender` and `recipients`, `hub.publish` writes them through the WAL,
+`hub.Apply` replays them, and the WAL never compacts. After a restart the counter restarts at 1, so
+anyone reaching the still-unauthenticated `/v1/enroll` and guessing the name `alpha` is minted
+`<bus>.alpha-1` — the previous alpha's id — and could read a day of that agent's direct messages.
+
+Fixed here by the **enrolment epoch**: a message sent before the reader's own `EnrolledAt` is never
+delivered (`store.Message.VisibleTo`). It costs a correct client nothing, and it stays right once
+AUTH-3 restores original enrolment instants — nothing to undo. Identity *continuity* is NOT fixed and
+is not claimed to be: the reuse is logged at ERROR by `hub.NoteEnrolment` and `MSG-FU-SUFFIXFLOOR`
+(P0) carries the real fix. Argued in full in `DECISIONS.md`.
+
+**Proved on a RUNNING server, not only in tests** (`committed != running`): seed a DM alpha→beta,
+`kill -TERM`, restart on the same data dir, enrol the name `beta` with a *different* keypair, get
+`<bus>.beta-1` back — and read **0** messages, while the log reports `message store rebuilt …
+messages=1`. Not delivered, not lost, and the ERROR line names the reuse.
+
+### Also fixed from the two gates
+
+- **Permanent wedge** (reviewer P1, caught independently before the review landed):
+  `expireIdemLocked` returned early on `oldest == 0`, which is what an empty-but-not-fresh store
+  reports. A hub at the applied-key cap with an aged-out store would have returned 503 to every send
+  **for ever**, restart-only recovery. Now `count == 0 && head > 0` expires the whole table.
+- **Response amplification** (security P1): batches were bounded by COUNT only — 256 × 64 KiB is
+  16 MiB of body, ~45 MiB of live allocation per request once base64 and `json.Marshal` are counted,
+  with no concurrency limiter anywhere in the repo. `store.MaxBatchBytes` (1 MiB) now bounds bytes
+  too, always returning at least one message so a large one cannot become undeliverable.
+- **Unbounded parked polls / `notify` amplification** (security P1): `hub.MaxWaitersPerAgent` = 32,
+  failing closed. The real cost bounded is not memory but `notify`, which runs under `writeMu` on the
+  critical path of **every** send and is O(parked waiters) — one agent parking thousands would have
+  slowed every *other* agent's durable write.
+- **Unbounded applied-key rebuild** (security P2): `Apply` now expires and honours the cap, so a
+  bounded steady state stopped implying an unbounded *startup* allocation on a log that never
+  compacts.
+- **`store.Decode` hardening** (reviewer P2): it names itself the validating boundary for records off
+  disk and, later, off a peer — it now bounds the idempotency key and **validates `BusPath`**, which
+  is echoed verbatim to every client.
+- **Aliasing** (reviewer P2): `Since` returned slices aliasing the store. `NewMessage` copies
+  carefully on the way in; the way out now matches.
+- **Wrong lock-order comment** (reviewer P2): it claimed `writeMu -> rosterMu`; the roster is
+  actually checked *before* `writeMu` and the two are never held together. Corrected, with the TOCTOU
+  consequence written on `Enrolled` for the day AUTH-4 adds leave.
+
+### Two narrowings recorded in DECISIONS.md rather than left implied
+
+1. **Idempotency-key retention** is the message window. Fail-closed is honoured on the axis that
+   carries the weight (never evict under pressure); a retry arriving *after a day* is a fresh send.
+   `DECISIONS.md` item 9 (CLI wave) said such a retry is rejected — rejecting it needs every key ever
+   used remembered for ever. Narrowed explicitly, and `CONTRACTS-HTTP.md` states the narrowed
+   behaviour rather than letting the stricter sentence stand over different code.
+2. **Message ids may repeat after a WAL quarantine, or after damage deeper than a torn tail.** The
+   sequence floor comes from the log's high-water index and `publish` ASSERTS `PrepareIndex >= seq`
+   per message, poisoning the hub if the counting argument ever breaks. Both exceptions lose the
+   mark with the bytes. Invariant 6's availability decision covers discarding *records*, not reusing
+   *ids*, so this is dated and argued rather than assumed. `MSG-FU-SEQHIGHWATER` carries the fix.
+
+### Proof
+
+All eight stored `proof_cmd`s through `scripts/proof-check.sh`, verbatim verdicts:
+`TestListAgents` PASS tests_run=7 · `TestBroadcastSend` PASS 24 · `TestDirectMessageSend` PASS 16 ·
+`TestMessageHistoryCursor` PASS 22 · `TestLongPollWait` PASS 12 · `TestWaiterWakeup` PASS 5 ·
+`TestPollConcurrency` PASS 4 · `TestMessagingCrashRecovery` PASS 587 (2 top-level) — all
+`failed=0 skipped=0 empty_pkgs=0`. Whole repo `go test -race ./...` green; `go build`, `go vet`,
+`$(go env GOROOT)/bin/gofmt -l` clean.
+
+**The wake test was confirmed RED before it was green**, which is the part that makes it evidence:
+deleting the single `h.notify(m)` call fails `TestWaitRoute/a_parked_poll_is_woken_by_a_new_broadcast`
+with "the parked poll was never woken by a committed broadcast", and restoring it passes.
+
+MSG-5's crash sweep cuts a 2523-byte WAL at **585 distinct offsets** and asserts every message is
+fully present or fully absent, that survivors form a prefix, and that the sequence never regresses.
+560 offsets left a survivor, and `survivorsSeen == 0` is a `t.Fatal` — so the assertions provably ran
+rather than being skipped, which is the vacuity failure mode this repo has already been bitten by.
+
+### An honest limit, measured rather than assumed
+
+Inside the genuine crash window (a tear between two fsyncs) the sequence never regresses and the test
+asserts it. Cut DEEPER — media damage — and it can: over the 585-offset sweep, 70 offsets regressed,
+all at `n <= 1449` of 2523, i.e. every cut losing more than half the records. The information needed
+to reconstruct the high-water mark is gone with the bytes. Filed as `MSG-FU-SEQHIGHWATER`; not
+hidden in a comment.
+
+### Not agent-reachable yet, and not claimed to be
+
+Invariant 7 wants a CLI subcommand shipped with every capability. The backlog already splits that out
+— `CLI-3` (watch), `CLI-4` (send/broadcast), `CLI-5` (agents) — so this wave delivers the HTTP
+surface and those three make it agent-facing. Until they land, an agent cannot use messaging through
+the sanctioned client. Stated in every task's `test_summary` rather than left for someone to discover.
