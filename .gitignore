@@ -1,0 +1,15 @@
+# build output
+/agent-bus
+/bin/
+*.test
+
+# runtime data — the durable store is never committed
+/data/
+*.wal
+*.log
+!AGENT_LOG.md
+
+# local agent config / scratch
+/.claude/settings.local.json
+/.claude/.autocommit-enabled
+/scratch/
