@@ -1,0 +1,115 @@
+{
+  "format": "agent-bus canonical signing format (SIGN-1)",
+  "format_version": 1,
+  "context": "agent-bus/msg-sig/1",
+  "note": "PUBLISHED ARTIFACT. These are the exact bytes agent-bus signs, verifies (SIGN-2/SIGN-5, ed25519.Sign over canonical_hex UNHASHED) and hashes for the audit log (DUR-5/CRYPTO-11, sha256 over the same bytes). Layout: PROTOCOL.md section 8. Regenerating this file to make a test pass is a wire-format change, not a fix. The signing key is RFC 8032 section 7.1 TEST 1, chosen so the key derivation itself is checkable against a published vector; it is a TEST key and must never be used by a real agent.",
+  "ed25519_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "ed25519_public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "vectors": [
+    {
+      "name": "minimal",
+      "why": "one recipient, ASCII body; this vector's expected bytes are also written out by hand in canonical_test.go against the PROTOCOL.md layout table",
+      "message": {
+        "message_id": "bus-a-1",
+        "sequence": 1,
+        "sender": "bus-a.alice-1",
+        "recipients": [
+          "bus-a.bob-2"
+        ],
+        "timestamp_unix_ms": 1,
+        "body_hex": "6869"
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f31000000076275732d612d3100000000000000010000000d6275732d612e616c6963652d31000000010000000b6275732d612e626f622d320000000000000001000000026869",
+      "canonical_sha256_hex": "a17304bf99a77434d5b4dfb4b22a42dc18a9541faf8ae4b36657890ae39f1872",
+      "ed25519_signature_hex": "26a3f7df6cbbcd401c410c65293d504a11432dab349431d409278c642c95ee04bbe1bfdc9133a11aff1efe39cd8fa91bb80af0334b9d933e17f392e6c476cc03"
+    },
+    {
+      "name": "multi-recipient-unsorted",
+      "why": "recipients are supplied UNSORTED and include the sender; the canonical bytes carry them sorted bytewise ascending",
+      "message": {
+        "message_id": "bus-a-9",
+        "sequence": 9,
+        "sender": "bus-a.alice-1",
+        "recipients": [
+          "bus-a.carol-1",
+          "bus-a.bob-2",
+          "bus-a.alice-1"
+        ],
+        "timestamp_unix_ms": 1700000000000,
+        "body_hex": "6f72646572696e67206d757374206e6f74206d6174746572"
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f31000000076275732d612d3900000000000000090000000d6275732d612e616c6963652d31000000030000000d6275732d612e616c6963652d310000000b6275732d612e626f622d320000000d6275732d612e6361726f6c2d310000018bcfe56800000000186f72646572696e67206d757374206e6f74206d6174746572",
+      "canonical_sha256_hex": "c316c7a4e96a592adb5fbed33e65f0e448edc277be6efbf81535540daca20f14",
+      "ed25519_signature_hex": "10dda26d78e2d9f59bfdb51ff8bb756d9b4d4ca1e04c1203e7ce3dae7a21f1665043112a75937e79d88e4800846d4972f6aa7d69733d8d7c98fb97577074e206"
+    },
+    {
+      "name": "empty-body",
+      "why": "a zero-length body is legal and encodes as a length prefix of 0, not as an absent field",
+      "message": {
+        "message_id": "bus-a-2",
+        "sequence": 2,
+        "sender": "bus-a.alice-1",
+        "recipients": [
+          "bus-a.bob-2"
+        ],
+        "timestamp_unix_ms": 1700000000001,
+        "body_hex": ""
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f31000000076275732d612d3200000000000000020000000d6275732d612e616c6963652d31000000010000000b6275732d612e626f622d320000018bcfe5680100000000",
+      "canonical_sha256_hex": "a06bdaf95883759938e492552b058569a07bf5dc40d801bcf3f7c957e95c3652",
+      "ed25519_signature_hex": "b47af39e6637c7000168421836319111343b5409c6abdfac0be40cdc3115fd79cbd8bc62acf4a2da035dbb8bdf6fdd8047ca3da07fc7a0badc46d54d88ce0a08"
+    },
+    {
+      "name": "binary-body",
+      "why": "the body is opaque bytes and is copied verbatim; this one is not valid UTF-8 and contains NUL, CR and LF",
+      "message": {
+        "message_id": "bus-a-3",
+        "sequence": 3,
+        "sender": "bus-a.alice-1",
+        "recipients": [
+          "bus-a.bob-2"
+        ],
+        "timestamp_unix_ms": 1700000000002,
+        "body_hex": "00fffe0a0d00"
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f31000000076275732d612d3300000000000000030000000d6275732d612e616c6963652d31000000010000000b6275732d612e626f622d320000018bcfe568020000000600fffe0a0d00",
+      "canonical_sha256_hex": "4c07d798c3a68f687dff6e9bfce80d7fd41996482a49e6978ca5c6b5e4942477",
+      "ed25519_signature_hex": "ef76616167344feae7ce2536255079cae12e98551e31108c0f37ca26c9f6a69d1cc04218c838b5b2561131bccf6b248bfbab82cae84ad0870ffb9c1195f79c06"
+    },
+    {
+      "name": "cross-bus-recipients",
+      "why": "the relay case: a recipient on another bus. The origin bus's id and sequence are what is signed; a receiving bus's local delivery sequence is outside these bytes (SIGN-7)",
+      "message": {
+        "message_id": "bus-origin-42",
+        "sequence": 42,
+        "sender": "bus-origin.relay-agent-1",
+        "recipients": [
+          "bus-far.dave-3",
+          "bus-origin.eve-2"
+        ],
+        "timestamp_unix_ms": 1700000000003,
+        "body_hex": "72656c61796564"
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f310000000d6275732d6f726967696e2d3432000000000000002a000000186275732d6f726967696e2e72656c61792d6167656e742d31000000020000000e6275732d6661722e646176652d33000000106275732d6f726967696e2e6576652d320000018bcfe568030000000772656c61796564",
+      "canonical_sha256_hex": "1889b089b508543c941c579198f327a5a1a7aedde3b1abec0582ff60becc7b89",
+      "ed25519_signature_hex": "ad1af8c8a54647e073361817b9663176f287d6765192a48d62ce25884c7938bf7ae3adaa049532ba8ec62971f10c738246ae62e6c07cfc30bf8ca7916a2c3c00"
+    },
+    {
+      "name": "extremes",
+      "why": "the largest sequence this bus could ever mint and the largest int64 timestamp, proving the fixed-width fields",
+      "message": {
+        "message_id": "bus-a-18446744073709551615",
+        "sequence": 18446744073709551615,
+        "sender": "bus-a.alice-1",
+        "recipients": [
+          "bus-a.bob-2"
+        ],
+        "timestamp_unix_ms": 9223372036854775807,
+        "body_hex": "6c617374206d6573736167652074686973206275732063616e206d696e74"
+      },
+      "canonical_hex": "000000136167656e742d6275732f6d73672d7369672f310000001a6275732d612d3138343436373434303733373039353531363135ffffffffffffffff0000000d6275732d612e616c6963652d31000000010000000b6275732d612e626f622d327fffffffffffffff0000001e6c617374206d6573736167652074686973206275732063616e206d696e74",
+      "canonical_sha256_hex": "4a5c6fbc007c0a29909e27fa104a4aaaaec3c03d2b7d32a6cb3c1bfa497ce11c",
+      "ed25519_signature_hex": "bedc8696cc57adba638769e1c8c729d2a9c2e8ffcef2b3f3ecc0275e00c464059de95ce127fdd802ab5b2e8592fd3de87c8192f0872b7b0a6546b9cf43609a0a"
+    }
+  ]
+}
