@@ -5,5 +5,14 @@
 // client. Ids are never reused, including across restarts. Agent ids are
 // always fully qualified as "<bus-id>.<agent-id>" (invariant 2).
 //
-// Stub: the ID epic supplies the implementation.
+// What is here so far:
+//
+//   - busid.go   — minting and persisting this bus's own id (ID-1).
+//   - sequence.go — the strictly monotonic message-sequence allocator (ID-2).
+//     Read its doc before wiring it: the resume floor is the one place
+//     invariant 1 can be broken, and this package cannot detect it.
+//   - messageid.go — the "<bus-id>-<seq>" message id format and its validator.
+//
+// The allocator has no callers yet. Deriving its resume floor from WAL recovery
+// is a separate, deliberate wiring task.
 package ids
