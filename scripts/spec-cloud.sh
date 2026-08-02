@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # spec-cloud.sh — authenticated curl shim for the CLOUD Spec Keeper
-# (spec.elasticninja.com), the primary task-state store as of 2026-07-23.
+# (spec.elasticninja.com) for the agent-bus project.
 #
 # Drop-in for the old `curl … http://localhost:8080/api/v1/…` calls: it finds the
 # request PATH among its args (the first arg starting with `/`), prepends the cloud
@@ -9,16 +9,16 @@
 # and exits non-zero on a non-2xx status.
 #
 # Usage mirrors the old calls after a mechanical rewrite:
-#   bash scripts/spec-cloud.sh -s /api/v1/projects/bird-song/export > SPEC.md
-#   bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/bird-song/tasks/claim-next \
+#   bash scripts/spec-cloud.sh -s /api/v1/projects/agent-bus/export > SPEC.md
+#   bash scripts/spec-cloud.sh -s -X POST /api/v1/projects/agent-bus/tasks/claim-next \
 #        -H 'Content-Type: application/json' -d '{"agent":"you"}'
 #   bash scripts/spec-cloud.sh -sf /readyz          # health check
 #
 # Creds live outside the repo (never committed): see the re-auth recipe in the
 # cloud-spec-keeper memory. Falls back with a clear error if they're missing.
 set -uo pipefail
-CREDS="${SPEC_CLOUD_CREDS:-/mnt/sdc/mike/claude-scratch/spec-cloud-creds.env}"
-CACHE="${SPEC_CLOUD_TOKENCACHE:-/mnt/sdc/mike/claude-scratch/.spec-cloud-token}"
+CREDS="${SPEC_CLOUD_CREDS:-/mnt/sdc/mike/claude-scratch/spec-cloud-creds-agent-bus.env}"
+CACHE="${SPEC_CLOUD_TOKENCACHE:-/mnt/sdc/mike/claude-scratch/.spec-cloud-token-agent-bus}"
 HOST="${SPEC_CLOUD_HOST:-https://api.spec.elasticninja.com}"
 
 [ -f "$CREDS" ] || { echo "spec-cloud: creds file missing ($CREDS) — re-enrol (see cloud-spec-keeper memory)" >&2; exit 3; }
