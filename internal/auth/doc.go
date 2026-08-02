@@ -32,6 +32,18 @@
 // re-verifies the signature and returns the SAME expiry, never a fresh one, so
 // one signature can never be leveraged into an unbounded session.
 //
+// # Admission control is asymmetric by design
+//
+// BeginSession keys nothing on agentID: on that unauthenticated route agentID
+// is an attacker-supplied VICTIM identifier, so any per-agent bucket there —
+// evict or refuse — is a lockout primitive (AUTH-1-FU-PENDINGCAP). CompleteSession
+// does key a cap on it (AUTH-1-FU-ACTIVECAP, MaxActiveSessionsPerAgent, default
+// 32): by then the key is a PROVEN identity, established only by an Ed25519
+// signature made with that agent's own enrolment private key, so a flooder can
+// only ever fill its own bucket. The two checks look like the same shape; they
+// are not the same primitive, and a future change must not delete one on the
+// strength of the other's rationale.
+//
 // # What is NOT durable yet
 //
 // State in this package is IN MEMORY ONLY. Enrolment is therefore NOT

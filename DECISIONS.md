@@ -1188,3 +1188,65 @@ to start rather than guess.* Where the surviving high-water mark is recorded so 
 still prove its floor is a durability-plane question that belongs with the quarantine defect, not with
 this schema decision.
 
+
+---
+
+## 2026-08-02 — Enrolment/mTLS design questions settled (E2–E6, E8)
+
+Six of the seven questions the planning pass raised. **E7 is NOT answered — see the end.**
+
+### E6 — The invite blob carries the bus certificate fingerprint. NO TOFU.
+
+The most consequential of the six. The invite carries **bus id + address + bus-cert fingerprint +
+invite secret**, so a client knows exactly which certificate to expect before it ever connects.
+There is no trust-on-first-use window at all.
+
+**This makes the invite blob the trust anchor, which moves the security requirement onto the channel
+the invite travels over.** Whoever can substitute an invite can point an agent at a bus of their
+choosing — and, because the fingerprint travels with it, do so without tripping any mismatch. That
+is a genuine new requirement on invite distribution, not a footnote. It is still the right trade:
+a TOFU window is exploitable by anyone on-path at exactly the moment a new agent joins, whereas
+invite integrity is a problem the operator can reason about and control.
+
+### E4 — The first invite is minted server-side
+
+A server-side subcommand writing to the data dir. Authority is **filesystem access**, the same model
+as `wal-mac.key`, and nothing new is exposed on the wire. Bootstrap therefore introduces no new
+network-reachable privilege.
+
+### E2 — `/v1/enroll` is settled ONCE in `ENROL-SHAPE`, and is UNSTABLE until all three land
+
+Three separate changes rewrite the enrol wire shape: the invite field, the client-cert binding, and
+`6e3083b0` (POPKEY). Settling the shape once and declaring the route explicitly unstable until all
+three ship avoids three consecutive breaking changes to the same route, each stranding whatever was
+built against the last.
+
+### E3 — Rotation serves TWO certificates during rollover
+
+The bus serves both the outgoing and incoming certificate during a rotation window, so clients
+re-pin without downtime. **Rotation must never require every client to re-enrol** — that would make
+routine key hygiene indistinguishable from a security incident, and would guarantee it is deferred
+indefinitely.
+
+### E5 — Revoking an invite does NOT affect an agent that already redeemed it
+
+An invite is **spent at redemption**. Revocation prevents future use only. Cascading revocation —
+"remove the agent this invite created" — is a different capability that needs AUTH-4's revocation
+surface first, and conflating the two would give operators a false expectation of reach.
+
+### E8 — Non-loopback binding is APPROVED, and must be CONFIGURABLE
+
+Needed for the Docker Compose multi-bus relay target. The default stays loopback (invariant 11);
+this is an explicit opt-in.
+
+**Hard sequencing constraint, and the reason this is stated here rather than assumed:** until the
+mTLS listener ships, **invite secrets cross the wire in cleartext**, bounded only by the loopback
+default. **The bus must NOT be exposed on a non-loopback interface before mTLS lands.** The
+configurability approved here creates exactly the flag that could violate that, so the ordering is a
+requirement on the implementation, not a recommendation.
+
+### E7 — STILL OPEN
+
+Not answered: (a) is there genuinely no plaintext escape hatch for tests and local development, or
+is one permitted; (b) may certificates be operator-supplied as well as self-generated? Invariant 11
+currently says no plaintext anywhere; that stands until decided otherwise.

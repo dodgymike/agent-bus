@@ -34,6 +34,30 @@ const (
 
 	// DefaultMaxSessions bounds the session table, pending and active together.
 	DefaultMaxSessions = 16384
+
+	// DefaultMaxActiveSessionsPerAgent bounds how many ACTIVE sessions one
+	// PROVEN agent identity may hold at once. Enforced in CompleteSession, which
+	// is the only place the key is a proven identity rather than an
+	// attacker-supplied one — see the comment on the check there
+	// (AUTH-1-FU-ACTIVECAP) for why a per-agent key is safe there and is not on
+	// the unauthenticated BeginSession route.
+	//
+	// # Why 32
+	//
+	// The steady state for a well-behaved agent is TWO concurrent sessions: a
+	// client establishes its next one at SessionRefreshFraction (75%) of
+	// SessionLifetime, so the old and the new overlap for the final quarter. 32
+	// is about sixteen times that — generous room for one agent id driven from
+	// several processes or hosts, and for a client that loses its token and
+	// re-handshakes rather than waiting out the old session — while still
+	// bounding one proven identity to 32/16384 = 0.2% of the session table.
+	//
+	// The ergonomic hazard is real and is why the value is generous and
+	// tunable: a refusal is not transient the way a global-capacity refusal is.
+	// An agent that has genuinely reached its cap stays refused until its OWN
+	// oldest session expires, which is up to SessionLifetime away, because
+	// nothing here evicts.
+	DefaultMaxActiveSessionsPerAgent = 32
 )
 
 // Options configures NewService.
@@ -66,9 +90,18 @@ type Options struct {
 
 	// MaxSessions bounds the session table; 0 means DefaultMaxSessions.
 	//
-	// It is, with ChallengeTTL, the ONLY bound on the session table. There is
-	// deliberately no per-agent cap to go with it — see BeginSession.
+	// It is, with ChallengeTTL, the GLOBAL bound on the session table. The
+	// per-agent bounds either side of it are deliberately asymmetric: there is
+	// NO per-agent cap on PENDING sessions (BeginSession, where agentID is
+	// attacker-supplied and any bucket is a lockout primitive), and there IS one
+	// on ACTIVE sessions (CompleteSession, where the key is a proven identity)
+	// — see MaxActiveSessionsPerAgent and the comments on both methods.
 	MaxSessions int
+
+	// MaxActiveSessionsPerAgent bounds the ACTIVE sessions one agent may hold
+	// at once; 0 means DefaultMaxActiveSessionsPerAgent. Enforced in
+	// CompleteSession.
+	MaxActiveSessionsPerAgent int
 }
 
 // Service is the enrolment and session authority. It is safe for concurrent
@@ -80,9 +113,10 @@ type Service struct {
 	roster Roster
 	now    func() time.Time
 
-	maxRosterEntries      int
-	maxIdempotencyEntries int
-	maxSessions           int
+	maxRosterEntries          int
+	maxIdempotencyEntries     int
+	maxSessions               int
+	maxActiveSessionsPerAgent int
 
 	// enrolMu guards idem and serialises the whole of Enrol. sessMu guards
 	// sessions.
@@ -143,14 +177,15 @@ func NewService(opts Options) (*Service, error) {
 	}
 
 	s := &Service{
-		minter:                opts.Minter,
-		roster:                opts.Roster,
-		now:                   opts.Now,
-		maxRosterEntries:      opts.MaxRosterEntries,
-		maxIdempotencyEntries: opts.MaxIdempotencyEntries,
-		maxSessions:           opts.MaxSessions,
-		idem:                  make(map[string]idempotentEnrol),
-		sessions:              make(map[string]*Session),
+		minter:                    opts.Minter,
+		roster:                    opts.Roster,
+		now:                       opts.Now,
+		maxRosterEntries:          opts.MaxRosterEntries,
+		maxIdempotencyEntries:     opts.MaxIdempotencyEntries,
+		maxSessions:               opts.MaxSessions,
+		maxActiveSessionsPerAgent: opts.MaxActiveSessionsPerAgent,
+		idem:                      make(map[string]idempotentEnrol),
+		sessions:                  make(map[string]*Session),
 	}
 	if s.roster == nil {
 		s.roster = NewMemoryRoster()
@@ -166,6 +201,9 @@ func NewService(opts Options) (*Service, error) {
 	}
 	if s.maxSessions <= 0 {
 		s.maxSessions = DefaultMaxSessions
+	}
+	if s.maxActiveSessionsPerAgent <= 0 {
+		s.maxActiveSessionsPerAgent = DefaultMaxActiveSessionsPerAgent
 	}
 	return s, nil
 }

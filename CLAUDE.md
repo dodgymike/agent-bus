@@ -130,11 +130,18 @@ one needs an explicit decision recorded in `DECISIONS.md`.
 
     Consequences that must be designed, not assumed:
     - **Certificates are SELF-SIGNED and TLS is MUTUAL (decided 2026-08-02).** Both ends present a
-      certificate and both verify. There is no CA: trust is established at enrolment, where the
-      agent's client-certificate fingerprint is bound to its server-minted agent id and the bus's
-      certificate fingerprint is pinned by the client. That reuses the trust-on-first-use moment
-      enrolment already is, rather than inventing a second trust model — and it means a bus runs on
-      a laptop with no certificate authority anywhere in the picture.
+      certificate and both verify. There is no CA, and **there is no trust-on-first-use either**:
+      the **invite blob carries the bus's certificate fingerprint** alongside the bus id, address and
+      invite secret, so the client knows what to expect BEFORE its first connection. The agent's
+      client-certificate fingerprint is bound to its server-minted agent id at enrolment. A bus runs
+      on a laptop with no certificate authority anywhere in the picture.
+
+      **Consequence: the invite blob is now the trust anchor, so the integrity of the channel it
+      travels over is load-bearing.** Whoever can substitute an invite can point an agent at a bus of
+      their choosing. That is a real requirement on invite distribution, not a footnote — and it is
+      the price of eliminating the TOFU window, which is the right trade.
+    - **Certificate rotation serves TWO certificates during rollover** so clients can re-pin without
+      downtime. Rotation must never require every client to re-enrol.
     - **mTLS and the session token are BOTH required, and they do different jobs.** mTLS proves which
       key holder is on the connection; the session token is the revocable, time-bounded application
       credential. Do not let one silently replace the other — but DO cross-check them: a session

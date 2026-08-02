@@ -5,29 +5,93 @@
 // rewritten by the write path. Recovery is the exception, and the size of that
 // exception changed on 2026-08-02 -- see "Recovery policy" below.
 //
-// On-disk layout (format version 1). All integers are big-endian so a hex dump
-// reads left to right, and every checksum is CRC-32 Castagnoli.
+// On-disk layout (format version 2). All integers are big-endian so a hex dump
+// reads left to right, and every tag is HMAC-SHA256 over the key described
+// below.
 //
-//	file header, 16 bytes, written once at creation:
+//	file header, 48 bytes, written once at creation:
 //	  [0:8]    magic "AGNTBUSW" (wal) or "AGNTBUSA" (audit)
-//	  [8:12]   uint32 format version
-//	  [12:16]  uint32 CRC32C over bytes [0:12]
+//	  [8:12]   uint32 format version (2)
+//	  [12:16]  uint32 reserved, written as 0
+//	  [16:48]  HMAC-SHA256(key, header[0:16])
 //
-//	record frame, a 20-byte header then the payload:
+//	record frame, a 48-byte header then the payload:
 //	  [0:4]    uint32 payload length, at most MaxPayloadSize
 //	  [4:12]   uint64 index, first record is 1, +1 per append, never reused
 //	  [12:14]  uint16 record type
 //	  [14:16]  uint16 reserved, written as 0, a non-zero value is corruption
-//	  [16:20]  uint32 CRC32C over frame[0:16] ++ payload
-//	  [20:...] payload, opaque to this package
+//	  [16:48]  HMAC-SHA256(key, frame[0:16] ++ payload)
+//	  [48:...] payload, opaque to this package
 //
-// The checksum covers the length and the index as well as the payload, so a
-// corrupted length is detected rather than acted on. CRC32C is an
-// error-detecting code and NOT an integrity primitive: it is unkeyed, so a
-// client who can get a chosen payload into the log can put bytes in it that
-// recovery will accept as a record. Replacing it with a keyed MAC is a separate,
-// reserved piece of work; until then, treat every checksum-based claim in this
-// package as holding against ACCIDENT, not against an adversary.
+// THE COVERED RANGE IS EXACTLY: the 16 header bytes (length, index, type,
+// reserved) followed by every payload byte. The LENGTH FIELD IS INSIDE IT, which
+// is what kills the length-inflation class of damage and attack: a corrupted or
+// crafted length is detected rather than acted on. The concatenation needs no
+// separator because the length is the first four covered bytes, so no two
+// distinct records share a covered byte string.
+//
+// The FILE HEADER's MAC is deliberately also the KEY CHECK VALUE: it is how a
+// wrong key is detected before a single record is touched. It authenticates 16
+// CONSTANT bytes, so it does not bind the header to one particular file. That is
+// an accepted limit, not an oversight -- an attacker who can rewrite the file can
+// read the key next to it.
+//
+// # The MAC key
+//
+// One file per data directory: MACKeyFileName ("wal-mac.key"), mode 0600, 64
+// lowercase hex characters (32 random bytes from crypto/rand). It is a function
+// of the log's DIRECTORY, not its name, and the WAL and the audit log share it.
+//
+// It is GENERATED whenever the key file is absent, EXCEPT on a log that
+// positively identifies itself as format version 2 -- our magic, version field
+// 2 -- and is longer than its own file header; there an absent key is FATAL.
+// That is deliberately the same condition recovery uses to raise
+// ErrMACKeyMismatch: one predicate, two errors, for a key that is missing
+// versus one that is merely wrong. Every other state (absent, zero-length,
+// version 1, too short, garbage magic) can only reach quarantine, which renames
+// the file aside without destroying a byte, so the fatal buys nothing there. A
+// key file that exists but is malformed or unreadable is FATAL and is NEVER
+// silently replaced.
+//
+// A MISSING OR WRONG KEY IS FATAL, and that is a DELIBERATE EXCEPTION to the
+// always-restart policy below (user decision, DECISIONS.md 2026-08-02). The
+// reasoning: a wrong key makes EVERY record fail verification, so "discard the
+// unverifiable" would destroy the whole log over a misconfiguration.
+// Always-restart exists to stop MEDIA DAMAGE holding the bus hostage; a wrong key
+// is not media damage and is fixable in seconds. Recovery distinguishes the two
+// by evidence, not guesswork: if the header MAC fails but ANY record verifies,
+// the key is proven right and the header is simply rebuilt (nothing is lost); if
+// the header MAC fails and not one record verifies anywhere, that is what a wrong
+// key looks like and recovery refuses, naming both paths. The accepted cost is
+// that a genuinely destroyed version 2 log needs one manual `mv` instead of
+// self-quarantining.
+//
+// WHAT THE MAC BUYS, exactly. It COMPLETELY defeats the attack that motivated it:
+// an ordinary enrolled client crafting a payload whose tag makes damage look like
+// a complete record, or planting a frame header inside a message body for the
+// forward search to find. A client cannot compute a tag over a key it does not
+// hold. It buys NOTHING against an attacker who already has data-directory WRITE
+// access -- the key file is in that directory. Accepted, recorded, and stated in
+// PROTOCOL.md rather than discovered later.
+//
+// # Format version 1, and the upgrade
+//
+// Version 1 was the same shape with UNKEYED CRC32C tags: a 16-byte file header
+// (CRC over [0:12] at [12:16]) and a 20-byte frame header (CRC over
+// frame[0:16] ++ payload at [16:20]). It is still READ, so that an existing bus
+// is not bricked by the version bump, and it is never written to.
+//
+//	A VERSION 1 LOG IS VERIFIED WITH CRC32C, REPAIRED IF DAMAGED WITH THE
+//	VERSION 1 CODEC, THEN CONVERTED ONCE TO VERSION 2 AT STARTUP.
+//
+// A FILE IS ENTIRELY ONE VERSION. There is never a mixed version-1-then-version-2
+// file: the version lives in the file header, and a version 2 writer never emits
+// a version 1 frame. The conversion (upgradeV1) carries indices, types and
+// payloads across BYTE FOR BYTE -- nothing is renumbered, because invariant 1
+// forbids reusing an id -- writes to a temporary file, VERIFIES the result by
+// re-scanning it and comparing a digest of every record, keeps a hard-linked
+// backup where it can, and only then renames. The original is untouched until
+// that rename, so a crash simply re-runs the whole upgrade.
 //
 // Writer is the append-only writer: its Append does not return until the bytes
 // are fsynced (invariant 4). ScanAll is the strict reader: any malformed frame
@@ -50,9 +114,9 @@
 //     and recovery continues to a running server.
 //   - CANNOT READ -- permission denied, an I/O error from the device, an audit
 //     file where a WAL was expected, a format version this binary does not
-//     implement, or a data directory another process is writing to -- still
-//     refuses the start. None of those are damage, and "repairing" them would
-//     destroy a file that is probably intact.
+//     implement, a MISSING OR WRONG MAC KEY (see above), or a data directory
+//     another process is writing to -- still refuses the start. None of those are
+//     damage, and "repairing" them would destroy a file that is probably intact.
 //
 // The thing that keeps this honest is no longer "we never discard". It is
 // "WE NEVER DISCARD SILENTLY". Discarded regions are reported in
@@ -158,11 +222,13 @@
 //     tail -- a damaged record with an intact record behind it does not move
 //     the high-water mark, because the search resumes at the survivor.
 //   - A record whose LENGTH FIELD alone is corrupt is RECOVERED, not discarded:
-//     its own checksum over the bytes actually present is overwhelming evidence
-//     that the payload is all there. It is NOT called a proof. A 32-bit CRC
-//     collides by accident about once in 2^32 wrong lengths, and being unkeyed
-//     it can be collided on purpose by anyone who chooses payload bytes. The
-//     word "proof" was removed from this package for exactly that reason; what
-//     is left is a strong check whose strength is a property of the format and
-//     improves when the keyed MAC lands.
+//     its own tag over the bytes actually present is overwhelming evidence that
+//     the payload is all there. Under version 1 that held against ACCIDENT only
+//     -- a 32-bit CRC collides by chance about once in 2^32 wrong lengths, and
+//     being unkeyed it could be collided on PURPOSE by anyone choosing payload
+//     bytes. Under version 2 the tag is keyed, so a chosen-payload collision is
+//     not something a client can compute: the length-field repair is now a real
+//     proof against an adversary as well as against accident. The limit that
+//     remains is the one stated above -- it says nothing about someone who can
+//     already write to the data directory and read the key.
 package wal

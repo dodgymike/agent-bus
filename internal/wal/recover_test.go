@@ -808,13 +808,18 @@ func TestWALRepairTailDiscardsDamageThatIsNotATornTail(t *testing.T) {
 			// STILL FATAL. A version number under OUR magic is not damage: this
 			// binary does not implement that layout, and guessing at it is how a
 			// downgrade eats a log.
+			// Version 3, not 2: 2 is what this binary writes and 1 is the
+			// legacy layout it still READS so that an existing bus can be
+			// upgraded, so neither of them is "unknown" any more. The property
+			// under test is unchanged -- a version this code does not implement
+			// is fatal.
 			name:  "unknown format version",
 			build: func(t *testing.T) string { _, p, _, _ := buildWAL(t, sixOps...); return p },
 			damage: func(t *testing.T, path string, recs []Record, cleanEnd int64) {
-				patch(t, path, 8, []byte{0x00, 0x00, 0x00, 0x02})
+				patch(t, path, 8, []byte{0x00, 0x00, 0x00, 0x03})
 			},
 			wantFatal:  true,
-			wantErrMsg: "format version 2, want 1",
+			wantErrMsg: "format version 3, want 2",
 			wantNote:   "a file whose layout this code does not know must never be edited by it",
 		},
 		{
@@ -1106,7 +1111,7 @@ func TestWALRepairTailDiscardsDamageToACompleteFinalRecord(t *testing.T) {
 				if err != nil {
 					t.Fatalf("encodePrepare: %v", err)
 				}
-				appendBytes(t, path, encodeFrame(7, TypePrepare, payload)[:7])
+				appendBytes(t, path, testCodec(t, path).encodeFrame(7, TypePrepare, payload)[:7])
 			},
 		},
 		{
@@ -1118,7 +1123,7 @@ func TestWALRepairTailDiscardsDamageToACompleteFinalRecord(t *testing.T) {
 				if err != nil {
 					t.Fatalf("encodePrepare: %v", err)
 				}
-				appendBytes(t, path, encodeFrame(7, TypePrepare, payload)[:FrameHeaderSize+5])
+				appendBytes(t, path, testCodec(t, path).encodeFrame(7, TypePrepare, payload)[:FrameHeaderSize+5])
 			},
 		},
 	}
@@ -1663,7 +1668,7 @@ func TestWALRepairTailThroughOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodePrepare: %v", err)
 	}
-	frame := encodeFrame(5, TypePrepare, payload)
+	frame := testCodec(t, path).encodeFrame(5, TypePrepare, payload)
 	partial := len(frame) / 2
 	if partial <= FrameHeaderSize {
 		t.Fatalf("half a frame is %d bytes, which is not past the %d-byte header", partial, FrameHeaderSize)
@@ -1824,5 +1829,144 @@ func TestWALSemanticDamageIsDiscardedNotTruncated(t *testing.T) {
 	if after := readFile(t, path); !bytes.Equal(before, after) {
 		t.Fatalf("Open changed the WAL: %d bytes before, %d after: a semantic failure must never truncate",
 			len(before), len(after))
+	}
+}
+
+// TestMACKeyCreationRule pins the ONE state in which a missing key file is fatal:
+// a log that positively identifies itself as format version 2 -- our magic,
+// version field 2 -- and is longer than its own file header.
+//
+// Everything else creates a key, and the reason is not generosity. Under a fresh
+// key an unidentifiable file fails its header tag and verifies no record, which
+// is the QUARANTINE branch: renamed aside, every byte preserved, bus starts. The
+// destructive paths (truncate, rewrite-and-discard) need a header that verifies,
+// so they are unreachable there -- the argument for the fatal does not reach
+// those states. A file no longer than its own header holds no record for the
+// same reason, hence the Size narrowing, which mirrors repairLog's exactly.
+func TestMACKeyCreationRule(t *testing.T) {
+	// v2Log lays down a real version 2 log under a known key, then REMOVES the
+	// key file: that is the "operator lost the key" shape.
+	v2Log := func(t *testing.T, records int) string {
+		t.Helper()
+		dir := t.TempDir()
+		plantGoldenMACKey(t, dir)
+		path := filepath.Join(dir, WALFileName)
+		w, err := OpenWriter(path, KindWAL)
+		if err != nil {
+			t.Fatalf("OpenWriter: %v", err)
+		}
+		for i := 0; i < records; i++ {
+			if _, err := w.Append(TypePrepare, []byte(`{"n":1}`)); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if err := os.Remove(macKeyPath(dir)); err != nil {
+			t.Fatalf("removing the key file: %v", err)
+		}
+		return path
+	}
+
+	tests := []struct {
+		name      string
+		build     func(t *testing.T) string
+		mayCreate bool
+	}{
+		{"the log does not exist", func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), WALFileName)
+		}, true},
+
+		{"a zero-length log", func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), WALFileName)
+			if err := os.WriteFile(path, nil, fileMode); err != nil {
+				t.Fatalf("writing a zero-length log: %v", err)
+			}
+			return path
+		}, true},
+
+		{"64 bytes of garbage", func(t *testing.T) string {
+			// The exact shape cmd/agent-bus seeds to prove the bus quarantines an
+			// unreadable log and starts anyway. It has no magic of ours, so it can
+			// never reach a destructive path -- refusing to boot over it would
+			// hold the bus hostage for nothing.
+			path := filepath.Join(t.TempDir(), WALFileName)
+			if err := os.WriteFile(path, bytes.Repeat([]byte{0xAB}, 64), fileMode); err != nil {
+				t.Fatalf("writing garbage: %v", err)
+			}
+			return path
+		}, true},
+
+		{"a file too short to hold a magic", func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), WALFileName)
+			if err := os.WriteFile(path, []byte("AGBUS"), fileMode); err != nil {
+				t.Fatalf("writing a stub: %v", err)
+			}
+			return path
+		}, true},
+
+		{"a format version 1 log", func(t *testing.T) string {
+			// Its records are authenticated by CRC32C; a brand new key is exactly
+			// what upgradeV1 needs.
+			path := filepath.Join(t.TempDir(), WALFileName)
+			writeV1Log(t, path, KindWAL, v1Record{Index: 1, Type: TypePrepare, Payload: []byte(`{"n":1}`)})
+			return path
+		}, true},
+
+		{"a version 2 file header and nothing else", func(t *testing.T) string {
+			// Size == fileHeaderSize: no record exists, so nothing can be lost.
+			return v2Log(t, 0)
+		}, true},
+
+		{"a version 2 log holding records", func(t *testing.T) string {
+			return v2Log(t, 2)
+		}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.build(t)
+
+			got, err := macKeyMayBeCreated(path, KindWAL)
+			if err != nil {
+				t.Fatalf("macKeyMayBeCreated: %v", err)
+			}
+			if got != tc.mayCreate {
+				t.Fatalf("macKeyMayBeCreated = %v, want %v", got, tc.mayCreate)
+			}
+
+			// And the predicate must be what macKeyFor actually acts on: creating
+			// the key file, or failing with ErrMACKeyMissing and naming both paths.
+			key, err := macKeyFor(path, KindWAL, nil)
+			keyPath := macKeyPath(filepath.Dir(path))
+			if !tc.mayCreate {
+				if !errors.Is(err, ErrMACKeyMissing) {
+					t.Fatalf("macKeyFor = %v, want ErrMACKeyMissing on a version 2 log with records", err)
+				}
+				for _, want := range []string{path, keyPath, "on-disk format version 2"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the error does not mention %q: %v", want, err)
+					}
+				}
+				if _, serr := os.Stat(keyPath); !os.IsNotExist(serr) {
+					t.Errorf("macKeyFor created %s anyway (stat err = %v)", keyPath, serr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("macKeyFor: %v, want a freshly generated key", err)
+			}
+			if len(key) != macKeySize {
+				t.Fatalf("macKeyFor returned %d key bytes, want %d", len(key), macKeySize)
+			}
+			fi, serr := os.Stat(keyPath)
+			if serr != nil {
+				t.Fatalf("the key file was not written: %v", serr)
+			}
+			if fi.Mode().Perm() != macKeyMode {
+				t.Errorf("the key file is mode %v, want %v", fi.Mode().Perm(), macKeyMode)
+			}
+		})
 	}
 }

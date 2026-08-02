@@ -551,3 +551,129 @@ internal/ids, internal/auth, and the backlog agents are concurrently live).
 
 Left task `in_progress` (status_note CODE-COMPLETE/UNCOMMITTED) — feature-runner does not commit;
 orchestrator commits after verification.
+
+## 2026-08-02 — ID-2-WIRING-SEAL: Sequence refuses to issue from an UNSEALED floor
+
+Task `ID-2-WIRING-SEAL` (public_id `8c9b6489-abb1-444e-9eeb-3ff87646f632`, P0), run by feature-runner
+(opus). Split out of `ID-2-WIRING` on the deep-diver's recommendation (`ID2_WIRING_DEEPDIVE.md` §4.1,
+§5/T1) as the only half implementable with no schema decision.
+
+**The defect.** `internal/ids.Sequence.RaiseFloor`'s guard `if s.last != 0 && atLeast <= s.last` was
+INERT AT STARTUP: `last` is 0 until the first `Next`, so in exactly the window where the floor is
+derived, every value — including a far-too-low one — was accepted silently. §3.4 of the deep-dive
+proved `go vet` cannot be made to flag a bare `s.RaiseFloor(x)` that drops the error, so the
+mitigation could not be a linter; it had to be an API that fails closed.
+
+**The change.** Two states, one-way: UNSEALED → SEALED, one unexported bool under the existing mutex.
+Both `NewSequence()` and `Resume(n)` are born UNSEALED. `Next()` returns `(0, ErrFloorUnproven)` and
+allocates nothing while unsealed; `Seal()` ends assembly (exactly once — a second call wraps
+`ErrFloorSealed` and changes nothing); `RaiseFloor` returns `ErrFloorSealed` after the seal. Guard
+ordering is deliberate and asserted by sentinel name: unsealed is checked BEFORE exhaustion (a floor
+of `MaxUint64` means a broken derivation, which is recoverable, not "this bus is finished", which is
+not), and sealed is checked BEFORE `ErrFloorBelowIssued` (after the seal every `atLeast` gets the same
+sentinel). Consequence, recorded openly: `ErrFloorBelowIssued` is now structurally UNREACHABLE on
+`Sequence`; the branch was KEPT as defence-in-depth on the reviewer's explicit verdict, and the
+sentinel is still live per-name on `NameSuffixes.RaiseFloor`.
+
+**Files:** `internal/ids/sequence.go`, `internal/ids/sequence_test.go`, `internal/ids/messageid_test.go`,
+`internal/ids/doc.go`. Nothing outside `internal/ids/`.
+
+**Proof (non-vacuous — the named test was written by this task):**
+`proof-check: verdict=PASS class=test exit=0 tests_run=15 top_level=1 skipped=0 failed=0 empty_pkgs=0`
+and for the whole package `verdict=PASS tests_run=203 top_level=41 failed=0`. `go build ./...` exit 0,
+`go vet` clean, `"$(go env GOROOT)/bin/gofmt" -l internal/ids` empty, `-race -count=2`/`-count=4` no
+flakes.
+
+**Chain:** spec-keeper → implementer → test-engineer → reviewer → security → documentation → spec-keeper.
+All ran; none skipped. Reviewer PASS-WITH-NITS, security PASS-WITH-NOTES. Both nit sets were fixed
+in-task before completion: two doc sentences that were still factually FALSE (`RaiseFloor`'s no-op
+bullet still keyed on `Last() == 0` rather than on the seal; "raising to `math.MaxUint64` succeeds
+while nothing has been issued" → "while UNSEALED"), the caller-contract sketch's bare `seq.Seal()` now
+checks its error, and — security's MEDIUM — the doc now states that a PEER-supplied floor claim is
+untrusted input which must be validated and BOUNDED before it reaches `RaiseFloor`, since `RaiseFloor`
+applies no upper bound and an unbounded peer claim exhausts the id space at once and permanently.
+
+**Deliberate, tracked debt.** The task said "Update CONTRACTS.md" and this task did NOT: `CONTRACTS.md`
+was being split into per-plane files by a concurrent agent in the same loop and admits one writer.
+The rows are carried verbatim in `ID-2-WIRING-SEAL-FU-CONTRACTS` (`9c183c8e-ca4f-4b5a-9d74-30c9c2d6f812`,
+P1), proof `grep -q 'ErrFloorUnproven' CONTRACTS*.md`, RED today.
+
+**Follow-up filed:** `ID-2-WIRING-SEAL-FU-NAMESUFFIXES` (`1c207a62-e904-4988-84c2-f4b69712ee35`, P1) —
+`NameSuffixes` in `agentmint.go` carries the identical inert guard with no seal, and security rates it
+HIGH-latent and worse in kind, because the agent id is the routing AND authorization subject. It must
+land BEFORE AUTH-3 makes enrolment durable.
+
+**Code-only.** `ids.Sequence` has zero production call sites, so nothing about a running bus changes
+and there is nothing to deploy. The derivation that will actually call `Seal()` is `ID-2-WIRING`,
+still blocked on `ID-2-WIRING-SCHEMA`.
+
+## 2026-08-02 — AUTH-1-FU-ACTIVECAP (2d92b699), feature-runner (opus)
+
+Task: cap ACTIVE sessions per agent. Enrolment is unauthenticated, so an attacker enrolled its own
+agent, completed handshakes, and filled the 16384-entry session table with ACTIVE entries — reclaimed
+only after `SessionLifetime` (1h), not `ChallengeTTL` (2m) — holding a global, pre-auth denial of NEW
+session establishment for an hour past the flood at ~9 req/s. Filed P1, dispatched as P0-equivalent,
+flipped to P0 by spec-keeper mid-run.
+
+**The fix is a placement, not just a counter.** The cap is enforced in `CompleteSession`, NOT
+`BeginSession`: after `ed25519.Verify` succeeds and after the already-active early return, immediately
+before the pending→active transition. That is what makes an agent-id key SAFE here when
+AUTH-1-FU-PENDINGCAP had to remove one from `BeginSession` — on the unauthenticated begin route
+`agent_id` is an attacker-supplied VICTIM identifier, so any bucket there is a lockout primitive,
+whereas here an entry only enters a bucket behind a valid Ed25519 signature made with that agent's own
+enrolment private key. Proven identity, so a flooder can only fill its OWN bucket and the refusal is
+self-inflicted. That argument is written into the code so the next reader does not delete the cap as a
+repeat of the mistake PENDINGCAP just fixed.
+
+`DefaultMaxActiveSessionsPerAgent = 32` (~16x the compliant steady state of 2 concurrent sessions,
+since a client refreshes at 75% of lifetime and old/new overlap; bounds one identity to 0.2% of the
+table). Refuse-new, NEVER evict — evicting an agent's own oldest would let a thief who compromised its
+key destroy the legitimate holder's LIVE sessions on demand. A refusal mutates nothing: the pending
+challenge survives (the single-attempt rule that burns a challenge is for a FAILED VERIFICATION, and
+this signature verified). Re-completing an already-active session is never refused (invariant 10).
+
+Chain ran in full: spec-keeper → implementer → test-engineer → reviewer → security → documentation.
+reviewer PASS (verified `sess.State = SessionActive` is written in exactly one place tree-wide and is
+unreachable without the check; off-by-one exact at caps 1/2/5; refusal is a bare return with no
+delete). security PASS, no P0/P1, with five throwaway probes in a /tmp repo copy: 200 concurrent
+completions at cap 5 gave exactly 5 + 195 ErrCapacity, race-clean (no TOCTOU); 50 completions naming
+the victim signed with the attacker's key all returned ErrBadSignature leaving the table at 0 — a
+third party CANNOT consume a victim's bucket. Both gates' P2 comment findings were folded back into
+`session.go` (the roster key is re-read at completion time, so the claim also rests on invariant 1 +
+`Roster.Put` never overwriting; the compromised-key case; and that 512 of 4096 roster entries is not a
+binding constraint).
+
+Honest residual risk, recorded rather than hidden: a global pre-auth active-entry fill is STILL
+reachable for +1.6% attacker cost (33280 vs 32769 requests, sustained hold unchanged at ~9.1 req/s),
+because `Enrol` accepts duplicate public keys so the 512 enrolments the cap forces come from ONE
+keypair. Filed as ac4f9c2b-5460-4e83-997d-0e433194752f; the root fix is the invite-only enrolment EPIC
+(0b43393e). This cap is defence in depth behind that gate, not a substitute for it.
+
+Proof (`bash scripts/proof-check.sh`): verdict=PASS class=test exit=0 tests_run=13 top_level=1 for
+`go test -race -run TestSessionActiveCap ./internal/auth`; tests_run=99 for the whole package;
+tests_run=722 for `go test -race ./...` (run before internal/wal went red — see below). Mutation-tested
+by the test-engineer: neutering the check fails 6 subtests, hoisting it above the early return fails
+the idempotency subtest, deleting the pending session on refusal fails 5, and counting PENDING entries
+into the bucket fails all three pre-existing PENDINGCAP subtests.
+
+Docs DEFERRED, deliberately and tracked: `CONTRACTS*.md` and `AGENT_PROTOCOL.md` were owned by
+concurrent agents this loop, so the documentation agent wrote only `internal/auth/doc.go` and drafted
+the rest. Filed as AUTH-1-FU-ACTIVECAP-DOCS (27a811c9-5942-4341-b5fd-67c12a2547d0) with a proof that
+globs `CONTRACTS*.md` (survives the split) and pins the literal string `a PROVEN identity, not an
+attacker-supplied victim identifier` — CONFIRMED RED before filing (verdict=FAIL class=file-assertion
+exit=1). The reviewer's P1 on the wire surface — `capacityRetryAfterSeconds = "5"` and "server at
+capacity, retry later" are both wrong for a refusal that can persist an hour and is the client's own
+fault — is `internal/httpapi`, outside the boundary: filed as AUTH-1-FU-ACTIVECAP-RETRYAFTER
+(03a8512b-450c-4bce-a7b9-b024b98efbf0).
+
+NOTE for whoever builds next: `go build ./...` is currently RED in `internal/wal` (undefined
+`encodeFrame`/`parseFileHeader`, `scanFrom` arity). That is a CONCURRENT agent's in-flight work, not
+this change — the reported line numbers shifted under me between two invocations. `internal/auth` does
+not import `internal/wal` and builds, vets and gofmts clean on its own.
+
+File-ownership boundary: `internal/auth/**` only. Staged exactly `internal/auth/{service.go,session.go,
+session_test.go,doc.go}`. Did not touch CONTRACTS*.md, DECISIONS.md, SPEC.md, CLAUDE.md,
+AGENT_PROTOCOL.md, internal/ids, internal/wal or internal/httpapi.
+
+Left task `in_progress` (status_note CODE-COMPLETE/UNCOMMITTED) — feature-runner does not commit;
+orchestrator commits and completes with `commit_sha`.

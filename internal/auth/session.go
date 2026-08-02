@@ -253,17 +253,18 @@ func (s *Service) BeginSession(agentID string) (Challenge, error) {
 	//     per second to hold an UNTARGETED, unamplified, self-healing outage,
 	//     against nine requests per round for a TARGETED, permanent, stealthy one
 	//     — but it does raise the priority of the mitigation below.
-	//   - ChallengeTTL is NOT the recovery bound in the worst case. It drains
-	//     pending entries in two minutes, but nothing here caps ACTIVE sessions
-	//     per agent, and enrolment is itself unauthenticated: an attacker that
-	//     enrols its own agent can complete handshakes and fill the table with
-	//     ACTIVE entries, which are reclaimed only after SessionLifetime. That
-	//     costs far less traffic to hold and outlives the flood by an hour. It is
-	//     a PRE-EXISTING gap — the removed cap counted only pending sessions and
-	//     never protected against it — and is filed as AUTH-1-FU-ACTIVECAP. A cap
-	//     keyed on agent id is SAFE there, and only there: an active session can
-	//     exist only if someone proved possession of that agent's private key, so
-	//     the key is a proven identity rather than an attacker-supplied one.
+	//   - ChallengeTTL is NOT the recovery bound for pending entries alone.
+	//     It drains them in two minutes, but ACTIVE entries are reclaimed only
+	//     after SessionLifetime, and enrolment is itself unauthenticated: an
+	//     attacker that enrols its own agent can complete handshakes and fill the
+	//     table with active entries that cost far less traffic to hold and
+	//     outlive the flood by an hour. Active sessions are now CAPPED PER AGENT
+	//     in CompleteSession (AUTH-1-FU-ACTIVECAP), which raises that from one
+	//     enrolment to ceil(maxSessions/cap) distinct ones. A cap keyed on agent
+	//     id is safe THERE, and only there: an active session can exist only if
+	//     someone proved possession of that agent's private key, so the key is a
+	//     proven identity rather than an attacker-supplied one. It bounds the
+	//     amplification; it does not make the table unfillable.
 	//
 	// The mitigation for the flood itself is per-SOURCE rate limiting — the only
 	// thing that can charge the flooder rather than the victim — task
@@ -380,7 +381,81 @@ func (s *Service) CompleteSession(token string, signature []byte) (Session, erro
 	if sess.State == SessionActive {
 		// Verified, and already live. Return it UNCHANGED — in particular with
 		// its original ExpiresAt. See the doc comment.
+		//
+		// This return is also what keeps the per-agent cap below compatible with
+		// idempotency, and it must stay ABOVE that check: re-completing a session
+		// that is already active creates NO new entry and is already counted in
+		// its agent's bucket, so refusing it would turn a safe retry into a
+		// failure. Moving the cap check above this line would break invariant 10.
 		return *sess, nil
+	}
+
+	// The PER-AGENT ACTIVE-SESSION CAP (AUTH-1-FU-ACTIVECAP). It fails CLOSED
+	// and NEVER evicts, and — like BeginSession's global cap — a refusal leaves
+	// the table exactly as it found it: the pending session is NOT deleted and
+	// nothing is mutated. The single-attempt rule that burns a pending challenge
+	// applies to a FAILED VERIFICATION, and this signature verified; the caller
+	// is the genuine agent and may retry once one of its own sessions expires.
+	//
+	// # Why an agent-id key is safe HERE and is not in BeginSession
+	//
+	// Read this before deleting it as a repeat of the per-agent PENDING cap that
+	// AUTH-1-FU-PENDINGCAP removed. The two are not the same check, because the
+	// KEY is not the same kind of thing:
+	//
+	//   - On BeginSession, which is unauthenticated, agentID is an
+	//     ATTACKER-SUPPLIED VICTIM IDENTIFIER. Anyone who knows a real agent's id
+	//     makes their calls land in the VICTIM's bucket, so any behaviour at the
+	//     limit — evict OR refuse — is a lockout of the victim. That is why there
+	//     is deliberately no bucket there.
+	//   - Here the key is a PROVEN IDENTITY. An entry can only be counted into an
+	//     agent's bucket by someone who produced a valid Ed25519 signature over
+	//     SessionSigningContext+token with that agent's enrolment PRIVATE key. A
+	//     flooder cannot make its sessions land in a victim's bucket; it can only
+	//     fill its OWN. Refusing at the cap is therefore self-inflicted only,
+	//     which is exactly what the pending version could not be.
+	//
+	// One leg of that argument is easy to miss, so name it: the roster key is
+	// re-read HERE, at completion time, not pinned at BeginSession. So the claim
+	// rests on the signature AND on an agent id never being rebound to a
+	// different key — invariant 1, plus Roster.Put's contract that it refuses
+	// rather than overwrites. If AUTH-3's durable roster or AUTH-4's
+	// leave/revocation ever lets an id be re-enrolled under a new key, this
+	// bucket becomes third-party-consumable and this cap must be re-argued.
+	//
+	// # What this does NOT fix
+	//
+	// It does not make the session table unfillable, because enrolment is
+	// unauthenticated. It raises the cost of an active-session flood from ONE
+	// agent to ceil(maxSessions/maxActiveSessionsPerAgent) DISTINCT ENROLMENTS —
+	// 512 at the 16384/32 defaults — each bounded by MaxRosterEntries and far
+	// more visible than a session handshake. Do not read that bound as
+	// reassurance: 512 is 12.5% of MaxRosterEntries, so the roster limit is NOT
+	// the binding constraint, and until enrolment is gated those 512 are simply
+	// 512 more unauthenticated POSTs — measured at +1.6% on the attacker's total
+	// request count. What this buys is a smaller BLAST RADIUS per identity, not
+	// an unreachable table. The real mitigations are the invite-only enrolment
+	// gate and per-SOURCE rate limiting, task AUTH-1-FU-RATELIMIT.
+	//
+	// Nor does it help against a COMPROMISED private key: whoever holds it can
+	// occupy all maxActiveSessionsPerAgent slots and, because nothing evicts,
+	// deny the legitimate holder a NEW session for up to SessionLifetime. That
+	// is still a win — the blast radius is one agent's 32 slots rather than the
+	// whole 16384-entry table — and the remedy is revocation (AUTH-4), not
+	// eviction here: evicting on a full bucket would let the thief destroy the
+	// victim's live sessions on demand.
+	//
+	// The count is an O(n) scan under the already-held s.sessMu, deliberately:
+	// there is no per-agent index and none is wanted (see Service.sessions).
+	// sweepLocked ran at the top of this call, so nothing expired is counted.
+	active := 0
+	for _, other := range s.sessions {
+		if other.State == SessionActive && other.AgentID == sess.AgentID {
+			active++
+		}
+	}
+	if active >= s.maxActiveSessionsPerAgent {
+		return Session{}, fmt.Errorf("%w: agent %q holds %d active sessions, at the per-agent limit of %d; one of its OWN sessions must expire before another can be established, and none is evicted to make room", ErrCapacity, sess.AgentID, active, s.maxActiveSessionsPerAgent)
 	}
 
 	sess.State = SessionActive

@@ -204,15 +204,15 @@ func TestParseMessageIDTrailingDashBusIDIsLegal(t *testing.T) {
 
 // TestParseMessageIDErrorIsNotSentinelWrapped is a small sanity check that
 // ParseMessageID's malformed-input errors are ordinary errors (not, say,
-// ErrSequenceExhausted or ErrFloorBelowIssued), so callers using errors.Is
-// against the Sequence sentinels never mistake a parse failure for one of
-// those allocator conditions.
+// ErrSequenceExhausted, ErrFloorBelowIssued, ErrFloorUnproven or
+// ErrFloorSealed), so callers using errors.Is against the Sequence sentinels
+// never mistake a parse failure for one of those allocator conditions.
 func TestParseMessageIDErrorIsNotSentinelWrapped(t *testing.T) {
 	_, _, err := ParseMessageID("bus-x-0")
 	if err == nil {
 		t.Fatalf("ParseMessageID(%q) = nil error, want an error", "bus-x-0")
 	}
-	if errors.Is(err, ErrSequenceExhausted) || errors.Is(err, ErrFloorBelowIssued) {
+	if errors.Is(err, ErrSequenceExhausted) || errors.Is(err, ErrFloorBelowIssued) || errors.Is(err, ErrFloorUnproven) || errors.Is(err, ErrFloorSealed) {
 		t.Fatalf("ParseMessageID(%q) error unexpectedly matches a Sequence sentinel: %v", "bus-x-0", err)
 	}
 }
