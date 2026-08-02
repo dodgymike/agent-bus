@@ -34,10 +34,6 @@ const (
 
 	// DefaultMaxSessions bounds the session table, pending and active together.
 	DefaultMaxSessions = 16384
-
-	// DefaultMaxPendingPerAgent bounds the challenges one agent may have
-	// outstanding.
-	DefaultMaxPendingPerAgent = 8
 )
 
 // Options configures NewService.
@@ -69,11 +65,10 @@ type Options struct {
 	MaxIdempotencyEntries int
 
 	// MaxSessions bounds the session table; 0 means DefaultMaxSessions.
+	//
+	// It is, with ChallengeTTL, the ONLY bound on the session table. There is
+	// deliberately no per-agent cap to go with it — see BeginSession.
 	MaxSessions int
-
-	// MaxPendingPerAgent bounds one agent's outstanding challenges; 0 means
-	// DefaultMaxPendingPerAgent.
-	MaxPendingPerAgent int
 }
 
 // Service is the enrolment and session authority. It is safe for concurrent
@@ -88,7 +83,6 @@ type Service struct {
 	maxRosterEntries      int
 	maxIdempotencyEntries int
 	maxSessions           int
-	maxPendingPerAgent    int
 
 	// enrolMu guards idem and serialises the whole of Enrol. sessMu guards
 	// sessions.
@@ -155,7 +149,6 @@ func NewService(opts Options) (*Service, error) {
 		maxRosterEntries:      opts.MaxRosterEntries,
 		maxIdempotencyEntries: opts.MaxIdempotencyEntries,
 		maxSessions:           opts.MaxSessions,
-		maxPendingPerAgent:    opts.MaxPendingPerAgent,
 		idem:                  make(map[string]idempotentEnrol),
 		sessions:              make(map[string]*Session),
 	}
@@ -173,9 +166,6 @@ func NewService(opts Options) (*Service, error) {
 	}
 	if s.maxSessions <= 0 {
 		s.maxSessions = DefaultMaxSessions
-	}
-	if s.maxPendingPerAgent <= 0 {
-		s.maxPendingPerAgent = DefaultMaxPendingPerAgent
 	}
 	return s, nil
 }

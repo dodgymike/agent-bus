@@ -34,7 +34,7 @@ var version = "dev"
 
 // Defaults for the command-line flags.
 const (
-	defaultListen      = ":8080"
+	defaultListen      = "127.0.0.1:8080"
 	defaultDataDir     = "./data"
 	defaultPollTimeout = 30 * time.Second
 	defaultLogLevel    = "info"
@@ -51,7 +51,8 @@ const (
 
 // Config is the fully validated runtime configuration.
 type Config struct {
-	// Listen is the TCP address the HTTP server binds, e.g. ":8080".
+	// Listen is the TCP address the HTTP server binds, e.g. "127.0.0.1:8080"
+	// (default, loopback-only) or ":8080" (all interfaces).
 	Listen string
 	// DataDir is the directory holding the durable store and the append-only
 	// log. Created if missing.
@@ -97,7 +98,7 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 
 	fs := flag.NewFlagSet(prog, flag.ContinueOnError)
 	fs.SetOutput(out)
-	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \":8080\" or \"127.0.0.1:8080\"")
+	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
 	fs.DurationVar(&cfg.PollTimeout, "poll-timeout", defaultPollTimeout, "maximum time a long-poll waits before returning empty, e.g. 30s")
 	fs.StringVar(&logLevel, "log-level", defaultLogLevel, "minimum log severity ("+logging.Levels+")")

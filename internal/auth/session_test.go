@@ -409,65 +409,133 @@ func TestEnrollThenSessionBeginRejectsUnknownAgents(t *testing.T) {
 	}
 }
 
-// TestEnrollThenSessionPendingCapEvictsTheOldest pins the per-agent cap's
-// choice: it EVICTS the oldest pending challenge rather than refusing the new
-// one.
+// TestSessionBeginNoVictimLockout is the ADVERSARIAL test for the per-agent
+// pending cap. The invariant: an UNAUTHENTICATED flooder that calls
+// BeginSession with a VICTIM's agent_id must never be able to stop that victim
+// from completing an authentication.
 //
-// It pins the BEHAVIOUR only, and claims no security property for it. The cap
-// is keyed on agentID, which an unauthenticated caller supplies, so eviction
-// drops whatever is oldest in the VICTIM's bucket — including the victim's own
-// correctly-issued challenge. Eviction is chosen because it bounds memory
-// without failing a client that legitimately retries, not because it defends
-// against a flood; see the long comment on the cap in BeginSession for the
-// trade-off and the mitigations that would actually address it.
-func TestEnrollThenSessionPendingCapEvictsTheOldest(t *testing.T) {
-	svc, clock := newService(t, auth.Options{MaxPendingPerAgent: 2})
-	agentID, priv := enrolAgent(t, svc, "alpha", "idem-1")
+// The attack it guards against: /v1/session/begin is unauthenticated and
+// agent_id is attacker-supplied, so a flooder's challenges land in the VICTIM's
+// bucket and eviction under a cap keyed on agent_id drops the victim's own
+// correctly-issued challenge. The cap this replaced defaulted to 8, so NINE
+// anonymous requests per round were enough to lock a named agent out
+// permanently. Refusing at the cap instead is the same lockout by the other
+// route. The cap was therefore removed outright (AUTH-1-FU-PENDINGCAP) rather
+// than retuned, and this test is what stops one being reintroduced.
+//
+// What this test does NOT claim: it does not claim the unauthenticated surface
+// is flood-proof. A flooder can still consume the GLOBAL session table, which
+// is per-source rate limiting's problem (task AUTH-1-FU-RATELIMIT, public_id
+// 42670f8b-ab58-491d-a8cf-04a6e92185f1), not this one. The property here is
+// narrower and behavioural: no amount of traffic naming the victim may destroy
+// the victim's ability to authenticate.
+func TestSessionBeginNoVictimLockout(t *testing.T) {
+	// floodSize is deliberately hard-coded rather than derived from a cap
+	// constant: this test must keep meaning after the per-agent cap is removed.
+	// 32 is far past the old cap of 8 (and past the 2*8 the property needs), so
+	// any bucket keyed on the victim would have turned over several times.
+	const floodSize = 32
 
-	begin := func() auth.Challenge {
+	// MaxSessions is set far above the traffic this test generates so the GLOBAL
+	// cap is deliberately NOT the binding constraint — an ErrCapacity refusal
+	// here would be measuring the wrong limit. The global cap is a separate,
+	// non-amplified bound and is covered by
+	// TestEnrollThenSessionGlobalCapFailsClosed.
+	opts := auth.Options{MaxSessions: 4096}
+
+	// flood is the attacker: unauthenticated BeginSession calls naming someone
+	// else's agent id. It holds no key and never completes anything; its only
+	// input is the victim's public, well-known id.
+	flood := func(t *testing.T, svc *auth.Service, clock *fakeClock, targetID string) {
 		t.Helper()
-		ch, err := svc.BeginSession(agentID)
-		if err != nil {
-			t.Fatalf("BeginSession: %v", err)
+		for i := 0; i < floodSize; i++ {
+			if _, err := svc.BeginSession(targetID); err != nil {
+				t.Fatalf("flood BeginSession(%q) #%d: %v (the global cap must not be what this test measures)", targetID, i, err)
+			}
+			// A tick per call so the flood's challenges have strictly ordered
+			// CreatedAt values and eviction is deterministic.
+			clock.Advance(time.Millisecond)
 		}
-		return ch
 	}
 
-	first := begin()
-	clock.Advance(time.Second)
-	second := begin()
-	clock.Advance(time.Second)
-	third := begin()
+	t.Run("the victim's outstanding challenge survives a flood naming it", func(t *testing.T) {
+		svc, clock := newService(t, opts)
+		victim, victimPriv := enrolAgent(t, svc, "victim", "idem-victim")
 
-	if n := svc.SessionCount(); n != 2 {
-		t.Fatalf("session table holds %d entries, want 2 (the per-agent cap)", n)
-	}
-
-	// The OLDEST went, and it is the one that cannot complete.
-	if _, err := svc.CompleteSession(first.Token, signToken(priv, first.Token)); !errors.Is(err, auth.ErrUnknownSession) {
-		t.Fatalf("the oldest challenge err = %v, want one wrapping ErrUnknownSession: it should have been evicted", err)
-	}
-
-	// The two newest both still complete — the cap must not have taken them.
-	if _, err := svc.CompleteSession(second.Token, signToken(priv, second.Token)); err != nil {
-		t.Fatalf("the second-oldest challenge was evicted too: %v", err)
-	}
-	if _, err := svc.CompleteSession(third.Token, signToken(priv, third.Token)); err != nil {
-		t.Fatalf("the newest challenge could not be completed: %v", err)
-	}
-
-	t.Run("one agent's flood does not evict another agent's challenge", func(t *testing.T) {
-		otherID, otherPriv := enrolAgent(t, svc, "beta", "idem-2")
-		otherCh, err := svc.BeginSession(otherID)
+		// The victim asks for its challenge and is now signing it — the window
+		// between begin and complete is exactly one client round trip.
+		ch, err := svc.BeginSession(victim)
 		if err != nil {
-			t.Fatalf("BeginSession for beta: %v", err)
+			t.Fatalf("victim BeginSession: %v", err)
 		}
-		for i := 0; i < 5; i++ {
+
+		flood(t, svc, clock, victim)
+
+		if _, err := svc.CompleteSession(ch.Token, signToken(victimPriv, ch.Token)); err != nil {
+			t.Fatalf("the victim could not complete its own challenge after %d unauthenticated begins naming it: %v; an unauthenticated caller must never be able to destroy a named agent's pending challenge", floodSize, err)
+		}
+		if _, err := svc.Authenticate(ch.Token); err != nil {
+			t.Fatalf("the victim's completed session does not authenticate: %v", err)
+		}
+	})
+
+	t.Run("a sustained flood over many rounds never locks the victim out", func(t *testing.T) {
+		svc, clock := newService(t, opts)
+		victim, victimPriv := enrolAgent(t, svc, "victim", "idem-victim")
+
+		const rounds = 4
+		for round := 0; round < rounds; round++ {
+			// Flooding before the victim's begin AND during its signing round
+			// trip: a real flood is continuous, not a single burst.
+			flood(t, svc, clock, victim)
+
+			ch, err := svc.BeginSession(victim)
+			if err != nil {
+				t.Fatalf("round %d: victim BeginSession: %v", round, err)
+			}
 			clock.Advance(time.Second)
-			begin()
+
+			flood(t, svc, clock, victim)
+
+			if _, err := svc.CompleteSession(ch.Token, signToken(victimPriv, ch.Token)); err != nil {
+				t.Fatalf("round %d: victim CompleteSession: %v; %d anonymous begins per round must not be a lockout primitive", round, err, floodSize)
+			}
+			p, err := svc.Authenticate(ch.Token)
+			if err != nil {
+				t.Fatalf("round %d: victim Authenticate: %v", round, err)
+			}
+			if p.AgentID != victim {
+				t.Fatalf("round %d: principal agent id = %q, want the victim %q", round, p.AgentID, victim)
+			}
+			clock.Advance(time.Second)
+		}
+	})
+
+	t.Run("no third party can destroy an already-issued challenge", func(t *testing.T) {
+		// Guards a future regression that keys the cap globally-but-wrongly: a
+		// flood naming a DIFFERENT enrolled agent must also leave the victim's
+		// pending challenge intact.
+		svc, clock := newService(t, opts)
+		victim, victimPriv := enrolAgent(t, svc, "victim", "idem-victim")
+		other, otherPriv := enrolAgent(t, svc, "other", "idem-other")
+
+		ch, err := svc.BeginSession(victim)
+		if err != nil {
+			t.Fatalf("victim BeginSession: %v", err)
+		}
+		otherCh, err := svc.BeginSession(other)
+		if err != nil {
+			t.Fatalf("other BeginSession: %v", err)
+		}
+
+		flood(t, svc, clock, other)
+		flood(t, svc, clock, victim)
+
+		if _, err := svc.CompleteSession(ch.Token, signToken(victimPriv, ch.Token)); err != nil {
+			t.Fatalf("the victim's challenge was collateral damage from floods naming it and another agent: %v", err)
 		}
 		if _, err := svc.CompleteSession(otherCh.Token, signToken(otherPriv, otherCh.Token)); err != nil {
-			t.Fatalf("beta's challenge was collateral damage from alpha's flood: %v", err)
+			t.Fatalf("the second agent's challenge did not survive either: %v", err)
 		}
 	})
 }
@@ -476,7 +544,7 @@ func TestEnrollThenSessionPendingCapEvictsTheOldest(t *testing.T) {
 // rather than growing without limit: it is memory an UNAUTHENTICATED caller can
 // allocate.
 func TestEnrollThenSessionGlobalCapFailsClosed(t *testing.T) {
-	svc, _ := newService(t, auth.Options{MaxSessions: 2, MaxPendingPerAgent: 8})
+	svc, _ := newService(t, auth.Options{MaxSessions: 2})
 
 	a, _ := enrolAgent(t, svc, "alpha", "idem-1")
 	b, _ := enrolAgent(t, svc, "beta", "idem-2")
@@ -494,13 +562,13 @@ func TestEnrollThenSessionGlobalCapFailsClosed(t *testing.T) {
 		t.Errorf("session table holds %d entries, want 2", n)
 	}
 
-	// A REFUSED call must leave the table exactly as it found it. The global cap
-	// is therefore checked BEFORE the per-agent eviction: with the checks the
-	// other way round, a caller already at its per-agent cap would have its
-	// oldest challenge destroyed on the way to being told the server is full —
-	// a failed call with a side effect on the caller's own state.
+	// A REFUSED call must leave the table exactly as it found it: a failed call
+	// with a side effect on the caller's own state is the worst kind. The
+	// scenario is the one a client actually hits — alpha already holds a pending
+	// challenge, the table fills, and alpha's NEXT begin is refused. That refusal
+	// must not cost alpha the challenge it is already part-way through signing.
 	t.Run("a refusal at the global cap destroys no pending challenge", func(t *testing.T) {
-		svc, _ := newService(t, auth.Options{MaxSessions: 2, MaxPendingPerAgent: 1})
+		svc, _ := newService(t, auth.Options{MaxSessions: 2})
 		alpha, alphaPriv := enrolAgent(t, svc, "alpha", "idem-1")
 		beta, _ := enrolAgent(t, svc, "beta", "idem-2")
 
@@ -512,7 +580,7 @@ func TestEnrollThenSessionGlobalCapFailsClosed(t *testing.T) {
 			t.Fatalf("BeginSession(beta): %v", err)
 		}
 
-		// alpha is at its per-agent cap AND the table is at the global cap.
+		// The table is now at the global cap, so alpha's next begin is refused.
 		if _, err := svc.BeginSession(alpha); !errors.Is(err, auth.ErrCapacity) {
 			t.Fatalf("err = %v, want one wrapping ErrCapacity", err)
 		}
@@ -559,7 +627,7 @@ func TestEnrollThenSessionLifetimeCeiling(t *testing.T) {
 // has to have. Two challenges must never collide, or one agent's session would
 // authenticate as another.
 func TestEnrollThenSessionTokensAreUnique(t *testing.T) {
-	svc, _ := newService(t, auth.Options{MaxPendingPerAgent: 256, MaxSessions: 1024})
+	svc, _ := newService(t, auth.Options{MaxSessions: 1024})
 	agentID, _ := enrolAgent(t, svc, "alpha", "idem-1")
 
 	const n = 128

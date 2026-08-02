@@ -187,7 +187,11 @@ func newToken() (string, error) {
 // agents something it should not learn.
 //
 // This route is UNAUTHENTICATED — it is part of how a credential is obtained —
-// so everything it allocates is bounded; see the caps below.
+// so what it allocates is bounded, by the GLOBAL session cap and by nothing
+// else. Entries leave the table only by EXPIRING, and the two states expire on
+// very different scales: a pending challenge after ChallengeTTL, an active
+// session only after SessionLifetime. See the cap check below for what that
+// bound does and, just as importantly, does not protect against.
 func (s *Service) BeginSession(agentID string) (Challenge, error) {
 	// Parsed before anything else touches it, and outside the lock. Parsing
 	// establishes only that the string is a well-formed id; it grants nothing,
@@ -215,55 +219,69 @@ func (s *Service) BeginSession(agentID string) (Challenge, error) {
 	// LIVE rather than by everything ever issued. O(n) over a capped table.
 	s.sweepLocked(now)
 
-	// Global cap, checked BEFORE the per-agent eviction below. Fails CLOSED: a
-	// session table that grew without limit is a memory exhaustion reachable by
-	// an unauthenticated caller.
+	// The GLOBAL session cap. It is the ONLY bound on how far an unauthenticated
+	// caller can grow this table; expiry (ChallengeTTL while pending,
+	// SessionLifetime once active) is what drains it. It fails CLOSED — a session
+	// table that grew without limit is a memory exhaustion reachable without
+	// credentials — and a refusal leaves the table exactly as it found it, so
+	// this error path has no side effect on anybody's state.
 	//
-	// The order matters for a reason that is not about capacity. If this ran
-	// after the eviction, a call that ends up REFUSED would still have destroyed
-	// the caller's earlier pending challenge on its way out — a failed call with
-	// a side effect on the caller's own state, which is the worst kind. A
-	// refusal now leaves the table exactly as it found it. The cost is that a
-	// per-agent reclaim can no longer rescue a call made at the global cap;
-	// that call is refused with ErrCapacity and the client retries, which is the
-	// documented behaviour of every other cap here.
+	// # There is deliberately NO per-agent cap
+	//
+	// A per-agent bucket could only be keyed on agentID, and agentID on this
+	// unauthenticated route is an ATTACKER-SUPPLIED VICTIM IDENTIFIER: anyone who
+	// knows a real agent's id makes its BeginSession calls land in THAT agent's
+	// bucket. Whichever way such a bucket behaves at its limit, the result is a
+	// lockout of the victim — EVICTING destroys the victim's own correctly-issued
+	// challenge, REFUSING denies the victim its next one — so on the order of
+	// cap+1 anonymous requests per round permanently stop a named agent
+	// authenticating. There is no ordering of a victim-keyed bucket that is not a
+	// lockout primitive, so the cap was removed outright rather than retuned
+	// (AUTH-1-FU-PENDINGCAP).
+	//
+	// # What this does NOT solve, and what removing the cap made CHEAPER
+	//
+	// A flooder can still fill this table to maxSessions and deny session
+	// establishment to EVERYONE until entries expire. That is not fixed here and
+	// must not be read as fixed. Two honest caveats:
+	//
+	//   - Removing the cap made that flood CHEAPER, not merely no worse. Pending
+	//     entries used to be bounded by cap × roster size, so exhausting the table
+	//     first meant enrolling enough distinct ids; it is now directly reachable
+	//     with maxSessions begins naming ONE known agent. The trade is still
+	//     clearly worth it — roughly maxSessions/ChallengeTTL sustained requests
+	//     per second to hold an UNTARGETED, unamplified, self-healing outage,
+	//     against nine requests per round for a TARGETED, permanent, stealthy one
+	//     — but it does raise the priority of the mitigation below.
+	//   - ChallengeTTL is NOT the recovery bound in the worst case. It drains
+	//     pending entries in two minutes, but nothing here caps ACTIVE sessions
+	//     per agent, and enrolment is itself unauthenticated: an attacker that
+	//     enrols its own agent can complete handshakes and fill the table with
+	//     ACTIVE entries, which are reclaimed only after SessionLifetime. That
+	//     costs far less traffic to hold and outlives the flood by an hour. It is
+	//     a PRE-EXISTING gap — the removed cap counted only pending sessions and
+	//     never protected against it — and is filed as AUTH-1-FU-ACTIVECAP. A cap
+	//     keyed on agent id is SAFE there, and only there: an active session can
+	//     exist only if someone proved possession of that agent's private key, so
+	//     the key is a proven identity rather than an attacker-supplied one.
+	//
+	// The mitigation for the flood itself is per-SOURCE rate limiting — the only
+	// thing that can charge the flooder rather than the victim — task
+	// AUTH-1-FU-RATELIMIT.
+	//
+	// # What IS guaranteed
+	//
+	// Nothing an unauthenticated caller does can DESTROY a challenge already
+	// issued to another agent. A challenge leaves this table by exactly three
+	// routes, and the third requires the token: it expires (ChallengeTTL), it is
+	// completed, or a completion attempt against it FAILS verification (see
+	// CompleteSession's single-attempt rule). The token is 32 bytes of
+	// crypto/rand and the table is keyed on its hash, so that third route is
+	// reachable only by whoever holds the token — the agent itself, or someone
+	// who observed it in flight. That unguessability is load-bearing now that no
+	// other per-agent bound exists.
 	if len(s.sessions) >= s.maxSessions {
 		return Challenge{}, fmt.Errorf("%w: the session table holds %d entries, the limit", ErrCapacity, s.maxSessions)
-	}
-
-	// Per-agent pending cap. When an agent is over it we EVICT ITS OLDEST
-	// PENDING CHALLENGE rather than refusing the new one.
-	//
-	// # This cap is NOT a defence against a flooder, and must not be read as one
-	//
-	// The cap is keyed on agentID, which is an ATTACKER-SUPPLIED VICTIM
-	// IDENTIFIER: this route is unauthenticated, so anyone who knows a real
-	// agent's id makes its BeginSession calls land in THAT agent's bucket.
-	// Eviction therefore drops the VICTIM's correctly-issued challenge, not the
-	// flooder's — MaxPendingPerAgent+1 anonymous calls per round are enough to
-	// keep a named agent from ever completing an authentication. Refusing at the
-	// cap instead is exactly the same lockout by the other route: the victim's
-	// own BeginSession is what gets refused. There is no ordering of a bucket
-	// keyed on the victim that is not a lockout primitive.
-	//
-	// Eviction is chosen only because it bounds memory WITHOUT also penalising
-	// the common honest case — a client that legitimately retries BeginSession
-	// keeps working, where refusal would start failing it at the cap. That is
-	// the entire justification; it buys nothing against an attacker.
-	//
-	// The real mitigations, neither of them implemented yet and both filed as
-	// follow-ups on AUTH-1, are: per-SOURCE rate limiting on the three
-	// unauthenticated routes (the only thing that can charge the flooder rather
-	// than the victim), or dropping this per-agent cap entirely and letting the
-	// global cap above plus ChallengeTTL bound the memory on their own.
-	for s.countPendingLocked(agentID) >= s.maxPendingPerAgent {
-		oldest := s.oldestPendingLocked(agentID)
-		if oldest == "" {
-			// Cannot happen while the count is at the cap; break rather than
-			// spin if it ever does.
-			break
-		}
-		delete(s.sessions, oldest)
 	}
 
 	sess := &Session{
@@ -438,41 +456,4 @@ func (s *Service) sweepLocked(now time.Time) {
 			delete(s.sessions, hash)
 		}
 	}
-}
-
-// countPendingLocked counts agentID's outstanding challenges. The caller must
-// hold s.sessMu, and should have swept first so expired challenges do not count
-// against a live agent.
-func (s *Service) countPendingLocked(agentID string) int {
-	n := 0
-	for _, sess := range s.sessions {
-		if sess.State == SessionPending && sess.AgentID == agentID {
-			n++
-		}
-	}
-	return n
-}
-
-// oldestPendingLocked returns the table key of agentID's oldest outstanding
-// challenge, or "" if it has none. The caller must hold s.sessMu.
-//
-// Ties are broken by the table key so the choice is deterministic rather than
-// dependent on Go's randomised map iteration order — two challenges minted in
-// the same clock tick would otherwise make eviction unpredictable, which is
-// exactly the sort of thing that makes a test flake once a week.
-func (s *Service) oldestPendingLocked(agentID string) string {
-	var (
-		oldestHash string
-		oldestAt   time.Time
-	)
-	for hash, sess := range s.sessions {
-		if sess.State != SessionPending || sess.AgentID != agentID {
-			continue
-		}
-		if oldestHash == "" || sess.CreatedAt.Before(oldestAt) ||
-			(sess.CreatedAt.Equal(oldestAt) && hash < oldestHash) {
-			oldestHash, oldestAt = hash, sess.CreatedAt
-		}
-	}
-	return oldestHash
 }
