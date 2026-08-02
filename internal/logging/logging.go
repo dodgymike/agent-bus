@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -171,21 +172,54 @@ func appendPairs(b *strings.Builder, kv []interface{}) {
 	}
 }
 
-func format(v interface{}) string {
-	switch t := v.(type) {
-	case nil:
+// format renders a value for a log field. It is invoked from the
+// panic-recovery defer path (a request handler's panic is itself logged), so
+// it must never panic: a TYPED nil satisfies fmt.Stringer/error (e.g. a nil
+// *bytes.Buffer or a nil *MyError boxed in an interface) but nil-derefs when
+// .String()/.Error() is called on it, and a caller-supplied Stringer can
+// itself panic. Either failure here, unrecovered, would turn "log the
+// panic" into "panic while logging the panic" and kill the process instead
+// of returning a 500. So: a reflect check catches the common typed-nil case
+// before ever invoking the method, and the recover is a backstop for any
+// other formatting panic (including String()/Error() panicking on a
+// non-nil receiver) so one bad field can never take down the rest of the
+// line.
+func format(v interface{}) (s string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s = "<unformattable>"
+		}
+	}()
+	if v == nil {
 		return "<nil>"
+	}
+	if isNilInner(v) {
+		return "<nil>"
+	}
+	switch t := v.(type) {
 	case string:
 		return t
 	case error:
-		if t == nil {
-			return "<nil>"
-		}
 		return t.Error()
 	case fmt.Stringer:
 		return t.String()
 	default:
 		return fmt.Sprint(v)
+	}
+}
+
+// isNilInner reports whether v holds a nil pointer, map, slice, chan, func
+// or interface value. A non-nil interface{} can still box a nil concrete
+// value of one of these kinds (the classic typed-nil trap: the interface
+// itself compares != nil, but the underlying pointer is nil), which is
+// exactly the case that crashes a naive .String()/.Error() call.
+func isNilInner(v interface{}) bool {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
+		return rv.IsNil()
+	default:
+		return false
 	}
 }
 

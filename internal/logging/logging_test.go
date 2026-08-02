@@ -75,6 +75,69 @@ func TestValueQuotingEscapesControlChars(t *testing.T) {
 	}
 }
 
+// panickyStringer's String() method always panics, simulating a
+// caller-supplied fmt.Stringer that is buggy rather than nil.
+type panickyStringer struct{}
+
+func (panickyStringer) String() string { panic("boom: String() panicked") }
+
+// nilError is a concrete error type whose Error() method dereferences the
+// receiver, so a typed-nil *nilError satisfies the error interface but
+// nil-derefs when .Error() is called on it.
+type nilError struct{ msg string }
+
+func (e *nilError) Error() string { return e.msg }
+
+// TestFormatTypedNil pins CORE-15: the logger is invoked from the
+// panic-recovery defer, so a typed-nil (or a buggy Stringer) reaching
+// format() must never itself panic and kill the process instead of
+// returning a 500. Every case below must produce exactly one log line and
+// must not panic; a recovered formatting failure must not swallow the rest
+// of the fields on the line.
+func TestFormatTypedNil(t *testing.T) {
+	cases := []struct {
+		name string
+		val  interface{}
+	}{
+		{"untyped nil", nil},
+		{"typed-nil fmt.Stringer", (*bytes.Buffer)(nil)},
+		{"typed-nil error", (*nilError)(nil)},
+		{"Stringer whose String() panics", panickyStringer{}},
+		{"normal value", "a normal string value"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			lg := logging.New(&buf, logging.LevelInfo)
+
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("logging %v panicked: %v", tc.name, r)
+					}
+				}()
+				lg.Info("evt", "field", tc.val, "after", "still-here")
+			}()
+
+			out := buf.String()
+			if out == "" {
+				t.Fatalf("%s: logger produced no output", tc.name)
+			}
+			if strings.Count(out, "\n") != 1 {
+				t.Fatalf("%s: expected exactly one log line, got: %q", tc.name, out)
+			}
+			// A recovered formatting failure on "field" must not swallow the
+			// rest of the line: the trailing pair must still be present.
+			if !strings.Contains(out, "after=still-here") {
+				t.Fatalf("%s: trailing field lost after a formatting failure: %q", tc.name, out)
+			}
+			if !strings.Contains(out, "msg=evt") {
+				t.Fatalf("%s: msg field missing: %q", tc.name, out)
+			}
+		})
+	}
+}
+
 // TestLevelFilteringSuppressesBelowConfigured is the package-level companion
 // to the middleware-level check in internal/httpapi.
 func TestLevelFilteringSuppressesBelowConfigured(t *testing.T) {
