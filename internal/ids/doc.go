@@ -12,7 +12,17 @@
 //     Read its doc before wiring it: the resume floor is the one place
 //     invariant 1 can be broken, and this package cannot detect it.
 //   - messageid.go — the "<bus-id>-<seq>" message id format and its validator.
+//   - agentid.go  — the "<bus-id>.<name>-<n>" agent id format, the legal-name
+//     rule (AgentNamePattern) and its validator (ID-3).
+//   - agentmint.go — the per-name suffix allocator and the minter that turns a
+//     client's requested name into a fully-qualified agent id (ID-3). Read
+//     NameSuffixes' doc before wiring it: like the message sequence, its resume
+//     floor is the one place invariant 1 can be broken, and re-minting an agent
+//     id is worse than re-minting a message id because the agent id is the
+//     routing and authorization subject.
 //
-// The allocator has no callers yet. Deriving its resume floor from WAL recovery
-// is a separate, deliberate wiring task.
+// Neither allocator has any callers yet. Deriving the message-sequence resume
+// floor from WAL recovery is a separate, deliberate wiring task; so is agent id
+// minting, where wiring the minter into enrolment is AUTH-1 and restoring the
+// per-name suffix floors from replay is AUTH-3.
 package ids
