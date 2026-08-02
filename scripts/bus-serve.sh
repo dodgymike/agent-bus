@@ -126,7 +126,16 @@ cmd_start() {
     rm -f "$PID_FILE"
   fi
 
-  mkdir -p "$RUN_DIR" "$DATA_DIR" "$(dirname "$BIN_FILE")"
+  mkdir -p "$RUN_DIR" "$(dirname "$BIN_FILE")"
+
+  # DATA_DIR holds agent credentials once ENROL ships (main.go: "0o700: the
+  # store holds agent credentials"). Go's os.MkdirAll is a no-op — it does
+  # NOT chmod — when the target already exists, so if this wrapper leaves the
+  # directory pre-created at the ambient umask, the server's own MkdirAll(...,
+  # 0o700) inside run() never actually secures it. Create + chmod it
+  # explicitly here rather than relying on the server to fix it up.
+  mkdir -p "$DATA_DIR"
+  chmod 700 "$DATA_DIR"
 
   echo "agent-bus: building..." >&2
   ( cd "$REPO_ROOT" && go build -o "$BIN_FILE" ./cmd/agent-bus )
