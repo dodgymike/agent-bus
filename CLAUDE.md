@@ -56,10 +56,25 @@ AGENT_LOG.md          per-task work log (append-only, dated)
 SPEC.md               GENERATED mirror of the Spec Server backlog — never hand-edit
 ```
 
+## Runtime target: Docker Compose
+
+**agent-bus ships as a container and runs under Docker Compose.** The deployment target — not this
+workstation — defines the toolchain. The box's ambient `go` is go1.19.4, but that is an accident of
+the dev machine, not a constraint on the product: the Go version is whatever the builder image
+pins, and it is chosen to satisfy the E2E-crypto requirements (the Signal-style ratchet needs
+`crypto/ecdh`, which is go1.20+, and a current libsignal-compatible stack wants newer still).
+
+Consequences:
+- `go.mod` pins the version the CONTAINER builds with. If you need a newer language or stdlib
+  feature for a real requirement, bump it — and record the bump in `DECISIONS.md`.
+- A local `go build` may therefore fail on this box while CI/the container is green. That is
+  expected. When it happens, build in the container rather than downgrading the code.
+- This does NOT license casual dependency growth. Invariant 8 still holds: stdlib first, and a
+  third-party dependency still needs a justification in `DECISIONS.md`. The relaxation is about the
+  Go VERSION, not about pulling in libraries.
+
 ## Go conventions
 
-- Target the toolchain on this box (`go version` — currently go1.19). Do not use language or stdlib
-  features newer than that without bumping and saying so.
 - `gofmt -l .` must be empty, `go vet ./...` clean, `go build ./...` green before any commit.
 - Tests run with `-race`. Concurrency here is the product; a data race is a P0.
 - Durability and recovery code must have **crash-injection tests** — a test that writes, kills at a
