@@ -634,3 +634,90 @@ a feature without its CLI subcommand is still not done.
 - `AGENT_PROTOCOL.md` must be rewritten against CLI subcommands rather than shell scripts.
 - The binary now has a second consumer with a compatibility expectation, so its flags, exit codes and
   JSON shapes belong in `CONTRACTS.md` like any other contract surface.
+
+---
+
+## 2026-08-02 — Sixteen open questions settled (durability policy, session/auth, delivery, process)
+
+All answers are the user's, given together. Two of them **reverse behaviour already implemented**;
+those are called out first because the code currently does the opposite.
+
+### 1. Availability over retention: the bus ALWAYS restarts (REVERSES current behaviour)
+
+> *"always be able to restart, prefer to discard messages and/or corruption, with logging"*
+
+The shipped code refuses to start on several damage classes. That is now wrong. Recovery must always
+reach a running server: discard damaged records, **log loudly and specifically what was discarded**,
+and continue.
+
+**This reconciles with answer (2) below rather than contradicting it.** The reviewer's finding — a
+double fault silently drops an acknowledged COMMIT — was rated P0 and the user agreed. The defect
+was never that data was discarded; it is that the discard was **SILENT**. Discarding is now the
+sanctioned behaviour; doing it without a log record is the bug. Every discard must be observable.
+
+Consequence for **invariant 4** ("nothing acknowledged before it is durable"): acknowledged data may
+now be discarded when it is found corrupt. The guarantee is narrowed honestly — we do not lose
+acknowledged data through *our own* write path, but we will not hold the bus hostage to damaged
+media. The narrowing is deliberate and must be stated in `PROTOCOL.md`, not left implicit.
+
+Consequence for **invariant 6**: truncation is no longer restricted to a verified-corrupt *tail*.
+Damaged records anywhere may be discarded — with a log entry each.
+
+This also removes the permanent-refuse-to-start DoS, and with it the need for the operator escape
+hatch that was previously recommended: always-restart *is* the escape hatch.
+
+### 2. The double-fault silent COMMIT loss is P0 — go with reviewer
+
+A torn sector is one physical event, not two independent faults, so the case is realistic. Fix is per
+(1): discard and log, never silently.
+
+### 3. Replace CRC32C with a modern keyed construction (CHANGES THE ON-DISK FORMAT)
+
+> *"don't use crc! use a hash/hmac/more modern approach. We're not optimising for efficiency, we're
+> optimising for integrity and security"*
+
+CRC32C is an error-detecting code, not an integrity primitive: it is unkeyed and GF(2)-linear, which
+is precisely why security demonstrated that an ordinary remote client could craft a payload making a
+torn tail look like a complete record. A keyed MAC **eliminates that attack by construction** — a
+client cannot compute a MAC over a key it does not hold.
+
+Per **invariant 9**, this must come from the stdlib's high-level API (`crypto/hmac` + `crypto/sha256`),
+never a hand-rolled construction.
+
+Consequences: this is an **on-disk format change** and needs a reserved format/record-type version.
+Much of DUR-4's torn-tail heuristic exists to compensate for a weak checksum and should get
+**simpler**, not more complex, once a strong MAC can distinguish damage from truth reliably. Key
+management is a new question — where the MAC key lives, and that storing it beside the WAL defends
+against a remote client but not against an attacker who already has data-directory write access.
+
+### 4–7. Session and auth
+
+- **Sessions do NOT survive restart.** Expire them; the CLI re-authenticates.
+- **Revocation is immediate.** `/leave` invalidates outstanding sessions at once — not at the
+  ≤1h expiry.
+- **Tokens are opaque server-side handles**, not signed claims. This is what makes immediate
+  revocation possible; stateless claims cannot be revoked.
+- **Clock skew**: server expiry is authoritative; the client refreshes at 75% of lifetime.
+
+### 8–11. Delivery and limits
+
+- **Delivery is AT-LEAST-ONCE.** Duplicates are the normal steady state, which is what invariant 10's
+  idempotency exists to absorb. Must be stated in `PROTOCOL.md` and `AGENT_PROTOCOL.md`.
+- **Idempotency keys are retained for a bounded window and fail closed** — a retry arriving after the
+  window is rejected, never silently re-applied.
+- **Retention: 1 day or 1 GB**, whichever comes first.
+- **The default listen address is localhost.**
+
+### 12–14. Scope
+
+- **Merge the CLI and AGENTIF epics** — one client, one epic.
+- **Relay auth is bi-directional and uses the same scheme as clients.** A node is **either a client
+  endpoint or a relay, never both** — that exclusivity is a routing and trust simplification and
+  should be enforced, not merely documented.
+- **Encryption is revisited later, once the bus works.**
+
+### 15–16. Process
+
+- **A missing `proof_cmd` blocks completion**, at least as hard as a vacuous one.
+- **`done` requires actually running `scripts/proof-check.sh` and quoting its verdict**, not storing
+  a bare command.

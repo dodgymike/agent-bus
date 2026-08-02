@@ -25,7 +25,9 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    enrolment authenticates.
 4. **Nothing is acknowledged before it is durable.** A send returns success only after the message
    is committed via the two-phase (prepare → commit) write path and fsynced. Never trade that for
-   latency.
+   latency. **Narrowing (2026-08-02):** this guarantees we never lose acknowledged data through our
+   own write path. It does NOT promise acknowledged data survives damaged media — see invariant 6,
+   where availability wins and the discard is logged.
 5. **Memory is the serving copy; disk is the truth.** State is held in memory for speed and rebuilt
    by replaying the durable store on start. A crash at any point must recover to a state that is a
    prefix of the accepted history — no torn records, no acknowledged-but-lost messages.
@@ -34,8 +36,13 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    size, and content hash. It does **not** record message bodies. That is a deliberate decision
    (2026-08-02) taken so the audit trail stays compatible with end-to-end encrypted, forward-secret
    payloads — a log holding plaintext would be unwritable the moment PFS lands, and a log holding
-   ciphertext it can never decrypt would be dead weight. The log is append-only in the strict sense:
-   no in-place edits, no truncation except a verified-corrupt tail during recovery.
+   ciphertext it can never decrypt would be dead weight. The log is append-only in the strict sense: no in-place edits.
+   **Recovery ALWAYS reaches a running server (2026-08-02): damaged records are discarded and the
+   bus starts.** It must never refuse to boot over corruption — a bus held hostage by one bad sector
+   is worse than a bus that has lost a message and said so. The absolute requirement is that every
+   discard is LOGGED, loudly and specifically: silent discard is the actual defect (it was rated P0),
+   not discard itself. Integrity is protected by a keyed MAC (`crypto/hmac` + `crypto/sha256`), never
+   a CRC — a CRC is unkeyed and linear, and a remote client was shown able to forge one.
 7. **Nobody hand-writes HTTP — the compiled Go CLI is THE client.** Every capability ships with a CLI
    subcommand and an `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its subcommand
    is not done. The CLI **replaces** the `scripts/bus-*.sh` wrappers (decided 2026-08-02); shell
@@ -149,7 +156,10 @@ Run the NARROWEST relevant check: `go test -race -run <Name> ./internal/<pkg>`, 
 `ok ... [no tests to run]` and EXITS 0, so a proof command naming a test that was never written
 looks identical to a passing one. Run proof commands through `bash scripts/proof-check.sh '<cmd>'`,
 which reports PASS / FAIL / VACUOUS / UNVERIFIABLE, and quote its verdict rather than a bare exit
-code. A task must never be completed on a VACUOUS proof. For anything agent-facing, ALSO exercise it the way an agent would:
+code. A task must never be completed on a VACUOUS proof, and **a task with NO `proof_cmd` may not be
+completed at all** — a missing proof is worse than a vacuous one, since it leaves no record of what
+would even count as evidence. Completing a task requires RUNNING `proof-check.sh` and quoting its
+verdict, not storing a command nobody executed. For anything agent-facing, ALSO exercise it the way an agent would:
 through `scripts/bus-*.sh` against a running server, not through a hand-written `curl`. If the
 wrapper doesn't work, the feature doesn't work.
 
