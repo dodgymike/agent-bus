@@ -42,10 +42,19 @@
 // single incomplete frame at the very end with nothing after it. Two
 // independent things have to agree before a byte is cut: the damage must have
 // the SHAPE of a torn tail, and the bytes that would be discarded must be
-// inspected and found to contain no complete record. The second check is not
+// inspected and found to hold neither a complete record nor a frame whose own
+// checksum verifies over the bytes present. The second check is not
 // belt-and-braces -- a corrupted length field makes a mid-file record produce
 // exactly the shape of a torn tail, and without the inspection that alone would
-// delete every committed record behind it. That
+// delete every committed record behind it.
+//
+// The dividing line is "provably incomplete", not "damaged". A frame whose
+// declared extent ends exactly at the end of the file has every byte it needs,
+// so a failed checksum there is damage to bytes that were fully written and may
+// have been fsynced and acknowledged; that is a refusal to start, not a repair.
+// Only bytes that are demonstrably MISSING are ever discarded, which is what
+// makes it true that nothing acknowledged is lost and that the index high-water
+// mark never moves backwards over anything a client could have seen. That
 // truncation is fsynced, and it is the ONLY truncation this package ever
 // performs: invariant 6 allows exactly one exception to append-only, "a
 // verified-corrupt tail during recovery", and this is it. Nothing acknowledged
