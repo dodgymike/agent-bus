@@ -52,7 +52,16 @@ const (
 	// child dies INSIDE Apply, so the entry is durable but was never applied to
 	// memory and was never acknowledged to the caller.
 	crashInsideApply = "inside-apply"
+	// crashMidFrameWrite: the child leaves the byte pattern a power loss during
+	// an append produces -- a strict PREFIX of one frame past the last fsynced
+	// record -- and dies. See TestWALCrashTornFrameTailIsRepaired for exactly
+	// what this does and does not prove.
+	crashMidFrameWrite = "mid-frame-write"
 )
+
+// crashFrameTime is the fixed timestamp the torn frame's prepare payload
+// carries, so the child's bytes are reproducible.
+var crashFrameTime = time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
 
 // crashEntries are the entries a crash child writes, in order. The second has a
 // nil body on purpose, so recovery of the nil/null normalisation is covered by
@@ -105,6 +114,61 @@ func TestWALCrashChild(t *testing.T) {
 			}
 		}
 		t.Fatalf("child: wrote every entry and is still alive: the applier never killed the process")
+
+	case crashMidFrameWrite:
+		// Two entries through the REAL write path first, so the good prefix is
+		// genuinely fsynced accepted history and not a hand-built fixture.
+		l, err := Open(LogOptions{Dir: dir})
+		if err != nil {
+			t.Fatalf("child: Open: %v", err)
+		}
+		for i, e := range crashEntries[:2] {
+			if _, err := l.Write(e); err != nil {
+				t.Fatalf("child: Write %d: %v", i, err)
+			}
+		}
+		if err := l.Close(); err != nil {
+			t.Fatalf("child: Close: %v", err)
+		}
+
+		// -------------------------------------------------------------------
+		// HONEST ACCOUNT OF WHAT THIS INJECTS.
+		//
+		// A SIGKILL cannot by itself tear a write: os.File.Write is a single
+		// syscall, the bytes land in the PAGE CACHE, and the page cache outlives
+		// the process. Killing between two Appends therefore leaves whole frames
+		// -- which is the crash shape the other two tests here cover.
+		//
+		// The byte pattern a POWER LOSS mid-append leaves -- a strict prefix of
+		// one frame -- has to be produced deliberately, and that is what the
+		// short write below does. It is built with the real encoders, at the
+		// index the next Append would have used, so the bytes are exactly the
+		// bytes that append would have been putting on the platter.
+		//
+		// What the kill DOES prove, and it is the part that cannot be faked: no
+		// Close, no Sync, no deferred cleanup and no runtime shutdown ran
+		// afterwards. The file the parent opens is precisely what the dying
+		// process had put there -- nobody tidied the tail up on the way out.
+		// -------------------------------------------------------------------
+		payload, err := encodePrepare(crashEntries[2].Kind, crashEntries[2].Body, crashFrameTime)
+		if err != nil {
+			t.Fatalf("child: encodePrepare: %v", err)
+		}
+		frame := encodeFrame(5, TypePrepare, payload) // records 1-4 exist; 5 is next
+		partial := len(frame) / 2
+		if partial <= FrameHeaderSize {
+			t.Fatalf("child: half a frame is %d bytes, which does not reach past the %d-byte header",
+				partial, FrameHeaderSize)
+		}
+		f, err := os.OpenFile(filepath.Join(dir, WALFileName), os.O_WRONLY|os.O_APPEND, fileMode)
+		if err != nil {
+			t.Fatalf("child: OpenFile to append a torn frame: %v", err)
+		}
+		if _, err := f.Write(frame[:partial]); err != nil {
+			t.Fatalf("child: writing the torn frame: %v", err)
+		}
+		// No Close, no Sync, no defer: the next statement is the kill.
+		suicide()
 
 	default:
 		t.Fatalf("child: unknown crash point %q", point)
@@ -353,6 +417,109 @@ func TestWALReplayCrashInsideApply(t *testing.T) {
 	}
 	if c.PrepareIndex != r.NextIndex {
 		t.Errorf("the first write after the crash got prepare index %d, want %d", c.PrepareIndex, r.NextIndex)
+	}
+	assertIndicesUnique(t, path)
+}
+
+// TestWALCrashTornFrameTailIsRepaired is DUR-4's crash-injection test: a process
+// that died with a half-written frame on the end of its log, and a restart that
+// has to turn that into a clean prefix of accepted history without losing
+// anything that was ever acknowledged.
+//
+// WHAT THE CHILD LEAVES, AND WHY: see the long comment at crashMidFrameWrite in
+// TestWALCrashChild. In short -- the two committed entries are real, fsynced,
+// accepted history written through the real Log; the torn frame after them is
+// written deliberately, because a SIGKILL cannot tear a write on its own (the
+// page cache outlives the process). The kill's contribution is that NOTHING
+// graceful ran afterwards: no Close, no Sync, no defer. What the parent opens is
+// exactly what the dying process had put on disk.
+func TestWALCrashTornFrameTailIsRepaired(t *testing.T) {
+	dir := t.TempDir()
+	runCrashChild(t, crashMidFrameWrite, dir)
+	path := filepath.Join(dir, WALFileName)
+
+	tornSize := fileSize(t, path)
+
+	// (1) The tail really IS torn. Without this the rest of the test would pass
+	// just as happily against a perfectly healthy file and would prove nothing.
+	if _, err := Replay(path, nil); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Replay of the crashed log = %v, want ErrCorrupt: the child did not leave a torn tail", err)
+	}
+
+	// (2) Open repairs it and starts.
+	app := &testApplier{}
+	l, err := Open(LogOptions{Dir: dir, Applier: app})
+	if err != nil {
+		t.Fatalf("Open after a crash mid-frame: %v, want a repaired start", err)
+	}
+	defer l.Close()
+
+	rec := l.Recovered()
+	rep := rec.Repaired
+	if !rep.Truncated {
+		t.Fatalf("Recovered().Repaired = %+v, want Truncated true", rep)
+	}
+	repairedSize := fileSize(t, path)
+	if rep.At != repairedSize {
+		t.Errorf("Repaired.At = %d but the file is %d bytes: the cut must land exactly at At", rep.At, repairedSize)
+	}
+	if rep.At+rep.Removed != tornSize {
+		t.Errorf("Repaired.At+Removed = %d, want the pre-repair size %d", rep.At+rep.Removed, tornSize)
+	}
+	if rep.Removed <= FrameHeaderSize {
+		t.Errorf("Repaired.Removed = %d bytes, want more than the %d-byte frame header: "+
+			"the child is meant to have torn the frame inside its PAYLOAD", rep.Removed, FrameHeaderSize)
+	}
+	// Records 1-4 are the two committed transactions; the torn frame would have
+	// been record 5.
+	if rep.NextIndex != 5 {
+		t.Errorf("Repaired.NextIndex = %d, want 5", rep.NextIndex)
+	}
+	if rep.Path != path || rep.Reason == "" {
+		t.Errorf("Repaired = %+v, want it to name the path and the reason", rep)
+	}
+
+	// (3) The repaired file is a clean four-record log.
+	recs, end, err := ScanAll(path, KindWAL)
+	if err != nil {
+		t.Fatalf("ScanAll after the repair: %v", err)
+	}
+	if len(recs) != 4 {
+		t.Fatalf("the repaired file holds %d records, want 4 (two prepare/commit pairs)", len(recs))
+	}
+	if end != repairedSize {
+		t.Errorf("the repaired file scans to %d but is %d bytes", end, repairedSize)
+	}
+
+	// (4) Memory was rebuilt from exactly the two committed entries, in order,
+	// with byte-identical bodies -- including the nil body of the second.
+	want := []Committed{
+		{PrepareIndex: 1, CommitIndex: 2, Entry: Entry{Kind: crashEntries[0].Kind, Body: crashEntries[0].Body}},
+		{PrepareIndex: 3, CommitIndex: 4, Entry: Entry{Kind: crashEntries[1].Kind, Body: crashEntries[1].Body}},
+	}
+	got := make([]Committed, app.count())
+	for i := range got {
+		got[i] = app.at(i)
+	}
+	if !sameCommitted(got, want) {
+		t.Fatalf("the restarted Log rebuilt memory from %s, want %s", showCommitted(got), showCommitted(want))
+	}
+	if rec.Applied != 2 || rec.Aborted != 0 || len(rec.Dangling) != 0 {
+		t.Errorf("Recovered() = %+v, want 2 applied, 0 aborted, no dangling", rec)
+	}
+
+	// (5) The first write after recovery takes index 5 -- the index the torn
+	// frame carried. That REISSUE is deliberate and documented on
+	// TailRepair.NextIndex: the frame never completed its fsync, Append returns
+	// only after fsync, and nothing is acknowledged before Append returns, so no
+	// id inside that frame can ever have been observed by a client, peer or
+	// relay. Invariant 1 protects OBSERVED ids, and none of these were.
+	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"seq":9}`)})
+	if err != nil {
+		t.Fatalf("Write after the repair: %v", err)
+	}
+	if c.PrepareIndex != 5 || c.CommitIndex != 6 {
+		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {5 6}", c.PrepareIndex, c.CommitIndex)
 	}
 	assertIndicesUnique(t, path)
 }

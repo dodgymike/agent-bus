@@ -33,11 +33,27 @@
 //
 // # Recovery
 //
-// On start the log is replayed from the beginning (see Replay), and Open runs
-// that replay before it opens the writer, so nothing can be appended ahead of
-// recovery. A COMMIT record makes its entry visible; a COMMIT is paired to the
-// PREPARE it names BY INDEX, never by adjacency, since nothing in the format
-// requires them to be neighbours. A prepare with no commit is discarded -- the
+// On start Open runs two passes over the file, in this order, both before the
+// writer is opened, so nothing can be appended ahead of recovery.
+//
+// First RepairTail: a framing-only check that verifies the file header and
+// every frame, and truncates the file back to the end of the last verified-good
+// record if -- and only if -- the damage is provably a torn tail, meaning a
+// single incomplete frame at the very end with nothing after it. That
+// truncation is fsynced, and it is the ONLY truncation this package ever
+// performs: invariant 6 allows exactly one exception to append-only, "a
+// verified-corrupt tail during recovery", and this is it. Nothing acknowledged
+// can be lost by it, because Append returns only after its fsync, so a torn
+// frame is one whose write never succeeded and whose contents were never
+// visible to anybody. Corruption ANYWHERE ELSE -- in a frame whose checksum
+// verified, in the file header, or anywhere with intact records after it -- is
+// a refusal to start, not a repair. See RepairTail for the classification rules
+// and for the deliberately conservative cases it declines to touch.
+//
+// Then Replay, from the beginning (see Replay). A COMMIT record makes its entry
+// visible; a COMMIT is paired to the PREPARE it names BY INDEX, never by
+// adjacency, since nothing in the format requires them to be neighbours. A
+// prepare with no commit is discarded -- the
 // ordinary crash artefact, since Append fsyncs whole frames, so the usual
 // artefact is a complete, uncommitted prepare rather than a torn record -- and
 // so is a prepare followed by an ABORT; either way an uncommitted prepare is
@@ -53,8 +69,13 @@
 // Replay is strict: a record it cannot interpret stops recovery and refuses
 // the start, rather than silently skipping it and serving a state that might
 // be missing an acknowledged write. The corrupt-tail policy -- verifying and
-// truncating a torn tail -- is NOT implemented here; it is a separate
-// recovery-policy task (DUR-4) that must run BEFORE replay. Today a torn tail
-// makes Open fail, and Replay reports the offset where the good prefix ends so
-// a future truncation knows where to cut.
+// truncating a torn tail -- is NOT implemented here: it is RepairTail, and it
+// has already run, before replay. A torn tail therefore does not reach Replay
+// through Open at all; when Replay is called directly on one it still fails, and
+// reports the offset where the good prefix ends.
+// That offset is where a torn tail would be cut, but it is NOT a licence to
+// truncate on its own: most replay failures are damage in a frame whose
+// checksum verified, which can sit anywhere in the file with committed records
+// after it, and cutting there would delete accepted history. CorruptError
+// carries FrameIntact and FrameEnd so recovery can tell the two apart.
 package wal

@@ -65,7 +65,8 @@ import (
 // A torn tail from a crash mid-write is likewise an error here, NOT a tolerated
 // condition: this function reports precisely where the file stops making sense,
 // and the policy question of whether that tail may be truncated belongs to
-// recovery policy (DUR-4), which runs BEFORE this replay. Note the common case
+// RepairTail, which runs BEFORE this replay (see Open) and is the only thing in
+// this package that ever shortens a file. Note the common case
 // is not a torn tail at all -- Append fsyncs whole frames, so the usual crash
 // artefact is a complete, uncommitted PREPARE record, which Replay handles by
 // discarding it.
@@ -147,9 +148,12 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 			// raised (with a test) if the write path ever batches prepares.
 			openBytes += int64(len(e.Kind)) + int64(len(e.Body))
 			if len(open) >= maxOpenPrepares || openBytes > maxOpenPrepareBytes {
+				// Both figures are reported, and both limits with them, so the
+				// message says which bound was hit instead of implying the
+				// count one always was.
 				return frameCorruptf(path, rec,
-					"record %d: more than %d unresolved prepares (%d bytes retained) before any commit; the write path resolves one transaction at a time, so this file was not written by this server",
-					rec.Index, maxOpenPrepares, openBytes)
+					"record %d: too many unresolved prepares: %d open, %d bytes retained, limits are %d prepares and %d bytes; the write path resolves one transaction at a time, so this file was not written by this server",
+					rec.Index, len(open)+1, openBytes, maxOpenPrepares, maxOpenPrepareBytes)
 			}
 			open[rec.Index] = e
 			return nil
@@ -175,7 +179,7 @@ func Replay(path string, fn func(Committed) error) (Recovered, error) {
 				// a record -- and deliberately NOT a CorruptError: the log is
 				// fine, the caller rejected an entry the log says was accepted.
 				return fmt.Errorf("wal: replay %s: applying committed entry (prepare %d, commit %d, kind %q): %w",
-					path, prepareIndex, rec.Index, elide(e.Kind), err)
+					path, prepareIndex, rec.Index, elide(e.Kind, maxValueChars), err)
 			}
 			return nil
 
@@ -248,8 +252,11 @@ const (
 	maxOpenPrepares = 1024
 
 	// maxOpenPrepareBytes caps what those entries may retain, since a count
-	// alone bounds nothing when a single body may be MaxPayloadSize.
-	maxOpenPrepareBytes = 32 << 20
+	// alone bounds nothing when a single body may be MaxPayloadSize. 8 MiB is
+	// eight times the largest single entry the format allows and eight times
+	// what the current write path can ever have open, which is enough slack to
+	// be sure it only ever fires on a file this server did not write.
+	maxOpenPrepareBytes = 8 << 20
 )
 
 // Recovered is the outcome of a Replay: what the durable log says happened, and
@@ -277,11 +284,11 @@ type Recovered struct {
 	// at EndOffset there would delete accepted history to tidy up a file that
 	// is fully readable.
 	//
-	// A corrupt-tail truncation (DUR-4) must therefore qualify the error first:
-	// only a *CorruptError with FrameIntact false, whose declared FrameEnd
-	// reaches or passes the end of the file (or is 0, meaning the frame header
-	// itself was short), can be a torn tail. Anything else is fatal where it
-	// sits.
+	// A corrupt-tail truncation qualifies the error first, and RepairTail is
+	// where that happens: only a *CorruptError with FrameIntact false, whose
+	// declared FrameEnd reaches or passes the end of the file (or is 0, meaning
+	// the frame header itself was short), can be a torn tail. Anything else is
+	// fatal where it sits.
 	EndOffset int64
 
 	// Records is the number of records read, of every type.
@@ -303,4 +310,10 @@ type Recovered struct {
 	// error -- but it is worth an operator seeing, because it is also the
 	// signature of a write that a client may have been waiting on.
 	Dangling []uint64
+
+	// Repaired describes a corrupt tail that was truncated by the recovery pass
+	// BEFORE this replay ran. It is zero (Truncated false) when nothing was
+	// repaired. Replay itself never truncates anything and never sets this;
+	// Open fills it in from RepairTail.
+	Repaired TailRepair
 }

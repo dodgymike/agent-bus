@@ -205,9 +205,34 @@ type CorruptError struct {
 func (e *CorruptError) Error() string {
 	s := fmt.Sprintf("wal: %s: corrupt at offset %d: %s", e.Path, e.Offset, e.Reason)
 	if e.Err != nil {
-		s += ": " + e.Err.Error()
+		// The cause is bounded, not printed raw. A JSON or time-parse error
+		// quotes the offending text back at you IN FULL, and that text came off
+		// disk -- so an underlying error is just as much a route for a corrupt
+		// record to write a megabyte into a log line as the Reason is. Unwrap
+		// still exposes the cause intact for a caller that wants all of it.
+		s += ": " + elide(e.Err.Error(), maxCauseChars)
 	}
 	return s
+}
+
+// Bounds on file-derived text in an error message. A record's payload is
+// attacker-influenced (message bodies are client-supplied) and may be up to
+// MaxPayloadSize; an error message is not the place to paste it.
+const (
+	// maxValueChars bounds a single value quoted into a Reason.
+	maxValueChars = 64
+	// maxCauseChars bounds a rendered underlying error, which is looser because
+	// a decoder's message is mostly its own words.
+	maxCauseChars = 160
+)
+
+// elide truncates s to at most max characters plus a marker. It is a size
+// bound, not a sanitiser: %q is what neutralises control characters.
+func elide(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[elided]"
 }
 
 // Is reports a match for ErrCorrupt so callers can classify without a type

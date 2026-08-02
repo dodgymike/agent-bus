@@ -232,3 +232,168 @@ auth/integrity using libsodium. encryption can come later"*. So:
   container image.
 - Encryption is deferred, not cancelled. Revisit it as a fresh decision rather than reviving the
   superseded ratchet plan.
+
+---
+
+## 2026-08-02 — Ed25519 is Go stdlib `crypto/ed25519`; NOT a cgo libsodium binding (RATCHET-7)
+
+**Context.** The entry above deliberately left one question open: *"Whether to use stdlib
+`crypto/ed25519` or a cgo libsodium binding is left to the implementing task; both satisfy
+invariant 9."* That open question gates AUTH-1/2/3, SIGN-1..8, CRYPTO-3, CRYPTO-4 and CRYPTO-10 —
+roughly a dozen tasks, several of which already name `crypto/ed25519` as a presumption they have no
+authority to make. RATCHET-7 settles it once, in writing, with the supply-chain review behind it.
+
+The shortlist was **exactly two** options, and deliberately not widened. Under invariant 9 no option
+that involves implementing a primitive ourselves was considered at all:
+
+- **(a)** Go stdlib `crypto/ed25519`.
+- **(b)** a cgo binding to libsodium — the option that matches the user's word *"libsodium"*
+  literally.
+
+**Decision.** **(a) Go stdlib `crypto/ed25519`.** All Ed25519 keygen, detached signing and
+verification in agent-bus uses `crypto/ed25519` from the Go standard library. **No third-party crypto
+module and no C crypto library is added to the build or the runtime image.**
+
+This *confirms* the presumption the SIGN/AUTH tasks were already carrying, rather than overriding it
+— but it is now a reviewed decision rather than an inherited assumption, and the review is recorded
+below so it does not have to be re-litigated per task.
+
+**This is not a departure from the user's instruction.** The controlling requirement in
+*"just use standard message auth/integrity using libsodium"* was **standard, audited, high-level
+sign/verify** — not a specific vendor. `crypto/ed25519` is the same Ed25519 primitive that
+libsodium's `crypto_sign` implements, from the same ref10/RFC 8032 reference lineage, behind an
+equally high-level `Sign`/`Verify` API. The wire format is identical: a 32-byte public key, a 64-byte
+detached signature. A future peer built against libsodium interoperates byte-for-byte.
+
+### The review (RATCHET-7's mandated supply-chain assessment)
+
+Conducted by the `security` sub-agent (read-only, opus) with network access, verified live against
+`proxy.golang.org`, `sum.golang.org`, `api.osv.dev`, `vuln.go.dev` and the GitHub API; the local
+go1.19.4 facts were independently reproduced. Verdict: **PASS, recommend (a)** — rejecting (b) on
+evidence, not on preference.
+
+**1. Provenance and who can push a release.** For (a) the supply chain *is* the Go toolchain: the Go
+team, a public proposal/review process, and releases distributed as signed, checksummed tarballs. For
+(b) the trust chain gains an extra, weaker link — a *binding* maintainer sitting between us and
+libsodium, on top of libsodium itself.
+
+**2. There is no credibly maintained cgo libsodium binding for Go.** This is the fact that decides
+it. Upstream `jedisct1/libsodium` is healthy (pushed 2026-07-31); **the rot is in the Go bindings,
+not in libsodium**:
+
+| candidate | latest release | last push | verdict |
+|---|---|---|---|
+| `github.com/jamesruan/sodium` | v1.0.14, 2022-01-02 | 2022-01-02 | ~4.6 years stale, single individual |
+| `github.com/GoKillers/libsodium-go` | **no tags at all** (`v0.0.0-20171022220152`) | 2018-02-23 | ~8.4 years abandoned |
+| `tink-crypto/tink-go/v2` | v2.7.0, 2026-06-10 | active | **not a libsodium binding** |
+
+Tink was assessed and is a category error in this shortlist: its `signature/ed25519` and
+`signature/subtle` packages `import "crypto/ed25519"` and call `ed25519.Sign`, and the module
+contains no `.c`/`.h` files. **Choosing Tink *is* choosing option (a)** — plus five modules
+(wycheproof, go-cmp, `golang.org/x/crypto`, protobuf, x/sys), a protobuf keyset layer, a `go 1.24.0`
+toolchain floor, and a Tink output-prefix that is **not RFC 8032 detached-signature compatible**
+unless `VariantNoPrefix` is used. Strictly worse on every axis that matters here, and an interop trap
+aimed straight at SIGN-1.
+
+Picking (b) would therefore mean depending on unmaintained code **for the security-critical path** —
+which is the precise failure mode the entry above was written about: `status-im/doubleratchet`, a
+2019 beta that was the only thing fitting the constraints and was quietly broken.
+
+**3. `#cgo pkg-config: libsodium` pins nothing.** `jamesruan/sodium` vendors no C and links the
+*system* libsodium, so the effective crypto version would be whatever the base image happens to ship
+— the opposite of a pinned dependency. libsodium itself demonstrably accrues CVEs
+(**CVE-2025-69277**, published 2025-12-31: `crypto_core_ed25519_is_valid_point` accepts points
+outside the main group; carried as Debian **DSA-6094-1**, fixed in `1.0.18-1+deb12u1`). That CVE is
+in point validation rather than `crypto_sign` detached verify, so it likely would not have hit us —
+but note it **postdates the newest binding release by roughly four years**, and the binding has no
+way to ship the fix.
+
+By contrast `crypto/ed25519` has **zero advisories, ever**: OSV `ecosystem=Go, package=stdlib`
+returns 159 advisories and none of them touch ed25519.
+
+**4. cgo breaks the shipping model (DEPLOY-1).** Verified on this box:
+- `CGO_ENABLED=0 go build` on a cgo package fails outright
+  (`build constraints exclude all Go files`).
+- With stdlib ed25519, `CGO_ENABLED=0 go build` produces `ELF 64-bit … statically linked` — it runs
+  on a `scratch`/distroless runtime with nothing else in the image.
+- `pkg-config --modversion libsodium` **fails on this workstation today**, so (b) would break the
+  local dev build immediately as well as complicating the image.
+
+Option (b) forces `CGO_ENABLED=1`, a dynamically linked binary, `libsodium.so` in the *runtime*
+image, and `libsodium-dev` + `pkg-config` in the builder — directly against DEPLOY-1's "minimal
+runtime image" requirement, and it complicates cross-compilation.
+
+**5. Transitive dependency footprint.** (a): zero. `go.mod` stays dependency-free. (b): one Go module
+plus one C library plus its distro packaging, none of it covered by the Go module checksum database.
+
+**6. RFC 8032 conformance, verified locally on go1.19.4.** RFC 8032 §7.1 TEST 1 reproduces exactly —
+seed `9d61b19d…7f60` yields public key `d75a9801…7511a` and signature `e5564300…7a100b`, and
+`Verify` returns true. Sizes are 32 / 64 / 64 / 32 (public / private / signature / seed).
+
+**Pinned version.** There is deliberately **no module pin, because there is no module** — the pin
+*is* the builder image. Concretely:
+- `go.mod` stays free of crypto dependencies. `crypto/ed25519` has been in the stdlib since Go 1.13
+  and needs no toolchain bump; the current `go 1.19` pin is sufficient (see the go1.19 entry above).
+- **DEPLOY-1** pins the Go builder image by exact tag **and digest**; **DEPLOY-4** owns bumping it.
+  Those two tasks are the whole version-pinning story for this decision.
+- Keep `GOFLAGS` free of `-mod=mod`, and `GONOSUMDB`/`GOPRIVATE`/`GONOSUMCHECK` unset, so
+  `GOSUMDB=sum.golang.org` and `GOPROXY=proxy.golang.org` stay in force for everything else.
+
+**How we learn about advisories** (named mechanisms, not a vague intention):
+1. **`govulncheck`** as a step in **DEPLOY-5**'s container check. It covers the Go stdlib, so with
+   option (a) our crypto is *inside* its coverage. **Note the asymmetry that reinforces the choice:
+   `govulncheck` is structurally blind to a C library** — `vuln.go.dev/index/modules.json` tracks
+   1344 modules, includes `stdlib`, and contains nothing matching "sodium". Under (b) our crypto
+   would have sat in the one place our tooling cannot see.
+2. **Subscribe `golang-announce`** — where Go security releases are published.
+3. A **base-image CVE scan** (trivy/grype) in the same DEPLOY-5 target, since `govulncheck` never
+   covers OS packages under either option.
+
+**User consent.** **None required.** Option (a) adds no dependency, no runtime component, and no new
+key material or rotation behaviour. Consent *would* have been required for (b), which would have put
+a new C library into the shipped image.
+
+### Consequences
+
+- **The open question in the previous entry is now closed.** SIGN-1..8, AUTH-1/2/3, CRYPTO-3/4/10 use
+  `crypto/ed25519` and must not re-open the choice. Reversing this needs a new dated entry here.
+- **Wire compatibility is preserved**, so this is reversible in principle: raw 32-byte keys and
+  64-byte detached signatures mean a later move to any RFC 8032 implementation is a build-time
+  change, not an on-disk or wire-format break.
+- **Residual risk: go1.19 is out of support**, so a stdlib CVE would not be backported to it. The
+  mitigation is **DEPLOY-4** landing a supported Go, and **DEPLOY-5**'s `govulncheck` step is exactly
+  what would surface the need. This is a real, accepted, *tracked* risk — not an unknown. (Go 1.24+
+  additionally routes ed25519 through the FIPS 140-3 Go Cryptographic Module, a provenance
+  improvement that favours a modern pin; noted as directional, validation status not verified here.)
+- **Do NOT reach for `ed25519consensus`.** It exists for consensus systems needing bit-exact
+  batch/cofactored verification semantics. Our threat model is detached signatures over
+  server-minted message metadata, with replay handled separately (invariant 10: server-minted
+  monotonic sequence + recipient-side cursor). Stdlib semantics are correct for us.
+
+### Sharp edges the implementing tasks MUST handle (verified against the go1.19.4 stdlib source and reproduced at runtime)
+
+These are the misuse-resistance gaps in an otherwise high-level API. They are recorded here because
+invariant 9 asks for the library that wraps as much of the problem as possible, and these are the
+parts `crypto/ed25519` does *not* wrap:
+
+- **`ed25519.Verify` PANICS on a wrong-size public key** — `panic("ed25519: bad public key length: …")`
+  at `crypto/ed25519/ed25519.go:197`, including on `nil` (reproduced: lengths 3 and 0 both panic).
+  **This is a remote-panic/DoS vector in CRYPTO-10**, which verifies keys drawn from an
+  attacker-influenceable contact list. Every call site MUST length-check against
+  `ed25519.PublicKeySize` first, and MUST have a test proving it.
+- **`ed25519.Sign` PANICS on a wrong-size private key** (`ed25519.go:153`), and
+  **`PrivateKey.Public()` on a short key panics with a bare `slice bounds out of range`**
+  (`ed25519.go:58`). Validate key material **at load time**, not at use.
+- **A short or garbage *signature* is safe** — `Verify` returns `false` with no panic. That asymmetry
+  between the key case and the signature case is exactly the trap: testing malformed signatures does
+  not prove malformed keys are handled.
+- **Never sign a digest.** The `crypto.Signer` path explicitly rejects pre-hashed input
+  (`ed25519: cannot sign hashed message`). Ed25519 signs the message itself. SIGN-1 must not take the
+  shortcut of "sign the content hash", and DUR-5's content hash and SIGN-2's signature must be
+  computed over the *identical* canonical bytes SIGN-1 defines.
+- **Classic malleability is already closed**: stdlib rejects non-canonical S (`SetCanonicalBytes`)
+  and high-bit S (`sig[63]&224`), both confirmed at runtime. Go uses ref10 cofactorless verification
+  and explicitly does not extend the Go 1 compatibility promise to low-order/non-canonical edge
+  cases — irrelevant to our threat model, as noted above.
+- **Always `ed25519.GenerateKey(nil)`** so key generation draws from `crypto/rand`. Never seed from a
+  caller-supplied reader.

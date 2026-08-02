@@ -11,8 +11,8 @@ import (
 // ScanAll reads every record in path, strictly: any malformed frame is an
 // error. Nothing is skipped and nothing is truncated -- deciding that a
 // corrupt TAIL is tolerable (and cutting it off) is recovery policy and lives
-// in the recovery task, not here. This function's job is to say precisely
-// where the file stops being trustworthy.
+// in RepairTail, not here. This function's job is to say precisely where the
+// file stops being trustworthy.
 //
 // It returns the records in file order, the byte offset just past the last
 // good record (which, on success, is the end of the file, and on failure is
@@ -41,10 +41,10 @@ func ScanAll(path string, kind Kind) ([]Record, int64, error) {
 // kind, calling fn for each record in order. It returns the offset just past
 // the last record it accepted.
 //
-// It is the single parsing path: ScanAll and OpenWriter both go through it, so
-// the writer can never disagree with the reader about where a file ends. fn
-// lets OpenWriter establish the next index without holding an entire log in
-// memory, and is the seam recovery will use for a streaming replay.
+// It is the single parsing path: ScanAll, OpenWriter, Replay and RepairTail all
+// go through it, so the writer can never disagree with the reader about where a
+// file ends. fn lets a caller establish the next index without holding an entire
+// log in memory, and is the seam recovery uses for a streaming replay.
 func scanFrom(r io.Reader, path string, kind Kind, fn func(Record) error) (int64, error) {
 	if kind.magic() == "" {
 		return 0, fmt.Errorf("wal: scan %s: %w: %s", path, ErrUnknownKind, kind)

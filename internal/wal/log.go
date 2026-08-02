@@ -230,11 +230,22 @@ func Open(opts LogOptions) (*Log, error) {
 	// anyway would mean serving a state that is not a prefix of accepted
 	// history.
 	//
-	// Corrupt-tail policy (truncate a verified-corrupt tail, or refuse to
-	// start) is DUR-4 and must run BEFORE this replay: a strict scan fails
-	// outright on a torn tail, and Replay reports EndOffset so that the
-	// truncation point is known.
+	// Corrupt-tail policy runs FIRST, in RepairTail, before a single entry is
+	// handed to the Applier. It is a framing-only pass: if the file ends in a
+	// torn frame -- the signature of a crash mid-append -- it cuts the file back
+	// to the end of the last verified-good record and fsyncs that, so the replay
+	// below sees a file that is a clean prefix of accepted history. Nothing that
+	// was ever acknowledged is inside the discarded region, because Append only
+	// returns after its fsync. Damage anywhere but the tail, and damage in a
+	// frame whose checksum verified, is NOT repaired: RepairTail returns the
+	// error and Open refuses to start. That is the only truncation this package
+	// performs (invariant 6).
 	// ---------------------------------------------------------------------
+	repair, err := RepairTail(path, KindWAL, opts.Logger)
+	if err != nil {
+		return nil, err // RepairTail already names the path and the offset
+	}
+
 	var apply func(Committed) error
 	if opts.Applier != nil {
 		apply = opts.Applier.Apply
@@ -243,6 +254,7 @@ func Open(opts LogOptions) (*Log, error) {
 	if err != nil {
 		return nil, err // Replay already names the path and the offset
 	}
+	rec.Repaired = repair
 
 	w, err := OpenWriter(path, KindWAL)
 	if err != nil {
@@ -596,7 +608,7 @@ func DecodePrepare(path string, rec Record) (Entry, time.Time, error) {
 	ts, err := time.Parse(time.RFC3339Nano, p.TS)
 	if err != nil {
 		e := frameCorruptf(path, rec, "record %d: prepare payload timestamp %q is not RFC3339Nano",
-			rec.Index, elide(p.TS))
+			rec.Index, elide(p.TS, maxValueChars))
 		e.Err = err
 		return Entry{}, time.Time{}, e
 	}
@@ -658,12 +670,10 @@ func decodePayload(path string, rec Record, want Type, v interface{}) error {
 	dec := json.NewDecoder(bytes.NewReader(rec.Payload))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		// The decoder's message can quote a field NAME straight out of the
-		// payload, so it is elided like every other file-derived string: a
-		// corrupt log must not be able to write megabytes into the server's
-		// logs. The payload itself is never included.
-		e := frameCorruptf(path, rec, "record %d: %s payload does not decode: %s",
-			rec.Index, want, elide(err.Error()))
+		// The decoder's own message quotes file-derived text (an unknown field
+		// NAME, for instance). It is carried as the cause, which CorruptError
+		// renders through a length bound; the payload itself is never included.
+		e := frameCorruptf(path, rec, "record %d: %s payload does not decode", rec.Index, want)
 		e.Err = err
 		return e
 	}
@@ -672,17 +682,4 @@ func decodePayload(path string, rec Record, want Type, v interface{}) error {
 			rec.Index, want)
 	}
 	return nil
-}
-
-// elide bounds a string that came off disk before it is formatted into an error
-// or a log line. A record's payload is attacker-influenced (message bodies are
-// client-supplied) and may be up to MaxPayloadSize, and an error message is not
-// a place to paste a megabyte of it. Nothing here is a security boundary on its
-// own -- %q already neutralises control characters -- it is a size bound.
-func elide(s string) string {
-	const max = 64
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "...[elided]"
 }

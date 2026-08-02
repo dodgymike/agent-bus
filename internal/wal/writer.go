@@ -39,8 +39,8 @@ type Writer struct {
 // contents -- survives a crash. If it does exist, its header is validated and
 // its records are scanned strictly (see ScanAll) to establish the next index
 // and the append offset; any malformed record is an error here. Deciding that
-// a corrupt tail may be truncated is recovery policy and belongs to the
-// recovery task, which will do its work before calling OpenWriter.
+// a corrupt tail may be truncated is recovery policy and belongs to RepairTail,
+// which does its work before OpenWriter is called (see Open).
 //
 // A zero-length existing file is the one case treated as fresh rather than
 // corrupt: it is the crash window between creating the file and writing its
