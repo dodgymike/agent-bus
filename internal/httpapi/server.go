@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
@@ -94,6 +95,13 @@ type Options struct {
 	// claim that the surface is there, and a server built without an auth
 	// service does not have it.
 	//
+	// A nil Auth also means nobody can be authenticated, and authMiddleware is
+	// DEFAULT-DENY, so every path that is NOT on UnauthenticatedRoutes answers
+	// 401. The three credential routes stay on the allow-list even then, so
+	// they still reach the mux and still 404 -- the documented behaviour above
+	// is preserved exactly, and is pinned by
+	// TestEnrollRoutesAreAbsentWithoutAnAuthService.
+	//
 	// There is no default: an auth service needs an id minter, and inventing
 	// one here would mint agent ids from a counter with nothing on disk behind
 	// it (invariant 1 -- see auth.Options.Minter).
@@ -116,6 +124,13 @@ type Server struct {
 	auth        *auth.Service
 	now         func() time.Time
 	handler     http.Handler
+
+	// routes is every pattern registered on the mux, in registration order.
+	// Go 1.19's http.ServeMux cannot be enumerated, and an authentication
+	// wrapper that is only claimed to cover the whole surface is worth
+	// nothing -- this is how a test walks the real surface. Written once in
+	// New, read-only afterwards; see (*Server).route.
+	routes []string
 }
 
 // New builds the mux, wraps it in the shared middleware and returns the
@@ -148,22 +163,51 @@ func New(opts Options) *Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.HandleFunc("/v1/info", s.handleInfo)
+	s.route(mux, "/healthz", s.handleHealthz)
+	s.route(mux, "/v1/info", s.handleInfo)
 
 	// Registered only when there is an auth service to serve them; see
-	// Options.Auth. NOTHING here authenticates a token on any other route --
-	// these three are the calls that ISSUE the credential, and enforcing it
-	// elsewhere is AUTH-2's change, kept separate so it is reviewable on its
-	// own. auth.Service.Authenticate is the seam it will wrap.
+	// Options.Auth. These three ISSUE the credential every other route
+	// requires, which is why they are on authMiddleware's allow-list -- see
+	// unauthenticatedRoutes for why session/complete belongs there too.
 	if s.auth != nil {
-		mux.HandleFunc(RouteEnroll, s.handleEnroll)
-		mux.HandleFunc(RouteSessionBegin, s.handleSessionBegin)
-		mux.HandleFunc(RouteSessionComplete, s.handleSessionComplete)
+		s.route(mux, RouteEnroll, s.handleEnroll)
+		s.route(mux, RouteSessionBegin, s.handleSessionBegin)
+		s.route(mux, RouteSessionComplete, s.handleSessionComplete)
 	}
 
-	s.handler = LoggingMiddleware(s.log, mux)
+	// The order is LOAD-BEARING. authMiddleware wraps the WHOLE mux, so
+	// invariant 3 is enforced by default-deny rather than route by route: a
+	// route added later is authenticated because it is registered, not because
+	// someone remembered to protect it. LoggingMiddleware stays OUTSIDE it for
+	// two reasons -- a 401 is a request an operator most wants in the log, and
+	// it is what puts the request id in the context, so authMiddleware's own
+	// refusal lines can be correlated with the response.
+	s.handler = LoggingMiddleware(s.log, s.authMiddleware(mux))
 	return s
+}
+
+// route registers h at pattern and records the pattern for Routes.
+//
+// EVERY route MUST be registered through this, not through mux.HandleFunc, so
+// the enumeration test can walk the real surface -- Go 1.19's http.ServeMux
+// offers no way to list its patterns.
+//
+// Forgetting is a testing gap, NOT a security hole: authMiddleware wraps the
+// whole mux and is default-deny, so an unrecorded route is still
+// authenticated. It is merely invisible to the test that proves it.
+func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
+	s.routes = append(s.routes, pattern)
+	mux.HandleFunc(pattern, h)
+}
+
+// Routes returns every pattern this server registered, sorted. It returns a
+// copy so a caller cannot mutate the server's view of its own surface.
+func (s *Server) Routes() []string {
+	out := make([]string, len(s.routes))
+	copy(out, s.routes)
+	sort.Strings(out)
+	return out
 }
 
 // ServeHTTP implements http.Handler.
@@ -184,8 +228,8 @@ func (s *Server) Durable() DurableLog { return s.durable }
 
 // Auth returns the enrolment and session authority the server was built with,
 // or nil when none was supplied -- in which case the credential-issuing routes
-// are not registered. AUTH-2 reaches it through here to authenticate the routes
-// that require a token.
+// are not registered -- and, since authMiddleware is default-deny, every path
+// off the allow-list answers 401.
 func (s *Server) Auth() *auth.Service { return s.auth }
 
 // HealthResponse is the body of GET /healthz.

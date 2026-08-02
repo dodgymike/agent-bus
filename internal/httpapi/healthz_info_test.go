@@ -27,6 +27,12 @@ func TestHealthzInfo(t *testing.T) {
 			Version:  "v9.9.9",
 		})
 
+		// Note the two unknown-path cases: they expect 401, NOT 404. That is
+		// deliberate. AUTH-2's middleware is default-deny and wraps the whole
+		// mux, so an UNAUTHENTICATED caller is refused before the mux ever
+		// decides whether the path exists -- it must not be able to enumerate
+		// which paths this bus serves by reading status codes. A caller
+		// holding a valid token passes the middleware and gets a genuine 404.
 		cases := []struct {
 			name       string
 			method     string
@@ -42,8 +48,8 @@ func TestHealthzInfo(t *testing.T) {
 			{"info post", http.MethodPost, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
 			{"info put", http.MethodPut, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
 			{"info delete", http.MethodDelete, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
-			{"unknown path", http.MethodGet, "/nope", http.StatusNotFound, ""},
-			{"unknown path under info", http.MethodGet, "/v1/info/nope", http.StatusNotFound, ""},
+			{"unknown path", http.MethodGet, "/nope", http.StatusUnauthorized, ""},
+			{"unknown path under info", http.MethodGet, "/v1/info/nope", http.StatusUnauthorized, ""},
 		}
 
 		for _, tc := range cases {
