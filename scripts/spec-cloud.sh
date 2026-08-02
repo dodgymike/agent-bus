@@ -24,11 +24,30 @@ HOST="${SPEC_CLOUD_HOST:-https://api.spec.elasticninja.com}"
 [ -f "$CREDS" ] || { echo "spec-cloud: creds file missing ($CREDS) — re-enrol (see cloud-spec-keeper memory)" >&2; exit 3; }
 set -a; . "$CREDS"; set +a
 
+# Mint an access token. The password is passed via --cli-input-json on STDIN, NOT on the
+# argv: `--auth-parameters PASSWORD=…` puts the plaintext password in the process table,
+# where any local user's `ps` can read it for the life of the call.
+# (The v1 aws CLI on this box cannot read --cli-input-json from file:///dev/stdin — it
+# reads it as empty — so the request goes through a mode-600 temp file that is removed
+# on every exit path.)
 _mint() {
-  aws cognito-idp initiate-auth --region "$SPEC_CLOUD_REGION" --auth-flow USER_PASSWORD_AUTH \
-    --client-id "$SPEC_CLOUD_CLIENT_ID" \
-    --auth-parameters USERNAME="$SPEC_CLOUD_USERNAME",PASSWORD="$SPEC_CLOUD_PASSWORD" \
-    --query 'AuthenticationResult.AccessToken' --output text 2>/dev/null
+  local req rc tok
+  req=$(mktemp "${TMPDIR:-/tmp}/.spec-cloud-auth.XXXXXX") || return 1
+  chmod 600 "$req"
+  trap 'rm -f "$req"' RETURN
+  python3 -c '
+import json, os, sys
+json.dump({"AuthFlow": "USER_PASSWORD_AUTH",
+           "ClientId": os.environ["SPEC_CLOUD_CLIENT_ID"],
+           "AuthParameters": {"USERNAME": os.environ["SPEC_CLOUD_USERNAME"],
+                              "PASSWORD": os.environ["SPEC_CLOUD_PASSWORD"]}}, open(sys.argv[1], "w"))
+' "$req" || return 1
+  tok=$(aws cognito-idp initiate-auth --region "$SPEC_CLOUD_REGION" \
+          --cli-input-json "file://$req" \
+          --query 'AuthenticationResult.AccessToken' --output text 2>/dev/null)
+  rc=$?
+  printf '%s' "$tok"
+  return $rc
 }
 _token() {
   if [ -f "$CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$CACHE" 2>/dev/null || echo 0) )) -lt 2400 ]; then
@@ -40,9 +59,32 @@ _token() {
 }
 
 # Split args into the request path (first /-prefixed arg) and pass-through curl opts.
-path=""; passthru=()
+#
+# A curl option that TAKES A VALUE can be followed by a /-prefixed argument that is a
+# local filename, not the API path — `-o /dev/null` and `-d @/tmp/body.json` are the ones
+# that bite. Naively grabbing "the first arg starting with /" retargets the request at
+# /dev/null and 404s. So skip the argument immediately after any value-taking option.
+# Long options are enumerated rather than matched as `--*`, because most of them
+# (--silent, --fail, --show-error) take NO value — treating them as if they did would
+# swallow the API path that follows.
+_takes_value() {
+  case "$1" in
+    -o | -d | -F | -H | -X | -A | -b | -c | -e | -T | -u | -U | -w | -K | -E | -y | -Y | -z | -m) return 0 ;;
+    --output | --data | --data-binary | --data-raw | --data-urlencode | --form | --header) return 0 ;;
+    --request | --user-agent | --cookie | --cookie-jar | --referer | --upload-file) return 0 ;;
+    --user | --proxy-user | --write-out | --config | --cert | --key | --cacert) return 0 ;;
+    --max-time | --connect-timeout | --retry | --url | --resolve | --interface) return 0 ;;
+    *) return 1 ;;   # bare paths, and flag clusters like -sS / -sf, take no value
+  esac
+}
+path=""; passthru=(); skip_next=0
 for a in "$@"; do
-  if [ -z "$path" ] && [ "${a#/}" != "$a" ]; then path="$a"; else passthru+=("$a"); fi
+  if [ -z "$path" ] && [ "$skip_next" -eq 0 ] && [ "${a#/}" != "$a" ]; then
+    path="$a"
+  else
+    passthru+=("$a")
+  fi
+  if [ "$skip_next" -eq 0 ] && _takes_value "$a"; then skip_next=1; else skip_next=0; fi
 done
 [ -n "$path" ] || { echo "spec-cloud: no /path argument found in: $*" >&2; exit 2; }
 
