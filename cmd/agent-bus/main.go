@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -131,6 +132,39 @@ func (c Config) validate() error {
 	if c.PollTimeout <= 0 {
 		return fmt.Errorf("-poll-timeout must be positive, got %s", c.PollTimeout)
 	}
+	// Invariant 1: a supplied bus id is input to be VALIDATED. The same rule is
+	// applied to the placeholder default so there is exactly one definition of a
+	// legal bus id.
+	if err := validateBusID(c.resolveBusID()); err != nil {
+		if c.BusID != "" {
+			return fmt.Errorf("invalid -bus-id: %w", err)
+		}
+		return fmt.Errorf("invalid default bus id: %w", err)
+	}
+	return nil
+}
+
+// resolveBusID returns the bus id the server will run with: the -bus-id
+// override when set, otherwise the placeholder default.
+func (c Config) resolveBusID() string {
+	if c.BusID != "" {
+		return c.BusID
+	}
+	return httpapi.DefaultBusID
+}
+
+// busIDPattern is the legal shape of a bus id. '.' is deliberately excluded:
+// invariant 2 qualifies every agent as "<bus-id>.<agent-id>", so a dot inside a
+// bus id would make that qualification ambiguous and silently corrupt routing.
+var busIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func validateBusID(id string) error {
+	if id == "" {
+		return errors.New("must not be empty")
+	}
+	if !busIDPattern.MatchString(id) {
+		return fmt.Errorf("%q must match %s; in particular '.' is not allowed because it is the \"<bus-id>.<agent-id>\" qualification separator (invariant 2)", id, busIDPattern)
+	}
 	return nil
 }
 
@@ -145,9 +179,12 @@ func run(cfg Config) error {
 
 	// PLACEHOLDER identity. The ID epic replaces this with server-minted,
 	// persisted ids from internal/ids; -bus-id only feeds the placeholder.
-	busID := cfg.BusID
-	if busID == "" {
-		busID = httpapi.DefaultBusID
+	busID := cfg.resolveBusID()
+	if cfg.BusID != "" {
+		// Runtime signal, not just a doc comment: the server is authoritative
+		// on every id (invariant 1), so an operator forcing one is a test-only
+		// configuration that should never be running in production.
+		lg.Warn("TEST-ONLY -bus-id override in use; the server is authoritative on ids, do not use this in production", "bus_id", busID)
 	}
 
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
@@ -196,6 +233,14 @@ func run(cfg Config) error {
 		"version", version,
 	)
 
+	return waitAndShutdown(lg, srv, cancelRoot, sigCh, serveErr)
+}
+
+// waitAndShutdown blocks until Serve fails or a shutdown signal arrives, then
+// drains the server. It is a separate function so the cancel-before-Shutdown
+// ordering below has a regression guard (see TestShutdownReleasesLongPoll):
+// reversing those two statements reintroduces a hang that nothing else catches.
+func waitAndShutdown(lg *logging.Logger, srv *http.Server, cancelRoot context.CancelFunc, sigCh <-chan os.Signal, serveErr <-chan error) error {
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {

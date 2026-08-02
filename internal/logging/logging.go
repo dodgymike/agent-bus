@@ -11,10 +11,14 @@
 //
 // logfmt was chosen over JSON because these logs are read by humans tailing a
 // dev server and grepped by shell wrappers, and because a single line per
-// event keeps the format stable when it is later fed to a log shipper. Values
-// are quoted with strconv.Quote whenever they contain whitespace, quotes, '='
-// or any control character, which also neutralises log injection: no attacker
-// controlled value can emit a newline and forge a second log record.
+// event keeps the format stable when it is later fed to a log shipper.
+//
+// A value is emitted bare only when it consists entirely of printable ASCII
+// excluding space, '"', '=' and '\'; anything else is quoted with
+// strconv.Quote, which escapes control characters AND every byte >= 0x7f. An
+// emitted record is therefore always a single line of printable ASCII: no
+// attacker-controlled value can emit a newline (or a raw U+2028) and forge a
+// second log record, and no invalid UTF-8 reaches a log shipper.
 package logging
 
 import (
@@ -220,9 +224,11 @@ func isKeyByte(c byte) bool {
 }
 
 // writeValue emits a value, quoting it whenever it is not a bare token. This
-// is the log-injection defence: strconv.Quote escapes newlines and every other
-// control character, so a value taken from an untrusted header can never end
-// the record and start a forged one.
+// is the log-injection defence: strconv.Quote escapes newlines, every other
+// control character and every non-ASCII byte, so a value taken from an
+// untrusted header can never end the record and start a forged one. It also
+// makes the byte-wise truncation below safe: a rune split by the cut is
+// escaped rather than emitted as invalid UTF-8.
 func writeValue(b *strings.Builder, v string) {
 	if len(v) > maxValueLen {
 		v = v[:maxValueLen] + "...(truncated)"
@@ -240,7 +246,12 @@ func needsQuote(v string) bool {
 	}
 	for i := 0; i < len(v); i++ {
 		c := v[i]
-		if c <= ' ' || c == 0x7f || c == '"' || c == '=' || c == '\\' {
+		// c >= 0x7f covers DEL and EVERY byte with the high bit set, so a value
+		// is quoted unless it is entirely printable ASCII. That matters: bytes
+		// >= 0x80 can carry invalid UTF-8 (breaking a JSON log shipper) or a
+		// raw U+2028/U+2029, which some post-processors treat as a line
+		// terminator and would let an attacker forge a second record.
+		if c <= ' ' || c >= 0x7f || c == '"' || c == '=' || c == '\\' {
 			return true
 		}
 	}
