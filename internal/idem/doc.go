@@ -23,8 +23,8 @@
 //	### Idempotency key (invariant 10)
 //
 //	Every MUTATING route requires an `Idempotency-Key` request header:
-//	`POST /v1/enrol`, `POST /v1/send`, `POST /v1/broadcast`, `POST /v1/leave`,
-//	`POST /v1/peer-enrol`, `POST /v1/relay`. A missing header on one of these
+//	`POST /v1/enroll`, `POST /v1/send`, `POST /v1/broadcast`, `POST /v1/leave`,
+//	`POST /v1/peer/enroll`, `POST /v1/relay`. A missing header on one of these
 //	routes is a 400 — the server never mints a substitute key on the caller's
 //	behalf. The key is at most 128 bytes and matches `[A-Za-z0-9._-]+`; a key
 //	failing either check is a 400 and is not echoed back if it is oversized.
@@ -242,11 +242,47 @@
 // (harmlessly, but confusingly) a byte-identical resend split across
 // different field boundaries would look like a "different payload".
 //
+// The route spellings above were CORRECTED on 2026-08-02 (IDEM-11): this block
+// originally said `POST /v1/enrol` and `POST /v1/peer-enrol`, neither of which
+// exists. The real routes are `/v1/enroll` (CONTRACTS-HTTP.md) and
+// `/v1/peer/enroll` (relay.PeerEnrollPath). Note that the Operation CONSTANT
+// idem.OpPeerEnrol is still the string "peer-enrol" and is deliberately NOT
+// changed: it is a scope LABEL, not a route, and it is already baked into
+// fingerprints and durable applied-key records.
+//
 // Each route that uses Fingerprint must document, at ITS call site, the fixed
 // field list and order it hashes — e.g. send might hash
 // [senderID, recipientID, body]; that per-operation list is that operation's
 // task to define (IDEM-11 and the route tasks after it), not this one's: this
 // task defines the collision-safe MECHANISM, not every route's field list.
+//
+// # 9. The DURABLE APPLIED-KEY STORE (IDEM-11) — added 2026-08-02
+//
+// The store IDEM-10 described as future work now lives in this package:
+// Record (record.go) is one durably-remembered applied operation, and Store
+// (store.go) is the table of them.
+//
+//   - DURABILITY. A Record is encoded (Record.Encode) BEFORE the durable write
+//     and rides in wal.Entry.Idem — the SAME two-phase prepare→commit→fsync
+//     transaction as the effect it records, because a wal transaction carries
+//     exactly one Entry. It is therefore impossible for the effect to be
+//     durable while its applied-key record is not; a crash in that gap plus a
+//     client retry is precisely the duplicate invariant 10 exists to prevent,
+//     and the gap would be small enough to be invisible in ordinary testing.
+//   - RECOVERY. The table is REBUILT by WAL replay (hub.Apply), which is what
+//     makes it recovered state rather than an in-memory cache. Logs written
+//     before the field existed still rebuild, from the message record's own
+//     idempotency key — see hub.Apply's back-compat path.
+//   - RETENTION, DERIVED. retention.go derives RetentionWindow term by term
+//     (peer outage budget + max session lifetime + max parked poll + the
+//     client's own retry horizon, doubled) rather than picking a round number,
+//     and MaxEntries from an explicit per-record size budget.
+//   - THE GUARANTEE. "Duplicates are suppressed within the retention window" —
+//     NOT unconditional exactly-once. A retry arriving after its key expired is
+//     applied as a NEW operation. Store's doc comment states in full why
+//     fail-closed is not implementable over opaque client-supplied keys, and
+//     what makes the boundary honest (a derived window, plus Stats.Expired and
+//     Stats.OldestAge so the bound is observable rather than assumed).
 //
 // # FOLLOW-UP (not this task's scope, recorded so it is not lost)
 //

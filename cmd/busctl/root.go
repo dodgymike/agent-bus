@@ -46,13 +46,27 @@ func (g *globals) register(fs *flag.FlagSet) {
 }
 
 // cliEnv is what a subcommand is handed: the resolved globals, the renderer,
-// and the environment lookup (injected so tests never mutate process state).
+// the standard streams, and the environment lookup (all injected so tests never
+// mutate process state).
 type cliEnv struct {
 	g         *globals
 	out       *output
+	stdin     io.Reader
 	stdout    io.Writer
 	stderr    io.Writer
 	lookupEnv func(string) (string, bool)
+
+	// stdoutIsTTY and stdinIsTTY are the answers isTerminal gave for the real
+	// process streams. They are carried rather than recomputed because the
+	// streams above are ordinary io.Writers under test, and a subcommand that
+	// reached for os.Stdout to ask the question would be asking about a
+	// descriptor it is not writing to.
+	//
+	// Both are FALSE in every injected/test path, which is the safe default:
+	// "not a terminal" means machine output and no interactive read, so nothing
+	// can block waiting for a human who is not there.
+	stdoutIsTTY bool
+	stdinIsTTY  bool
 }
 
 // client builds a configured client.Client from the globals and environment.
@@ -120,6 +134,10 @@ func commands() []command {
 		whoamiCommand(),
 		useCommand(),
 		logoutCommand(),
+		agentsCommand(),
+		sendCommand(),
+		broadcastCommand(),
+		watchCommand(),
 	}
 }
 
@@ -134,7 +152,23 @@ func lookupCommand(name string) (command, bool) {
 
 // run is the whole CLI, injectable for tests: no globals, no os.Exit, no
 // direct access to the process environment.
+//
+// It is runWithTTY with the three process-shaped inputs neutralised: an EMPTY
+// stdin and "neither stream is a terminal". Empty rather than os.Stdin so that
+// no test can ever block reading a terminal the test harness may or may not
+// have handed it, and false/false because that is the machine-facing behaviour
+// (NDJSON, no interactive read) which is the one worth having as the default.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, lookupEnv func(string) (string, bool)) int {
+	return runWithTTY(ctx, args, strings.NewReader(""), stdout, stderr, lookupEnv, false, false)
+}
+
+// runWithTTY is run with stdin and the terminal answers supplied explicitly.
+// main uses it with the real process streams; a test uses it to drive the
+// TTY-dependent behaviour of `watch` and `send` without owning a terminal.
+func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, lookupEnv func(string) (string, bool), stdoutIsTTY, stdinIsTTY bool) int {
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
 	if lookupEnv == nil {
 		lookupEnv = func(string) (string, bool) { return "", false }
 	}
@@ -188,7 +222,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, lookupEnv
 		return out.Fail(unknownCommandError(name))
 	}
 
-	env := &cliEnv{g: g, out: out, stdout: stdout, stderr: stderr, lookupEnv: lookupEnv}
+	env := &cliEnv{
+		g: g, out: out,
+		stdin: stdin, stdout: stdout, stderr: stderr,
+		lookupEnv:   lookupEnv,
+		stdoutIsTTY: stdoutIsTTY,
+		stdinIsTTY:  stdinIsTTY,
+	}
 	if err := cmd.run(ctx, env, rest); err != nil {
 		if err == flag.ErrHelp {
 			fmt.Fprint(stdout, cmd.help)
@@ -280,9 +320,11 @@ COMMANDS
 	cmds := commands()
 	sort.Slice(cmds, func(i, j int) bool { return cmds[i].name < cmds[j].name })
 	for _, c := range cmds {
-		fmt.Fprintf(&b, "  %-9s %s\n", c.name, c.summary)
+		// Widened from 9 to 10 when `broadcast` (9 characters) landed: at 9 the
+		// column was still aligned but the longest name touched its summary.
+		fmt.Fprintf(&b, "  %-10s %s\n", c.name, c.summary)
 	}
-	b.WriteString(`  help      show help for a command
+	b.WriteString(`  help       show help for a command
 
 FLAGS (accepted before or after the command)
   --bus <url>       base URL of the bus                       (env ` + client.EnvBusURL + `)
@@ -303,6 +345,11 @@ NOTES
   No busctl command is ever interactive. Credentials come from the store or
   the environment, never from a prompt, because an agent shelling out has no
   terminal to answer one.
+
+  ` + "`busctl watch`" + ` streams NDJSON whenever stdout is not a terminal, one
+  message per line, flushed as it arrives. Delivery is AT-LEAST-ONCE, so a
+  handler must be idempotent on message_id: run ` + "`busctl watch --help`" + ` for the
+  cursor and re-delivery contract before you write one.
 
   Credentials live in a 0600 file under the credential store directory
   (default: the user's config directory + /agent-bus). Never in a repository.

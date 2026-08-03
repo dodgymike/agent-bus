@@ -114,6 +114,18 @@ type Error struct {
 	// Unexported because it is scheduling advice consumed by this package's
 	// backoff, not a fact a caller should branch on — the Kind is.
 	retryAfter time.Duration
+
+	// fatal marks a failure that LOOKS retryable by status but is not. Today
+	// that is exactly one thing: a 503 with no Retry-After, which the bus emits
+	// only when its hub cannot durably accept messages (see statusError).
+	//
+	// It is unexported and read through IsFatalUnavailable rather than being a
+	// Kind of its own, because the Kind set is a CLOSED vocabulary a caller
+	// branches on (and the CLI maps to an exit code): this is still KindServer
+	// to everything that switches on Kind, with one extra bit for the two places
+	// that must not loop on it — the transport's retry loop and a long-running
+	// watch.
+	fatal bool
 }
 
 // Error implements error.
@@ -157,6 +169,27 @@ func KindOf(err error) Kind {
 		return e.Kind
 	}
 	return KindInternal
+}
+
+// IsFatalUnavailable reports whether err is a bus unavailability that RETRYING
+// WILL NOT FIX, following the Unwrap chain like KindOf.
+//
+// It is true for exactly one condition today: the bus answered 503 with NO
+// Retry-After header, which it does only when the hub cannot durably accept
+// messages (hub.ErrNotDurable / hub.ErrPoisoned). Every capacity refusal on
+// every route carries the header, so the header's absence is the bus saying
+// "this is not transient" — and, per invariant 4, refusing rather than
+// acknowledging something it cannot make durable.
+//
+// A caller that loops — a long poll, a watch, a supervisor — must check this and
+// STOP. Backing off forever on a poisoned write path converts an operator-
+// visible fault into a silent one.
+func IsFatalUnavailable(err error) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.fatal
+	}
+	return false
 }
 
 // ExitCode maps err to the process exit code a caller should use.

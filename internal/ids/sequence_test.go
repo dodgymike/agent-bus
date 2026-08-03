@@ -278,16 +278,22 @@ func TestSequenceRefusesToIssueFromAnUnsealedFloor(t *testing.T) {
 			}
 			return s.Seal()
 		}()
-		// ErrFloorBelowIssued is unreachable on Sequence under the seal gate, so
-		// its live producer is NameSuffixes.RaiseFloor, which has no seal and
-		// enforces the same contract per name.
-		belowIssued := func() error {
-			ns := NewNameSuffixes()
-			if _, err := ns.NextSuffix("alice"); err != nil {
-				t.Fatalf("NextSuffix: %v", err)
-			}
-			return ns.RaiseFloor("alice", 1)
+		// The refusal NameSuffixes.NextSuffix returns while unsealed: an
+		// unexported wrap of ErrFloorUnproven carrying the per-name suffix
+		// guidance, which must still match the shared sentinel and nothing else.
+		suffixUnproven := func() error {
+			_, err := ResumeNameSuffixes(map[string]uint64{"alice": 1}).NextSuffix("alice") // unsealed
+			return err
 		}()
+		// ErrFloorBelowIssued now has NO reachable producer through the exported
+		// API of EITHER allocator: NameSuffixes.RaiseFloor gained the same seal
+		// gate as Sequence.RaiseFloor, and on both the sealed check pre-empts the
+		// below-issued one (issuing at all requires a seal). The sentinel is
+		// retained in the package as defence-in-depth — the whole one-way state
+		// machine rests on a single bool — so it is still covered here, but it
+		// has to be SYNTHESISED rather than produced, and this test says so
+		// rather than pretending otherwise.
+		belowIssued := fmt.Errorf("%w: synthesised — no exported call path produces this any more", ErrFloorBelowIssued)
 
 		sentinels := []struct {
 			name string
@@ -314,7 +320,9 @@ func TestSequenceRefusesToIssueFromAnUnsealedFloor(t *testing.T) {
 			}
 		}
 
-		// Each live, wrapped error matches only its own sentinel.
+		// Each wrapped error matches only its own sentinel. Every one of these
+		// comes from a live code path except the ErrFloorBelowIssued row, which
+		// is synthesised because that sentinel is unreachable (see above).
 		produced := []struct {
 			name string
 			err  error
@@ -323,7 +331,9 @@ func TestSequenceRefusesToIssueFromAnUnsealedFloor(t *testing.T) {
 			{"unsealed Next()", unproven, ErrFloorUnproven},
 			{"sealed Next() at MaxUint64", exhausted, ErrSequenceExhausted},
 			{"second Seal()", sealed, ErrFloorSealed},
-			{"NameSuffixes.RaiseFloor below issued", belowIssued, ErrFloorBelowIssued},
+			{"unsealed NameSuffixes.NextSuffix()", suffixUnproven, ErrFloorUnproven},
+			{"errSuffixFloorUnproven", errSuffixFloorUnproven, ErrFloorUnproven},
+			{"synthesised ErrFloorBelowIssued", belowIssued, ErrFloorBelowIssued},
 		}
 		for _, p := range produced {
 			if p.err == nil {

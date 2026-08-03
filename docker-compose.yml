@@ -77,7 +77,6 @@ services:
         # Override at build time: docker compose build --build-arg VERSION=$(git describe --tags --always)
         VERSION: dev
     image: agent-bus:local
-    container_name: agent-bus
     restart: unless-stopped
 
     # No new configuration surface: every flag here already exists on the

@@ -16,26 +16,41 @@ var ErrSequenceExhausted = errors.New("ids: sequence exhausted: math.MaxUint64 h
 // the floor to a value this allocator has ALREADY issued. See RaiseFloor for
 // why that is an error rather than a no-op.
 //
-// On Sequence this is now UNREACHABLE — the seal gate pre-empts it, because
-// issuing anything requires a Seal and a sealed RaiseFloor returns
-// ErrFloorSealed first (see Sequence.RaiseFloor). The live user of this sentinel
-// is NameSuffixes.RaiseFloor, which has no seal and enforces the same contract
-// per name; the branch in Sequence.RaiseFloor survives as defence-in-depth.
+// This sentinel now has NO reachable producer through the exported API of
+// EITHER allocator. On both Sequence and NameSuffixes the seal gate pre-empts
+// it: issuing anything requires a Seal, and a sealed RaiseFloor returns
+// ErrFloorSealed first (see Sequence.RaiseFloor and NameSuffixes.RaiseFloor).
+//
+// Both branches survive as defence-in-depth, and the sentinel is kept rather
+// than deleted: the whole one-way state machine rests on a single bool staying
+// one-way, and if that ever changes, these are the checks that stop a stale
+// floor landing on top of numbers already issued. The reasoning recorded on
+// each branch is retained for the same reason — it is what the check would
+// catch.
 var ErrFloorBelowIssued = errors.New("ids: refusing to set a sequence floor at or below a number already issued")
 
-// ErrFloorUnproven is returned by Next while the allocator is still UNSEALED —
-// nobody has yet asserted that the floor is the true high-water mark. It is the
-// fail-closed half of invariant 1: an allocator that cannot be shown a proven
-// floor refuses to mint rather than minting from a guess.
+// ErrFloorUnproven is returned by Sequence.Next, and by
+// NameSuffixes.NextSuffix, while that allocator is still UNSEALED — nobody has
+// yet asserted that its floor is the true high-water mark. It is the fail-closed
+// half of invariant 1: an allocator that cannot be shown a proven floor refuses
+// to mint rather than minting from a guess.
+//
+// The MESSAGE TEXT below is written for the message-sequence case (one floor,
+// derived from the highest sequence ever written). NameSuffixes.NextSuffix
+// therefore does not return this value bare: it returns an error WRAPPING it
+// that carries the per-name suffix guidance instead, since floors there are per
+// name and derived from a different thing. Match on this sentinel with
+// errors.Is; do not read its text as advice for the suffix case.
 //
 // The fix is to PROVE the floor, then Seal. It is NEVER to call Seal until the
 // error stops appearing.
 var ErrFloorUnproven = errors.New("ids: refusing to issue a sequence number from an unproven floor: derive the floor from the highest sequence number EVER WRITTEN TO DISK — every prepare, committed, aborted and dangling alike, NOT a record count and NOT the highest COMMITTED sequence — hand it to Resume/RaiseFloor and then call Seal(); calling Seal() merely to silence this error resumes below the high-water mark and silently reissues message ids, which nothing downstream can detect")
 
-// ErrFloorSealed is returned by RaiseFloor once Seal has been called, and by a
-// second call to Seal. Sealing is one-way and happens exactly once: after it,
-// floor assembly is over, and any further claim about the high-water mark is by
-// definition too late.
+// ErrFloorSealed is returned by Sequence.RaiseFloor and by
+// NameSuffixes.RaiseFloor once that allocator has been sealed, and by a second
+// call to either Seal. Sealing is one-way and happens exactly once per
+// allocator: after it, floor assembly is over, and any further claim about the
+// high-water mark is by definition too late.
 var ErrFloorSealed = errors.New("ids: the sequence floor is sealed: floor assembly ended at Seal() and the floor can no longer be changed")
 
 // Sequence is a strictly monotonic, concurrency-safe allocator of message
@@ -344,13 +359,17 @@ func (s *Sequence) Last() uint64 {
 //     on a single bool, and if that ever changes this is the check that stops a
 //     stale floor from landing on top of issued numbers.
 //
-//     The reasoning is still worth reading, because the SAME contract is live,
-//     per name, on NameSuffixes.RaiseFloor, which has no seal: a caller
-//     asserting that atLeast is the high-water mark while a number at or above
-//     it has already been handed out is asserting something FALSE, and it is the
-//     same wrong belief that, computed one restart later and fed to Resume,
-//     silently reissues ids and breaks invariant 1. While it is still visible it
-//     is reported. The equality case is included deliberately: a caller whose
+//     NameSuffixes.RaiseFloor now carries the same branch, under the same seal,
+//     equally unreachable and equally kept — so ErrFloorBelowIssued has no
+//     reachable producer anywhere in this package's exported API.
+//
+//     The reasoning is still worth reading, because it is exactly what these
+//     checks would catch if the one-way seal ever stopped being one-way: a
+//     caller asserting that atLeast is the high-water mark while a number at or
+//     above it has already been handed out is asserting something FALSE, and it
+//     is the same wrong belief that, computed one restart later and fed to
+//     Resume, silently reissues ids and breaks invariant 1. The equality case is
+//     included deliberately: a caller whose
 //     view merely matches ours has learned nothing new, and treating a stale
 //     derivation as success is precisely the silent no-op that hides the
 //     off-by-one this check exists to catch. The allocator is left unchanged —

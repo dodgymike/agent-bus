@@ -36,6 +36,20 @@
 // that does not survive a bus restart anyway, so persisting it would trade a
 // stealable token at rest for two saved round trips.
 //
+// # Messaging and polling
+//
+// Send and Broadcast mint an idempotency key ONCE per logical send and carry
+// that one key through every transport retry, so a retry after a lost
+// acknowledgement is answered from the bus's applied-key table rather than
+// producing a second message (invariant 10). Read fetches one batch, either as
+// history or as a long poll; Watch is the loop built on it.
+//
+// The rule that governs the read side is that THE CURSOR ADVANCES ONLY AFTER THE
+// CALLER HAS BEEN HANDED THE MESSAGES. Delivery is at-least-once, so the safe
+// direction on any failure is to re-deliver rather than skip — which means an
+// agent's handler must be IDEMPOTENT, keyed on Message.MessageID. Watch's doc
+// comment spells out exactly which crash re-delivers what.
+//
 // # Errors
 //
 // Every failure is an *Error carrying a Kind, a message and, wherever one

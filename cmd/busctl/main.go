@@ -25,5 +25,36 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.LookupEnv))
+	os.Exit(runWithTTY(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.LookupEnv,
+		isTerminal(os.Stdout), isTerminal(os.Stdin)))
+}
+
+// isTerminal reports whether f is attached to a character device — a terminal.
+//
+// Two commands change BEHAVIOUR on the answer, so this is not cosmetic:
+//
+//   - `watch` prints its live human feed only to a terminal. A pipe or a
+//     redirect is a MACHINE, and a machine gets NDJSON whether or not it
+//     remembered to pass --json. A long poll whose output is buffered into a
+//     human-shaped block that only completes at exit is useless.
+//   - `send` reads the body from stdin when no other source is given, and only
+//     announces that it is doing so when stdin is a terminal. That way an agent
+//     shelling out can never hang on a prompt it cannot see.
+//
+// Stat + ModeCharDevice is the stdlib-only check (invariant 8); an ioctl-based
+// isatty would be a dependency for a sharper answer than either caller needs.
+// It is deliberately conservative at the edges: /dev/null is also a character
+// device, so `busctl send x </dev/null` takes the "terminal" branch — it prints
+// the notice, reads EOF immediately and fails with "empty body". It never hangs.
+// An unstattable descriptor reports false: guessing "terminal" would make `send`
+// park on a stdin nobody is going to write to.
+func isTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }

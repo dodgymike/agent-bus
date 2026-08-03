@@ -925,18 +925,55 @@ func TestDirectMessageSend(t *testing.T) {
 		}
 	})
 
+	// CHANGED BY IDEM-11 (2026-08-02), deliberately, and this is the same
+	// property stated more strongly rather than a weakened one.
+	//
+	// The applied-key table is now scoped by idem.Scope = (agent, OPERATION,
+	// key), which is IDEM-10's settled key format. A broadcast and a directed
+	// send that happen to reuse one key are therefore in DIFFERENT KEY SPACES,
+	// not one key space distinguished by fingerprint.
+	//
+	// Before, "they do not share an identity" was expressed as "the second one
+	// is rejected as a reused key" — which punished a client using a per-route
+	// counter for doing nothing wrong. Now it is expressed directly: each is a
+	// distinct operation with a distinct result, and each replays ITS OWN
+	// original result on retry. That is a stronger assertion — it pins what
+	// each key resolves to, not merely that the second call failed — and the
+	// cross-payload violation check for a key reused WITHIN one operation is
+	// still asserted above (same key, same body, different recipient).
 	t.Run("BroadcastAndDirectDoNotShareAnIdempotencyIdentity", func(t *testing.T) {
 		h, _, _ := newTestHub(t, "alpha", "beta")
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 		body := []byte("same bytes, different shape")
 
-		if _, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"}); err != nil {
+		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
+		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
-		_, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
-		if !errors.Is(err, hub.ErrIdempotencyKeyReused) {
-			t.Fatalf("a directed send reusing a broadcast's key gave err = %v, want ErrIdempotencyKeyReused", err)
+		dm, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
+		if err != nil {
+			t.Fatalf("a directed send reusing a broadcast's key is a DIFFERENT scope and must be accepted, got err = %v", err)
+		}
+		if dm.MessageID == bc.MessageID || dm.Replayed {
+			t.Fatalf("the directed send was answered from the broadcast's applied-key entry: broadcast %+v, send %+v", bc, dm)
+		}
+
+		// And each key still replays its OWN original result, which is what
+		// "do not share an identity" actually means.
+		bcAgain, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
+		if err != nil {
+			t.Fatalf("broadcast retry: %v", err)
+		}
+		if !bcAgain.Replayed || bcAgain.MessageID != bc.MessageID {
+			t.Fatalf("broadcast retry returned %+v, want the original %s with Replayed set", bcAgain, bc.MessageID)
+		}
+		dmAgain, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
+		if err != nil {
+			t.Fatalf("send retry: %v", err)
+		}
+		if !dmAgain.Replayed || dmAgain.MessageID != dm.MessageID {
+			t.Fatalf("send retry returned %+v, want the original %s with Replayed set", dmAgain, dm.MessageID)
 		}
 	})
 }

@@ -85,6 +85,35 @@ type Entry struct {
 	// body of "null" is normalised to nil, so an entry handed to Apply by a
 	// live write is byte-for-byte the entry a replay will hand to Apply.
 	Body json.RawMessage
+	// Idem, when non-nil, is the APPLIED-KEY RECORD for the operation this
+	// entry effects (IDEM-11, invariant 10). It is opaque JSON: wal does not
+	// interpret it, exactly as it does not interpret Kind or Body.
+	//
+	// IT RIDES IN THE SAME PREPARE PAYLOAD AS THE EFFECT, and that is the whole
+	// point rather than an implementation detail. A transaction carries exactly
+	// one Entry, so an applied-key record written here commits when -- and only
+	// when -- the effect commits, in one fsync. A second, separately ordered
+	// write would leave a window where the effect is durable and the key is
+	// not; a crash there plus a client retry produces exactly the duplicate
+	// invariant 10 exists to prevent, and the window is small enough to be
+	// invisible in ordinary testing.
+	//
+	// It is canonicalised (compacted, "null" normalised to nil) exactly like
+	// Body, so a live Apply and a replayed Apply see byte-identical bytes.
+	//
+	// # FORWARD-COMPATIBILITY HAZARD (downgrade is not supported, and this is
+	// # why)
+	//
+	// decodePayload uses DisallowUnknownFields. A binary built BEFORE this
+	// field existed, reading a log written AFTER it, treats EVERY prepare
+	// carrying an idem record as an undecodable payload -- which recovery
+	// DISCARDS. That is an acknowledged write lost on downgrade, not a
+	// degraded-but-correct read. Downgrade is not a supported operation here
+	// (one binary, one container, forward-only), so this is not a defect to be
+	// fixed by loosening the decoder -- a lenient decoder is how a file that no
+	// longer says what history was accepted gets served as if it did. It is
+	// written down so it is known rather than discovered.
+	Idem json.RawMessage
 	// Audit, when non-nil, requests an audit-log record for this entry.
 	// DUR-5 implements it; this task only carries the field. The audit record
 	// is metadata and routing info ONLY -- never the message body (invariant 6,
@@ -417,6 +446,14 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal: prepare in %s: %w: %v", l.Path(), ErrInvalidBody, err)
 	}
+	// The applied-key record is canonicalised with the SAME helper and the same
+	// validation as the body, so the two can never disagree about what "the
+	// bytes that were written" means. The error context names it separately so
+	// an operator can tell which of the two failed.
+	idemRec, err := canonicalBody(e.Idem)
+	if err != nil {
+		return nil, fmt.Errorf("wal: prepare in %s: %w: entry idem record: %v", l.Path(), ErrInvalidBody, err)
+	}
 
 	l.mu.Lock()
 	// The lock is released here on every FAILURE path and kept on the success
@@ -432,7 +469,7 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 		return nil, l.diverged
 	}
 
-	payload, err := encodePrepare(e.Kind, body, l.now())
+	payload, err := encodePrepareWithIdem(e.Kind, body, idemRec, l.now())
 	if err != nil {
 		return nil, fmt.Errorf("wal: prepare in %s: encode payload: %w", l.Path(), err)
 	}
@@ -443,7 +480,7 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 	}
 
 	handedOver = true
-	return &Txn{l: l, prepareIndex: rec.Index, entry: Entry{Kind: e.Kind, Body: body, Audit: e.Audit}}, nil
+	return &Txn{l: l, prepareIndex: rec.Index, entry: Entry{Kind: e.Kind, Body: body, Idem: idemRec, Audit: e.Audit}}, nil
 }
 
 // Txn is one in-flight two-phase write, between prepare and commit. Its
@@ -569,9 +606,15 @@ func (e *divergedError) Unwrap() error { return e.cause }
 // add a field without a format-version bump and so an operator can read a
 // record with `head -c` and a pretty-printer.
 //
-//	PREPARE  {"kind":"<Entry.Kind>","ts":"<RFC3339Nano>","body":<Entry.Body>}
+//	PREPARE  {"kind":"<Entry.Kind>","ts":"<RFC3339Nano>","body":<Entry.Body>,"idem":<opaque JSON, omitted when absent>}
 //	COMMIT   {"prepare_index":<uint64>}
 //	ABORT    {"prepare_index":<uint64>,"reason":"<string>"}
+//
+// "idem" is IDEM-11's applied-key record (see Entry.Idem). It is OMITTED
+// ENTIRELY when the entry carries none, so a prepare written for an entry with
+// no applied-key record is BYTE-IDENTICAL to one written before the field
+// existed -- an existing log and a new one are the same file for every entry
+// that does not use the field. See TestPrepareWithoutIdemIsByteIdentical.
 //
 // The decoders are STRICT in both directions: an unknown field, trailing
 // garbage, a wrong record type, a zero prepare_index or a forward reference is
@@ -584,6 +627,10 @@ type preparePayload struct {
 	Kind string          `json:"kind"`
 	TS   string          `json:"ts"`
 	Body json.RawMessage `json:"body"`
+	// Idem is omitempty so an entry with no applied-key record encodes to the
+	// exact bytes this codec produced before the field existed. See the block
+	// comment above and Entry.Idem.
+	Idem json.RawMessage `json:"idem,omitempty"`
 }
 
 type commitPayload struct {
@@ -613,11 +660,26 @@ func canonicalBody(body json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(buf.Bytes()), nil
 }
 
+// encodePrepare encodes a prepare payload for an entry that carries NO
+// applied-key record. It is the pre-IDEM-11 form, kept as its own name so that
+// every existing call site -- and every byte-identity proof written against it
+// -- continues to describe exactly the bytes it always did.
 func encodePrepare(kind string, body json.RawMessage, ts time.Time) ([]byte, error) {
+	return encodePrepareWithIdem(kind, body, nil, ts)
+}
+
+// encodePrepareWithIdem encodes a prepare payload, optionally carrying
+// IDEM-11's applied-key record (Entry.Idem).
+//
+// A nil idem is OMITTED from the JSON entirely rather than written as null:
+// with omitempty on the field, encodePrepareWithIdem(k, b, nil, ts) and the
+// pre-IDEM-11 encoder produce identical bytes. That is what keeps this change
+// additive on disk instead of a silent format change.
+func encodePrepareWithIdem(kind string, body, idem json.RawMessage, ts time.Time) ([]byte, error) {
 	if body == nil {
 		body = json.RawMessage("null")
 	}
-	return encodeJSON(preparePayload{Kind: kind, TS: ts.UTC().Format(time.RFC3339Nano), Body: body})
+	return encodeJSON(preparePayload{Kind: kind, TS: ts.UTC().Format(time.RFC3339Nano), Body: body, Idem: idem})
 }
 
 func encodeCommit(prepareIndex uint64) ([]byte, error) {
@@ -667,7 +729,14 @@ func DecodePrepare(path string, rec Record) (Entry, time.Time, error) {
 	if len(body) == 0 || string(body) == "null" {
 		body = nil
 	}
-	return Entry{Kind: p.Kind, Body: body}, ts, nil
+	// The applied-key record is normalised the same way, so a record written
+	// with no idem field, one written with an explicit null, and one written by
+	// a pre-IDEM-11 binary all decode to the same nil.
+	idemRec := p.Idem
+	if len(idemRec) == 0 || string(idemRec) == "null" {
+		idemRec = nil
+	}
+	return Entry{Kind: p.Kind, Body: body, Idem: idemRec}, ts, nil
 }
 
 // DecodeCommit decodes a COMMIT record and returns the index of the PREPARE it

@@ -14,9 +14,16 @@
 //     wake-up.
 //   - REBUILDING the serving copy by replaying that durable log at startup
 //     (invariant 5: memory is the serving copy, disk is the truth).
-//   - REMEMBERING applied idempotency keys, durably — the key is part of the
-//     durable record and is restored by replay, so it is recovered state and
-//     not an in-memory cache (invariant 10).
+//   - REMEMBERING applied idempotency keys, durably — the applied-key RECORD
+//     (internal/idem, IDEM-11) rides in the SAME two-phase transaction as the
+//     message it belongs to and is restored by replay, so it is recovered state
+//     and not an in-memory cache (invariant 10). The table is bounded by a
+//     DERIVED retention window (idem.RetentionWindow) and by
+//     MaxIdempotencyEntries, and its state is observable through
+//     Hub.IdempotencyStats. The guarantee is "duplicates are suppressed within
+//     the retention window", NOT unconditional exactly-once — see idem.Store's
+//     doc comment for why fail-closed past the window is not implementable over
+//     opaque client-supplied keys.
 //   - PARKING long polls and releasing them on a new message, on the deadline,
 //     or when the client's context is done.
 //

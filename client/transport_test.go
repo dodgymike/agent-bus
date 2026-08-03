@@ -19,6 +19,12 @@ func TestRetrySucceedsAfterTransientFailures(t *testing.T) {
 		n := atomic.AddInt32(&count, 1)
 		w.Header().Set("Content-Type", "application/json")
 		if n < 3 {
+			// Retry-After is what makes a 503 a CAPACITY refusal rather than
+			// the bus reporting it cannot durably accept writes at all; the
+			// real bus sends it on every capacity 503 (CONTRACTS-HTTP.md), and
+			// without it statusError classifies this as fatal and correctly
+			// refuses to retry. See the 503 split in statusError.
+			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "busy"})
 			return

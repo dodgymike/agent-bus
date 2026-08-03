@@ -35,10 +35,23 @@ const userAgent = "busctl"
 // must never be left hanging on a bus that accepted the TCP connection and
 // then went quiet.
 const (
-	dialTimeout           = 10 * time.Second
-	tlsHandshakeTimeout   = 10 * time.Second
-	responseHeaderTimeout = 30 * time.Second
-	idleConnTimeout       = 90 * time.Second
+	dialTimeout         = 10 * time.Second
+	tlsHandshakeTimeout = 10 * time.Second
+
+	// responseHeaderTimeout must exceed the LONGEST legitimate silence on this
+	// API, and that is a long poll: GET /v1/wait parks on the bus for up to
+	// MaxPollTimeout (5 minutes) without sending a single response header.
+	// A 30s value here — which is what this was — did not bound a hung bus, it
+	// silently broke every poll longer than half a minute, and raced the
+	// 30-second DEFAULT poll for the rest.
+	//
+	// Nothing is weakened by the larger value: this is a per-transport bound,
+	// while every ORDINARY call is bounded end to end by its context
+	// (Config.Timeout, applied in contextWithTimeout), which is where a bus that
+	// accepts the connection and then goes quiet is actually caught.
+	responseHeaderTimeout = MaxPollTimeout + time.Minute
+
+	idleConnTimeout = 90 * time.Second
 )
 
 // newHTTPClient builds the transport. It is THE ONLY place in this package
@@ -111,6 +124,11 @@ type request struct {
 	// e.g. http.MethodPost and "/v1/enroll".
 	method, path string
 
+	// query is the URL query string, when the route takes one. It is separate
+	// from path because path is escaped as a PATH — a '?' smuggled into it
+	// would be percent-encoded and the bus would see a route it does not serve.
+	query url.Values
+
 	// body is marshalled as JSON when non-nil.
 	body interface{}
 
@@ -131,6 +149,14 @@ type request struct {
 	// idempotency key is safe to retry — that is what invariant 10 buys — and
 	// a POST without one is not, and only the call site knows which it built.
 	retryable bool
+
+	// maxResponse overrides maxResponseBytes for routes whose legitimate
+	// response is larger than the default bound. Zero means the default.
+	//
+	// It is a per-request knob rather than a raised global because the bound is
+	// a memory-safety bound: an 8-byte enrolment reply has no business being
+	// allowed a multi-megabyte body just because a message batch is.
+	maxResponse int64
 }
 
 // response is what the caller of do gets back.
@@ -156,6 +182,9 @@ func (c *Client) do(ctx context.Context, req request) (*response, error) {
 
 	target := *base
 	target.Path = base.Path + req.path
+	if len(req.query) > 0 {
+		target.RawQuery = req.query.Encode()
+	}
 
 	attempts := c.cfg.Retry.Attempts
 	var lastErr error
@@ -204,12 +233,16 @@ func (c *Client) attempt(ctx context.Context, urlStr string, payload []byte, req
 		// --bus flag the caller had not used.
 		return nil, networkError(req.op, urlStr, err)
 	}
+	limit := int64(maxResponseBytes)
+	if req.maxResponse > 0 {
+		limit = req.maxResponse
+	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, maxResponseBytes))
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, limit))
 		_ = httpResp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBytes))
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, limit))
 	if err != nil {
 		return nil, wrapError(KindNetwork, req.op, "the connection failed while reading the response", "retry; if it persists, check the bus's logs", err)
 	}
@@ -235,6 +268,27 @@ func (c *Client) attempt(ctx context.Context, urlStr string, payload []byte, req
 // carried through verbatim as the detail: the server deliberately writes a
 // terse, non-enumerating reason there, so quoting it is both safe and the most
 // useful thing we can tell a human.
+//
+// # The 503 split: Retry-After is the discriminator, not decoration
+//
+// A 503 from this bus means one of two OPPOSITE things, and the only signal
+// telling them apart is whether a Retry-After header is present:
+//
+//   - WITH Retry-After — a live in-memory capacity bound (the applied-key
+//     table, the per-agent waiter count, the roster, the session table). It is
+//     transient by construction: something in flight finishes and the capacity
+//     comes back. Back off and retry.
+//   - WITHOUT Retry-After — hub.ErrNotDurable / hub.ErrPoisoned: the hub cannot
+//     durably accept messages at all. The header's ABSENCE is deliberate, not an
+//     oversight; dressing this up as retryable would be a lie, and retrying it
+//     burns the caller's budget while hiding a fault an operator has to fix.
+//     That is the one 503 the bus emits without the header today — EVERY
+//     capacity refusal on EVERY route carries it — so its absence is a reliable
+//     signal rather than a guess.
+//
+// The second case is marked fatal, which takes it out of the retry loop
+// (isRetryable) and is reported to callers by IsFatalUnavailable so a long-lived
+// watcher can stop and say so instead of looping forever on a dead bus.
 func statusError(op string, resp *http.Response, body []byte) *Error {
 	detail := decodeServerError(body)
 	e := &Error{Op: op, Status: resp.StatusCode, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
@@ -251,6 +305,12 @@ func statusError(op string, resp *http.Response, body []byte) *Error {
 		e.Kind = KindRejected
 		e.Message = "the bus refused the request: " + detail
 		e.Remedy = "an idempotency key was reused with different content; use a fresh key for new content (invariant 10)"
+	case resp.StatusCode == http.StatusServiceUnavailable && e.retryAfter <= 0:
+		// NOT transient. See the 503 split in this function's doc comment.
+		e.Kind = KindServer
+		e.fatal = true
+		e.Message = "the bus cannot durably accept messages: " + detail
+		e.Remedy = "this is not transient and retrying will not clear it — check the bus's logs for a non-durable or poisoned write path; nothing is acknowledged before it is durable (invariant 4), so the bus is refusing rather than losing data"
 	case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode == http.StatusServiceUnavailable:
 		e.Kind = KindServer
 		e.Message = "the bus is at capacity: " + detail
@@ -378,6 +438,12 @@ func isRetryable(err error) bool {
 	// A certificate that does not verify will not verify on the next attempt
 	// either, and retrying an authentication failure looks like guessing.
 	if isCertificateError(err) {
+		return false
+	}
+	// A 503 the bus declined to put a Retry-After on is a durability fault, not
+	// a capacity refusal. Retrying it burns the caller's budget and delays the
+	// moment an operator sees the real problem. See statusError.
+	if e.fatal {
 		return false
 	}
 	switch e.Kind {

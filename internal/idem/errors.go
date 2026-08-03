@@ -32,4 +32,31 @@ var (
 	// would defeat that by construction, so it is refused rather than
 	// accepted as an opaque string.
 	ErrInvalidOperation = errors.New("idem: invalid idempotency operation")
+
+	// ErrInvalidRecord reports an applied-key Record that is not
+	// self-consistent: an unknown operation, an invalid key, an agent id that
+	// disagrees with the bus-wide-enrol discriminant, a zero commit time, or —
+	// on the way back IN — unknown JSON fields, trailing data, or a malformed
+	// fingerprint.
+	//
+	// It is returned in BOTH directions on purpose. On the way out it runs
+	// BEFORE the durable write, so a record that could not be stored fails the
+	// operation with nothing written instead of being discovered at replay,
+	// when it is far too late. On the way in it treats a record read off disk
+	// as untrusted input (invariant 1) even though this server wrote it —
+	// because "this server wrote it" is exactly what corruption disproves.
+	ErrInvalidRecord = errors.New("idem: invalid applied-key record")
+
+	// ErrResultTooLarge reports a Record.Result over MaxResultBytes. The stored
+	// result is what IDEM-12 replays verbatim to a retrying client, and it is
+	// also the single largest term in the memory bound (see retention.go), so
+	// it is capped at the point of encoding rather than trusted to stay small.
+	ErrResultTooLarge = errors.New("idem: applied-key record result is too large")
+
+	// ErrCapacity reports that the applied-key table is full at MaxEntries.
+	//
+	// NOTHING is evicted to make room. Evicting a live key silently turns its
+	// next retry into a SECOND effect, which is the double-apply invariant 10
+	// forbids; a refused operation is recoverable, a duplicated one is not.
+	ErrCapacity = errors.New("idem: the applied-key table is full")
 )

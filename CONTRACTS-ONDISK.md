@@ -9,11 +9,24 @@ is the reason it got its own file rather than sharing one with a more stable pla
 
 ## Record types / wire protocol versions
 
-None yet — no durable store, no WAL record types, no wire protocol version exists in this wave.
-When one is introduced: **reserve its number via
-`POST /api/v1/projects/agent-bus/reservations`, never hand-pick it** — that is the standing rule
-(`CLAUDE.md`, "Parallel-agent coordination") for record-type numbers, wire protocol versions, and
-epic task keys alike, so two agents working in parallel can never collide on the same number.
+**Corrected 2026-08-03 — the "None yet" wording below was stale, not another wave's in-flight
+prose; it described a durable store and WAL that have since been built and shipped.** As of this
+correction, `internal/wal/format.go` reserves four WAL record types (`record-type` namespace) and
+the on-disk format has been bumped once (`ondisk-format-version` namespace):
+
+| namespace | reserved values | meaning |
+| --- | --- | --- |
+| `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
+| `ondisk-format-version` | `1` (legacy, read-only), `2` (current) | WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12) |
+
+Both tables are confirmed against the Spec Server reservations for this project (`GET
+/api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
+this is the live reservation ledger, not a number picked by eyeballing the list. **The rule below
+still stands and is unchanged**: when a NEW record type or format version is needed, **reserve its
+number via `POST /api/v1/projects/agent-bus/reservations`, never hand-pick it** — that is the
+standing rule (`CLAUDE.md`, "Parallel-agent coordination") for record-type numbers, wire protocol
+versions, and epic task keys alike, so two agents working in parallel can never collide on the
+same number.
 
 ## On-disk files in the data directory (added 2026-08-02)
 
@@ -147,3 +160,117 @@ does not add an entry to the "Env vars" section above, which remains empty.
 
 No new HTTP route, CLI flag, production env var, header, or on-disk record type was introduced by
 this change.
+
+## The durable applied-key store (IDEM-11, added 2026-08-03)
+
+Invariant 10 requires that duplicate detection survive a restart — the applied-key memory has to be
+part of RECOVERED state, not an in-memory cache that a crash empties. IDEM-11 is that store:
+`internal/idem` (the retention policy, the record shape, and `Store`, the in-memory table it
+recovers into) plus one additive field on the existing PREPARE payload (`internal/wal/log.go`) that
+carries the record durably. Read `internal/idem/store.go`'s package doc for the honest statement of
+the guarantee this buys; this section documents only the on-disk shape.
+
+**NO new WAL record type and NO `ondisk-format-version` bump.** Nothing was reserved from either
+namespace above, because IDEM-11 did not need a new frame — it needed the applied-key record to
+commit in the SAME two-phase (prepare → commit → fsync) transaction as the effect it records. A
+`wal.Entry` is exactly one transaction, so "same transaction" means "same PREPARE payload": adding
+an optional JSON field to the existing payload keeps the record inside the one fsync that already
+exists, where a second, separately-committed frame would reopen precisely the crash window
+invariant 10 exists to close (a message durable, its applied-key record not, a client retry landing
+in that gap).
+
+**The PREPARE payload's shape (`internal/wal/log.go`'s `preparePayload`), updated:**
+
+```
+PREPARE  {"kind":"<Entry.Kind>","ts":"<RFC3339Nano>","body":<Entry.Body>,"idem":<opaque JSON, omitted when absent>}
+```
+
+`idem` is `Entry.Idem` — IDEM-11's applied-key record, opaque to `internal/wal` exactly as `body` is
+(the package does not interpret either). It carries the Go struct tag `json:"idem,omitempty"`, so an
+entry with `Entry.Idem == nil` **omits the field entirely** rather than writing `"idem":null` — a
+PREPARE record for an operation with no applied-key record is BYTE-IDENTICAL to one written before
+this field existed. That is proved, not merely asserted:
+`internal/wal/idem_field_test.go`'s `TestPrepareWithoutIdemIsByteIdentical` encodes the same
+`(kind, body, ts)` through the pre-IDEM-11 encoder (`encodePrepare`) and the current one
+(`encodePrepareWithIdem(..., nil, ...)`) and fails if the bytes, or the presence of the literal
+`"idem"` field, differ. Like `body`, the `idem` bytes are canonicalised (JSON-compacted, an explicit
+`null` normalised to absent) with the same helper (`canonicalBody`), so a live write and a replayed
+read see identical bytes for both fields.
+
+**The applied-key record's own JSON shape** (`internal/idem/record.go`'s `recordJSON`, the value
+that rides inside `idem`):
+
+```
+{"agent","enrol_bus_wide","op","key","fp","result","seq","committed_at"}
+```
+
+| field | Go type | on-disk encoding | omitted when |
+| --- | --- | --- | --- |
+| `agent` | `string` | fully-qualified `<bus-id>.<agent-id>` | empty (bus-wide enrolment record) |
+| `enrol_bus_wide` | `bool` | — | `false` |
+| `op` | `Operation` | fixed string (e.g. `"send"`, `"broadcast"`) | never |
+| `key` | `string` | the client-supplied idempotency key, verbatim | never |
+| `fp` | `string` | the payload fingerprint, **hex-encoded** (`encoding/hex`) | never |
+| `result` | `json.RawMessage` | the minted result, verbatim, compacted | empty/absent result |
+| `seq` | `uint64` | the message sequence, or 0 when the operation mints none | `0` |
+| `committed_at` | `string` | `RFC3339Nano`, UTC | never |
+
+`result` is capped at `MaxResultBytes = 512` bytes (`internal/idem/record.go`, `record.go`'s
+`validate`/`Encode`); a result that would exceed it fails the operation with `ErrResultTooLarge`
+BEFORE anything durable is written, not at replay time. `Record.Encode` validates before it
+returns, for the same reason: a record that cannot be stored must fail the whole operation with
+nothing written, never be discovered as broken only when replay tries to decode it.
+
+**Backward compatibility: an existing log needs no migration.** A log written before this change
+has no `idem` field in any PREPARE payload. `hub.Apply`'s `recoverIdemRecord`
+(`internal/hub/hub.go`) checks `Entry.Idem` first and, when it is nil, falls back to rebuilding the
+applied-key record from the message record's own `store.Message.IdempotencyKey` field (a durable
+field of the message record since before IDEM-11, kept precisely so this fallback would be
+possible) plus a recomputed fingerprint (`publishFingerprint`, the same function the live write
+path uses). No applied key is lost across the upgrade; no operator migration step, no log rewrite.
+
+**FORWARD/DOWNGRADE HAZARD — stated plainly, not softened.** `wal.decodePayload` decodes every
+record with `encoding/json`'s `DisallowUnknownFields`. A binary built BEFORE this change, reading a
+log written AFTER it, therefore treats every PREPARE record that carries an `idem` field as an
+undecodable payload — a `CorruptError` — and recovery DISCARDS it (loudly logged, per the
+`invariant 6` recovery contract above, but discarded all the same). That is an acknowledged write
+LOST on downgrade, not a degraded-but-correct read. Downgrade of the server binary is **not a
+supported operation** in this project (one binary, one container, forward-only) — this is not a
+defect to be fixed by loosening the decoder, because a lenient decoder here is exactly how a file
+that no longer says what history was accepted gets served as if it did. Operators: do not roll the
+`agent-bus` binary back over a log written by a newer one.
+
+**The retention window: `RetentionWindow = 50h10m22s`** (`internal/idem/retention.go`), derived term
+by term rather than picked — read that file for the exact terms and the reasoning behind each; in
+outline it sums a peer-outage budget (24h), the maximum session lifetime (1h, invariant 3), the
+maximum parked long-poll ceiling (5m, `hub.MaxPollTimeout`), and the client transport's own retry
+horizon (11s), then doubles the total for margin (`RetentionSafetyFactor = 2`). **`MaxEntries = 65536`**,
+the quotient of a 64 MiB memory budget (`MaxRetainedBytes`) and a derived ~1 KiB
+worst-case per-record footprint (`MaxRecordBytes`) — also worked out field-by-field in
+`retention.go`, not picked. The table **fails closed**: at `MaxEntries`, `Store.Remember` returns
+`ErrCapacity` and refuses the operation rather than evicting anything, because evicting a live key
+turns its next legitimate retry into a second effect (`internal/idem/store.go`).
+
+State the guarantee in exactly these terms, because the exact wording is the whole point:
+**"duplicates are suppressed within the retention window"** — this is NOT unconditional
+exactly-once. A retry whose key has aged out of the window is indistinguishable, on disk, from a
+key that was never seen (idempotency keys are opaque client-supplied strings), so it is applied as
+a NEW operation and produces a second effect. The throughput consequence, stated without softening:
+`MaxEntries` records sustained continuously over `RetentionWindow` bounds accepted-mutating-op
+throughput at roughly `65536 / 180622s ≈ 0.36 operations/second` — a bus sustaining more than that
+reaches the cap and begins refusing operations with `ErrCapacity` until the oldest records age out
+of the window.
+
+**The DUR-7 (snapshot/compaction) constraint**, specified now even though DUR-7 is not yet
+implemented (`internal/idem/store.go`'s package doc): a future snapshot/compaction pass MUST
+capture each retained record's `committed_at` and MUST re-apply the SAME `now.Sub(committed_at) >
+window` expiry predicate on load, because eviction here is a pure predicate over `committed_at` —
+that is what keeps the in-memory table and the durable log from ever disagreeing about which keys
+are live. A snapshot that stores only the keys (dropping `committed_at`) can never expire them at
+all; a snapshot that resets `committed_at` to the snapshot time silently EXTENDS every key's life by
+the age of the snapshot. Both break the retention window, in opposite directions, and neither is
+detectable from the table's own contents afterwards — this has to be got right when DUR-7 is built,
+not discovered by an operator watching a key that should have expired keep answering retries.
+
+No new HTTP route, CLI flag, header, or env var was introduced by IDEM-11 — see the sections above,
+which remain the complete index for those planes.

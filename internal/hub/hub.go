@@ -1,13 +1,15 @@
 package hub
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/store"
@@ -27,19 +29,21 @@ const MaxIdempotencyKeyLen = 128
 
 // MaxIdempotencyEntries bounds the applied-key table.
 //
-// It is a MEMORY bound, not the retention policy. The real retention is the
-// message window (store.DefaultMaxAge / store.DefaultMaxBytes): a key is
-// forgotten when the message it produced ages out of the store, which is
-// exactly the right window — a key is worth remembering for as long as a client
-// could plausibly still be retrying the send it belongs to, and no longer.
+// It is a MEMORY bound, not the retention policy. Since IDEM-11 both live in
+// internal/idem: the retention policy is idem.RetentionWindow, DERIVED term by
+// term from the longest interval a client or peer could still be retrying over
+// (see internal/idem/retention.go), and this bound is idem.MaxEntries, derived
+// from an explicit per-record memory budget.
+//
+// It is DEFINED AS idem.MaxEntries rather than restated, so the number
+// CONTRACTS-HTTP.md documents (65536) cannot move in one place only.
 //
 // The table FAILS CLOSED at this bound rather than evicting. Evicting a
 // remembered key silently turns the next retry of it into a SECOND message,
 // which is the double-apply invariant 10 forbids; a refused send is
 // recoverable, a duplicated one is not. It is the same posture as
-// auth.recordIdempotent, and it is reached only if more than this many messages
-// are inside the retention window at once.
-const MaxIdempotencyEntries = 1 << 16
+// auth.recordIdempotent.
+const MaxIdempotencyEntries = idem.MaxEntries
 
 // Batch-size bounds for the read paths.
 const (
@@ -194,15 +198,20 @@ type Hub struct {
 	// writeMu at all, which is what keeps a long poll off the fsync path.
 	writeMu sync.Mutex
 
-	// idem is the applied-key table, guarded by writeMu. It is keyed on the
-	// SENDER AND the key together: an idempotency key is scoped to the agent
-	// that chose it, so one agent can neither collide with nor probe for
-	// another's keys.
-	idem map[idemKey]idemEntry
+	// idem is the durable applied-key table (IDEM-11). It is keyed on the
+	// idem.Scope tuple — (agent, operation, key) — so one agent can neither
+	// collide with nor probe for another's keys, and one agent cannot collide
+	// with ITSELF across two routes.
+	//
+	// Every mutating call takes writeMu around it, but the Store has its own
+	// lock too, because IdempotencyStats is read off writeMu by CORE-5's
+	// inspect endpoint.
+	idem *idem.Store
 
-	// idemOrder is the same keys in sequence order, so expiry is a pop from the
-	// front rather than a scan. Guarded by writeMu.
-	idemOrder []idemAge
+	// idemCapWarned records that the replay-time capacity warning has already
+	// been emitted, so a large log produces ONE line rather than one per
+	// message. Written only during Open, before the hub is reachable.
+	idemCapWarned bool
 
 	// poisoned, once set, is never cleared. See ErrPoisoned. Guarded by
 	// writeMu.
@@ -231,36 +240,6 @@ type Hub struct {
 	// section and must never drift.
 	waiters        map[*waiter]struct{}
 	waitersByAgent map[string]int
-}
-
-// idemKey scopes an idempotency key to the agent that chose it.
-type idemKey struct {
-	sender string
-	key    string
-}
-
-// idemEntry is one remembered send: enough of the request to tell a legitimate
-// RETRY from a key REUSED for different content, plus the original result to
-// replay.
-type idemEntry struct {
-	// fingerprint is a SHA-256 over the request's semantic content. The whole
-	// payload is not retained: a body may be 64 KiB and the table may hold tens
-	// of thousands of entries, and a 32-byte digest answers the only question
-	// asked of it — "is this the same request?" — for a fraction of the memory.
-	//
-	// This is a COLLISION-RESISTANCE use of a hash, not a secret-keyed one: two
-	// DIFFERENT payloads colliding here would make a protocol violation look
-	// like a retry. SHA-256 is the right tool and there is no bespoke
-	// construction anywhere near it (invariant 9).
-	fingerprint [sha256.Size]byte
-	result      Result
-}
-
-// idemAge pairs a key with the sequence of the message it produced, so the
-// table can be expired against the store's retention window.
-type idemAge struct {
-	key idemKey
-	seq uint64
 }
 
 // Result is what an accepted send or broadcast produced.
@@ -305,7 +284,6 @@ func Open(o Options) (*Hub, error) {
 		log:            o.Logger,
 		now:            o.Now,
 		pollTimeout:    o.PollTimeout,
-		idem:           make(map[idemKey]idemEntry),
 		roster:         make(map[string]Agent),
 		recovered:      make(map[string]struct{}),
 		waiters:        make(map[*waiter]struct{}),
@@ -324,6 +302,10 @@ func Open(o Options) (*Hub, error) {
 		h.pollTimeout = MaxPollTimeout
 	}
 	h.store = store.New(store.Options{MaxAge: o.MaxAge, MaxBytes: o.MaxBytes, Now: h.now})
+	// Built after h.now is normalised so the applied-key table and the message
+	// store read the SAME clock: two clocks would let a test (or a future
+	// injected clock) expire messages and keys against different "now"s.
+	h.idem = idem.NewStore(idem.StoreOptions{Now: h.now})
 
 	// # Deriving the sequence floor — read this before changing it
 	//
@@ -476,26 +458,100 @@ func (h *Hub) Apply(c wal.Committed) error {
 	// that retries a send across a restart gets the original result, not a
 	// second message.
 	//
-	// EXPIRED AND BOUNDED on this path exactly as on the live one. Without
-	// this, replay builds one entry per message ever written — the WAL does not
-	// compact — so a long-lived bus turns a bounded steady state into an
-	// unbounded STARTUP allocation. The store has already pruned by the time we
-	// get here, so the retention cutoff is the same one publish would compute.
-	h.expireIdemLocked()
-	if m.IdempotencyKey != "" && len(h.idem) < MaxIdempotencyEntries {
-		h.rememberLocked(idemKey{sender: m.Sender, key: m.IdempotencyKey}, idemEntry{
-			fingerprint: fingerprint(m.Broadcast, m.Recipients, m.Body),
-			result: Result{
-				MessageID:  m.ID,
-				Seq:        m.Seq,
-				Sender:     m.Sender,
-				Broadcast:  m.Broadcast,
-				Recipients: m.Recipients,
-				SentAt:     m.SentAt,
-			},
-		})
+	// EXPIRY AND THE BOUND apply on this path exactly as on the live one, and
+	// they are applied by the SAME code: idem.Store expires internally on every
+	// call, from the record's own CommittedAt. That is what keeps memory and
+	// disk from ever disagreeing about which keys are live (IDEM-11 point (f)):
+	// eviction is a pure predicate re-derived on both paths, not a second
+	// mechanism that could drift.
+	rec, ok := h.recoverIdemRecord(c, m)
+	if !ok {
+		return nil
+	}
+	if err := h.idem.Remember(rec); err != nil {
+		if errors.Is(err, idem.ErrCapacity) {
+			// Not fatal, but the operator must know: the rebuilt table is a
+			// PREFIX of the durable one, so keys beyond the cap will not
+			// suppress a retry that the pre-restart bus would have suppressed.
+			// Logged ONCE — one line per message would bury it.
+			if !h.idemCapWarned {
+				h.idemCapWarned = true
+				h.log.Warn("the applied-key table reached its cap during recovery, so the rebuilt table is a PREFIX of the durable one: keys beyond the cap will not suppress a retry",
+					"max_entries", MaxIdempotencyEntries,
+					"prepare_index", c.PrepareIndex,
+				)
+			}
+			return nil
+		}
+		h.log.Error("DISCARDING an applied-key record that could not be remembered during recovery; a retry of this key will be applied as a NEW operation",
+			"prepare_index", c.PrepareIndex,
+			"message_id", m.ID,
+			"err", err,
+		)
 	}
 	return nil
+}
+
+// recoverIdemRecord rebuilds the applied-key record for a replayed message,
+// from the durable record when the entry carries one and from the message
+// itself when it does not.
+func (h *Hub) recoverIdemRecord(c wal.Committed, m store.Message) (idem.Record, bool) {
+	if c.Entry.Idem != nil {
+		rec, err := idem.DecodeRecord(c.Entry.Idem)
+		if err != nil {
+			// DISCARDED LOUDLY. Invariant 6 sanctions the discard; SILENT
+			// discard is the defect. The message itself has already been
+			// applied above, so this loses only the duplicate suppression for
+			// that one key.
+			h.log.Error("DISCARDING an applied-key record that could not be decoded during recovery; a retry of this key will be applied as a NEW operation",
+				"prepare_index", c.PrepareIndex,
+				"commit_index", c.CommitIndex,
+				"message_id", m.ID,
+				"err", err,
+			)
+			return idem.Record{}, false
+		}
+		return rec, true
+	}
+
+	// BACK-COMPAT, AND IT IS MANDATORY, NOT OPTIONAL.
+	//
+	// A log written BEFORE IDEM-11 carries no idem record in its prepare
+	// payload, but it DOES carry the message's own idempotency key (it has been
+	// a durable field of store.Record from the start, precisely so the
+	// applied-key memory could be recovered state). Without this path, every
+	// applied key in an existing on-disk log would be lost on the FIRST restart
+	// after this change — turning a durability improvement into a durability
+	// regression, and doing it exactly once, at the upgrade, where it is
+	// hardest to notice.
+	//
+	// The fingerprint is recomputed with the SAME function publish uses, so a
+	// record rebuilt this way is indistinguishable from one read off disk.
+	if m.IdempotencyKey == "" {
+		return idem.Record{}, false
+	}
+	op := idem.OpSend
+	if m.Broadcast {
+		op = idem.OpBroadcast
+	}
+	result, err := encodeStoredResult(m.ID, m.Seq, m.Recipients, m.SentAt)
+	if err != nil {
+		h.log.Error("DISCARDING an applied-key record rebuilt from a pre-IDEM-11 message record; a retry of this key will be applied as a NEW operation",
+			"prepare_index", c.PrepareIndex,
+			"message_id", m.ID,
+			"err", err,
+		)
+		return idem.Record{}, false
+	}
+	return idem.Record{
+		Agent:       m.Sender,
+		Op:          op,
+		Key:         m.IdempotencyKey,
+		Fingerprint: publishFingerprint(op, m.Recipients, m.Body),
+		Result:      result,
+		Seq:         m.Seq,
+		CommittedAt: m.SentAt,
+	}, true
 }
 
 // BroadcastRequest is one broadcast attempt. Sender is the AUTHENTICATED
@@ -585,27 +641,48 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		return Result{}, ErrNotDurable
 	}
 
-	ik := idemKey{sender: sender, key: key}
-	fp := fingerprint(broadcast, recipients, body)
-	if prev, ok := h.idem[ik]; ok {
-		if prev.fingerprint != fp {
-			// Same key, DIFFERENT payload. Not a retry — a protocol violation.
-			// Neither payload is echoed into the error: the caller already
-			// knows what it sent, and the other one belongs to a message it may
-			// have no business seeing quoted back.
-			return Result{}, fmt.Errorf("%w: key %q was applied for message %s", ErrIdempotencyKeyReused, key, prev.result.MessageID)
-		}
+	op := idem.OpSend
+	if broadcast {
+		op = idem.OpBroadcast
+	}
+	// The scope is the (agent, operation, key) tuple, never the key alone: one
+	// agent can neither collide with nor probe another's keys, and cannot
+	// collide with itself across two routes. The key's SHAPE was already
+	// checked above (ErrInvalidIdempotencyKey, a client error), so a failure
+	// here is the sender id being unusable, which is an internal fault — the
+	// sender was authenticated before it reached this function.
+	sc, err := idem.NewAgentScope(sender, op, key)
+	if err != nil {
+		return Result{}, fmt.Errorf("hub: building the idempotency scope for %s: %w", op, err)
+	}
+	fp := publishFingerprint(op, recipients, body)
+	prev, outcome := h.idem.Lookup(sc, fp)
+	switch outcome {
+	case idem.OutcomeViolation:
+		// Same key, DIFFERENT payload. Not a retry — a protocol violation.
+		// NEITHER payload is echoed into the error: the caller already knows
+		// what it sent, and the other one belongs to a message it may have no
+		// business seeing quoted back.
+		return Result{}, fmt.Errorf("%w: key %q was applied for message %s", ErrIdempotencyKeyReused, key, storedMessageID(prev))
+	case idem.OutcomeRetry:
 		// A legitimate retry: the ack was probably lost in flight. Return the
 		// ORIGINAL result, re-apply nothing, error nothing, disconnect nobody.
-		out := prev.result
+		out, err := decodeStoredResult(prev)
+		if err != nil {
+			// The stored result is unreadable, so the original answer cannot be
+			// returned. Failing is the only honest option: re-applying would be
+			// the double-apply invariant 10 forbids.
+			return Result{}, fmt.Errorf("hub: replaying the original result for idempotency key %q: %w", key, err)
+		}
 		out.Replayed = true
 		return out, nil
 	}
 
-	// Expiry first, so a table full of keys whose messages have already aged
-	// out does not refuse a send that has room.
-	h.expireIdemLocked()
-	if len(h.idem) >= MaxIdempotencyEntries {
+	// Full() expires first, so a table of keys already past the retention
+	// window does not refuse a send that has room. Checked BEFORE the sequence
+	// is minted: a sequence spent on a send that will be refused is a sequence
+	// burned for nothing, and invariant 1 forbids reusing it.
+	if h.idem.Full() {
 		return Result{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, MaxIdempotencyEntries)
 	}
 
@@ -622,8 +699,44 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		return Result{}, err
 	}
 
+	// THE APPLIED-KEY RECORD, built and validated BEFORE the durable write.
+	//
+	// CommittedAt is m.SentAt — THE SAME CLOCK READING THE MESSAGE CARRIES, not
+	// a second call to h.now(). Two readings would let the message and its
+	// applied key disagree about when the operation happened, and retention is
+	// computed from the key's copy.
+	//
+	// Encoding here rather than later is what makes a record that cannot be
+	// stored fail the send with NOTHING written, instead of surfacing at replay
+	// when the message is already durable.
+	storedResult, err := encodeStoredResult(m.ID, m.Seq, m.Recipients, m.SentAt)
+	if err != nil {
+		return Result{}, fmt.Errorf("hub: encoding the applied-key result for message %s: %w", m.ID, err)
+	}
+	idemRecord := idem.Record{
+		Agent:       sender,
+		Op:          op,
+		Key:         key,
+		Fingerprint: fp,
+		Result:      storedResult,
+		Seq:         m.Seq,
+		CommittedAt: m.SentAt,
+	}
+	encodedIdem, err := idemRecord.Encode()
+	if err != nil {
+		return Result{}, fmt.Errorf("hub: encoding the applied-key record for message %s: %w", m.ID, err)
+	}
+
 	// THE DURABLE WRITE. Nothing below this line may run before it returns, and
 	// nothing above it may be acknowledged to a client.
+	//
+	// Idem carries the applied-key record in the SAME two-phase transaction as
+	// the message (IDEM-11's load-bearing requirement, invariant 10): a
+	// wal.Entry is one transaction, so the key becomes durable when — and only
+	// when — the message does, in one fsync. A separate write ordered after the
+	// message would leave a window in which the message is durable and the key
+	// is not; a crash there plus a client retry is a duplicate, and the window
+	// is small enough to be invisible in ordinary testing.
 	//
 	// Audit is set non-nil to REQUEST an audit record. wal carries the field
 	// today and DUR-5 writes it; store.Record is already shaped so DUR-5 lifts
@@ -631,6 +744,7 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 	committed, err := h.durable.Write(wal.Entry{
 		Kind:  store.RecordKind,
 		Body:  payload,
+		Idem:  encodedIdem,
 		Audit: &wal.AuditRecord{},
 	})
 	if err != nil {
@@ -680,7 +794,24 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		Recipients: m.Recipients,
 		SentAt:     m.SentAt,
 	}
-	h.rememberLocked(ik, idemEntry{fingerprint: fp, result: result})
+	if err := h.idem.Remember(idemRecord); err != nil {
+		// The message is COMMITTED but its applied key is not in the serving
+		// table, so a retry would produce a SECOND message. That is a
+		// divergence between memory and the durable record, exactly like a
+		// failed store.Append above, and it gets the same answer: POISON.
+		//
+		// It cannot happen — Full() was checked under this same lock and Encode
+		// already validated the record — but "cannot happen" is precisely the
+		// class of failure that must not be allowed to corrupt the applied-key
+		// table silently.
+		h.poisoned = fmt.Errorf("%w: message %s is committed on disk but its applied-key record was rejected by the serving table, so a retry of key %q would produce a second message: %s", ErrPoisoned, m.ID, key, err)
+		h.log.Error("POISONED: a committed message's applied-key record could not be remembered, so a retry would be applied twice; refusing all further sends",
+			"message_id", m.ID,
+			"seq", m.Seq,
+			"err", err,
+		)
+		return Result{}, h.poisoned
+	}
 
 	// LAST, and only here: the message is durable and it is in the serving
 	// copy, so a waiter woken now cannot observe something a crash would take
@@ -689,82 +820,122 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 	return result, nil
 }
 
-// rememberLocked records an applied key. The caller must hold writeMu, or be
-// inside Open before the hub is reachable.
-func (h *Hub) rememberLocked(k idemKey, e idemEntry) {
-	if _, ok := h.idem[k]; ok {
-		return
-	}
-	h.idem[k] = e
-	h.idemOrder = append(h.idemOrder, idemAge{key: k, seq: e.result.Seq})
+// IdempotencyStats reports the observable state of the applied-key table: how
+// many keys are retained, how old the oldest is, how many have been evicted,
+// and the bounds in force.
+//
+// It is IDEM-11 point (g)'s hook — the thing CORE-5's inspect/metrics endpoint
+// surfaces so the bound is VERIFIED in production rather than assumed. Watching
+// Stats.OldestAge approach Stats.Window is how an operator sees the derived
+// retention margin actually being consumed, and Stats.Expired counts the
+// evictions past which a retry is no longer suppressed.
+func (h *Hub) IdempotencyStats() idem.Stats {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	return h.idem.Stats()
 }
 
-// expireIdemLocked forgets keys whose messages have aged out of the store.
-// The caller must hold writeMu.
+// publishFingerprint digests the semantic content of a send: what operation it
+// is, who it is addressed to, and what it says. Two requests with the same
+// fingerprint are the same request for the purposes of invariant 10.
 //
-// Tying key retention to MESSAGE retention is the point: a key is worth
-// remembering exactly as long as the message it produced is still part of this
-// bus's history, and no longer. It also means the table cannot outgrow the
-// store, so the hard cap above it is a memory backstop rather than the policy.
-func (h *Hub) expireIdemLocked() {
-	count, _, oldest, head, _ := h.store.Stats()
-	// An EMPTY store is not "nothing to expire". When count is 0 but head is
-	// not, retention has taken EVERY message: the honest cutoff is then one
-	// past the head, so every remembered key goes with the messages it belongs
-	// to. Reading `oldest == 0` as "skip" — the obvious spelling — would leak
-	// the whole table on exactly the bus this bound exists for: one that went
-	// quiet long enough for its history to age out.
-	cutoff := oldest
-	if count == 0 {
-		if head == 0 {
-			return // a fresh store; there is nothing to expire against
-		}
-		cutoff = head + 1
-	}
-	drop := 0
-	for drop < len(h.idemOrder) && h.idemOrder[drop].seq < cutoff {
-		delete(h.idem, h.idemOrder[drop].key)
-		drop++
-	}
-	if drop == 0 {
-		return
-	}
-	kept := make([]idemAge, len(h.idemOrder)-drop)
-	copy(kept, h.idemOrder[drop:])
-	h.idemOrder = kept
-}
-
-// fingerprint digests the semantic content of a send: what it says and who it
-// is addressed to. Two requests with the same fingerprint are the same request
-// for the purposes of invariant 10.
+// THE FIELD LIST AND ORDER, documented here as idem's doc.go point 8 requires
+// every call site to do:
 //
-// The parts are LENGTH-PREFIXED rather than concatenated, so no two different
-// requests can produce the same input bytes — ("ab","c") and ("a","bc") must
-// not fingerprint alike, and plain concatenation is precisely how that kind of
-// ambiguity gets built.
-func fingerprint(broadcast bool, recipients []string, body []byte) [sha256.Size]byte {
-	h := sha256.New()
-	var b [8]byte
-	writeField := func(s []byte) {
-		binary.BigEndian.PutUint64(b[:], uint64(len(s)))
-		_, _ = h.Write(b[:])
-		_, _ = h.Write(s)
-	}
-	if broadcast {
-		writeField([]byte("broadcast"))
-	} else {
-		writeField([]byte("direct"))
-	}
-	binary.BigEndian.PutUint64(b[:], uint64(len(recipients)))
-	_, _ = h.Write(b[:])
+//	[ op ("send" | "broadcast"),
+//	  8-byte big-endian recipient count,
+//	  each recipient, in order,
+//	  body ]
+//
+// The op string subsumes the old "broadcast"/"direct" discriminator: it is
+// already the scope's operation component, so hashing it keeps the digest
+// unambiguous without carrying a second, parallel spelling of the same fact.
+//
+// EVERY FIELD IS LENGTH-PREFIXED by idem.ComputeFingerprint, so ("ab","c") and
+// ("a","bc") cannot digest alike. The recipient COUNT is hashed in addition,
+// because the count is what distinguishes a directed send to N agents from one
+// to N-1 with a differently-split list.
+//
+// NOTE FOR ANY FUTURE CHANGE TO THIS LIST: since IDEM-11 this digest is STORED
+// ON DISK inside the applied-key record rather than recomputed at replay, so
+// changing the field list changes the MEANING of records already written — an
+// old record's fingerprint would no longer match the digest a retry of the same
+// request now produces, and the retry would be reported as a key-reuse
+// VIOLATION rather than replayed. Anything that changes this must therefore
+// carry a migration, not just a code change.
+func publishFingerprint(op idem.Operation, recipients []string, body []byte) idem.Fingerprint {
+	fields := make([][]byte, 0, len(recipients)+3)
+	fields = append(fields, []byte(op))
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(len(recipients)))
+	fields = append(fields, count[:])
 	for _, r := range recipients {
-		writeField([]byte(r))
+		fields = append(fields, []byte(r))
 	}
-	writeField(body)
+	fields = append(fields, body)
+	return idem.ComputeFingerprint(fields...)
+}
 
-	var out [sha256.Size]byte
-	copy(out[:], h.Sum(nil))
-	return out
+// storedResult is what an applied-key record retains of a send's result.
+//
+// It stores ONLY what the scope does not already say. The scope tuple carries
+// the agent and the operation, so Result.Sender is rebuilt from Record.Agent
+// and Result.Broadcast from Record.Op == idem.OpBroadcast; storing either again
+// would spend part of a 512-byte budget (idem.MaxResultBytes) restating a fact
+// the record already carries, and would create a second copy that could
+// disagree with the first.
+type storedResult struct {
+	MessageID  string   `json:"message_id"`
+	Seq        uint64   `json:"seq"`
+	Recipients []string `json:"recipients,omitempty"`
+	SentAt     string   `json:"sent_at"`
+}
+
+// encodeStoredResult renders the retained half of a Result.
+func encodeStoredResult(messageID string, seq uint64, recipients []string, sentAt time.Time) (json.RawMessage, error) {
+	b, err := json.Marshal(storedResult{
+		MessageID:  messageID,
+		Seq:        seq,
+		Recipients: recipients,
+		SentAt:     sentAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}
+
+// decodeStoredResult rebuilds the full Result a retry is answered with, filling
+// the scope-derived fields back in from the record itself.
+func decodeStoredResult(rec idem.Record) (Result, error) {
+	var sr storedResult
+	if err := json.Unmarshal(rec.Result, &sr); err != nil {
+		return Result{}, err
+	}
+	sentAt, err := time.Parse(time.RFC3339Nano, sr.SentAt)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{
+		MessageID:  sr.MessageID,
+		Seq:        sr.Seq,
+		Sender:     rec.Agent,
+		Broadcast:  rec.Op == idem.OpBroadcast,
+		Recipients: sr.Recipients,
+		SentAt:     sentAt.UTC(),
+	}, nil
+}
+
+// storedMessageID digs just the message id out of a stored result, for the
+// key-reuse error. It never fails: a record whose result will not decode still
+// has to produce a usable violation message, and "unknown" is more honest than
+// swallowing the violation.
+func storedMessageID(rec idem.Record) string {
+	var sr storedResult
+	if err := json.Unmarshal(rec.Result, &sr); err != nil || sr.MessageID == "" {
+		return "unknown"
+	}
+	return sr.MessageID
 }
 
 // validateIdempotencyKey enforces the shape of a client-supplied key:
