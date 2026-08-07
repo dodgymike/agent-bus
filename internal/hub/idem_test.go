@@ -56,11 +56,11 @@ func TestAppliedKeyStoreSurvivesRestart(t *testing.T) {
 	a := agentID(t, testBusID, "alpha")
 	b := agentID(t, testBusID, "beta")
 
-	first, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("hello"), IdempotencyKey: "k-restart"})
+	first, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("hello"), IdempotencyKey: "k-restart"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	bc, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("all hands"), IdempotencyKey: "k-restart-bc"})
+	bc, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("all hands"), IdempotencyKey: "k-restart-bc"})
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestAppliedKeyStoreSurvivesRestart(t *testing.T) {
 		t.Fatalf("recovered bounds = %v / %d, want %v / %d", st.Window, st.MaxEntries, idem.RetentionWindow, hub.MaxIdempotencyEntries)
 	}
 
-	again, err := h2.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("hello"), IdempotencyKey: "k-restart"})
+	again, err := mintedSend(t, h2, hub.SendRequest{Sender: a, To: b, Body: []byte("hello"), IdempotencyKey: "k-restart"})
 	if err != nil {
 		t.Fatalf("retry after restart: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestAppliedKeyStoreSurvivesRestart(t *testing.T) {
 	if again.Broadcast || again.Sender != a {
 		t.Fatalf("the replayed result lost its scope-derived fields: %+v", again)
 	}
-	bcAgain, err := h2.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("all hands"), IdempotencyKey: "k-restart-bc"})
+	bcAgain, err := mintedBroadcast(t, h2, hub.BroadcastRequest{Sender: a, Body: []byte("all hands"), IdempotencyKey: "k-restart-bc"})
 	if err != nil {
 		t.Fatalf("broadcast retry after restart: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestAppliedKeyStoreSurvivesRestart(t *testing.T) {
 
 	// A key reused for DIFFERENT content across the restart is still a
 	// violation, so the fingerprint survived the round trip too.
-	if _, err := h2.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("different"), IdempotencyKey: "k-restart"}); !errors.Is(err, hub.ErrIdempotencyKeyReused) {
+	if _, err := mintedSend(t, h2, hub.SendRequest{Sender: a, To: b, Body: []byte("different"), IdempotencyKey: "k-restart"}); !errors.Is(err, hub.ErrIdempotencyKeyReused) {
 		t.Fatalf("a key reused for different content after a restart gave err = %v, want ErrIdempotencyKeyReused", err)
 	}
 }
@@ -124,7 +124,7 @@ func TestAppliedKeyRecoveryFromPreIdemLog(t *testing.T) {
 	sentAt := time.Now().UTC().Add(-time.Minute)
 
 	// Written the PRE-IDEM-11 way: wal.Entry with no Idem field at all.
-	m, err := store.NewMessage(testBusID, a, false, []string{b}, 1, sentAt, []byte("legacy"), "k-legacy")
+	m, err := store.NewMessage(testBusID, a, false, []string{b}, 1, sentAt, []byte("legacy"), "k-legacy", fixtureTimestampMs, fixtureSignature())
 	if err != nil {
 		t.Fatalf("store.NewMessage: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestAppliedKeyRecoveryFromPreIdemLog(t *testing.T) {
 	if got := h.IdempotencyStats().Count; got != 1 {
 		t.Fatalf("IdempotencyStats().Count = %d after replaying a pre-IDEM-11 log, want 1 — the applied key must be rebuilt from the message record", got)
 	}
-	again, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("legacy"), IdempotencyKey: "k-legacy"})
+	again, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("legacy"), IdempotencyKey: "k-legacy"})
 	if err != nil {
 		t.Fatalf("retry of a pre-IDEM-11 key: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestAppliedKeyRecoveryFromPreIdemLog(t *testing.T) {
 	}
 	// And the RECOMPUTED fingerprint must be the same one publish computes, or
 	// a legitimate retry would look like a key-reuse violation.
-	if _, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("changed"), IdempotencyKey: "k-legacy"}); !errors.Is(err, hub.ErrIdempotencyKeyReused) {
+	if _, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("changed"), IdempotencyKey: "k-legacy"}); !errors.Is(err, hub.ErrIdempotencyKeyReused) {
 		t.Fatalf("a pre-IDEM-11 key reused for different content gave err = %v, want ErrIdempotencyKeyReused", err)
 	}
 }

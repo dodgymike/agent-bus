@@ -99,6 +99,20 @@ type Config struct {
 	// newHTTPClient stays the single place TLS is configured. Leave it nil
 	// unless you mean it.
 	HTTPClient HTTPDoer
+
+	// KeyRing is the trust store the READ path verifies senders against. Nil
+	// means a DirKeyRing under IdentityDir/TrustedKeysDirName, which is what New
+	// installs and what `busctl trust` writes.
+	//
+	// It is a knob so an embedding agent can source trust from wherever it
+	// already keeps it. It is NOT a way to turn verification off: a KeyRing that
+	// answers "yes" to everything is a bus that can forge any message from any
+	// sender, and this package will never ship one. There is no allow-unsigned
+	// mode, no --insecure, and no field that produces one. A Client whose KeyRing
+	// is nil AND whose config was never defaulted trusts NOBODY and rejects
+	// everything — fail closed, in the direction that loses messages rather than
+	// accepting forged ones.
+	KeyRing KeyRing
 }
 
 // HTTPDoer is the narrow slice of *http.Client the transport uses. It is an

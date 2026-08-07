@@ -203,7 +203,14 @@ func TestLegacyDataDirDoesNotReMintAgentIDs(t *testing.T) {
 	}
 
 	// --- start against the legacy dir ---
-	p2 := startServer(t, dir)
+	//
+	// -backfill-suffix-floors is the operator's one-time migration opt-in, and it
+	// is REQUIRED here: since AUTH-3-FU-FAILOPEN a data dir with history and no
+	// floors file is refused rather than backfilled silently, precisely because
+	// the same shape is what a DELETED floors file looks like. This test is the
+	// legacy MIGRATION, so it opts in; that the same dir without the flag refuses
+	// is a separate assertion.
+	p2 := startServerArgs(t, dir, "-backfill-suffix-floors")
 	addr2 := p2.awaitServerStarted(t)
 
 	// The migration is LOUD, in the real operator log, at ERROR: this dir has
@@ -225,6 +232,144 @@ func TestLegacyDataDirDoesNotReMintAgentIDs(t *testing.T) {
 	// A name with no history on that dir still starts at 1.
 	if n := suffixOf(t, enrolAgent(t, addr2, "gamma")); n != 1 {
 		t.Fatalf("enrolling \"gamma\" on the legacy dir minted suffix %d, want 1: the seal asserts that names absent from the derivation were never written", n)
+	}
+}
+
+// TestServerRefusesToStartWithHistoryAndNoSuffixFloors is the PIN ON THE GUARD
+// ITSELF (AUTH-3-FU-FAILOPEN), and it is the assertion
+// TestLegacyDataDirDoesNotReMintAgentIDs above defers to when it says "that the
+// same dir without the flag refuses is a separate assertion".
+//
+// It matters more than its size suggests. Every other test in this package
+// arranges NOT to trip the guard -- by seeding a floors file, or by taking the
+// -backfill-suffix-floors opt-in -- so without this test the guard could be
+// deleted outright and the whole suite would stay green. That is precisely how
+// a superseded decision gets restored by someone "making a failing test pass":
+// the four tests this fix broke all looked like the guard was the bug.
+//
+// The shape being refused: a dir that HAS history and has NO agent-suffixes
+// file. It is what a legacy dir looks like, and it is equally what a DELETED
+// floors file looks like, and nothing on disk tells those apart -- so the server
+// asks rather than guesses. The information lives in the operator's head.
+func TestServerRefusesToStartWithHistoryAndNoSuffixFloors(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real, ordinary data dir: started once, so it holds a bus id, a WAL, a
+	// MAC key and a correct floors file.
+	p1 := startServer(t, dir)
+	p1.awaitServerStarted(t)
+	p1.signal(t, syscall.SIGTERM)
+	if code := p1.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("first shutdown exited %d, want 0\n%s", code, p1.stderr())
+	}
+
+	floorsPath := filepath.Join(dir, suffixFileInDataDir)
+	if _, err := os.Stat(floorsPath); err != nil {
+		t.Fatalf("a completed first start left no %q: %v; the rest of this test would be vacuous", suffixFileInDataDir, err)
+	}
+	// THE LOSS. Only the floors file goes -- bus id, log and MAC key all stay
+	// intact, which is what makes this indistinguishable from a legacy dir and
+	// is exactly the case the guard exists for.
+	if err := os.Remove(floorsPath); err != nil {
+		t.Fatalf("removing %q: %v", floorsPath, err)
+	}
+
+	// --- restart with NO opt-in: must REFUSE ---
+	p2 := startServer(t, dir)
+	if code := p2.awaitExit(t, startupTimeout); code != 1 {
+		t.Fatalf("server exited %d on a data dir with history and no %q, want 1: resuming every agent name from suffix 1 would re-mint agent ids that are live (invariant 1)\n%s",
+			code, suffixFileInDataDir, p2.stderr())
+	}
+	out := p2.stderr()
+	// It must NOT have served. A server that refuses after binding has already
+	// answered from an allocator it could not prove.
+	for _, line := range p2.snapshot() {
+		if strings.Contains(line, msgServerStarted) {
+			t.Fatalf("the server logged %q despite an unprovable agent-id floors file\n%s", msgServerStarted, out)
+		}
+	}
+	// The refusal has to be ACTIONABLE, not merely correct: an operator woken by
+	// it needs to know what is wrong and what the two ways out are. This is the
+	// only thing standing between a lost floors file and a silent identity
+	// takeover, so the wording is contract, not decoration.
+	for _, want := range []string{
+		"has HISTORY",             // what is wrong
+		suffixFileInDataDir,       // which file
+		"restore",                 // remedy 1: put it back
+		"-backfill-suffix-floors", // remedy 2: the one-time opt-in
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not mention %q; an operator cannot act on it\n%s", want, out)
+		}
+	}
+
+	// --- and the outage is RECOVERABLE IN ONE RESTART ---
+	//
+	// Load-bearing for the whole fail-closed argument: refusing to boot is only
+	// defensible because the operator has a way forward that costs one restart.
+	// A guard that could not be cleared would be a permanent outage, and this is
+	// what makes the difference observable rather than asserted in a comment.
+	p3 := startServerArgs(t, dir, "-backfill-suffix-floors")
+	p3.awaitServerStarted(t)
+	p3.signal(t, syscall.SIGTERM)
+	if code := p3.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("the -backfill-suffix-floors restart exited %d, want 0; the refusal must be clearable in a single restart\n%s", code, p3.stderr())
+	}
+}
+
+// TestFreshDataDirStartsWithoutTheBackfillOptIn pins the OTHER side of the guard
+// above: it must NOT fire on a genuinely fresh data directory. That is the
+// common case -- every bus's first start -- and a guard that caught it would
+// make a new bus unstartable without an opt-in flag whose own documentation says
+// it is "never needed in normal operation".
+//
+// The discriminator is DIRECTORY EMPTINESS (run() reads it before dirlock
+// writes bus.lock, which is the last instant the answer is knowable), so this
+// test is also the pin on that ordering: hoist the emptiness probe below the
+// lock, or below wal.Open, and every fresh start starts refusing. No unit test
+// sees that, because the flag is a parameter there and a real one only at
+// process level.
+//
+// The second start is as load-bearing as the first. It proves the migration
+// window really does close on its own: the first start WRITES the floors file,
+// so the ordinary restart that follows is the steady state and needs no opt-in
+// either. If it did, the guard would have made every bus permanently dependent
+// on a migration flag.
+func TestFreshDataDirStartsWithoutTheBackfillOptIn(t *testing.T) {
+	dir := t.TempDir() // empty: no bus id, no log, no floors file
+
+	p1 := startServer(t, dir) // deliberately NO -backfill-suffix-floors
+	addr1 := p1.awaitServerStarted(t)
+
+	// It is a usable bus, not just a process that logged a banner: enrolling
+	// requires a SEALED allocator (an unsealed one refuses every NextSuffix with
+	// ErrFloorUnproven), so this proves the floors were proven, not bypassed.
+	if n := suffixOf(t, enrolAgent(t, addr1, "alpha")); n != 1 {
+		t.Fatalf("first enrolment on a fresh dir minted suffix %d, want 1", n)
+	}
+
+	p1.signal(t, syscall.SIGTERM)
+	if code := p1.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("first shutdown exited %d, want 0\n%s", code, p1.stderr())
+	}
+
+	// The first start must have PERSISTED the floors, or the restart below would
+	// be the refusal case rather than the steady state.
+	if _, err := os.Stat(filepath.Join(dir, suffixFileInDataDir)); err != nil {
+		t.Fatalf("a fresh start left no %q: %v; without it every subsequent start of this dir refuses", suffixFileInDataDir, err)
+	}
+
+	// --- the ordinary restart: still no opt-in ---
+	p2 := startServer(t, dir)
+	addr2 := p2.awaitServerStarted(t)
+	// And the floors are REAL, not merely present: alpha-1 is durable, so the
+	// restart must mint strictly above it.
+	if n := suffixOf(t, enrolAgent(t, addr2, "alpha")); n <= 1 {
+		t.Fatalf("after a restart, enrolling \"alpha\" minted suffix %d, want strictly greater than 1\n%s", n, p2.stderr())
+	}
+	p2.signal(t, syscall.SIGTERM)
+	if code := p2.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("restart shutdown exited %d, want 0\n%s", code, p2.stderr())
 	}
 }
 

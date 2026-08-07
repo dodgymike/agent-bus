@@ -52,7 +52,7 @@ func agentIDFor(t *testing.T, name string) string {
 // interdependent fields (id from seq, hash from body) cannot drift.
 func mkMessage(t *testing.T, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body string) store.Message {
 	t.Helper()
-	m, err := store.NewMessage(testBusID, sender, broadcast, recipients, seq, sentAt, []byte(body), fmt.Sprintf("key-%d", seq))
+	m, err := store.NewMessage(testBusID, sender, broadcast, recipients, seq, sentAt, []byte(body), fmt.Sprintf("key-%d", seq), testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("store.NewMessage(seq=%d): %v", seq, err)
 	}

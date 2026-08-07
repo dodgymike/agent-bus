@@ -1,0 +1,869 @@
+package hub_test
+
+// The DURABLE MINT, tested at the level the guarantee is actually made.
+//
+// # Why this file exists at all
+//
+// SIGN-2/SIGN-6 shipped /v1/mint — reserve-then-send — with NO unit tests of its
+// durability mechanism whatsoever. A reviewer measured what that cost: gutting
+// applySeqFloor, replacing the mint-authority check with `if false`, and deleting
+// the store record validations each left the whole tree GREEN. Every existing
+// test minted and spent in the same breath, so nothing in the suite could see the
+// difference between "the number is burned on disk" and "the number is not".
+//
+// The property under test is ONE sentence, and every test below is a way of
+// trying to break it:
+//
+//	no sequence number this bus has ever handed out is ever handed out again,
+//	including across a restart, a crash, and a WAL QUARANTINE
+//
+// The quarantine clause is the one that was false. Read
+// TestQuarantineDoesNotReissueAMintedSequence first: it is the regression test
+// for a P0 in which a client's SIGNED assignment could be minted a second time,
+// with both signatures verifying and nothing downstream able to tell.
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dodgymike/agent-bus/internal/hub"
+	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/wal"
+)
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+// openMintHub opens a hub over an already-open log in dir, wired exactly as
+// cmd/agent-bus wires it — DataDir alongside the log, replay as a read-only pass
+// over the log's own path — and enrols one agent per name.
+//
+// It returns the hub and the buffer its logger writes to, because several
+// properties here (the migration warning, the quarantine report) are OBSERVABLE
+// ONLY as a log line: they are what an operator is told, and a test that skips
+// them lets the wording silently become false.
+//
+// now may be nil for the real clock. quarantined mirrors the string main passes
+// from wal.Repair.Quarantined and only affects what is logged.
+func openMintHub(t *testing.T, dir string, lg *wal.Log, now func() time.Time, quarantined string, agents ...string) (*hub.Hub, *bytes.Buffer) {
+	t.Helper()
+	h, buf, err := tryOpenMintHub(t, dir, lg, now, quarantined, agents...)
+	if err != nil {
+		t.Fatalf("hub.Open(dir=%s): %v", dir, err)
+	}
+	return h, buf
+}
+
+// tryOpenMintHub is openMintHub for the tests that expect Open to REFUSE. It
+// returns the error rather than failing, so a test can assert on it.
+func tryOpenMintHub(t *testing.T, dir string, lg *wal.Log, now func() time.Time, quarantined string, agents ...string) (*hub.Hub, *bytes.Buffer, error) {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	roster := hub.NewStaticRoster()
+	path := lg.Path()
+	h, err := hub.Open(hub.Options{
+		BusID:       testBusID,
+		DataDir:     dir,
+		Durable:     lg,
+		Replay:      func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+		NextIndex:   lg.Recovered().NextIndex,
+		Quarantined: quarantined,
+		Roster:      roster,
+		Logger:      logging.New(buf, logging.LevelDebug),
+		Now:         now,
+	})
+	if err != nil {
+		return nil, buf, err
+	}
+	enrolAll(t, roster, testBusID, agents...)
+	return h, buf, nil
+}
+
+// mustMint reserves an assignment and fails the test if the bus refuses. It is
+// distinct from hub_test.go's mintFor, which deliberately SWALLOWS a refusal
+// because most publish tests are asserting on the publish error; here the mint
+// itself is the thing under test.
+func mustMint(t *testing.T, h *hub.Hub, sender, op, key string) hub.Mint {
+	t.Helper()
+	m, err := h.Mint(hub.MintRequest{Sender: sender, Op: op, IdempotencyKey: key})
+	if err != nil {
+		t.Fatalf("Mint(%s, %s, %q): %v", sender, op, key, err)
+	}
+	return m
+}
+
+// readSeqFloor reads <dir>/message-seq-floor and returns the floor it records,
+// and whether the file exists at all.
+//
+// It parses the file rather than calling into the package, and that is
+// deliberate: the point of this file is that it is READABLE BY AN OPERATOR AND
+// BY ANOTHER PROGRAM. A test that only round-tripped through the writer would
+// pass just as happily if the format silently changed shape, which is exactly
+// the kind of change that strands a data directory (an unknown format is fatal
+// and the file is never regenerated).
+func readSeqFloor(t *testing.T, dir string) (uint64, bool) {
+	t.Helper()
+	path := filepath.Join(dir, hub.SeqFloorFileName)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("%s has %d lines, want a header and one \"floor <n>\" line:\n%s", path, len(lines), data)
+	}
+	if !strings.HasPrefix(lines[0], "agent-bus-message-seq-floor v5 sha256=") {
+		t.Fatalf("%s header = %q, want the magic, the on-disk format version 5 (RESERVED for this file) and a sha256 digest", path, lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "floor ") {
+		t.Fatalf("%s body = %q, want \"floor <n>\"", path, lines[1])
+	}
+	n, err := strconv.ParseUint(strings.TrimPrefix(lines[1], "floor "), 10, 64)
+	if err != nil {
+		t.Fatalf("%s floor field: %v", path, err)
+	}
+	return n, true
+}
+
+// quarantineTheLog does to the data directory exactly what a WAL quarantine
+// does: it MOVES THE LOG ASIDE and leaves everything else in place, so the next
+// wal.Open starts a fresh, empty log in the same directory.
+//
+// The log must be CLOSED first — this models the next process, not a concurrent
+// one. Everything else the data directory holds (wal-mac.key, wal-index-floor,
+// and the message sequence floor this wave added) survives, because a real
+// quarantine touches only the log file. That detail is the whole test: the
+// question is which of the surviving artifacts still bounds the sequence.
+func quarantineTheLog(t *testing.T, lg *wal.Log) string {
+	t.Helper()
+	path := lg.Path()
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log before quarantining it: %v", err)
+	}
+	aside := path + ".quarantined"
+	if err := os.Rename(path, aside); err != nil {
+		t.Fatalf("moving %s aside to simulate a quarantine: %v", path, err)
+	}
+	return aside
+}
+
+// ---------------------------------------------------------------------------
+// The floor is durable BEFORE the number is handed out
+// ---------------------------------------------------------------------------
+
+// TestMintBurnsTheSequenceOnDiskBeforeHandingItOut is the ordering test, and the
+// ordering is the entire guarantee.
+//
+// "The number is burned" and "the number was handed out" are only safe in ONE
+// order. If the client learns the number first, a crash in the window loses the
+// claim and a restart hands the same number to somebody else — who then holds a
+// second signature over one origin message id.
+//
+// Two halves, and the second is the one that cannot be faked:
+//
+//  1. after a mint, the floor file on disk already covers the sequence returned;
+//  2. when the floor CANNOT be written, the mint FAILS and hands out NOTHING —
+//     proven by making the data directory unwritable and then observing that the
+//     sequence the failed mint would have used is still available afterwards.
+func TestMintBurnsTheSequenceOnDiskBeforeHandingItOut(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	alpha := agentID(t, testBusID, "alpha")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+	if _, existed := readSeqFloor(t, dir); existed {
+		t.Fatalf("a fresh data directory already holds %s; the file must be created by the first mint, not by opening the hub, or every start would rewrite a file it has nothing new to say about", hub.SeqFloorFileName)
+	}
+
+	m := mustMint(t, h, alpha, "send", "k-1")
+	floor, existed := readSeqFloor(t, dir)
+	if !existed {
+		t.Fatalf("Mint returned sequence %d but %s does not exist: the number was handed to a client and NOTHING on disk says it is burned, so a restart would hand it out again (invariant 1)", m.Seq, hub.SeqFloorFileName)
+	}
+	if floor < m.Seq {
+		t.Fatalf("Mint returned sequence %d but the durable floor is only %d; every issued number must be at or below the floor that was fsynced BEFORE it was issued", m.Seq, floor)
+	}
+	// The batch is burned in one write, so the floor runs a whole MintBatchSize
+	// ahead. Pinned exactly, because "at least the sequence" would also pass for
+	// an implementation that wrote a floor per mint — which is a different
+	// mechanism with a different fsync cost, and it should not change silently.
+	if want := uint64(hub.MintBatchSize); floor != want {
+		t.Fatalf("after the first mint the durable floor is %d, want %d (MintBatchSize burned ahead in one write)", floor, want)
+	}
+
+}
+
+// TestAMintWhoseFloorCannotBePersistedIssuesNothing is the second half of the
+// ordering proof, and the half that cannot be faked by an implementation that
+// writes the floor AFTER handing the number out.
+//
+// The data directory is made unwritable BEFORE the first mint, so the atomic
+// replace (temp file + fsync + rename) cannot even begin. The mint must then
+// FAIL and issue nothing — and the proof that it issued nothing is that once the
+// directory is writable again, the very first sequence is still available. An
+// implementation that returned the number first and persisted afterwards would
+// have handed out sequence 1 already and would resume at 2, silently having told
+// a client about a number no disk has ever recorded.
+func TestAMintWhoseFloorCannotBePersistedIssuesNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		// root ignores the mode bits, so the write would succeed and the test
+		// would assert nothing. Skipping is honest; passing vacuously is not.
+		t.Skip("running as root: directory permissions do not deny writes, so this test cannot create the failure it is about")
+	}
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	alpha := agentID(t, testBusID, "alpha")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			// t.TempDir's cleanup needs the write bit back, or the test binary
+			// fails on a directory it cannot remove.
+			_ = os.Chmod(dir, 0o700)
+		}
+	}()
+
+	if m, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-1"}); err == nil {
+		t.Fatalf("Mint returned %s (sequence %d) on a data directory it cannot write the sequence floor to; the number would be known to a client and to nothing else", m.MessageID, m.Seq)
+	}
+	if _, existed := readSeqFloor(t, dir); existed {
+		t.Fatalf("%s exists after a mint that could not write it", hub.SeqFloorFileName)
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("restoring the mode on %s: %v", dir, err)
+	}
+	restored = true
+
+	m := mustMint(t, h, alpha, "send", "k-1")
+	if m.Seq != 1 {
+		t.Fatalf("after a mint that FAILED to burn its floor, the next mint returned sequence %d, want 1; the failed mint issued nothing, so it must not have consumed a number either — and if it did consume one, it consumed a number that was never durably burned", m.Seq)
+	}
+	if floor, _ := readSeqFloor(t, dir); floor < m.Seq {
+		t.Fatalf("the durable floor is %d, below the issued sequence %d", floor, m.Seq)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// THE P0: a quarantine must not reissue a minted sequence
+// ---------------------------------------------------------------------------
+
+// TestQuarantineDoesNotReissueAMintedSequence is the regression test for the
+// defect this wave exists to close, and it is the one to run first if any of
+// this is ever refactored.
+//
+// # The defect, exactly
+//
+// The mint's claim ("every sequence up to N is burned") was written as a
+// "seqfloor" record INSIDE THE WAL. A quarantine moves the whole log aside, so
+// the claim went with it. Five mints consume five sequences but only TWO WAL
+// indices — one floor record covers 256 numbers — so after a quarantine every
+// surviving source collapsed: wal.Recovered.NextIndex-1 = 2, the replayed floor
+// records = none, the highest replayed message sequence = none. The next mint
+// then returned 3, then 4, then 5: numbers a client already held Ed25519
+// signatures over, with no way for any recipient to tell the two apart.
+//
+// It is NOT covered by wal's own durable index floor, and this is the point most
+// easily got wrong. That floor bounded the sequence only through a COUNTING
+// argument — every sequence was <= the index of the prepare carrying it — and
+// minting in batches of 256 made that false on the very first mint.
+//
+// # Why the assertions are written against the numbers already handed out
+//
+// The test does not assert a particular resumed value beyond the minimum,
+// because gaps are CORRECT here (internal/ids/sequence.go). What must hold is
+// only that nothing already issued comes back.
+func TestQuarantineDoesNotReissueAMintedSequence(t *testing.T) {
+	cases := []struct {
+		name string
+		// alsoRemove is a file to delete along with the log, to model a harsher
+		// loss than a plain quarantine.
+		alsoRemove string
+	}{
+		{
+			name: "the log is moved aside",
+		},
+		{
+			// wal's index floor is the other durable number in the directory. It
+			// is removed here to prove this property does NOT lean on it: it is a
+			// floor on WAL RECORD INDICES, it is only accidentally near the
+			// sequence, and one day the two counters will be nowhere near each
+			// other.
+			name:       "the log is moved aside and the WAL index floor is lost too",
+			alsoRemove: "wal-index-floor",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			lg := openTestLog(t, dir, false)
+			alpha := agentID(t, testBusID, "alpha")
+			h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+			// Five mints: five sequences, ONE floor record, two WAL indices. This
+			// is the reviewer's probe, reproduced.
+			issued := make([]uint64, 0, 5)
+			for i := 0; i < 5; i++ {
+				m := mustMint(t, h, alpha, "send", fmt.Sprintf("k-%d", i))
+				issued = append(issued, m.Seq)
+			}
+
+			aside := quarantineTheLog(t, lg)
+			if tc.alsoRemove != "" {
+				if err := os.Remove(filepath.Join(dir, tc.alsoRemove)); err != nil {
+					t.Fatalf("removing %s: %v", tc.alsoRemove, err)
+				}
+			}
+
+			lg2 := openTestLog(t, dir, true)
+			if next := lg2.Recovered().NextIndex; next > issued[len(issued)-1] {
+				t.Fatalf("the fresh log resumed at index %d, above every sequence this test issued (%v); the WAL index would then mask the defect and this test would prove nothing", next, issued)
+			}
+			h2, buf := openMintHub(t, dir, lg2, nil, aside, "alpha")
+
+			m := mustMint(t, h2, alpha, "send", "k-after-quarantine")
+			for _, prev := range issued {
+				if m.Seq == prev {
+					t.Fatalf("after a QUARANTINE the bus reissued sequence %d, which it had already handed out (%v). A client holds a signature over that assignment, so two validly-signed messages would now carry one origin message id and nothing downstream can detect it (invariant 1).\nstartup log: %s", m.Seq, issued, buf.String())
+				}
+			}
+			if m.Seq <= issued[len(issued)-1] {
+				t.Fatalf("after a QUARANTINE the bus resumed at sequence %d, at or below the highest it had already issued (%d); every number up to the durable floor is burned for ever, whether or not a message carried it", m.Seq, issued[len(issued)-1])
+			}
+			// The whole first batch was burned, so the resumption is above it.
+			if want := uint64(hub.MintBatchSize); m.Seq <= want {
+				t.Fatalf("after a QUARANTINE the bus resumed at sequence %d, inside the batch of %d numbers the first mint durably burned; a burned number is burned even if no message ever carried it", m.Seq, want)
+			}
+			// The operator must be TOLD, and told the truth: message ids are not at
+			// risk on this path, and saying they are would train an operator to
+			// ignore the line that matters.
+			if out := buf.String(); !strings.Contains(out, "QUARANTINED") {
+				t.Fatalf("a quarantined start logged nothing about it; the discard is sanctioned but silence about it is the defect.\nlog: %s", out)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Restart mid-batch
+// ---------------------------------------------------------------------------
+
+// TestRestartMidBatchResumesAboveEveryNumberHandedOut covers the ordinary
+// restart — no damage, no quarantine, a clean close — while the mint is PART WAY
+// through a burned batch.
+//
+// This is the case the batch created: the client has three numbers, the log has
+// one floor record covering 256, and nothing anywhere carries sequences 4..256.
+// Resuming from "the highest sequence the log can show" would hand 4 straight
+// back out. The durable floor is what makes the burned-but-unused range stay
+// burned, and the resulting GAP is correct, not damage to compact.
+func TestRestartMidBatchResumesAboveEveryNumberHandedOut(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, false)
+	alpha := agentID(t, testBusID, "alpha")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+	var issued []uint64
+	for i := 0; i < 3; i++ {
+		issued = append(issued, mustMint(t, h, alpha, "send", fmt.Sprintf("k-%d", i)).Seq)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log: %v", err)
+	}
+
+	lg2 := openTestLog(t, dir, true)
+	h2, _ := openMintHub(t, dir, lg2, nil, "", "alpha")
+	m := mustMint(t, h2, alpha, "send", "k-after-restart")
+
+	for _, prev := range issued {
+		if m.Seq == prev {
+			t.Fatalf("after a clean restart the bus reissued sequence %d (already handed out: %v)", m.Seq, issued)
+		}
+	}
+	// Pinned exactly: the first batch burned 1..MintBatchSize, so the first number
+	// after a restart is MintBatchSize+1. The 253 unused numbers are GONE, and
+	// that is the correct outcome — a bus that "recovered" them would be reissuing
+	// numbers it had already promised never to issue.
+	if want := uint64(hub.MintBatchSize) + 1; m.Seq != want {
+		t.Fatalf("after a restart mid-batch the first mint returned sequence %d, want %d (one past the whole burned batch)", m.Seq, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pre-upgrade data directories
+// ---------------------------------------------------------------------------
+
+// TestADataDirWithNoSeqFloorFileIsBackfilledLoudly pins the MIGRATION decision,
+// which is a judgement call and therefore has to be a test rather than a comment.
+//
+// A data directory with history but no message-seq-floor file was written by a
+// binary that predates the file. The decision is: NOT FATAL, backfilled from
+// what the log can prove, and reported at WARN.
+//
+// It is deliberately the OPPOSITE call to the agent-suffix floors, where the
+// same shape IS fatal (openSuffixAllocator, with a -backfill opt-in, set by a
+// security gate). The difference is that a missing agent-suffixes file has NO
+// other durable source — enrolment was memory-only, so every name really would
+// resume from 1 — whereas here the log still carries three independent sources.
+// Making this one fatal would brick every deployed bus on upgrade to buy nothing
+// on any start that is not ALSO a quarantine.
+//
+// The window is closed by the very start that finds it open: Open writes the
+// derived floor before it serves. That is asserted here, because a backfill that
+// is only in memory would leave the NEXT start — the one that quarantines —
+// exactly as exposed as before.
+func TestADataDirWithNoSeqFloorFileIsBackfilledLoudly(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, false)
+	alpha := agentID(t, testBusID, "alpha")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+	issued := mustMint(t, h, alpha, "send", "k-1").Seq
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log: %v", err)
+	}
+
+	// Model the pre-upgrade directory: the log and its in-log "seqfloor" records
+	// are intact, the floor FILE has never been written.
+	floorPath := filepath.Join(dir, hub.SeqFloorFileName)
+	if err := os.Remove(floorPath); err != nil {
+		t.Fatalf("removing %s to model a pre-upgrade data directory: %v", floorPath, err)
+	}
+
+	lg2 := openTestLog(t, dir, true)
+	_, buf := openMintHub(t, dir, lg2, nil, "", "alpha")
+
+	floor, existed := readSeqFloor(t, dir)
+	if !existed {
+		t.Fatalf("opening a data directory with history and no %s left the file absent; the migration window would then still be open on the NEXT start, which is the one that might quarantine", hub.SeqFloorFileName)
+	}
+	if floor < issued {
+		t.Fatalf("the backfilled floor is %d, below the sequence %d this directory had already handed out", floor, issued)
+	}
+	if out := buf.String(); !strings.Contains(out, hub.SeqFloorFileName) {
+		t.Fatalf("backfilling the sequence floor logged nothing naming %s; an operator has no other way to know this directory spent a start unprotected.\nlog: %s", hub.SeqFloorFileName, out)
+	}
+}
+
+// TestOpenRefusesACorruptSeqFloorFile pins the other half of the missing/corrupt
+// judgement: a file that EXISTS and does not verify is FATAL and is NEVER
+// regenerated.
+//
+// Regenerating it would resume the sequence below numbers already handed out and
+// already signed, silently. A loud, recoverable startup failure beats that every
+// time — and the operator is given a one-step remedy, so the bus is not bricked.
+func TestOpenRefusesACorruptSeqFloorFile(t *testing.T) {
+	corruptions := []struct {
+		name    string
+		content string
+	}{
+		{"a truncated file with no header", "agent-bus-message-seq-floor"},
+		{"a foreign file", "hello\nfloor 5\n"},
+		{"an unknown on-disk format version", "agent-bus-message-seq-floor v99 sha256=00\nfloor 5\n"},
+		{"a body that does not match the digest", "agent-bus-message-seq-floor v5 sha256=" + strings.Repeat("00", 32) + "\nfloor 5\n"},
+	}
+	for _, tc := range corruptions {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			lg := openTestLog(t, dir, true)
+			path := filepath.Join(dir, hub.SeqFloorFileName)
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("writing the corrupt fixture: %v", err)
+			}
+
+			h, _, err := tryOpenMintHub(t, dir, lg, nil, "", "alpha")
+			if err == nil {
+				t.Fatalf("hub.Open accepted a corrupt %s and returned a usable hub (%p); it would then resume the sequence from whatever it could salvage, below numbers already handed out and already signed", hub.SeqFloorFileName, h)
+			}
+			if !errors.Is(err, hub.ErrSeqFloorFileCorrupt) {
+				t.Fatalf("hub.Open error = %v, want one satisfying errors.Is(err, hub.ErrSeqFloorFileCorrupt) so the HTTP layer and an operator can tell it from an I/O failure", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("the refusal does not name %s, so an operator does not know which file to move aside: %v", path, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading %s after the refusal: %v", path, err)
+			}
+			if string(got) != tc.content {
+				t.Fatalf("the corrupt %s was REWRITTEN by the failed open (now %q); it must never be regenerated, because regenerating it is exactly the silent rewind it exists to prevent", hub.SeqFloorFileName, got)
+			}
+		})
+	}
+}
+
+// TestOpenRefusesADurableHubWithNoDataDir pins the wiring failure, which is
+// silent in every other way.
+//
+// A hub with a durable log and no data directory would mint, burn its numbers
+// only inside the log, pass every health check, and reissue the lot after a
+// quarantine. "Serves the defect" must not be reachable by forgetting a field —
+// the same rule, and the same reasoning, as the missing-roster refusal.
+func TestOpenRefusesADurableHubWithNoDataDir(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	path := lg.Path()
+	h, err := hub.Open(hub.Options{
+		BusID:     testBusID,
+		Durable:   lg,
+		Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+		NextIndex: lg.Recovered().NextIndex,
+		Roster:    hub.NewStaticRoster(),
+		// DataDir deliberately omitted.
+	})
+	if err == nil {
+		t.Fatalf("hub.Open with a durable log and no DataDir returned a usable hub (%p); it can mint numbers it cannot durably burn", h)
+	}
+	if !strings.Contains(err.Error(), hub.SeqFloorFileName) {
+		t.Fatalf("hub.Open error = %q, want it to name %s so the wiring mistake is obvious in a composition root", err, hub.SeqFloorFileName)
+	}
+}
+
+// TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed pins the overflow boundary,
+// which is the one place an arithmetic slip is unrecoverable.
+//
+// The mint burns MintBatchSize numbers AHEAD, so within a batch of MaxUint64 the
+// target addition would wrap. A wrapped floor would claim a LOW number is burned
+// and permit reissuing every id this bus has ever minted — so the code saturates
+// instead, and the bus simply stops issuing: loudly, at the mint, with nothing
+// handed out.
+//
+// The fixture is written BY THE TEST, in the documented format, rather than
+// produced by the writer. That is deliberate twice over: it proves the file is
+// readable by something other than its own writer (an operator or a tool with a
+// recovery job to do), and it is the only way to reach this state without
+// issuing 1.8e19 sequences.
+func TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeSeqFloorFixture(t, dir, math.MaxUint64)
+	lg := openTestLog(t, dir, true)
+	alpha := agentID(t, testBusID, "alpha")
+
+	// It opens: an exhausted id space is a legitimate state to recover, not
+	// corruption. Refusing to start here would be indistinguishable from a
+	// damaged file and would send an operator after the wrong problem.
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+	m, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-1"})
+	if err == nil {
+		t.Fatalf("Mint returned %s (sequence %d) with the whole 64-bit sequence space durably burned; the only numbers left are ones this directory has already promised never to issue", m.MessageID, m.Seq)
+	}
+	if floor, _ := readSeqFloor(t, dir); floor != math.MaxUint64 {
+		t.Fatalf("the durable floor is now %d, want it unchanged at MaxUint64; a floor that WRAPPED would claim a low number is burned and permit reissuing every id this bus ever minted", floor)
+	}
+}
+
+// writeSeqFloorFixture writes a floor file by hand, in the documented on-disk
+// format, digest and all. See TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed
+// for why a test writes this rather than driving the writer.
+func writeSeqFloorFixture(t *testing.T, dir string, floor uint64) {
+	t.Helper()
+	body := fmt.Sprintf("floor %d\n", floor)
+	sum := sha256.Sum256([]byte(body))
+	data := fmt.Sprintf("agent-bus-message-seq-floor v5 sha256=%x\n%s", sum, body)
+	if err := os.WriteFile(filepath.Join(dir, hub.SeqFloorFileName), []byte(data), 0o600); err != nil {
+		t.Fatalf("writing the sequence floor fixture: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Spending a reservation: ErrUnknownMint and ErrMintMismatch
+// ---------------------------------------------------------------------------
+
+// TestSendWithoutAReservationIsErrUnknownMint covers the sentinel that, before
+// this file, appeared in the suite only inside COMMENTS.
+//
+// It is the ROUTINE refusal — a restart or an expiry lost the in-memory
+// reservation — and its remedy (re-mint under the same key, re-sign, re-send)
+// is safe because a message that DID become durable is answered from the
+// applied-key table before the mint is ever consulted.
+func TestSendWithoutAReservationIsErrUnknownMint(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	alpha := agentID(t, testBusID, "alpha")
+	beta := agentID(t, testBusID, "beta")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha", "beta")
+
+	_, err := h.Send(hub.SendRequest{
+		Sender:         alpha,
+		To:             beta,
+		Body:           []byte("no reservation was ever made for this key"),
+		IdempotencyKey: "k-never-minted",
+		SignedMint: hub.SignedMint{
+			MessageID:          "testbus-1",
+			Seq:                1,
+			TimestampUnixMilli: fixtureTimestampMs,
+			Signature:          fixtureSignature(),
+		},
+	})
+	if !errors.Is(err, hub.ErrUnknownMint) {
+		t.Fatalf("Send with no reservation = %v, want ErrUnknownMint; a send that allocates its own sequence on the fly is the reserve-then-send path bypassed entirely", err)
+	}
+	if n, _, _, _, _ := h.Store().Stats(); n != 0 {
+		t.Fatalf("a send refused for want of a reservation still stored %d messages; nothing may be written before the reservation is matched", n)
+	}
+}
+
+// TestSendPresentingTheWrongAssignmentIsErrMintMismatch covers the sentinel that
+// is NEVER routine: the client was handed an assignment and presented a
+// different one.
+//
+// Invariant 1 is the whole answer — a client-supplied id is input to be
+// validated, never an identity to be trusted — so the MINT wins and the send is
+// refused. The two halves (wrong sequence, wrong message id) are separate cases
+// because a check on only one of them would let the other through, and the
+// canonical signing format covers both.
+func TestSendPresentingTheWrongAssignmentIsErrMintMismatch(t *testing.T) {
+	alpha := agentID(t, testBusID, "alpha")
+	beta := agentID(t, testBusID, "beta")
+
+	cases := []struct {
+		name string
+		// mangle turns the honest assignment into the one the client presents.
+		mangle func(hub.Mint) hub.SignedMint
+	}{
+		{
+			name: "a sequence the bus did not mint",
+			mangle: func(m hub.Mint) hub.SignedMint {
+				return hub.SignedMint{MessageID: m.MessageID, Seq: m.Seq + 1, TimestampUnixMilli: fixtureTimestampMs, Signature: fixtureSignature()}
+			},
+		},
+		{
+			name: "a message id the bus did not mint",
+			mangle: func(m hub.Mint) hub.SignedMint {
+				return hub.SignedMint{MessageID: "testbus-999999", Seq: m.Seq, TimestampUnixMilli: fixtureTimestampMs, Signature: fixtureSignature()}
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			lg := openTestLog(t, dir, true)
+			h, _ := openMintHub(t, dir, lg, nil, "", "alpha", "beta")
+
+			m := mustMint(t, h, alpha, "send", "k-1")
+			_, err := h.Send(hub.SendRequest{
+				Sender:         alpha,
+				To:             beta,
+				Body:           []byte("an assignment of the client's own choosing"),
+				IdempotencyKey: "k-1",
+				SignedMint:     tc.mangle(m),
+			})
+			if !errors.Is(err, hub.ErrMintMismatch) {
+				t.Fatalf("Send presenting a mangled assignment = %v, want ErrMintMismatch; the bus must take its own minted values, never the client's", err)
+			}
+			if n, _, _, _, _ := h.Store().Stats(); n != 0 {
+				t.Fatalf("a mismatched send still stored %d messages", n)
+			}
+
+			// The reservation SURVIVES the refusal. It is not consumed until the
+			// message it names is durable, so an honest retry with the correct
+			// assignment — and the signature the client already computed — still
+			// works. Punishing a client by burning its reservation on a refusal
+			// would make every transient failure cost a re-sign.
+			if _, err := h.Send(hub.SendRequest{
+				Sender:         alpha,
+				To:             beta,
+				Body:           []byte("an assignment of the client's own choosing"),
+				IdempotencyKey: "k-1",
+				SignedMint: hub.SignedMint{
+					MessageID:          m.MessageID,
+					Seq:                m.Seq,
+					TimestampUnixMilli: fixtureTimestampMs,
+					Signature:          fixtureSignature(),
+				},
+			}); err != nil {
+				t.Fatalf("the honest retry after a mismatch was refused (%v); the reservation must survive a refused send", err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The bounds
+// ---------------------------------------------------------------------------
+
+// TestMintBoundsFailClosedAndNeverEvict covers both bounds on the
+// outstanding-mint table and, more importantly, the thing they must NOT do.
+//
+// Evicting somebody else's reservation to make room would take a sequence back
+// from a client that has already SIGNED it: that client's next send is refused
+// for a reason it cannot see, caused entirely by a stranger. So both bounds fail
+// CLOSED, and the test asserts the eviction has not happened by re-minting the
+// FIRST key and requiring the original assignment back.
+//
+// The per-agent bound is checked before the bus-wide one, and the order matters:
+// an agent at its own share must be told it is ITS fault, not that the bus is
+// full, or an operator goes looking at the bus instead of at one client.
+func TestMintBoundsFailClosedAndNeverEvict(t *testing.T) {
+	t.Run("the per-agent bound", func(t *testing.T) {
+		dir := t.TempDir()
+		lg := openTestLog(t, dir, true)
+		alpha := agentID(t, testBusID, "alpha")
+		h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+
+		first := mustMint(t, h, alpha, "send", "k-0")
+		for i := 1; i < hub.MaxOutstandingMintsPerAgent; i++ {
+			mustMint(t, h, alpha, "send", fmt.Sprintf("k-%d", i))
+		}
+
+		_, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-one-too-many"})
+		if !errors.Is(err, hub.ErrAgentQuota) {
+			t.Fatalf("the %dth outstanding mint for one agent = %v, want ErrAgentQuota", hub.MaxOutstandingMintsPerAgent+1, err)
+		}
+		if !errors.Is(err, hub.ErrCapacity) {
+			t.Fatalf("the per-agent refusal does not also satisfy ErrCapacity, so the HTTP layer's capacity mapping would miss it: %v", err)
+		}
+
+		again, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-0"})
+		if err != nil {
+			t.Fatalf("re-minting the FIRST key after the bound was hit failed (%v); it must still be in the table — nothing is evicted", err)
+		}
+		if again.Seq != first.Seq || again.MessageID != first.MessageID {
+			t.Fatalf("re-minting k-0 returned %s/%d, want the original %s/%d; a reservation that changes under a client invalidates the signature it already computed", again.MessageID, again.Seq, first.MessageID, first.Seq)
+		}
+		if !again.Replayed {
+			t.Fatalf("re-minting an outstanding key did not report Replayed; the caller cannot tell a fresh allocation from a returned one, and invariant 10 requires the retry be answered, not re-applied")
+		}
+	})
+
+	t.Run("the bus-wide bound", func(t *testing.T) {
+		dir := t.TempDir()
+		lg := openTestLog(t, dir, true)
+
+		// One more agent than the bus-wide bound divided by the per-agent share, so
+		// the LAST agent's FIRST mint hits the bus-wide bound rather than its own.
+		// That is what makes the two errors distinguishable at all.
+		perAgent := hub.MaxOutstandingMintsPerAgent
+		agents := make([]string, 0, hub.MaxOutstandingMints/perAgent+1)
+		for i := 0; i <= hub.MaxOutstandingMints/perAgent; i++ {
+			agents = append(agents, fmt.Sprintf("agent%04d", i))
+		}
+		h, _ := openMintHub(t, dir, lg, nil, "", agents...)
+
+		for i := 0; i < hub.MaxOutstandingMints/perAgent; i++ {
+			sender := agentID(t, testBusID, agents[i])
+			for j := 0; j < perAgent; j++ {
+				mustMint(t, h, sender, "send", fmt.Sprintf("k-%d-%d", i, j))
+			}
+		}
+
+		last := agentID(t, testBusID, agents[len(agents)-1])
+		_, err := h.Mint(hub.MintRequest{Sender: last, Op: "send", IdempotencyKey: "k-over"})
+		if !errors.Is(err, hub.ErrCapacity) {
+			t.Fatalf("the mint past the bus-wide bound = %v, want ErrCapacity", err)
+		}
+		if errors.Is(err, hub.ErrAgentQuota) {
+			t.Fatalf("a bus-wide refusal was reported as a per-agent one (%v); this agent holds NO reservations and would be blamed for a bus-wide limit", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// MintTTL
+// ---------------------------------------------------------------------------
+
+// TestMintTTLExpiry is the test whose absence hid a real bug.
+//
+// mint.go claimed expiry "runs on EVERY mint and EVERY send". It did not:
+// publish never called expireMintsLocked, so an expired reservation was still
+// spendable and Mint.ExpiresAt — a value this bus RETURNS TO CLIENTS — was not a
+// fact. Nothing caught it because every other test in the repository mints and
+// sends in the same instant.
+//
+// The fix was to the CODE, not the comment, and the reasoning is worth keeping:
+// honouring a reservation past the expiry the bus published is not generosity,
+// it makes a documented bound unobservable, and a bound nobody can observe is
+// one that silently stops holding. Expiring costs a client nothing it was
+// promised — ErrUnknownMint is documented as routine and its remedy cannot
+// double-apply — while NOT expiring makes MintTTL decorative.
+//
+// Both directions are asserted. A test that only proved "expires eventually"
+// would pass for an implementation that expired everything immediately, which
+// would refuse every honest send on a slow link.
+func TestMintTTLExpiry(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	alpha := agentID(t, testBusID, "alpha")
+	beta := agentID(t, testBusID, "beta")
+
+	// A clock the test drives. It starts in the past by an hour so the fixture
+	// roster's enrolment epoch (fixtureEnrolledAt) still precedes every message —
+	// otherwise store.Message.VisibleTo would hide the traffic and the assertions
+	// below would be vacuous for the wrong reason.
+	base := time.Now().Add(-time.Hour)
+	offset := time.Duration(0)
+	now := func() time.Time { return base.Add(offset) }
+
+	h, _ := openMintHub(t, dir, lg, now, "", "alpha", "beta")
+
+	send := func(key string, m hub.Mint) error {
+		_, err := h.Send(hub.SendRequest{
+			Sender:         alpha,
+			To:             beta,
+			Body:           []byte("body for " + key),
+			IdempotencyKey: key,
+			SignedMint: hub.SignedMint{
+				MessageID:          m.MessageID,
+				Seq:                m.Seq,
+				TimestampUnixMilli: fixtureTimestampMs,
+				Signature:          fixtureSignature(),
+			},
+		})
+		return err
+	}
+
+	// (a) A reservation is honoured right up to its expiry. Nothing about a slow
+	// client is a fault.
+	live := mustMint(t, h, alpha, "send", "k-live")
+	if want := base.Add(hub.MintTTL); !live.ExpiresAt.Equal(want) {
+		t.Fatalf("Mint.ExpiresAt = %s, want %s (now + MintTTL); a client is told this value and plans around it", live.ExpiresAt, want)
+	}
+	offset = hub.MintTTL - time.Second
+	if err := send("k-live", live); err != nil {
+		t.Fatalf("a send one second BEFORE the published expiry was refused (%v); expiring early refuses honest clients for nothing", err)
+	}
+
+	// (b) Past the expiry the reservation is GONE, and the send is refused with
+	// the routine sentinel rather than silently accepted.
+	offset = 0
+	stale := mustMint(t, h, alpha, "send", "k-stale")
+	offset = hub.MintTTL + time.Second
+	err := send("k-stale", stale)
+	if !errors.Is(err, hub.ErrUnknownMint) {
+		t.Fatalf("a send with a reservation %s past its published expiry = %v, want ErrUnknownMint. MintTTL is a bound this bus publishes in Mint.ExpiresAt; honouring a reservation past it makes that value a fiction and the bound untestable", time.Second, err)
+	}
+
+	// (c) The remedy works, and the expired NUMBER stays burned: re-minting under
+	// the same key yields a NEW, strictly higher sequence. Expiry frees a table
+	// slot, never a number.
+	fresh := mustMint(t, h, alpha, "send", "k-stale")
+	if fresh.Seq <= stale.Seq {
+		t.Fatalf("re-minting after an expiry returned sequence %d, at or below the expired %d; expiry must never un-burn a number", fresh.Seq, stale.Seq)
+	}
+	if fresh.Replayed {
+		t.Fatalf("re-minting after an expiry reported Replayed; the original reservation is gone, so this is a fresh allocation and must say so")
+	}
+	if err := send("k-stale", fresh); err != nil {
+		t.Fatalf("the documented remedy (re-mint under the same key, re-sign, re-send) was refused: %v", err)
+	}
+}

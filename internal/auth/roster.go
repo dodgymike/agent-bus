@@ -162,8 +162,9 @@ type RosterEntry struct {
 //     path and rebuilds itself from the log at Open (invariants 4 and 5).
 //
 // Which one is in force is a property of the PROCESS THAT CONSTRUCTED THE
-// SERVICE, not of this package: see the "What is NOT durable yet" section of
-// doc.go for what cmd/agent-bus/main.go injects today.
+// SERVICE, not of this package. cmd/agent-bus/main.go injects the WALRoster
+// (AUTH-7); see the "What is durable, what is not, and what is actually WIRED"
+// section of doc.go, which is kept honest about the SHIPPED BINARY.
 type Roster interface {
 	// Put records a new enrolment. It MUST reject a duplicate AgentID with
 	// ErrDuplicateAgentID rather than overwriting: an overwrite would silently
@@ -180,28 +181,26 @@ type Roster interface {
 
 	// List returns every enrolled agent, sorted by AgentID, as deep copies.
 	//
-	// # Why a listing seam exists at all, and why it had to land HERE
+	// # Why a listing seam exists at all
 	//
-	// internal/hub keeps its OWN roster view, fed by internal/httpapi calling
-	// hub.NoteEnrolment on each accepted enrolment. That is honest only while
-	// the two views have IDENTICAL LIFETIMES — which was true exactly as long as
-	// both were memory-only.
+	// internal/hub used to keep its OWN roster view, fed by internal/httpapi
+	// calling hub.NoteEnrolment on each accepted enrolment. That was honest only
+	// while the two views had IDENTICAL LIFETIMES — true exactly as long as both
+	// were memory-only.
 	//
-	// A durable roster breaks that. auth's roster now survives a restart while
-	// the hub's starts empty, so after a restart a recovered agent AUTHENTICATES
-	// fine and then hub.publish refuses it: 403 ErrUnknownSender for every send,
-	// 404 for every recipient, and both read paths fail closed. The result is a
-	// bus that authenticates everyone and serves nobody — and it fails in the
-	// direction that looks like the auth layer working, so it is slow to
-	// diagnose.
+	// A durable roster breaks that. auth's roster survives a restart while the
+	// hub's would start empty, so after a restart a recovered agent
+	// AUTHENTICATES fine and then hub.publish refuses it: 403 ErrUnknownSender
+	// for every send, 404 for every recipient, and both read paths fail closed.
+	// The result is a bus that authenticates everyone and serves nobody — and it
+	// fails in the direction that looks like the auth layer working, so it is
+	// slow to diagnose.
 	//
-	// This method is the auth half of the fix (backlog fa26036c-ecb5-4c0e-a7cf-
-	// d72963cae686, which requires it in the SAME change as durable enrolment,
-	// never after). The other half is not in this package: the hub must take the
-	// roster as a source and hub.NoteEnrolment must be deleted along with its
-	// call site. Until that lands, this method has no production caller — it is
-	// here so the wiring task has something to wire, rather than needing to
-	// reshape this interface while it does.
+	// This method is the auth half of the fix. AUTH-7 landed the other half: the
+	// hub now takes a hub.RosterSource and keeps no roster of its own, and
+	// NoteEnrolment and its call site are DELETED. cmd/agent-bus adapts this
+	// interface onto that one (hubRoster) — a live view, never a snapshot — so
+	// the production caller of this method is GET /v1/agents.
 	//
 	// The entries carry each agent's ORIGINAL EnrolledAt, which is load-bearing
 	// rather than incidental: it is the enrolment epoch every read path filters

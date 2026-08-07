@@ -9,12 +9,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -47,6 +50,94 @@ const testBusID = "testbus"
 // A single package-level value, not a function, so the two runs of a recovery
 // test cannot drift apart.
 var fixtureEnrolledAt = time.Now().Add(-time.Hour)
+
+// fixtureTimestampMs is the SENDER-clock reading (Unix milliseconds) every
+// hand-built fixture message carries. store.NewMessage refuses 0 — "unset" — so
+// a fixture needs a plausible positive value, and one shared constant keeps two
+// fixtures from disagreeing about when the same fixture traffic happened.
+const fixtureTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
+
+// fixtureSignature is a well-formed 64-byte placeholder. store.NewMessage
+// enforces the LENGTH and nothing else — the bus never verifies a message
+// signature, because it does not hold the sender's messaging key — so any
+// signing.SignatureSize bytes are as good as a real signature here, and a
+// constant one keeps a fixture reproducible byte for byte.
+func fixtureSignature() []byte { return bytes.Repeat([]byte{0xAB}, signing.SignatureSize) }
+
+// ---------------------------------------------------------------------------
+// The two-step send: mint, then publish
+// ---------------------------------------------------------------------------
+
+// mintedSend and mintedBroadcast are how EVERY publish in this package is
+// issued, and they exist because SIGN-1 made a send a TWO-STEP.
+//
+// Since SIGN-1 option (a) the SENDER signs the origin bus's minted message id
+// and sequence, so a client must first reserve that assignment (Hub.Mint) and
+// then present it back. A bare h.Send is no longer a send a real client can
+// make: it is refused with ErrUnknownMint, because it names an idempotency key
+// this bus holds no reservation for. Routing every test publish through these
+// two helpers is what keeps the suite exercising the sequence a client actually
+// performs rather than a shortcut only a test can take.
+//
+// # A MINT FAILURE IS NOT REPORTED, AND THAT IS DELIBERATE
+//
+// These helpers do NOT t.Fatal when Mint fails. Many tests here publish with
+// arguments that are SUPPOSED to be refused — an empty idempotency key, a
+// sender that is not on the roster, a poisoned or non-durable hub — and the
+// property under test is the error the PUBLISH returns. Failing the test at the
+// mint would hide that error behind a helper's own diagnosis, and worse, would
+// hide it behind a DIFFERENT one: the mint and the publish reject an unenrolled
+// sender with the same sentinel but an empty key with errors that are the same
+// sentinel by design and not by accident. So a failed mint yields a zero
+// SignedMint, the publish runs anyway, and the test sees exactly what a client
+// would.
+//
+// # Why the mint is made from the request rather than passed in
+//
+// The scope of a reservation is the (agent, op, key) TUPLE, and it must be the
+// SAME tuple the publish then presents. Deriving it here from the very request
+// being issued makes the two impossible to get out of step; a caller-supplied
+// mint would let a test drift into ErrMintMismatch by accident and spend an
+// afternoon on it.
+func mintedSend(t *testing.T, h *hub.Hub, req hub.SendRequest) (hub.Result, error) {
+	t.Helper()
+	req.SignedMint = mintFor(t, h, req.Sender, "send", req.IdempotencyKey)
+	return h.Send(req)
+}
+
+// mintedBroadcast is mintedSend for a broadcast. The two are separate rather
+// than one function with a flag because hub.Send and hub.Broadcast take
+// different request types, and because the OP is part of the mint's scope —
+// minting under "send" and spending under "broadcast" is a mismatch, not a
+// detail.
+func mintedBroadcast(t *testing.T, h *hub.Hub, req hub.BroadcastRequest) (hub.Result, error) {
+	t.Helper()
+	req.SignedMint = mintFor(t, h, req.Sender, "broadcast", req.IdempotencyKey)
+	return h.Broadcast(req)
+}
+
+// mintFor reserves an assignment and dresses it as the SignedMint a client
+// would present, or returns the zero value if the reservation was refused.
+//
+// The signature is fixtureSignature(): a well-formed 64-byte placeholder. The
+// bus checks the LENGTH and never verifies — it does not hold the sender's
+// messaging key — so a real signature would prove nothing here that a constant
+// one does not, and a constant keeps a durable fixture reproducible byte for
+// byte. The negative suite that proves the LENGTH check is enforced belongs to
+// internal/httpapi, where the check actually lives.
+func mintFor(t *testing.T, h *hub.Hub, sender, op, key string) hub.SignedMint {
+	t.Helper()
+	m, err := h.Mint(hub.MintRequest{Sender: sender, Op: op, IdempotencyKey: key})
+	if err != nil {
+		return hub.SignedMint{}
+	}
+	return hub.SignedMint{
+		MessageID:          m.MessageID,
+		Seq:                m.Seq,
+		TimestampUnixMilli: fixtureTimestampMs,
+		Signature:          fixtureSignature(),
+	}
+}
 
 // agentID builds the fully-qualified "<bus-id>.<name>-1" every enrolled test
 // agent uses (invariant 2). Suffix 1 because ids.AgentID rejects 0.
@@ -100,36 +191,53 @@ func newHubOver(t *testing.T, lg *wal.Log, busID string, agents ...string) *hub.
 // path while replay still comes off the real file.
 func newHubOverDurable(t *testing.T, durable hub.DurableLog, lg *wal.Log, busID string, agents ...string) *hub.Hub {
 	t.Helper()
-	h := openHubOverDurable(t, durable, lg, busID, nil)
-	enrolAll(t, h, busID, agents...)
+	h, roster := openHubOverDurable(t, durable, lg, busID, nil)
+	enrolAll(t, roster, busID, agents...)
 	return h
 }
 
-// openHubOverDurable opens a Hub and enrols NOBODY, so a caller that needs to
-// choose each agent's enrolment epoch (TestEnrolmentEpoch) can do so itself.
-// now may be nil, in which case the hub uses the real clock.
-func openHubOverDurable(t *testing.T, durable hub.DurableLog, lg *wal.Log, busID string, now func() time.Time) *hub.Hub {
+// openHubOverDurable opens a Hub and enrols NOBODY, returning the roster the hub
+// serves from so a caller that needs to choose each agent's enrolment epoch
+// (TestEnrolmentEpoch) can do so itself. now may be nil, in which case the hub
+// uses the real clock.
+//
+// The roster is a hub.StaticRoster and is the ONLY one this hub has: since
+// AUTH-7 the hub keeps no roster of its own and reads through to whatever is
+// injected, so adding an agent here is adding it to the bus. In production the
+// injected source is a view of internal/auth's durable roster; a test that wants
+// to model a restart therefore re-populates this one with each agent's ORIGINAL
+// EnrolledAt, exactly as recovery does.
+func openHubOverDurable(t *testing.T, durable hub.DurableLog, lg *wal.Log, busID string, now func() time.Time) (*hub.Hub, *hub.StaticRoster) {
 	t.Helper()
 	path := lg.Path()
+	roster := hub.NewStaticRoster()
 	h, err := hub.Open(hub.Options{
-		BusID:     busID,
+		BusID: busID,
+		// The log's own directory, which is where main puts every durable file
+		// this bus owns — including the message sequence floor the hub writes
+		// ahead of every minted number (hub.SeqFloorFileName). Derived from the
+		// log rather than taken as a parameter so the two can never point at
+		// different directories in a test, which would silently give the hub a
+		// floor file no restart of that log would ever read.
+		DataDir:   filepath.Dir(path),
 		Durable:   durable,
 		Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
 		NextIndex: lg.Recovered().NextIndex,
+		Roster:    roster,
 		Now:       now,
 	})
 	if err != nil {
 		t.Fatalf("hub.Open: %v", err)
 	}
-	return h
+	return h, roster
 }
 
-// enrolAll registers one agent per name on the hub's roster view, all at
-// fixtureEnrolledAt. See that variable for why the instant is in the past.
-func enrolAll(t *testing.T, h *hub.Hub, busID string, agents ...string) {
+// enrolAll registers one agent per name on the roster the hub serves from, all
+// at fixtureEnrolledAt. See that variable for why the instant is in the past.
+func enrolAll(t *testing.T, roster *hub.StaticRoster, busID string, agents ...string) {
 	t.Helper()
 	for _, name := range agents {
-		h.NoteEnrolment(hub.Agent{
+		roster.Add(hub.Agent{
 			AgentID:    agentID(t, busID, name),
 			Name:       name,
 			EnrolledAt: fixtureEnrolledAt,
@@ -230,13 +338,128 @@ func shapeOf(h *hub.Hub) storeShape {
 }
 
 // ---------------------------------------------------------------------------
+// AUTH-7 — the roster is INJECTED, and its absence is a hard failure
+// ---------------------------------------------------------------------------
+
+// TestOpenRefusesAHubWithNoRoster pins the one thing that must never be
+// reachable by omission.
+//
+// Every roster check in this package fails CLOSED, so a hub with an empty or
+// missing roster does not break loudly: it starts, serves an empty agent list,
+// answers 403 to every send and 404 to every recipient, and passes a health
+// check while doing it. That is the exact shape of the AUTH-7 bug — a bus that
+// authenticates everyone and serves nobody — so a defaulted empty roster is not
+// a convenience, it is the defect with a different cause. Open must refuse.
+func TestOpenRefusesAHubWithNoRoster(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	path := lg.Path()
+
+	h, err := hub.Open(hub.Options{
+		BusID:     testBusID,
+		Durable:   lg,
+		Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+		NextIndex: lg.Recovered().NextIndex,
+		// Roster deliberately omitted.
+	})
+	if err == nil {
+		t.Fatalf("hub.Open with no Roster returned a usable hub (%p) instead of an error; a hub that cannot see the roster refuses every send and lists no agents, and it must not be possible to build one by forgetting a field", h)
+	}
+	if h != nil {
+		t.Fatalf("hub.Open failed but still returned a hub: %p", h)
+	}
+	// The message has to name the thing that is missing: this failure is a
+	// wiring mistake in a composition root, and "invalid options" would send the
+	// reader looking in the wrong package.
+	if !strings.Contains(err.Error(), "roster") {
+		t.Fatalf("hub.Open error = %q, want it to name the missing roster", err)
+	}
+}
+
+// TestRecoveredAgentIDsAbsentFromTheRosterAreReported covers the id-reuse
+// detector, which was re-sited into Open when NoteEnrolment was deleted.
+//
+// An agent id that a REPLAYED MESSAGE names and that the roster does NOT hold is
+// an id whose holder has vanished: nothing can authenticate as it and the name it
+// was minted from is free to be enrolled again. The suffix floors are what stop
+// the re-mint producing the same id, so a mismatch here is the shape a lost or
+// restored-from-backup floors file leaves behind — and the standing rule in this
+// project is that a reuse is never SILENT.
+//
+// The negative half is asserted too, and it is the half that would rot first: a
+// check that fires for every recovered agent is a check an operator learns to
+// ignore, which is the same as not having one.
+func TestRecoveredAgentIDsAbsentFromTheRosterAreReported(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, false)
+	a := agentID(t, testBusID, "alpha")
+	b := agentID(t, testBusID, "beta")
+
+	m, err := store.NewMessage(testBusID, a, false, []string{b}, 1, time.Now().UTC().Add(-time.Minute), []byte("recovered traffic"), "k-recovered", fixtureTimestampMs, fixtureSignature())
+	if err != nil {
+		t.Fatalf("store.NewMessage: %v", err)
+	}
+	payload, err := m.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if _, err := lg.Write(wal.Entry{Kind: store.RecordKind, Body: payload}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	openWithRoster := func(t *testing.T, roster *hub.StaticRoster) string {
+		t.Helper()
+		l := openTestLog(t, dir, true)
+		buf := &bytes.Buffer{}
+		path := l.Path()
+		if _, err := hub.Open(hub.Options{
+			BusID:     testBusID,
+			DataDir:   dir,
+			Durable:   l,
+			Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+			NextIndex: l.Recovered().NextIndex,
+			Roster:    roster,
+			Logger:    logging.New(buf, logging.LevelError),
+		}); err != nil {
+			t.Fatalf("hub.Open: %v", err)
+		}
+		return buf.String()
+	}
+
+	t.Run("an empty roster reports both the sender and the recipient", func(t *testing.T) {
+		out := openWithRoster(t, hub.NewStaticRoster())
+		if !strings.Contains(out, "ABSENT FROM THE ROSTER") {
+			t.Fatalf("recovering a message naming agents that are NOT enrolled logged nothing at ERROR; the reuse must never be silent.\nlog: %s", out)
+		}
+		for _, id := range []string{a, b} {
+			if !strings.Contains(out, id) {
+				t.Fatalf("the report does not name %q, so an operator cannot act on it.\nlog: %s", id, out)
+			}
+		}
+	})
+
+	t.Run("a roster holding them says nothing", func(t *testing.T) {
+		roster := hub.NewStaticRoster()
+		roster.Add(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: fixtureEnrolledAt})
+		roster.Add(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: fixtureEnrolledAt})
+		if out := openWithRoster(t, roster); strings.Contains(out, "ABSENT FROM THE ROSTER") {
+			t.Fatalf("an ordinary recovery — every recovered id present in the roster — logged an id-reuse ERROR; a check that fires on healthy startups is one nobody reads.\nlog: %s", out)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // MSG-1 — the agent list
 // ---------------------------------------------------------------------------
 
 func TestListAgents(t *testing.T) {
 	// Enrolled deliberately OUT of id order, so a passing sort assertion is
 	// evidence of sorting rather than of insertion order.
-	h, _, _ := newTestHub(t)
+	lg := openTestLog(t, t.TempDir(), true)
+	h, roster := openHubOverDurable(t, lg, lg, testBusID, nil)
 	busID := h.BusID()
 
 	zeta := agentID(t, busID, "zeta")
@@ -247,9 +470,9 @@ func TestListAgents(t *testing.T) {
 	tAlpha := time.Date(2026, 8, 2, 10, 0, 1, 0, time.UTC)
 	tMid := time.Date(2026, 8, 2, 10, 0, 2, 0, time.UTC)
 
-	h.NoteEnrolment(hub.Agent{AgentID: zeta, Name: "zeta", EnrolledAt: tZeta})
-	h.NoteEnrolment(hub.Agent{AgentID: alpha, Name: "alpha", EnrolledAt: tAlpha})
-	h.NoteEnrolment(hub.Agent{AgentID: mid, Name: "mid", EnrolledAt: tMid})
+	roster.Add(hub.Agent{AgentID: zeta, Name: "zeta", EnrolledAt: tZeta})
+	roster.Add(hub.Agent{AgentID: alpha, Name: "alpha", EnrolledAt: tAlpha})
+	roster.Add(hub.Agent{AgentID: mid, Name: "mid", EnrolledAt: tMid})
 
 	t.Run("SortedByAgentID", func(t *testing.T) {
 		got := h.Agents()
@@ -302,9 +525,9 @@ func TestListAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("NoteEnrolmentIsIdempotentFirstWriteWins", func(t *testing.T) {
+	t.Run("AddingAnExistingAgentIDIsIdempotentFirstWriteWins", func(t *testing.T) {
 		later := tAlpha.Add(72 * time.Hour)
-		h.NoteEnrolment(hub.Agent{AgentID: alpha, Name: "impostor", EnrolledAt: later})
+		roster.Add(hub.Agent{AgentID: alpha, Name: "impostor", EnrolledAt: later})
 
 		got := h.Agents()
 		if len(got) != 3 {
@@ -322,7 +545,7 @@ func TestListAgents(t *testing.T) {
 	})
 
 	t.Run("EmptyAgentIDIsIgnored", func(t *testing.T) {
-		h.NoteEnrolment(hub.Agent{AgentID: "", Name: "nobody"})
+		roster.Add(hub.Agent{AgentID: "", Name: "nobody"})
 		if got := h.Agents(); len(got) != 3 {
 			t.Fatalf("an empty agent id was admitted to the roster: %+v", got)
 		}
@@ -360,7 +583,7 @@ func TestBroadcastSend(t *testing.T) {
 		h, _, _ := newTestHub(t, "alpha", "beta")
 		a := agentID(t, h.BusID(), "alpha")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("hello"), IdempotencyKey: "k-mint"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("hello"), IdempotencyKey: "k-mint"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -400,7 +623,7 @@ func TestBroadcastSend(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		body := []byte("durable before the ack")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-durable"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-durable"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -430,7 +653,7 @@ func TestBroadcastSend(t *testing.T) {
 		b := agentID(t, h.BusID(), "beta")
 		g := agentID(t, h.BusID(), "gamma")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("to everyone"), IdempotencyKey: "k-fanout"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("to everyone"), IdempotencyKey: "k-fanout"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -462,7 +685,7 @@ func TestBroadcastSend(t *testing.T) {
 		var prev uint64
 		const n = 5
 		for i := 0; i < n; i++ {
-			res, err := h.Broadcast(hub.BroadcastRequest{
+			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("msg-%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-seq-%d", i),
@@ -496,7 +719,7 @@ func TestBroadcastSend(t *testing.T) {
 		}
 		checked := 0
 		for i, body := range bodies {
-			res, err := h.Broadcast(hub.BroadcastRequest{
+			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           body,
 				IdempotencyKey: fmt.Sprintf("k-body-%d", i),
@@ -535,14 +758,14 @@ func TestBroadcastSend(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		body := []byte("the ack was lost in flight")
 
-		first, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-retry"})
+		first, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-retry"})
 		if err != nil {
 			t.Fatalf("first Broadcast: %v", err)
 		}
 		before := shapeOf(h)
 
 		for attempt := 0; attempt < 3; attempt++ {
-			again, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-retry"})
+			again, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-retry"})
 			if err != nil {
 				t.Fatalf("retry %d: %v — a legitimate retry must not error", attempt, err)
 			}
@@ -565,13 +788,13 @@ func TestBroadcastSend(t *testing.T) {
 		h, lg, _ := newTestHub(t, "alpha", "beta")
 		a := agentID(t, h.BusID(), "alpha")
 
-		if _, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("first"), IdempotencyKey: "k-reuse"}); err != nil {
+		if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("first"), IdempotencyKey: "k-reuse"}); err != nil {
 			t.Fatalf("first Broadcast: %v", err)
 		}
 		before := shapeOf(h)
 		onDiskBefore := len(replayMessages(t, lg.Path()))
 
-		_, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("SECOND, different"), IdempotencyKey: "k-reuse"})
+		_, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("SECOND, different"), IdempotencyKey: "k-reuse"})
 		if !errors.Is(err, hub.ErrIdempotencyKeyReused) {
 			t.Fatalf("same key + different payload gave err = %v, want ErrIdempotencyKeyReused", err)
 		}
@@ -590,11 +813,11 @@ func TestBroadcastSend(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 
-		first, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("mine"), IdempotencyKey: "shared-key"})
+		first, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("mine"), IdempotencyKey: "shared-key"})
 		if err != nil {
 			t.Fatalf("Broadcast from %s: %v", a, err)
 		}
-		second, err := h.Broadcast(hub.BroadcastRequest{Sender: b, Body: []byte("also mine"), IdempotencyKey: "shared-key"})
+		second, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: b, Body: []byte("also mine"), IdempotencyKey: "shared-key"})
 		if err != nil {
 			t.Fatalf("Broadcast from %s with the same key: %v — keys are scoped per sender", b, err)
 		}
@@ -631,7 +854,7 @@ func TestBroadcastSend(t *testing.T) {
 		for _, c := range cases {
 			c := c
 			t.Run(c.name, func(t *testing.T) {
-				_, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("x"), IdempotencyKey: c.key})
+				_, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("x"), IdempotencyKey: c.key})
 				if !errors.Is(err, hub.ErrInvalidIdempotencyKey) {
 					t.Fatalf("key %q gave err = %v, want ErrInvalidIdempotencyKey", c.key, err)
 				}
@@ -649,7 +872,7 @@ func TestBroadcastSend(t *testing.T) {
 		if len(okKey) > hub.MaxIdempotencyKeyLen {
 			t.Fatalf("test bug: %d-byte key is over the %d limit", len(okKey), hub.MaxIdempotencyKeyLen)
 		}
-		if _, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("x"), IdempotencyKey: okKey}); err != nil {
+		if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("x"), IdempotencyKey: okKey}); err != nil {
 			t.Fatalf("a %d-byte key over [A-Za-z0-9._-] was rejected: %v", len(okKey), err)
 		}
 	})
@@ -675,7 +898,7 @@ func TestBroadcastSend(t *testing.T) {
 		for i, c := range cases {
 			c, i := c, i
 			t.Run(c.name, func(t *testing.T) {
-				_, err := h.Broadcast(hub.BroadcastRequest{
+				_, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 					Sender:         a,
 					Body:           c.body,
 					IdempotencyKey: fmt.Sprintf("k-badbody-%d", i),
@@ -693,7 +916,7 @@ func TestBroadcastSend(t *testing.T) {
 		}
 		// Exactly at the limit is accepted, so the rejection above is a boundary
 		// and not a blanket refusal.
-		if _, err := h.Broadcast(hub.BroadcastRequest{
+		if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 			Sender:         a,
 			Body:           bytes.Repeat([]byte("y"), store.MaxBodyBytes),
 			IdempotencyKey: "k-body-at-limit",
@@ -709,7 +932,7 @@ func TestBroadcastSend(t *testing.T) {
 		before := shapeOf(h)
 		onDiskBefore := len(replayMessages(t, lg.Path()))
 
-		_, err := h.Broadcast(hub.BroadcastRequest{Sender: ghost, Body: []byte("x"), IdempotencyKey: "k-ghost"})
+		_, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: ghost, Body: []byte("x"), IdempotencyKey: "k-ghost"})
 		if !errors.Is(err, hub.ErrUnknownSender) {
 			t.Fatalf("broadcast from an unenrolled agent gave err = %v, want ErrUnknownSender", err)
 		}
@@ -733,7 +956,7 @@ func TestDirectMessageSend(t *testing.T) {
 		b := agentID(t, h.BusID(), "beta")
 		g := agentID(t, h.BusID(), "gamma")
 
-		res, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("for beta only"), IdempotencyKey: "k-dm"})
+		res, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("for beta only"), IdempotencyKey: "k-dm"})
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -768,7 +991,7 @@ func TestDirectMessageSend(t *testing.T) {
 		b := agentID(t, h.BusID(), "beta")
 		body := []byte("directed and durable")
 
-		res, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-durable"})
+		res, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-durable"})
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -807,7 +1030,7 @@ func TestDirectMessageSend(t *testing.T) {
 		before := shapeOf(h)
 		onDiskBefore := len(replayMessages(t, lg.Path()))
 
-		_, err := h.Send(hub.SendRequest{Sender: a, To: ghost, Body: []byte("x"), IdempotencyKey: "k-unknown-to"})
+		_, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: ghost, Body: []byte("x"), IdempotencyKey: "k-unknown-to"})
 		if !errors.Is(err, hub.ErrUnknownRecipient) {
 			t.Fatalf("Send to an unenrolled agent gave err = %v, want ErrUnknownRecipient", err)
 		}
@@ -820,7 +1043,7 @@ func TestDirectMessageSend(t *testing.T) {
 		// And the key it presented was not consumed either: the same key with the
 		// same payload to a REAL recipient must still be accepted as a first send.
 		b := agentID(t, h.BusID(), "beta")
-		res, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("x"), IdempotencyKey: "k-unknown-to"})
+		res, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("x"), IdempotencyKey: "k-unknown-to"})
 		if err != nil {
 			t.Fatalf("re-using the key of a REJECTED send: %v", err)
 		}
@@ -854,7 +1077,7 @@ func TestDirectMessageSend(t *testing.T) {
 		for i, c := range cases {
 			c, i := c, i
 			t.Run(c.name, func(t *testing.T) {
-				_, err := h.Send(hub.SendRequest{
+				_, err := mintedSend(t, h, hub.SendRequest{
 					Sender:         a,
 					To:             c.to,
 					Body:           []byte("x"),
@@ -881,7 +1104,7 @@ func TestDirectMessageSend(t *testing.T) {
 		h, _, _ := newTestHub(t, "alpha", "beta")
 		a := agentID(t, h.BusID(), "alpha")
 
-		res, err := h.Send(hub.SendRequest{Sender: a, To: a, Body: []byte("note to self"), IdempotencyKey: "k-self"})
+		res, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: a, Body: []byte("note to self"), IdempotencyKey: "k-self"})
 		if err != nil {
 			t.Fatalf("Send to self: %v", err)
 		}
@@ -897,13 +1120,13 @@ func TestDirectMessageSend(t *testing.T) {
 		g := agentID(t, h.BusID(), "gamma")
 		body := []byte("retried DM")
 
-		first, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-retry"})
+		first, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-retry"})
 		if err != nil {
 			t.Fatalf("first Send: %v", err)
 		}
 		before := shapeOf(h)
 
-		again, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-retry"})
+		again, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-dm-retry"})
 		if err != nil {
 			t.Fatalf("retry: %v", err)
 		}
@@ -916,7 +1139,7 @@ func TestDirectMessageSend(t *testing.T) {
 
 		// Same key, same body, DIFFERENT recipient is a different request:
 		// addressing is part of the fingerprint.
-		_, err = h.Send(hub.SendRequest{Sender: a, To: g, Body: body, IdempotencyKey: "k-dm-retry"})
+		_, err = mintedSend(t, h, hub.SendRequest{Sender: a, To: g, Body: body, IdempotencyKey: "k-dm-retry"})
 		if !errors.Is(err, hub.ErrIdempotencyKeyReused) {
 			t.Fatalf("same key, same body, different recipient gave err = %v, want ErrIdempotencyKeyReused", err)
 		}
@@ -947,11 +1170,11 @@ func TestDirectMessageSend(t *testing.T) {
 		b := agentID(t, h.BusID(), "beta")
 		body := []byte("same bytes, different shape")
 
-		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
+		bc, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
-		dm, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
+		dm, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
 		if err != nil {
 			t.Fatalf("a directed send reusing a broadcast's key is a DIFFERENT scope and must be accepted, got err = %v", err)
 		}
@@ -961,14 +1184,14 @@ func TestDirectMessageSend(t *testing.T) {
 
 		// And each key still replays its OWN original result, which is what
 		// "do not share an identity" actually means.
-		bcAgain, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
+		bcAgain, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: body, IdempotencyKey: "k-shape"})
 		if err != nil {
 			t.Fatalf("broadcast retry: %v", err)
 		}
 		if !bcAgain.Replayed || bcAgain.MessageID != bc.MessageID {
 			t.Fatalf("broadcast retry returned %+v, want the original %s with Replayed set", bcAgain, bc.MessageID)
 		}
-		dmAgain, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
+		dmAgain, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: body, IdempotencyKey: "k-shape"})
 		if err != nil {
 			t.Fatalf("send retry: %v", err)
 		}
@@ -1009,24 +1232,24 @@ func TestEnrolmentEpoch(t *testing.T) {
 	t.Run("HistoryRefusesTrafficThatPredatesTheReader", func(t *testing.T) {
 		dir := t.TempDir()
 		lg := openTestLog(t, dir, true)
-		h := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
+		h, roster := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
 
 		a := agentID(t, testBusID, "alpha")
 		early := agentID(t, testBusID, "early")
 		late := agentID(t, testBusID, "late")
 
-		h.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
-		h.NoteEnrolment(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
+		roster.Add(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
+		roster.Add(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
 		// LATE enrols one minute after the messages below are sent.
-		h.NoteEnrolment(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
+		roster.Add(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
 
-		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("before late existed"), IdempotencyKey: "k-epoch-bc"})
+		bc, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("before late existed"), IdempotencyKey: "k-epoch-bc"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
 		// Addressed to LATE BY NAME, and still not deliverable: the epoch is not
 		// a broadcast-only rule.
-		dm, err := h.Send(hub.SendRequest{Sender: a, To: late, Body: []byte("a DM late must not read"), IdempotencyKey: "k-epoch-dm"})
+		dm, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: late, Body: []byte("a DM late must not read"), IdempotencyKey: "k-epoch-dm"})
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -1060,15 +1283,15 @@ func TestEnrolmentEpoch(t *testing.T) {
 		// "pass" a history-only test, while burning a wake-up on every send.
 		dir := t.TempDir()
 		lg := openTestLog(t, dir, true)
-		h := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
+		h, roster := openHubOverDurable(t, lg, lg, testBusID, pinnedNow)
 
 		a := agentID(t, testBusID, "alpha")
 		early := agentID(t, testBusID, "early")
 		late := agentID(t, testBusID, "late")
 
-		h.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
-		h.NoteEnrolment(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
-		h.NoteEnrolment(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
+		roster.Add(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: pinned.Add(-time.Minute)})
+		roster.Add(hub.Agent{AgentID: early, Name: "early", EnrolledAt: pinned.Add(-time.Minute)})
+		roster.Add(hub.Agent{AgentID: late, Name: "late", EnrolledAt: pinned.Add(time.Minute)})
 
 		type outcome struct {
 			batch hub.Batch
@@ -1088,7 +1311,7 @@ func TestEnrolmentEpoch(t *testing.T) {
 
 		waitForWaiters(t, h, 2, "both readers must park before the broadcast")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("wake only the eligible"), IdempotencyKey: "k-epoch-wake"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("wake only the eligible"), IdempotencyKey: "k-epoch-wake"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -1143,11 +1366,11 @@ func TestEnrolmentEpoch(t *testing.T) {
 		a := agentID(t, testBusID, "alpha")
 		b := agentID(t, testBusID, "beta")
 
-		dm, err := h1.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("the previous beta's private mail"), IdempotencyKey: "k-reuse-dm"})
+		dm, err := mintedSend(t, h1, hub.SendRequest{Sender: a, To: b, Body: []byte("the previous beta's private mail"), IdempotencyKey: "k-reuse-dm"})
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
-		bc, err := h1.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("the previous beta's bus traffic"), IdempotencyKey: "k-reuse-bc"})
+		bc, err := mintedBroadcast(t, h1, hub.BroadcastRequest{Sender: a, Body: []byte("the previous beta's bus traffic"), IdempotencyKey: "k-reuse-bc"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -1161,9 +1384,9 @@ func TestEnrolmentEpoch(t *testing.T) {
 		// --- Run 2: a DIFFERENT keypair enrols the same name and is minted the
 		// same id. Its enrolment instant is NOW, after everything on disk.
 		lg2 := openTestLog(t, dir, false)
-		h2 := openHubOverDurable(t, lg2, lg2, testBusID, nil)
-		h2.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: time.Now()})
-		h2.NoteEnrolment(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: time.Now()})
+		h2, roster2 := openHubOverDurable(t, lg2, lg2, testBusID, nil)
+		roster2.Add(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: time.Now()})
+		roster2.Add(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: time.Now()})
 
 		// NOT DELIVERED — via history…
 		if got := historyIDs(t, h2, b); len(got) != 0 {
@@ -1206,9 +1429,9 @@ func TestEnrolmentEpoch(t *testing.T) {
 		// Without this the refusal above is consistent with a recovered hub that
 		// simply serves nobody anything.
 		lg3 := openTestLog(t, dir, true)
-		h3 := openHubOverDurable(t, lg3, lg3, testBusID, nil)
-		h3.NoteEnrolment(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: fixtureEnrolledAt})
-		h3.NoteEnrolment(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: fixtureEnrolledAt})
+		h3, roster3 := openHubOverDurable(t, lg3, lg3, testBusID, nil)
+		roster3.Add(hub.Agent{AgentID: a, Name: "alpha", EnrolledAt: fixtureEnrolledAt})
+		roster3.Add(hub.Agent{AgentID: b, Name: "beta", EnrolledAt: fixtureEnrolledAt})
 		got := historyIDs(t, h3, b)
 		if len(got) != 2 || !contains(got, dm.MessageID) || !contains(got, bc.MessageID) {
 			t.Fatalf("a genuinely continuous %s (re-enrolled at its ORIGINAL instant) sees %v, want both %s and %s", b, got, dm.MessageID, bc.MessageID)
@@ -1231,7 +1454,7 @@ func TestReadPathsFailClosedForAnUnknownAgent(t *testing.T) {
 	a := agentID(t, h.BusID(), "alpha")
 	b := agentID(t, h.BusID(), "beta")
 
-	res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("visible to the enrolled"), IdempotencyKey: "k-failclosed"})
+	res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("visible to the enrolled"), IdempotencyKey: "k-failclosed"})
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
 	}

@@ -45,6 +45,14 @@ const MaxIdempotencyKeyLen = 128
 // auth.recordIdempotent.
 const MaxIdempotencyEntries = idem.MaxEntries
 
+// maxDecodeFailuresLogged bounds how many undecodable message records recovery
+// names INDIVIDUALLY. It mirrors internal/wal's maxDanglingLogged, which caps
+// the same class of flood one layer down and for the same reason: a bulk
+// discard — a record-schema bump discards every message record in the log — must
+// not bury the rest of the startup log under one line per record. The exact
+// total is never lost; noteRecoveredIdentities reports it.
+const maxDecodeFailuresLogged = 8
+
 // Batch-size bounds for the read paths.
 const (
 	// DefaultBatchLimit is the batch size when a client does not ask.
@@ -113,6 +121,35 @@ type Options struct {
 	// BusID is this bus's server-minted id. REQUIRED: every message id and
 	// every agent id is qualified with it (invariants 1 and 2).
 	BusID string
+
+	// DataDir is the directory holding this bus's durable state. It is where
+	// the MESSAGE-SEQUENCE FLOOR file (SeqFloorFileName) is read and written —
+	// the only record of a minted sequence that survives a WAL quarantine.
+	//
+	// It is REQUIRED whenever Durable is set, and Open FAILS without it. That is
+	// not fussiness about a field: a hub that can mint but cannot write the floor
+	// file would burn its numbers only inside the log, and a quarantine would
+	// then hand the SAME sequence to a second client — the exact P0 seqfloorfile.go
+	// exists to close. There is no "best effort" setting for it, for the same
+	// reason invariant 4 has none.
+	//
+	// A hub built with Durable nil (a read-only or test hub, which refuses every
+	// send and every mint with ErrNotDurable) may leave it empty: it can never
+	// issue a number, so there is nothing to burn.
+	DataDir string
+
+	// Roster is who is enrolled on this bus. It is REQUIRED and there is NO
+	// DEFAULT — Open FAILS on a nil one.
+	//
+	// An empty default would be catastrophically quiet. Every roster check in
+	// this package fails CLOSED, so a hub built with nothing to read would
+	// answer 403 to every send, 404 to every recipient and an empty agent list
+	// to everyone, while starting, logging nothing and passing a health check.
+	// "Serves nobody" must not be reachable by forgetting a field, which is why
+	// the omission is a startup error and not a warning.
+	//
+	// It is READ THROUGH on every check, never copied: see RosterSource.
+	Roster RosterSource
 
 	// Durable is the two-phase write path. When nil the hub serves reads and
 	// refuses every send with ErrNotDurable — invariant 4 has no "best effort"
@@ -202,15 +239,18 @@ type Hub struct {
 	//
 	// writeMu -> waitMu (the wake) and writeMu -> the store's own lock.
 	//
-	// rosterMu is deliberately NOT in that chain: publish validates the sender
-	// and the recipients BEFORE it takes writeMu, so the two are never held
-	// together at all. That is the strongest position available and it is worth
-	// keeping — but it is also why Enrolled's TOCTOU note matters, so read that
-	// before moving the roster check inside the lock to "tidy this up".
+	// The ROSTER's lock is deliberately NOT in that chain: publish validates the
+	// sender and the recipients BEFORE it takes writeMu, so the two are never
+	// held together at all. That is the strongest position available and it is
+	// worth keeping — but it is also why Enrolled's TOCTOU note matters, so read
+	// that before moving the roster check inside the lock to "tidy this up".
+	// Since AUTH-7 that lock belongs to an INJECTED RosterSource, so this
+	// package cannot even see it; nothing here may hold writeMu across a call
+	// into the roster.
 	//
-	// Nothing takes writeMu while holding waitMu, rosterMu or the store lock,
-	// so there is no cycle. The read paths (History, Wait, Agents) never take
-	// writeMu at all, which is what keeps a long poll off the fsync path.
+	// Nothing takes writeMu while holding waitMu, the roster's lock or the store
+	// lock, so there is no cycle. The read paths (History, Wait, Agents) never
+	// take writeMu at all, which is what keeps a long poll off the fsync path.
 	writeMu sync.Mutex
 
 	// idem is the durable applied-key table (IDEM-11). It is keyed on the
@@ -247,16 +287,70 @@ type Hub struct {
 	// only there.
 	appliedSeq uint64
 
-	rosterMu sync.RWMutex
-	roster   map[string]Agent
+	// undecodableMessages counts the message records recovery DISCARDED because
+	// they would not decode. Written only during Open, before anything can reach
+	// the hub.
+	//
+	// It exists so noteRecoveredIdentities can distinguish "no ids were
+	// recovered because this directory is fresh" from "no ids were recovered
+	// because every record was discarded" — two states that are identical in the
+	// recovered map and opposite in what they mean.
+	undecodableMessages int
+
+	// replayedSeqFloor is the highest floor claimed by a SeqFloorRecordKind
+	// record replayed from disk (see mint.go). Written only during Open, by
+	// applySeqFloor, before anything can reach the hub.
+	replayedSeqFloor uint64
+
+	// seqFloorFile is the DURABLE, quarantine-proof message-sequence floor:
+	// <data-dir>/message-seq-floor, outside the log. It is the AUTHORITATIVE
+	// source of the floor — see seqfloorfile.go for why the in-log "seqfloor"
+	// record it supplements cannot be. Nil only on a hub with no durable write
+	// path, which can never issue a sequence at all.
+	//
+	// It has its own lock, so it is NOT guarded by writeMu; but every hub caller
+	// reaches it under writeMu anyway, because the number it authorises is
+	// allocated under writeMu.
+	seqFloorFile *seqFloorFile
+
+	// durableSeqFloor is the highest sequence this bus has DURABLY RECORDED as
+	// burned. Every number handed out must be at or below it — that is the
+	// assertion which replaced Open's counting argument, and assertSeqFloorLocked
+	// is where it is enforced.
+	//
+	// It is set once in Open, from the same maximum the sequence allocator is
+	// sealed at, and raised thereafter ONLY by ensureSeqFloorLocked, which raises
+	// it only AFTER the record proving it is fsynced. Guarded by writeMu. It
+	// never decreases; a lower value would claim numbers are available that have
+	// already been handed out.
+	durableSeqFloor uint64
+
+	// mints is every sequence reservation handed out and not yet spent, keyed by
+	// the (agent, operation, idempotency key) tuple; mintsByAgent is the same set
+	// counted per agent, for the per-agent bound. They are updated in the same
+	// critical section, under writeMu, and must never drift.
+	//
+	// IN MEMORY ONLY, DELIBERATELY. What must survive a restart is that the
+	// NUMBER is burned, and the durable floor record does that; which client
+	// happened to be holding it does not need to survive, because a client that
+	// loses its reservation re-mints under the same idempotency key and cannot
+	// double-apply (see ErrUnknownMint). Making this table durable would put a
+	// second fsync on the mint path to protect a fact nothing depends on.
+	mints        map[mintKey]outstandingMint
+	mintsByAgent map[string]int
+
+	// roster is the AUTHORITATIVE roster, injected and read through. The hub
+	// keeps no copy of its own — see RosterSource for why a copy is a defect and
+	// not an optimisation. Set once in Open, never replaced.
+	roster RosterSource
 
 	// recovered holds every agent id named as a sender or a recipient by a
 	// message replayed from disk at startup. It is written only during Open and
 	// read-only afterwards, so it needs no lock.
 	//
 	// It exists to make ONE thing observable: an id that appears here and is
-	// then enrolled again in this process is an id being REUSED, which
-	// invariant 1 forbids. See noteIdentityReuse.
+	// NOT in the roster is an id whose holder is gone and whose name could be
+	// minted again, which invariant 1 forbids. See noteRecoveredIdentities.
 	recovered map[string]struct{}
 
 	waitMu sync.Mutex
@@ -303,16 +397,32 @@ func Open(o Options) (*Hub, error) {
 	if err := ids.ValidateBusID(o.BusID); err != nil {
 		return nil, fmt.Errorf("hub: open: %w", err)
 	}
+	if o.Roster == nil {
+		// HARD, not a warning, and not a silent empty roster. See Options.Roster:
+		// every check in this package fails closed, so the omission would produce
+		// a bus that authenticates everyone and serves nobody, quietly.
+		return nil, errors.New("hub: open: a roster source is REQUIRED and has no default; a hub with nothing to read would refuse every send, reject every recipient and serve an empty agent list while looking healthy (see hub.RosterSource)")
+	}
+	if o.Durable != nil && o.DataDir == "" {
+		// HARD, and for the same reason the roster check above is hard: the
+		// failure it prevents is SILENT. A durable hub without a data directory
+		// would mint happily, burn its numbers only inside the log, and reissue
+		// every one of them after a quarantine — with both copies validly signed
+		// and nothing downstream able to tell. See Options.DataDir.
+		return nil, errors.New("hub: open: a data directory is REQUIRED for a hub with a durable write path; it is where the message sequence floor (" + SeqFloorFileName + ") lives, and without it a WAL quarantine would reissue sequence numbers already handed to — and already signed by — a client (invariant 1)")
+	}
 	h := &Hub{
 		busID:          o.BusID,
 		durable:        o.Durable,
 		log:            o.Logger,
 		now:            o.Now,
 		pollTimeout:    o.PollTimeout,
-		roster:         make(map[string]Agent),
+		roster:         o.Roster,
 		recovered:      make(map[string]struct{}),
 		waiters:        make(map[*waiter]struct{}),
 		waitersByAgent: make(map[string]int),
+		mints:          make(map[mintKey]outstandingMint),
+		mintsByAgent:   make(map[string]int),
 	}
 	if h.log == nil {
 		h.log = logging.New(io.Discard, logging.LevelError)
@@ -343,55 +453,99 @@ func Open(o Options) (*Hub, error) {
 	// prepared or committed, delivered or discarded", and it cannot check the
 	// claim, so the claim has to be argued here.
 	//
-	// The floor used is the durable log's own high-water index, which
-	// wal.Recovered documents as "strictly greater than EVERY index in the
-	// file, INCLUDING indices burned by prepares that were discarded". The
-	// argument that this bounds every sequence rests on one property that
-	// publish maintains and CHECKS:
+	// The floor is the MAXIMUM of four durable facts, each of which is on disk
+	// and each of which alone would be sound in the situations it covers:
 	//
-	//	  every sequence this hub issues is <= the WAL index of the PREPARE
-	//	  record that carried it.
+	//	(0) the durable message-sequence floor FILE       (seqfloorfile.go)
+	//	(1) the durable log's high-water index, NextIndex-1
+	//	(2) the highest floor claimed by a replayed "seqfloor" record (mint.go)
+	//	(3) the highest sequence carried by a replayed message record
 	//
-	// It holds by counting. At start the floor is NextIndex-1, so the first
-	// sequence issued is NextIndex, which is exactly the index the next append
-	// takes. Thereafter each published message consumes ONE sequence and at
-	// least TWO indices (a prepare and a commit), so the indices outrun the
-	// sequences by at least one per message and the gap only widens. Anything
-	// else that ever writes to this log — AUTH-3's durable enrolment, DUR-5 —
-	// consumes indices without consuming sequences and widens it further.
+	// # (0) IS THE AUTHORITATIVE ONE. (1), (2) AND (3) ARE DEFENCE IN DEPTH
 	//
-	// Therefore every sequence on disk sits at or below an index on disk, so
-	// the next start's NextIndex is strictly above every sequence ever written,
-	// and Resume(NextIndex-1) is a sound floor. publish asserts the property
-	// per message rather than trusting the counting argument to survive future
-	// edits — see the check there and ErrPoisoned.
+	// Sources (1), (2) and (3) are all read OUT OF THE LOG, and the log is the
+	// one artifact recovery is allowed to truncate, rewrite or move aside
+	// wholesale. So all three drop together, to nearly zero, on exactly the start
+	// where the floor matters most — a quarantine. Since the mint burns numbers
+	// in BATCHES of MintBatchSize, a sequence is no longer bounded by the WAL
+	// index of any record (five mints consume five sequences and two indices), so
+	// wal's own durable index floor no longer covers this one transitively
+	// either. Source (0) lives in its OWN atomically-replaced file outside the
+	// log, which is what makes it survive; read seqfloorfile.go before touching
+	// any of this.
 	//
-	// The floor is deliberately NOT derived from the recovered store's highest
-	// sequence. That is the obvious wiring and it is WRONG: it misses the
-	// sequence of a DANGLING prepare (a message prepared but never committed,
-	// the ordinary signature of a crash mid-write), which never reaches Apply,
-	// and reissuing it is exactly what invariant 1's 2026-08-02 restatement
-	// forbids — "recovery may not reissue an index it has already handed out,
-	// even for a record it discards".
+	// # (2) IS THE LOAD-BEARING ONE SINCE SIGN-6, AND (1) IS NO LONGER SUFFICIENT
+	//
+	// (1) used to stand alone, on a COUNTING argument: every sequence issued was
+	// <= the WAL index of the prepare carrying it, because each message consumed
+	// one sequence and at least two indices, so the indices outran the sequences
+	// for ever. That argument is RETIRED. SIGN-1 settled that the sender signs
+	// the origin bus's minted id and sequence, so /v1/mint now hands a sequence
+	// to a client BEFORE any record carries it — a sequence consumed against
+	// ZERO indices — and the counting stops holding on the very first mint.
+	//
+	// What replaced it is not another derivation but a WRITTEN CLAIM: the mint
+	// fsyncs a "seqfloor" record burning a batch of numbers BEFORE it hands any
+	// of them out, and (2) reads those records back. See mint.go for the whole
+	// argument and for the assertion (assertSeqFloorLocked) that now enforces it
+	// at both ends.
+	//
+	// (1) is KEPT anyway, as defence in depth: it can only ever RAISE the floor,
+	// never lower it, and it is the fallback if a floor record is ever
+	// undecodable at replay (applySeqFloor discards such a record LOUDLY and
+	// carries on, exactly as invariant 6 requires).
+	//
+	// (3) is likewise kept and is likewise only ever a raise. Note it must NOT
+	// be used ALONE: it misses the sequence of a DANGLING prepare (a message
+	// prepared but never committed, the ordinary signature of a crash mid-write),
+	// which never reaches Apply, and reissuing it is exactly what invariant 1's
+	// 2026-08-02 restatement forbids — "recovery may not reissue an index it has
+	// already handed out, even for a record it discards".
+	//
+	// floor is tracked in this local as well as inside the allocator because
+	// h.durableSeqFloor must end up at the SAME value the allocator is sealed
+	// at, and ids.Sequence exposes no floor accessor by design. Every RaiseFloor
+	// below therefore updates both, in one place each.
+	// Source (0), read FIRST so every line below — including the quarantine
+	// report — can see it. A corrupt file is FATAL and is never regenerated (see
+	// ErrSeqFloorFileCorrupt); a MISSING one is not, and is reported below.
+	if o.DataDir != "" {
+		sf, err := openSeqFloorFile(o.DataDir)
+		if err != nil {
+			return nil, err
+		}
+		h.seqFloorFile = sf
+	}
+
 	floor := o.NextIndex
 	if floor > 0 {
 		floor--
+	}
+	if h.seqFloorFile != nil && h.seqFloorFile.burned() > floor {
+		floor = h.seqFloorFile.burned()
 	}
 	h.seq = ids.Resume(floor)
 
 	if o.Quarantined != "" {
 		// LOUD, and not a nicety. A quarantine starts a FRESH log, so NextIndex
 		// restarts near 1 while the quarantined file holds sequences far above
-		// it — this hub can then reissue message ids the quarantined log
-		// already used, which invariant 1 forbids. Nothing here can recover the
-		// old high-water mark (the file was unreadable, which is why it was
-		// quarantined), so the honest action is to say so at ERROR and carry on
-		// serving, per invariant 6's availability-over-retention decision:
-		// silent discard is the defect, discard is not.
-		h.log.Error("the durable log was QUARANTINED, so the message sequence high-water mark from before the quarantine is UNKNOWN: message ids may repeat values the quarantined log already used (invariant 1). The quarantined file is the only record of them",
-			"quarantined_to", o.Quarantined,
-			"resumed_floor", floor,
-		)
+		// it. Whether that is survivable depends ENTIRELY on source (0), so the
+		// two cases are reported differently — a single unconditional sentence
+		// here would be false on one of them, and an operator reading a false
+		// startup ERROR learns to ignore the true one.
+		switch {
+		case h.seqFloorFile != nil && h.seqFloorFile.existedAtOpen():
+			h.log.Error("the durable log was QUARANTINED. Message ids are NOT at risk: the durable message sequence floor lives outside the log and survived, so this bus resumes strictly above every sequence it has ever handed out (invariant 1). The MESSAGES in the quarantined file are another matter — that file is the only record of them",
+				"quarantined_to", o.Quarantined,
+				"seq_floor_file", h.seqFloorFile.Path(),
+				"resumed_floor", floor,
+			)
+		default:
+			h.log.Error("the durable log was QUARANTINED and there is NO durable message sequence floor file, so the sequence high-water mark from before the quarantine is UNKNOWN: message ids may repeat values the quarantined log already used, and a client may hold a signature over one of them (invariant 1). This is the one-start migration window for a data directory written before "+SeqFloorFileName+" existed; the file is written on this start, so the next one is covered",
+				"quarantined_to", o.Quarantined,
+				"resumed_floor", floor,
+			)
+		}
 	}
 
 	if o.Replay != nil {
@@ -401,30 +555,101 @@ func Open(o Options) (*Hub, error) {
 			// and must not be served (invariant 5).
 			return nil, fmt.Errorf("hub: rebuilding the message store from the durable log: %w", err)
 		}
-		if rec.NextIndex > 0 {
-			if err := h.seq.RaiseFloor(rec.NextIndex - 1); err != nil {
+		if rec.NextIndex > 0 && rec.NextIndex-1 > floor {
+			floor = rec.NextIndex - 1
+			if err := h.seq.RaiseFloor(floor); err != nil {
 				return nil, fmt.Errorf("hub: raising the sequence floor to the replayed high-water mark: %w", err)
 			}
 		}
 		h.log.Info("message store rebuilt from the durable log",
 			"messages", h.store.Head(),
 			"applied_high_water", h.appliedSeq,
+			"seq_floor_records_high_water", h.replayedSeqFloor,
 			"records_replayed", rec.Records,
 			"next_index", rec.NextIndex,
 		)
 	}
 
-	// Belt and braces: whatever the counting argument says, never resume at or
-	// below a sequence a replayed record proves was written.
-	if h.appliedSeq > 0 {
-		if err := h.seq.RaiseFloor(h.appliedSeq); err != nil {
+	// Compare what the messages remember against who is actually enrolled. It
+	// runs HERE, after replay has filled h.recovered and while nothing can yet
+	// reach this hub, and it assumes the injected roster has ALREADY recovered —
+	// which is a real ordering requirement on the caller, not an implementation
+	// detail: cmd/agent-bus opens the durable log (whose replay rebuilds the
+	// roster) strictly before it opens the hub.
+	h.noteRecoveredIdentities()
+
+	// Source (2): every sequence a replayed "seqfloor" record says was burned
+	// STAYS burned, whether or not a message ever carried it. This is the one
+	// that covers the numbers handed out by /v1/mint and never spent — the case
+	// no other source here can see, because nothing was written about them
+	// anywhere else.
+	if h.replayedSeqFloor > floor {
+		floor = h.replayedSeqFloor
+		if err := h.seq.RaiseFloor(floor); err != nil {
+			return nil, fmt.Errorf("hub: raising the sequence floor to the highest durably-burned sequence: %w", err)
+		}
+	}
+
+	// Source (3), belt and braces: never resume at or below a sequence a
+	// replayed message record proves was written.
+	if h.appliedSeq > floor {
+		floor = h.appliedSeq
+		if err := h.seq.RaiseFloor(floor); err != nil {
 			return nil, fmt.Errorf("hub: raising the sequence floor to the highest replayed sequence: %w", err)
 		}
 	}
+	// PERSIST THE DERIVED FLOOR BEFORE ANYTHING MAY ISSUE. This is the exact
+	// counterpart of wal indexFloor.begin's "written = start-1", and it is the
+	// step most easily mistaken for redundant bookkeeping.
+	//
+	// It is not. Sources (1), (2) and (3) are read out of the log; source (0) is
+	// the only one that survives a quarantine. A run that derived a high floor
+	// from the LOG and did not write it down leaves no trace of what it resumed
+	// at, so the NEXT start — the one where the log is quarantined — would fall
+	// back to a file that still says whatever it said before, and reissue the
+	// whole range in between. Writing the maximum here is what makes each start's
+	// knowledge survive the loss of the log it came from.
+	//
+	// A failure is FATAL: a floor that is not on disk is a floor that does not
+	// exist, and serving on would mean handing out numbers this bus cannot prove
+	// it has never handed out before. Nothing has been issued at this point, so
+	// refusing costs nothing but a restart.
+	//
+	// raise(0) on a genuinely fresh data directory is a no-op and writes NOTHING,
+	// so a first start leaves no file behind until the first mint burns a batch.
+	if h.seqFloorFile != nil {
+		migrating := !h.seqFloorFile.existedAtOpen() && floor > 0
+		if err := h.seqFloorFile.raise(floor); err != nil {
+			return nil, fmt.Errorf("hub: recording the durable message sequence floor before serving: %w", err)
+		}
+		if migrating {
+			// The MIGRATION window, named. A data directory with history but no
+			// floor file was written by a binary that predates the file, and until
+			// this write landed a quarantine could have reissued a minted
+			// sequence. It is a WARN and not an ERROR because the window is now
+			// CLOSED — one start, and the derivation it was seeded from is the
+			// best the log can prove.
+			h.log.Warn("this data directory had no durable message sequence floor file: it was written by an agent-bus that predates it. Until now a WAL quarantine could have reissued sequence numbers already handed out by /v1/mint. The file has been created from the floor the log proves, so this start closes the window",
+				"seq_floor_file", h.seqFloorFile.Path(),
+				"floor", floor,
+			)
+		}
+	}
+
 	// Floor assembly ends here. Next refuses to issue until it does.
 	if err := h.seq.Seal(); err != nil {
 		return nil, fmt.Errorf("hub: sealing the sequence floor: %w", err)
 	}
+
+	// The sealed floor is, by construction, the highest number this bus can
+	// PROVE from disk is burned — so it is also the starting value of the
+	// durable floor the mint asserts against. Setting it to anything lower would
+	// make the very first mint's assertion fire on a hub that is perfectly
+	// healthy; setting it HIGHER would claim numbers are burned that nothing on
+	// disk says are, which is the silent id-reuse this whole derivation exists
+	// to prevent. The first mint then writes the first record ABOVE it (see
+	// ensureSeqFloorLocked), which is what makes the claim durable going forward.
+	h.durableSeqFloor = floor
 	return h, nil
 }
 
@@ -467,17 +692,47 @@ func (h *Hub) Store() *store.Store { return h.store }
 // Entries of any other Kind are skipped SILENTLY and without complaint. That is
 // not the same thing: AUTH-3 will write enrolment records into this same log,
 // and a hub that treated them as damage would fill the log with false alarms.
+//
+// TWO kinds are understood here, and they are not interchangeable:
+// store.RecordKind is a MESSAGE and rebuilds the serving copy;
+// SeqFloorRecordKind is a claim that a range of sequence numbers is burned and
+// contributes only to the sequence floor (see mint.go). A floor record carries
+// no message and must never be allowed to reach store.Decode, which would
+// report it as damage.
 func (h *Hub) Apply(c wal.Committed) error {
+	if c.Entry.Kind == SeqFloorRecordKind {
+		return h.applySeqFloor(c)
+	}
 	if c.Entry.Kind != store.RecordKind {
 		return nil
 	}
 	m, err := store.Decode(c.Entry.Body)
 	if err != nil {
-		h.log.Error("DISCARDING a message record that could not be decoded during recovery; it is not in this bus's history and will not be delivered",
-			"prepare_index", c.PrepareIndex,
-			"commit_index", c.CommitIndex,
-			"err", err,
-		)
+		// COUNTED, not merely logged. The count is what noteRecoveredIdentities
+		// needs to tell "this data directory is fresh" from "everything was
+		// discarded", which look identical from the recovered-id map alone — see
+		// the comment there. Without it, the first start after a record-schema
+		// change silently disables the id-reuse detector.
+		h.undecodableMessages++
+		// Logged per record only up to a cap. A schema bump discards EVERY
+		// message record in the log, so an uncapped line here is one ERROR per
+		// message on exactly the start an operator most needs to be able to read
+		// — the same flood internal/wal already caps one layer down, and the same
+		// one-shot shape used for the applied-key capacity warning below. The
+		// exact total is not lost: noteRecoveredIdentities reports it.
+		if h.undecodableMessages <= maxDecodeFailuresLogged {
+			h.log.Error("DISCARDING a message record that could not be decoded during recovery; it is not in this bus's history and will not be delivered",
+				"prepare_index", c.PrepareIndex,
+				"commit_index", c.CommitIndex,
+				"discarded_so_far", h.undecodableMessages,
+				"err", err,
+			)
+			if h.undecodableMessages == maxDecodeFailuresLogged {
+				h.log.Error("further undecodable message records will NOT be logged individually; the total is reported once recovery finishes",
+					"logged_up_to", maxDecodeFailuresLogged,
+				)
+			}
+		}
 		return nil
 	}
 	if err := h.store.Append(m); err != nil {
@@ -608,13 +863,50 @@ func (h *Hub) recoverIdemRecord(c wal.Committed, m store.Message) (idem.Record, 
 	}, true
 }
 
+// SignedMint is the half of a send request that the client obtained from
+// /v1/mint and then SIGNED. It is embedded in both BroadcastRequest and
+// SendRequest so the two cannot drift: a shape that is mandatory on one route
+// and optional on the other is the unsigned-traffic hole SIGN-6 exists to close.
+//
+// EVERY FIELD HERE IS CLIENT INPUT TO BE VALIDATED, NEVER AN IDENTITY OR AN
+// ASSIGNMENT TO BE TRUSTED (invariant 1). MessageID and Seq are checked against
+// the reservation this bus minted and the RESERVATION wins; Signature is checked
+// for SHAPE only and is then carried as opaque bytes.
+type SignedMint struct {
+	// MessageID and Seq are the assignment the client is presenting back. They
+	// must be exactly what Mint returned for this (sender, operation, key), or
+	// the send is ErrMintMismatch.
+	MessageID string
+	Seq       uint64
+
+	// TimestampUnixMilli is the SENDER's clock, and is covered by the signature.
+	// It is NOT this bus's clock and does not order anything — see
+	// store.Message.TimestampUnixMilli.
+	TimestampUnixMilli int64
+
+	// Signature is the detached Ed25519 signature over
+	// signing.Canonicalize(store.Message.SigningMessage()). The bus checks its
+	// LENGTH and never verifies it: it does not hold the sender's messaging key
+	// and must not be trusted to police messages for senders it does not
+	// control.
+	Signature []byte
+}
+
 // BroadcastRequest is one broadcast attempt. Sender is the AUTHENTICATED
 // principal and is supplied by the caller from the request context, never from
 // the request body (invariant 1).
+//
+// NOTE: /v1/broadcast currently answers 501 and never reaches here — a broadcast
+// has no canonical audience under signing format v1, because
+// signing.Canonicalize rejects an empty recipient set and store.Message stores a
+// broadcast as a FLAG rather than an expanded roster snapshot. The hub-level
+// plumbing is deliberately kept whole and signed-by-construction so SIGN-3 can
+// re-open the route by settling that one question, not by re-plumbing this path.
 type BroadcastRequest struct {
 	Sender         string
 	Body           []byte
 	IdempotencyKey string
+	SignedMint
 }
 
 // SendRequest is one directed send.
@@ -623,13 +915,20 @@ type SendRequest struct {
 	To             string
 	Body           []byte
 	IdempotencyKey string
+	SignedMint
 }
 
 // Broadcast durably records a message addressed to the whole bus and wakes
 // every eligible waiter. It returns only once the message is committed and
 // fsynced (invariant 4).
 func (h *Hub) Broadcast(req BroadcastRequest) (Result, error) {
-	return h.publish(req.Sender, true, nil, req.Body, req.IdempotencyKey)
+	return h.publish(publishRequest{
+		sender:     req.Sender,
+		broadcast:  true,
+		body:       req.Body,
+		key:        req.IdempotencyKey,
+		signedMint: req.SignedMint,
+	})
 }
 
 // Send durably records a message addressed to one agent and wakes that agent's
@@ -641,7 +940,28 @@ func (h *Hub) Send(req SendRequest) (Result, error) {
 	if _, _, _, err := ids.ParseAgentID(req.To); err != nil {
 		return Result{}, fmt.Errorf("%w: %s", ErrInvalidRecipient, err)
 	}
-	return h.publish(req.Sender, false, []string{req.To}, req.Body, req.IdempotencyKey)
+	return h.publish(publishRequest{
+		sender:     req.Sender,
+		broadcast:  false,
+		recipients: []string{req.To},
+		body:       req.Body,
+		key:        req.IdempotencyKey,
+		signedMint: req.SignedMint,
+	})
+}
+
+// publishRequest is the union of everything publish needs. It is a struct
+// rather than a parameter list because the list reached nine values with three
+// strings and two byte slices adjacent to each other, and a transposed pair
+// there — body and signature, sender and message id — would compile and would
+// be caught only by a signature that never verifies on some other machine.
+type publishRequest struct {
+	sender     string
+	broadcast  bool
+	recipients []string
+	body       []byte
+	key        string
+	signedMint SignedMint
 }
 
 // publish is the ONE durable write path for a message. Broadcast and Send
@@ -653,7 +973,9 @@ func (h *Hub) Send(req SendRequest) (Result, error) {
 // rearranged:
 //
 //  1. reject a retried key, or a key reused for different content
-//  2. mint the sequence and the message id (server-authoritative, invariant 1)
+//  2. CONSUME the reservation minted for this key (server-authoritative,
+//     invariant 1 — see Hub.Mint; the sequence was allocated and DURABLY BURNED
+//     at mint time, so nothing is allocated here)
 //  3. WRITE THROUGH THE TWO-PHASE PATH AND FSYNC (invariant 4)
 //  4. only then apply to the serving copy (invariant 5: disk is the truth)
 //  5. only then remember the key and wake waiters (POLL-2)
@@ -662,7 +984,15 @@ func (h *Hub) Send(req SendRequest) (Result, error) {
 // task: a waiter woken before the commit is durable can observe a message that
 // a crash then un-observes, which is an acknowledged-but-lost message wearing a
 // different hat.
-func (h *Hub) publish(sender string, broadcast bool, recipients []string, body []byte, key string) (Result, error) {
+//
+// Step 1 BEFORE step 2 is the subtle one SIGN-6 added, and it is what makes the
+// in-memory mint table safe: a legitimate retry is answered from the applied-key
+// table and never reaches the mint lookup at all, so the fact that the
+// reservation was consumed — or lost to a restart — is invisible to it.
+func (h *Hub) publish(req publishRequest) (Result, error) {
+	sender, broadcast, recipients := req.sender, req.broadcast, req.recipients
+	body, key := req.body, req.key
+
 	if err := validateIdempotencyKey(key); err != nil {
 		return Result{}, err
 	}
@@ -738,9 +1068,13 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 	// (IDEM-11-FU-FAIRSHARE — one agent must never be able to fill the table and
 	// deny every other agent its own first applied key).
 	//
-	// Checked BEFORE the sequence is minted: a sequence spent on a send that will
-	// be refused is a sequence burned for nothing, and invariant 1 forbids
-	// reusing it.
+	// It used to be checked before the sequence was minted, so a refused send
+	// burned no sequence. Since SIGN-1's reserve-then-send the sequence is
+	// already burned before this function is entered, so the ordering no longer
+	// protects the id space — what it protects now is the RESERVATION: the mint
+	// below is not consumed until the message is durable, so a send refused here
+	// leaves the client holding a still-valid mint and free to retry with the
+	// SAME signature once the pressure passes.
 	if err := h.idem.Admit(sc); err != nil {
 		// The per-agent case is checked FIRST because it is the more specific
 		// one: an idem fair-share refusal deliberately satisfies BOTH sentinels
@@ -753,11 +1087,71 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		return Result{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, h.idemMaxEntries)
 	}
 
-	seq, err := h.seq.Next()
-	if err != nil {
-		return Result{}, fmt.Errorf("hub: allocating a message sequence: %w", err)
+	// CONSUME THE RESERVATION. Nothing is allocated here: the sequence was
+	// allocated, and DURABLY BURNED, by Hub.Mint (invariant 1 — the server is
+	// authoritative on every id, and SIGN-1 chose to hand that id out early so
+	// the SENDER can sign it).
+	//
+	// The mint is LOOKED UP but not yet deleted. It is spent only once the
+	// message it names is durable, further down: a send refused between here and
+	// the write — at admission, at encoding, at the durable write itself — must
+	// leave the client holding a reservation it can retry with the SAME
+	// signature, because re-minting would give it a different id to sign and the
+	// signature it already computed would be worthless.
+	// EXPIRE FIRST, and only here on this path — after the retry check above, so
+	// a legitimate retry answered from the applied-key table never depends on the
+	// TTL, and before the lookup below, so an expired reservation is NOT
+	// spendable.
+	//
+	// This call was MISSING until 2026-08-07 while mint.go claimed expiry "runs on
+	// EVERY mint and EVERY send", which made MintTTL a promise the bus did not
+	// keep: an hour-old reservation still spent fine, Mint.ExpiresAt was returned
+	// to clients as a fact and was not one, and a hoarding agent's slots were
+	// released only if it came back to MINT again — never by sending. The comment
+	// was fixed to match the code rather than the other way round in an earlier
+	// draft; that was the wrong direction. Honouring a reservation past the expiry
+	// this bus PUBLISHED is not "being generous", it is making a documented bound
+	// unobservable and untestable, and a bound nobody can observe is one that
+	// silently stops holding.
+	//
+	// Expiring here costs a client nothing it was promised: the answer is
+	// ErrUnknownMint, which is documented as ROUTINE and whose remedy — re-mint
+	// under the SAME key, re-sign, re-send — cannot double-apply (see that
+	// sentinel). The number stays burned either way.
+	h.expireMintsLocked(h.now())
+
+	mk := mintKey{agent: sender, op: op, key: key}
+	mint, ok := h.mints[mk]
+	if !ok {
+		// Routine, not a fault: a restart or an expiry. See ErrUnknownMint for
+		// why re-minting under the same key is safe and cannot double-apply.
+		return Result{}, fmt.Errorf("%w: agent %q has no reservation for this %s key; re-mint under the same idempotency key, re-sign the fresh assignment and re-send", ErrUnknownMint, sender, op)
 	}
-	m, err := store.NewMessage(h.busID, sender, broadcast, recipients, seq, h.now().UTC(), body, key)
+	if mint.seq != req.signedMint.Seq || mint.messageID != req.signedMint.MessageID {
+		// The client presented an assignment this bus did not give it. The
+		// presented values are NOT echoed — they are attacker-choosable strings
+		// headed for a log line — and the MINTED ones are, because those are the
+		// bus's own and are what the client should have signed.
+		return Result{}, fmt.Errorf("%w: agent %q was minted %s (sequence %d) for this %s key", ErrMintMismatch, sender, mint.messageID, mint.seq, op)
+	}
+	seq := mint.seq
+
+	// The id-authority assertion, re-made on the write path. It was already made
+	// at mint time; it is made again here because the two are separated by a
+	// network round trip and by a client, and an assertion whose value depends on
+	// the code in between staying correct is not worth making. See
+	// assertSeqFloorLocked, and mint.go for the argument this replaced.
+	//
+	// It runs BEFORE the durable write, which the OLD check could not do — that
+	// one compared the sequence against the WAL index of its own prepare and so
+	// could only fire once the message was already on disk and could not be
+	// unwritten. This one needs nothing from the write, so a violation costs
+	// NOTHING durable.
+	if err := h.assertSeqFloorLocked(string(op), mint.messageID, seq); err != nil {
+		return Result{}, err
+	}
+
+	m, err := store.NewMessage(h.busID, sender, broadcast, recipients, seq, h.now().UTC(), body, key, req.signedMint.TimestampUnixMilli, req.signedMint.Signature)
 	if err != nil {
 		return Result{}, err
 	}
@@ -808,37 +1202,56 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 	// Audit is set non-nil to REQUEST an audit record. wal carries the field
 	// today and DUR-5 writes it; store.Record is already shaped so DUR-5 lifts
 	// every field invariant 6 names and drops exactly one (the body).
-	committed, err := h.durable.Write(wal.Entry{
+	//
+	// The returned wal.Committed is DISCARDED, and that is a change from before
+	// SIGN-6: its PrepareIndex was the input to the poison check documented
+	// below, and with that check retired there is no longer anything on this path
+	// that may be decided by a WAL index. Discarding it explicitly, rather than
+	// binding it to a name nothing reads, is the point — a live `committed` here
+	// is an invitation to reintroduce an index-versus-sequence comparison that is
+	// no longer sound.
+	if _, err := h.durable.Write(wal.Entry{
 		Kind:  store.RecordKind,
 		Body:  payload,
 		Idem:  encodedIdem,
 		Audit: &wal.AuditRecord{},
-	})
-	if err != nil {
+	}); err != nil {
 		return Result{}, fmt.Errorf("hub: durably recording message %s: %w", m.ID, err)
 	}
 
-	// The id-authority assertion. See the floor derivation in Open: the whole
-	// argument that a restart cannot reissue this sequence is that the sequence
-	// never runs ahead of the WAL index carrying it. Checked per message rather
-	// than trusted, because the counting argument is the kind of thing a future
-	// edit breaks silently, and the damage — reissued message ids after a
-	// restart — is undetectable downstream.
+	// THE RESERVATION IS SPENT, and only now. The message is durable, so the
+	// number is unambiguously consumed and no retry may be answered from the
+	// mint table again; a retry from here on is answered from the applied-key
+	// table, which the durable write above just made recoverable.
 	//
-	// The message is already durable at this point and cannot be unwritten, so
-	// the response is to POISON the hub: this send fails, no further send is
-	// accepted, and an operator gets an ERROR naming both numbers. Serving on
-	// would mint ids from a floor the next start cannot reconstruct.
-	if committed.PrepareIndex < seq {
-		h.poisoned = fmt.Errorf("%w: message %s took sequence %d but its prepare record landed at WAL index %d; the sequence floor derived at the next start (from the log's high-water index) would then sit BELOW a sequence already written, and message ids would repeat (invariant 1)",
-			ErrPoisoned, m.ID, seq, committed.PrepareIndex)
-		h.log.Error("POISONED: the message sequence has overtaken the durable log index, so a restart could reissue message ids; refusing all further sends",
-			"message_id", m.ID,
-			"seq", seq,
-			"prepare_index", committed.PrepareIndex,
-		)
-		return Result{}, h.poisoned
-	}
+	// Everything below this line is already-durable state being reflected into
+	// memory, and every failure below POISONS rather than returning, so there is
+	// no path on which the mint is deleted for a message that did not land.
+	delete(h.mints, mk)
+	h.decMintCountLocked(sender)
+
+	// # WHERE THE OLD POISON CHECK WENT — read this before adding one back here
+	//
+	// This is where `if committed.PrepareIndex < seq { poison }` used to live. It
+	// asserted the COUNTING argument Open once rested on: "every sequence issued
+	// is <= the WAL index of the prepare carrying it", true while each message
+	// consumed one sequence and at least two indices.
+	//
+	// That argument is RETIRED, and the check with it, because SIGN-1's
+	// reserve-then-send makes it FALSE in normal operation: the first mint writes
+	// a floor record burning sequences 1..256 while sitting at WAL index 1, so a
+	// perfectly healthy bus reaches this line with a sequence far above its
+	// prepare index. A check that fires on healthy traffic is worse than no
+	// check — a false poison stops the bus for ever, and the fix is invariably to
+	// delete the check rather than to understand it.
+	//
+	// It is replaced by the DIRECT assertion — every sequence handed out is <=
+	// the durably-recorded floor — which is strictly stronger (it does not care
+	// how many indices a message costs) and which is made ABOVE, before the
+	// durable write, and again at the moment the number is issued. Do not
+	// reintroduce an index-versus-sequence comparison here: the two counters are
+	// no longer related, and wal.Recovered.NextIndex is documented as a distinct
+	// counter for exactly this reason.
 
 	if err := h.store.Append(m); err != nil {
 		// Durable but not applied: memory no longer matches disk, which is

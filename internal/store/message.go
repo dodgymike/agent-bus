@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/signing"
 )
 
 // RecordKind is the wal.Entry.Kind discriminator for a message. wal does not
@@ -21,10 +22,32 @@ const RecordKind = "message"
 // owned by internal/wal) and it is NOT the HTTP API version: it versions only
 // the field set of Record below.
 //
+// The number is RESERVED, never chosen by eyeballing this constant:
+//
+//	store.RecordVersion = 2 — RESERVED 2026-08-07 from the Spec Server
+//	`store-record-version` namespace by feature-runner (value 1 was seeded to
+//	cover the already-shipped v1 record).
+//
 // Bumping it is a last resort. Record is deliberately shaped so that the CRYPTO
 // epic and DUR-5 can ADD optional fields without a break — see the Record doc —
 // and an added optional field does not move this number.
-const RecordVersion = 1
+//
+// # Why SIGN-6 moved it anyway, and what that costs the operator
+//
+// v2 adds "timestamp_ms" and "signature", and both are REQUIRED rather than
+// optional: SIGN-6 admits no unsigned message, so a record carrying neither is
+// not an older shape of the same fact, it is a message this build is not
+// willing to say was signed. Decode therefore REFUSES every v1 record, Hub.Apply
+// logs the refusal loudly and skips it, and an operator upgrading an existing
+// bus must expect its message history to be DISCARDED.
+//
+// There is no migration and there cannot be one: pre-SIGN-6 messages are
+// unsigned, and the only way to give them a v2 shape would be to invent a
+// signature or to mark them "signed by nobody" — the first is forgery, the
+// second is the unsigned-traffic hole SIGN-6 exists to close. Enrolment
+// ("agent") and invite records are untouched: this version covers Record and
+// nothing else.
+const RecordVersion = 2
 
 // MaxBodyBytes bounds a single message body.
 //
@@ -130,6 +153,32 @@ type Message struct {
 	// table on replay, which is what makes the idempotency memory survive a
 	// restart rather than being an in-memory cache.
 	IdempotencyKey string
+
+	// TimestampUnixMilli is the SENDER's clock, Unix milliseconds UTC. It is
+	// COVERED BY THE SIGNATURE and is therefore NOT interchangeable with SentAt,
+	// which is this bus's clock and is not covered.
+	//
+	// Keeping both is the point, not redundancy. SentAt is what this bus will
+	// swear to and is what retention and ordering are computed from; this field
+	// is what the SENDER claimed and is the only one a recipient can check
+	// against the signature. A bus that collapsed them would either be signing
+	// its own clock (which the sender never saw) or ordering on a clock a client
+	// chooses. Clocks lie, so this is not a freshness mechanism either: replay
+	// protection is the server-minted monotonic sequence plus the recipient's
+	// cursor (invariant 10).
+	TimestampUnixMilli int64
+
+	// Signature is the sender's 64-byte detached Ed25519 signature over
+	// signing.Canonicalize of this message. The bus carries it as OPAQUE BYTES
+	// and never verifies it.
+	//
+	// That is a deliberate division of labour, not a gap: the bus does not hold
+	// the sender's messaging key and must not be trusted to police messages for
+	// senders it does not control, so the BUS enforces SHAPE (present, exactly
+	// signing.SignatureSize bytes) and the RECIPIENT enforces AUTHENTICITY.
+	// SigningMessage below is the one place the mapping from this record to the
+	// bytes this signature covers is written down.
+	Signature []byte
 }
 
 // Size reports the body size in bytes, which is the size the audit trail
@@ -230,6 +279,21 @@ type Record struct {
 	// STATE and not an in-memory cache (invariant 10).
 	IdempotencyKey string `json:"idempotency_key"`
 
+	// TimestampUnixMilli is the SENDER's clock — see Message.TimestampUnixMilli.
+	// It is a separate durable field from sent_at because the two are different
+	// facts and only this one is covered by the signature.
+	TimestampUnixMilli int64 `json:"timestamp_ms"`
+
+	// Signature is the sender's detached Ed25519 signature. encoding/json
+	// renders []byte as standard base64, so it costs 88 bytes on disk and stays
+	// readable with a JSON pretty-printer.
+	//
+	// It is deliberately NOT last: Body is the one field the audit log must
+	// drop, and keeping it last keeps that rule "drop the final field" rather
+	// than "drop the field in the middle". The signature is metadata and DUR-5
+	// may carry it.
+	Signature []byte `json:"signature"`
+
 	// Body is LAST, and is the only field the audit log must not copy.
 	// encoding/json renders []byte as standard base64, so the durable record
 	// stays readable with a JSON pretty-printer and carries arbitrary bytes.
@@ -247,7 +311,15 @@ func ContentHash(body []byte) string {
 // NewMessage builds a validated Message from server-derived parts. It is the
 // ONLY constructor: the fields are interdependent (id derives from seq, hash
 // derives from body) and building one by hand is how they drift apart.
-func NewMessage(busID, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body []byte, idempotencyKey string) (Message, error) {
+//
+// timestampUnixMilli and signature are the two SENDER-supplied fields, and both
+// are MANDATORY. That is SIGN-6: there is no unsigned message type, so a
+// constructor that would accept a zero timestamp or an absent signature would be
+// the hole the whole epic exists to close — an attacker (or a lazy client) that
+// simply omits the field would get a durable, delivered, un-verifiable message.
+// The bound on the signature is a LENGTH and nothing more; see Message.Signature
+// for why this package must not verify.
+func NewMessage(busID, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body []byte, idempotencyKey string, timestampUnixMilli int64, signature []byte) (Message, error) {
 	id, err := ids.MessageID(busID, seq)
 	if err != nil {
 		return Message{}, fmt.Errorf("%w: %s", ErrInvalidMessage, err)
@@ -257,6 +329,19 @@ func NewMessage(busID, sender string, broadcast bool, recipients []string, seq u
 	}
 	if len(recipients) > MaxRecipients {
 		return Message{}, fmt.Errorf("%w: %d recipients, the limit is %d", ErrInvalidMessage, len(recipients), MaxRecipients)
+	}
+	// 0 means "unset", exactly as it does for a sequence and for
+	// signing.Message.TimestampUnixMilli — and a negative value is a pre-1970
+	// clock, which the canonical format can ENCODE but which validate() there
+	// refuses, so accepting one here would build a message that can never be
+	// canonicalized and therefore never verified.
+	if timestampUnixMilli <= 0 {
+		return Message{}, fmt.Errorf("%w: timestamp %d is not a positive Unix millisecond value; 0 means \"unset\" and every message carries the sender's clock (SIGN-6)", ErrInvalidMessage, timestampUnixMilli)
+	}
+	if len(signature) != signing.SignatureSize {
+		// The signature itself is not echoed: it is attacker-chosen bytes headed
+		// for a log line, and its LENGTH is the whole of what was wrong.
+		return Message{}, fmt.Errorf("%w: signature is %d bytes, but every message carries a detached Ed25519 signature of exactly %d (SIGN-6)", ErrInvalidMessage, len(signature), signing.SignatureSize)
 	}
 	m := Message{
 		Seq:       seq,
@@ -272,8 +357,47 @@ func NewMessage(busID, sender string, broadcast bool, recipients []string, seq u
 		Body:           append([]byte(nil), body...),
 		ContentSHA256:  ContentHash(body),
 		IdempotencyKey: idempotencyKey,
+
+		TimestampUnixMilli: timestampUnixMilli,
+		// Copied for the same reason the body and the recipient list are: the
+		// caller still holds these bytes, and a signature mutated after
+		// acceptance would no longer be the one the sender produced over a
+		// message that is already durable.
+		Signature: append([]byte(nil), signature...),
 	}
 	return m, nil
+}
+
+// SigningMessage returns the signing.Message whose canonicalization this
+// message's Signature covers. It is the ONE place the mapping from a stored
+// message to its signed bytes is written down.
+//
+// Everything about verification depends on this mapping being identical on both
+// sides, and the failure mode when it is not is silent: a verifier that
+// reconstructs the bytes slightly differently — one extra field, a different
+// timestamp source, the bus path included — computes a signature check that
+// simply returns false, for every message, for ever, with no test able to tell
+// that from a genuine forgery. So there is exactly one function, and any code
+// that needs the signed bytes calls it rather than assembling its own copy.
+//
+// NOTE WHAT IS ABSENT, and do not "complete" it: SentAt (this bus's clock),
+// BusPath (rewritten by every relay hop, deliberately uncovered — SIGN-1),
+// ContentSHA256 (derived from Body, which is already covered), IdempotencyKey
+// and Broadcast. A broadcast has an EMPTY Recipients, which
+// signing.Canonicalize rejects outright — "an empty recipient set would sign an
+// audience of nobody" — which is exactly why /v1/broadcast is refused today
+// rather than accepting unsigned traffic. This method still returns the
+// broadcast's mapping unchanged; the refusal belongs at the route, not here,
+// and SIGN-3 will settle what a broadcast's canonical audience is.
+func (m Message) SigningMessage() signing.Message {
+	return signing.Message{
+		MessageID:          m.ID,
+		Sequence:           m.Seq,
+		Sender:             m.Sender,
+		Recipients:         m.Recipients,
+		TimestampUnixMilli: m.TimestampUnixMilli,
+		Body:               m.Body,
+	}
 }
 
 // Record renders m as the durable JSON record.
@@ -290,7 +414,11 @@ func (m Message) Record() Record {
 		Size:           len(m.Body),
 		ContentSHA256:  m.ContentSHA256,
 		IdempotencyKey: m.IdempotencyKey,
-		Body:           m.Body,
+
+		TimestampUnixMilli: m.TimestampUnixMilli,
+		Signature:          m.Signature,
+
+		Body: m.Body,
 	}
 }
 
@@ -321,9 +449,20 @@ func Decode(raw json.RawMessage) (Message, error) {
 		return Message{}, fmt.Errorf("%w: %s", ErrInvalidMessage, err)
 	}
 	if rec.V != RecordVersion {
-		// A record from a FUTURE build is refused rather than guessed at. It is
-		// a distinct message from "malformed" because the remedy is different:
-		// the operator downgraded, and the fix is to run the newer binary.
+		// EXACT match, in BOTH directions, and each direction means something
+		// different to the operator:
+		//
+		//   - A record from a FUTURE build is refused rather than guessed at:
+		//     the operator downgraded, and the fix is to run the newer binary.
+		//   - A record from an OLDER build (v1) is refused because it carries no
+		//     signature and no sender timestamp, and SIGN-6 admits no unsigned
+		//     message. The fix is NOT to run an older binary — it is to accept
+		//     that the pre-SIGN-6 history is gone. See RecordVersion for why
+		//     there is no migration.
+		//
+		// Either way the caller DISCARDS the record and says so loudly
+		// (Hub.Apply); invariant 6 sanctions the discard, silent discard is the
+		// defect.
 		return Message{}, fmt.Errorf("%w: record schema version %d, this build understands %d", ErrInvalidMessage, rec.V, RecordVersion)
 	}
 	if rec.Seq == 0 {
@@ -385,6 +524,26 @@ func Decode(raw json.RawMessage) (Message, error) {
 			return Message{}, fmt.Errorf("%w: bus path hop %d: %s", ErrInvalidMessage, i, err)
 		}
 	}
+	// The SIGN-6 pair, re-checked here with the SAME bounds NewMessage applies,
+	// because this decoder is the boundary for bytes THIS PROCESS DID NOT
+	// VALIDATE: a file written by another build, damaged media, and — once the
+	// bus federates — a record handed over by a peer. A record that reached disk
+	// without them is not an older shape of a message, it is a message this
+	// build will not claim was signed, and serving it would put an unsigned
+	// message on a read path whose whole contract is that every message carries
+	// a signature to verify.
+	//
+	// The LENGTH is all that is checked. Verifying here is impossible and would
+	// be wrong even if it were possible: this bus does not hold the sender's
+	// messaging key (Message.Signature).
+	if rec.TimestampUnixMilli <= 0 {
+		return Message{}, fmt.Errorf("%w: record for %s carries timestamp %d; 0 means \"unset\" and every message carries the sender's clock (SIGN-6)", ErrInvalidMessage, rec.MessageID, rec.TimestampUnixMilli)
+	}
+	if len(rec.Signature) != signing.SignatureSize {
+		// The signature bytes are NOT echoed: they are off untrusted media on
+		// their way to a log line, and the length is the whole of the fault.
+		return Message{}, fmt.Errorf("%w: record for %s carries a %d-byte signature, but every message carries a detached Ed25519 signature of exactly %d (SIGN-6)", ErrInvalidMessage, rec.MessageID, len(rec.Signature), signing.SignatureSize)
+	}
 	busPath := rec.BusPath
 	if len(busPath) == 0 {
 		busPath = []string{busID}
@@ -400,5 +559,8 @@ func Decode(raw json.RawMessage) (Message, error) {
 		Body:           rec.Body,
 		ContentSHA256:  rec.ContentSHA256,
 		IdempotencyKey: rec.IdempotencyKey,
+
+		TimestampUnixMilli: rec.TimestampUnixMilli,
+		Signature:          rec.Signature,
 	}, nil
 }

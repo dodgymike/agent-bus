@@ -317,6 +317,50 @@ func (s *Sequence) Next() (uint64, error) {
 	return s.floor, nil
 }
 
+// Peek reports the number Next WOULD issue, without issuing it. It allocates
+// NOTHING and mutates NOTHING: floor, last and sealed are all left exactly as
+// they were, so calling it a thousand times and calling it never are
+// indistinguishable from outside.
+//
+// # Why it exists
+//
+// A caller that must make a number DURABLE BEFORE handing it out needs to know
+// which number is coming before it commits to it. internal/hub's durable mint
+// is that caller: it writes a WAL record burning every sequence up to some N,
+// fsyncs it, and only then calls Next — and it cannot write that record without
+// first knowing where the allocator currently stands. Peek is the read-only
+// half of that dance. It is NOT a reservation: nothing here stops a concurrent
+// Next from taking the peeked number, so a caller that acts on the value must
+// hold whatever lock serialises its own allocation (the hub holds writeMu
+// across the whole of peek -> burn -> Next).
+//
+// # 0 means "not going to issue", and the two reasons are DELIBERATELY conflated
+//
+// It returns 0 both when the allocator is UNSEALED (the floor is unproven, so
+// Next would refuse with ErrFloorUnproven) and when it is EXHAUSTED (floor is
+// math.MaxUint64, so Next would refuse with ErrSequenceExhausted). Zero is
+// unambiguous as a sentinel because 0 is never a number this package issues —
+// see NewSequence.
+//
+// Collapsing the two is safe HERE, and only because of what the caller does
+// next: the caller's very next act is Next(), which returns the real, distinct
+// error. So the information is not lost, it is merely reported by the call that
+// is entitled to report it. Peek's contract is a question about a number, not
+// about the allocator's state, and answering "there is no such number" is the
+// whole of that question. Do NOT reach for this value to decide whether the
+// allocator is healthy — ask Next and read its error.
+func (s *Sequence) Peek() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sealed {
+		return 0
+	}
+	if s.floor == math.MaxUint64 {
+		return 0
+	}
+	return s.floor + 1
+}
+
 // Last reports the highest number this allocator has ISSUED, or 0 if it has
 // issued none. A resumed allocator reports 0 until its first Next, even though
 // its floor is non-zero: Last answers "what did I hand out", not "what is

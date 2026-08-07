@@ -29,7 +29,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		const n = 5
 		var want []string
 		for i := 0; i < n; i++ {
-			res, err := h.Broadcast(hub.BroadcastRequest{
+			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("m%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-empty-%d", i),
@@ -67,7 +67,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		const n = 5
 		var published []string
 		for i := 0; i < n; i++ {
-			res, err := h.Broadcast(hub.BroadcastRequest{
+			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("page-%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-page-%d", i),
@@ -122,7 +122,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("only one"), IdempotencyKey: "k-tail"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("only one"), IdempotencyKey: "k-tail"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -235,11 +235,11 @@ func TestMessageHistoryCursor(t *testing.T) {
 		b := agentID(t, h.BusID(), "beta")
 		g := agentID(t, h.BusID(), "gamma")
 
-		dm, err := h.Send(hub.SendRequest{Sender: g, To: a, Body: []byte("for alpha's eyes"), IdempotencyKey: "k-secret"})
+		dm, err := mintedSend(t, h, hub.SendRequest{Sender: g, To: a, Body: []byte("for alpha's eyes"), IdempotencyKey: "k-secret"})
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
-		bc, err := h.Broadcast(hub.BroadcastRequest{Sender: g, Body: []byte("for everyone"), IdempotencyKey: "k-public"})
+		bc, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: g, Body: []byte("for everyone"), IdempotencyKey: "k-public"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -286,7 +286,7 @@ func TestMessageHistoryCursor(t *testing.T) {
 
 		total := hub.DefaultBatchLimit + 1
 		for i := 0; i < total; i++ {
-			if _, err := h.Broadcast(hub.BroadcastRequest{
+			if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("clamp-%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-clamp-%d", i),

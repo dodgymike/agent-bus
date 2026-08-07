@@ -17,7 +17,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | namespace | reserved values | meaning |
 | --- | --- | --- |
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
-| `ondisk-format-version` | `1` (legacy, read-only), `2` (current) | WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12) |
+| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below) |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -67,6 +67,90 @@ committed; a data dir at a non-default, non-ignored path is the operator's own r
 
 No new route, CLI flag, env var, or header was introduced by this change — see the sections above,
 which remain the complete index.
+
+## On-disk files in the data directory: the durable WAL record-index floor (e120153b, db350e39, added 2026-08-07)
+
+**Corrects two Spec Server defects, both P0, with one root cause.** Recovery previously derived the
+index the next WAL append would use SOLELY from what survived in the log — one past the highest
+SURVIVOR. That reissued ids two ways: a discarded tail record's index was handed straight back out
+(`e120153b`), and a whole-log QUARANTINE reset the derivation to 1, reissuing the bus's entire
+history of record indices and, through `internal/hub`'s `Recovered.NextIndex - 1` derivation, every
+message id it had ever minted (`db350e39`). See `DECISIONS.md`, 2026-08-07, for the full defect
+writeup and how invariants 1 and 6 were reconciled without narrowing either.
+
+`<data-dir>/wal-index-floor` (mode `0600`, on-disk format version **4** — RESERVED via the Spec
+Server `ondisk-format-version` namespace on 2026-08-07, never hand-picked; `1`/`2` are the WAL frame
+format above, `3` is `agent-suffixes`) is a small, atomically-replaced file living OUTSIDE the WAL,
+implemented in `internal/wal/indexfloor.go`. Format, mirroring `agent-suffixes`: a header line
+carrying a SHA-256 of the body, then a two-line body:
+
+```
+agent-bus-wal-index-floor v4 sha256=<64 hex>
+reserved <decimal uint64>
+written <decimal uint64>
+```
+
+The SHA-256 is an INTEGRITY check against media damage and accidental editing, **not
+authentication** — anyone who can write the file can recompute it, the same posture the
+`agent-suffixes` digest already takes.
+
+**Two fields, both STRICTLY NON-DECREASING and enforced as such in code. There is deliberately no
+clean-shutdown flag and no field that can rewind:**
+- `reserved` — no WAL record index above this value has EVER been authorised by this data directory.
+- `written` — every WAL record index at or below this value is BURNED: it has either been written to
+  the log, or permanently SKIPPED by recovery.
+- Always `written <= reserved`; a loaded file where that fails is corrupt.
+
+**Written AHEAD of the index it authorises.** `Writer.Append` reserves the index durably BEFORE
+stamping it into a frame, and POISONS the writer if the reservation cannot be made. Reservation is
+amortised in blocks of `indexReserveBlock = 256`, so the disk is touched roughly once per 256
+appends — about one extra fsync per 256 the WAL already performs under invariant 4, not one per
+append (which would double the fsync count on the send path). The price of the block: a crash may
+permanently burn up to 255 unused indices, which show up as a HOLE in the WAL's index sequence.
+Holes are legal and permanent here — invariant 1 beats gap-freeness.
+
+**`wal.Open` resumes at the MAXIMUM of three sources** — see the 2026-08-07 addendum in "The
+write-ahead log at startup" below for the full statement: the replayed high-water mark, one past the
+highest index the repair pass OBSERVED (identified discards included, `Repair.NextIndex`), and
+`written+1` from this floor — plus `reserved+1` when recovery lost bytes it could not enumerate
+(`Repair.LostUnidentified`: a framing-stage region discard, an exhausted forward search, or a
+quarantine).
+
+**Written atomically:** a temp file in the same directory is written, fsynced, renamed into place,
+and then the directory itself is fsynced. A crash can therefore never produce a corrupt floor file —
+corruption means media damage or tampering.
+
+**MISSING vs CORRUPT is the load-bearing distinction, and the two are handled oppositely:**
+- **MISSING is benign** — a data directory written by a binary that predates this file — and yields a
+  zero floor, logged at WARN when the directory is not otherwise fresh. Refusing to start over a
+  missing file would brick every already-deployed bus on upgrade, which is exactly the bricking the
+  existing `upgradeV1` path exists to avoid.
+- **CORRUPT (bad header, unknown version, checksum mismatch, malformed number, or `written >
+  reserved`) is FATAL**, wraps the exported sentinel `wal.ErrIndexFloorCorrupt`, and is **NEVER
+  regenerated** — regenerating it would resume the WAL record index (and the message sequence
+  derived from it) below numbers already handed out, silently, with nothing downstream able to
+  detect it. The error names a one-step operator remedy: delete the file and restart; the bus then
+  resumes from the log's own high-water mark, which is correct **unless the log has ALSO been
+  damaged or quarantined**.
+
+**Recovery still ALWAYS reaches a running server — this file adds NO refuse-to-start behaviour.** A
+quarantine still starts a fresh log; it just starts it above the floor instead of at 1. Every index
+skip is logged loudly (WARN, or ERROR after a quarantine) naming from/to/indices skipped and the
+floor file's path.
+
+**Scope limit, stated plainly and not softened:** the AUDIT log writer (`wal.OpenWriter`,
+`wal.KindAudit`) attaches NO floor — only `wal.Open` (the WAL proper) does. An audit log's discarded
+tail record index can therefore still be reissued; this file protects the WAL's record indices and,
+through `internal/hub`'s derivation, message ids — it does not protect the audit trail.
+
+**Migration residual, stated plainly and not softened:** on a data directory that predates this
+file, the floor reads as zero until the first `Open` under the new binary writes it. If such a
+directory's WAL is quarantined on that very first start under the new binary, ids can still be
+reissued. The window closes permanently after one successful start.
+
+New exported surface introduced by this file: `wal.IndexFloorFileName` (= `"wal-index-floor"`),
+`(*wal.Log).IndexFloorPath()`, `wal.Repair.LostUnidentified`, `wal.Recovered.FirstIndex`. No new
+HTTP route, CLI flag, env var, or header was introduced by this change.
 
 ## The write-ahead log at startup (added 2026-08-02)
 
@@ -160,6 +244,16 @@ does not add an entry to the "Env vars" section above, which remains empty.
 
 No new HTTP route, CLI flag, production env var, header, or on-disk record type was introduced by
 this change.
+
+**2026-08-07 addendum — the start index is no longer derived from the log alone (e120153b,
+db350e39).** `wal.Open` now computes the index its first append will use as the MAXIMUM of three
+sources, not the log's own arithmetic: (1) the replayed high-water mark, (2) one past the highest
+index the repair pass OBSERVED (`Repair.NextIndex`, now including identified discards — it used to
+be one past the highest SURVIVOR, which was defect `e120153b`), and (3) `written+1` from the durable
+record-index floor at `<data-dir>/wal-index-floor` — plus `reserved+1` from that same floor when
+recovery lost bytes it could not enumerate (`Repair.LostUnidentified`). See "On-disk files in the
+data directory" above for the floor file itself, and `DECISIONS.md` (2026-08-07) for why deriving
+the mark from the log alone, on its own, was the defect rather than an accepted limit.
 
 ## The durable applied-key store (IDEM-11, added 2026-08-03)
 
@@ -384,7 +478,11 @@ fsync-at-prepare-and-again-at-commit, no new frame shape.
 
 **One WAL now carries at least two `Entry.Kind` values.** `auth.RecordKind = "agent"` /
 `auth.RecordVersion = 1` sit alongside the existing `store.RecordKind = "message"` /
-`store.RecordVersion = 1` (`internal/store/message.go`) in the SAME log file. Each applier is handed
+`store.RecordVersion` (`internal/store/message.go` — **`1` when this section was written; `2` since
+SIGN-2/SIGN-6, see "The message record is version 2" at the end of this file**. `auth.RecordVersion`
+is a SEPARATE, independently-versioned number and is still `1`: bumping the message record did not
+touch the enrolment record, and an enrolment written by a pre-SIGN-6 build is still read by a
+post-SIGN-6 one) in the SAME log file. Each applier is handed
 every committed entry regardless of kind and SILENTLY SKIPS the ones that are not its own —
 `WALRoster.Apply` returns `nil` immediately when `c.Entry.Kind != RecordKind`, the same shape
 `Hub.Apply` already uses for message records it does not own. Neither applier treats the other kind's
@@ -678,3 +776,89 @@ safe.
 the `POST /v1/enroll` wire shape that will present an invite secret; `INVITE-MINT`/`INVITE-REVOKE` own
 the operator-facing surface for minting and revoking one. Nothing in this section is reachable by an
 agent yet.
+
+## The message record is version 2 — a DESTRUCTIVE, BIDIRECTIONAL break (SIGN-2/SIGN-6, 2026-08-07)
+
+**`store.RecordVersion` is `2`.** It was `1`, and every passage in this file that still says `1` for
+the MESSAGE record is stale; the one such passage above has been corrected in place. The value was
+**RESERVED from the Spec Server `store-record-version` namespace on 2026-08-07** — value `1` was
+seeded in the same pass to cover the already-shipped v1 record, so the namespace describes the whole
+history rather than starting at the bump. It was not picked by eyeballing the constant.
+
+**This is the destructive part, and it is the first thing an operator needs.** `store.Decode` refuses
+any record whose `v` is not exactly `RecordVersion`, so:
+
+- **Upgrade:** every `"message"`-kind record already on disk is `v:1`. On the first start under the
+  new binary, recovery refuses each one and `Hub.Apply` **discards it, LOUDLY** (ERROR, naming the
+  record). **A bus upgraded across this boundary loses its entire message history.** That is not a
+  bug to be reported and there is no migration flag: a pre-SIGN-6 message carries no signature and no
+  sender timestamp, and a v2 record REQUIRES both, so there is no value to migrate them to. Inventing
+  one — a zero signature, a synthesised timestamp — would manufacture a record that looks signed and
+  verifies as nothing, which is the exact silent failure invariant 9 warns about.
+- **Rollback:** the break runs BOTH ways. An old binary reading a v2 log discards every v2 message
+  record for the same reason. Rolling back is therefore not a way to get the history back; it is a
+  second discard. Take a copy of the data directory before upgrading if the history matters.
+
+**What is NOT affected** (say it explicitly so nobody widens the blast radius): `auth.RecordKind =
+"agent"` (enrolment — still `auth.RecordVersion = 1`), `invite.RecordKind = "invite"`, and the new
+`"seqfloor"` kind below. The enrolment roster, the invite store and the sequence floor all survive
+the upgrade intact. An agent does **not** have to re-enrol because of this bump.
+
+**The two new fields**, both REQUIRED — `store.NewMessage` refuses to construct without them, and
+`store.Decode` refuses to read without them, because `Decode` is the boundary for bytes this process
+did not validate:
+
+| field | JSON key | Go type | on-disk encoding | rule |
+| --- | --- | --- | --- | --- |
+| `TimestampUnixMilli` | `timestamp_ms` | `int64` | plain JSON number | the **SENDER's** clock, Unix milliseconds UTC. Must be `> 0`. It is **covered by the signature**, which is precisely why the bus stores the sender's value verbatim and never substitutes its own |
+| `Signature` | `signature` | `[]byte` | standard base64 (what `encoding/json` does with `[]byte`) | exactly `signing.SignatureSize` (64) bytes. Carried as **OPAQUE BYTES**; this bus never verifies it |
+
+`SentAtUnixNs` (`sent_at_unix_ns`) is unchanged and is a **different fact**: it is this bus's clock
+and is **NOT** covered by the signature. The two are not interchangeable and conflating them makes
+every verification fail. `store.Message.SigningMessage()` is the ONE place the mapping from a stored
+message to the bytes its signature covers is written down — read it rather than re-deriving the
+field order.
+
+### A fourth `Entry.Kind`: `"seqfloor"` — the durable sequence floor
+
+**Nothing was reserved, and nothing needed to be.** `wal.Entry.Kind` is a free-form APPLICATION
+STRING, exactly as this file already records for `"agent"` and `"invite"` above; the reserved
+NUMBERS are `wal.Type`'s framing values, which are untouched. `hub.SeqFloorRecordKind = "seqfloor"`
+now sits alongside `"message"`, `"agent"` and `"invite"` in the same log, and every applier still
+silently skips the kinds it does not own.
+
+| | |
+|---|---|
+| `Entry.Kind` | `"seqfloor"` (`hub.SeqFloorRecordKind`) |
+| `Entry.Body` | `{"v":1,"floor":<uint64>}` (`hub`'s unexported `seqFloorRecord`, `seqFloorRecordVersion = 1`) |
+| Meaning | **every sequence `<= floor` is BURNED. This bus will never issue any of them again.** |
+| Written | AHEAD — fsynced BEFORE any sequence above the currently-proven floor is handed to a client |
+| Batch | `hub.MintBatchSize = 256`. One floor record burns 256 numbers, so the cost is one extra fsync per 256 mints and **zero on the send path itself** |
+| Frames | the ordinary PREPARE/COMMIT pair — no new frame shape, no new fsync discipline |
+| Undecodable at replay | **skipped LOUDLY at ERROR** (invariant 6: discard is sanctioned, SILENT discard is the defect) |
+
+`hub.Open` derives the resume floor as the **maximum** of `Recovered.NextIndex - 1`, the highest
+floor from replayed `"seqfloor"` records, and the highest applied message sequence — then seals. The
+`NextIndex - 1` term is KEPT as defence in depth; it can only raise the floor, never lower it.
+
+**The operator-visible consequence: SEQUENCE NUMBERS NOW ADVANCE IN JUMPS.** A restart typically
+resumes at the next multiple of 256, and a mint that is never spent leaves a permanent hole.
+**This is CORRECT, not corruption.** `internal/ids/sequence.go` already states the rule consumers
+must hold to: **treat the sequence as strictly increasing, never as dense.** Anything that infers
+"messages were lost" from a gap was already wrong; it is now visibly wrong. A gap costs nothing —
+invariant 1 (ids are never reused, including across restarts) beats gap-freeness, and this record is
+what buys it across the mint.
+
+**The mint TABLE is deliberately NOT durable, only the burned NUMBER is.** Which
+`(agent, op, idempotency_key)` holds which sequence lives in memory
+(`hub.MaxOutstandingMintsPerAgent = 64`, `hub.MaxOutstandingMints = 8192`,
+`hub.MintTTL = 15m`). A restart therefore invalidates every outstanding reservation: the client's
+next `POST /v1/send` gets `409` (`hub.ErrUnknownMint`), re-mints under the SAME idempotency key,
+gets a FRESH sequence, re-signs and re-sends. The old number stays burned. This cannot double-apply:
+if the crash landed after the message became durable, the re-sent request carries the same key and
+the same fingerprint, so `internal/idem` answers `OutcomeRetry` and replays the ORIGINAL result.
+
+**No new on-disk FILE, no `ondisk-format-version` bump, no new `record-type` number, and no new HTTP
+route, CLI flag, env var or header is introduced by the `"seqfloor"` record itself.** The HTTP
+surface this wave DID change (`POST /v1/mint`, `POST /v1/send`, `POST /v1/broadcast`) is in
+`CONTRACTS-HTTP.md`.

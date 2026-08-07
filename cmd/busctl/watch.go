@@ -298,6 +298,19 @@ type watchRecord struct {
 	Size          int      `json:"size"`
 	ContentSHA256 string   `json:"content_sha256"`
 
+	// TimestampMS is the SENDER's clock and Signature is the sender's detached
+	// Ed25519 signature. They are carried HERE, on the stream, because they are
+	// the only things a consumer can verify the message with — SIGN-6 requires
+	// the receive path to hand the recipient the signature, and a stream that
+	// dropped it would leave every consumer of this command structurally unable
+	// to check anything, however good its key material.
+	//
+	// sent_at above is the BUS's clock and is NOT covered by the signature;
+	// timestamp_ms is the sender's and IS. Do not conflate them: verifying
+	// against the wrong one fails every time, and the reason is not obvious.
+	TimestampMS int64  `json:"timestamp_ms"`
+	Signature   string `json:"signature"`
+
 	// Body is the AUTHORITATIVE form: encoding/json renders []byte as standard
 	// base64, so it is lossless for any bytes at all and is always present.
 	Body []byte `json:"body"`
@@ -320,6 +333,8 @@ func newWatchRecord(m client.Message) watchRecord {
 		SentAt:        m.SentAt,
 		Size:          m.Size,
 		ContentSHA256: m.ContentSHA256,
+		TimestampMS:   m.TimestampMS,
+		Signature:     m.Signature,
 		Body:          m.Body,
 	}
 	if s, ok := plainText(m.Body); ok {

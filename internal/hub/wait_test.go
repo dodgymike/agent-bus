@@ -61,7 +61,7 @@ func TestLongPollWait(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("already here"), IdempotencyKey: "k-fast"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("already here"), IdempotencyKey: "k-fast"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -198,7 +198,7 @@ func TestLongPollWait(t *testing.T) {
 
 		total := hub.MaxBatchLimit + 1
 		for i := 0; i < total; i++ {
-			if _, err := h.Broadcast(hub.BroadcastRequest{
+			if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("clamp-%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-waitclamp-%d", i),
@@ -265,7 +265,7 @@ func TestWaiterWakeup(t *testing.T) {
 
 		waitForWaiters(t, h, 1, "the waiter must be parked before the broadcast")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("wake up"), IdempotencyKey: "k-wake"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("wake up"), IdempotencyKey: "k-wake"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -311,7 +311,7 @@ func TestWaiterWakeup(t *testing.T) {
 
 		waitForWaiters(t, h, 1, "gamma must be parked before the DM")
 
-		if _, err := h.Send(hub.SendRequest{Sender: a, To: b, Body: []byte("not for gamma"), IdempotencyKey: "k-notseen"}); err != nil {
+		if _, err := mintedSend(t, h, hub.SendRequest{Sender: a, To: b, Body: []byte("not for gamma"), IdempotencyKey: "k-notseen"}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 
@@ -385,7 +385,7 @@ func TestWaiterWakeup(t *testing.T) {
 
 		waitForWaiters(t, h, 1, "the waiter must be parked before the durable write starts")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("ordered"), IdempotencyKey: "k-order"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("ordered"), IdempotencyKey: "k-order"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -442,7 +442,7 @@ func TestWaiterWakeup(t *testing.T) {
 				out <- outcome{batch, err}
 			}()
 
-			res, err := h.Broadcast(hub.BroadcastRequest{
+			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
 				Body:           []byte(fmt.Sprintf("race-%d", i)),
 				IdempotencyKey: fmt.Sprintf("k-race-%d", i),
@@ -614,7 +614,7 @@ func TestPollConcurrency(t *testing.T) {
 
 		// And the already-parked waiters are UNDISTURBED: one broadcast still
 		// wakes every one of them, normally.
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("still working"), IdempotencyKey: "k-cap"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("still working"), IdempotencyKey: "k-cap"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
@@ -697,7 +697,7 @@ func TestPollConcurrency(t *testing.T) {
 
 		waitForWaiters(t, h, n+1, "all waiters, including the sender's, must park before the broadcast")
 
-		res, err := h.Broadcast(hub.BroadcastRequest{Sender: sender, Body: []byte("one to many"), IdempotencyKey: "k-herd"})
+		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: sender, Body: []byte("one to many"), IdempotencyKey: "k-herd"})
 		if err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}

@@ -466,6 +466,48 @@ assignment rather than burning another), and the recovery floor must count **ass
 sequences, not merely those carried by an accepted message. SIGN-2 implements this; it is stated here
 because a SIGN-2 that skips it is silently wrong in a way no signature test detects.
 
+#### 8.4.1 What SIGN-2 actually shipped, and where it DIVERGES from the paragraph above (2026-08-07)
+
+The paragraph above is the specification. This subsection is the implementation, written separately
+because one clause of the specification was **deliberately not implemented as stated**.
+
+**The durable artefact is a SEQUENCE FLOOR, not a per-key assignment record.** A new WAL entry kind
+`"seqfloor"` (`hub.SeqFloorRecordKind`, body `{"v":1,"floor":N}`) records that **every sequence
+`<= N` is BURNED and will never be issued by this bus again**. It is fsynced AHEAD of any number
+above the proven floor being handed out, in batches of `hub.MintBatchSize = 256` — so the amortised
+cost is one extra fsync per 256 mints and **zero on the send path itself**. On-disk shape:
+`CONTRACTS-ONDISK.md`.
+
+**THE DIVERGENCE.** The specification says the assignment must reach disk "bound to the idempotency
+key that asked for it". It is **not**. What reaches disk is only that the NUMBER is burned; the table
+mapping `(agent, op, idempotency_key) → sequence` is **in memory only**, bounded
+(`MaxOutstandingMintsPerAgent = 64`, `MaxOutstandingMints = 8192`) and expiring (`MintTTL = 15m`).
+
+That is a deliberate narrowing, and it is safe, because the property the binding was there to protect
+is invariant 1 (never issue a number twice) and the floor protects that directly and more cheaply.
+What is LOST is only that a reservation does not survive a restart:
+
+- A client that minted and then met a restart gets `409` (`hub.ErrUnknownMint`) on its send. It
+  re-mints under the **same** idempotency key, receives a **fresh** sequence, re-signs and re-sends.
+- The old number stays burned — a hole, which §8.4 above already declares correct and which
+  `internal/ids/sequence.go` pins as the rule for consumers: **strictly increasing, never dense.**
+- This cannot double-apply. If the crash landed AFTER the message became durable, the re-sent request
+  carries the same key and the same fingerprint, so `internal/idem` answers `OutcomeRetry` and
+  returns the ORIGINAL result. One message, not two.
+
+**The counting argument is RETIRED, and replaced by a stronger direct assertion.** `hub.Open`
+previously derived its floor as `NextIndex - 1` on the argument that "every sequence issued is <= the
+WAL index of the prepare carrying it" — which held only while a sequence could not be issued before a
+record existed, and the mint breaks that outright. `Open` now takes the **maximum** of
+`NextIndex - 1`, the highest replayed `"seqfloor"` value, and the highest applied sequence
+(`NextIndex - 1` is kept purely as defence in depth — it can only raise the floor). The runtime check
+is now the direct assertion **every sequence handed out is <= the durably-recorded floor**, asserted
+where the sequence is issued and re-asserted at publish; a violation POISONS the hub exactly as
+before.
+
+**Bounds fail CLOSED.** Over the per-agent bound is `hub.ErrAgentQuota`, over the global bound is
+`hub.ErrCapacity`; **another agent's reservation is never evicted to make room.**
+
 ### 8.5 Relay: the origin's numbers are signed, the receiving bus's are not
 
 This is the collision SIGN-7 raised, and this is its resolution. The signed bytes carry the **origin

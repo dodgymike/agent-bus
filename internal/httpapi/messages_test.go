@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
+	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
@@ -56,9 +59,33 @@ func newMessagingServer(t *testing.T) (*httpapi.Server, *bytes.Buffer) {
 	if err != nil {
 		t.Fatalf("building the agent id minter: %v", err)
 	}
-	svc, err := auth.NewService(auth.Options{Minter: minter})
+	// ONE roster, shared by construction. The auth service writes it at
+	// enrolment and the hub READS THROUGH to it (hub.RosterSource): there is no
+	// second copy for a handler to forget to update, which is the whole of
+	// AUTH-7. That is why an agent enrolled over HTTP below is immediately
+	// addressable on /v1/send, with nothing in this package reporting it.
+	roster := auth.NewMemoryRoster()
+	svc, err := auth.NewService(auth.Options{Minter: minter, Roster: roster})
 	if err != nil {
 		t.Fatalf("building the auth service: %v", err)
+	}
+
+	// The hub is built by the CALLER now — httpapi no longer constructs one —
+	// so this helper wires it the way cmd/agent-bus does: the same durable log,
+	// a read-only replay pass over its file, and a live view of the roster.
+	h, err := hub.Open(hub.Options{
+		BusID:   msgTestBusID,
+		DataDir: filepath.Dir(walLog.Path()),
+		Durable: walLog,
+		Replay: func(fn func(wal.Committed) error) (wal.Recovered, error) {
+			return wal.Replay(walLog.Path(), fn)
+		},
+		NextIndex: walLog.Recovered().NextIndex,
+		Roster:    authRosterView{roster},
+		Logger:    logger,
+	})
+	if err != nil {
+		t.Fatalf("opening the messaging hub: %v", err)
 	}
 
 	srv := httpapi.New(httpapi.Options{
@@ -66,11 +93,39 @@ func newMessagingServer(t *testing.T) (*httpapi.Server, *bytes.Buffer) {
 		Logger:   logger,
 		Durable:  walLog,
 		Auth:     svc,
+		Hub:      h,
 	})
 	if srv.Hub() == nil {
 		t.Fatal("the server built no hub from a real durable log, so no messaging route is registered; every assertion below would be about a 404")
 	}
 	return srv, lg
+}
+
+// authRosterView adapts internal/auth's roster to the read-only view the hub
+// serves from, exactly as cmd/agent-bus's hubRoster does for the real server.
+//
+// It is duplicated here rather than exported from cmd because the production
+// adapter lives in package main and cannot be imported. Keep the two in step:
+// the field that matters is EnrolledAt, which must be the agent's ORIGINAL
+// enrolment instant — it is the epoch every read path filters with
+// (store.Message.VisibleTo).
+type authRosterView struct{ roster auth.Roster }
+
+func (v authRosterView) Lookup(agentID string) (hub.Agent, bool) {
+	e, ok := v.roster.Get(agentID)
+	if !ok {
+		return hub.Agent{}, false
+	}
+	return hub.Agent{AgentID: e.AgentID, Name: e.Name, EnrolledAt: e.EnrolledAt}, true
+}
+
+func (v authRosterView) List() []hub.Agent {
+	entries := v.roster.List()
+	out := make([]hub.Agent, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, hub.Agent{AgentID: e.AgentID, Name: e.Name, EnrolledAt: e.EnrolledAt})
+	}
+	return out
 }
 
 // testAgent is one enrolled agent with a live session, as a client holds it.
@@ -124,12 +179,80 @@ func authed(t *testing.T, srv *httpapi.Server, a testAgent, method, path, body s
 // b64 spells a body the way a client sends it.
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-// sendOK posts a broadcast or a DM and insists on the 201.
-func sendOK(t *testing.T, srv *httpapi.Server, from testAgent, path, body string) map[string]interface{} {
+// msgTestTimestampMs is the SENDER-clock reading every send below carries.
+//
+// It is a fixed value rather than time.Now() because it is COVERED BY THE
+// SIGNATURE: a client computes its signature over this exact number, so a
+// timestamp that moved between building the request and building the signature
+// would be a bug a real client cannot have. Fixing it also keeps a response body
+// byte-reproducible across runs.
+const msgTestTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
+
+// msgTestSignature is a well-formed 64-byte placeholder, standard base64.
+//
+// THE BUS NEVER VERIFIES A MESSAGE SIGNATURE and must never be given the
+// ability to: it does not hold the sender's messaging key and must not be
+// trusted to police messages for senders it does not control. What it enforces
+// is SHAPE — present, valid base64, exactly signing.SignatureSize bytes — so a
+// real Ed25519 signature would prove nothing here that a constant does not.
+//
+// The negative cases (absent, not base64, 63 bytes, 65 bytes) belong to the
+// SIGN-6 rejection suite and are deliberately NOT written here.
+func msgTestSignature() string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xAB}, ed25519.SignatureSize))
+}
+
+// mintOverHTTP is STEP ONE of a send, performed the way a client performs it.
+//
+// SIGN-1 settled that the sender signs the ORIGIN bus's minted message id and
+// sequence, which makes a send a two-step: reserve here, sign, then present the
+// reservation back on /v1/send. A test that skipped this step would not be
+// testing a shortcut, it would be testing a request no client can make — the
+// send is refused with 409 because there is no reservation to spend.
+func mintOverHTTP(t *testing.T, srv *httpapi.Server, from testAgent, op, key string) (messageID string, seq uint64) {
 	t.Helper()
-	rec := authed(t, srv, from, http.MethodPost, path, body)
+	rec := authed(t, srv, from, http.MethodPost, httpapi.RouteMint,
+		`{"op":"`+op+`","idempotency_key":"`+key+`"}`)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("POST %s = %d, want 201; body %s", path, rec.Code, rec.Body.String())
+		t.Fatalf("POST %s = %d, want 201; body %s", httpapi.RouteMint, rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	messageID, _ = body["message_id"].(string)
+	rawSeq, _ := body["seq"].(float64)
+	if messageID == "" || rawSeq == 0 {
+		t.Fatalf("%s returned message_id %q and seq %v; a reservation must carry both", httpapi.RouteMint, messageID, body["seq"])
+	}
+	return messageID, uint64(rawSeq)
+}
+
+// signedSendBody is the /v1/send request a client builds once it holds a
+// reservation: the addressing, the payload, the reservation itself and the
+// detached signature over them.
+//
+// `sender` is spelled out here rather than left off because SIGN-6 requires the
+// request to name the sender it signed as, so the bus can refuse a message whose
+// signed content contradicts the identity it authenticated. It is INPUT TO
+// VALIDATE and never an identity — the bus takes the principal from the session.
+func signedSendBody(to, payloadB64, key, sender, messageID string, seq uint64) string {
+	return fmt.Sprintf(`{"to":%q,"body":%q,"idempotency_key":%q,"sender":%q,"message_id":%q,"seq":%d,"timestamp_ms":%d,"signature":%q}`,
+		to, payloadB64, key, sender, messageID, seq, msgTestTimestampMs, msgTestSignature())
+}
+
+// sendDM runs the WHOLE two-step — mint, then send — and returns the raw
+// recorder so a caller can assert on a status other than 201.
+func sendDM(t *testing.T, srv *httpapi.Server, from testAgent, to, payloadB64, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	msgID, seq := mintOverHTTP(t, srv, from, "send", key)
+	return authed(t, srv, from, http.MethodPost, httpapi.RouteSend,
+		signedSendBody(to, payloadB64, key, from.id, msgID, seq))
+}
+
+// sendOK is sendDM insisting on the 201.
+func sendOK(t *testing.T, srv *httpapi.Server, from testAgent, to, payloadB64, key string) map[string]interface{} {
+	t.Helper()
+	rec := sendDM(t, srv, from, to, payloadB64, key)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST %s = %d, want 201; body %s", httpapi.RouteSend, rec.Code, rec.Body.String())
 	}
 	return decodeBody(t, rec)
 }
@@ -169,6 +292,7 @@ func TestMessagingRoutesRequireAuthentication(t *testing.T) {
 	}{
 		{httpapi.RouteAgents, http.MethodGet},
 		{httpapi.RouteBroadcast, http.MethodPost},
+		{httpapi.RouteMint, http.MethodPost},
 		{httpapi.RouteSend, http.MethodPost},
 		{httpapi.RouteMessages, http.MethodGet},
 		{httpapi.RouteWait, http.MethodGet},
@@ -245,18 +369,158 @@ func TestAgentsRoute(t *testing.T) {
 	}
 }
 
-// TestBroadcastRoute covers POST /v1/broadcast (MSG-2) on the wire, including
-// both halves of invariant 10 as a client sees them.
-func TestBroadcastRoute(t *testing.T) {
+// TestMintRoute covers POST /v1/mint (SIGN-2) on the wire: the reservation a
+// sender must hold before it can sign anything.
+func TestMintRoute(t *testing.T) {
+	srv, _ := newMessagingServer(t)
+	alpha := enrolAndAuthenticate(t, srv, "alpha")
+
+	rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteMint, `{"op":"send","idempotency_key":"mint-1"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	wantKeys(t, body, "message_id", "seq", "sender", "op", "expires_at")
+
+	msgID, _ := body["message_id"].(string)
+	gotBus, gotSeq, err := ids.ParseMessageID(msgID)
+	if err != nil {
+		t.Fatalf("message_id %q is not a well-formed id: %v", msgID, err)
+	}
+	if gotBus != msgTestBusID {
+		t.Errorf("message id bus half = %q, want %q: the id a sender signs must name the ORIGIN bus (SIGN-1)", gotBus, msgTestBusID)
+	}
+	if body["seq"] != float64(gotSeq) {
+		t.Errorf("seq = %v but the message id carries %d; the canonical format encodes both and checks they agree", body["seq"], gotSeq)
+	}
+	if gotSeq == 0 {
+		t.Error("sequence 0 is never allocated")
+	}
+	// The sender is the AUTHENTICATED principal echoed back. There is no sender
+	// field in the request and there never may be: a reservation minted under a
+	// name of the caller's choosing is a signed message id attributable to
+	// somebody else (invariant 1).
+	if body["sender"] != alpha.id {
+		t.Errorf("sender = %v, want the authenticated principal %q", body["sender"], alpha.id)
+	}
+	if body["op"] != "send" {
+		t.Errorf("op = %v, want \"send\"", body["op"])
+	}
+	if _, err := time.Parse(time.RFC3339Nano, body["expires_at"].(string)); err != nil {
+		t.Errorf("expires_at is not RFC3339: %v", err)
+	}
+
+	t.Run("a re-mint under the same key returns the SAME reservation and allocates nothing", func(t *testing.T) {
+		again := authed(t, srv, alpha, http.MethodPost, httpapi.RouteMint, `{"op":"send","idempotency_key":"mint-1"}`)
+		if again.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 on a legitimate re-mint; a retry must never be punished (invariant 10)", again.Code)
+		}
+		if got := again.Header().Get(httpapi.IdempotencyReplayedHeader); got != "true" {
+			t.Errorf("%s = %q, want \"true\"", httpapi.IdempotencyReplayedHeader, got)
+		}
+		// BYTE-IDENTICAL, expires_at included. A re-mint that returned a fresh
+		// expiry would let a client hold a reservation open for ever by asking
+		// again, and would make the response body disagree with the first one a
+		// client may already have signed against.
+		if again.Body.String() != rec.Body.String() {
+			t.Errorf("the re-mint body is\n  %s\nwant the ORIGINAL, byte for byte\n  %s", again.Body.String(), rec.Body.String())
+		}
+	})
+
+	t.Run("op is validated", func(t *testing.T) {
+		for _, bad := range []string{`{"op":"relay","idempotency_key":"mint-bad-op"}`, `{"idempotency_key":"mint-no-op"}`} {
+			r := authed(t, srv, alpha, http.MethodPost, httpapi.RouteMint, bad)
+			if r.Code != http.StatusBadRequest {
+				t.Fatalf("%s gave %d, want 400: an unrecognised op must be refused, never defaulted", bad, r.Code)
+			}
+		}
+	})
+
+	t.Run("an idempotency key is required", func(t *testing.T) {
+		r := authed(t, srv, alpha, http.MethodPost, httpapi.RouteMint, `{"op":"send"}`)
+		if r.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 without an idempotency key (invariant 10)", r.Code)
+		}
+	})
+}
+
+// TestBroadcastRouteIsRefused pins the 501 (SIGN-6).
+//
+// This test USED to be TestBroadcastRoute and used to assert a working
+// broadcast: the fan-out, the read-back and both halves of invariant 10. The
+// route now fails CLOSED, so what is left to prove is that it refuses, that it
+// says WHY, and that it writes nothing on the way.
+//
+// The coverage that moved rather than vanished: the wire-level invariant 10
+// assertions — legitimate retry replays, same key with different content is a
+// 409 that disconnects, a key is required — now live in TestSendRoute. They are
+// properties of publish, which both routes share, so they are proved on the
+// route that still reaches it.
+//
+// The reason for the refusal is worth restating because deleting this test is
+// the obvious way to "fix" it: signing.Canonicalize rejects an empty recipient
+// set and store.Message records a broadcast as a FLAG rather than an expanded
+// roster snapshot, so a broadcast has no canonical audience under signing format
+// v1. SIGN-6 admits no unsigned message type, so the alternative to refusing is
+// leaving one route on the bus that accepts unsigned traffic — the easiest hole
+// in the whole system to find.
+func TestBroadcastRouteIsRefused(t *testing.T) {
 	srv, _ := newMessagingServer(t)
 	alpha := enrolAndAuthenticate(t, srv, "alpha")
 	beta := enrolAndAuthenticate(t, srv, "beta")
 
-	body := sendOK(t, srv, alpha, httpapi.RouteBroadcast,
+	rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteBroadcast,
 		`{"body":"`+b64("hello bus")+`","idempotency_key":"bc-1"}`)
-	wantKeys(t, body, "message_id", "seq", "from", "broadcast", "to", "sent_at", "content_sha256")
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("POST %s = %d, want 501; body %s", httpapi.RouteBroadcast, rec.Code, rec.Body.String())
+	}
 
+	// The refusal must EXPLAIN itself. A bare 501 tells a client the route is
+	// missing; this one has to say that the message could not be signed, or the
+	// client's only rational response is to retry for ever.
+	msg, _ := decodeBody(t, rec)["error"].(string)
+	for _, want := range []string{"signed", "recipient set", "unsigned"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the 501 body does not mention %q, so a client cannot tell why a broadcast is refused: %q", want, msg)
+		}
+	}
+
+	// NOT dressed up as transient. A Retry-After would put a well-behaved client
+	// into a loop that can never succeed.
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q on a 501; the refusal is permanent under signing format v1, not a transient one to retry", got)
+	}
+
+	// And NOTHING was written. The refusal happens before the body is decoded,
+	// so no sequence is burned, no WAL record is made and no agent receives
+	// anything.
+	if _, msgs := batchOf(t, authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages, "")); len(msgs) != 0 {
+		t.Fatalf("beta received %d messages from a REFUSED broadcast; a 501 must write nothing", len(msgs))
+	}
+
+	t.Run("an anonymous caller is still 401, not 501", func(t *testing.T) {
+		// Authentication runs FIRST. A route that told an unauthenticated caller
+		// what it does and does not implement would describe the messaging
+		// surface to somebody with no business knowing it exists.
+		r := doRequest(t, srv, http.MethodPost, httpapi.RouteBroadcast, `{"body":"`+b64("x")+`","idempotency_key":"k"}`, "")
+		if r.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401 with no credential", r.Code)
+		}
+	})
+}
+
+// TestSendRoute covers POST /v1/send (MSG-3, SIGN-6) on the wire, including both
+// halves of invariant 10 as a client sees them.
+func TestSendRoute(t *testing.T) {
+	srv, _ := newMessagingServer(t)
+	alpha := enrolAndAuthenticate(t, srv, "alpha")
+	beta := enrolAndAuthenticate(t, srv, "beta")
+	gamma := enrolAndAuthenticate(t, srv, "gamma")
+
+	body := sendOK(t, srv, alpha, beta.id, b64("just for you"), "dm-1")
+	wantKeys(t, body, "message_id", "seq", "from", "broadcast", "to", "sent_at", "content_sha256")
 	msgID, _ := body["message_id"].(string)
+
 	gotBus, gotSeq, err := ids.ParseMessageID(msgID)
 	if err != nil {
 		t.Fatalf("message_id %q is not a well-formed id: %v", msgID, err)
@@ -267,44 +531,60 @@ func TestBroadcastRoute(t *testing.T) {
 	if body["seq"] != float64(gotSeq) {
 		t.Errorf("seq = %v but the message id carries %d", body["seq"], gotSeq)
 	}
-	if gotSeq == 0 {
-		t.Error("sequence 0 is never allocated")
-	}
 	if body["from"] != alpha.id {
 		t.Errorf("from = %v, want the AUTHENTICATED sender %q; a client never chooses it", body["from"], alpha.id)
 	}
-	if body["broadcast"] != true {
-		t.Errorf("broadcast = %v, want true", body["broadcast"])
+	if body["broadcast"] != false {
+		t.Errorf("broadcast = %v, want false", body["broadcast"])
+	}
+	to, _ := body["to"].([]interface{})
+	if len(to) != 1 || to[0] != beta.id {
+		t.Fatalf("to = %v, want exactly [%q]", to, beta.id)
 	}
 
-	t.Run("every other agent receives it and the sender does not", func(t *testing.T) {
-		_, msgs := batchOf(t, authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages, ""))
-		if len(msgs) != 1 {
-			t.Fatalf("beta sees %d messages, want 1", len(msgs))
+	t.Run("only the named recipient sees it, and the signature reaches it", func(t *testing.T) {
+		_, mine := batchOf(t, authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages, ""))
+		if len(mine) != 1 {
+			t.Fatalf("the recipient sees %d messages, want 1", len(mine))
 		}
-		m := msgs[0].(map[string]interface{})
-		wantKeys(t, m, "message_id", "seq", "from", "broadcast", "to", "bus_path", "sent_at", "size", "content_sha256", "body")
+		m := mine[0].(map[string]interface{})
+		wantKeys(t, m, "message_id", "seq", "from", "broadcast", "to", "bus_path", "sent_at", "size", "content_sha256", "timestamp_ms", "signature", "body")
 		if m["message_id"] != msgID {
 			t.Errorf("message_id = %v, want %q", m["message_id"], msgID)
 		}
-		if got := m["body"]; got != b64("hello bus") {
+		if got := m["body"]; got != b64("just for you") {
 			t.Errorf("body = %v, want the base64 the sender posted", got)
 		}
 		if m["content_sha256"] != body["content_sha256"] {
 			t.Errorf("content_sha256 on the read path (%v) differs from the send response (%v)", m["content_sha256"], body["content_sha256"])
 		}
+		// The recipient cannot verify without these two, and they must be the
+		// SENDER's, carried through untouched.
+		if m["signature"] != msgTestSignature() {
+			t.Errorf("signature = %v, want the sender's, carried through unaltered", m["signature"])
+		}
+		if m["timestamp_ms"] != float64(msgTestTimestampMs) {
+			t.Errorf("timestamp_ms = %v, want the SENDER's clock %d; the bus's own clock is sent_at and is NOT covered by the signature", m["timestamp_ms"], msgTestTimestampMs)
+		}
+		if m["sent_at"] == m["timestamp_ms"] {
+			t.Error("sent_at and timestamp_ms are the same value; they are two different facts told by two different parties and only one is signed")
+		}
 
-		_, own := batchOf(t, authed(t, srv, alpha, http.MethodGet, httpapi.RouteMessages, ""))
-		if len(own) != 0 {
-			t.Fatalf("the sender sees its own broadcast (%d messages); the contract excludes it", len(own))
+		for _, other := range []testAgent{alpha, gamma} {
+			_, msgs := batchOf(t, authed(t, srv, other, http.MethodGet, httpapi.RouteMessages, ""))
+			if len(msgs) != 0 {
+				t.Fatalf("agent %s sees %d messages of a DM addressed to somebody else", other.id, len(msgs))
+			}
 		}
 	})
 
 	t.Run("a retry with the same key and the same payload replays the original", func(t *testing.T) {
-		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteBroadcast,
-			`{"body":"`+b64("hello bus")+`","idempotency_key":"bc-1"}`)
+		// The whole two-step is retried, mint included: a re-mint under a held
+		// key returns the SAME assignment, so the client re-presents the SAME
+		// signature and the send is answered from the applied-key table.
+		rec := sendDM(t, srv, alpha, beta.id, b64("just for you"), "dm-1")
 		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201 on a legitimate retry; a retry must never be punished", rec.Code)
+			t.Fatalf("status = %d, want 201 on a legitimate retry; a retry must never be punished; body %s", rec.Code, rec.Body.String())
 		}
 		if got := rec.Header().Get(httpapi.IdempotencyReplayedHeader); got != "true" {
 			t.Errorf("%s = %q, want \"true\"", httpapi.IdempotencyReplayedHeader, got)
@@ -320,10 +600,9 @@ func TestBroadcastRoute(t *testing.T) {
 	})
 
 	t.Run("the same key with a DIFFERENT payload is a protocol violation", func(t *testing.T) {
-		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteBroadcast,
-			`{"body":"`+b64("something else")+`","idempotency_key":"bc-1"}`)
+		rec := sendDM(t, srv, alpha, beta.id, b64("something else"), "dm-1")
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("status = %d, want 409", rec.Code)
+			t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
 		}
 		if got := rec.Header().Get("Connection"); !strings.EqualFold(got, "close") {
 			t.Errorf("Connection = %q, want \"close\": invariant 10 disconnects a client that reuses a key for different content", got)
@@ -331,40 +610,13 @@ func TestBroadcastRoute(t *testing.T) {
 	})
 
 	t.Run("an idempotency key is required", func(t *testing.T) {
-		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteBroadcast, `{"body":"`+b64("x")+`"}`)
+		// Sent WITHOUT a mint on purpose: there is no key to mint under, so the
+		// key check is what must answer, and it must answer 400 rather than the
+		// 409 a missing reservation would produce.
+		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend,
+			signedSendBody(beta.id, b64("x"), "", alpha.id, msgID, gotSeq))
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 without an idempotency key (invariant 10)", rec.Code)
-		}
-	})
-}
-
-// TestSendRoute covers POST /v1/send (MSG-3) on the wire.
-func TestSendRoute(t *testing.T) {
-	srv, _ := newMessagingServer(t)
-	alpha := enrolAndAuthenticate(t, srv, "alpha")
-	beta := enrolAndAuthenticate(t, srv, "beta")
-	gamma := enrolAndAuthenticate(t, srv, "gamma")
-
-	body := sendOK(t, srv, alpha, httpapi.RouteSend,
-		`{"to":"`+beta.id+`","body":"`+b64("just for you")+`","idempotency_key":"dm-1"}`)
-	if body["broadcast"] != false {
-		t.Errorf("broadcast = %v, want false", body["broadcast"])
-	}
-	to, _ := body["to"].([]interface{})
-	if len(to) != 1 || to[0] != beta.id {
-		t.Fatalf("to = %v, want exactly [%q]", to, beta.id)
-	}
-
-	t.Run("only the named recipient sees it", func(t *testing.T) {
-		_, mine := batchOf(t, authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages, ""))
-		if len(mine) != 1 {
-			t.Fatalf("the recipient sees %d messages, want 1", len(mine))
-		}
-		for _, other := range []testAgent{alpha, gamma} {
-			_, msgs := batchOf(t, authed(t, srv, other, http.MethodGet, httpapi.RouteMessages, ""))
-			if len(msgs) != 0 {
-				t.Fatalf("agent %s sees %d messages of a DM addressed to somebody else", other.id, len(msgs))
-			}
+			t.Fatalf("status = %d, want 400 without an idempotency key (invariant 10); body %s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -373,18 +625,34 @@ func TestSendRoute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("building a well-formed but unenrolled id: %v", err)
 		}
-		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend,
-			`{"to":"`+unknown+`","body":"`+b64("x")+`","idempotency_key":"dm-unknown"}`)
+		rec := sendDM(t, srv, alpha, unknown, b64("x"), "dm-unknown")
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("400 on a malformed recipient id", func(t *testing.T) {
-		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend,
-			`{"to":"not-a-qualified-id","body":"`+b64("x")+`","idempotency_key":"dm-bad"}`)
+		rec := sendDM(t, srv, alpha, "not-a-qualified-id", b64("x"), "dm-bad")
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("409 when no reservation was minted for the key", func(t *testing.T) {
+		// The send is well formed in every other respect and names an id this
+		// bus really did mint — for a DIFFERENT key. That is exactly the state a
+		// client is in after a restart, and the response has to point at the
+		// remedy rather than look like a transient failure.
+		rec := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend,
+			signedSendBody(beta.id, b64("x"), "dm-never-minted", alpha.id, msgID, gotSeq))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
+		}
+		if msg, _ := decodeBody(t, rec)["error"].(string); !strings.Contains(msg, httpapi.RouteMint) {
+			t.Errorf("the 409 body does not name %s, so a client cannot tell what to do next: %q", httpapi.RouteMint, msg)
+		}
+		if got := rec.Header().Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q; replaying this exact request can never succeed, so it must not be dressed up as transient", got)
 		}
 	})
 }
@@ -396,10 +664,13 @@ func TestMessagesCursorRoute(t *testing.T) {
 	alpha := enrolAndAuthenticate(t, srv, "alpha")
 	beta := enrolAndAuthenticate(t, srv, "beta")
 
+	// Directed sends rather than broadcasts: /v1/broadcast is refused under
+	// signing format v1 (see TestBroadcastRouteIsRefused), and the cursor
+	// contract is about the READ path, which does not care how a message was
+	// addressed.
 	const total = 5
 	for i := 0; i < total; i++ {
-		sendOK(t, srv, alpha, httpapi.RouteBroadcast,
-			`{"body":"`+b64(string(rune('a'+i)))+`","idempotency_key":"page-`+string(rune('a'+i))+`"}`)
+		sendOK(t, srv, alpha, beta.id, b64(string(rune('a'+i))), "page-"+string(rune('a'+i)))
 	}
 
 	// Page through with limit=2 and prove the cursor neither skips nor repeats.
@@ -504,7 +775,7 @@ func TestWaitRoute(t *testing.T) {
 	})
 
 	t.Run("an existing message returns immediately", func(t *testing.T) {
-		sendOK(t, srv, alpha, httpapi.RouteBroadcast, `{"body":"`+b64("already here")+`","idempotency_key":"wait-1"}`)
+		sendOK(t, srv, alpha, beta.id, b64("already here"), "wait-1")
 		began := time.Now()
 		_, msgs := batchOf(t, authed(t, srv, beta, http.MethodGet, httpapi.RouteWait+"?timeout=60", ""))
 		if len(msgs) != 1 {
@@ -515,7 +786,7 @@ func TestWaitRoute(t *testing.T) {
 		}
 	})
 
-	t.Run("a parked poll is woken by a new broadcast", func(t *testing.T) {
+	t.Run("a parked poll is woken by a new message", func(t *testing.T) {
 		cursor := hubStartCursor(t, srv, beta)
 		type result struct {
 			msgs []interface{}
@@ -535,7 +806,7 @@ func TestWaitRoute(t *testing.T) {
 		// Wait until the poll has actually PARKED before publishing, so the
 		// test proves the wake rather than the fast path.
 		waitForWaiters(t, srv, 1)
-		sendOK(t, srv, alpha, httpapi.RouteBroadcast, `{"body":"`+b64("woken")+`","idempotency_key":"wait-wake"}`)
+		sendOK(t, srv, alpha, beta.id, b64("woken"), "wait-wake")
 
 		select {
 		case r := <-done:
@@ -549,7 +820,7 @@ func TestWaitRoute(t *testing.T) {
 				t.Errorf("body = %v, want the message that woke it", got)
 			}
 		case <-time.After(20 * time.Second):
-			t.Fatal("the parked poll was never woken by a committed broadcast")
+			t.Fatal("the parked poll was never woken by a committed message")
 		}
 	})
 

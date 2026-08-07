@@ -195,6 +195,60 @@ func TestCLISendSurfaces409AsIdempotencyViolation(t *testing.T) {
 	}
 }
 
+// TestCLISendSurfaces409MintLostAsRoutineNotAViolation checks the OTHER 409 is
+// told apart from invariant 10's key-reused-with-different-payload.
+//
+// After SIGN-6 a 409 on /v1/send is ALSO the bus's answer to
+// hub.ErrUnknownMint (no matching reservation for this idempotency key — the
+// ROUTINE case after a restart, because the mint table is memory-only). Before
+// this fix that 409 was misclassified as the payload-conflict case, whose
+// remedy says "use a FRESH idempotency key" — which is actively harmful here:
+// if the original send had already landed, a fresh key applies it a SECOND
+// time (invariant 10). The correct remedy is to redo reserve-then-send under
+// the SAME key.
+func TestCLISendSurfaces409MintLostAsRoutineNotAViolation(t *testing.T) {
+	const key = "post-restart-key-1"
+	var calls int32
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		stubWriteJSON(w, http.StatusConflict, map[string]string{
+			"error": "no matching sequence reservation: mint a fresh message id with POST " + routeMint + ", re-sign it and re-send",
+		})
+	})
+	c := bus.client(t, nil)
+
+	_, err := c.Send(context.Background(), SendOptions{
+		To:             "bus-x.other-1",
+		Body:           []byte("hi again"),
+		IdempotencyKey: key,
+	})
+	if err == nil {
+		t.Fatalf("Send answered 409 (mint lost) = nil error, want one")
+	}
+	if KindOf(err) != KindRejected {
+		t.Fatalf("KindOf(err) = %q, want %q", KindOf(err), KindRejected)
+	}
+	if got := ExitCode(err); got != ExitRejected {
+		t.Fatalf("ExitCode(err) = %d, want %d", got, ExitRejected)
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	if strings.Contains(e.Remedy, "FRESH") {
+		t.Fatalf("Remedy = %q, tells the caller to use a FRESH key — for a lost reservation that is HARMFUL: if the original send landed, a fresh key double-applies it (invariant 10)", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, "SAME idempotency key") {
+		t.Fatalf("Remedy = %q, want it to say to reuse the SAME idempotency key", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, routeMint) {
+		t.Fatalf("Remedy = %q, want it to name %s as the re-mint route", e.Remedy, routeMint)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("the bus saw %d send attempts, want 1 — a 409 must not be retried automatically", got)
+	}
+}
+
 // TestCLISendReportsReplayed checks the Idempotency-Replayed header sets
 // Replayed and is NOT an error. Same key + same payload is a legitimate retry:
 // the bus answers from its applied-key table, and punishing the client for
@@ -272,6 +326,68 @@ func TestCLIBroadcastSendsNoRecipient(t *testing.T) {
 	}
 	if string(decoded) != "all hands" {
 		t.Fatalf("broadcast body decoded to %q, want %q", decoded, "all hands")
+	}
+}
+
+// TestCLIBroadcastRefusedIsRejectionNotServerFault pins the client-facing fix
+// for the regression this whole area exists to close: the bus answers every
+// /v1/broadcast with 501 (SIGN-6 — a broadcast cannot be signed under signing
+// format v1), and the OLD client reported that as "the bus reported an
+// INTERNAL ERROR" (KindServer, exit 6) with advice to retry using the
+// idempotency key — exactly the retry loop SIGN-6(6) forbids on a TERMINAL
+// rejection, and a lie besides: the bus refuses before it even reads the body,
+// so nothing was ever applied.
+func TestCLIBroadcastRefusedIsRejectionNotServerFault(t *testing.T) {
+	var calls int32
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != routeBroadcast {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&calls, 1)
+		stubWriteJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "a broadcast cannot be signed under signing format v1: the canonical format requires a non-empty recipient set and the canonical audience of a broadcast is SIGN-3's undecided question; SIGN-6 admits no unsigned message type, so this route is refused rather than accepting unsigned traffic",
+		})
+	})
+	c := bus.client(t, nil)
+
+	_, err := c.Broadcast(context.Background(), BroadcastOptions{Body: []byte("all hands")})
+	if err == nil {
+		t.Fatalf("Broadcast against a 501 = nil error, want one")
+	}
+	if KindOf(err) != KindRejected {
+		t.Fatalf("KindOf(err) = %q, want %q — a deliberate, permanent refusal is a rejection, not a server fault or an unknown outcome", KindOf(err), KindRejected)
+	}
+	if got := ExitCode(err); got != ExitRejected {
+		t.Fatalf("ExitCode(err) = %d, want %d", got, ExitRejected)
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	if strings.Contains(e.Message, "internal error") {
+		t.Fatalf("Message = %q, still reads as an internal error, not a deliberate refusal", e.Message)
+	}
+	if !strings.Contains(e.Message, "nothing was applied") {
+		t.Fatalf("Message = %q, want it to say plainly that NOTHING was applied — the bus refuses before reading the body", e.Message)
+	}
+	if strings.Contains(e.Message, "may or may not have been applied") {
+		t.Fatalf("Message = %q, falsely claims the outcome is AMBIGUOUS — a 501 here is certain, not ambiguous", e.Message)
+	}
+	if !strings.Contains(e.Remedy, "SIGN-3") {
+		t.Fatalf("Remedy = %q, want it to name SIGN-3 as the task that reopens this route", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, "send") {
+		t.Fatalf("Remedy = %q, want it to point at `send` as the meanwhile-workaround", e.Remedy)
+	}
+	if strings.Contains(e.Remedy, "--idempotency-key") {
+		t.Fatalf("Remedy = %q, offers the idempotency key as a retry handle — SIGN-6(6) forbids exactly this: a rejection is TERMINAL for its idempotency key, there is nothing to retry", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, "do not retry") {
+		t.Fatalf("Remedy = %q, want it to say explicitly not to retry", e.Remedy)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("the bus saw %d broadcast attempts, want 1 — a 501 must not be retried", got)
 	}
 }
 

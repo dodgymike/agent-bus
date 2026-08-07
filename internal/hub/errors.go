@@ -12,10 +12,12 @@ import (
 var (
 	// ErrUnknownSender reports a caller that authenticated but is not on this
 	// bus's roster. It is a should-not-happen: the principal came from a live
-	// session, and a session can only exist for an enrolled agent. It is
-	// checked anyway, because the roster is the hub's own view (see
-	// Hub.NoteEnrolment) and a divergence between it and internal/auth's is
-	// exactly the thing that must be loud rather than silently permissive.
+	// session, and a session can only exist for an enrolled agent — and since
+	// AUTH-7 the hub reads the SAME roster the session was issued against (see
+	// RosterSource), so the two cannot disagree by construction. It is checked
+	// anyway, fail-closed: this is the last gate before a durable write, and the
+	// day a second roster is introduced the divergence must be loud rather than
+	// silently permissive.
 	ErrUnknownSender = errors.New("hub: the sending agent is not on this bus's roster")
 
 	// ErrUnknownRecipient reports a directed send to an agent this bus does not
@@ -72,12 +74,49 @@ var (
 	// drive-by fix is how the three end up answering differently.
 	ErrAgentQuota = errors.New("hub: at a per-agent fair-share limit")
 
+	// ErrInvalidOp reports a mint asked for an operation this bus does not mint
+	// sequences for. Only "send" and "broadcast" are minted; see parseMintOp
+	// for why an unrecognised value is refused rather than defaulted.
+	ErrInvalidOp = errors.New("hub: invalid mint operation")
+
+	// ErrUnknownMint reports a send presenting an idempotency key that has no
+	// outstanding sequence reservation on this bus.
+	//
+	// It is a ROUTINE, EXPECTED condition, not a fault, and the two ways to
+	// reach it are both benign:
+	//
+	//   - the bus RESTARTED between the mint and the send. The mint table is
+	//     deliberately in-memory (only the burned NUMBER is durable — see
+	//     mint.go), so a restart invalidates every outstanding reservation.
+	//   - the reservation EXPIRED (MintTTL).
+	//
+	// The remedy in both cases is the same and is safe: re-mint under the SAME
+	// idempotency key, re-sign the fresh assignment, re-send. The old number
+	// stays burned, leaving a gap, which internal/ids/sequence.go documents as
+	// correct. It cannot double-apply: if the crash landed AFTER the message
+	// became durable, the re-sent request carries the same key and the same
+	// fingerprint, so internal/idem answers OutcomeRetry and returns the
+	// ORIGINAL result before the mint is ever consulted (invariant 10).
+	ErrUnknownMint = errors.New("hub: no outstanding sequence reservation for this idempotency key")
+
+	// ErrMintMismatch reports a send whose message id or sequence is NOT the one
+	// this bus minted for that idempotency key.
+	//
+	// Unlike ErrUnknownMint this is never routine: the client was handed an
+	// assignment and presented a different one, which is either a client bug
+	// splicing two operations together or an attempt to get a signature over a
+	// number of the client's own choosing accepted. Invariant 1 is the whole
+	// answer — a client-supplied id is input to be validated, never an identity
+	// to be trusted — so the presented values are checked against the mint and
+	// the mint wins.
+	ErrMintMismatch = errors.New("hub: the message id or sequence does not match the reservation minted for this idempotency key")
+
 	// ErrPoisoned reports a hub that has stopped accepting writes because an
-	// internal invariant failed. See Hub.publish for the one condition that
-	// sets it: a message whose sequence number came out ABOVE the WAL index
-	// that carried it, which would let a restart reissue that sequence
-	// (invariant 1). It is a hard stop, never a retry: the fix is to restart
-	// with a correctly derived sequence floor.
+	// internal invariant failed. See assertSeqFloorLocked for the condition that
+	// sets it: a sequence number handed out ABOVE the durably-recorded sequence
+	// floor, which would let a restart reissue that sequence (invariant 1). It
+	// is a hard stop, never a retry: the fix is to restart with a correctly
+	// derived sequence floor.
 	ErrPoisoned = errors.New("hub: refusing to write: an id-authority invariant failed and this hub is poisoned")
 
 	// ErrNotDurable reports a hub built without a durable write path. Nothing

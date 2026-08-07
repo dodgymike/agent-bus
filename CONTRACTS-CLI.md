@@ -65,9 +65,47 @@ recorded value (`--bus` only) → built-in default.
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
 | `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
-| `send <to-agent-id> [body]` | Send one direct message, durable before it returns (invariant 4) | yes — `POST /v1/send` |
-| `broadcast [body]` | Send one message to every other enrolled agent, durable before it returns | yes — `POST /v1/broadcast` |
+| `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
+| `broadcast [body]` | **BROKEN as of 2026-08-07.** The subcommand is still registered and still builds a request; the bus answers **501** because a broadcast has no canonical audience under signing format v1. Surfaces as **exit 6** — see below. | yes — `POST /v1/mint` then `POST /v1/broadcast`, which refuses |
 | `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
+
+**There is no `busctl keygen` and no `busctl trust` subcommand**, and the registry in
+`cmd/busctl/root.go` is exactly the eight rows above. This matters because several error remedies in
+`client/store.go`, `client/client.go` and `client/keyring.go` tell the operator to "run
+`busctl keygen`" or to add a key with `busctl trust` — **those commands do not exist**. The
+capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
+`Client.TrustedKeys()`), so today they are reachable by an agent EMBEDDING the client and not by one
+shelling out. Recorded as an open item, not as a satisfied requirement; see `CONTRACTS-AGENT.md`.
+
+### Signed sends: `busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
+
+`client.Send` reserves, signs, then sends. The whole two-step is invisible from the command line —
+the flags, the positional body and the JSON output shape are all unchanged — but it is visible in a
+packet capture and in the bus's logs, so it is documented rather than hidden:
+
+1. `POST /v1/mint` → `{message_id, seq, sender, op, expires_at}`.
+2. The client canonicalizes and signs with its **MESSAGING** key (see "Credential storage" below).
+3. `POST /v1/send` carrying the reservation, `timestamp_ms` and the base64 signature.
+
+**Both calls use the SAME idempotency key**, and that is what makes the two-step retryable: a
+reservation is scoped by `(agent, op, key)`, so repeating step 1 with the same key returns the SAME
+id and sequence rather than burning a second one. A client that crashes between the two steps repeats
+both under the same key and converges on ONE message. Minting a fresh key on the retry would produce
+a second reservation and, if the first send had landed, a second message.
+
+**A 409 on step 3 is not always a conflict.** After a bus restart the reservation table (memory-only
+by design) is empty, so `/v1/send` answers 409 `ErrUnknownMint`. That is ROUTINE, and the correct
+response is to re-mint under the same key, re-sign and re-send — not to mint a new key. Note the
+client's generic remedy text for a 409 currently says "an idempotency key was reused with different
+content; use a fresh key for new content", which is **wrong advice for this case**
+(`client/transport.go`'s `statusError` has no `ErrUnknownMint` branch). Reported, not fixed here.
+
+**`busctl broadcast` exits 6, not 7.** `client/transport.go` maps any status `>= 500` that is not
+429/503 to `KindServer`, and 501 falls there, so a refused broadcast is reported as "the bus reported
+an internal error" with the bus's own explanation appended. It is **not retried** (`isRetryable`
+retries `KindServer` only on 429/503), so there is no retry loop — but the exit code and wording do
+not say "this route is deliberately unimplemented", and an agent branching on exit codes will read a
+deliberate refusal as a server fault. Recorded as a known rough edge.
 
 `enrol` flags: `--name` (required), `--invite` (**reserved, currently rejected** — see below),
 `--idempotency-key` (resume an earlier attempt), `--keep-current` (do not switch the selection).
@@ -120,7 +158,10 @@ No code changes meaning; some commands give one a more specific sense:
   disconnects), and an unknown recipient on `send`.
 - `6` — a fatal 503 (the bus's write path cannot durably accept messages, signalled by **no**
   `Retry-After` header) is `KindServer`, so it is exit **6**, not `5`. `5` stays reserved for the bus
-  being unreachable at all — refused, DNS, timeout, TLS. See "The 503 split" below.
+  being unreachable at all — refused, DNS, timeout, TLS. See "The 503 split" below. **Also `6`
+  (2026-08-07): `busctl broadcast`, because the bus's deliberate `501` falls into the generic
+  `>= 500` branch.** Not retried, but not distinguishable from a real server fault by exit code alone
+  — read the message text, which carries the bus's own explanation.
 
 ### JSON shapes — CONTRACT
 
@@ -188,11 +229,17 @@ One NDJSON record per message, field by field:
 | `broadcast` | whether this went to every agent except the sender |
 | `to` | the recipient list — one entry for a direct message, empty for a broadcast |
 | `bus_path` | bus ids traversed, oldest first |
-| `sent_at` | the bus's timestamp, verbatim |
+| `sent_at` | the **bus's** timestamp, verbatim. **NOT covered by the signature** |
 | `size` | body length in bytes, as the bus recorded it |
 | `content_sha256` | hex SHA-256 of the decoded body |
+| `timestamp_ms` | (added 2026-08-07) `int64` Unix milliseconds UTC — the **SENDER's** clock, and the one that **IS** covered by the signature |
+| `signature` | (added 2026-08-07) the sender's detached Ed25519 signature, standard base64 of 64 bytes |
 | `body` | the decoded body |
 | `text` | the body as a string, present only under the conditions below |
+
+**`sent_at` and `timestamp_ms` are different facts and are both on the stream on purpose.** Verifying
+a signature against `sent_at` fails every time. The signed bytes are reconstructed from
+`message_id`, `seq`, `from`, `to`, `timestamp_ms` and `body`; `bus_path` is deliberately not covered.
 
 `body` is **always present**, standard base64 — the authoritative, lossless form, true for any bytes
 at all. `text` is present **only** when the body is valid UTF-8, free of control characters other
@@ -237,8 +284,9 @@ This is the load-bearing part of `watch`, and it applies whether the output is h
 | Path | Mode | Contents |
 | --- | --- | --- |
 | `<identity-dir>/` | `0700` | The store. Tightened on open if it already exists looser. |
-| `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including Ed25519 private-key seeds**, the current selection, and in-flight (`pending`) enrolments. |
+| `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the current selection, and in-flight (`pending`) enrolments. |
 | `<identity-dir>/identities.lock` | `0600` | Exclusive lock for read-modify-write; treated as abandoned after 30s. |
+| `<identity-dir>/trusted-keys/` | `0700` | (added 2026-08-07) The local trust store — `client.TrustedKeysDirName`. One `0600` file per peer, **named `<fully-qualified-agent-id>.pub`**, holding the standard base64 of that peer's 32-byte Ed25519 **messaging** public key. Deliberately the dullest format that works: one key, one file, no index, so an operator can inspect/add/remove with `cat`/`cp`/`rm` during an incident and a damaged file costs trust in one peer rather than all. A file over `4 KiB` is refused unread. The `0600`/`0700` modes protect **INTEGRITY, not secrecy** — these are public keys; whoever can write this directory decides whose signatures this agent accepts. |
 | `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_url`) pair — no key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
 | `<identity-dir>/cursors.lock` | `0600` | A **separate** exclusive lock from `identities.lock` — a cursor advances far more often than a credential changes, and sharing one lock would put `watch` in needless contention with `enrol`/`use`/`logout`. |
 
@@ -269,6 +317,41 @@ compromised, and silently fixing the mode destroys the only evidence.
 **Session tokens are never written to disk.** They are bearer credentials with at most an hour of
 life that do not survive a bus restart, so persisting them would trade a stealable token at rest for
 two saved round trips. Each `busctl` process performs its own handshake.
+
+### The MESSAGING keypair — a second key, distinct from the AUTH key (added 2026-08-07)
+
+An identity now holds **two** Ed25519 keypairs, and they are not interchangeable:
+
+| Key | Store field | Proves | Minted |
+| --- | --- | --- | --- |
+| **AUTH** | `private_key_seed` | this agent **to the bus** — it signs `agent-bus:session-token:v1:<challenge>` at `POST /v1/session/complete` (invariant 3) | at `enrol`, before the request is sent |
+| **MESSAGING** | `messaging_key_seed` | this agent **to its PEERS** — it signs the canonical bytes of every outgoing message | **on first use**, lazily, under the store lock (`Store.EnsureMessagingKey`) |
+
+Both private halves live in the same `0600` `identities.json` inside the `0700` store directory, and
+**neither ever leaves the machine**. `Credential.String()` redacts both.
+
+Splitting them is invariant 3's separation of concerns, not bookkeeping: the bus must be able to
+authenticate an agent without being able to speak as it. Only the AUTH public key is registered with
+the bus (at enrolment); the MESSAGING public key is registered **nowhere**, and that is the gap
+below.
+
+**KNOWN GAP — there is no way to publish or fetch a messaging public key through the bus.** Nothing
+registers one at enrolment (the server leaves `auth.RosterEntry.MessagingPublicKey` zero),
+`GET /v1/agents` carries no key material, and CRYPTO-4 (the server-attested key bundle) does not
+exist. `trusted-keys/` is therefore a **manually populated stopgap**: a peer's key reaches it out of
+band, by a human or a deployment system. There is deliberately **no TOFU, no "trust the key the bus
+handed over", no verification-optional switch and no `--insecure`** — each would let a bus that can
+choose the verification key forge any message from any sender, which is the exact property the
+messaging key exists to deny it.
+
+**Verification is NOT yet performed on receive.** Signing works end to end and the signature is
+carried on the wire and returned by the read path, but `client.Read` does not verify: it decodes the
+batch and returns it. `Batch.Rejected` is declared and documented but nothing populates it, and the
+doc comment on `Batch.Messages` — "the VERIFIED messages" — is **FALSE today**. A recipient that
+wants verification must do it itself, against a key it obtained out of band; that path is proven to
+work (a client-made signature verifies under `internal/signing.Verify` from the wire fields). Do not
+read the presence of `RejectionReason`, `RejectedMessage` or `KeyRing` as evidence that the read path
+enforces anything yet.
 
 ### Enrolment idempotency (invariant 10)
 
@@ -348,12 +431,15 @@ Exported surface as of 2026-08-02:
 | `Config`, `DefaultConfig`, `Config.ApplyEnv`, `DefaultIdentityDir`, `RetryPolicy`, `HTTPDoer` | Configuration and the transport escape hatch |
 | `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout` | The env var names above |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
-| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()` |
+| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()` |
 | `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
 | `EnrolOptions`, `EnrolResult`, `SessionInfo`, `LogoutResult` | Operation inputs and results |
 | `SendOptions`, `BroadcastOptions`, `SendResult`, `AgentSummary`, `AgentList`, `ReadOptions`, `Batch`, `Message`, `WatchOptions`, `WatchStats` | Messaging inputs, results and the wire-faithful `Message`/`Batch` types |
 | `Error`, `Kind` (+ the `Kind*` constants), `KindOf`, `ExitCode`, `ErrorPayload`, `NewErrorPayload`, the `Exit*` constants, `IsFatalUnavailable`, `IdempotencyKeyOf` | Errors and the exit-code contract |
 | `SessionSigningContext`, `AgentNamePattern` | Pinned protocol constants |
+| `MessageSigningContext` (`"agent-bus/msg-sig/1"`), `MessageSigningFormatVersion` (`1`), `BusIDPattern` | (2026-08-07) The message-signing constants, **pinned literals mirroring `internal/signing/canonical.go` byte-for-byte in behaviour** — `client/` may not import `internal/`, so the canonical encoder is duplicated in `client/canonical.go` under the same rule as `SessionSigningContext` and the route paths. **Divergence FAILS CLOSED**: a signature simply does not verify. |
+| `KeyRing`, `DirKeyRing` (`NewDirKeyRing`, `MessagingKey`, `Trust`, `List`), `TrustedKey`, `TrustedKeysDirName`, `ErrNoTrustedKey`, `Config.KeyRing` | (2026-08-07) The local trust store. A `nil` `Config.KeyRing` means a `DirKeyRing` under `<identity-dir>/trusted-keys`; it is **not** a way to turn verification off — a `KeyRing` holding nothing means "this agent trusts nobody" and every message is unverifiable. Fail closed. |
+| `RejectionReason` (+ `RejectedNoTrustedKey`, `RejectedMalformedKey`, `RejectedNoSignature`, `RejectedSignatureEncoded`, `RejectedSignatureLength`, `RejectedNotCanonical`, `RejectedSignatureInvalid`), `RejectedMessage`, `Batch.Rejected` | (2026-08-07) The verification-failure vocabulary. **Declared, json-tagged and stable — but NOT YET PRODUCED**: `Client.Read` does not verify, so `Batch.Rejected` is always empty today. The settled policy these encode, for when the wiring lands: on failure the **cursor ADVANCES**, the **body is DISCARDED** and never handed to the caller, and the event is **recorded loudly** (message id, sender, which check failed). Fail-closed applies to the BODY, not the CURSOR — blocking the cursor would hand anyone who can inject one bad message a permanent DoS against that agent. |
 | `MaxBodyBytes`, `MaxBatchLimit`, `DefaultBatchLimit`, `MaxPollTimeout`, `DefaultPollTimeout` | Protocol limits, pinned literals mirroring the server's own (see `client/messages.go`) |
 
 `Identity` is the redacted public half and `Credential` is `Identity` plus the secret seed; the split

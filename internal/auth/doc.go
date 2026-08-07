@@ -65,11 +65,14 @@
 //     on restart, so a retry that straddles a restart re-applies and mints a
 //     second agent id for one agent. Invariant 10's durability half is not met
 //     on this route; IDEM-11 owns closing it.
-//   - NOTHING IS WIRED YET. cmd/agent-bus/main.go still injects the default
-//     MemoryRoster, which writes nothing and fsyncs nothing. The durable path
-//     above exists and is exercised by this package's tests; it is NOT the path
-//     a deployed bus takes until the startup-wiring task lands. Read no
-//     durability claim about the SHIPPED BINARY into any of it.
+//   - IT IS WIRED (AUTH-7). cmd/agent-bus/main.go builds a WALRoster, opens the
+//     durable log WITH THAT ROSTER AS THE APPLIER — which is what rebuilds it by
+//     replay and what makes a live enrolment reach the serving copy — attaches
+//     it, and passes it as Options.Roster. The shipped binary therefore takes
+//     the durable path, and its acceptance proof is a real process killed with
+//     SIGKILL and restarted (TestTwoAgentsKeepTalkingAcrossARestartWithoutRe-
+//     Enrolling in cmd/agent-bus). This paragraph read "NOTHING IS WIRED YET"
+//     until that landed; if it is ever true again, say so here first.
 //
 // Sessions are a deliberate exception and stay memory-only permanently: a
 // session is a short-lived credential with a one-hour ceiling, and losing it on

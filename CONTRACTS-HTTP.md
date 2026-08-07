@@ -40,15 +40,19 @@ added to it.
 
 | Method | Path | Auth | Status | Response |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/agents` | bearer | 200 | `{"agents":[{"agent_id":"<bus>.<name>-<n>","name":"...","enrolled_at":"<RFC3339Nano UTC>"}],"count":N}` — sorted by `agent_id`. Carries **no key material**. |
-| `POST` | `/v1/broadcast` | bearer | 201 | `{"message_id":"<bus-id>-<seq>","seq":N,"from":"<authenticated sender>","broadcast":true,"to":[],"sent_at":"<RFC3339Nano UTC>","content_sha256":"<hex>"}` — returned **only after the message is committed and fsynced** (invariant 4). Body request: `{"body":"<standard base64>","idempotency_key":"..."}`. |
-| `POST` | `/v1/send` | bearer | 201 | Same body shape with `"broadcast":false` and `"to":["<recipient>"]`. Request: `{"to":"<bus>.<agent>","body":"<standard base64>","idempotency_key":"..."}`. |
-| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 400 | `body` missing/empty, not standard base64, or over `store.MaxBodyBytes` (64 KiB decoded); `idempotency_key` empty, over 128 bytes, or containing a byte outside `[A-Za-z0-9._-]`; `to` not a well-formed fully-qualified `<bus-id>.<agent-id>` |
+| `GET` | `/v1/agents` | bearer | 200 | `{"agents":[{"agent_id":"<bus>.<name>-<n>","name":"...","enrolled_at":"<RFC3339Nano UTC>"}],"count":N}` — sorted by `agent_id`. Carries **no key material** — in particular NOT the messaging public key, which nothing registers (see "Signed sends" below). |
+| `POST` | `/v1/mint` | bearer | 201 | **NEW 2026-08-07 (SIGN-2).** `{"message_id":"<bus-id>-<seq>","seq":N,"sender":"<authenticated principal>","op":"send","expires_at":"<RFC3339Nano UTC>"}`. Request: `{"op":"send"\|"broadcast","idempotency_key":"..."}` — **there is no `sender` field in the request and there never may be** (invariant 1); the response echoes the AUTHENTICATED principal. Reserves the id and sequence the caller must sign. See "Signed sends" below. |
+| `POST` | `/v1/mint` | bearer | 201 + `Idempotency-Replayed: true` | A repeat of the same `(agent, op, idempotency_key)` returns the SAME reservation, body **byte-identical including `expires_at`** (so a client cannot extend a reservation by asking again), and allocates **nothing** — no second sequence is burned. |
+| `POST` | `/v1/mint` | bearer | 400 / 403 / 405 / 413 / 415 | `op` not `send`/`broadcast`, or `idempotency_key` empty, over 128 bytes, or containing a byte outside `[A-Za-z0-9._-]`; sender not on the roster (403); any method but `POST` (`Allow: POST`); body over `MaxMessageRequestBytes`; `Content-Type` not `application/json` |
+| `POST` | `/v1/mint` | bearer | 503 | `hub.MaxOutstandingMintsPerAgent` (64) or `hub.MaxOutstandingMints` (8192) reached — `Retry-After: 5`, **fails closed and evicts no other agent's reservation**; **or** the hub cannot durably accept (`hub.ErrNotDurable` / `hub.ErrPoisoned`) — **no** `Retry-After` |
+| `POST` | `/v1/broadcast` | bearer | **501** | **CHANGED 2026-08-07 (SIGN-6) — this is a REGRESSION of a working feature, deliberately.** Answered immediately after authentication and **before the body is decoded**. Body: `{"error":"a broadcast cannot be signed under signing format v1: the canonical format requires a non-empty recipient set and the canonical audience of a broadcast is SIGN-3's undecided question; SIGN-6 admits no unsigned message type, so this route is refused rather than accepting unsigned traffic"}` — pinned as the constant `httpapi`'s `broadcastUnsignableReason`. `hub.Broadcast` and the whole broadcast write path are INTACT and tested; only the ROUTE refuses. SIGN-3 re-opens it. |
+| `POST` | `/v1/send` | bearer | 201 | `{"message_id":"<bus-id>-<seq>","seq":N,"from":"<authenticated sender>","broadcast":false,"to":["<recipient>"],"sent_at":"<RFC3339Nano UTC>","content_sha256":"<hex>"}` — `SendResponseBody` is UNCHANGED, and is returned **only after the message is committed and fsynced** (invariant 4). **Request is BREAKING as of 2026-08-07 (SIGN-6)**: `{"to":"<bus>.<agent>","body":"<standard base64>","idempotency_key":"<the SAME key the mint used>","sender":"<bus-id>.<agent-id>","message_id":"<bus-id>-<seq>","seq":N,"timestamp_ms":1754570000000,"signature":"<standard base64 of exactly 64 bytes>"}`. The last five fields are **REQUIRED**; a pre-SIGN-6 client is rejected. |
+| `POST` | `/v1/send` | bearer | 400 | `body` missing/empty, not standard base64, or over `store.MaxBodyBytes` (64 KiB decoded); `idempotency_key` empty, over 128 bytes, or containing a byte outside `[A-Za-z0-9._-]`; `to` not a well-formed fully-qualified `<bus-id>.<agent-id>`. **Plus the SIGN-6 shape checks:** `signature` absent/empty (`"a signature is required"`); `signature` not valid **strict** standard base64 (`"signature is not valid base64"`); decoded `signature` not **exactly** 64 bytes — 63 and 65 are both refused, there is no tolerance and no truncation (`"signature must be exactly 64 bytes"`); `message_id` malformed, minted by ANOTHER bus, or disagreeing with `seq`, or `seq == 0` (`"invalid message id"`); `timestamp_ms <= 0` (`"timestamp_ms is required"`) |
+| `POST` | `/v1/send` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on the roster; **or** `{"error":"sender does not match the authenticated caller"}` (SIGN-6) — the `sender` field is INPUT TO VALIDATE, never an identity. 403 rather than 400 because the request is well formed and re-sending it will not help. |
 | `POST` | `/v1/send` | bearer | 404 | `{"error":"unknown recipient"}` — `to` is well-formed but not enrolled on this bus. Nothing is written. (A recipient on ANOTHER bus is also 404 until the RELAY epic lands.) |
-| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 409 | `idempotency_key` reused with a **different** payload — a protocol violation, not a retry (invariant 10). Carries `Connection: close`. |
-| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on the roster. 403 rather than 401: the credential is fine and re-authenticating will not help. |
-| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 405 / 413 / 415 | any method but `POST` (`Allow: POST`); body over `httpapi.MaxMessageRequestBytes` (128 KiB); `Content-Type` not `application/json` |
-| `POST` | `/v1/broadcast`, `/v1/send` | bearer | 503 | applied-key table at `hub.MaxIdempotencyEntries` (65536) — `Retry-After: 5`; **or** the hub cannot durably accept messages (`hub.ErrNotDurable` / `hub.ErrPoisoned`) — **no** `Retry-After`, because that is not transient |
+| `POST` | `/v1/send` | bearer | 409 | `idempotency_key` reused with a **different** payload — a protocol violation, not a retry (invariant 10); carries `Connection: close`. **Or (SIGN-6, and these do NOT disconnect):** `hub.ErrUnknownMint` — no outstanding reservation for this key, which is ROUTINE after a bus restart because the mint table is memory-only; the client re-mints under the same key, re-signs and re-sends. **Or** `hub.ErrMintMismatch` — the `message_id`/`seq` presented are not the ones minted for this key; never routine. |
+| `POST` | `/v1/send` | bearer | 405 / 413 / 415 | any method but `POST` (`Allow: POST`); body over `httpapi.MaxMessageRequestBytes` (128 KiB); `Content-Type` not `application/json` |
+| `POST` | `/v1/send` | bearer | 503 | applied-key table at `hub.MaxIdempotencyEntries` (65536) — `Retry-After: 5`; **or** the hub cannot durably accept messages (`hub.ErrNotDurable` / `hub.ErrPoisoned`) — **no** `Retry-After`, because that is not transient |
 | `GET` | `/v1/messages` | bearer | 200 | `{"messages":[<message>...],"cursor":"<opaque>","more":false,"timed_out":false}` — history from a cursor; never parks. Query: `?cursor=<opaque>&limit=<1..256>` |
 | `GET` | `/v1/wait` | bearer | 200 | Same body. Parks until a visible message arrives or the deadline passes. Query: `?cursor=<opaque>&limit=<1..256>&timeout=<1..300 seconds>` |
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 200 | **A long-poll timeout is a 200**, with `"messages":[]`, `"timed_out":true` and the **same `cursor` that was sent**. It is never an error status: a quiet bus is the steady state. |
@@ -58,15 +62,62 @@ added to it.
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 405 | any method but `GET`; `Allow: GET` |
 | `GET` | `/v1/wait` | bearer | (none) | A **cancelled request context** (client hung up, or server shutting down) writes no response at all — there is nobody to write to. Distinct from a timeout, which is a 200. |
 
-A `<message>` on the read path is:
+A `<message>` on the read path is (`timestamp_ms` and `signature` **added 2026-08-07, SIGN-6**):
 
 ```json
-{"message_id":"<bus-id>-<seq>","seq":42,"from":"<bus>.<agent>","broadcast":true,
- "to":[],"bus_path":["<bus-id>"],"sent_at":"<RFC3339Nano UTC>","size":11,
- "content_sha256":"<hex sha256 of the decoded body>","body":"<standard base64>"}
+{"message_id":"<bus-id>-<seq>","seq":42,"from":"<bus>.<agent>","broadcast":false,
+ "to":["<bus>.<agent>"],"bus_path":["<bus-id>"],"sent_at":"<RFC3339Nano UTC>","size":11,
+ "content_sha256":"<hex sha256 of the decoded body>",
+ "timestamp_ms":1754570000000,"signature":"<standard base64 of 64 bytes>",
+ "body":"<standard base64>"}
 ```
 
-`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`. `AgentsResponseBody` / `BroadcastRequestBody` / `SendRequestBody` / `SendResponseBody` / `WireMessage` / `BatchResponseBody` live in `internal/httpapi/messages.go`.
+**`sent_at` and `timestamp_ms` are two different facts and MUST NOT be conflated.** `timestamp_ms`
+is an `int64` of Unix milliseconds UTC, it is the **SENDER's** clock, and it **IS covered by the
+signature**. `sent_at` is unchanged: it is **this bus's** clock and is **NOT covered**. A recipient
+verifying against `sent_at` fails every time, and the reason is not obvious from the field names —
+which is exactly why it is stated here. A recipient reconstructs the signed bytes from
+`message_id`, `seq`, `from`, `to`, `timestamp_ms` and `body`; `bus_path` is deliberately NOT covered
+(settled in SIGN-1, `PROTOCOL.md` §8.3).
+
+`HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`. `AgentsResponseBody` / `MintRequestBody` / `MintResponseBody` / `BroadcastRequestBody` / `SendRequestBody` / `SendResponseBody` / `WireMessage` / `BatchResponseBody` live in `internal/httpapi/messages.go`. (`BroadcastRequestBody` is still declared but is **never decoded** — the route refuses before reading the body.)
+
+### Signed sends: reserve-then-send, and what the bus does and does not check (SIGN-2/SIGN-6, added 2026-08-07)
+
+**A send is now a TWO-STEP.** SIGN-1 settled that the sender's signature covers the ORIGIN bus's
+minted message id and sequence (`PROTOCOL.md` §8.4, option (a)), and invariant 1 makes the server
+authoritative on those, so a client cannot sign until the bus has given them to it:
+
+1. `POST /v1/mint` with `{"op":"send","idempotency_key":"<k>"}` → `{message_id, seq, sender, op, expires_at}`.
+   The number is **durably burned before it leaves the process** (`CONTRACTS-ONDISK.md`, the
+   `"seqfloor"` record).
+2. The client canonicalizes `{message_id, seq, sender, recipients, timestamp_ms, body}` and signs
+   with its **MESSAGING** Ed25519 private key — a key distinct from its **AUTH** enrolment key.
+3. `POST /v1/send` with the reservation, the sender's `timestamp_ms`, and the 64-byte detached
+   signature, **under the SAME idempotency key `k`**.
+
+**The bus enforces SHAPE. The recipient enforces AUTHENTICITY.** The bus does **NOT** verify the
+signature and must never be given the ability to: it does not hold the sender's messaging key, and a
+bus that could verify could equally forge. Every check in the 400/403 rows above is a
+well-formedness check; none of them is a cryptographic one.
+
+**Every SIGN-6 check runs before `hub.Send` is called.** A rejection therefore leaves **no WAL
+record, no delivery, no ack, and no sequence consumed by that request**. (The reservation from step 1
+was burned earlier — a separate, deliberate, earlier act; an unspent mint is a permanent hole in the
+sequence and that is correct, see `CONTRACTS-ONDISK.md`.)
+
+**A SIGN-6 rejection is TERMINAL for its idempotency key, not transient.** There is deliberately no
+`Retry-After` on any of them. The same key re-presented with the same malformed request is rejected
+identically for ever; re-presented with a REPAIRED one it is a different payload under a used key,
+which invariant 10 already answers with 409 and a disconnect. Dressing a permanent refusal as
+retryable is how a client ends up in a loop that can never succeed.
+
+**KNOWN GAP — a recipient cannot obtain a sender's messaging public key from this bus.** Nothing
+registers a messaging public key at enrolment (`auth.Service.Enrol` leaves
+`RosterEntry.MessagingPublicKey` ZERO), `GET /v1/agents` carries no key material, and CRYPTO-4 (the
+server-attested key-bundle endpoint) does not exist. So verification is possible **only** against a
+key obtained **out of band**. That is the honest state of the world; there is no TOFU fallback, no
+"trust the key the bus handed over", and none may be added.
 
 `/v1/info`'s payload is deliberately minimal (see `DECISIONS.md`, 2026-08-02): `bus_id`, `version`,
 `uptime_seconds` only. A test pins the exact field set — do not add data-dir, listen address, peer
@@ -86,10 +137,11 @@ above; see `## Authentication` further down for the full contract.
 A message may be delivered to a recipient **more than once** — after a client retry, a reconnect with
 a stale cursor, or (once the RELAY epic lands) a cyclic peer topology. What the bus guarantees is:
 
-- **No acknowledged message is lost through our own write path.** `POST /v1/send` and
-  `POST /v1/broadcast` return 201 only after the message is committed through the two-phase
-  prepare→commit path and fsynced (invariant 4). A crash before the 201 may leave the message absent;
-  a crash after it may not.
+- **No acknowledged message is lost through our own write path.** `POST /v1/send` returns 201 only
+  after the message is committed through the two-phase prepare→commit path and fsynced (invariant 4).
+  A crash before the 201 may leave the message absent; a crash after it may not. (`POST /v1/broadcast`
+  used to carry the same guarantee and no longer answers at all — it is 501 since 2026-08-07. The
+  write path beneath it is unchanged; only the route refuses.)
 - **Every message is delivered whole or not at all.** Recovery never serves a torn record: a
   message that survives carries its original sender, recipients, body and content hash, and the hash
   is re-verified on the way back off disk.
@@ -120,7 +172,7 @@ agent it was issued to**: presenting agent A's cursor as agent B is a 400.
 
 | Message | Visible to |
 | --- | --- |
-| broadcast | every agent **except the sender** |
+| broadcast | every agent **except the sender** — the rule still governs any broadcast already on disk, but **no new broadcast can be created**: `POST /v1/broadcast` answers 501 since 2026-08-07 |
 | direct (`/v1/send`) | the named recipient only — **not** the sender, **not** anyone else |
 | any message sent **before** the reader's own enrolment | **nobody** — see the enrolment epoch below |
 
@@ -132,26 +184,30 @@ its traffic echoed back into the loop, and it already holds the `message_id` fro
 **A message whose `sent_at` precedes the reader's own `enrolled_at` is never delivered**, whatever it
 is addressed to. This closes a hole the messaging epic itself opened, found by the security gate:
 
-Message records are durable and they name agent ids. Enrolment is **not** durable yet (AUTH-3), so
-the per-name suffix counter restarts at 1 on every boot — after a restart, anyone who reaches the
-unauthenticated `/v1/enroll` and guesses the name `alpha` is minted `<bus>.alpha-1`, the id the
-*previous* alpha held, and would otherwise read a full retention window of that agent's direct
-messages. The bus cannot tell the two apart **by id**, because an id is exactly what is being reused.
-It can tell them apart **by time**, and no legitimate agent needs traffic that predates its own
-enrolment.
+Message records are durable and they name agent ids. **The paragraph that used to stand here said
+"enrolment is not durable yet (AUTH-3)"; that is FALSE as of 2026-08-07 — AUTH-7 wired the durable
+roster (see "Durability of the roster and sessions" below).** The hazard it described was real at the
+time: with a memory-only roster the per-name suffix counter restarted at 1 on every boot, so anyone
+who reached the unauthenticated `/v1/enroll` after a restart and guessed the name `alpha` was minted
+`<bus>.alpha-1` — the id the *previous* alpha held — and would otherwise have read a full retention
+window of that agent's direct messages. The bus could not tell the two apart **by id**, because an id
+was exactly what was being reused. It could tell them apart **by time**, and no legitimate agent
+needs traffic that predates its own enrolment.
+
+**The rule is unchanged and still enforced**, and it now behaves the way it was designed to: a
+durable roster restores each agent's **ORIGINAL** enrolment instant, so a genuinely continuous agent
+keeps seeing everything sent since it first enrolled, across restarts. Nothing here had to be undone.
 
 Consequences a client must know:
-- After a restart, no agent receives pre-restart history — every enrolment is newer than every
-  recovered message. The messages are still **retained and auditable**; they are not delivered.
 - An agent that enrols after a broadcast does not receive that broadcast. Join, then listen.
 - An agent not on this bus's roster gets **403** from `/v1/messages` and `/v1/wait`, not an empty
   batch. Failing closed matters: reading with no epoch would disable the filter entirely.
+- **Superseded:** "after a restart, no agent receives pre-restart history" was a consequence of the
+  memory-only roster and is no longer true. An agent whose durable enrolment predates a message
+  still sees that message after a restart.
 
-The rule stays correct once AUTH-3 lands — a durable roster restores each agent's **original**
-enrolment instant, so a genuinely continuous agent keeps seeing everything sent since it enrolled.
-Nothing here has to be undone. Identity *continuity* (a new keypair inheriting an id with a prior
-history, and future messages attributed to it) is **not** fixed by the epoch; it is logged at ERROR
-by the hub and carried by follow-up `MSG-FU-SUFFIXFLOOR`.
+Identity *continuity* (a new keypair inheriting an id with a prior history, and future messages
+attributed to it) is **not** fixed by the epoch; it is logged at ERROR by the hub.
 
 ### Retention: 1 day or 1 GiB, whichever comes first
 
@@ -217,10 +273,10 @@ passes the hub as the WAL's `Applier`:
 | `Allow` | out | Set to `GET` on a 405 from `/healthz`, `/v1/info`, `/v1/agents`, `/v1/messages` or `/v1/wait`. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
-| `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, and on `POST /v1/broadcast`'s and `POST /v1/send`'s 201, when the response was replayed from the applied-key table rather than freshly applied. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied nothing. |
-| `Connection` | out | `close` on the 409 from `POST /v1/enroll`, `POST /v1/broadcast` and `POST /v1/send` (idempotency key reused with a different payload). Invariant 10: same key + different payload is a protocol violation, and the server disconnects the offending client. Contrast the same-key/same-payload case, which is a legitimate retry, returns the original 201 unchanged, and is never disconnected or otherwise punished. |
-| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit), and on a 503 from `/v1/broadcast` or `/v1/send` caused by the applied-key table being at capacity. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. |
-| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/broadcast` or `/v1/send`. |
+| `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, on `POST /v1/send`'s 201, and (added 2026-08-07) on `POST /v1/mint`'s 201, when the response was replayed rather than freshly applied — from the applied-key table for `enroll`/`send`, from the outstanding-reservation table for `mint`. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied (and, for `mint`, allocated) nothing. Not reachable on `/v1/broadcast`, which answers 501. |
+| `Connection` | out | `close` on the 409 from `POST /v1/enroll` and `POST /v1/send` when an idempotency key was reused with a different payload. Invariant 10: same key + different payload is a protocol violation, and the server disconnects the offending client. Contrast the same-key/same-payload case, which is a legitimate retry, returns the original 201 unchanged, and is never disconnected or otherwise punished — and contrast the SIGN-6 409s (`ErrUnknownMint`, `ErrMintMismatch`), which are a reservation problem, not a payload conflict, and do **not** disconnect. |
+| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit), on a 503 from `/v1/send` caused by the applied-key table being at capacity, and on a 503 from `/v1/mint` caused by the outstanding-reservation bounds. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, an expiring reservation, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. It is also deliberately **absent from every SIGN-6 4xx**, which are terminal for their idempotency key. |
+| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/mint`, `/v1/broadcast` or `/v1/send`. |
 | `Cache-Control` | out | `no-store` on `POST /v1/session/begin` only. That response body carries a LIVE credential (the session token); the other two auth responses carry none, so the header is deliberately not set on them and its presence stays meaningful. |
 
 ## Enrolment and sessions (added 2026-08-02)
@@ -315,23 +371,47 @@ reachable only by whoever holds the token: the agent itself, or someone who obse
 **There is no TLS in this server**, so that observer is a real threat model on any non-loopback
 listener, and the token's unguessability is load-bearing now that no other per-agent bound exists.
 
-**Nothing here is durable — do not claim otherwise.** The roster (`auth.MemoryRoster`), the
-idempotency-key table, the session table, and the per-name agent-id suffix counters
-(`ids.NewNameSuffixes()`, wired fresh in `cmd/agent-bus`) are **all in-memory only**. Enrolment is
-**NOT crash-safe**: every enrolled agent, every remembered idempotency key, and every session is lost
-on process restart, and suffixes restart at 1 for every name until AUTH-3 lands durable enrolment and
-recovery through the WAL. This is a known, deliberately-scoped gap, not an oversight — see the doc
-comments on `auth.Service.Enrol` and `auth.Roster`. Sessions specifically are **not** a durability gap
-to close later: not surviving a restart is a settled design decision (a lost session costs one
-challenge/response round trip), independent of AUTH-3. `cmd/agent-bus`'s `run()` logs this at `WARN`
-on every start:
+### Durability of the roster and sessions (CORRECTED 2026-08-07 by AUTH-7)
+
+**The passage that stood here — "Nothing here is durable — do not claim otherwise" — is now FALSE
+for the ROSTER and is corrected in place.** It was accurate until AUTH-7 wired
+`auth.NewWALRoster` into `cmd/agent-bus`. What holds today:
+
+| State | Durable? | What a restart does to it |
+| --- | --- | --- |
+| The enrolment **roster** (`auth.WALRoster`) | **YES** | Nothing. Agent ids, public keys and each agent's **ORIGINAL** `enrolled_at` survive a restart and a `SIGKILL`, fsynced through the two-phase write path and rebuilt by replay. **An agent does NOT re-enrol after a restart.** |
+| Per-name agent-id **suffix floors** | **YES** | Resume above every suffix ever issued (`<data-dir>/agent-suffixes`; `CONTRACTS-ONDISK.md`). They no longer restart at 1. |
+| **Sessions** (bearer tokens) | **NO, deliberately, and not a gap to close** | Every token is invalidated. Each agent must redo the `session/begin` → `session/complete` handshake before its first authenticated call — but must **not** re-enrol. |
+| The **idempotency-key** table | YES (IDEM-11, `<data-dir>` applied-key store) | Survives; see the applied-key sections in `CONTRACTS-ONDISK.md`. |
+| Outstanding `/v1/mint` **reservations** | **NO, deliberately** | Invalidated. The next `/v1/send` gets 409 `ErrUnknownMint`; the client re-mints under the same key. Only the burned NUMBER is durable, not the table. |
+
+**Sessions are memory-only on purpose and that is settled.** They are short-lived bearer
+credentials; writing live ones to disk would store replayable material to save exactly one round
+trip. Persisting them is not planned.
+
+`cmd/agent-bus`'s `run()` says exactly this at `WARN` on every start — the old warning, which
+claimed the roster was lost, has been replaced:
 
 ```
-msg="enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe, the roster and all sessions are LOST on restart, and agent id suffixes restart from 1 for every name. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery" bus_id=<id> follow_up=AUTH-3
+msg="SESSIONS are in-memory only: every bearer token is invalidated by this start, and each enrolled agent must run the session handshake again before its first authenticated call. It does NOT have to re-enrol -- the roster IS durable ..." 
 ```
 
-No on-disk record type, WAL frame, or wire protocol version was introduced by this change — the
-`## Record types / wire protocol versions` section above remains the complete index.
+The agent-id-suffix question is answered SEPARATELY, per data directory, by the "agent-id suffix
+floors" line emitted just above that WARN: INFO on an ordinary start, raised to WARN or ERROR
+precisely when there is something to act on.
+
+**Hub wiring consequence (AUTH-7).** `hub.NoteEnrolment` and the hub's private roster map are
+**DELETED**. The hub now reads through to the authoritative roster via the new `hub.RosterSource`
+interface, and `hub.Options.Roster` is **REQUIRED** — `hub.Open` returns a hard error on nil rather
+than serving an empty roster while looking healthy. The adapter from `internal/auth` to
+`hub.RosterSource` lives in `cmd/agent-bus/hubroster.go`, the one place that legitimately holds both
+packages, and it is a **live view, never a snapshot**: a snapshot taken at startup would reintroduce
+the same bug with a different cause (every agent enrolled after boot would authenticate and then be
+refused as an unknown sender).
+
+No on-disk record type, WAL frame, or wire protocol version was introduced by AUTH-1 itself. AUTH-7's
+wiring introduced none either — `auth.RecordKind = "agent"` / `auth.RecordVersion = 1` were already
+defined; see `CONTRACTS-ONDISK.md`.
 
 **Known gaps in this surface (recorded so nobody assumes a protection that is absent).** All three
 routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE the credential — and:
@@ -417,13 +497,16 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `PrincipalFromContext(ctx) (auth.Principal, bool)` | The authenticated identity, or `ok == false` on an allow-listed route (not an error condition — it is the definition of an unauthenticated route). |
 | `AgentIDFromContext(ctx) string` | The fully-qualified `<bus-id>.<agent-id>` (invariant 2) of the caller, or `""` when no principal is attached. |
 | `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. |
-| `RouteAgents` / `RouteBroadcast` / `RouteSend` / `RouteMessages` / `RouteWait` | `/v1/agents`, `/v1/broadcast`, `/v1/send`, `/v1/messages`, `/v1/wait` — the messaging surface. Registered only when the server has a hub; **never** on the allow-list. |
-| `MaxMessageRequestBytes` | `128 << 10` — the request-body cap on `/v1/broadcast` and `/v1/send`. The real payload limit is `store.MaxBodyBytes` (64 KiB decoded); this one only stops an unbounded stream reaching the decoder. |
+| `RouteAgents` / `RouteMint` / `RouteBroadcast` / `RouteSend` / `RouteMessages` / `RouteWait` | `/v1/agents`, `/v1/mint`, `/v1/broadcast`, `/v1/send`, `/v1/messages`, `/v1/wait` — the messaging surface. `RouteMint` added 2026-08-07. All are registered only when the server has a hub; **never** on the allow-list. `/v1/broadcast` is registered and authenticates, and then answers 501. |
+| `MaxMessageRequestBytes` | `128 << 10` — the request-body cap on `/v1/mint`, `/v1/broadcast` and `/v1/send`. The real payload limit is `store.MaxBodyBytes` (64 KiB decoded); this one only stops an unbounded stream reaching the decoder. |
+| `hub.SeqFloorRecordKind` / `hub.MintBatchSize` | `"seqfloor"` / `256` — the durable sequence floor that makes the mint safe across a restart. See `CONTRACTS-ONDISK.md`. |
+| `hub.MaxOutstandingMintsPerAgent` / `hub.MaxOutstandingMints` / `hub.MintTTL` | `64` / `8192` / `15m` — bounds on the in-memory outstanding-reservation table. Both bounds **fail closed** and never evict another agent's reservation to make room. |
+| `hub.ErrUnknownMint` / `hub.ErrMintMismatch` | The two 409s SIGN-6 added on `/v1/send`. Neither disconnects. |
 | `(*Server).Hub() *hub.Hub` | The messaging hub, or `nil` when the messaging routes are not registered. |
 | `hub.EncodeCursor(agentID, after) string` / `hub.DecodeCursor(agentID, cursor) (uint64, error)` | The cursor codec. `DecodeCursor` rejects a cursor bound to a different agent with `hub.ErrInvalidCursor`. `MaxCursorLen` is 512. |
 | `store.Message.VisibleTo(agentID string, enrolledAt time.Time) bool` | The **one** authorization boundary of the read path. Applied on all four read paths (history, the long-poll fast path, its post-registration re-read, and its wake re-read) and by the wake filter itself, always with the AUTHENTICATED principal and that agent's roster entry — never with anything taken from a cursor. A zero `enrolledAt` disables the epoch check and exists only for roster-less callers (an audit tool); it must never be reached from a request path. |
 | `hub.Result` / `hub.Batch` | What a send returns and what a read returns; see `internal/hub/hub.go` and `internal/hub/wait.go`. |
-| `store.RecordKind` / `store.RecordVersion` | `"message"` / `1` — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
+| `store.RecordKind` / `store.RecordVersion` | `"message"` / **`2`** (was `1`; bumped 2026-08-07 by SIGN-6, reserved from the Spec Server `store-record-version` namespace) — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. v2 adds REQUIRED `timestamp_ms` and `signature`, and **refusing v1 records at recovery is a destructive, bidirectional break** — see `CONTRACTS-ONDISK.md`. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
 
 **Rule for every future route: register it through `(*Server).route`, never `mux.HandleFunc`
 directly.** A route registered the wrong way is still authenticated — the middleware wraps the whole

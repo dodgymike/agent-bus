@@ -1,18 +1,30 @@
 # agent-bus
 
 A small, very durable inter-agent message bus, written in Go. Claude Code agents enrol with it,
-wait on an HTTP long-poll, and broadcast or DM each other. Multiple buses relay to each other.
-Agents drive it entirely through shell wrappers — **an agent should never have to construct an
-HTTP call.**
+wait on an HTTP long-poll, and DM each other. Multiple buses relay to each other.
+Agents drive it entirely through the `busctl` CLI (or the importable `client` package it shells
+over) — **an agent should never have to construct an HTTP call.**
 
-## Status: early scaffold
+## Status (2026-08-07)
 
-This is the CORE wave. The server binary starts, binds, logs, and answers two unauthenticated
-routes (`/healthz`, `/v1/info`). **Enrolment, sending, long-poll, and relay are not built yet.**
-There is no `scripts/bus-*.sh` wrapper yet, because there is no agent-facing capability yet —
-invariant 7 (every capability ships with its wrapper) doesn't apply until one exists. Do not expect
-the quickstart below to do anything beyond start a server and query it; the enrol/send/wait steps
-are placeholders that will fill in as the ID, AUTH, MSG and POLL epics land.
+Enrolment, sessions, direct messaging and long-poll all work, and the client is `cmd/busctl` — see
+[`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) for the agent-facing walkthrough. Relay between buses is
+written but **not registered on any listener**, so cross-bus messaging does not work yet.
+
+Three things an operator must know before upgrading an existing bus:
+
+- **Enrolment is durable.** Agent ids, public keys and each agent's original enrolment instant
+  survive a restart and a crash. **Agents no longer re-enrol after a restart.** Sessions are
+  memory-only by design, so each agent redoes the session handshake — but not the enrolment.
+- **A signature is mandatory on every message.** `POST /v1/send` requires a sender-supplied
+  Ed25519 signature over the bus-minted message id and sequence; `busctl send` handles the whole
+  two-step for you. **`busctl broadcast` / `POST /v1/broadcast` now answer `501` and do not work** —
+  a broadcast has no signable audience under the current signing format, and the route fails closed
+  rather than carrying unsigned traffic. Send N direct messages instead until that is settled.
+- **Upgrading DISCARDS the existing message history.** The durable message record moved from
+  version 1 to version 2 to carry the signature, and there is no migration — an unsigned message has
+  nothing to migrate to. The break runs both ways, so rolling back discards the v2 records too. Copy
+  the data directory first if the history matters. Enrolment and invite records are unaffected.
 
 ## Design contract
 
@@ -92,13 +104,23 @@ Both routes are unauthenticated by design (liveness and pre-enrolment discovery 
 `DECISIONS.md`). Every other route (`GET`/`POST` other than these two paths, or a non-`GET` on
 these) returns a JSON error, not the bare 200 above.
 
-## Quickstart (placeholder — fills in as the wrappers land)
+## Quickstart
 
-Once the ID, AUTH, MSG and POLL epics ship, this section becomes a real walkthrough: build one bus,
-enrol two agents through `scripts/bus-enrol.sh`, have one wait on `scripts/bus-wait.sh` and the
-other send through `scripts/bus-send.sh`. Until then, showing those commands here would document
-commands that fail — see `AGENT_PROTOCOL.md` (not yet written; it lands with the ENROL epic) for the
-agent-facing instructions once they exist.
+```sh
+go build -o /tmp/agent-bus/busctl ./cmd/busctl
+scripts/bus-serve.sh start                       # start a local bus
+
+busctl --bus http://127.0.0.1:8080 enrol --name planner
+busctl --bus http://127.0.0.1:8080 enrol --name builder --keep-current
+busctl agents                                    # fully-qualified ids
+
+busctl --as <bus>.builder-1 watch &              # long-poll for messages
+busctl --as <bus>.planner-1 send <bus>.builder-1 'hello'
+```
+
+`busctl broadcast` is deliberately refused by the bus — see the status note above.
+[`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) is the full agent-facing doc (every flag, exit code and
+idempotency rule); [`CONTRACTS-CLI.md`](./CONTRACTS-CLI.md) is the exact reference.
 
 ## Repository layout
 
@@ -109,6 +131,9 @@ here to avoid the two going out of sync.
 
 - [`CLAUDE.md`](./CLAUDE.md) — the development protocol and design invariants (read this first)
 - [`DECISIONS.md`](./DECISIONS.md) — dated design decisions and their rationale
-- [`CONTRACTS.md`](./CONTRACTS.md) — every route, flag, env var, and record type
+- [`CONTRACTS.md`](./CONTRACTS.md) — index of every route, flag, env var, and record type; the
+  detail lives in `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, `CONTRACTS-CLI.md`, `CONTRACTS-AGENT.md`
+- [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) — agent-facing instructions (`busctl`)
+- [`PROTOCOL.md`](./PROTOCOL.md) — the on-disk format and the canonical signing format
 - [`AGENT_LOG.md`](./AGENT_LOG.md) — per-task work log
 - [`SPEC.md`](./SPEC.md) — generated mirror of the Spec Server backlog (never hand-edit)

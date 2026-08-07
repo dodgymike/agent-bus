@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
-	"github.com/dodgymike/agent-bus/internal/hub"
 )
 
 // The three routes that ISSUE a credential. All are POST, all take and return
@@ -147,24 +146,17 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The hub keeps its OWN roster view, because auth.Roster exposes no listing
-	// and internal/auth is outside this epic's ownership — see
-	// hub.(*Hub).NoteEnrolment for the full argument, and in particular for why
-	// the two views are equivalent today (both are in memory only and both are
-	// lost on restart) and why this must be replaced when AUTH-3 makes
-	// enrolment durable.
+	// NOTHING IS REPORTED TO THE HUB HERE, and nothing may be added back.
 	//
-	// It runs on the REPLAY path too, and must: a retry whose original
-	// acknowledgement was lost is the same enrolment, and an agent that
-	// disappeared from the agent list because it retried would be a bug that
-	// only shows up under packet loss. NoteEnrolment is idempotent.
-	if s.hub != nil {
-		s.hub.NoteEnrolment(hub.Agent{
-			AgentID:    res.AgentID,
-			Name:       res.Name,
-			EnrolledAt: res.EnrolledAt,
-		})
-	}
+	// This handler used to call hub.NoteEnrolment to feed a SECOND roster the
+	// hub kept for itself. AUTH-7 deleted both: the hub now reads through to the
+	// same auth roster this Enrol just wrote to (hub.RosterSource), so the agent
+	// is on the hub's list the instant Enrol returns, on the replay path as much
+	// as on the first attempt, with no second copy that could be missed, ordered
+	// differently, or lost across a restart.
+	//
+	// Re-adding a notification here would recreate exactly the divergence that
+	// change removed.
 
 	if res.Replayed {
 		w.Header().Set(IdempotencyReplayedHeader, "true")

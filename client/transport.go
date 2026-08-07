@@ -316,6 +316,19 @@ func statusError(op string, resp *http.Response, body []byte) *Error {
 		e.Kind = KindRejected
 		e.Message = "the bus refused the request: " + detail
 		e.Remedy = "an idempotency key was reused with different content; use a fresh key for new content (invariant 10)"
+	case resp.StatusCode == http.StatusNotImplemented:
+		// A DELIBERATE, PERMANENT refusal, not a fault. Today the only route
+		// that answers 501 is /v1/broadcast (SIGN-6: a broadcast cannot be
+		// signed under signing format v1, and the bus fails CLOSED rather than
+		// carrying unsigned traffic — see the broadcast-specific annotation in
+		// messages.go for the remedy an agent can act on). Nothing was applied:
+		// the bus refuses before it even decodes the request body. KindRejected,
+		// not KindServer, and no retry is ever advised — the same request will
+		// fail the same way every time, so "retry" is actively wrong advice
+		// here, unlike an ordinary 5xx.
+		e.Kind = KindRejected
+		e.Message = "the bus deliberately refuses this request: " + detail
+		e.Remedy = "this is not a bus fault and not transient; do not retry"
 	case resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("Retry-After") == "":
 		// NOT transient. See the 503 split in this function's doc comment.
 		e.Kind = KindServer

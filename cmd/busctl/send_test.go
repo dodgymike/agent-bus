@@ -625,6 +625,86 @@ func TestCLIBroadcastSendsNoRecipient(t *testing.T) {
 	}
 }
 
+// TestCLIBroadcastRefused501ExitsRejectedNotServer is the end-to-end version of
+// the SIGN-6 client fix: `busctl broadcast` against a bus that answers 501
+// (the deliberate, permanent refusal — a broadcast cannot be signed under
+// signing format v1) must exit 7 (client.ExitRejected), not 6, and the message
+// an agent sees must say plainly that this is a refusal, not a fault, that
+// NOTHING was applied, and it must not tell the agent to retry.
+//
+// Before this fix `busctl broadcast` reported this as "the bus reported an
+// INTERNAL ERROR", exit 6, with "may or may not have been APPLIED" and a
+// `retry with --idempotency-key` instruction — which is exactly the retry loop
+// SIGN-6(6) forbids for a TERMINAL rejection.
+func TestCLIBroadcastRefused501ExitsRejectedNotServer(t *testing.T) {
+	var calls int32
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteBroadcast {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		stubWriteJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "a broadcast cannot be signed under signing format v1: the canonical format requires a non-empty recipient set and the canonical audience of a broadcast is SIGN-3's undecided question; SIGN-6 admits no unsigned message type, so this route is refused rather than accepting unsigned traffic",
+		})
+	})
+
+	res := bus.run(t, "", false, false, "broadcast", "all hands")
+	if res.Code != client.ExitRejected {
+		t.Fatalf("broadcast against a 501 exited %d, want %d (client.ExitRejected); stdout=%q stderr=%q",
+			res.Code, client.ExitRejected, res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "INTERNAL ERROR") || strings.Contains(res.Stderr, "internal error") {
+		t.Fatalf("stderr still reads as an internal error, not a deliberate refusal: %q", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "may or may not have been APPLIED") || strings.Contains(res.Stderr, "may or may not have been applied") {
+		t.Fatalf("stderr falsely claims the outcome is ambiguous — a 501 here is certain: nothing was applied: %q", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "--idempotency-key") {
+		t.Fatalf("stderr still advises a retry with --idempotency-key — SIGN-6(6) forbids this for a TERMINAL rejection: %q", res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "SIGN-3") {
+		t.Fatalf("stderr does not name SIGN-3 as the task that reopens broadcast: %q", res.Stderr)
+	}
+	if calls != 1 {
+		t.Fatalf("the bus saw %d broadcast attempts, want 1 — a 501 must not be retried", calls)
+	}
+}
+
+// TestCLISendSurfaces409MintLostDoesNotAdviseAFreshKey is the end-to-end
+// version of the mint-vs-conflict split: after a bus restart the (memory-only)
+// mint table is empty, so /v1/send answers 409 for a perfectly good
+// idempotency key. Telling the operator to use a FRESH key there is harmful —
+// if the original send had landed, a fresh key applies it a SECOND time
+// (invariant 10) — so the human-mode remedy must say to redo the same
+// reserve-then-send under the SAME key instead.
+func TestCLISendSurfaces409MintLostDoesNotAdviseAFreshKey(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteSend {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusConflict, map[string]string{
+			"error": "no matching sequence reservation: mint a fresh message id with POST /v1/mint, re-sign it and re-send",
+		})
+	})
+
+	res := bus.run(t, "", false, false, "send", "bus-x.other-1", "payload")
+	if res.Code != client.ExitRejected {
+		t.Fatalf("send against a mint-lost 409 exited %d, want %d (client.ExitRejected); stdout=%q stderr=%q",
+			res.Code, client.ExitRejected, res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "FRESH") {
+		t.Fatalf("stderr advises a FRESH idempotency key for a lost reservation — harmful, since a fresh key double-applies an already-landed send (invariant 10): %q", res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "SAME idempotency key") {
+		t.Fatalf("stderr does not tell the operator to reuse the SAME idempotency key: %q", res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "/v1/mint") {
+		t.Fatalf("stderr does not point at /v1/mint to re-mint: %q", res.Stderr)
+	}
+}
+
 // bodyOf reads a handler's request body. The stub bus has already replaced
 // r.Body with a re-readable buffer, so this is safe inside a route handler.
 func bodyOf(t *testing.T, r *http.Request) []byte {

@@ -108,6 +108,36 @@ type Credential struct {
 	// of the same fact that could disagree.
 	PrivateKeySeed string `json:"private_key_seed"`
 
+	// MessagingKeySeed is the base64 (standard, padded) 32-byte Ed25519 seed of
+	// this identity's MESSAGING key. SECRET, and NEVER SENT TO THE BUS.
+	//
+	// # Two keys, and why they must not be one key
+	//
+	// PrivateKeySeed above is the AUTH key: it proves this agent to the BUS, the
+	// bus holds its public half, and the bus is the only party that ever checks
+	// it. MessagingKeySeed proves this agent to its PEERS. It is the one a
+	// COMPROMISED BUS CANNOT FORGE — which is the entire value of message
+	// signing, and which collapses the moment the two are the same key, because
+	// the bus already holds the auth public key and could then be the one
+	// deciding what a "verified" message from this agent says.
+	//
+	// # Optional and ADDITIVE, on purpose
+	//
+	// It is omitempty and storeFormatVersion is deliberately NOT bumped: a
+	// credential written before signing existed is still perfectly valid, and
+	// refusing to load it would lock an agent out of a bus it is legitimately
+	// enrolled on over a field it never needed. A credential without one gets a
+	// key MINTED ON FIRST USE (Store.EnsureMessagingKey), under the store lock,
+	// and the minting is the only write.
+	//
+	// # It never leaves the machine
+	//
+	// Nothing sends it, nothing prints it, and there is no route that accepts
+	// one. Only the PUBLIC half is ever handed out, and only out of band —
+	// `busctl keygen` prints it for a human to pass to a peer. When CRYPTO-4
+	// lands, the public half is what gets registered; this field stays here.
+	MessagingKeySeed string `json:"messaging_key_seed,omitempty"`
+
 	// IdempotencyKey is the key this enrolment was accepted under.
 	//
 	// It is kept AFTER success, not discarded, so that re-running the same
@@ -119,9 +149,11 @@ type Credential struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
-// String redacts the private half. See the type comment.
+// String redacts BOTH private halves. See the type comment, and note that a new
+// secret field added to this struct MUST be added here too — the redaction is
+// enumerated rather than derived, so a forgotten field prints in full.
 func (c Credential) String() string {
-	return fmt.Sprintf("Credential{AgentID:%s BusID:%s Name:%s BusURL:%s PrivateKeySeed:[REDACTED]}",
+	return fmt.Sprintf("Credential{AgentID:%s BusID:%s Name:%s BusURL:%s PrivateKeySeed:[REDACTED] MessagingKeySeed:[REDACTED]}",
 		c.AgentID, c.BusID, c.Name, c.BusURL)
 }
 
@@ -140,6 +172,105 @@ func (c Credential) PrivateKey() (ed25519.PrivateKey, error) {
 			"the credential store is damaged; re-enrol with `busctl enrol --name <name>`")
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// MessagingPrivateKey expands the stored messaging seed into a usable Ed25519
+// private key.
+//
+// A credential with no messaging seed is an ERROR here rather than a silent
+// mint: minting is a WRITE, it belongs under the store lock, and a read-only
+// accessor that quietly created key material would mean two goroutines could
+// each mint a different key and one of them would sign with a key nobody else
+// will ever hold. Call Store.EnsureMessagingKey first — Client.messagingKey
+// does.
+func (c Credential) MessagingPrivateKey() (ed25519.PrivateKey, error) {
+	if c.MessagingKeySeed == "" {
+		return nil, newError(KindConfig, "messaging key",
+			"identity "+c.AgentID+" has no messaging key yet",
+			"run `busctl keygen` to mint one, then hand the printed public key to your peers")
+	}
+	seed, err := base64.StdEncoding.Strict().DecodeString(c.MessagingKeySeed)
+	if err != nil {
+		return nil, wrapError(KindConfig, "messaging key",
+			"the stored messaging key for "+c.AgentID+" is not valid base64",
+			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `busctl keygen`, then re-distribute the new public key to your peers",
+			err)
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, newError(KindConfig, "messaging key",
+			fmt.Sprintf("the stored messaging key for %s is %d bytes, expected %d", c.AgentID, len(seed), ed25519.SeedSize),
+			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `busctl keygen`, then re-distribute the new public key to your peers")
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// MessagingPublicKey returns the standard base64 of the PUBLIC half of the
+// messaging key — the value that is handed to a peer out of band.
+//
+// It is DERIVED from the seed on every call rather than stored beside it. The
+// two could otherwise disagree, and a stored public key that does not match the
+// stored private key is the worst possible failure here: peers would be handed a
+// key that verifies nothing this agent signs, and the symptom (every message
+// rejected, by everyone) points nowhere near the cause.
+func (c Credential) MessagingPublicKey() (string, error) {
+	priv, err := c.MessagingPrivateKey()
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)), nil
+}
+
+// EnsureMessagingKey returns ref's credential, minting its messaging key first
+// if it has none.
+//
+// # Why minting is a locked read-modify-write and not a lazy field initialiser
+//
+// The store is shared by parallel agents in this project by design, and the
+// credential file is rewritten whole. Minting outside the lock means two
+// processes generate two DIFFERENT keys, both write, and one wins: the loser
+// spends the rest of its life signing with a key that is no longer on disk, and
+// every peer it handed the losing public key to rejects everything it sends. The
+// lock plus insert-if-absent makes the second caller adopt the first caller's
+// key instead, which is the only outcome that keeps one identity to one key.
+//
+// A credential that ALREADY has a seed is returned untouched and nothing is
+// written, so this is safe to call on every send.
+func (s *Store) EnsureMessagingKey(ref string) (Credential, error) {
+	// Read first, outside the lock: the overwhelmingly common case is that the
+	// key already exists, and taking an exclusive file lock on every send to
+	// discover that would serialise every parallel agent sharing this store
+	// behind one another for nothing.
+	if cred, err := s.Resolve(ref); err == nil && cred.MessagingKeySeed != "" {
+		return cred, nil
+	}
+
+	var out Credential
+	err := s.update(func(d *storeData) error {
+		cred, rerr := resolveIn(*d, ref)
+		if rerr != nil {
+			return rerr
+		}
+		i := findCredential(d.Credentials, cred.AgentID)
+		if i < 0 {
+			return newError(KindConfig, "messaging key",
+				"identity "+cred.AgentID+" is not in the credential store",
+				"enrol with `busctl enrol --bus <url> --name <name>`")
+		}
+		if d.Credentials[i].MessagingKeySeed == "" {
+			seed := make([]byte, ed25519.SeedSize)
+			if _, gerr := rand.Read(seed); gerr != nil {
+				return wrapError(KindInternal, "messaging key",
+					"cannot generate a messaging key pair: the system random source failed", "", gerr)
+			}
+			d.Credentials[i].MessagingKeySeed = base64.StdEncoding.EncodeToString(seed)
+		}
+		out = d.Credentials[i]
+		return nil
+	})
+	if err != nil {
+		return Credential{}, err
+	}
+	return out, nil
 }
 
 // pendingEnrolment is key material generated for an enrolment whose outcome we

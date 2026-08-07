@@ -24,16 +24,24 @@ package main
 //
 // # Where the derived floors come from, and what they do NOT cover
 //
-// The population is the SENDER and the RECIPIENTS of store message records
-// (store.RecordKind). Those are fully-qualified agent ids (invariant 2), they
-// are server-derived, and the WAL never compacts, so they are the ids that
-// really are durable on a legacy dir.
+// The derivation is the UNION of two complementary halves, per name maximum:
 //
-// It is a LOWER BOUND, not a complete floor, and three holes are known:
+//   - messageAgentIDFloors: the SENDER and the RECIPIENTS of store message
+//     records (store.RecordKind). Those are fully-qualified agent ids
+//     (invariant 2), they are server-derived, and the WAL never compacts, so
+//     they are the ids that really are durable on a legacy dir.
+//   - auth.EnrolmentSuffixesInWAL: the agent id of every enrolment record
+//     (auth.RecordKind), committed, aborted AND dangling.
+//
+// Neither half is a floor on its own — each folds only its own record kind and
+// is blind to the other's — and their union is still a LOWER BOUND, not a
+// complete floor. Three holes are known:
 //
 //   - A BROADCAST stores a flag instead of a recipient list (store.Message.
 //     Broadcast), deliberately. An agent that only ever RECEIVED broadcasts
-//     therefore leaves no trace in any record and its suffix is invisible here.
+//     therefore leaves no trace in any MESSAGE record; today the enrolment half
+//     does not close that hole either, because run() injects no
+//     auth.Options.Roster and so no enrolment record is written at all.
 //   - wal.Open's recovery may have DISCARDED or QUARANTINED records before this
 //     scan runs, taking their ids with them. See suffixBackfillExposure below:
 //     that is detected and logged at ERROR, and the bus still starts.
@@ -45,15 +53,22 @@ package main
 //
 // Only the first two are real gaps, and both are structural to a DERIVED floor.
 // They are exactly what the WRITTEN-AHEAD floor file removes, which is why this
-// code runs once per data dir and then never again.
+// code runs once per data dir and then never again — and why a dir that HAS
+// history but no floors file is refused rather than backfilled silently; see
+// the ruling on the seal-line switch in openSuffixAllocator.
 //
 // # What is deliberately NOT used
 //
-// auth.EnrolmentSuffixesInWAL is NOT called as the floor source, and its own doc
-// comment says why at length: it scans only enrolment records, and on every dir
-// the shipped binary has written that set is EMPTY while the message records are
-// the entire population. Sealing its result is indistinguishable from sealing an
-// empty map on a bus with history.
+// auth.EnrolmentSuffixesInWAL IS folded in, as the complementary half above.
+// That is a change: this file used to say it was not called at all. What its
+// own doc comment forbids still stands unchanged and must not be re-read as
+// permission — it is NOT A FLOOR ON ITS OWN and must never be sealed alone,
+// because on every dir the shipped binary has written its result is EMPTY while
+// the message records are the entire population. Sealing it alone would be
+// indistinguishable from sealing an empty map on a bus with history. Folded
+// into a per-name MAXIMUM with the message half it can only ever raise a floor,
+// never lower one, which is the only shape in which it is safe. The union is
+// still a lower bound and still not a complete floor.
 //
 // A GENERIC walk over record bodies, folding every string that happens to parse
 // as an agent id, is also deliberately avoided. It looks strictly safer — floors
@@ -83,6 +98,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/store"
@@ -106,9 +122,17 @@ import (
 // exactly right and neither narrower nor wider.
 //
 // dataDirWasEmpty must be the state of dataDir at the very start of the process,
-// before anything wrote to it. It is only used to pick the LOG LEVEL of the seal
-// line; nothing about the floors themselves depends on it.
-func openSuffixAllocator(dataDir string, walLog *wal.Log, busID string, dataDirWasEmpty bool, lg *logging.Logger) (*ids.DurableNameSuffixes, error) {
+// before anything wrote to it. It picks the LOG LEVEL of the seal line, and — as
+// of AUTH-3-FU-FAILOPEN — it is half of the test that decides whether a MISSING
+// floors file is a first start or a loss of authority. Nothing about the floors
+// themselves depends on it.
+//
+// allowBackfill is the operator's one-time `-backfill-suffix-floors` opt-in. It
+// is required, and required ONLY, to backfill a data directory that HAS history
+// and has no floors file. Absent it, that case is FATAL rather than backfilled;
+// the ruling and its counter-arguments are recorded above the seal-line switch
+// below.
+func openSuffixAllocator(dataDir string, walLog *wal.Log, busID string, dataDirWasEmpty, allowBackfill bool, lg *logging.Logger) (*ids.DurableNameSuffixes, error) {
 	alloc, err := ids.OpenNameSuffixes(dataDir)
 	if err != nil {
 		// Includes ErrSuffixFileCorrupt, which is never recovered by
@@ -146,7 +170,19 @@ func openSuffixAllocator(dataDir string, walLog *wal.Log, busID string, dataDirW
 	backfilling := !alloc.Existed()
 	raised := 0
 
+	// Does this data directory have HISTORY? Computed before the switch below
+	// uses it, because the refusal has to happen before the scan.
+	hasHistory := !dataDirWasEmpty || walLog.Recovered().Records > 0
+
 	if backfilling {
+		// FAIL CLOSED. A floors file that is MISSING on a dir with history is a
+		// loss of authority, not a fresh start, and no derivation can make it
+		// good: see the ruling above the seal-line switch below. Checked BEFORE
+		// the WAL scan, so a refusal costs no scan.
+		if hasHistory && !allowBackfill {
+			return nil, fmt.Errorf("this data directory has HISTORY but no %s file, so the agent-id suffixes it has already issued cannot be proven: starting would resume every agent name from suffix 1 and re-mint agent ids that are live (invariant 1: ids are never reused, including across restarts). The floors file is the only authoritative record of what this directory has issued -- the durable log is a strict lower bound and can never be tight, because the floor is persisted BEFORE the suffix is issued. Remedy, in order of preference: (1) restore %s from backup and restart; or (2) if this directory genuinely never issued an agent id -- a legacy directory written before the floors file existed, or a first start that crashed before it finished starting -- restart ONCE with -backfill-suffix-floors, which derives the floors from the durable log and accepts the residual", alloc.Path(), alloc.Path())
+		}
+
 		derived, err := walAgentIDFloors(walLog.Path(), busID)
 		if err != nil {
 			// No floors file AND no derivation: nothing can prove what suffixes
@@ -196,17 +232,65 @@ func openSuffixAllocator(dataDir string, walLog *wal.Log, busID string, dataDirW
 	// is a loss of identity continuity, and it went out at INFO, indistinguishable
 	// from an ordinary start.
 	//
-	// It cannot be a refusal to boot: a legacy dir looks identical, so refusing
-	// would block the very migration this code exists to perform, and it would
-	// hand anyone with data-dir write access a permanent boot-denial primitive.
-	// So it is LOUD instead, and graded by whether this dir has history:
+	// Being LOUD was the whole of the answer, and it was not enough. This
+	// comment used to argue that it "cannot be a refusal to boot: a legacy dir
+	// looks identical". That reasoning is SUPERSEDED (AUTH-3-FU-FAILOPEN) and is
+	// recorded here as superseded rather than deleted, so nobody reinstates it.
+	//
+	// THE RULING: a missing floors file on a dir with history is FATAL, and the
+	// backfill happens only behind the explicit operator opt-in
+	// -backfill-suffix-floors. The union derivation above is NECESSARY BUT NOT
+	// SUFFICIENT, provably so:
+	//
+	//   - auth.Service.Enrol writes an enrolment record only when a WALRoster is
+	//     injected through auth.Options.Roster, and run() below does not inject
+	//     one, so the enrolment half of the union is EMPTY on every dir the
+	//     shipped binary has written; and
+	//   - even AFTER durable enrolment lands, ids.DurableNameSuffixes persists
+	//     the floor BEFORE the suffix is issued and the enrolment record is
+	//     written AFTER it, so the floors file is ALWAYS strictly ahead of
+	//     anything derivable.
+	//
+	// A derivation is therefore structurally a lower bound that can never be
+	// tight. The floors file is the ONLY authoritative witness of what this
+	// directory has issued, and losing it on a dir with history is a loss of
+	// authority, not a fresh start.
+	//
+	// The three counter-arguments, and why they do not survive:
+	//
+	//   (i) "It blocks the legacy migration." It does not: the legacy dir is
+	//       still migratable, in one restart, via the opt-in. The information
+	//       that distinguishes "legacy dir that never issued an id" from
+	//       "someone deleted my floors file" is not on disk at all — it is in
+	//       the operator's head — so the right move is to ASK for it.
+	//  (ii) "It hands anyone with data-dir write access a boot-denial
+	//       primitive." They already have one, and a stronger one: corrupt the
+	//       floors file and ids.ErrSuffixFileCorrupt is fatal with NO override
+	//       at all; remove or alter wal-mac.key and startup is fatal likewise.
+	//       This adds no attacker capability. What it removes is a SILENT
+	//       identity-takeover primitive, and unlike corruption this denial is
+	//       recoverable in a single restart.
+	// (iii) "The bus always restarts (DECISIONS.md 2026-08-07)." That decision is
+	//       about MEDIA DAMAGE to the log — availability over retention when
+	//       bytes rot. A missing file is MISCONFIGURATION, not media damage, and
+	//       the missing/wrong wal-mac.key FATAL precedent already carved out
+	//       exactly this class.
+	//
+	// The one KNOWN FALSE POSITIVE, stated honestly: a first start that crashed
+	// between ids.LoadOrCreateBusID and Seal leaves a NON-EMPTY dir with no
+	// floors file, and will refuse. That costs one restart with the flag. It is
+	// accepted, because the alternative is silent identity reuse and the window
+	// is before anything has been served.
+	//
+	// So the seal line is LOUD, graded by whether this dir has history:
 	//
 	//   - floors file present -> INFO. The steady state; nothing was derived.
 	//   - absent, and the data dir was EMPTY when the process started -> WARN.
 	//     This is a genuinely first start. One line, once per dir.
 	//   - absent, and the dir was NOT empty (or the log holds records) -> ERROR.
-	//     This dir HAS history and its floors file is missing, so any id it
-	//     issued that no durable record names can be re-minted on this start.
+	//     This dir HAS history and its floors file is missing. That branch is now
+	//     reachable ONLY with -backfill-suffix-floors set: without it the refusal
+	//     above returned long before here.
 	//
 	// The discriminator is DIRECTORY EMPTINESS and not the record count, and that
 	// correction came from running it: with enrolment still memory-only, a bus
@@ -223,14 +307,27 @@ func openSuffixAllocator(dataDir string, walLog *wal.Log, busID string, dataDirW
 		"floors_raised", raised,
 		"records_in_log", walLog.Recovered().Records,
 		"data_dir_was_empty", dataDirWasEmpty,
+		"backfill_override", allowBackfill,
 	}
 	switch {
 	case !backfilling:
 		lg.Info("agent-id suffix floors sealed", fields...)
-	case dataDirWasEmpty && walLog.Recovered().Records == 0:
+	case !hasHistory:
 		lg.Warn("agent-id suffix floors sealed: this data directory was EMPTY at startup and had no persisted floors file, so this is a first start and every agent name begins at suffix 1. Expected exactly once per data directory; if you see it again, the floors file is being lost between starts", fields...)
 	default:
-		lg.Error("agent-id suffix floors sealed WITHOUT a persisted floors file on a data directory that HAS history: the floors were backfilled from the durable log, so any agent id this bus issued that no durable record names can be RE-MINTED on this start, handing a new keypair a previous holder's identity (invariant 1). This is expected exactly once, when migrating a data directory written before the floors file existed; on any other start it means the floors file was deleted, and the data directory should be investigated", fields...)
+		lg.Error("agent-id suffix floors sealed WITHOUT a persisted floors file on a data directory that HAS history, because -backfill-suffix-floors was set: the floors were backfilled from the durable log, so any agent id this bus issued that no durable record names can be RE-MINTED on this start, handing a new keypair a previous holder's identity (invariant 1). Without the override this start would have REFUSED. Use the override exactly once, to migrate a data directory written before the floors file existed, and then remove it; if this directory did have a floors file and it is now gone, stop and restore it from backup instead", fields...)
+	}
+
+	// The override is a MIGRATION tool, not a setting. Say so when it was set and
+	// not needed, so it does not sit wired into a service unit forever, silently
+	// disarming the refusal above on the day it actually matters.
+	if allowBackfill && !(backfilling && hasHistory) {
+		lg.Warn("-backfill-suffix-floors is set but was NOT required on this start: it is a one-time migration opt-in, and leaving it in place permanently disables the refusal that stops a data directory with a LOST agent-id floors file from re-minting live agent ids. Remove it from the command line or service unit",
+			"path", alloc.Path(),
+			"backfilled", backfilling,
+			"data_dir_was_empty", dataDirWasEmpty,
+			"records_in_log", walLog.Recovered().Records,
+		)
 	}
 	return alloc, nil
 }
@@ -269,8 +366,56 @@ func suffixBackfillExposure(rec wal.Recovered) bool {
 }
 
 // walAgentIDFloors derives, per agent name, the highest suffix of any LOCAL
+// agent id this data directory can be PROVEN to have written, as the UNION of
+// the two complementary derivations — the per-name MAXIMUM of
+// messageAgentIDFloors and auth.EnrolmentSuffixesInWAL.
+//
+// Neither half is a floor alone. messageAgentIDFloors folds only
+// store.RecordKind records; auth.EnrolmentSuffixesInWAL folds only
+// auth.RecordKind ones, and its own doc comment is emphatic that sealing it by
+// itself re-mints live ids. They cover complementary halves of the record
+// stream, so the union is strictly better than either — and still only a LOWER
+// BOUND, never a complete floor. See the file header for the holes that remain
+// and openSuffixAllocator's seal-line comment for why that means a dir with
+// history and no floors file is refused rather than backfilled silently.
+//
+// # Failure in EITHER half is TOTAL
+//
+// Any error from either derivation returns (nil, err). A missed NAME is exactly
+// as fatal as a low maximum — both mint from 1 onto suffixes already on disk —
+// so a partial union is never returned and never usable.
+//
+// A MISSING LOG IS NOT A FAILURE in either half: both return an empty, non-nil
+// map and a nil error, so the union of a fresh bus is the empty map.
+func walAgentIDFloors(walPath, busID string) (map[string]uint64, error) {
+	// The two scans are SEQUENTIAL, and that is load-bearing rather than
+	// stylistic: each wal.ScanAll accumulates every record INCLUDING ITS PAYLOAD
+	// in memory (internal/wal/reader.go), so running them one after the other
+	// keeps PEAK startup memory at one scan's worth, not two. The first scan's
+	// record slice is unreachable before the second one begins.
+	//
+	// The cost is paid at most ONCE PER DATA DIR: this whole path runs only when
+	// there is no floors file, and the start that runs it writes one.
+	floors, err := messageAgentIDFloors(walPath, busID)
+	if err != nil {
+		return nil, fmt.Errorf("deriving agent-id suffix floors: the MESSAGE-RECORD half failed, so the union is INCOMPLETE and must not be used: %w", err)
+	}
+
+	enrolments, err := auth.EnrolmentSuffixesInWAL(walPath, busID)
+	if err != nil {
+		return nil, fmt.Errorf("deriving agent-id suffix floors: the ENROLMENT-RECORD half failed, so the union is INCOMPLETE and must not be used: %w", err)
+	}
+	for name, n := range enrolments {
+		if n > floors[name] {
+			floors[name] = n
+		}
+	}
+	return floors, nil
+}
+
+// messageAgentIDFloors derives, per agent name, the highest suffix of any LOCAL
 // agent id appearing as the sender or a recipient of a message record in
-// walPath.
+// walPath. It is ONE HALF of walAgentIDFloors and is not a floor by itself.
 //
 // # Failure is TOTAL: never a partial map
 //
@@ -313,7 +458,7 @@ func suffixBackfillExposure(rec wal.Recovered) bool {
 // it is precisely how a floor ends up too low. Validation protects the SERVING
 // COPY; a floor is a claim about BYTES THAT REACHED DISK, and those two
 // questions have different right answers.
-func walAgentIDFloors(walPath, busID string) (map[string]uint64, error) {
+func messageAgentIDFloors(walPath, busID string) (map[string]uint64, error) {
 	floors := make(map[string]uint64)
 
 	recs, _, err := wal.ScanAll(walPath, wal.KindWAL)

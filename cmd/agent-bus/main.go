@@ -23,6 +23,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
+	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
@@ -71,6 +72,16 @@ type Config struct {
 	// seeds that on a first start with an empty -data-dir, or must match what
 	// is already persisted there.
 	BusID string
+	// BackfillSuffixFloors is the operator's ONE-TIME opt-in permitting the
+	// agent-id suffix floors to be BACKFILLED from the durable log on a data
+	// directory that has history but no `agent-suffixes` file.
+	//
+	// Default false, and that default is the safety property: without it, that
+	// directory is REFUSED at startup rather than resumed from suffix 1, because
+	// the floors file is the only authoritative witness of what ids the directory
+	// has issued and a derivation from the log is structurally a lower bound (see
+	// openSuffixAllocator). Never needed in normal operation.
+	BackfillSuffixFloors bool
 }
 
 func main() {
@@ -103,6 +114,11 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 	fs.DurationVar(&cfg.PollTimeout, "poll-timeout", defaultPollTimeout, "maximum time a long-poll waits before returning empty, e.g. 30s")
 	fs.StringVar(&logLevel, "log-level", defaultLogLevel, "minimum log severity ("+logging.Levels+")")
 	fs.StringVar(&cfg.BusID, "bus-id", "", "TEST-ONLY: force the bus id. The server is authoritative on every id (invariant 1); a supplied bus id is not a trusted identity. Never use this in production")
+	// NO BACKQUOTES in this usage string, deliberately: flag.UnquoteUsage reads
+	// the first backquoted word as the flag's VALUE PLACEHOLDER and strips the
+	// quotes, so "`agent-suffixes`" would render -h as though this boolean took
+	// an agent-suffixes argument.
+	fs.BoolVar(&cfg.BackfillSuffixFloors, "backfill-suffix-floors", false, "one-time operator opt-in permitting the agent-id suffix floors to be BACKFILLED from the durable log on a data directory that has history but no agent-suffixes file; never needed in normal operation")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -166,9 +182,10 @@ func run(cfg Config) error {
 	//
 	// It exists for exactly one consumer, openSuffixAllocator, and it is the
 	// difference between two cases that are otherwise indistinguishable and want
-	// opposite log levels: a genuinely first start (no floors file, and that is
-	// expected) versus a data dir whose floors file has been LOST (no floors
-	// file, and agent ids this bus already issued may now be re-minted). The
+	// opposite OUTCOMES: a genuinely first start (no floors file, and that is
+	// expected -- proceed, at WARN) versus a data dir whose floors file has been
+	// LOST (no floors file, and agent ids this bus already issued would now be
+	// re-minted -- REFUSE, unless -backfill-suffix-floors says otherwise). The
 	// obvious discriminator -- "does the log hold records" -- is NOT sufficient
 	// today and was measured to be: enrolment is still memory-only, so a bus can
 	// issue alpha-1 and alpha-2, be restarted with agent-suffixes deleted, and
@@ -243,15 +260,27 @@ func run(cfg Config) error {
 	// SERVING, not about binding: nothing here promises the socket is unbound
 	// during replay, only that nothing answers on it.
 	//
-	// The Applier is deliberately nil, and that is an honest statement of where
-	// this project is: there is no in-memory serving copy yet (internal/store is
-	// still a doc.go stub), so there is nothing for committed entries to be
-	// applied TO. The replay is therefore a durability fsck -- it verifies every
-	// frame, resolves prepares against commits, and establishes the high-water
-	// index -- and it rebuilds no state, because there is no state to rebuild.
-	// When the store lands, it is passed here as the Applier and this comment
-	// goes with it.
-	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg})
+	// THE APPLIER IS THE ENROLMENT ROSTER, and the three-step order below is
+	// fixed (see auth.WALRoster's type doc, which spells it out):
+	//
+	//	1. build the roster            -- it is the applier, so it must exist first
+	//	2. wal.Open(Applier: roster)   -- replay REBUILDS the roster, inside Open
+	//	3. roster.Attach(log)          -- only now may it accept a live enrolment
+	//
+	// Step 2 is what makes enrolment survive a restart (AUTH-7), and step 3 is
+	// what makes a LIVE enrolment durable: wal.Log.Write hands every committed
+	// entry to the log's applier after the commit fsync, so this roster must be
+	// THAT applier or Put would write to disk and never reach the serving copy.
+	// WALRoster.Put checks for exactly that mis-wiring and refuses.
+	//
+	// The hub is deliberately NOT an applier here. Its Apply is safe on the
+	// replay path only -- it inserts applied-key records through idem.Recover,
+	// which skips the per-agent fair share because a record on disk proves
+	// admission already succeeded -- so registering it for live commits would
+	// make publish's own admission control dead code. It is given a read-only
+	// replay pass of its own below instead. See (*hub.Hub).Apply.
+	authRoster := auth.NewWALRoster(lg)
+	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg, Applier: authRoster})
 	if err != nil {
 		// FATAL, but this is now a NARROW case, not the general one. Under the
 		// always-restart decision (2026-08-02) recovery repairs or QUARANTINES
@@ -345,7 +374,7 @@ func run(cfg Config) error {
 	// a fallback buys nothing and silently restores the defect while looking
 	// fixed. Every failure below is FATAL, deliberately: a loud, recoverable
 	// outage beats silent identity reuse.
-	alloc, err := openSuffixAllocator(cfg.DataDir, walLog, busID, dataDirWasEmpty, lg)
+	alloc, err := openSuffixAllocator(cfg.DataDir, walLog, busID, dataDirWasEmpty, cfg.BackfillSuffixFloors, lg)
 	if err != nil {
 		return fmt.Errorf("preparing the agent id suffix allocator: %w", err)
 	}
@@ -353,14 +382,39 @@ func run(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("creating the agent id minter: %w", err)
 	}
-	authSvc, err := auth.NewService(auth.Options{Minter: minter})
+	// Attach LAST of the three steps, and before anything can serve: from here
+	// the roster may accept a Put, and every Put is prepared, committed and
+	// fsynced before Enrol returns (invariant 4).
+	if err := authRoster.Attach(walLog); err != nil {
+		return fmt.Errorf("attaching the durable enrolment roster to the write-ahead log: %w", err)
+	}
+	authSvc, err := auth.NewService(auth.Options{Minter: minter, Roster: authRoster})
 	if err != nil {
 		return fmt.Errorf("creating the auth service: %w", err)
 	}
 
-	// Operator-visible, at WARN, on every start. This is not boilerplate: the
-	// bus is NOT yet durable for auth, and the honest signal belongs in the log
-	// where an operator sees it, not only in a doc comment.
+	// Operator-visible, at WARN, on every start, and NARROWED AGAIN by AUTH-7.
+	//
+	// This line used to say the roster and the sessions were both in memory only
+	// and that an accepted enrolment must not be treated as durable. The ROSTER
+	// half of that became FALSE the moment authRoster was wired above: enrolment
+	// is now recorded through the two-phase path, fsynced before Enrol returns,
+	// and rebuilt by replay. A startup line that lies about durability is worse
+	// than no line at all -- it is read exactly by the operator deciding whether
+	// to trust the bus with something -- so what remains is the SESSION half,
+	// stated precisely and no wider.
+	//
+	// The session half is NOT a defect and must not be "fixed" by persisting
+	// sessions. A session is a short-lived bearer credential with a one-hour
+	// ceiling; losing one costs an agent a single challenge/response round trip,
+	// while writing live credentials to disk would put replayable material there
+	// for no benefit (see auth's doc.go). What an agent must NOT have to do
+	// after a restart is RE-ENROL, and it no longer does.
+	//
+	// The level stays WARN rather than dropping to INFO: an operator restarting
+	// a bus needs to know every in-flight token just became invalid, because
+	// every agent will re-handshake at once and anything holding a token will see
+	// one 401 first.
 	//
 	// NARROWED by MSG-FU-SUFFIXFLOOR. This line used to end "and agent id
 	// suffixes restart from 1 for every name", which became FALSE the moment
@@ -374,16 +428,74 @@ func run(cfg Config) error {
 	// The clause was DELETED rather than negated, and that is deliberate. The
 	// security gate showed that the obvious replacement -- "agent id suffixes are
 	// durable and never restart from 1" -- is itself false in the one case an
-	// operator most needs the truth: a data dir whose floors file has been lost
-	// DOES resume names from 1. A single unconditional sentence cannot be right
-	// in both cases, so the claim now lives entirely in the "agent-id suffix
-	// floors" line that openSuffixAllocator emits, which knows which case it is
-	// in and picks INFO, WARN or ERROR accordingly. This line says only what is
-	// unconditionally true.
-	lg.Warn("enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe and the roster and all sessions are LOST on restart. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery. For agent id suffix durability -- which is a SEPARATE question and is answered per data directory -- read the \"agent-id suffix floors\" line above",
+	// operator most needs the truth. That case has since CHANGED, and this
+	// comment is corrected rather than left standing: a data dir whose floors
+	// file has been lost no longer resumes names from 1, it REFUSES TO START
+	// (AUTH-3-FU-FAILOPEN), and it starts only with -backfill-suffix-floors. A
+	// single unconditional sentence still cannot be right in every case, so the
+	// claim continues to live entirely in the "agent-id suffix floors" line that
+	// openSuffixAllocator emits, which knows which case it is in and picks INFO,
+	// WARN or ERROR accordingly. This line says only what is unconditionally
+	// true.
+	//
+	// AUTH-3 and AUTH-7 have both landed, so nothing here points at a follow-up
+	// any more: the roster is durable, and the session table is a deliberate,
+	// permanent exception rather than a gap waiting to be closed.
+	lg.Warn("SESSIONS are in-memory only: every bearer token is invalidated by this start, and each enrolled agent must run the session handshake again before its first authenticated call. It does NOT have to re-enrol -- the roster IS durable (fsynced through the two-phase write path and rebuilt by replay), so agent ids, public keys and each agent's ORIGINAL enrolment instant survive a restart and a crash. Persisting sessions is deliberately NOT planned: they are short-lived credentials, and writing live ones to disk would store replayable material for the price of one round trip saved. For agent id suffix durability -- a SEPARATE question, answered per data directory -- read the \"agent-id suffix floors\" line above; on an ordinary start it is emitted at INFO, and it is raised to WARN or ERROR precisely when there is something to act on",
 		"bus_id", busID,
-		"follow_up", "AUTH-3",
+		"roster_durable", true,
+		"agents_recovered", authRoster.Len(),
+		"sessions_durable", false,
 	)
+
+	// The messaging core, built HERE rather than inside internal/httpapi (which
+	// used to construct one for itself; see httpapi.Options.Hub). This is the
+	// composition root, so it is the one place that can hold the durable log, the
+	// authoritative roster and the hub at the same time -- and the one place a
+	// failure to build any of them can still be FATAL, which is the whole reason
+	// the arrangement moved.
+	//
+	// Replay is a SECOND, READ-ONLY pass over the same file. It is not the same
+	// pass wal.Open just made: that one fed the roster (the log's applier), and
+	// this one rebuilds the message store, the applied-key table and the sequence
+	// floor. They stay separate because the hub must not be the log's applier --
+	// see the wal.Open comment above -- and because hub.Open needs the recovery
+	// outcome (NextIndex, Quarantined) that wal.Open only produces by returning.
+	// A second wal.Open on this directory would be a second WRITER and is not an
+	// option; wal.Replay is read-only.
+	//
+	// The roster is passed as a LIVE VIEW, never a snapshot. hubRoster reads
+	// through to authRoster on every call, so an agent that enrols a minute from
+	// now is on the hub's roster a minute from now. A []hub.Agent captured here
+	// would be a roster frozen at boot: every agent enrolled afterwards would
+	// authenticate and then be refused as an unknown sender, which is the AUTH-7
+	// failure with a new cause.
+	//
+	// DataDir is passed because the hub keeps ONE durable file of its own there:
+	// the message sequence floor (hub.SeqFloorFileName), the only record of a
+	// minted-but-unspent sequence that survives a WAL quarantine. It is the same
+	// directory the WAL, the bus id and the agent-suffix floors live in, and it is
+	// already created and LOCKED above -- the hub must never be handed a directory
+	// another process may be writing.
+	h, err := hub.Open(hub.Options{
+		BusID:   busID,
+		DataDir: cfg.DataDir,
+		Durable: walLog,
+		Replay: func(fn func(wal.Committed) error) (wal.Recovered, error) {
+			return wal.Replay(walLog.Path(), fn)
+		},
+		NextIndex:   rec.NextIndex,
+		Quarantined: rec.Repaired.Quarantined,
+		Roster:      hubRoster{roster: authRoster},
+		Logger:      lg,
+		PollTimeout: cfg.PollTimeout,
+	})
+	if err != nil {
+		// FATAL. A bus that cannot rebuild its message store must not serve one
+		// (invariant 5), and a bus that starts with no messaging is the silent
+		// half-outage AUTH-7 exists to make impossible.
+		return fmt.Errorf("opening the messaging hub: %w", err)
+	}
 
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
 	// to every connection, so each request context descends from it: cancelling
@@ -406,6 +518,9 @@ func run(cfg Config) error {
 		// Registers /v1/enroll, /v1/session/begin and /v1/session/complete.
 		// It authenticates NO other route -- that is AUTH-2.
 		Auth: authSvc,
+		// Registers the messaging surface: /v1/agents, /v1/broadcast, /v1/send,
+		// /v1/messages and /v1/wait. Every one of them authenticates.
+		Hub: h,
 	})
 
 	srv := &http.Server{

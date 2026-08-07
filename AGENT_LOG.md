@@ -1948,3 +1948,120 @@ relayed message is `ErrUnpeeredBus` by construction. Recorded as `doc.go` handof
 failed=0` for `go test -race ./internal/relay/`. Verified in ISOLATION: the tree is red in
 `internal/hub` from a concurrent agent's in-flight `store.NewMessage` arity change, unrelated to
 this task.
+
+## 2026-08-07 — AUTH-7 + SIGN-2/SIGN-6: durable enrolment WIRED, and a signature is MANDATORY (two-part wave)
+
+Two parts landed together because the second depends on the first being real: a mandatory-signature
+policy on a bus whose roster evaporates every restart is a policy nobody can comply with twice.
+
+### Part 1 — AUTH-7: durable enrolment is WIRED (not merely written)
+
+`cmd/agent-bus/main.go` constructs `auth.NewWALRoster`, attaches it to the WAL, and injects it into
+`auth.NewService` and — adapted through the new `cmd/agent-bus/hubroster.go` — into the hub.
+
+**The headline for operators: agents no longer re-enrol after a restart.** Agent ids, public keys
+and each agent's ORIGINAL `enrolled_at` survive a restart and a `SIGKILL`. SESSIONS remain
+memory-only, deliberately and permanently (short-lived bearer credentials; persisting them stores
+replayable material to save one round trip), so each agent redoes the session handshake — but not
+the enrolment. The startup WARN was rewritten accordingly: the old one asserted the roster was lost,
+which is now the opposite of the truth.
+
+**`hub.NoteEnrolment` and the hub's private roster map are DELETED.** The hub reads through to the
+authoritative roster via the new `hub.RosterSource`, and `hub.Options.Roster` is REQUIRED — nil is a
+hard error at `Open`, because a hub with nothing to read refuses every send, rejects every recipient
+and serves an empty agent list *while looking healthy*. The old duplicate roster was the bug: after a
+restart the hub's copy came back empty while auth's durable one came back full — a bus that
+authenticated everyone and served nobody.
+
+**Evidence:** verified END TO END against a running server — enrol two agents, `SIGKILL`, restart,
+both authenticate with their existing credentials and `/v1/agents` lists both.
+
+### Part 2 — SIGN-2/SIGN-6: a signature is MANDATORY on the wire
+
+- **`POST /v1/mint` (NEW)** — reserve-then-send. `{"op","idempotency_key"}` → 201
+  `{message_id, seq, sender, op, expires_at}`. A repeat of the same `(agent, op, key)` returns the
+  SAME reservation with `Idempotency-Replayed: true` and burns no second sequence. It exists because
+  SIGN-1 settled that the signature covers the ORIGIN bus's minted id and sequence, so a client
+  cannot sign until it has them.
+- **`POST /v1/send` (BREAKING)** — gains required `sender`, `message_id`, `seq`, `timestamp_ms`,
+  `signature`. `sender` is INPUT TO VALIDATE, never an identity: every downstream use takes the
+  principal from the session. Rejections: absent signature 400 · not base64 400 · not exactly 64
+  bytes 400 (63 and 65 both) · sender ≠ authenticated caller 403 · bad/foreign/mismatched
+  `message_id` 400 · `timestamp_ms <= 0` 400 · unknown or mismatched reservation 409. Every check
+  runs before `hub.Send`, so a rejection leaves NO durable record, and it is TERMINAL for its
+  idempotency key (no `Retry-After`).
+- **The bus NEVER verifies the signature** — SHAPE only. It does not hold the sender's messaging key
+  and must not be trusted to police messages for senders it does not control; a bus that could
+  verify could equally forge.
+- **`POST /v1/broadcast` answers 501, deliberately.** `signing.Canonicalize` rejects an empty
+  recipient set and `store.Message` stores a broadcast as a FLAG not a roster snapshot, so a
+  broadcast has no canonical audience under format v1 — SIGN-3's undecided question. SIGN-6 admits no
+  unsigned message type, so the route fails closed. **This is a REGRESSION of a working feature and
+  is documented as one** in README, AGENT_PROTOCOL, CONTRACTS-HTTP and CONTRACTS-CLI.
+- **Read path** — `/v1/wait` and `/v1/messages` messages gain `timestamp_ms` (the SENDER's clock,
+  COVERED by the signature) and `signature`. `sent_at` is unchanged, is the BUS's clock, and is NOT
+  covered. Every doc that mentions one now states the distinction, because verifying against the
+  wrong one fails every time and the field names do not hint at why.
+- **Client/CLI** — the agent now holds a MESSAGING keypair distinct from its AUTH keypair
+  (invariant 3), stored as `messaging_key_seed`, minted on first use, private half never leaving the
+  machine. `busctl watch`'s NDJSON records carry `timestamp_ms` and `signature`.
+
+### On-disk: two changes, both operator-visible
+
+1. **`store.RecordVersion` 1 → 2**, RESERVED from the Spec Server `store-record-version` namespace
+   (value 1 seeded in the same pass to cover the shipped v1 record). A **destructive, BIDIRECTIONAL**
+   break: v1 message records are refused at recovery and discarded loudly, and a rollback discards v2
+   records the same way. **There is no migration and there must not be one** — a pre-SIGN-6 message
+   is unsigned, and synthesising a zero signature would manufacture records that look signed and
+   verify as nothing. Enrolment (`"agent"`), invite and seqfloor records are unaffected; **no agent
+   re-enrols because of this.**
+2. **A new `wal.Entry.Kind`: `"seqfloor"`** (`hub.SeqFloorRecordKind`, body `{"v":1,"floor":N}`).
+   `Entry.Kind` is free-form and needed no reservation. It records that every sequence `<= N` is
+   BURNED, is fsynced AHEAD of any number being handed out, in batches of `hub.MintBatchSize = 256`,
+   and is what makes the durable mint safe across a restart. It **retires the counting argument**
+   (`NextIndex - 1`) that `hub.Open` rested on, replacing it with the direct and strictly stronger
+   assertion *every sequence handed out is <= the durably-recorded floor*. Operator consequence:
+   **sequence numbers now advance in jumps** — a restart typically skips to the next multiple of 256.
+   That is CORRECT; `internal/ids/sequence.go` already binds consumers to treat the sequence as
+   strictly increasing, never as dense.
+
+### Chain that ran
+
+spec-keeper → implementer → test-engineer → reviewer → security → documentation (this entry). No
+step skipped.
+
+**Security verdict: PASS with findings — 2 × P1.** One was fixed in code during the wave. The other
+was this documentation pass itself, on two specific counts: (i) `CONTRACTS-ONDISK.md` still asserted
+`store.RecordVersion = 1`, and (ii) `DECISIONS.md`'s only SIGN-6 section was titled *"the
+mandatory-signature policy is BLOCKED"* and enumerated why SIGN-2/SIGN-6 could not be done — the
+exact opposite of what shipped, actively misleading anyone who read it. Both are now closed:
+`CONTRACTS-ONDISK.md` states version 2 and documents the bidirectional break, and `DECISIONS.md`
+carries a new dated section that SUPERSEDES the blocked one BY NAME (append-only, so the old section
+is left in place and marked historical).
+
+### Honest limits — recorded so this wave is not oversold
+
+- **No messaging public key is registered at enrolment** (`auth.Service.Enrol` leaves
+  `RosterEntry.MessagingPublicKey` zero) and **CRYPTO-4 does not exist**, so a recipient can obtain a
+  sender's messaging public key ONLY out of band. `client/keyring.go` is a local, manually-populated
+  trust store and an explicit stopgap. No TOFU fallback was added and none may be.
+- **Recipient-side verification is NOT wired into `client.Read`.** Signing works end to end and the
+  signature is carried and returned; automatic verification on receive does not happen. What a
+  recipient CAN do today is verify manually given an out-of-band key — proven: a client-made
+  signature verifies under `internal/signing.Verify` from the wire fields.
+- **Code-doc defects reported, not fixed** (documentation does not edit `.go` files):
+  `client/messages.go` documents `Batch.Messages` as "the VERIFIED messages", which is FALSE today;
+  and `client/store.go`, `client/client.go`, `client/keyring.go` direct operators to
+  **`busctl keygen`** and **`busctl trust`**, **neither of which exists** — the registry in
+  `cmd/busctl/root.go` is exactly eight subcommands and contains neither.
+- **Invariant 7 is NOT satisfied for three capabilities** (`/v1/mint` has no dedicated entry point;
+  `busctl keygen` and `busctl trust` do not exist), recorded as an explicit open item in
+  `CONTRACTS-AGENT.md` rather than reported as met. `scripts/` holds only `bus-serve.sh`,
+  `proof-check.sh` and `spec-cloud.sh`; the agent-facing surface is `cmd/busctl`.
+
+### Docs changed by this pass
+
+`CONTRACTS.md`, `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, `CONTRACTS-CLI.md`, `CONTRACTS-AGENT.md`,
+`PROTOCOL.md` (new §8.4.1 recording where the shipped mint DIVERGES from §8.4's specification — the
+reservation is bound to the idempotency key only in memory, not on disk), `AGENT_PROTOCOL.md`,
+`DECISIONS.md`, `AGENT_LOG.md` (this entry), `README.md`.

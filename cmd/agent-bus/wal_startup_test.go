@@ -34,6 +34,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -44,6 +46,12 @@ const (
 	envDataDir   = "AGENT_BUS_TEST_DATA_DIR"
 	envListen    = "AGENT_BUS_TEST_LISTEN"
 	envLogLevel  = "AGENT_BUS_TEST_LOG_LEVEL"
+	// envExtraArgs carries SPACE-SEPARATED extra flags for the child, so a test
+	// can exercise a flag the four fixed variables above do not cover (today:
+	// -backfill-suffix-floors). Space-separated is enough because every flag it
+	// carries is a bare boolean or a value with no spaces; if that ever stops
+	// being true, encode it properly rather than quoting here.
+	envExtraArgs = "AGENT_BUS_TEST_EXTRA_ARGS"
 )
 
 // Bounds. Every wait in this file is bounded so a regression fails the test
@@ -92,6 +100,7 @@ func runServerChild() int {
 		level = defaultLogLevel
 	}
 	os.Args = []string{"agent-bus", "-listen", listen, "-data-dir", dataDir, "-log-level", level}
+	os.Args = append(os.Args, strings.Fields(os.Getenv(envExtraArgs))...)
 	main()
 	return 0
 }
@@ -224,6 +233,13 @@ func TestServerOpensWALOnStart(t *testing.T) {
 		if err := seed.Close(); err != nil {
 			t.Fatalf("closing the seeded log: %v", err)
 		}
+		// This dir now has history, so it needs the floors file a real restart
+		// would have. The subject here is REPLAY, and the shape being modelled is
+		// an ordinary restart of a bus over its own data dir -- which always has
+		// a floors file. Seeding one (rather than passing
+		// -backfill-suffix-floors) keeps the identity guard armed and keeps this
+		// test about the log. See seedSuffixFloorsFile.
+		seedSuffixFloorsFile(t, dir)
 
 		// Expectations are DERIVED from what was actually written, not guessed:
 		// the two-phase write path emits one PREPARE and one COMMIT per Write
@@ -321,6 +337,16 @@ func TestServerQuarantinesACorruptLogAndStartsAnyway(t *testing.T) {
 		t.Fatalf("writing the corrupt log %q: %v", walPath, err)
 	}
 	before := mustReadFile(t, walPath)
+	// ISOLATE THE VARIABLE. The claim under test is that MEDIA DAMAGE TO THE LOG
+	// does not stop the bus (DECISIONS.md 2026-08-02, availability over
+	// retention). Writing a corrupt bus.wal also makes the dir non-empty, so
+	// without a floors file the server would refuse for an unrelated reason --
+	// lost identity authority -- and this test would be asserting the wrong
+	// thing, or would have to disarm the identity guard with
+	// -backfill-suffix-floors to see past it. Seeding the floors file leaves the
+	// guard armed and makes the corrupt log the ONLY damage present, so a green
+	// result means exactly what the test name says.
+	seedSuffixFloorsFile(t, dir)
 
 	proc := startServer(t, dir)
 
@@ -451,6 +477,11 @@ func TestStartupSummaryLogsQuarantineFields(t *testing.T) {
 	if err := os.WriteFile(walPath, corrupt, 0o600); err != nil {
 		t.Fatalf("writing the corrupt log %q: %v", walPath, err)
 	}
+	// As in the sibling test above: the corrupt log is the damage under test, so
+	// the dir gets the floors file a real one would have and the identity guard
+	// stays armed. This test needs the server to REACH its startup summary line
+	// at all, and a refusal over a missing floors file would stop it before then.
+	seedSuffixFloorsFile(t, dir)
 
 	proc := startServer(t, dir)
 	addr := proc.awaitServerStarted(t)
@@ -528,10 +559,101 @@ type serverProc struct {
 	waitErr error         // the Wait() result; read only after done is closed
 }
 
+// seedSuffixFloorsFile writes a valid, EMPTY agent-id floors file into dataDir,
+// making the directory look like one a previous run of THIS binary left behind.
+//
+// # Why the tests below need it, and why it is the right fixture
+//
+// Since AUTH-3-FU-FAILOPEN, a data directory that has HISTORY (it was non-empty
+// when the process started, or its log holds records) but has NO agent-suffixes
+// file is a FATAL startup error rather than a silent backfill: that shape is
+// indistinguishable from a floors file someone deleted, and starting would
+// resume every agent name from suffix 1 over ids that are already live
+// (invariant 1). Every fixture in this file builds exactly that shape -- it
+// seeds a log, or writes a damaged one, into an otherwise empty dir -- so all of
+// them tripped the new guard.
+//
+// The fix is this seed and NOT `-backfill-suffix-floors`, and the difference
+// matters. The flag DISARMS the guard; a test that passes it is no longer
+// running the code path a real restart runs, and would keep passing if the guard
+// were deleted outright. Seeding the floors file instead leaves the guard fully
+// ARMED and makes the directory a genuine steady-state restart, which is what
+// these tests were always about: a bus coming back up over a data dir it already
+// owns. The one test whose subject really IS the migration
+// (TestLegacyDataDirDoesNotReMintAgentIDs) takes the flag, and the guard's own
+// refusal is pinned by TestServerRefusesToStartWithHistoryAndNoSuffixFloors.
+//
+// It is written through ids.OpenNameSuffixes + Seal -- the production writer --
+// rather than as literal bytes, so the fixture cannot drift out of the file
+// format the way a hand-written header would (compare the deliberately corrupt
+// literal in TestServerRefusesToStartWithCorruptSuffixFloors, which wants to be
+// invalid). An EMPTY floors map is the honest content here: these directories
+// have never enrolled anyone, so no name has a floor to record.
+//
+// # PRECONDITION, ENFORCED: dataDir's log must hold no agent id
+//
+// Sealing an empty floors map asserts "no suffix has ever been issued for any
+// name on this dir". On the fixtures below that is simply TRUE -- their logs
+// hold records of kind "test", or 64 bytes of garbage, and no agent id at all.
+// Called on a dir whose log DOES name an agent id, the same two lines would
+// seal a floor that is provably too low, and the resulting test would go green
+// over exactly the re-mint this whole mechanism exists to prevent -- a false
+// pass indistinguishable from a real one, which is the failure mode that
+// produced this task.
+//
+// So the precondition is CHECKED rather than left as prose for a future fixture
+// author to read. It is deliberately checked by RECORD KIND and not by deriving
+// floors: the derivation needs a bus id this dir has not been given yet (the
+// child process mints it on the start that follows), whereas the kinds are
+// readable without one. A log that cannot be scanned at all is not a violation
+// -- that is the corrupt-log fixture, whose unreadable bytes name no id anyone
+// can recover -- so an unreadable log is accepted and only a READABLE log that
+// carries an identity-bearing record is refused.
+func seedSuffixFloorsFile(t *testing.T, dataDir string) {
+	t.Helper()
+
+	if recs, _, err := wal.ScanAll(filepath.Join(dataDir, wal.WALFileName), wal.KindWAL); err == nil {
+		for _, rec := range recs {
+			if rec.Type != wal.TypePrepare {
+				continue
+			}
+			entry, _, err := wal.DecodePrepare(filepath.Join(dataDir, wal.WALFileName), rec)
+			if err != nil {
+				continue // undecodable: carries no id this fixture could be hiding
+			}
+			if entry.Kind == store.RecordKind || entry.Kind == enrolmentRecordKindOnDisk {
+				t.Fatalf("seedSuffixFloorsFile(%q) was called on a dir whose log holds a %q record (index %d). Sealing an EMPTY floors map here would assert that no agent-id suffix was ever issued on this dir, which that record disproves -- the test would pass while a real bus in the same shape re-mints a live agent id (invariant 1). Use -backfill-suffix-floors for a dir whose log genuinely holds agent ids (see TestLegacyDataDirDoesNotReMintAgentIDs), or seed a log with no identity-bearing records.",
+					dataDir, entry.Kind, rec.Index)
+			}
+		}
+	}
+
+	alloc, err := ids.OpenNameSuffixes(dataDir)
+	if err != nil {
+		t.Fatalf("seeding the agent-id floors file in %q: %v", dataDir, err)
+	}
+	if err := alloc.Seal(); err != nil {
+		t.Fatalf("sealing the seeded agent-id floors file in %q: %v", dataDir, err)
+	}
+	// Prove the fixture actually produced the file the guard looks for. Without
+	// this, a change to where the floors live would turn every test that calls
+	// this helper into a test of the refusal path, failing far from the cause.
+	if _, err := os.Stat(filepath.Join(dataDir, suffixFileInDataDir)); err != nil {
+		t.Fatalf("seeding the floors file left no %q in %q: %v; the fixture proves nothing", suffixFileInDataDir, dataDir, err)
+	}
+}
+
 // startServer re-executes the test binary as a server bound to 127.0.0.1:0 (an
 // ephemeral port: never a fixed one, and never the tracked ./data dir) against
 // dataDir, and registers a cleanup that kills it however the test ends.
 func startServer(t *testing.T, dataDir string) *serverProc {
+	t.Helper()
+	return startServerArgs(t, dataDir)
+}
+
+// startServerArgs is startServer with extra flags appended to the child's argv.
+// Only tests that need a flag outside the fixed four use it.
+func startServerArgs(t *testing.T, dataDir string, extra ...string) *serverProc {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0])
@@ -540,6 +662,7 @@ func startServer(t *testing.T, dataDir string) *serverProc {
 		envDataDir+"="+dataDir,
 		envListen+"=127.0.0.1:0",
 		envLogLevel+"=debug",
+		envExtraArgs+"="+strings.Join(extra, " "),
 	)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

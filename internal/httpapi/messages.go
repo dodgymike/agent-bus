@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/hub"
+	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 )
 
@@ -19,8 +22,20 @@ const (
 	// RouteAgents lists the agents enrolled on this bus.
 	RouteAgents = "/v1/agents"
 
-	// RouteBroadcast sends a message to the whole bus.
+	// RouteBroadcast sends a message to the whole bus. It currently answers 501;
+	// see handleBroadcast for why refusing is the only answer that does not
+	// admit unsigned traffic.
 	RouteBroadcast = "/v1/broadcast"
+
+	// RouteMint reserves the message id and sequence a sender must SIGN before
+	// it may send (SIGN-1 option (a), SIGN-2).
+	//
+	// It exists because a signature has to cover a server-minted id — invariant
+	// 1 makes the server authoritative on every id, so the client cannot choose
+	// one to sign, and a signature that did not cover the id would leave the id
+	// free to be swapped in flight. That makes a send a TWO-STEP: reserve here,
+	// sign, then present the reservation back on /v1/send.
+	RouteMint = "/v1/mint"
 
 	// RouteSend sends a message to one named agent.
 	RouteSend = "/v1/send"
@@ -66,6 +81,12 @@ type AgentsResponseBody struct {
 }
 
 // BroadcastRequestBody is the body of POST /v1/broadcast.
+//
+// The route currently answers 501 and never decodes this (see handleBroadcast),
+// so nothing in this package reads it today. It is KEPT rather than deleted for
+// the same reason hub.Broadcast is: SIGN-3 re-opens the route by settling what a
+// broadcast's canonical audience is, and it should find the shape of the request
+// already agreed rather than have to re-invent it.
 type BroadcastRequestBody struct {
 	// Body is the message payload, standard base64. It is BYTES, not a string:
 	// the bus never interprets a payload, and once the CRYPTO epic lands this
@@ -76,6 +97,55 @@ type BroadcastRequestBody struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+// MintRequestBody is the body of POST /v1/mint.
+//
+// THERE IS NO SENDER FIELD, and there never may be one. The reservation is
+// minted for the AUTHENTICATED principal taken from the request context; a
+// sender a client could name here would be a sender it could choose, and a
+// sequence minted under a name of the caller's choosing is a signed message id
+// attributable to somebody else (invariant 1).
+type MintRequestBody struct {
+	// Op is the operation the reservation may be spent on: "send" or
+	// "broadcast". It is part of the mint's scope rather than decoration —
+	// minting under one op and spending under the other must not be the same
+	// reservation, or one route's idempotency key would shadow the other's. An
+	// unrecognised value is 400, never a silent default (hub.parseMintOp).
+	Op string `json:"op"`
+
+	// IdempotencyKey is the key the SUBSEQUENT send will carry. Re-minting under
+	// it returns the SAME assignment, allocates nothing and burns no further
+	// sequence (invariant 10).
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// MintResponseBody is the 201 body of POST /v1/mint.
+//
+// It is replayed BYTE-IDENTICALLY on a repeat of the same (agent, op, key),
+// ExpiresAt included — the expiry is the ORIGINAL one, not a fresh one computed
+// on the retry, so a client cannot extend a reservation by re-minting. The fact
+// that a response was a replay travels out of band in IdempotencyReplayedHeader,
+// exactly as it does on /v1/enroll and /v1/send.
+type MintResponseBody struct {
+	// MessageID and Seq are the assignment to sign. The client does not choose
+	// them and may not alter them: a send presenting anything else is refused
+	// (hub.ErrMintMismatch -> 409).
+	MessageID string `json:"message_id"`
+	Seq       uint64 `json:"seq"`
+
+	// Sender is the AUTHENTICATED principal echoed back, so a client that sees
+	// an unexpected value there has learned something worth knowing.
+	Sender string `json:"sender"`
+
+	// Op is the operation this reservation may be spent on.
+	Op string `json:"op"`
+
+	// ExpiresAt is when the reservation stops being honoured (hub.MintTTL).
+	// Past it — and across a RESTART, because the mint table is deliberately
+	// in-memory while only the burned NUMBER is durable — a send is 409 and the
+	// remedy is to re-mint under the same idempotency key and re-sign.
+	ExpiresAt string `json:"expires_at"`
+}
+
 // SendRequestBody is the body of POST /v1/send.
 type SendRequestBody struct {
 	// To is the fully-qualified "<bus-id>.<agent-id>" of the recipient
@@ -84,6 +154,48 @@ type SendRequestBody struct {
 
 	Body           string `json:"body"`
 	IdempotencyKey string `json:"idempotency_key"`
+
+	// Sender EXISTS ONLY SO SIGN-6 CHECK (d) CAN BE MADE. IT IS INPUT TO
+	// VALIDATE, NEVER AN IDENTITY.
+	//
+	// It is here because the canonical signed bytes contain the sender
+	// (signing.Canonicalize), so the client has already committed to a name and
+	// the bus is entitled to insist that name is the one it authenticated. What
+	// it must NEVER become is the source of "who sent this": every downstream
+	// use — the hub, the durable record, the audit trail, the fan-out — takes
+	// the principal from the REQUEST CONTEXT, where authMiddleware put it after
+	// internal/auth resolved a live session (invariant 1).
+	//
+	// The failure mode this guards against is subtle and worth naming, because
+	// the obvious "simplification" reintroduces it: if a future edit ever passes
+	// this field to hub.SendRequest.Sender "since we checked it anyway", then
+	// the day the check is loosened — or reordered after an early return, or
+	// skipped on a sibling route — a client names its own sender and the bus
+	// signs off on it. Keep the two separate: this field is compared and then
+	// DISCARDED.
+	Sender string `json:"sender"`
+
+	// MessageID and Seq are the reservation minted by POST /v1/mint and covered
+	// by Signature. They are checked for SHAPE here and then checked against the
+	// reservation itself in the hub, which WINS on any disagreement.
+	MessageID string `json:"message_id"`
+	Seq       uint64 `json:"seq"`
+
+	// TimestampMs is the SENDER's clock, Unix milliseconds UTC, and is covered
+	// by the signature. It is NOT this bus's clock and orders nothing: the bus
+	// stamps its own SentAt and the sequence is what orders messages. It is
+	// carried, and required, because a recipient cannot reconstruct the signed
+	// bytes without it.
+	TimestampMs int64 `json:"timestamp_ms"`
+
+	// Signature is the sender's detached Ed25519 signature over
+	// signing.Canonicalize of the message, standard base64 of exactly 64 bytes.
+	//
+	// The bus checks its SHAPE and NEVER its authenticity — it does not hold the
+	// sender's messaging key and must not be trusted to police messages for
+	// senders it does not control. Bus enforces shape; recipient enforces
+	// authenticity.
+	Signature string `json:"signature"`
 }
 
 // SendResponseBody is the 201 body of POST /v1/send and POST /v1/broadcast, and
@@ -110,13 +222,40 @@ type WireMessage struct {
 	Broadcast bool     `json:"broadcast"`
 	To        []string `json:"to"`
 	BusPath   []string `json:"bus_path"`
-	SentAt    string   `json:"sent_at"`
-	Size      int      `json:"size"`
+
+	// SentAt is THIS BUS's clock, RFC3339Nano UTC, and is NOT COVERED BY THE
+	// SIGNATURE. It records when the bus accepted the message and is what the
+	// audit trail and the retention window are measured from. Do not verify
+	// against it and do not conflate it with TimestampMs below — they are two
+	// different facts, told by two different parties, and only one of them is
+	// something the sender committed to.
+	SentAt string `json:"sent_at"`
+
+	Size int `json:"size"`
 
 	// ContentSHA256 lets a recipient verify the body it received is the body
 	// the audit trail records, without the audit trail holding the body
 	// (invariant 6).
 	ContentSHA256 string `json:"content_sha256"`
+
+	// TimestampMs is the SENDER's clock, Unix milliseconds UTC, and IS COVERED
+	// BY THE SIGNATURE. A recipient MUST use this value, not SentAt, when it
+	// reconstructs the signed bytes: substituting the bus's clock produces
+	// different canonical bytes and every signature fails to verify.
+	TimestampMs int64 `json:"timestamp_ms"`
+
+	// Signature is the sender's detached Ed25519 signature, standard base64 of
+	// 64 bytes, carried through untouched.
+	//
+	// The recipient reconstructs the signed bytes from MessageID, Seq, From, To,
+	// TimestampMs and Body. BusPath is deliberately NOT covered (settled in
+	// SIGN-1): it changes as a message is relayed, so signing it would make
+	// every relayed message unverifiable.
+	//
+	// This bus never verified it and cannot: the verification key must be
+	// resolved from the roster using the SENDER INSIDE the signed bytes, and
+	// trust in a foreign sender's key is not this bus's to grant.
+	Signature string `json:"signature"`
 
 	// Body is standard base64 of the opaque payload.
 	Body string `json:"body"`
@@ -164,8 +303,22 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, AgentsResponseBody{Agents: out, Count: len(out)})
 }
 
-// handleBroadcast serves POST /v1/broadcast (MSG-2).
-func (s *Server) handleBroadcast(w http.ResponseWriter, r *http.Request) {
+// broadcastUnsignableReason is the 501 body of POST /v1/broadcast, and the whole
+// of the explanation a client gets. It is a constant so the route and any test
+// pinning it cannot drift.
+const broadcastUnsignableReason = "a broadcast cannot be signed under signing format v1: the canonical format requires a non-empty recipient set and the canonical audience of a broadcast is SIGN-3's undecided question; SIGN-6 admits no unsigned message type, so this route is refused rather than accepting unsigned traffic"
+
+// handleMint serves POST /v1/mint (SIGN-2): it reserves the message id and
+// sequence the caller must sign, DURABLY, and hands them back.
+//
+// The reservation is minted for the AUTHENTICATED principal and for nobody
+// else. That is the whole reason this route exists as a separate step rather
+// than the client picking an id: invariant 1 makes the server authoritative on
+// every id, and SIGN-1 chose to hand that id out EARLY so the sender can sign
+// it — which is only safe because the number is durably burned before it leaves
+// this process (see hub/mint.go, and note that the mint TABLE is deliberately
+// not durable while the burned NUMBER is).
+func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePOST(w, r) {
 		return
 	}
@@ -173,28 +326,99 @@ func (s *Server) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var body BroadcastRequestBody
+	var body MintRequestBody
 	if !s.decodeJSONRequest(w, r, &body, MaxMessageRequestBytes) {
 		return
 	}
-	payload, ok := s.decodeBase64Field(w, r, "body", body.Body)
-	if !ok {
-		return
-	}
 
-	res, err := s.hub.Broadcast(hub.BroadcastRequest{
-		// The sender is the AUTHENTICATED principal. There is no field in
-		// BroadcastRequestBody for it and there never may be: a client-supplied
-		// sender is a spoofed sender (invariant 1).
+	m, err := s.hub.Mint(hub.MintRequest{
+		// The AUTHENTICATED principal, from the context. MintRequestBody has no
+		// sender field and never may have one (invariant 1).
 		Sender:         sender,
-		Body:           payload,
+		Op:             body.Op,
 		IdempotencyKey: body.IdempotencyKey,
 	})
 	if err != nil {
-		s.writeHubError(w, r, "broadcast", err)
+		s.writeHubError(w, r, "mint", err)
 		return
 	}
-	s.writeSendResult(w, r, res, store.ContentHash(payload))
+
+	if m.Replayed {
+		// A re-mint under a key this agent already holds. NOTHING was allocated
+		// and nothing was burned; the body below is byte-identical to the
+		// original, expiry included, so a client cannot extend a reservation by
+		// asking again. The header is how the fact travels without changing the
+		// body — the same arrangement as /v1/send and /v1/enroll.
+		w.Header().Set(IdempotencyReplayedHeader, "true")
+		s.log.Info("mint replayed from the outstanding-reservation table; no sequence was allocated",
+			"request_id", RequestIDFromContext(r.Context()),
+			"agent_id", m.Sender,
+			"message_id", m.MessageID,
+		)
+	} else {
+		s.log.Info("message id and sequence reserved",
+			"request_id", RequestIDFromContext(r.Context()),
+			"agent_id", m.Sender,
+			"message_id", m.MessageID,
+			"seq", m.Seq,
+			"op", m.Op,
+		)
+	}
+
+	s.writeJSON(w, r, http.StatusCreated, MintResponseBody{
+		MessageID: m.MessageID,
+		Seq:       m.Seq,
+		Sender:    m.Sender,
+		Op:        m.Op,
+		ExpiresAt: formatInstant(m.ExpiresAt),
+	})
+}
+
+// handleBroadcast serves POST /v1/broadcast (MSG-2) — and REFUSES it, 501.
+//
+// # Why a working code path answers "not implemented"
+//
+// SIGN-6 admits no unsigned message type. A broadcast cannot be signed under
+// signing format v1, for two reasons that are both deliberate and neither of
+// which this route may paper over:
+//
+//   - signing.Canonicalize REJECTS an empty recipient set, because an empty set
+//     would sign an audience of nobody — a signature that commits the sender to
+//     nothing about who was meant to read the message.
+//   - store.Message stores a broadcast as a FLAG, not as an expanded roster
+//     snapshot, so there is no recorded audience to canonicalize even if the
+//     format allowed one. What the canonical audience of a broadcast should be
+//     is SIGN-3's open question, and answering it here by accident would settle
+//     it for everybody.
+//
+// So the two available answers were: leave this route accepting UNSIGNED
+// messages — which is precisely the "strip the signature and the epic is
+// theatre" hole SIGN-6 exists to close, and it would be the easiest hole in the
+// bus to find — or FAIL CLOSED. We fail closed.
+//
+// The refusal is made HERE, immediately after authentication and BEFORE the
+// body is decoded, so no broadcast payload is read, parsed, logged or measured
+// on a route that cannot accept one.
+//
+// DO NOT "fix" this by deleting hub.Broadcast or the broadcast plumbing beneath
+// it. That path is whole, signed-by-construction and covered by tests precisely
+// so SIGN-3 can re-open this route by settling ONE question rather than by
+// re-plumbing the write path. Only the route refuses.
+func (s *Server) handleBroadcast(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePOST(w, r) {
+		return
+	}
+	if _, ok := s.messagingPrincipal(w, r); !ok {
+		// Authentication still runs first. A route that told an ANONYMOUS caller
+		// what it does and does not implement would be describing the messaging
+		// surface to somebody with no business knowing it exists.
+		return
+	}
+	s.log.Info("broadcast refused: a broadcast has no canonical audience under signing format v1, and SIGN-6 admits no unsigned message type",
+		"request_id", RequestIDFromContext(r.Context()),
+		"agent_id", AgentIDFromContext(r.Context()),
+	)
+	s.writeJSON(w, r, http.StatusNotImplemented, ErrorResponse{Error: broadcastUnsignableReason})
 }
 
 // handleSend serves POST /v1/send (MSG-3).
@@ -214,18 +438,179 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	signed, ok := s.checkSignedMint(w, r, sender, body)
+	if !ok {
+		return
+	}
 
 	res, err := s.hub.Send(hub.SendRequest{
+		// STILL the authenticated principal from the context, NOT body.Sender.
+		// body.Sender was compared against this value in checkSignedMint and is
+		// then discarded; it is a claim that was validated, never the identity
+		// this send is attributed to (invariant 1).
 		Sender:         sender,
 		To:             body.To,
 		Body:           payload,
 		IdempotencyKey: body.IdempotencyKey,
+		SignedMint:     signed,
 	})
 	if err != nil {
 		s.writeHubError(w, r, "send", err)
 		return
 	}
 	s.writeSendResult(w, r, res, store.ContentHash(payload))
+}
+
+// checkSignedMint is SIGN-6's INGEST POLICY: every well-formedness check the bus
+// makes on a signed send, all of them BEFORE hub.Send is called.
+//
+// # Why every check lives here, on this side of the hub call
+//
+// A failure at any of these must leave NO WAL RECORD, NO DELIVERY, NO ACK and NO
+// SEQUENCE CONSUMED BY THIS REQUEST. That is only true if the check happens
+// before anything durable is attempted, and hub.Send's very first durable act is
+// the two-phase write. Pushing one of these into the hub "for tidiness" would
+// move it after the idempotency admission and would make a malformed request
+// cost a remembered key.
+//
+// (The reservation itself was burned earlier, at POST /v1/mint. That is a
+// separate, deliberate, earlier act — a mint is spent whether or not a send ever
+// follows, and mint.go documents the resulting gaps as correct.)
+//
+// # What is NOT checked, and must never be added here
+//
+// The signature is NOT VERIFIED. This bus does not hold the sender's messaging
+// key, and a bus must not be trusted to police messages on behalf of senders it
+// does not control — a compromised bus that could "verify" could equally forge.
+// The division is: THE BUS ENFORCES SHAPE, THE RECIPIENT ENFORCES AUTHENTICITY.
+// Adding a verify here would look like an improvement and would quietly move the
+// trust boundary onto the bus.
+//
+// # A rejection is TERMINAL for this idempotency key
+//
+// Not transient. There is no Retry-After on any of these and there must not be:
+// the same key re-presented with the same malformed request is rejected
+// identically for ever, and re-presented with a REPAIRED one it is a different
+// payload under a used key, which invariant 10 already handles as a protocol
+// violation. Dressing a permanent refusal as transient is how a client ends up
+// in a retry loop that can never succeed.
+func (s *Server) checkSignedMint(w http.ResponseWriter, r *http.Request, sender string, body SendRequestBody) (hub.SignedMint, bool) {
+	reject := func(status int, clientMsg, logMsg string, kv ...interface{}) (hub.SignedMint, bool) {
+		kv = append([]interface{}{
+			"request_id", RequestIDFromContext(r.Context()),
+			"agent_id", sender,
+			"path", r.URL.Path,
+		}, kv...)
+		s.log.Debug(logMsg, kv...)
+		s.writeJSON(w, r, status, ErrorResponse{Error: clientMsg})
+		return hub.SignedMint{}, false
+	}
+
+	// (b) The signature must be standard base64. Strict() so a signature has
+	// EXACTLY ONE spelling: the permissive decoder accepts trailing bits no
+	// encoder produces, which would let one signature be written several ways —
+	// and anything with several spellings is something a dedup or audit trail
+	// keyed on the string form sees as several things.
+	//
+	// An ABSENT signature decodes to zero bytes rather than failing here, which
+	// is why (a) is asserted by ValidateSignature below and not by this call.
+	sig, err := base64.StdEncoding.Strict().DecodeString(body.Signature)
+	if err != nil {
+		// The value is NOT echoed, here or in the log. It is attacker-choosable
+		// input, and the fact that it did not decode is the whole of what either
+		// reader needs.
+		return reject(http.StatusBadRequest, "signature is not valid base64", "send rejected: the signature is not valid standard base64")
+	}
+
+	// (a) and (c): present, and EXACTLY 64 bytes.
+	//
+	// Delegated to signing.ValidateSignature rather than open-coded, because
+	// /v1/send, /v1/broadcast and the relay ingest path (SIGN-7) must all apply
+	// the SAME rule. Three copies of "is it 64 bytes" are three chances for one
+	// to be written as >= or to be missed on the path a peer bus reaches, and
+	// the relay path is exactly the backdoor SIGN-7 names. Both 63 and 65 bytes
+	// are refused; there is no tolerance and no truncation.
+	if err := signing.ValidateSignature(sig); err != nil {
+		if errors.Is(err, signing.ErrNoSignature) {
+			// Kept DISTINCT from the length failure on purpose: "no signature"
+			// must never read as "unsigned but fine", and an attacker STRIPPING a
+			// signature is a different event from one mangling it.
+			return reject(http.StatusBadRequest, "a signature is required", "send rejected: no signature was supplied")
+		}
+		return reject(http.StatusBadRequest, "signature must be exactly 64 bytes", "send rejected: the signature is the wrong length", "err", err)
+	}
+
+	// (d) The sender named in the request — and therefore inside the signed
+	// bytes — must be the agent that authenticated.
+	//
+	// 403, not 400: the request is well formed and re-sending it will not help.
+	// The check exists because the canonical format binds a signature to a
+	// sender, so a client signing as somebody else would produce a message whose
+	// signed content contradicts the identity the bus recorded — the recipient
+	// would resolve a verification key for the NAMED sender, and either fail
+	// confusingly or, worse, succeed against a key the real sender never used.
+	// The bus refuses to store that contradiction rather than pass it on.
+	if body.Sender != sender {
+		// The claimed value is not echoed to the client (it chose it) and IS
+		// logged, because an operator hunting an impersonation attempt needs to
+		// know which name was being worn.
+		return reject(http.StatusForbidden, "sender does not match the authenticated caller",
+			"send rejected: the sender named in the request is not the authenticated principal",
+			"claimed_sender", body.Sender)
+	}
+
+	// (e) The message id must be well formed, must be THIS bus's, and must agree
+	// with seq.
+	//
+	// The hub checks the id against the reservation and wins on any
+	// disagreement, so this is not the authority check — it is the SHAPE check
+	// that stops a malformed or foreign id reaching the write path at all. The
+	// bus-half check is the one worth naming: an id minted by ANOTHER bus that
+	// happened to match a local reservation's sequence would be a message
+	// attributed to this bus's total order while carrying a foreign origin, and
+	// origin is what SIGN-1 made the signature cover.
+	//
+	// ParseMessageID also rejects sequence 0 and every alternate spelling of a
+	// sequence ("007", "+7"), so one id has one spelling — two spellings of one
+	// id defeat duplicate detection (invariant 10).
+	parsedBus, parsedSeq, err := ids.ParseMessageID(body.MessageID)
+	if err != nil {
+		return reject(http.StatusBadRequest, "invalid message id", "send rejected: the message id is malformed", "err", err)
+	}
+	if parsedBus != s.identity.BusID() {
+		return reject(http.StatusBadRequest, "invalid message id",
+			"send rejected: the message id was minted by another bus",
+			"message_id_bus", parsedBus, "this_bus", s.identity.BusID())
+	}
+	if body.Seq == 0 || parsedSeq != body.Seq {
+		// Both halves are carried on the wire because the canonical format
+		// encodes the sequence separately as well as inside the id, so the two
+		// must agree before anything is signed over them. A mismatch is either a
+		// client splicing two operations together or an attempt to have one
+		// number signed and a different one recorded.
+		return reject(http.StatusBadRequest, "invalid message id",
+			"send rejected: the seq field disagrees with the sequence inside the message id",
+			"message_id_seq", parsedSeq, "seq_field", body.Seq)
+	}
+
+	// (f) The sender's clock is REQUIRED. 0 means "unset" and a negative value
+	// is a pre-1970 instant, and both are refused rather than defaulted: the
+	// timestamp is covered by the signature, so a bus that substituted its own
+	// value would store a message whose recorded content no recipient can
+	// reproduce, and every signature over it would fail to verify for a reason
+	// no client could diagnose.
+	if body.TimestampMs <= 0 {
+		return reject(http.StatusBadRequest, "timestamp_ms is required",
+			"send rejected: the sender's timestamp is missing or not a positive Unix-millisecond instant",
+			"timestamp_ms", body.TimestampMs)
+	}
+
+	return hub.SignedMint{
+		MessageID:          body.MessageID,
+		Seq:                body.Seq,
+		TimestampUnixMilli: body.TimestampMs,
+		Signature:          sig,
+	}, true
 }
 
 // writeSendResult answers an accepted send. The status is 201 on the replay
@@ -362,6 +747,8 @@ func toWireMessage(m store.Message) WireMessage {
 		SentAt:        formatInstant(m.SentAt),
 		Size:          m.Size(),
 		ContentSHA256: m.ContentSHA256,
+		TimestampMs:   m.TimestampUnixMilli,
+		Signature:     encodeBase64(m.Signature),
 		Body:          encodeBase64(m.Body),
 	}
 }
@@ -482,9 +869,46 @@ func (s *Server) writeHubError(w http.ResponseWriter, r *http.Request, op string
 	case errors.Is(err, hub.ErrInvalidBody),
 		errors.Is(err, hub.ErrInvalidRecipient),
 		errors.Is(err, hub.ErrInvalidIdempotencyKey),
-		errors.Is(err, hub.ErrInvalidCursor):
+		errors.Is(err, hub.ErrInvalidCursor),
+		errors.Is(err, hub.ErrInvalidOp):
 		s.log.Debug("message request rejected", kv...)
 		s.writeJSON(w, r, http.StatusBadRequest, ErrorResponse{Error: terseHubError(err)})
+
+	case errors.Is(err, hub.ErrUnknownMint), errors.Is(err, hub.ErrMintMismatch):
+		// 409 Conflict: the request is well formed, but the reservation it names
+		// is not one this bus is holding for this key. The two ways in are very
+		// different and the client's remedy is the same, which is why they share
+		// a status:
+		//
+		//   - ErrUnknownMint is ROUTINE — the bus restarted (the mint table is
+		//     in-memory; only the burned NUMBER is durable) or the reservation
+		//     expired.
+		//   - ErrMintMismatch is NOT routine — the client presented an
+		//     assignment this bus did not give it, which is either a client bug
+		//     splicing two operations together or an attempt to get a signature
+		//     over a self-chosen id accepted (invariant 1).
+		//
+		// Deliberately NO Retry-After: replaying the SAME request cannot ever
+		// succeed, so a retry loop on it is a client spinning for nothing. The
+		// remedy is a new two-step, and it is stated in the response because the
+		// client cannot deduce it from the status alone. It is safe: a re-mint
+		// under the same key yields a fresh number, and if the original message
+		// did become durable the applied-key table answers the re-send with the
+		// ORIGINAL result before the mint is ever consulted (invariant 10).
+		//
+		// The mismatch case is logged at WARN, not Debug: a client presenting an
+		// id it was not given is worth an operator's attention even though the
+		// bus is unharmed. The error text — which names the id this bus DID
+		// mint — stays in the log and out of the response, per terseHubError's
+		// rule.
+		if errors.Is(err, hub.ErrMintMismatch) {
+			s.log.Warn("send refused: the message id or sequence presented is not the one this bus minted for that idempotency key", kv...)
+		} else {
+			s.log.Debug("send refused: no outstanding sequence reservation for this idempotency key", kv...)
+		}
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{
+			Error: "no matching sequence reservation: mint a fresh message id with POST " + RouteMint + ", re-sign it and re-send",
+		})
 
 	case errors.Is(err, hub.ErrIdempotencyKeyReused):
 		// Invariant 10: same key + DIFFERENT payload is a protocol violation,
@@ -538,6 +962,10 @@ func terseHubError(err error) string {
 		return "invalid idempotency key"
 	case errors.Is(err, hub.ErrInvalidCursor):
 		return "invalid cursor"
+	case errors.Is(err, hub.ErrInvalidOp):
+		// The set of legal answers is the whole of what the caller needs, and
+		// the hub deliberately does not echo the value it was given.
+		return "op must be \"send\" or \"broadcast\""
 	default:
 		return "bad request"
 	}

@@ -48,6 +48,13 @@ type stubBus struct {
 	tokens   map[string]bool
 	issued   int
 	requests []stubRequest
+
+	// mints is every reservation this stub has handed out, keyed by the
+	// (op, idempotency key) scope, and mintSeq is the sequence it allocates
+	// from. They are here rather than in each test so a REPEAT of one scope
+	// returns the SAME sequence — see the routeMint case.
+	mints   map[string]uint64
+	mintSeq uint64
 }
 
 // stubRequest is one call the stub bus saw, captured before it was dispatched.
@@ -78,7 +85,7 @@ func (r stubRequest) JSON() map[string]interface{} {
 func newStubBus(t *testing.T, agentID string, route http.HandlerFunc) *stubBus {
 	t.Helper()
 
-	b := &stubBus{t: t, Dir: t.TempDir(), AgentID: agentID, tokens: map[string]bool{}}
+	b := &stubBus{t: t, Dir: t.TempDir(), AgentID: agentID, tokens: map[string]bool{}, mints: map[string]uint64{}}
 	cred, pub := newTestCredential(t, agentID)
 
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +140,60 @@ func newStubBus(t *testing.T, agentID string, route http.HandlerFunc) *stubBus {
 				ExpiresAt:           time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
 				LifetimeSeconds:     3600,
 				RefreshAfterSeconds: 2700,
+			})
+		case routeMint:
+			// SERVED BY THE STUB ITSELF, like the session handshake above and for
+			// the same reason. Since SIGN-1's reserve-then-send, EVERY send is a
+			// two-call handshake — /v1/mint for the id and sequence, then
+			// /v1/send for the signed message — so a test that wants to assert
+			// one thing about /v1/send would otherwise have to hand-roll a minter
+			// first. Four copies of that is four places for the handshake to
+			// drift, which is the argument this whole type is built on.
+			//
+			// It authenticates first: /v1/mint is on the authenticated surface,
+			// and a stub that answered it without a bearer would let a broken
+			// client pass a test a real bus would 401.
+			b.mu.Lock()
+			mintKnown := b.tokens[bearer]
+			b.mu.Unlock()
+			if !mintKnown {
+				stubWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "no such session"})
+				return
+			}
+			var mreq mintRequestBody
+			if err := json.Unmarshal(raw, &mreq); err != nil {
+				t.Errorf("stub bus: mint body is not JSON: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// The reservation is scoped by (agent, op, key) and a REPEAT RETURNS
+			// THE SAME NUMBERS — that is the property the two-step handshake's
+			// retry safety rests on, so the stub honours it rather than handing
+			// out a fresh sequence each time and quietly hiding a client that
+			// re-mints on retry.
+			b.mu.Lock()
+			scope := mreq.Op + "\x00" + mreq.IdempotencyKey
+			seq, minted := b.mints[scope]
+			replayed := minted
+			if !minted {
+				b.mintSeq++
+				seq = b.mintSeq
+				b.mints[scope] = seq
+			}
+			b.mu.Unlock()
+			if replayed {
+				w.Header().Set(idempotencyReplayedHeader, "true")
+			}
+			busID := agentID
+			if i := strings.IndexByte(agentID, '.'); i > 0 {
+				busID = agentID[:i]
+			}
+			stubWriteJSON(w, http.StatusCreated, mintResponseBody{
+				MessageID: fmt.Sprintf("%s-%d", busID, seq),
+				Seq:       seq,
+				Sender:    agentID,
+				Op:        mreq.Op,
+				ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339Nano),
 			})
 		default:
 			b.mu.Lock()

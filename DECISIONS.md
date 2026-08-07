@@ -2283,3 +2283,637 @@ greater one.
 - Both are generated with stdlib per invariant 9 — `crypto/ed25519` for signing, `crypto/tls` +
   `crypto/x509` for the certificate. Never hand-rolled, never assembled from primitives.
 - Rotation of each follows the two-key rollover rule independently.
+
+---
+
+## 2026-08-07 — SIGN-2/SIGN-6: the signing core lands; the mandatory-signature policy is BLOCKED
+
+**Context.** SIGN-2 asked for the Ed25519 sign/verify primitive; SIGN-6 asked for the policy that
+makes a message's signature mandatory rather than advisory. Landing `internal/signing` (pure
+delegation to `crypto/ed25519`, per invariant 9) over `internal/signing.Canonicalize`'s bytes forced
+four choices that the next agent must not have to re-derive from scratch.
+
+**Decision 1 — a rejected send must not consume a sequence number; validation happens BEFORE
+minting.** Consuming a sequence on rejection would make every recipient cursor gap-tolerant, and once
+gaps are normal a recipient can no longer tell a DROPPED message from a REJECTED one — which silently
+destroys the only end-to-end signal that a bus on the path is withholding traffic, the one thing
+SIGN-1's option (a) was bought with a round trip to preserve. Gaps also cost SIGN-4 its simplest and
+strongest rule (strictly-increasing). The existing code already agrees with this and says so:
+`internal/hub/hub.go`'s `publish()` checks the idempotency admission BEFORE `h.seq.Next()` with the
+comment "Checked BEFORE the sequence is minted: a sequence spent on a send that will be refused is a
+sequence burned for nothing, and invariant 1 forbids reusing it." So the SIGN-6 checks (signature
+present; exactly 64 bytes; claimed sender == the AUTHENTICATED caller) belong at the same place or
+earlier — in `internal/httpapi`, before `hub.Send`/`hub.Broadcast` is called at all. Consequence,
+stated plainly: a rejected send leaves NO WAL record, NO audit entry beyond a rejection event, NO
+delivery, NO ack, and NO sequence — the mirror image of invariant 4. SIGN-4's cursor is therefore
+strictly increasing with no gap tolerance required.
+
+**Decision 2 — the poison-message wedge: the cursor ADVANCES past an unverifiable message; the body
+is DISCARDED, never delivered; the event is RECORDED.** The alternative — blocking the cursor until
+verification succeeds — hands anyone who can get one bad message into an agent's stream a PERMANENT
+denial of service against that agent, for the price of a single message. The asymmetry that makes
+this the only defensible choice: the message was already durably accepted and cannot be un-sent, so
+refusing to move past it does not undo it, it only stops everything behind it. Fail-closed applies to
+the BODY (it is never handed to the calling agent), not to the CURSOR. And the failure must be LOUD —
+log the message id, the sender, and WHICH check failed — because a silently skipped message is
+indistinguishable from one that never arrived. `internal/signing`'s distinct error sentinels exist
+precisely so "which check failed" is answerable, and the security gate confirmed the taxonomy is not
+an oracle (`ErrVerify` is one opaque verdict for every cryptographic failure — it does not, by itself,
+tell an attacker which byte of a forgery was wrong).
+
+**Decision 3 — which key verifies.** `Verify()` takes the public key as a free parameter and cannot
+check the caller chose it correctly, so PROTOCOL.md §8.3's rule is binding on callers: the key MUST be
+resolved from the roster using the fully-qualified sender field INSIDE the signed bytes, and nothing
+else — never a key or key-hint carried beside the signature. Get it wrong and verification is
+self-signed and worth nothing while every test still passes.
+
+**Decision 4 — why SIGN-2 and SIGN-6 are not done, three blockers, recorded so nobody re-derives
+them.**
+(a) No messaging keypair exists. `internal/auth/service.go` leaves `RosterEntry.MessagingPublicKey`
+ZERO (CRYPTO-3, todo) and there is no `agent-bus keygen` (SIGN-8, todo). Nothing can sign; nothing can
+verify.
+(b) The durable mint does not exist. SIGN-1 chose option (a) — the sender signs the ORIGIN's minted
+message id and sequence — so the bus must hand out an id/seq BEFORE the send, and that hand-out must
+be DURABLE. Today `internal/hub`'s `Open()` derives the restart floor as `NextIndex-1` from the WAL
+high-water index, resting on an explicit counting argument that every sequence issued is <= the WAL
+index of the prepare that carried it. A mint that RETURNS a sequence without writing a durable record
+breaks that argument outright: mint, restart, and the floor resumes below numbers already handed
+out — so two validly-signed messages would share one origin message id, which is undetectable
+downstream. The good news for whoever fixes it: `wal.Log` already exposes
+`Begin`/`Txn.Commit`/`Txn.Abort`, and `CONTRACTS-ONDISK.md` records that `Entry.Kind` is NOT a
+reserved namespace, so a durable reservation can be built without minting a new reserved record-type
+number.
+(c) The signature cannot reach the durable record without `internal/hub`. The path is
+`httpapi -> hub.SendRequest/BroadcastRequest -> hub.publish -> store.NewMessage -> WAL`, and the
+middle of that is `internal/hub`, which was outside this agent's file-ownership boundary.
+
+**Warning to the next agent.** Shipping SIGN-6's ingest check ALONE — requiring a signature the bus
+never persists and never returns on `/v1/wait` — would be exactly the "theatre" SIGN-6 warns against,
+since senders would pay the cost and recipients would still have nothing to verify. It must land
+together with the durable carry and the receive-path field.
+
+---
+
+## 2026-08-07 — ADDENDUM to MSG-FU-SUFFIXFLOOR (wiring): the suffix-floor WAL scan is GATED, and a
+missing floors file is now LOUD
+
+This corrects §4 of the "MSG-FU-SUFFIXFLOOR (wiring)" section above and adds one decision it did not
+make. Written as an addendum rather than an edit because that section is already committed and
+`DECISIONS.md` is append-only. **Where the two disagree, this one governs.**
+
+### Correction to §4: the WAL scan runs ONLY when there is no floors file
+
+§4 decided the derivation should run on EVERY start so a rewound floors file could be cross-checked.
+The reviewer and security gates independently rejected that, on the same evidence, and they are
+right.
+
+`wal.ScanAll` accumulates every record **including full payloads** (`internal/wal/reader.go`), the
+WAL never rotates or compacts, and enrolment is unauthenticated — so peak startup memory would be
+proportional to the entire log, on every start, forever, with no compaction to recover with. That is
+not a hypothetical: `internal/wal` already carries a measured incident where a per-record **index
+list** — far smaller than the payloads — cost 1.76 MB on a 23.7 MB log and was described as "the
+boot-time OOM the eviction was written to avoid" at 10 GiB. Recovery itself is streaming
+(`wal.Replay` uses the `scanFrom` callback); the raw scan is not, because `scanFrom` is unexported,
+so there is no third option inside this task's file boundary.
+
+**Decision.** The scan is gated on `!alloc.Existed()` — at most once per data directory, for the
+legacy backfill. The every-start cross-check is filed as
+`MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN` (`6f4c17ef-220c-465f-b8d8-a0f04aac1905`): export a streaming raw
+scan from `internal/wal`, fold floors as records arrive, and reinstate the check at O(record) peak.
+
+**What that costs, precisely.** A floors file that EXISTS but has been rewound to an
+older-but-checksum-valid version is no longer detected. A **deleted** one still is (`Existed()` is
+false, so the backfill runs and the case is logged — see below); a **corrupt** one still is
+(`ids.ErrSuffixFileCorrupt`, fatal). Only rewound-but-valid is uncovered, and that is written into
+the code at the gate rather than left to be discovered.
+
+**Unchanged from §4, and endorsed by both gates:** when the cross-check does fire, it RAISES the
+floor rather than merely reporting it, and it does not refuse to boot. Refuse-to-boot would hand
+anyone with data-dir write access a permanent boot-denial primitive; `RaiseFloor` can never lower a
+floor, so raising cannot weaken the persisted authority.
+
+### New: a MISSING floors file is logged loudly, and the startup WARN no longer claims otherwise
+
+The security gate reproduced a case §4 did not cover. Delete **only** `agent-suffixes` from a live
+data dir, leaving `bus-id` and the log intact, and the bus re-mints ids it has already issued —
+because an id that was issued but never reached a durable record leaves nothing for the backfill to
+find. The floors file was the only thing that knew. It went out at INFO, indistinguishable from an
+ordinary start, while the startup WARN two lines later asserted "Agent id SUFFIXES are durable and
+never restart from 1" — actively false in exactly the case an operator most needs the truth.
+
+**Decision, two parts.**
+
+1. The seal line is graded by case: **INFO** when the floors file was present (the steady state);
+   **WARN** when it was absent AND the data directory was EMPTY when the process started (a
+   genuinely first start — one line, once per dir); **ERROR** otherwise, i.e. absent on a directory
+   that already had content or whose log holds records. It is deliberately NOT a refusal to boot: a
+   legacy dir looks identical, so refusing would block the very migration this code performs, and it
+   would hand anyone with data-dir write access a permanent boot-denial primitive.
+
+   **The discriminator is DIRECTORY EMPTINESS, not the record count, and that correction came from
+   running it.** The security gate prescribed "ERROR when `walLog.Recovered().Records > 0`, WARN
+   otherwise", which was implemented and then measured against a real binary: because enrolment is
+   still memory-only, a bus can issue `alpha-1` and `alpha-2` and leave a COMPLETELY EMPTY log, so
+   deleting `agent-suffixes` on a dir with real history reported as a routine first start at WARN and
+   re-minted `alpha-1`. Emptiness of the data dir catches that; the record count does not. It is read
+   in `run()` at the last instant it is knowable — after `MkdirAll`, before `dirlock.Acquire` writes
+   `bus.lock` — and it is used for NOTHING except the log level. The record count is kept as a second
+   trigger, because it stays correct once enrolment is durable and a non-empty log is history by any
+   definition.
+2. The suffix clause was **deleted** from the standing startup WARN rather than negated. No single
+   unconditional sentence can be right in both cases, so the claim now lives entirely in the
+   per-start "agent-id suffix floors" line, which knows which case it is in. The WARN says only what
+   is unconditionally true (the roster and sessions are in memory only) and points at that line.
+
+### Release ordering, recorded because it is a constraint and not an observation
+
+The backfill folds `store.RecordKind` records only; enrolment (`kind=agent`) records are deliberately
+NOT folded, and a test pins that. **MSG-FU-SUFFIXFLOOR must therefore ship before or with AUTH-3.** A
+build that has durable enrolment but reaches a data dir with no floors file would leave those
+enrolment suffixes invisible to the backfill.
+
+---
+
+## 2026-08-07 — MTLS-DESIGN: the consolidated certificate lifecycle (audit + the two genuine gaps)
+
+`MTLS-DESIGN`'s task description is STALE — it says "BLOCKED ON USER DECISION" for five questions,
+but the user has since answered all but two of them and the answers are already scattered across this
+file. This entry is the single pointer for all five, and settles the two that were never actually
+closed.
+
+### The three already settled — pointers only, not restated
+
+1. **How a client learns the bus cert fingerprint before first connection.** Settled: the invite blob
+   carries bus id + address + bus-cert fingerprint + invite secret, eliminating TOFU entirely. See
+   "E6 — The invite blob carries the bus certificate fingerprint. NO TOFU" (line 1198) and the
+   cross-bus reaffirmation at line 2227 ("This matches the invite-blob decision (E6, 2026-08-02) where
+   the bus-cert fingerprint travels out of band precisely to eliminate the TOFU window").
+2. **Bus-key rotation invalidating every client's pin.** Settled: the two-certificates rule — the bus
+   serves both the outgoing and incoming certificate during a rollover window, so no client is ever
+   forced to re-enrol on routine rotation. See "E3 — Rotation serves TWO certificates during rollover"
+   (line 1224) and its restatement for the *signing* key specifically at "The bus TLS key and the bus
+   SIGNING key are SEPARATE" (line 2251), which is also the entry establishing that the TLS key and
+   the signing key are two independent keypairs with independent rotation schedules — the lifecycle
+   below treats them as such throughout.
+3. **Plaintext escape hatch for tests/dev, and self-generated vs operator-supplied certs.** Settled,
+   both in the same entry: NO plaintext hatch anywhere — not a flag, not an env var, not a build tag —
+   tests use real TLS against certificates minted at test time via a dedicated helper, and
+   `InsecureSkipVerify` must appear nowhere in the tree. Operator-supplied certificates ARE allowed
+   (`-tls-cert` / `-tls-key`) alongside the self-signed default. See "E7: no plaintext escape hatch;
+   tests use REAL TLS; operator certs allowed" (line 1256).
+
+### The two genuine gaps — decided here
+
+Confirmed by grep: `expir` and `validity` do not appear anywhere in `DECISIONS.md` before this entry
+in the context of TLS certificates (only session-token expiry, lines 576–700, and unrelated hits).
+`re-bind` / `re-enrol` in the mTLS context likewise appear only as open questions in task descriptions,
+never as a decision. This is the real gap the task's own status note predicted.
+
+**Decision — validity periods.** Both the bus TLS certificate (`MTLS-BUSCERT`) and the client TLS
+certificate (`MTLS-CLIENTCERT`) default to **365 days** when self-generated. Reasoning:
+
+- There is no CA and no browser trust store to satisfy, so there is no externally-imposed ceiling
+  (unlike the ~398-day cap public CAs enforce) — the number is purely an internal operational choice.
+  365 days is chosen because it is long enough that routine possession of a valid cert is not itself
+  an operational burden, short enough that a cert leaked and never rotated does not stay valid
+  indefinitely, and it gives operators one predictable, memorable cadence to plan around instead of
+  two different ones for the two cert kinds.
+- Symmetry between bus and client cert periods is deliberate: both are stdlib-generated
+  (`crypto/tls` + `crypto/x509`, per invariant 9) long-lived identity keys with the same job — proving
+  which key holder is on the connection — so there is no reason for them to drift onto separate
+  schedules. This is distinct from, and does not have to match, the *signing* key's rotation cadence
+  (line 2251), which is deliberately allowed to run on its own, longer schedule because its blast
+  radius is federation-wide rather than per-connection.
+- Operator-supplied certificates (E7, allowed) are exempt — their validity period is whatever the
+  operator's own PKI issues, and the bus does not second-guess it.
+- This does **not** double as a revocation mechanism, and is not meant to. Line 1139–1144 already
+  drew that line: "mTLS proves which key holder is on the connection; the session token is the
+  revocable, time-bounded application credential." A cert with no CRL has no cheap way to be revoked
+  early; the session token (≤1h expiry, immediate revocation on `/leave`, line 695–700) and the
+  planned agent-revocation surface (`AUTH-4`) carry the short-term, revocable half of the job. The
+  cert's validity period is a leak-containment bound, not a substitute for revocation.
+
+**Decision — renewal discipline.** Both certs are renewed **proactively, at 75% of lifetime**,
+mirroring the session-token refresh rule already decided at line 700 ("the client refreshes at 75% of
+lifetime") rather than inventing a second convention. For the bus cert this means the operator (or an
+operator-triggered rotation, per E3) starts serving the successor certificate well before the
+incumbent's `NotAfter`, during the two-certificate rollover window that already exists. For the client
+cert this is the re-bind route decided below.
+
+**Decision — what an agent does when its client cert expires: a re-bind route, not re-enrolment, for
+the common case; re-enrolment only for the case a re-bind route cannot reach.**
+
+Two distinct situations, with different answers, and the distinction is the point:
+
+1. **The cert is approaching `NotAfter` but the agent still holds a valid session token and can still
+   complete the current mTLS handshake.** The agent generates a new keypair/self-signed cert
+   (`MTLS-CLIENTCERT`'s existing job) and calls a **re-bind** route, authenticated by its still-valid
+   session token (and, once `AUTH-1-FU-POPKEY` lands, proof of possession of its existing AUTH key —
+   never proof of possession of the TLS key alone, since that key is exactly what is being replaced),
+   to have the NEW fingerprint bound to its EXISTING, unchanged agent id. No invite is spent; no new
+   identity is minted. This is the client-side mirror of E3's rule for the bus's own cert: "Rotation
+   must never require every client to re-enrol — that would make routine key hygiene indistinguishable
+   from a security incident." The same principle applies in the other direction — an agent renewing
+   its own routine credential must not be indistinguishable from a brand-new agent joining. Note this
+   is a NEW route, not yet filed as its own task; `MTLS-BIND` as scoped only covers the FIRST binding
+   at enrolment, and the re-bind path is intentionally NOT folded into it here so it is not quietly
+   dropped the way the E-7 section (line 1256) warned `MTLS-CROSSCHECK` not to fold into `MTLS-BIND`.
+2. **The cert has already lapsed past `NotAfter` with no prior renewal — the agent was offline for the
+   whole validity period, or otherwise missed the window.** No route can rescue this: every
+   authenticated route sits behind the mTLS handshake, and a client that cannot complete that
+   handshake cannot reach a re-bind route to save itself. This collapses to the same case as a lost or
+   compromised private key, and the answer already implied by `INVITE-GATE` and invariant 3 is the
+   right one: the operator issues a **fresh invite**, and redemption mints a **new** agent id
+   (line 1146: "the invite is what authorises a new client certificate to be bound to a **new** agent
+   id"). The old id is not recovered — invariant 1 forbids reissuing an id, and there is no mechanism
+   recorded anywhere that lets an invite rebind an EXISTING id, so inventing one here to preserve
+   continuity would be exactly the kind of undocumented, un-reviewed departure invariant 1 exists to
+   prevent. The loss of identity continuity is the accepted cost of a credential that was never
+   renewed in time, not a defect to route around.
+
+**OPEN, not decided here, and flagged loudly because it affects `MTLS-CLIENTAUTH`/`MTLS-CROSSCHECK`
+directly.** `MTLS-CLIENTAUTH` is scoped as "`RequireAnyClientCert` plus application-layer policy,
+never `InsecureSkipVerify`" (`SPEC.md`). `tls.RequireAnyClientCert` performs **no chain verification
+at all**, which in Go's stdlib means the TLS handshake itself does not check a client certificate's
+`NotAfter`/`NotBefore` — only application code that explicitly reads those fields after the handshake
+would enforce expiry. Nothing in `DECISIONS.md`, `MTLS-BIND`, or `MTLS-CROSSCHECK`'s scoping commits to
+that application-side check existing. This entry's validity-period and renewal decisions above are
+therefore a POLICY, not yet a proven ENFORCEMENT path — whoever implements `MTLS-CROSSCHECK` must
+either (a) read the presented cert's `NotAfter` at the application layer and reject a connection past
+it, mirroring the session-token expiry check, or (b) explicitly decide expiry is advisory only and the
+session-token/revocation layer is the sole enforcement, and record which. This was not resolved from
+anything already on record and is called out here rather than silently assumed either way.
+
+### Key file locations in the data dir — three long-lived secrets after `MTLS-BUSCERT` lands
+
+Confirmed by reading `internal/wal/mackey.go:35`: the existing secret is literally named
+`wal-mac.key`, mode 0600 (`macKeyMode`, `mackey.go:44`), fatal if missing or wrong (line 1093–1098).
+After `MTLS-BUSCERT` (`internal/buscert`, `SPEC.md` line 2266) lands, the data dir holds **three**
+long-lived secrets, all mode 0600, all fatal-if-unusable on the same precedent as `wal-mac.key`:
+
+1. **`wal-mac.key`** — the WAL integrity MAC key (existing, shipped).
+2. **The bus TLS private key** — backs the certificate whose fingerprint is what E6's invite blob
+   carries and what `MTLS-PIN` verifies against. Not yet landed; `MTLS-BUSCERT` does not commit to a
+   literal filename in `SPEC.md`, so none is asserted here — only that it is a fourth (now second)
+   file in the data dir governed by the same "0600, fatal if unusable" rule as `wal-mac.key`.
+3. **The bus SIGNING private key** — the Ed25519 key peers pin at peering time (line 2211), separate
+   from the TLS key per the 2026-08-07 separation decision (line 2251). Also not yet landed, also no
+   literal filename asserted here for the same reason.
+
+**Stated explicitly, per this task's brief:** a backup of the data dir that omits any one of these
+three files produces a bus that cannot do its job — missing `wal-mac.key` means the WAL cannot be
+verified or extended; missing the bus TLS key means the bus cannot serve TLS at all (`MTLS-LISTENER`
+refuses to start without a usable cert/key, `SPEC.md` line 2246); missing the bus signing key means
+every peer's pin (line 2211) goes stale and no relayed signature from this bus can be verified anywhere
+in the federation. This is already noted in passing at line 2278–2280 ("a backup that omits any of
+them is a bus that cannot do its job") for the two not-yet-landed keys; this entry adds `wal-mac.key`
+to make the count of three explicit and complete, and restates it because `PROTOCOL.md`'s backup
+guidance (owned by `documentation`, outside this task's file boundary) still needs to name all three
+once the two new keys exist on disk — filed here as a pointer for whoever does that edit, not done in
+this task.
+
+---
+
+## 2026-08-07 — The WAL record-index high-water mark is a dedicated write-ahead file, not derived from the log (e120153b, db350e39)
+
+**The two defects, one root cause.** `e120153b` and `db350e39` were reported as separate Spec Server
+defects — a discarded tail record's index handed straight back out, and a whole-log quarantine
+resetting the index space to 1 — but they share a single cause: `NextIndex` was derived SOLELY from
+what SURVIVES in the log, and both a torn-tail discard and a quarantine destroy the evidence that
+would be needed to derive it correctly. `internal/hub` derives the message-sequence floor from
+`wal.Recovered.NextIndex - 1`, so both defects reissued MESSAGE IDS as well as WAL record indices.
+This entry is the follow-through on the design already sketched in this file's 2026-08-07
+"SUPERSEDES two earlier passages" entry above (line ~1983): that entry proposed persisting the
+high-water mark outside the log; this entry records what actually shipped, the two rejected
+alternatives that entry did not consider, and the security bound the implementation needed that the
+design sketch did not.
+
+**How invariants 1 and 6 were reconciled — they only LOOKED irreconcilable.** Invariant 1: an index
+(and, downstream, a message id) is never reissued, including across restarts. Invariant 6
+(2026-08-02, "Availability over retention"): recovery must always reach a running server, preferring
+to discard damaged or unreadable data over refusing to start. These two read as a straight
+contradiction the moment the high-water mark is derived SOLELY from the log: a quarantine must
+discard the log to satisfy invariant 6, and discarding the log destroys the only record of what was
+already minted, which invariant 1 needs to avoid reissuing it. **Moving the mark OUTSIDE the log
+dissolves the conflict rather than trading one invariant against the other.** A quarantine still
+discards the unreadable log and starts a fresh one (invariant 6 fully intact — the log itself is
+still disposable), while the index still resumes above everything this data directory ever
+authorised, because that fact now lives in a file the quarantine never touches (invariant 1 fully
+intact). **No narrowing of either invariant was needed or made.** The apparent conflict was an
+artefact of where the state was kept, not a property of the two invariants themselves.
+
+**`db350e39`'s "startup must refuse, not resume from 1" premise was deliberately NOT implemented,
+and is SUPERSEDED.** The defect as filed argued: *"a caller that cannot prove its floor MUST refuse
+to start rather than guess."* That premise is rejected here, for the same reason the "SUPERSEDES"
+entry above already gives: the always-restart decision (2026-08-02, "Availability over retention")
+is newer and explicit, and once the mark survives the quarantine a refusal buys nothing — the bus
+can prove its floor (it reads the durable file) and can always restart, so there is no case left
+where refusing would have been the only honest answer. **Also recorded here because it is the kind
+of thing that silently reappears:** `db350e39`'s stored `proof_cmd` named a test
+`TestRecover_WholeLogQuarantine_RefusesStartOnUnprovenSequenceFloor` that was **deliberately never
+written**, because the test's NAME would have enshrined the superseded refuse-to-start policy as the
+contract — this repo has already had exactly one case of a test name outliving the policy it
+encoded (the reissue-is-accepted framing at line 1541, superseded below). The behaviour that DID
+land is proved instead by `TestWALIndexFloorSurvivesAQuarantine` and
+`TestWALIndexFloorCrashNeverReissuesAnIndex` (`internal/wal/indexfloor_test.go`,
+`indexfloor_crash_test.go`), which assert the bus **starts** after a quarantine and the next index is
+strictly above everything the quarantined run ever authorised — the opposite assertion from the one
+the abandoned test name would have carried.
+
+**Why a dedicated file, and the alternatives rejected:**
+- **(a) Derive the mark from the log alone.** Rejected — impossible after a quarantine by
+  construction; that derivation IS the bug being fixed, not an option still on the table.
+- **(b) Refuse to start when the floor cannot be proven.** Rejected — contradicts invariant 6 and is
+  the superseded `db350e39` premise above; also unnecessary once (c)/(d) below are rejected too and
+  the dedicated-file design makes refusal moot.
+- **(c) Put the mark in the WAL frame header itself.** Rejected — this forces a WAL on-disk format
+  bump (a real, disruptive migration for every deployed data directory) and the mark still dies with
+  the log on exactly the quarantine path it exists to survive; storing it inside the thing being
+  discarded solves nothing.
+- **(d) fsync the floor before EVERY index (a reservation block of 1).** Rejected as the DEFAULT,
+  though it is the theoretically simplest and most conservative option. It is CORRECT — it never
+  burns a hole — but it DOUBLES the fsync count on the send path, doubling the cost of invariant 4's
+  guarantee to buy nothing invariant 1 does not already get from a larger block. Shipped instead:
+  `indexReserveBlock = 256`, which amortises the floor write to roughly one extra fsync per 256 WAL
+  appends and accepts that a crash may burn up to 255 unused indices as a permanent hole in the index
+  sequence. Holes are legal and permanent (invariant 1 beats gap-freeness) — the same trade
+  `internal/ids/suffixstore.go` already made for the per-name agent-id suffix floor, arrived at
+  independently and now mirrored deliberately.
+
+**The security bound on untrusted indices.** A discarded frame's index is read from a frame header
+whose MAC did NOT verify — that is precisely why the frame is being discarded rather than trusted —
+and on a WAL those header bytes are CLIENT-INFLUENCED (a message body reaches the frame a client
+constructed the content of). A forged, wildly implausible index in such a header could otherwise push
+the durable floor to near `math.MaxUint64` in one damaged frame, permanently exhausting the bus's
+64-bit id space — a restart-proof denial of service from a single corrupted byte. The fix accepts a
+discarded frame's declared index only when it is PLAUSIBLE for the file's size (`RepairLog`'s framing
+pass; proved by `TestWALIndexFloorRejectsAnImplausibleForgedIndex`, which forges index `1<<62` and
+asserts the durable ceiling after recovery stays within one reservation block of the file's honest
+size, not anywhere near the forged value). The durable floor is the TRUSTED backstop either way: an
+implausible index is simply treated the same as any other unidentifiable loss
+(`Repair.LostUnidentified`), which sends `Open` to the floor rather than to the untrusted number.
+
+**This SUBSUMES most of the open task `MSG-FU-SEQHIGHWATER` (`6ebe51be`).** That task asked for
+exactly this artefact, but scoped to the message sequence rather than the WAL record index:
+`internal/hub` derives its sequence floor from `wal.Recovered.NextIndex - 1`, so raising the value
+`Recovered.NextIndex` reports closes the measured message-id regression this task's item 4 (line
+1541 below) recorded, without `internal/hub` needing a floor file of its own. **The residual that
+keeps `MSG-FU-SEQHIGHWATER` open:** the migration window on a data directory that predates this file
+— until the first `Open` under the new binary writes `wal-index-floor`, a quarantine on that very
+first start can still regress the mark, exactly as before. That gap is inherent to any first-run
+migration and is not something a second, hub-level floor file would close any further; whoever
+re-scopes `MSG-FU-SEQHIGHWATER` should read it as "confirm the residual is acceptable and close" or
+"account for the migration window explicitly", not "build a second floor".
+
+**This SUPERSEDES the 2026-08-02 section "### 4. Message ids may repeat after a WAL QUARANTINE, and
+after damage deeper than a torn tail" (line ~1541).** `DECISIONS.md` is append-only, so the
+correction is recorded here rather than by editing those lines, which must be read as HISTORICAL —
+they describe the pre-2026-08-07 behaviour and the narrowing that was, at the time, believed to be
+the accepted trade. It is not: quoted in full, that section recorded *"This narrows invariant 1,
+which says ids are never reused including across restarts, and the narrowing needs to be recorded
+rather than implied"* and pointed at `MSG-FU-SEQHIGHWATER` as "the real fix". The real fix has now
+landed, in the WAL layer rather than in `hub` directly (see the subsumption note above), and
+invariant 1 is UNNARROWED as of this section: a WAL quarantine no longer regresses the sequence
+floor, and neither does damage deeper than a torn tail, because both are bounded by the durable
+index floor rather than by the log's own arithmetic. The nine test assertions that encoded the old,
+accepted-reissue behaviour were inverted, not preserved (see `AGENT_LOG.md`, same date, for the
+full list) — that inversion was the point of the task, not a side effect of it.
+
+**The cost, stated plainly.** Roughly one extra small-file write+fsync per 256 WAL appends on the hot
+path (the reservation block), plus one at `wal.Open` (recording the skip, if any, and creating the
+file on a migrating data directory) and one at a clean `Close` (sealing the true high-water mark so
+the next start burns no hole it does not have to). Against invariant 4's existing one-fsync-per-append
+cost, this is an amortised ~0.4% addition, not a new class of cost.
+
+**Chain and verification.** spec-keeper → implementer → test-engineer → reviewer → security →
+documentation (this entry). Code-only as shipped: nothing here has been exercised against a running
+`agent-bus` server, so no claim of LIVE behaviour is made by this entry — see `AGENT_LOG.md`, same
+date, for the full proof verdicts (RED/GREEN via `scripts/proof-check.sh`, plus a real `kill -9`
+crash-injection test) and for that same caveat restated.
+
+---
+
+## 2026-08-07 — SIGN-2/SIGN-6 SHIPPED: the mandatory-signature policy is UNBLOCKED. This SUPERSEDES "SIGN-2/SIGN-6: the signing core lands; the mandatory-signature policy is BLOCKED"
+
+**This entry SUPERSEDES, by name, the earlier section on this same date titled "SIGN-2/SIGN-6: the
+signing core lands; the mandatory-signature policy is BLOCKED".** `DECISIONS.md` is append-only, so
+that section is not edited — but it must now be read as HISTORICAL, and specifically its **Decision
+4 ("why SIGN-2 and SIGN-6 are not done, three blockers")** is obsolete in its entirety. Anyone
+reading that section on its own will conclude a signature is optional on this bus. **It is not: a
+signature is MANDATORY on `POST /v1/send` and there is no unsigned message type on the wire.**
+Decisions 1, 2 and 3 of that section SURVIVE unchanged and are re-affirmed below.
+
+### What unblocked it — the three blockers, answered
+
+The earlier entry named three. Each was real; none needed the thing it appeared to need.
+
+**(a) "No messaging keypair exists."** It does not need to exist ON THE SERVER. The realisation that
+unblocked this is that **SIGN-6's ingest check is SHAPE-ONLY**: present, valid strict base64, exactly
+64 bytes, sender matches the authenticated caller, message id is this bus's and agrees with seq,
+timestamp is positive. **Not one of those needs the sender's public key.** The bus therefore needs no
+messaging key at all to enforce the policy, and the blocker dissolved rather than being solved. The
+CLIENT mints and holds its own messaging keypair locally (`messaging_key_seed`, minted on first use,
+private half never leaving the machine), distinct from its AUTH enrolment keypair per invariant 3, so
+signing works end to end today.
+
+**(b) "The durable mint does not exist."** Built — see the next decision.
+
+**(c) "The signature cannot reach the durable record without `internal/hub`."** That was a
+file-ownership boundary on one agent, not a design problem. `store.Message` gains
+`TimestampUnixMilli` and `Signature`, `store.Record` carries both, and the hub passes them through.
+
+### Decision 1 — the bus enforces SHAPE; the RECIPIENT enforces AUTHENTICITY. The bus NEVER verifies a signature
+
+**Why.** The bus does not hold the sender's messaging key, and it must not be trusted to police
+messages for senders it does not control. The asymmetry is the whole argument: **a bus that could
+verify could equally forge.** Giving the server the verification key would put the trust boundary on
+the very component the signature exists to make untrustworthy. Adding a verify to the ingest path
+would look like an improvement and would quietly move that boundary.
+
+**What it costs.** The bus accepts a well-formed message it cannot itself attribute — a signature
+over the right shape by the wrong key passes ingest and is stored. That is intended: attribution is
+the recipient's job, and a stored-but-unverifiable message is loud at the recipient rather than
+silent everywhere.
+
+### Decision 2 — reserve-then-send: a send is a TWO-STEP through a new `POST /v1/mint`
+
+SIGN-1 settled (option (a), `PROTOCOL.md` §8.4) that the signature covers the ORIGIN bus's minted
+message id and sequence. Invariant 1 makes the server authoritative on those, so the client
+**cannot sign until it has them**. `POST /v1/mint` hands them out; the client canonicalizes, signs,
+and presents the reservation back on `POST /v1/send`, **under the same idempotency key**.
+
+**Why the same key covers both calls.** A reservation is scoped by `(agent, op, idempotency_key)` —
+the same scoping `internal/idem` uses, for the same reason. A repeat of step 1 returns the SAME
+reservation (`Idempotency-Replayed: true`) and burns no second sequence, so a client that crashes
+between the two steps repeats both and converges on ONE message. A fresh key on the retry would
+produce a second reservation and, if the first send had landed, a second message.
+
+**What it costs.** One extra round trip per send, permanently. That was priced in when SIGN-1 chose
+option (a): the alternative leaves the id and sequence unsigned, and an unsigned sequence is exactly
+the field the replay defence rests on.
+
+### Decision 3 — the durable artefact is a SEQUENCE FLOOR written AHEAD, not a per-key assignment record. The counting argument is RETIRED
+
+`hub.Open` used to derive its restart floor as `NextIndex - 1` on a **counting argument**: every
+sequence issued is `<=` the WAL index of the prepare carrying it, which held because each message
+consumes one sequence and at least two WAL indices. **Handing a sequence to a client BEFORE any
+record is written breaks that argument outright** — mint, restart, and the floor resumes below
+numbers already handed out, so two validly-signed messages could carry one origin message id,
+undetectably. That is the precise failure option (a) exists to prevent.
+
+**Decision.** A new WAL entry kind `"seqfloor"` (`hub.SeqFloorRecordKind`, body
+`{"v":1,"floor":N}`) records that every sequence `<= N` is BURNED. It is fsynced AHEAD of the number
+being handed out, in batches of `hub.MintBatchSize = 256`. `hub.Open` takes the **maximum** of
+`NextIndex - 1`, the replayed floor, and the highest applied sequence; `NextIndex - 1` is kept purely
+as defence in depth, since it can only raise the floor. The runtime check becomes the **direct**
+assertion — *every sequence handed out is `<=` the durably-recorded floor* — which is strictly
+stronger than the counting argument it retires, and which POISONS the hub on violation exactly as
+before. `publish`'s old `committed.PrepareIndex < seq` check had to GO, not merely be relaxed: it
+now fires legitimately (the first floor record burns seqs 1..256 while sitting at WAL index 1), and
+a false poison is worse than no check at all.
+
+**This is the same pattern MSG-FU-SUFFIXFLOOR established** for per-name agent-id suffixes — *write
+the floor AHEAD, never derive it* — reached here independently and then deliberately mirrored.
+
+**Decision 3a — the mint TABLE is in memory; only the NUMBER is durable.** What must survive a crash
+is that a number can never be issued twice, and the floor record does exactly that. Which
+`(agent, op, key)` holds which sequence does not need to survive. **This is a conscious narrowing of
+`PROTOCOL.md` §8.4's wording** ("bound to the idempotency key that asked for it"), recorded in
+`PROTOCOL.md` §8.4.1 as a divergence rather than left to be discovered.
+
+**What it costs, stated honestly:**
+- **A restart invalidates outstanding reservations.** The send answers `409` (`hub.ErrUnknownMint`);
+  the client re-mints under the same key, gets a fresh sequence, re-signs, re-sends. Safe against
+  double-apply: if the crash landed after durability, the same key and fingerprint make
+  `internal/idem` answer `OutcomeRetry` with the ORIGINAL result.
+- **Sequence numbers now advance in jumps** — a restart typically skips to the next multiple of 256,
+  and an unspent mint leaves a permanent hole. **Correct, not corruption:**
+  `internal/ids/sequence.go` already binds consumers to treat the sequence as strictly increasing,
+  never as dense. Invariant 1 beats gap-freeness.
+- **One extra fsync per 256 mints**, and zero on the send path itself. A block of 1 would never burn
+  a hole and was rejected as the default for doubling the fsync cost of invariant 4's guarantee to
+  buy nothing invariant 1 does not already get from a larger block.
+- Bounds fail CLOSED (`MaxOutstandingMintsPerAgent = 64`, `MaxOutstandingMints = 8192`,
+  `MintTTL = 15m`); another agent's reservation is **never** evicted to make room.
+
+### Decision 4 — `POST /v1/broadcast` answers 501, and this is a REGRESSION we chose
+
+A broadcast **cannot be signed** under signing format v1, for two reasons that are both deliberate
+and neither of which the route may paper over: `signing.Canonicalize` REJECTS an empty recipient set
+(an empty set signs an audience of nobody), and `store.Message` stores a broadcast as a **FLAG**, not
+an expanded roster snapshot, so there is no recorded audience to canonicalize even if the format
+allowed one. What the canonical audience of a broadcast should BE is SIGN-3's open question, and
+answering it here by accident would settle it for everybody.
+
+Two answers were available: leave the route accepting UNSIGNED messages — precisely the "strip the
+signature and the epic is theatre" hole SIGN-6 exists to close, and it would be the easiest hole in
+the bus to find — or **fail closed**. **We fail closed.** The refusal is made immediately after
+authentication and BEFORE the body is decoded, so no broadcast payload is read, parsed, logged or
+measured on a route that cannot accept one. An anonymous caller still gets 401 first: a route that
+told an unauthenticated caller what it does and does not implement would be describing the messaging
+surface to somebody with no business knowing it exists.
+
+**What it costs.** A working, shipped, agent-facing feature stops working. `busctl broadcast` fails
+(exit 6, because the client maps `>= 500` generically). This is a REGRESSION and must be reported as
+one, not as a limitation. `hub.Broadcast`, `client.Broadcast` and the whole broadcast write path are
+**deliberately left INTACT and tested**, so SIGN-3 re-opens the route by settling ONE question rather
+than by re-plumbing the write path.
+
+### Decision 5 — `store.RecordVersion` 1 → 2, a destructive BIDIRECTIONAL break, with NO migration
+
+`store.Record` gains REQUIRED `timestamp_ms` and `signature`. `RecordVersion` becomes **2**, reserved
+from the Spec Server `store-record-version` namespace on 2026-08-07 (value `1` seeded in the same
+pass to cover the already-shipped v1 record) — not picked by eyeballing the constant.
+
+**Why there is no migration, and why one must not be invented.** A pre-SIGN-6 message is unsigned.
+There is nothing to migrate it TO. Synthesising a zero signature or a fabricated timestamp would
+manufacture records that look signed and verify as nothing — the silent-failure mode invariant 9
+exists to forbid. So `store.Decode` refuses any record whose `v` is not exactly `RecordVersion`, and
+`Hub.Apply` discards refused records **loudly** (invariant 6: discard is sanctioned, SILENT discard
+is the defect).
+
+**What it costs — say this to operators before they upgrade.** Upgrading an existing bus **discards
+its entire message history**. The break is **BIDIRECTIONAL**: rolling back to the old binary discards
+the v2 records the same way, so rollback is a second discard, not a recovery. Copy the data directory
+first if the history matters. **Enrolment (`"agent"`), invite and `"seqfloor"` records are NOT
+affected** — `auth.RecordVersion` is a separate, independently-versioned number and stays at `1` — so
+**no agent has to re-enrol because of this bump.**
+
+### Re-affirmed from the superseded entry, and now actually shipped
+
+- **A rejected send consumes no sequence and leaves no durable record.** Every SIGN-6 check runs in
+  `internal/httpapi` BEFORE `hub.Send` is called: no WAL record, no delivery, no ack, no sequence
+  consumed by that request. (The reservation was burned earlier at `/v1/mint` — a separate,
+  deliberate, earlier act.) **A rejection is TERMINAL for its idempotency key**, carries no
+  `Retry-After`, and must not be retry-looped: re-presented unchanged it fails identically for ever;
+  re-presented repaired it is a different payload under a used key, which invariant 10 answers with
+  409 and a disconnect.
+- **The poison-message wedge policy stands** (cursor ADVANCES, body DISCARDED, event RECORDED
+  LOUDLY). It is encoded in `client`'s `RejectionReason`/`RejectedMessage` types, and it is **not yet
+  in force** — see the honest limits below.
+- **Which key verifies** — resolved from the fully-qualified sender INSIDE the signed bytes, never
+  from a key or key-hint carried beside the signature.
+
+### What is still BLOCKED — do not read this entry as "signing is done"
+
+- **No messaging public key is registered at enrolment.** `auth.Service.Enrol` leaves
+  `RosterEntry.MessagingPublicKey` ZERO, `GET /v1/agents` carries no key material, and **CRYPTO-4
+  (the server-attested key-bundle endpoint) does not exist.** A recipient can therefore obtain a
+  sender's messaging public key **only OUT OF BAND**. `client/keyring.go`'s `DirKeyRing` is a local,
+  **manually populated** trust store and is explicitly a stopgap. **No fallback may be invented** —
+  no TOFU, no "trust the key the bus handed over", no verification-optional switch, no `--insecure`.
+- **Recipient-side verification is NOT wired into `client.Read`.** Signing works end to end, the
+  signature is carried on the wire and returned by the read path, and a client-made signature is
+  proven to verify under `internal/signing.Verify` from the wire fields — but nothing verifies
+  automatically on receive. `Batch.Rejected` is always empty. `client/messages.go`'s doc comment
+  calling `Batch.Messages` "the VERIFIED messages" is **FALSE today** and is recorded as a code-doc
+  defect.
+- **`busctl keygen` and `busctl trust` DO NOT EXIST**, though error remedies in `client/store.go`,
+  `client/client.go` and `client/keyring.go` instruct operators to run them. An agent that shells out
+  to `busctl` therefore cannot publish its messaging key or trust a peer's; only an embedder can.
+  Recorded in `CONTRACTS-AGENT.md` as an open invariant-7 item, not as a satisfied requirement.
+
+---
+
+## 2026-08-07 — AUTH-7: durable enrolment is WIRED, and the hub keeps NO roster of its own
+
+**Decision.** `cmd/agent-bus` constructs `auth.NewWALRoster`, attaches it to the WAL, and injects it
+into `auth.NewService` and — adapted through the new `cmd/agent-bus/hubroster.go` — into the hub.
+`hub.NoteEnrolment` and the hub's private roster map are **DELETED**; the hub reads through to the
+authoritative roster via a new `hub.RosterSource` interface, and `hub.Options.Roster` is **REQUIRED**
+(nil is a hard error at `Open`).
+
+**Why one roster, read through, and not a synchronised copy.** The hub used to keep a second roster
+fed by the enrolment handler. After a restart that copy came back EMPTY while `auth`'s durable one
+came back full — **a bus that authenticated everyone and served nobody.** One roster read through
+cannot diverge from itself. A snapshot taken at startup would reintroduce the same bug with a
+different cause: every agent enrolled after boot would authenticate and then be refused as an unknown
+sender. So `hubRoster` reads through on every call and caches nothing.
+
+**Why the adapter lives in `cmd/agent-bus` and not in either package.** `internal/hub` must not
+import `internal/auth` — the hub would then need the enrolment authority, the id minter and the
+session table to build a message store, and the dependency runs the wrong way round, since auth
+issues the identity the hub consumes. `internal/auth` must not import `internal/hub` for the mirror
+reason. The composition root is the one place that legitimately holds both, so the translation is
+fifteen lines there rather than a cycle anywhere else. It wraps the INTERFACE `auth.Roster` rather
+than `*auth.WALRoster`, so a test's `MemoryRoster` needs no second adapter and nothing in the hub can
+reach a durable-write method.
+
+**Why `Options.Roster` is a hard error rather than defaulting to an empty roster.** A hub with
+nothing to read refuses every send, rejects every recipient and serves an empty agent list **while
+looking healthy**. Failing at `Open` turns a silent, hours-later mystery into a startup error.
+
+**What this means for an operator — the headline.** **Agents no longer re-enrol after a restart.**
+Agent ids, public keys and each agent's **ORIGINAL** `enrolled_at` survive a restart and a `SIGKILL`,
+fsynced through the two-phase write path and rebuilt by replay. The enrolment-epoch visibility rule
+(`CONTRACTS-HTTP.md`) now behaves as designed: a genuinely continuous agent keeps seeing everything
+sent since it first enrolled, across restarts. Verified end to end — enrol two agents, `SIGKILL`,
+restart, both authenticate with their existing credentials and `/v1/agents` lists both.
+
+**What it costs — SESSIONS are still memory-only, and that is permanent, not a follow-up.** Every
+bearer token is invalidated by a restart, so each agent must redo the session handshake before its
+first authenticated call. It must **not** re-enrol. Persisting sessions is deliberately NOT planned:
+they are short-lived credentials, and writing live ones to disk would store **replayable material**
+to buy exactly one saved round trip. The startup WARN was rewritten to say precisely this — the old
+one claimed the roster was lost, which is now the opposite of the truth, and a false reassurance in
+either direction on this line is worse than no line.

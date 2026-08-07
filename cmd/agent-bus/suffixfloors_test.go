@@ -10,6 +10,7 @@ package main
 // or must not fold.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -23,8 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -33,9 +36,44 @@ import (
 // the id before anything mints one.
 const testBusID = "bus-testsuffixfloor"
 
+// enrolmentRecordKindOnDisk is the ON-DISK kind string of an enrolment record.
+//
+// Spelled as a LITERAL rather than as auth.RecordKind on purpose. The fixtures
+// below hand-write record bytes to stand in for what a previous build left in
+// the log, so what they must reproduce is the byte sequence that is really on
+// the platter -- not whatever the constant happens to say today. Written as
+// auth.RecordKind, a rename of the constant would silently rename the fixture
+// too and the union test would keep passing while no longer describing any log
+// that exists. TestEnrolmentRecordKindIsStillAgent pins the two together, so a
+// divergence is caught loudly and in one place instead.
+const enrolmentRecordKindOnDisk = "agent"
+
+// TestEnrolmentRecordKindIsStillAgent ties the hand-written fixture kind above
+// to the constant production writes. If auth.RecordKind is ever changed, this
+// fails and says which fixtures must be reconsidered -- rather than leaving the
+// union tests green against a kind the server no longer writes.
+func TestEnrolmentRecordKindIsStillAgent(t *testing.T) {
+	if auth.RecordKind != enrolmentRecordKindOnDisk {
+		t.Fatalf("auth.RecordKind = %q but the WAL fixtures in this file hand-write %q. The floor derivation folds enrolment records by kind, so the fixtures no longer describe a log this build writes: update enrolmentRecordKindOnDisk, and check whether any data directory already holds records under the OLD kind (their agent-id suffixes would become invisible to the backfill).",
+			auth.RecordKind, enrolmentRecordKindOnDisk)
+	}
+}
+
 // idsImportPath is the package TestNoFreshSuffixCounterInCmd resolves import
 // names against, so an alias or a dot-import cannot slip the guard.
 const idsImportPath = "github.com/dodgymike/agent-bus/internal/ids"
+
+// fixtureTimestampMs is the SENDER-clock reading (Unix milliseconds) every
+// hand-built fixture message carries. store.NewMessage refuses 0 — that value
+// means "unset" — so a fixture needs a plausible positive one.
+const fixtureTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
+
+// fixtureSignature is a well-formed 64-byte placeholder. store.NewMessage
+// enforces the LENGTH and nothing else — this bus never verifies a message
+// signature, because it does not hold the sender's messaging key — so any
+// signing.SignatureSize bytes serve a fixture that only needs the record to be
+// constructible.
+func fixtureSignature() []byte { return bytes.Repeat([]byte{0xAB}, signing.SignatureSize) }
 
 // quietLogger is a logger that discards everything, for the unit tests that
 // exercise openSuffixAllocator without wanting its output.
@@ -70,7 +108,7 @@ func openTestWAL(t *testing.T, dir string) *wal.Log {
 func writeMessageRecord(t *testing.T, l *wal.Log, busID, sender string, recipients []string, seq uint64) {
 	t.Helper()
 	broadcast := len(recipients) == 0
-	m, err := store.NewMessage(busID, sender, broadcast, recipients, seq, time.Unix(0, 0).UTC(), []byte("hello"), fmt.Sprintf("idem-%d", seq))
+	m, err := store.NewMessage(busID, sender, broadcast, recipients, seq, time.Unix(0, 0).UTC(), []byte("hello"), fmt.Sprintf("idem-%d", seq), fixtureTimestampMs, fixtureSignature())
 	if err != nil {
 		t.Fatalf("store.NewMessage: %v", err)
 	}
@@ -166,21 +204,48 @@ func TestWALAgentIDFloors(t *testing.T) {
 			},
 			want: map[string]uint64{"beta": 2},
 		},
+		// THE UNION, in both directions. These two cases replace one that asserted
+		// `want: {"alpha": 1}` under the name "records of another kind are
+		// skipped" -- i.e. that an ENROLMENT record contributed nothing and only
+		// the message half was folded.
+		//
+		// That assertion is SUPERSEDED (AUTH-3-FU-FAILOPEN) and is described here
+		// rather than deleted, so nobody restores it by "making the failing test
+		// pass". walAgentIDFloors is now the per-name MAXIMUM of
+		// messageAgentIDFloors and auth.EnrolmentSuffixesInWAL, because NEITHER
+		// half is a floor on its own: an agent that enrolled and never sent leaves
+		// no message record at all, so folding only store.RecordKind reported a
+		// floor of 0 for a name whose suffix was already durable and re-minted it.
+		// Records of the enrolment kind are no longer "another kind" to be
+		// skipped; they are the complementary half of the same population.
+		//
+		// Both directions are covered on purpose. A single case can be satisfied
+		// by a merge that simply overwrites, and an overwrite is only correct in
+		// whichever direction that one case happens to run; only a pair pins that
+		// the fold is a MAXIMUM and can never LOWER a floor.
 		{
-			name: "records of another kind are skipped",
+			name: "the ENROLMENT half raises a floor the message half cannot see",
 			write: func(t *testing.T, l *wal.Log) {
-				writeRawRecord(t, l, "agent", `{"agent_id":"`+testBusID+`.alpha-99"}`)
+				writeRawRecord(t, l, enrolmentRecordKindOnDisk, `{"agent_id":"`+testBusID+`.alpha-99"}`)
 				writeMessageRecord(t, l, testBusID, testBusID+".alpha-1", []string{testBusID + ".beta-1"}, 1)
 			},
-			// The enrolment record is NOT folded here: this scan's population is
-			// the message records. Its suffix is covered by the floors FILE from
-			// the first start of this binary onward.
-			want: map[string]uint64{"alpha": 1, "beta": 1},
+			// 99, not 1: alpha-99 reached disk in an enrolment record, and a floor
+			// of 1 would hand alpha-99 to the next keypair that enrols as "alpha".
+			want: map[string]uint64{"alpha": 99, "beta": 1},
+		},
+		{
+			name: "the MESSAGE half still wins when it is the higher of the two",
+			write: func(t *testing.T, l *wal.Log) {
+				writeRawRecord(t, l, enrolmentRecordKindOnDisk, `{"agent_id":"`+testBusID+`.alpha-2"}`)
+				writeMessageRecord(t, l, testBusID, testBusID+".alpha-9", []string{testBusID + ".beta-1"}, 1)
+			},
+			// The enrolment half must never DROP the message half's floor to 2.
+			want: map[string]uint64{"alpha": 9, "beta": 1},
 		},
 		{
 			name: "an ABORTED prepare still counts: the suffix reached disk",
 			write: func(t *testing.T, l *wal.Log) {
-				m, err := store.NewMessage(testBusID, testBusID+".alpha-6", true, nil, 1, time.Unix(0, 0).UTC(), []byte("x"), "idem-abort")
+				m, err := store.NewMessage(testBusID, testBusID+".alpha-6", true, nil, 1, time.Unix(0, 0).UTC(), []byte("x"), "idem-abort", fixtureTimestampMs, fixtureSignature())
 				if err != nil {
 					t.Fatalf("store.NewMessage: %v", err)
 				}
@@ -282,7 +347,7 @@ func TestOpenSuffixAllocatorBackfillsALegacyDataDir(t *testing.T) {
 		t.Fatalf("agent-suffixes must not exist before the first openSuffixAllocator; stat err = %v", err)
 	}
 
-	alloc, err := openSuffixAllocator(dir, l, busID, false, quietLogger(t))
+	alloc, err := openSuffixAllocator(dir, l, busID, false, true, quietLogger(t))
 	if err != nil {
 		t.Fatalf("openSuffixAllocator on a legacy dir: %v", err)
 	}
@@ -339,7 +404,7 @@ func TestOpenSuffixAllocatorShoutsWhenTheFloorsFileIsMissingOnADirWithHistory(t 
 		}
 
 		// First start writes a correct floors file.
-		if _, err := openSuffixAllocator(dir, l, busID, false, quietLogger(t)); err != nil {
+		if _, err := openSuffixAllocator(dir, l, busID, false, true, quietLogger(t)); err != nil {
 			t.Fatalf("first openSuffixAllocator: %v", err)
 		}
 		if err := os.Remove(filepath.Join(dir, "agent-suffixes")); err != nil {
@@ -349,7 +414,7 @@ func TestOpenSuffixAllocatorShoutsWhenTheFloorsFileIsMissingOnADirWithHistory(t 
 		// LevelError, so a line that is merely INFO or WARN produces NOTHING here
 		// and the assertion below fails -- which is the whole point.
 		var buf logBuf
-		alloc, err := openSuffixAllocator(dir, l, busID, false, logging.New(&buf, logging.LevelError))
+		alloc, err := openSuffixAllocator(dir, l, busID, false, true, logging.New(&buf, logging.LevelError))
 		if err != nil {
 			t.Fatalf("openSuffixAllocator with a missing floors file: %v", err)
 		}
@@ -362,12 +427,53 @@ func TestOpenSuffixAllocatorShoutsWhenTheFloorsFileIsMissingOnADirWithHistory(t 
 		}
 	})
 
+	// THE PIN ON THE DISCRIMINATOR ITSELF. Everything else in this test passes
+	// under BOTH the old rule ("ERROR when the log has records") and the current
+	// one ("ERROR unless the data dir was empty at startup"), so without this
+	// subtest the fix is silently revertible.
+	//
+	// It is also the case that made the fix necessary, and it was found by running
+	// the binary rather than by any test: enrolment was memory-only, so a bus
+	// could issue alpha-1 and alpha-2 and leave a COMPLETELY EMPTY log. The
+	// record-count rule then graded a LOST floors file as a routine first start,
+	// at WARN, and re-minted alpha-1.
+	//
+	// Note this stays a meaningful pin as durable enrolment fills the log in: the
+	// subtest constructs the empty-log case explicitly rather than relying on
+	// enrolment happening not to write.
+	t.Run("history with an EMPTY log still logs at ERROR", func(t *testing.T) {
+		dir := t.TempDir()
+		// Gives the dir an identity -- and therefore history -- without writing a
+		// single WAL record.
+		if _, err := ids.LoadOrCreateBusID(dir, testBusID); err != nil {
+			t.Fatalf("LoadOrCreateBusID: %v", err)
+		}
+		l := openTestWAL(t, dir)
+		if got := l.Recovered().Records; got != 0 {
+			t.Fatalf("the fixture log holds %d records, want 0; this subtest exists to cover the EMPTY-log case", got)
+		}
+
+		var buf logBuf
+		// dataDirWasEmpty=false: the dir already held bus-id when the process
+		// started, which is exactly what run() would have observed.
+		// allowBackfill=true: this dir HAS history and no floors file, which is
+		// now a REFUSAL unless the operator opted in (AUTH-3-FU-FAILOPEN). The
+		// subtest is about the LOG LEVEL of the backfill, so it takes the opt-in
+		// and keeps asserting the level.
+		if _, err := openSuffixAllocator(dir, l, testBusID, false, true, logging.New(&buf, logging.LevelError)); err != nil {
+			t.Fatalf("openSuffixAllocator: %v", err)
+		}
+		if !strings.Contains(buf.String(), "WITHOUT a persisted floors file") {
+			t.Fatalf("a data dir with history and no floors file must log at ERROR even when its log is EMPTY -- a bus can issue ids and write no record, so the record count cannot be the discriminator; the log at level=error was:\n%q", buf.String())
+		}
+	})
+
 	t.Run("a fresh dir logs at WARN, not ERROR", func(t *testing.T) {
 		dir := t.TempDir()
 		l := openTestWAL(t, dir)
 
 		var errBuf logBuf
-		if _, err := openSuffixAllocator(dir, l, testBusID, true, logging.New(&errBuf, logging.LevelError)); err != nil {
+		if _, err := openSuffixAllocator(dir, l, testBusID, true, false, logging.New(&errBuf, logging.LevelError)); err != nil {
 			t.Fatalf("openSuffixAllocator on a fresh dir: %v", err)
 		}
 		if errBuf.String() != "" {
@@ -377,7 +483,7 @@ func TestOpenSuffixAllocatorShoutsWhenTheFloorsFileIsMissingOnADirWithHistory(t 
 		dir2 := t.TempDir()
 		l2 := openTestWAL(t, dir2)
 		var warnBuf logBuf
-		if _, err := openSuffixAllocator(dir2, l2, testBusID, true, logging.New(&warnBuf, logging.LevelWarn)); err != nil {
+		if _, err := openSuffixAllocator(dir2, l2, testBusID, true, false, logging.New(&warnBuf, logging.LevelWarn)); err != nil {
 			t.Fatalf("openSuffixAllocator on a fresh dir: %v", err)
 		}
 		if !strings.Contains(warnBuf.String(), "EMPTY at startup and had no persisted floors file") {
@@ -388,11 +494,11 @@ func TestOpenSuffixAllocatorShoutsWhenTheFloorsFileIsMissingOnADirWithHistory(t 
 	t.Run("the steady state is quiet", func(t *testing.T) {
 		dir := t.TempDir()
 		l := openTestWAL(t, dir)
-		if _, err := openSuffixAllocator(dir, l, testBusID, false, quietLogger(t)); err != nil {
+		if _, err := openSuffixAllocator(dir, l, testBusID, false, true, quietLogger(t)); err != nil {
 			t.Fatalf("first openSuffixAllocator: %v", err)
 		}
 		var buf logBuf
-		if _, err := openSuffixAllocator(dir, l, testBusID, false, logging.New(&buf, logging.LevelWarn)); err != nil {
+		if _, err := openSuffixAllocator(dir, l, testBusID, false, false, logging.New(&buf, logging.LevelWarn)); err != nil {
 			t.Fatalf("second openSuffixAllocator: %v", err)
 		}
 		if buf.String() != "" {
@@ -425,7 +531,7 @@ func TestOpenSuffixAllocatorDoesNotReadTheLogWhenFloorsExist(t *testing.T) {
 	writeMessageRecord(t, l, busID, busID+".alpha-3", nil, 1)
 
 	// First start: derives from the log and writes the floors file.
-	if _, err := openSuffixAllocator(dir, l, busID, false, quietLogger(t)); err != nil {
+	if _, err := openSuffixAllocator(dir, l, busID, false, true, quietLogger(t)); err != nil {
 		t.Fatalf("first openSuffixAllocator: %v", err)
 	}
 
@@ -440,7 +546,7 @@ func TestOpenSuffixAllocatorDoesNotReadTheLogWhenFloorsExist(t *testing.T) {
 		t.Fatal("the WAL is still readable after chmod 000; this test would prove nothing")
 	}
 
-	alloc, err := openSuffixAllocator(dir, l, busID, false, quietLogger(t))
+	alloc, err := openSuffixAllocator(dir, l, busID, false, false, quietLogger(t))
 	if err != nil {
 		t.Fatalf("openSuffixAllocator with a present floors file and an UNREADABLE log = %v; an ordinary start must not read the log at all -- see the gate on !alloc.Existed()", err)
 	}
@@ -495,7 +601,7 @@ func TestOpenSuffixAllocatorBootsButShoutsWhenTheLogWasRepaired(t *testing.T) {
 		t.Fatalf("the fixture did not actually make recovery remove anything; the test would prove nothing. Repair = %+v", repaired.Recovered().Repaired)
 	}
 
-	alloc, err := openSuffixAllocator(dir, repaired, busID, false, lg)
+	alloc, err := openSuffixAllocator(dir, repaired, busID, false, true, lg)
 	if err != nil {
 		t.Fatalf("openSuffixAllocator after a repaired log = %v; the bus must still START (DECISIONS.md: availability over retention)", err)
 	}
@@ -519,7 +625,7 @@ func TestOpenSuffixAllocatorFailsClosed(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "agent-suffixes"), []byte("not an agent-bus floors file\n"), 0o600); err != nil {
 			t.Fatalf("writing the corrupt floors file: %v", err)
 		}
-		alloc, err := openSuffixAllocator(dir, l, testBusID, false, quietLogger(t))
+		alloc, err := openSuffixAllocator(dir, l, testBusID, false, false, quietLogger(t))
 		if err == nil {
 			t.Fatalf("openSuffixAllocator returned %v and no error on a CORRUPT floors file; it must refuse, never regenerate, because regenerating resumes every name from 1", alloc)
 		}
@@ -541,7 +647,7 @@ func TestOpenSuffixAllocatorFailsClosed(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		alloc, err := openSuffixAllocator(dir, l, testBusID, false, quietLogger(t))
+		alloc, err := openSuffixAllocator(dir, l, testBusID, false, true, quietLogger(t))
 		if err == nil {
 			t.Fatalf("openSuffixAllocator returned %v and no error when Seal could not write; an unsealed allocator refuses every enrolment, so startup must fail loudly instead", alloc)
 		}
@@ -558,7 +664,7 @@ func TestOpenSuffixAllocatorFailsClosed(t *testing.T) {
 		// must never be sealed.
 		writeRawRecord(t, l, store.RecordKind, `{"sender":"?????"}`)
 
-		alloc, err := openSuffixAllocator(dir, l, testBusID, false, quietLogger(t))
+		alloc, err := openSuffixAllocator(dir, l, testBusID, false, true, quietLogger(t))
 		if err == nil {
 			t.Fatalf("openSuffixAllocator returned %v and no error when the backfill derivation failed on a dir with no floors file", alloc)
 		}

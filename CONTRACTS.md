@@ -20,7 +20,7 @@ index so existing references and muscle memory land somewhere useful instead of 
 | [`CONTRACTS-CLI.md`](CONTRACTS-CLI.md) | Server / CLI flags (`cmd/agent-bus`) and environment variables. |
 | [`CONTRACTS-HTTP.md`](CONTRACTS-HTTP.md) | HTTP routes, headers, enrolment/sessions, and authentication (the `authMiddleware` contract, the allow-list, the credential model). |
 | [`CONTRACTS-ONDISK.md`](CONTRACTS-ONDISK.md) | Durable record types / wire protocol versions, on-disk files in the data directory (`bus.lock`, `bus.wal`), and the write-ahead log at startup. **This is the plane most in flux** (DUR / on-disk format version 2 work is active) — it benefits most from being isolated in its own file. |
-| [`CONTRACTS-AGENT.md`](CONTRACTS-AGENT.md) | The agent-facing surface (`scripts/bus-*.sh` wrappers, `AGENT_PROTOCOL.md`) and repo tooling scripts (`scripts/spec-cloud.sh`, `scripts/proof-check.sh`) that are NOT agent-facing but are documented alongside it. |
+| [`CONTRACTS-AGENT.md`](CONTRACTS-AGENT.md) | The agent-facing surface (`cmd/busctl` and the one surviving wrapper `scripts/bus-serve.sh`; `AGENT_PROTOCOL.md`) and repo tooling scripts (`scripts/spec-cloud.sh`, `scripts/proof-check.sh`) that are NOT agent-facing but are documented alongside it. |
 
 Two known-wrong passages were moved **unchanged, wrong exactly as before** — fixing their content is
 explicitly out of scope for the split itself and is tracked by other tasks, not this one:
@@ -276,3 +276,48 @@ writing nothing on the startup path imports it, so a running bus produces neithe
 for the same reason the entry above gives: nothing serves these handlers, so the format is not yet on
 any wire. The task that first REGISTERS these handlers must reserve a version and add the field to
 both surfaces at once.
+
+## 2026-08-07 — AUTH-7 + SIGN-2/SIGN-6: durable enrolment WIRED, and a signature is MANDATORY
+
+Unlike the RELAY/SIGN-7 entries above, **this wave is REACHABLE**: it changes routes that are served,
+records that are written, and behaviour an operator will notice on the next restart. Each plane file
+carries the detail; this entry is the index and the list of breaks.
+
+**Where the detail lives**
+
+| Change | Plane file |
+|---|---|
+| `POST /v1/mint` (NEW), `POST /v1/send` (BREAKING request), `POST /v1/broadcast` (now 501), `timestamp_ms` + `signature` on the read path, the roster/session durability table | `CONTRACTS-HTTP.md` |
+| `store.RecordVersion` 1 → **2** and its bidirectional break; the new `wal.Entry.Kind` value `"seqfloor"`; sequence numbers advancing in jumps | `CONTRACTS-ONDISK.md` |
+| `busctl send`'s two-step; `busctl broadcast` exiting 6; the MESSAGING keypair and `messaging_key_seed`; `<identity-dir>/trusted-keys/`; the new `client` exported surface | `CONTRACTS-CLI.md` |
+| Invariant 7's status — `busctl keygen` and `busctl trust` DO NOT EXIST | `CONTRACTS-AGENT.md` |
+| The reserve-then-send flow as an agent performs it | `AGENT_PROTOCOL.md` |
+
+**Reservations used, none hand-picked:** `store.RecordVersion = 2` from the Spec Server
+`store-record-version` namespace on 2026-08-07 (value `1` seeded in the same pass to cover the
+already-shipped v1 record). `wal.Entry.Kind` needed none — it is a free-form application string, as
+`CONTRACTS-ONDISK.md` already recorded. `signing.FormatVersion` is UNCHANGED at `1`; nothing in this
+wave touches the canonical format.
+
+**The three breaks, stated together so none is missed**
+
+1. **`POST /v1/send` is a BREAKING wire change.** Five new required fields. A pre-SIGN-6 client is
+   rejected with a 400 and cannot send at all.
+2. **`POST /v1/broadcast` is a REGRESSION of a working feature**, to 501, deliberately and failing
+   closed. SIGN-6 admits no unsigned message type and a broadcast has no canonical audience under
+   signing format v1. SIGN-3 owns re-opening it.
+3. **`store.RecordVersion` 1 → 2 is a DESTRUCTIVE, BIDIRECTIONAL on-disk break.** Upgrading discards
+   the message history; rolling back discards it again. There is no migration and there cannot be
+   one. Enrolment, invite and seqfloor records are unaffected — **an agent does not have to
+   re-enrol.**
+
+**Also true, and the good news of the wave:** AUTH-7 means agents **no longer re-enrol after a
+restart**. Agent ids, public keys and each agent's ORIGINAL `enrolled_at` survive a restart and a
+`SIGKILL`. Sessions remain memory-only, deliberately and permanently, so every agent must redo the
+session handshake — but not the enrolment.
+
+**Honest limits, so nothing here is oversold.** No messaging public key is registered at enrolment
+and CRYPTO-4 does not exist, so a recipient can obtain a sender's messaging public key ONLY out of
+band; recipient-side verification is not yet wired into `client.Read`; and `busctl` has no `keygen`
+or `trust` subcommand. Signing works end to end and the signature is carried and returned. Automatic
+verification on receive does not happen yet.

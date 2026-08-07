@@ -9,8 +9,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 )
+
+// testTimestampMs is a fixed, plausible sender-clock value (Unix
+// milliseconds) for tests that do not care about a specific instant, only
+// that NewMessage and Decode accept it: both reject a timestamp <= 0.
+const testTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
+
+// testSignature returns a fixed, well-formed 64-byte placeholder signature.
+// NewMessage and Decode enforce only its LENGTH — Message.Signature is
+// carried as opaque bytes and this package never verifies it — so any
+// signing.SignatureSize bytes satisfy every call site here.
+func testSignature(t *testing.T) []byte {
+	t.Helper()
+	return bytes.Repeat([]byte{0xAB}, signing.SignatureSize)
+}
 
 // ---------------------------------------------------------------------------
 // The durable message record.
@@ -62,7 +77,7 @@ func TestMessageRoundTrip(t *testing.T) {
 	for i, c := range cases {
 		c, i := c, i
 		t.Run(c.name, func(t *testing.T) {
-			m, err := store.NewMessage(testBusID, a, c.broadcast, c.recipients, uint64(i+1), sentAt, c.body, "rt-key")
+			m, err := store.NewMessage(testBusID, a, c.broadcast, c.recipients, uint64(i+1), sentAt, c.body, "rt-key", testTimestampMs, testSignature(t))
 			if err != nil {
 				t.Fatalf("NewMessage: %v", err)
 			}
@@ -138,7 +153,7 @@ func TestNewMessageRejects(t *testing.T) {
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			_, err := store.NewMessage(c.busID, a, len(c.recipients) == 0, c.recipients, c.seq, now, c.body, "k")
+			_, err := store.NewMessage(c.busID, a, len(c.recipients) == 0, c.recipients, c.seq, now, c.body, "k", testTimestampMs, testSignature(t))
 			if !errors.Is(err, store.ErrInvalidMessage) {
 				t.Fatalf("NewMessage = %v, want ErrInvalidMessage", err)
 			}
@@ -156,7 +171,7 @@ func TestNewMessageCopiesItsInputs(t *testing.T) {
 	recipients := []string{b}
 	body := []byte("original")
 
-	m, err := store.NewMessage(testBusID, a, false, recipients, 1, time.Now(), body, "k")
+	m, err := store.NewMessage(testBusID, a, false, recipients, 1, time.Now(), body, "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
@@ -179,11 +194,11 @@ func TestDecodeRejects(t *testing.T) {
 	b := agentIDFor(t, "beta")
 	sentAt := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 
-	broadcast, err := store.NewMessage(testBusID, a, true, nil, 7, sentAt, []byte("payload"), "k")
+	broadcast, err := store.NewMessage(testBusID, a, true, nil, 7, sentAt, []byte("payload"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	directed, err := store.NewMessage(testBusID, a, false, []string{b}, 8, sentAt, []byte("payload"), "k")
+	directed, err := store.NewMessage(testBusID, a, false, []string{b}, 8, sentAt, []byte("payload"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
@@ -461,7 +476,7 @@ func TestDecodeRejects(t *testing.T) {
 		// The body may be a megabyte, and once the CRYPTO epic lands it is
 		// ciphertext nobody here can read. It must not be echoed.
 		secret := strings.Repeat("SECRETBODY", 8)
-		m, err := store.NewMessage(testBusID, a, true, nil, 11, sentAt, []byte(secret), "k")
+		m, err := store.NewMessage(testBusID, a, true, nil, 11, sentAt, []byte(secret), "k", testTimestampMs, testSignature(t))
 		if err != nil {
 			t.Fatalf("NewMessage: %v", err)
 		}
@@ -483,7 +498,7 @@ func TestDecodeToleratesUnknownFields(t *testing.T) {
 	// during a rolling restart. Refusing an unknown field here would turn a
 	// forward-compatible addition into a refusal to recover.
 	a := agentIDFor(t, "alpha")
-	m, err := store.NewMessage(testBusID, a, true, nil, 3, time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC), []byte("payload"), "k")
+	m, err := store.NewMessage(testBusID, a, true, nil, 3, time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC), []byte("payload"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
@@ -519,19 +534,19 @@ func TestMessageVisibleTo(t *testing.T) {
 	g := agentIDFor(t, "gamma")
 	now := time.Now()
 
-	broadcast, err := store.NewMessage(testBusID, a, true, nil, 1, now, []byte("all"), "k")
+	broadcast, err := store.NewMessage(testBusID, a, true, nil, 1, now, []byte("all"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	dm, err := store.NewMessage(testBusID, a, false, []string{b}, 2, now, []byte("one"), "k")
+	dm, err := store.NewMessage(testBusID, a, false, []string{b}, 2, now, []byte("one"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	multi, err := store.NewMessage(testBusID, a, false, []string{b, g}, 3, now, []byte("two"), "k")
+	multi, err := store.NewMessage(testBusID, a, false, []string{b, g}, 3, now, []byte("two"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	selfDM, err := store.NewMessage(testBusID, a, false, []string{a}, 4, now, []byte("self"), "k")
+	selfDM, err := store.NewMessage(testBusID, a, false, []string{a}, 4, now, []byte("self"), "k", testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}

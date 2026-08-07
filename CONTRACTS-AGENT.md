@@ -4,13 +4,51 @@ Split out of `CONTRACTS.md` (2026-08-02) — see that file for the index of all 
 the rest of the surface (CLI/env, HTTP, on-disk). This is a pure content move: everything below this
 header is unchanged from the prior single-file `CONTRACTS.md`, verbatim.
 
-## Agent-facing wrappers (`scripts/bus-*.sh`) and `AGENT_PROTOCOL.md`
+## Agent-facing surface (`cmd/busctl`, `scripts/bus-serve.sh`) and `AGENT_PROTOCOL.md`
 
-No wrapper is due this wave. `/healthz` and `/v1/info` are operator/discovery surfaces, not agent
-capabilities — invariant 7 ("every capability ships with a `scripts/bus-*.sh` wrapper and an
-`AGENT_PROTOCOL.md` entry in the same task") is not yet triggered because no agent-facing capability
-(enrol, send, wait, relay) exists yet. `AGENT_PROTOCOL.md` does not exist in the repo and should not
-be created until the ENROL epic lands the first real agent-facing route.
+**The paragraph that stood here — "No wrapper is due this wave … `AGENT_PROTOCOL.md` does not exist
+in the repo" — is FALSE and is corrected below.** It described the CORE wave, when the only routes
+were `/healthz` and `/v1/info`.
+
+**The agent-facing surface is `cmd/busctl`, not `scripts/bus-*.sh`.** Invariant 7 was amended on
+2026-08-02 (`DECISIONS.md`, "The Go CLI replaces the shell wrappers"): a Go CLI over the importable
+`github.com/dodgymike/agent-bus/client` package satisfies the invariant in the wrappers' place, and
+serves a third audience the wrappers never could — an agent that EMBEDS the client. `AGENT_PROTOCOL.md`
+exists and is the usage doc; `CONTRACTS-CLI.md` is the exact flag/JSON/exit-code reference.
+
+`scripts/` holds exactly three files, and only one of them is agent-facing:
+
+| Script | Agent-facing? | Purpose |
+|---|---|---|
+| `scripts/bus-serve.sh` | yes | Start/stop/status the SERVER for a session. The only surviving `bus-*.sh`. |
+| `scripts/spec-cloud.sh` | no | Authed `curl` shim for the Spec Server (task state) |
+| `scripts/proof-check.sh` | no | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something |
+
+### OPEN ITEM — invariant 7 is NOT satisfied for three capabilities (2026-08-07)
+
+Recorded as an open question rather than quietly treated as met. Invariant 7 requires every
+capability to ship with its agent-facing entry point **in the same task**:
+
+1. **`POST /v1/mint`** has no dedicated entry point. It is not a hole in practice — `busctl send`
+   performs the reserve-then-send two-step internally and an agent never issues the mint itself — but
+   the route exists on the wire with no way to drive it alone, so it is named here rather than left
+   for someone to discover.
+2. **`busctl keygen`** — printing this agent's own MESSAGING public key so a peer can trust it —
+   **does not exist**. The capability exists only as `client.Client.MessagingPublicKey()`. Several
+   error remedies in `client/store.go` and `client/keyring.go` tell the operator to run
+   `busctl keygen`; following that advice fails with "unknown subcommand".
+3. **`busctl trust`** — adding a peer's messaging public key to `<identity-dir>/trusted-keys/` —
+   **does not exist** either. The capability exists only as `client.Client.TrustPeer()`.
+   `client/client.go`'s own doc comment refers to `busctl trust` as though it were shipped.
+
+Consequence, stated plainly: **an agent that shells out to `busctl` cannot today publish its
+messaging key or trust a peer's**, so it cannot participate in end-to-end verification at all. Only
+an agent embedding the `client` package can. Since verification is not wired into `client.Read`
+either (see `CONTRACTS-CLI.md`), nothing is currently *blocked* by this — but the two gaps must close
+together, and neither should be reported as done.
+
+`POST /v1/broadcast` needs no entry point: `busctl broadcast` already exists and the route now
+refuses (501). That is a regression to be re-opened by SIGN-3, not a missing wrapper.
 
 ## Repo tooling scripts (`scripts/*.sh`, NOT agent-facing)
 

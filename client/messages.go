@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,10 +22,20 @@ import (
 // which is the right direction for a duplicated constant to break in.
 const (
 	routeAgents    = "/v1/agents"
+	routeMint      = "/v1/mint"
 	routeSend      = "/v1/send"
 	routeBroadcast = "/v1/broadcast"
 	routeMessages  = "/v1/messages"
 	routeWait      = "/v1/wait"
+)
+
+// The operation names /v1/mint scopes a reservation by. They mirror
+// internal/idem's OpSend and OpBroadcast, which are the same strings the bus
+// scopes its applied-key table with — one agent must not be able to collide
+// with itself across two routes by reusing a key.
+const (
+	mintOpSend      = "send"
+	mintOpBroadcast = "broadcast"
 )
 
 // Protocol limits, PINNED here as literals mirroring the server's definitions.
@@ -116,8 +127,31 @@ type Message struct {
 	// what prevents a relay loop in a cyclic peer topology.
 	BusPath []string `json:"bus_path"`
 
-	// SentAt is the bus's timestamp, verbatim.
+	// SentAt is the BUS's timestamp, verbatim. It is NOT covered by the
+	// signature and must not be confused with TimestampMS below: a bus can write
+	// whatever it likes here, and a relay writes its own.
 	SentAt string `json:"sent_at"`
+
+	// TimestampMS is the SENDER's clock in Unix milliseconds UTC, and it IS
+	// covered by the signature. It and SentAt are different facts about
+	// different clocks; conflating them would attribute a bus-chosen value to
+	// the sender.
+	//
+	// It is not freshness: clocks lie, and a sender can put anything here and
+	// sign it. Replay protection is the server-minted monotonic Seq plus this
+	// agent's cursor (invariant 10).
+	TimestampMS int64 `json:"timestamp_ms"`
+
+	// Signature is the sender's detached Ed25519 signature, standard base64 of
+	// exactly 64 bytes, over the canonical encoding of this message (see
+	// canonical.go).
+	//
+	// It is carried on the type because it is a wire field, NOT because a caller
+	// should verify it: Read has already done that, and a message that reaches a
+	// caller in Batch.Messages is one that verified. A caller re-verifying it
+	// must resolve the key from From through a trust store and nothing else — the
+	// signature is not self-describing on purpose.
+	Signature string `json:"signature"`
 
 	// Size is the body length in bytes, as the bus recorded it.
 	Size int `json:"size"`
@@ -249,9 +283,90 @@ type ReadOptions struct {
 	Wait time.Duration
 }
 
+// RejectionReason names WHICH check a message failed on the way in. It is a
+// CLOSED vocabulary: a caller branches on it, and the CLI prints it.
+//
+// The cases are kept distinct on purpose, because they are four different events
+// with four different remedies and one of them is not an attack at all:
+//
+//	no_trusted_key             you have never been given this sender's key.
+//	                           Today this is the ORDINARY state of the world —
+//	                           see keyring.go's blocker note — and the remedy is
+//	                           `busctl trust`, not an investigation.
+//	malformed_trusted_key      the key you hold is not a 32-byte Ed25519 key.
+//	                           An OPERATOR fault: the trust store is damaged.
+//	no_signature               the message carried none. This is the exact case
+//	                           SIGN-6 exists to close: "unsigned" must never be
+//	                           read as "unsigned but fine".
+//	signature_not_base64,
+//	signature_length           present but mangled — a different event from
+//	                           stripped, and worth telling apart.
+//	not_canonicalizable        the message cannot be re-serialised into signable
+//	                           bytes at all (a broadcast, a mismatched id/seq, a
+//	                           sender from another bus than minted the id).
+//	signature_does_not_verify  the verdict. Nothing more can be said: a tampered
+//	                           body, a re-labelled sender and a forged signature
+//	                           are indistinguishable from inside.
+//
+// Folding them into one "verification failed" would bury the operator faults
+// among the routine ones and make SIGN-5's per-case assertions impossible.
+type RejectionReason string
+
+const (
+	RejectedNoTrustedKey     RejectionReason = "no_trusted_key"
+	RejectedMalformedKey     RejectionReason = "malformed_trusted_key"
+	RejectedNoSignature      RejectionReason = "no_signature"
+	RejectedSignatureEncoded RejectionReason = "signature_not_base64"
+	RejectedSignatureLength  RejectionReason = "signature_length"
+	RejectedNotCanonical     RejectionReason = "not_canonicalizable"
+	RejectedSignatureInvalid RejectionReason = "signature_does_not_verify"
+)
+
+// RejectedMessage is a message the bus delivered that this client REFUSED to
+// hand to the calling agent because it could not be verified.
+//
+// It carries the metadata needed to investigate — which message, from whom, and
+// which check failed — and DELIBERATELY NOT THE BODY. The body is discarded at
+// the moment verification fails and never reaches the caller, because a body
+// that reaches an agent has been acted on whatever the accompanying warning
+// said. There is no flag to get it back.
+//
+// The json tags are a contract surface (CONTRACTS-CLI.md).
+type RejectedMessage struct {
+	// MessageID and Seq identify the message in the bus's audit log, so an
+	// operator can correlate this rejection with what the bus actually stored.
+	MessageID string `json:"message_id"`
+	Seq       uint64 `json:"seq"`
+
+	// From is the sender the ENVELOPE claimed. It is the id the verification key
+	// was looked up under, and — precisely because the message did not verify —
+	// it is UNPROVEN: treat it as a lead, never as an attribution.
+	From string `json:"from"`
+
+	// Reason is which check failed.
+	Reason RejectionReason `json:"reason"`
+
+	// Detail is a one-line human explanation. It never contains the body and
+	// never contains key material.
+	Detail string `json:"detail"`
+}
+
 // Batch is one page of messages plus the position to resume from.
 type Batch struct {
+	// Messages are the VERIFIED messages, unchanged. Every message here carried
+	// a signature that verified against a key resolved from its own From field
+	// through the local trust store.
 	Messages []Message `json:"messages"`
+
+	// Rejected are the messages that did NOT verify and whose bodies were
+	// discarded. It is empty in the ordinary case.
+	//
+	// THE CURSOR STILL ADVANCED PAST THEM, and that is settled policy, not an
+	// oversight: fail-closed applies to the BODY, not to the cursor. Blocking the
+	// cursor on an unverifiable message would hand anyone who can inject a single
+	// bad message a PERMANENT denial of service against this agent — it would
+	// never read anything again. Discard the body, record the event, move on.
+	Rejected []RejectedMessage `json:"rejected,omitempty"`
 
 	// Cursor is the position to pass to the NEXT call. An empty batch returns
 	// the cursor unchanged, byte for byte, which is what makes a timed-out long
@@ -278,6 +393,167 @@ type sendRequestBody struct {
 	To             string `json:"to"`
 	Body           []byte `json:"body"`
 	IdempotencyKey string `json:"idempotency_key"`
+
+	// Sender is this agent's own fully-qualified id, echoed up so the bus can
+	// make SIGN-6's third ingest check — that the CLAIMED sender equals the
+	// AUTHENTICATED caller. It is not how the bus learns who we are (it takes
+	// that from the session), and a bus that trusted this field instead would be
+	// accepting a spoofed sender (invariant 1). It is here because the sender is
+	// INSIDE the signed bytes, so the bus must be able to see the two agree.
+	Sender string `json:"sender"`
+
+	// MessageID and Seq are the reservation /v1/mint handed back, presented
+	// again so the bus can match them against what it minted. The client does
+	// not choose them and must not alter them: they are covered by Signature,
+	// and a value that disagrees with the reservation is refused (409) rather
+	// than accepted.
+	MessageID string `json:"message_id"`
+	Seq       uint64 `json:"seq"`
+
+	// TimestampMS is OUR clock in Unix milliseconds UTC, and it is covered by
+	// the signature. It is not the bus's clock and orders nothing — the bus
+	// stamps its own sent_at, which is deliberately NOT signed, because a
+	// recipient verifying a signature must not need to trust any bus's clock.
+	TimestampMS int64 `json:"timestamp_ms"`
+
+	// Signature is the detached Ed25519 signature over canonicalize() of this
+	// message, standard base64 of exactly 64 bytes. It is made with the
+	// MESSAGING private key, which never leaves this machine and is never sent
+	// to the bus.
+	Signature string `json:"signature"`
+}
+
+// mintRequestBody and mintResponseBody mirror httpapi's /v1/mint shapes.
+//
+// There is deliberately no sender field in the REQUEST: the bus takes the
+// principal from the session and echoes it back, and a request that could name
+// its own sender would be a request that could reserve a sequence in someone
+// else's name.
+type mintRequestBody struct {
+	Op             string `json:"op"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type mintResponseBody struct {
+	MessageID string `json:"message_id"`
+	Seq       uint64 `json:"seq"`
+	Sender    string `json:"sender"`
+	Op        string `json:"op"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// reservation is a minted, not-yet-spent message id and sequence.
+type reservation struct {
+	MessageID string
+	Seq       uint64
+	Sender    string
+}
+
+// reserve performs the FIRST half of the reserve-then-send handshake: it asks
+// the bus to mint the message id and sequence that this send will carry.
+//
+// # Why a send costs two round trips
+//
+// SIGN-1 settled that the signature covers the ORIGIN bus's minted message id
+// and sequence (option (a)). Those are server-authoritative (invariant 1) and
+// the client cannot guess them, so it cannot sign until it has them — hence
+// reserve, then sign, then send. The alternative considered and rejected was to
+// sign only the fields the client controls and bind the server's numbers
+// alongside; that leaves the id and sequence unsigned, and an unsigned sequence
+// is exactly the field the replay defence rests on.
+//
+// # The SAME idempotency key covers both calls, and that is what makes it safe
+//
+// A reservation is scoped by (agent, operation, key), so re-issuing this call
+// with the same key returns the SAME id and sequence rather than burning a
+// second one. That is what makes the whole two-step retryable: a client that
+// loses the response, or that crashes between the two calls, repeats both with
+// the same key and converges on one message. Minting a fresh key on the retry
+// would produce a second reservation and, if the first send had actually
+// landed, a second message.
+func (c *Client) reserve(ctx context.Context, op, mintOp, key string) (reservation, error) {
+	var out mintResponseBody
+	if _, err := c.authorizedRequest(ctx, request{
+		method: http.MethodPost,
+		path:   routeMint,
+		op:     op,
+		body:   mintRequestBody{Op: mintOp, IdempotencyKey: key},
+		out:    &out,
+		// Safe to repeat for the reason in the doc comment above: the key makes
+		// a repeat return the original reservation rather than a new one.
+		retryable: true,
+	}); err != nil {
+		return reservation{}, err
+	}
+
+	// The bus is authoritative on ids — authoritative, not unvalidated. These
+	// strings are about to be signed by us and printed to a terminal, and a
+	// hostile bus chooses every byte of them.
+	if err := validateServerField(op, "message id", out.MessageID); err != nil {
+		return reservation{}, err
+	}
+	if err := validateServerField(op, "sender id", out.Sender); err != nil {
+		return reservation{}, err
+	}
+	if out.Seq == 0 {
+		// Sequence 0 is never allocated, so it means "unset" rather than a real
+		// assignment. Refusing here rather than signing it keeps the failure
+		// local: canonicalize would reject it too, but a step later and with a
+		// message about framing rather than about the bus.
+		return reservation{}, newError(KindServer, op,
+			"the bus returned sequence 0 for "+safeText(out.MessageID, 60)+", which is never allocated",
+			"this is not a well-formed agent-bus response; check that --bus points at the bus you intended")
+	}
+	return reservation{MessageID: out.MessageID, Seq: out.Seq, Sender: out.Sender}, nil
+}
+
+// signOutgoing builds the canonical bytes for an outgoing message and signs
+// them with this identity's MESSAGING private key.
+//
+// # The sender that gets signed is OURS, not the one the bus echoed
+//
+// res.Sender is checked against the local credential and then discarded. That
+// direction is load-bearing: signing whatever the bus said we are would let a
+// bus induce us to produce a validly-signed message attributing our words to
+// another id — a signature is worth nothing if the signer will put any name in
+// it. The bus's echo is useful only as a cross-check, and a mismatch is an
+// error rather than something to reconcile.
+func (c *Client) signOutgoing(op string, res reservation, recipients []string, body []byte) (sig string, timestampMS int64, err error) {
+	cred, err := c.credential()
+	if err != nil {
+		return "", 0, err
+	}
+	if res.Sender != cred.AgentID {
+		return "", 0, newError(KindServer, op,
+			"the bus minted a reservation for "+safeText(res.Sender, 60)+" but this identity is "+safeText(cred.AgentID, 60),
+			"point this identity at the bus that issued it; do not sign under an id this bus disputes")
+	}
+	priv, err := c.messagingKey()
+	if err != nil {
+		return "", 0, err
+	}
+
+	// Milliseconds UTC, and the SAME integer travels on the wire — see
+	// signedMessage.TimestampUnixMilli for why no conversion happens between the
+	// signed form and the wire form.
+	timestampMS = c.now().UTC().UnixNano() / int64(time.Millisecond)
+
+	raw, err := signSignedMessage(priv, signedMessage{
+		MessageID:          res.MessageID,
+		Sequence:           res.Seq,
+		Sender:             cred.AgentID,
+		Recipients:         recipients,
+		TimestampUnixMilli: timestampMS,
+		Body:               body,
+	})
+	if err != nil {
+		// canonicalize failed closed: there are no bytes, so there is nothing to
+		// sign. This is a local fault — a malformed recipient, an id that will
+		// not parse — and it is reported as usage rather than as a bus failure.
+		return "", 0, usagef(op, "check the recipient id and try again",
+			"this message cannot be canonicalized for signing: %s", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw), timestampMS, nil
 }
 
 // broadcastRequestBody mirrors httpapi.BroadcastRequestBody.
@@ -321,16 +597,66 @@ func (c *Client) Send(ctx context.Context, opts SendOptions) (SendResult, error)
 	if err != nil {
 		return SendResult{}, err
 	}
+
+	// RESERVE, then SIGN, then SEND. All three carry the one idempotency key, so
+	// the whole handshake is retryable as a unit — see reserve for why that is
+	// what makes two round trips safe rather than merely tolerable.
+	//
+	// The context is shared across both calls deliberately: a deadline the
+	// caller set for "this send" must bound the send, not each leg of it.
+	ctx, cancel := c.contextWithTimeout(ctx)
+	defer cancel()
+
+	res, err := c.reserve(ctx, op, mintOpSend, key)
+	if err != nil {
+		return SendResult{IdempotencyKey: key}, err
+	}
+	sig, timestampMS, err := c.signOutgoing(op, res, []string{to}, opts.Body)
+	if err != nil {
+		return SendResult{IdempotencyKey: key}, err
+	}
+
 	return c.submit(ctx, op, routeSend, sendRequestBody{
 		To:             to,
 		Body:           opts.Body,
 		IdempotencyKey: key,
+		Sender:         res.Sender,
+		MessageID:      res.MessageID,
+		Seq:            res.Seq,
+		TimestampMS:    timestampMS,
+		Signature:      sig,
 	}, key)
 }
 
 // Broadcast delivers a message to every agent on the bus EXCEPT the sender, and
 // returns once it is durable. See Send for the idempotency contract, which is
 // identical.
+//
+// # Broadcast is refused, deliberately and permanently, until SIGN-3
+//
+// SIGN-6 made a signature mandatory on every message. A broadcast has no
+// canonical audience to sign against under signing format v1:
+// internal/signing.Canonicalize rejects an empty recipient set, and
+// store.Message records a broadcast as a FLAG rather than an expanded
+// recipient roster, so there is nothing stable to canonicalize and sign. The
+// bus therefore answers every /v1/broadcast with 501 Not Implemented, refusing
+// BEFORE it even decodes the body, rather than carrying an unsigned message.
+// That server behaviour is correct and settled (SIGN-6); SIGN-3 is the task
+// that decides a canonical broadcast audience and reopens this route.
+//
+// # Why this call still makes the round trip rather than failing locally
+//
+// The refusal is mapped from the bus's own 501 (statusError, transport.go),
+// not pre-judged here before anything is sent. The bus is authoritative on
+// whether a route is open (invariant 1 is about ids, but the same reasoning
+// applies to routes: a client that decides "broadcast never works" for itself
+// can drift from the server the moment SIGN-3 lands and the route reopens,
+// silently blocking a now-valid operation with no signal that anything
+// changed). A round trip on a call that is certain to be refused costs one
+// request; a client hard-coded to assume the refusal costs a correctness bug
+// that only shows up after a deploy nobody thought to touch this function for.
+// See annotateBroadcastRefused for how the 501 is turned into an error an
+// agent can act on.
 func (c *Client) Broadcast(ctx context.Context, opts BroadcastOptions) (SendResult, error) {
 	const op = "broadcast"
 
@@ -374,7 +700,7 @@ func (c *Client) submit(ctx context.Context, op, route string, body interface{},
 		retryable: true,
 	})
 	if err != nil {
-		return SendResult{IdempotencyKey: key}, writeFailed(op, key, annotateIdempotencyConflict(op, key, err))
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, annotateBroadcastRefused(op, annotateIdempotencyConflict(op, key, err)))
 	}
 
 	// The bus is authoritative on ids (invariant 1) — authoritative, not
@@ -798,15 +1124,37 @@ func writeFailed(op, key string, err error) error {
 	return e
 }
 
+// mintLostMarker is the substring internal/httpapi's writeHubError puts in the
+// body of a 409 caused by hub.ErrUnknownMint / hub.ErrMintMismatch — it points
+// the caller at POST routeMint by name. Matching on it is how this package
+// tells that 409 apart from the OTHER one (invariant 10's key-reused-with-
+// different-payload) without importing internal/ (invariant 7): both are
+// literal duplicates of a server string, same as routeMint itself already is.
+const mintLostMarker = "POST " + routeMint
+
 // annotateIdempotencyConflict replaces the transport's generic 409 wording with
-// the specific, loud one this failure deserves.
+// the specific one the actual failure deserves — and a 409 on this bus is TWO
+// different failures wearing the same status code, not one:
 //
-// A 409 on a send is not "the bus refused the request". It is invariant 10's one
-// unforgivable case: the SAME idempotency key presented with a DIFFERENT payload.
-// The bus treats that as a protocol violation — it answers 409 with
-// `Connection: close` and DISCONNECTS — so the caller must be told plainly that
-// retrying will not help and that a fresh key is the fix. The generic text
-// invites exactly the wrong reaction.
+//   - invariant 10's one unforgivable case: the SAME idempotency key presented
+//     with a DIFFERENT payload. The bus treats that as a protocol violation —
+//     it answers 409 with `Connection: close` and DISCONNECTS — so the caller
+//     must be told plainly that retrying will not help and a FRESH key is the
+//     fix.
+//   - hub.ErrUnknownMint / hub.ErrMintMismatch: the reservation this key named
+//     is not one the bus is holding. ErrUnknownMint is ROUTINE — the mint
+//     table is in-memory only and does not survive a restart — so this is the
+//     ordinary post-restart case, not a protocol violation. Telling the caller
+//     to use a FRESH key here is actively harmful: if the original send had
+//     already landed, a fresh key produces a SECOND message, which is exactly
+//     the double-apply invariant 10 forbids. The correct remedy is to redo the
+//     WHOLE reserve-then-send under the SAME idempotency key.
+//
+// The generic text ("an idempotency key was reused with different content")
+// invites the wrong reaction either way — a retry loop in the first case, a
+// fresh key in the second — so both are replaced, and which replacement is
+// used is decided by mintLostMarker, not by assuming every 409 is the same
+// failure.
 func annotateIdempotencyConflict(op, key string, err error) error {
 	// errors.As, not a type assertion: a wrapped *Error would otherwise slip
 	// through and keep the generic wording.
@@ -814,9 +1162,40 @@ func annotateIdempotencyConflict(op, key string, err error) error {
 	if !errors.As(err, &e) || e.Status != http.StatusConflict {
 		return err
 	}
+	detail := strings.TrimPrefix(e.Message, "the bus refused the request: ")
+	if strings.Contains(detail, mintLostMarker) {
+		e.Kind = KindRejected
+		e.Message = "the bus has no matching reservation for this " + op + " under idempotency key " + key + ": " + detail
+		e.Remedy = "re-mint under the SAME idempotency key (POST " + routeMint + "), re-sign, and re-send — do NOT switch to a fresh key: if the original " + op + " already landed, a fresh key would apply it a SECOND time (invariant 10). This is routine after a bus restart; the mint table is memory-only and does not survive one."
+		return e
+	}
 	e.Kind = KindRejected
 	e.Message = "the bus refused this " + op + ": idempotency key " + key +
 		" was already used with a DIFFERENT payload"
 	e.Remedy = "use a FRESH idempotency key for new content — reusing one with different content is a protocol violation and the bus disconnects the client (invariant 10); to RETRY the original message, resend it byte for byte under the same key"
+	return e
+}
+
+// annotateBroadcastRefused replaces the transport's generic 501 wording with
+// the specific, actionable one a refused broadcast deserves.
+//
+// The bus's own detail already says WHY (see broadcastUnsignableReason in
+// internal/httpapi/messages.go), but not what to do about it, and "an internal
+// error, maybe retry" is exactly the wrong read of a deliberate, permanent
+// refusal — see the SIGN-6(6) note on Client.Broadcast. This is what turns that
+// into "use send instead, this is settled until SIGN-3".
+func annotateBroadcastRefused(op string, err error) error {
+	// errors.As, not a type assertion, for the same reason as above.
+	var e *Error
+	if !errors.As(err, &e) || e.Status != http.StatusNotImplemented {
+		return err
+	}
+	e.Kind = KindRejected
+	e.Message = "the bus refuses to " + op + ": a broadcast cannot be signed under signing format v1 " +
+		"(SIGN-6 requires every message to carry a signature, and a broadcast has no canonical recipient " +
+		"set to sign against — that is SIGN-3's open question); nothing was applied, the bus refused before " +
+		"reading the message body"
+	e.Remedy = "this is deliberate and will not change until SIGN-3 decides a canonical broadcast audience — " +
+		"do not retry; send the message directly to each recipient with `busctl send` (or Client.Send) instead"
 	return e
 }

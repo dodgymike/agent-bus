@@ -36,14 +36,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // crashAgents are the names enrolled in every crash fixture and in every hub
-// rebuilt from one. The roster is not durable yet (see hub.NoteEnrolment), so
-// recovery re-enrols the same names — which is also what a restarted server
-// does today.
+// rebuilt from one. This package's hub reads through to an injected
+// hub.RosterSource and stores no roster itself (AUTH-7), so a rebuilt hub is
+// handed a fresh StaticRoster carrying the same agents — which is what recovery
+// does for real, with cmd/agent-bus injecting a view of internal/auth's DURABLE
+// roster.
 //
 // Both runs enrol at fixtureEnrolledAt, which PRECEDES every fixture message.
 // That is not a convenience to keep the assertions non-empty: it is what the
-// durable roster AUTH-3 will provide, namely each agent's ORIGINAL enrolment
-// instant. Re-enrolling at time.Now() instead would put every recovered message
+// durable roster provides, namely each agent's ORIGINAL enrolment instant. Re-enrolling at time.Now() instead would put every recovered message
 // before the epoch and this whole sweep would assert nothing — and would be
 // modelling a bus that had FORGOTTEN when its agents joined rather than one that
 // remembers. The case where an id really is reused by a NEW keypair after a
@@ -144,9 +145,9 @@ func buildCrashFixture(t *testing.T) crashFixture {
 		var res hub.Result
 		var err error
 		if s.to == "" {
-			res, err = h.Broadcast(hub.BroadcastRequest{Sender: s.sender, Body: []byte(s.body), IdempotencyKey: s.key})
+			res, err = mintedBroadcast(t, h, hub.BroadcastRequest{Sender: s.sender, Body: []byte(s.body), IdempotencyKey: s.key})
 		} else {
-			res, err = h.Send(hub.SendRequest{Sender: s.sender, To: s.to, Body: []byte(s.body), IdempotencyKey: s.key})
+			res, err = mintedSend(t, h, hub.SendRequest{Sender: s.sender, To: s.to, Body: []byte(s.body), IdempotencyKey: s.key})
 		}
 		if err != nil {
 			t.Fatalf("fixture step %d: %v", i, err)
@@ -414,9 +415,9 @@ func TestMessagingCrashRecovery(t *testing.T) {
 				var res hub.Result
 				var err error
 				if p.broadcast {
-					res, err = h.Broadcast(hub.BroadcastRequest{Sender: p.sender, Body: p.body, IdempotencyKey: p.key})
+					res, err = mintedBroadcast(t, h, hub.BroadcastRequest{Sender: p.sender, Body: p.body, IdempotencyKey: p.key})
 				} else {
-					res, err = h.Send(hub.SendRequest{Sender: p.sender, To: p.recipients[0], Body: p.body, IdempotencyKey: p.key})
+					res, err = mintedSend(t, h, hub.SendRequest{Sender: p.sender, To: p.recipients[0], Body: p.body, IdempotencyKey: p.key})
 				}
 				if err != nil {
 					t.Fatalf("retrying survivor %s's key after recovery: %v", p.id, err)
@@ -433,7 +434,7 @@ func TestMessagingCrashRecovery(t *testing.T) {
 			}
 
 			// The sequence must never regress (invariant 1).
-			fresh, err := h.Broadcast(hub.BroadcastRequest{
+			fresh, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         f.agents[0],
 				Body:           []byte("post-recovery"),
 				IdempotencyKey: fmt.Sprintf("k-post-%d", n),
@@ -509,7 +510,7 @@ func TestMessagingCrashRecoveryLeavesAWorkingHub(t *testing.T) {
 
 	waitForWaiters(t, h, 1, "the post-recovery waiter must park")
 
-	res, err := h.Broadcast(hub.BroadcastRequest{Sender: a, Body: []byte("alive after the crash"), IdempotencyKey: "k-alive"})
+	res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("alive after the crash"), IdempotencyKey: "k-alive"})
 	if err != nil {
 		t.Fatalf("publishing after recovery: %v", err)
 	}

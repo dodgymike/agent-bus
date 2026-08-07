@@ -33,10 +33,14 @@
 // every request, taken from the request context by internal/httpapi, and this
 // package never reads an identity from anywhere a client could choose it.
 //
-// It does not hold the authoritative roster either. That lives in
-// internal/auth; the view here is fed from the enrolment handler and has the
-// same (process-only) lifetime — see (*Hub).NoteEnrolment for the argument and
-// for what must change when AUTH-3 makes enrolment durable.
+// It does not hold the authoritative roster either. That lives in internal/auth,
+// which since AUTH-3 records every enrolment durably, and this package READS
+// THROUGH to it via an injected hub.RosterSource rather than keeping a copy —
+// see RosterSource for why a copy is a defect and not an optimisation, and for
+// the failure it produced (a restarted bus that authenticated everyone and
+// served nobody). The adapter from auth's roster to this one lives in
+// cmd/agent-bus, the composition root; this package does not import
+// internal/auth.
 //
 // # Delivery is AT-LEAST-ONCE
 //

@@ -2,6 +2,10 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,8 +75,114 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.KeyRing == nil {
+		// The trust store lives beside the credentials, under the same 0700
+		// directory, because "which keys do I hold" and "who am I" are answers to
+		// the same question and an operator should not have to point two flags at
+		// two places. Nothing is created here: a missing directory is an EMPTY
+		// trust store, which is the correct reading before any key has been
+		// exchanged.
+		cfg.KeyRing = NewDirKeyRing(filepath.Join(dir, TrustedKeysDirName))
+	}
 
 	return &Client{cfg: cfg, http: newHTTPClient(cfg), store: store}, nil
+}
+
+// keyRing returns the trust store the read path verifies against.
+//
+// A nil ring is returned as nil and MUST be treated by the caller as "trusts
+// nobody" — see verifyReceivedMessage. It is deliberately not replaced with a
+// permissive default here: a fallback that made an unconfigured client accept
+// everything would be exactly the silent hole invariant 9 warns about, since
+// every test would still pass while nothing was actually being verified.
+func (c *Client) keyRing() KeyRing { return c.cfg.KeyRing }
+
+// messagingKey returns this identity's MESSAGING private key, minting one on
+// first use.
+//
+// The mint is a locked store write (Store.EnsureMessagingKey); the cached
+// credential is refreshed here so a long-lived Client does not keep handing back
+// the pre-mint copy with an empty seed and re-minting on every send.
+func (c *Client) messagingKey() (ed25519.PrivateKey, error) {
+	cred, err := c.credential()
+	if err != nil {
+		return nil, err
+	}
+	if cred.MessagingKeySeed == "" {
+		cred, err = c.store.EnsureMessagingKey(cred.AgentID)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.cred = &cred
+		c.mu.Unlock()
+	}
+	return cred.MessagingPrivateKey()
+}
+
+// MessagingPublicKey returns the base64 PUBLIC half of this identity's messaging
+// key, minting the key on first use.
+//
+// This is the value that must reach a peer OUT OF BAND for that peer to be able
+// to verify anything this agent sends. There is no route that publishes it: no
+// messaging key is registered at enrolment and CRYPTO-4 (the server-attested key
+// bundle) does not exist, so until it lands the exchange is a human copying this
+// string into the peer's `busctl trust`. Say so when you print it.
+func (c *Client) MessagingPublicKey() (Identity, string, error) {
+	cred, err := c.credential()
+	if err != nil {
+		return Identity{}, "", err
+	}
+	cred, err = c.store.EnsureMessagingKey(cred.AgentID)
+	if err != nil {
+		return Identity{}, "", err
+	}
+	c.mu.Lock()
+	c.cred = &cred
+	c.mu.Unlock()
+	pub, err := cred.MessagingPublicKey()
+	if err != nil {
+		return Identity{}, "", err
+	}
+	return cred.Identity, pub, nil
+}
+
+// TrustPeer records encoded (standard base64 of a 32-byte Ed25519 messaging
+// public key) as the key agentID's messages are verified with.
+//
+// It lives in this package rather than in the CLI because cmd/busctl is a THIN
+// shell over it (see cmd/busctl/main.go): anything implemented only there is
+// something an agent EMBEDDING the client cannot reach, and an embedder that
+// cannot populate its own trust store cannot verify anything at all.
+//
+// The key must have come from OUT OF BAND — the peer ran `busctl keygen` and a
+// human, or a deployment system, carried the string across. A key learned from
+// the bus, or from beside a signature, is worth nothing: see keyring.go.
+func (c *Client) TrustPeer(agentID, encoded string) (TrustedKey, error) {
+	ring, ok := c.keyRing().(*DirKeyRing)
+	if !ok {
+		return TrustedKey{}, newError(KindConfig, "trust",
+			"this client's trust store is not a local directory and cannot be written to",
+			"the embedding program supplied its own KeyRing; add the key there instead")
+	}
+	pub, err := decodeMessagingPublicKey(strings.TrimSpace(encoded))
+	if err != nil {
+		return TrustedKey{}, newError(KindUsage, "trust", err.Error(),
+			"pass the base64 key exactly as the peer printed it with `busctl keygen`")
+	}
+	if err := ring.Trust(agentID, pub); err != nil {
+		return TrustedKey{}, err
+	}
+	return TrustedKey{AgentID: agentID, PublicKey: base64.StdEncoding.EncodeToString(pub)}, nil
+}
+
+// TrustedKeys lists the peers this agent holds a messaging key for.
+func (c *Client) TrustedKeys() ([]TrustedKey, error) {
+	ring, ok := c.keyRing().(*DirKeyRing)
+	if !ok {
+		return []TrustedKey{}, nil
+	}
+	return ring.List()
 }
 
 // Config returns the configuration this client resolved, with defaults filled

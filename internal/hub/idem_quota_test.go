@@ -25,6 +25,7 @@ package hub_test
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -73,18 +74,21 @@ func openQuotaHub(t *testing.T, lg *wal.Log, maxEntries int, agents ...string) *
 func openQuotaHubClock(t *testing.T, lg *wal.Log, maxEntries int, now func() time.Time, agents ...string) *hub.Hub {
 	t.Helper()
 	path := lg.Path()
+	roster := hub.NewStaticRoster()
 	h, err := hub.Open(hub.Options{
 		BusID:                 testBusID,
+		DataDir:               filepath.Dir(path),
 		Durable:               lg,
 		Replay:                func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
 		NextIndex:             lg.Recovered().NextIndex,
 		MaxIdempotencyEntries: maxEntries,
+		Roster:                roster,
 		Now:                   now,
 	})
 	if err != nil {
 		t.Fatalf("hub.Open: %v", err)
 	}
-	enrolAll(t, h, testBusID, agents...)
+	enrolAll(t, roster, testBusID, agents...)
 	return h
 }
 
@@ -99,13 +103,17 @@ type publishShape struct {
 
 var publishShapes = []publishShape{{name: "send", broadcast: false}, {name: "broadcast", broadcast: true}}
 
-// publishAs issues one message of the given shape. `to` is ignored for a
-// broadcast, which addresses the whole bus.
-func publishAs(h *hub.Hub, sh publishShape, sender, to, key string, body []byte) (hub.Result, error) {
+// publishAs issues one message of the given shape, THROUGH THE MINT. `to` is
+// ignored for a broadcast, which addresses the whole bus.
+//
+// It takes *testing.T only because the two-step publish helpers do (see
+// mintedSend in hub_test.go); nothing here fails the test on its own.
+func publishAs(t *testing.T, h *hub.Hub, sh publishShape, sender, to, key string, body []byte) (hub.Result, error) {
+	t.Helper()
 	if sh.broadcast {
-		return h.Broadcast(hub.BroadcastRequest{Sender: sender, Body: body, IdempotencyKey: key})
+		return mintedBroadcast(t, h, hub.BroadcastRequest{Sender: sender, Body: body, IdempotencyKey: key})
 	}
-	return h.Send(hub.SendRequest{Sender: sender, To: to, Body: body, IdempotencyKey: key})
+	return mintedSend(t, h, hub.SendRequest{Sender: sender, To: to, Body: body, IdempotencyKey: key})
 }
 
 // hogKey and hogBody are deterministic so a later restart can retry the EXACT
@@ -124,7 +132,7 @@ func fillUntilRefused(t *testing.T, h *hub.Hub, sh publishShape, sender, to stri
 	t.Helper()
 	var accepted []hub.Result
 	for i := 0; i < quotaLoopBound; i++ {
-		res, err := publishAs(h, sh, sender, to, hogKey(sh.name, i), hogBody(sh.name, i))
+		res, err := publishAs(t, h, sh, sender, to, hogKey(sh.name, i), hogBody(sh.name, i))
 		if err != nil {
 			return accepted, err
 		}
@@ -198,7 +206,7 @@ func TestOneAgentCannotStarveAnotherThroughSend(t *testing.T) {
 			// must still be served.
 			victimKey := "victim-" + sh.name + "-first"
 			victimBody := []byte("the victim's very first message")
-			got, err := publishAs(h, sh, victim, sink, victimKey, victimBody)
+			got, err := publishAs(t, h, sh, victim, sink, victimKey, victimBody)
 			if err != nil {
 				t.Fatalf("the victim — an agent that has never sent a single message and holds not one applied key — was refused its FIRST %s with %v, because the hog filled the table. ONE AGENT MUST NEVER BE ABLE TO DENY ANOTHER THE BUS: that is the whole of IDEM-11-FU-FAIRSHARE and the reason invariant 10 exists (idempotency is there so a well-behaved client can retry safely, not so one client's volume can revoke that safety from everybody else)", sh.name, err)
 			}
@@ -258,7 +266,7 @@ func TestFairShareIsNotEnforcedBelowThePressureLine(t *testing.T) {
 		if st.UnderPressure {
 			t.Fatalf("before send %d the table already reports UnderPressure with %d of %d entries retained; the line is maxEntries/2 = %d", i, st.Count, st.MaxEntries, quotaPressureLine)
 		}
-		res, err := h.Send(hub.SendRequest{
+		res, err := mintedSend(t, h, hub.SendRequest{
 			Sender:         solo,
 			To:             sink,
 			Body:           hogBody("solo", i),
@@ -283,7 +291,7 @@ func TestFairShareIsNotEnforcedBelowThePressureLine(t *testing.T) {
 	// The boundary, asserted from the other side. Without this the test above
 	// would also pass against a hub that enforces NOTHING, which would make the
 	// "no behaviour change below the line" claim unfalsifiable.
-	_, err := h.Send(hub.SendRequest{
+	_, err := mintedSend(t, h, hub.SendRequest{
 		Sender:         solo,
 		To:             sink,
 		Body:           hogBody("solo", quotaPressureLine),
@@ -294,16 +302,35 @@ func TestFairShareIsNotEnforcedBelowThePressureLine(t *testing.T) {
 	}
 }
 
-// TestFairShareRefusalMintsNoSequence: a refused send must burn NOTHING
-// server-authoritative.
+// TestFairShareRefusalBurnsNoSequenceBeyondItsReservation: a refused send must
+// consume NOTHING server-authoritative of its own.
 //
-// Invariant 1 forbids reusing a sequence number, so a sequence spent on an
-// operation that is then refused is a sequence burned for nothing — a permanent
-// hole in the bus's total order, visible to every client that walks it. This is
-// exactly why publish checks h.idem.Admit BEFORE it calls h.seq.Next(): the
-// admission decision is made while a refusal is still free. Reorder those two
-// and this test goes red.
-func TestFairShareRefusalMintsNoSequence(t *testing.T) {
+// # What this test used to assert, and why it could not stay that way
+//
+// It was TestFairShareRefusalMintsNoSequence, and it asserted the stronger
+// claim that a refused send burns NO sequence at all — publish called
+// h.idem.Admit before h.seq.Next(), so the admission decision was made while a
+// refusal was still free.
+//
+// SIGN-1 retired that ordering, deliberately and with its eyes open. The SENDER
+// now signs the origin bus's minted id, so the number must leave the bus BEFORE
+// the message arrives, which puts the allocation in Hub.Mint — one step and one
+// network round trip earlier than any admission decision could possibly be
+// made. A refused send therefore leaves behind the ONE number its own mint
+// reserved. internal/ids/sequence.go already documents that outcome as CORRECT
+// rather than as damage: consumers must treat the sequence as strictly
+// increasing, NEVER as dense.
+//
+// # What is still worth pinning, and is
+//
+// Exactly one number per reservation, and not one more. A refusal must not
+// allocate on top of the client's mint, and it must not allocate again on a
+// retry of the same reservation — either would turn every refused send into a
+// widening hole in the bus's total order, and the fair share is a condition a
+// busy client meets ROUTINELY. So the arithmetic below counts reservations
+// rather than accepted messages, and it is still falsified by a publish path
+// that reaches for h.seq.Next() on the refusal path.
+func TestFairShareRefusalBurnsNoSequenceBeyondItsReservation(t *testing.T) {
 	dir := t.TempDir()
 	lg := openTestLog(t, dir, true)
 	h := openQuotaHub(t, lg, quotaMaxEntries, "hog", "victim", "sink")
@@ -328,11 +355,17 @@ func TestFairShareRefusalMintsNoSequence(t *testing.T) {
 		}
 	}
 
-	// Burn some more refusals. If a refusal minted a sequence, these would open
-	// a multi-slot hole and the assertion below would catch it by more than one.
+	// Every refused attempt so far, INCLUDING the one that ended the fill loop.
+	// Each one reserved a number before it was refused, and each is entitled to
+	// exactly that one.
+	reservations := 1
+
+	// Burn some more refusals, each under a FRESH reservation. If a refusal
+	// allocated on top of its mint, these would open a hole wider than one slot
+	// apiece and the arithmetic below catches it.
 	const extraRefusals = 3
 	for i := 0; i < extraRefusals; i++ {
-		_, err := h.Send(hub.SendRequest{
+		_, err := mintedSend(t, h, hub.SendRequest{
 			Sender:         hog,
 			To:             sink,
 			Body:           hogBody("burn", i),
@@ -341,10 +374,28 @@ func TestFairShareRefusalMintsNoSequence(t *testing.T) {
 		if !errors.Is(err, hub.ErrAgentQuota) {
 			t.Fatalf("extra refusal %d gave err = %v, want hub.ErrAgentQuota", i, err)
 		}
+		reservations++
 	}
 
-	// The next ACCEPTED message must sit exactly one past the last accepted one.
-	next, err := h.Send(hub.SendRequest{
+	// And retry ONE of those refusals under its EXISTING reservation, without
+	// minting again. A re-mint under the same (agent, op, key) returns the SAME
+	// assignment and allocates nothing (invariant 10), so this must not move the
+	// sequence at all — it is the case that would go unnoticed if the helper
+	// above were the only way a send were ever issued.
+	retryMint := mintFor(t, h, hog, "send", hogKey("burn", 0))
+	if _, err := h.Send(hub.SendRequest{
+		Sender:         hog,
+		To:             sink,
+		Body:           hogBody("burn", 0),
+		IdempotencyKey: hogKey("burn", 0),
+		SignedMint:     retryMint,
+	}); !errors.Is(err, hub.ErrAgentQuota) {
+		t.Fatalf("the retry of a refused send under its ORIGINAL reservation gave err = %v, want hub.ErrAgentQuota", err)
+	}
+
+	// The next ACCEPTED message must sit exactly one past the numbers those
+	// reservations account for — no wider.
+	next, err := mintedSend(t, h, hub.SendRequest{
 		Sender:         victim,
 		To:             sink,
 		Body:           []byte("the next accepted message"),
@@ -353,9 +404,9 @@ func TestFairShareRefusalMintsNoSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the victim's send after the hog's refusals: %v", err)
 	}
-	if next.Seq != last.Seq+1 {
-		t.Fatalf("the next accepted message took Seq %d but the last accepted one was %d: %d refused send(s) burned %d sequence number(s). Invariant 1 forbids reusing a sequence, so a sequence spent on a refused operation is a permanent hole in the bus's total order — publish must call idem.Admit BEFORE seq.Next()",
-			next.Seq, last.Seq, extraRefusals+1, next.Seq-last.Seq-1)
+	if want := last.Seq + uint64(reservations) + 1; next.Seq != want {
+		t.Fatalf("the next accepted message took Seq %d, want %d: the last accepted message took %d and %d refused send(s) each hold ONE reservation of their own, so the hole must be exactly %d wide. A wider one means the refusal path allocated a sequence on top of the client's reservation, and every refused send would then widen the bus's total order (invariant 1 forbids ever reusing the numbers it skips)",
+			next.Seq, want, last.Seq, reservations, reservations)
 	}
 	if _, head := shapeOf(h).count, shapeOf(h).head; head != next.Seq {
 		t.Fatalf("the serving copy's head sequence is %d but the last accepted message took %d", head, next.Seq)
@@ -390,7 +441,7 @@ func TestFairShareSurvivesRestart(t *testing.T) {
 	}
 	// The victim sends too, so the replayed table has TWO distinct agents in it
 	// and the share on the replay path is divided the same way it was live.
-	victimFirst, err := h.Send(hub.SendRequest{
+	victimFirst, err := mintedSend(t, h, hub.SendRequest{
 		Sender:         victim,
 		To:             sink,
 		Body:           []byte("victim before the restart"),
@@ -432,7 +483,7 @@ func TestFairShareSurvivesRestart(t *testing.T) {
 	// invariant 10 and would be defeated if the share refused retries too.
 	for _, i := range []int{0, len(accepted) - 1} {
 		want := accepted[i]
-		again, err := h2.Send(hub.SendRequest{
+		again, err := mintedSend(t, h2, hub.SendRequest{
 			Sender:         hog,
 			To:             sink,
 			Body:           hogBody(publishShapes[0].name, i),
@@ -447,7 +498,7 @@ func TestFairShareSurvivesRestart(t *testing.T) {
 	}
 	// The victim's pre-restart key replays too — the table is recovered state
 	// for every agent in it, not just the one that filled it.
-	victimAgain, err := h2.Send(hub.SendRequest{
+	victimAgain, err := mintedSend(t, h2, hub.SendRequest{
 		Sender:         victim,
 		To:             sink,
 		Body:           []byte("victim before the restart"),
@@ -461,7 +512,7 @@ func TestFairShareSurvivesRestart(t *testing.T) {
 	}
 
 	// (c) And the victim can still be SERVED after the restart, with a new key.
-	fresh, err := h2.Send(hub.SendRequest{
+	fresh, err := mintedSend(t, h2, hub.SendRequest{
 		Sender:         victim,
 		To:             sink,
 		Body:           []byte("victim after the restart"),
@@ -588,7 +639,7 @@ func TestReplayNeverRefusesWhatTheLivePathAccepted(t *testing.T) {
 		var accepted []acceptedSend
 		send := func(key string, body []byte) {
 			t.Helper()
-			res, err := h.Send(hub.SendRequest{Sender: hog, To: sink, Body: body, IdempotencyKey: key})
+			res, err := mintedSend(t, h, hub.SendRequest{Sender: hog, To: sink, Body: body, IdempotencyKey: key})
 			if err != nil {
 				t.Fatalf("send %q: %v", key, err)
 			}
@@ -598,7 +649,7 @@ func TestReplayNeverRefusesWhatTheLivePathAccepted(t *testing.T) {
 		for i := 0; i < share; i++ {
 			send(fmt.Sprintf("early-%d", i), []byte(fmt.Sprintf("early %d", i)))
 		}
-		if _, err := h.Send(hub.SendRequest{Sender: hog, To: sink, Body: []byte("over"), IdempotencyKey: "early-over"}); !errors.Is(err, hub.ErrAgentQuota) {
+		if _, err := mintedSend(t, h, hub.SendRequest{Sender: hog, To: sink, Body: []byte("over"), IdempotencyKey: "early-over"}); !errors.Is(err, hub.ErrAgentQuota) {
 			t.Fatalf("the hog's send past its share gave err = %v, want hub.ErrAgentQuota; batch one did not fill the share, so batch two proves nothing", err)
 		}
 
@@ -656,7 +707,7 @@ func assertReplayKeptEverything(t *testing.T, h *hub.Hub, sender, to string, acc
 	// bites: a share refuses the TAIL, so the last key is the one that vanishes.
 	for _, i := range []int{0, want - 1} {
 		orig := accepted[i]
-		again, err := h.Send(hub.SendRequest{
+		again, err := mintedSend(t, h, hub.SendRequest{
 			Sender:         sender,
 			To:             to,
 			Body:           orig.body,
