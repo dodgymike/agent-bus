@@ -250,7 +250,7 @@ func (f BusFingerprint) IsZero() bool { return f == BusFingerprint{} }
 //
 // Revocation is genuinely out of scope: there is no CA and therefore no CRL or
 // OCSP to consult. Revoking a bus certificate means re-issuing invites.
-func pinnedTLSConfig(pins BusPinSet) *tls.Config {
+func pinnedTLSConfig(pins BusPinSet, clientCert *tls.Certificate) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 
@@ -259,6 +259,18 @@ func pinnedTLSConfig(pins BusPinSet) *tls.Config {
 		// removed, by the callback on the next line.
 		InsecureSkipVerify:    true,
 		VerifyPeerCertificate: pinVerifier(pins, time.Now),
+
+		// The OTHER half of mutual TLS (invariant 11): what this end PRESENTS.
+		// It belongs in this literal and not in newHTTPClient's unpinned one,
+		// which this function replaces wholesale — a client certificate set
+		// there would be silently dropped on every pinned, i.e. every real,
+		// connection.
+		//
+		// A callback rather than Certificates, and the reason is a lockout
+		// rather than a preference: see clientCertificateProvider. nil when
+		// there is no material, which is exactly "present nothing" — and is
+		// what happens today anyway, because the bus does not ask.
+		GetClientCertificate: clientCertificateProvider(clientCert),
 	}
 }
 

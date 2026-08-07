@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/base64"
 	"net/url"
 	"path/filepath"
@@ -55,6 +56,20 @@ type Client struct {
 	// connection was verified against the OLD set.
 	http     HTTPDoer
 	httpPins BusPinSet
+
+	// warnMu guards warnings. Separate from mu because a warning is appended
+	// while mu is NOT held (during the certificate load) and drained by the CLI
+	// between commands; folding it into mu would put a disk read and a stderr
+	// drain on the same lock every request contends on.
+	warnMu   sync.Mutex
+	warnings []string
+
+	// clientCert caches this agent's OWN TLS material — the half of mutual TLS
+	// this end presents — so a long-lived client reads and parses it once
+	// rather than on every transport rebuild. Nil until first use; see
+	// clientCertificate, which is the only writer and which never holds mu
+	// across the disk read.
+	clientCert *ClientCertificate
 
 	// cred caches the resolved credential so a command that touches the store
 	// twice does not read and parse it twice.
@@ -247,14 +262,116 @@ func (c *Client) doer(u *url.URL, pins BusPinSet) (HTTPDoer, error) {
 	if err := transportSecurity(u, pins); err != nil {
 		return nil, err
 	}
+
+	// This end's OWN certificate — mutual TLS's other half (invariant 11).
+	//
+	// Loaded only on the pinned path, because that is the only path with a
+	// handshake: an empty pin set means a plaintext loopback URL, where there
+	// is nothing to present and where requiring a writable credential store to
+	// make a request would be a new failure for no gain.
+	//
+	// It is resolved BEFORE c.mu is taken. clientCertificate reads the disk,
+	// and doing that under the mutex every other call contends on would
+	// serialise the client behind a filesystem — and worse, the two would be
+	// one lock ordering to get wrong later.
+	//
+	// A failure here STOPS the request. It does not fall back to connecting
+	// without a certificate: today that would appear to work, because the bus
+	// does not ask for one, and would become a lockout the day it does — a
+	// failure that arrives months after the change that caused it.
+	var clientCert *tls.Certificate
+	if !pins.IsEmpty() {
+		cc, err := c.clientCertificate()
+		if err != nil {
+			return nil, err
+		}
+		clientCert = cc.certificate()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.http == nil || !c.httpPins.Equal(pins) {
 		closeIdleConnections(c.http)
-		c.http = newHTTPClient(pins)
+		c.http = newHTTPClient(pins, clientCert)
 		c.httpPins = pins
 	}
 	return c.http, nil
+}
+
+// ClientCertificate returns this agent's own TLS material, minting it on first
+// use.
+//
+// Exported for `agent-busctl client-cert`, which is how an operator finds the
+// files and reads the fingerprint the bus will bind. It is idempotent: calling
+// it never replaces material already on disk.
+func (c *Client) ClientCertificate() (*ClientCertificate, error) { return c.clientCertificate() }
+
+// clientCertificate loads-or-mints this agent's TLS material once per Client.
+//
+// The disk read happens OUTSIDE the lock, so two goroutines racing on a fresh
+// store may both call LoadOrCreateClientCertificate. That is safe by
+// construction rather than by luck — creation installs the material with a
+// single directory rename, so one of them wins and the other loads what the
+// winner wrote (see LoadOrCreateClientCertificate). The second-check-under-lock
+// then makes sure every caller is handed the SAME *ClientCertificate, so the
+// certificate a transport was built with cannot differ from the one another
+// goroutine is reporting.
+func (c *Client) clientCertificate() (*ClientCertificate, error) {
+	c.mu.Lock()
+	cached := c.clientCert
+	c.mu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+
+	cc, err := LoadOrCreateClientCertificate(c.cfg.IdentityDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Anything the load had to REPAIR is recorded for the caller to surface.
+	//
+	// This is not decoration. tightenPermissions chmods a world-readable
+	// private key back to 0600 and records why, and this file argues at length
+	// that tightening SILENTLY is the actual defect — the operator ends up
+	// believing a key was private when another local user may already have read
+	// it. Before this, cc.Warnings was read only by `agent-busctl client-cert`,
+	// a command whose own help says you rarely need to run it, so on every
+	// ordinary command the warning was collected and dropped on the floor. The
+	// security gate was right to call that a P1: the detection existed and the
+	// telling did not.
+	if len(cc.Warnings) > 0 {
+		c.warnMu.Lock()
+		c.warnings = append(c.warnings, cc.Warnings...)
+		c.warnMu.Unlock()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.clientCert == nil {
+		c.clientCert = cc
+	}
+	return c.clientCert, nil
+}
+
+// Warnings returns and CLEARS conditions the operator should be told about
+// which did not stop the client — today, key material found with permissions
+// that had to be tightened.
+//
+// It drains rather than accumulates so a long-running command (`watch`) can
+// poll it without reprinting the same line forever. Store.Warnings is the
+// sibling for the credential store; the two are separate because they are
+// populated at different moments — the store's at New, these on the first
+// pinned request.
+func (c *Client) Warnings() []string {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	if len(c.warnings) == 0 {
+		return nil
+	}
+	out := c.warnings
+	c.warnings = nil
+	return out
 }
 
 // closeIdleConnections drops the sockets of a transport that has been

@@ -846,7 +846,9 @@ func TestPinnedTLSConfigUsesALiveClock(t *testing.T) {
 		leaf := leafOf(t, cert)
 
 		// The config is built ONCE, now, while the certificate is still valid.
-		cfg := pinnedTLSConfig(NewBusPinSet(fingerprintOf(cert)))
+		// nil client certificate: this test is about the clock the VERIFIER is
+		// handed, and the certificate this end PRESENTS plays no part in it.
+		cfg := pinnedTLSConfig(NewBusPinSet(fingerprintOf(cert)), nil)
 		if cfg.VerifyPeerCertificate == nil {
 			t.Fatal("pinnedTLSConfig produced a config with no verification callback")
 		}

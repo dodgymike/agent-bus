@@ -61,12 +61,13 @@ const (
 // That second clause is deliberately narrower than "the only place a tls.Config
 // is built", which an earlier draft of this comment said and which is false —
 // the unpinned branch below builds one too, a few lines down. The distinction
-// matters for whoever lands MTLS-CLIENTCERT: tls.Config.Certificates belongs in
-// pinnedTLSConfig, NOT in the unpinned literal below, because the pinned branch
-// REPLACES that value wholesale. A client certificate added to the wrong one is
-// silently dropped on every pinned — i.e. every real — connection. It fails
-// closed (the handshake is refused), so it costs an afternoon rather than a
-// breach, which is exactly why it is worth a sentence here.
+// mattered for MTLS-CLIENTCERT, which landed 2026-08-07: the client certificate
+// is offered from pinnedTLSConfig, NOT from the unpinned literal below, because
+// the pinned branch REPLACES that value wholesale. A client certificate added
+// to the wrong one is silently dropped on every pinned — i.e. every real —
+// connection. It fails closed (the handshake is refused), so it costs an
+// afternoon rather than a breach, which is exactly why it is worth a sentence
+// here.
 //
 // The single-seam property is the point, and it is why this function exists
 // rather than an inline &http.Client{} at each call site: invariant 11 makes
@@ -96,13 +97,20 @@ const (
 // draws the wrong conclusion about which branch runs. Nothing else on Config
 // affects the transport: the timeout lives on the context, and the retry policy
 // lives in do(). If that changes, pass the field, not the whole Config.
-func newHTTPClient(pins BusPinSet) HTTPDoer {
+func newHTTPClient(pins BusPinSet, clientCert *tls.Certificate) HTTPDoer {
 	// The pinned configuration, or — for the plaintext loopback case that is
 	// all the bus serves until MTLS-LISTENER lands — the platform defaults with
 	// verification fully ON.
+	//
+	// clientCert is deliberately NOT threaded into the unpinned literal. That
+	// branch is reachable only for a PLAINTEXT loopback URL (transportSecurity
+	// refuses an https bus with no pin before this function is reached), and a
+	// plaintext connection performs no handshake, so there is nothing to
+	// present. Adding it there would be dead configuration in the one place a
+	// reader most needs to be able to tell which branch does the work.
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if !pins.IsEmpty() {
-		tlsConfig = pinnedTLSConfig(pins)
+		tlsConfig = pinnedTLSConfig(pins, clientCert)
 	}
 	return &http.Client{
 		Transport: &http.Transport{

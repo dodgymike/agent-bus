@@ -202,12 +202,37 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		}
 	}()
 
+	// The CLIENT's own warnings need the same treatment, and `watch` needs it
+	// differently from every other command. They are produced when the TLS
+	// material is loaded — on the FIRST PINNED REQUEST, i.e. after this command
+	// has already started — and the one that matters says a private key was
+	// found readable by other local users.
+	//
+	// A defer alone is not enough here, and saying otherwise was the first
+	// version of this comment: for an unbounded watch, "when this function
+	// returns" IS process exit, which is exactly the moment root.go's drain
+	// already fires. It would have been a comment asserting a property nothing
+	// exercised. So the drain is called from the message handler as well, which
+	// runs as soon as the first message arrives — seconds after the request
+	// that produced the warning, rather than whenever the agent is finally
+	// stopped. The defer stays for the watch that never receives anything.
+	//
+	// Draining is idempotent (Client.Warnings clears as it reads), so calling
+	// it from both places prints each warning exactly once.
+	drainClientWarnings := func() {
+		for _, w := range c.Warnings() {
+			fmt.Fprintf(env.stderr, "agent-busctl: WARNING: %s\n", w)
+		}
+	}
+	defer drainClientWarnings()
+
 	// A pipe is a machine. Someone who redirected this into a file or a
 	// consumer, and did not think to pass --json, wants records — not a live
 	// feed frozen into a text file.
 	ndjson := env.g.json || !env.stdoutIsTTY
 
 	handle := func(m client.Message) error {
+		drainClientWarnings()
 		if ndjson {
 			if werr := env.out.Stream(newWatchRecord(m)); werr != nil {
 				// Returning it stops the watch WITHOUT advancing the cursor, so

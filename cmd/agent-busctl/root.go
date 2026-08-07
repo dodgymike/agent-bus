@@ -79,6 +79,11 @@ type cliEnv struct {
 	// can block waiting for a human who is not there.
 	stdoutIsTTY bool
 	stdinIsTTY  bool
+
+	// lastClient is the most recent client built by client(), kept so run() can
+	// drain its warnings after the command finishes. A subcommand that builds
+	// no client leaves it nil.
+	lastClient *client.Client
 }
 
 // client builds a configured client.Client from the globals and environment.
@@ -122,6 +127,7 @@ func (e *cliEnv) client() (*client.Client, error) {
 	for _, w := range c.Store().Warnings() {
 		fmt.Fprintf(e.stderr, "agent-busctl: WARNING: %s\n", w)
 	}
+	e.lastClient = c
 	return c, nil
 }
 
@@ -148,6 +154,7 @@ func commands() []command {
 		useCommand(),
 		logoutCommand(),
 		pinCommand(),
+		clientCertCommand(),
 		agentsCommand(),
 		sendCommand(),
 		broadcastCommand(),
@@ -243,6 +250,22 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		stdoutIsTTY: stdoutIsTTY,
 		stdinIsTTY:  stdinIsTTY,
 	}
+	// Drained AFTER the command, on both the success and the failure path.
+	//
+	// env.client() already prints the credential store's warnings, but those
+	// are known at construction. The client's own warnings are not: the TLS
+	// material is loaded lazily on the first pinned request, so "your private
+	// key was world-readable and I tightened it" only exists once the command
+	// has run. Draining only on success would hide it on exactly the runs where
+	// something is already wrong.
+	defer func() {
+		if env.lastClient == nil {
+			return
+		}
+		for _, w := range env.lastClient.Warnings() {
+			fmt.Fprintf(stderr, "agent-busctl: WARNING: %s\n", w)
+		}
+	}()
 	if err := cmd.run(ctx, env, rest); err != nil {
 		if err == flag.ErrHelp {
 			fmt.Fprint(stdout, cmd.help)
@@ -334,11 +357,12 @@ COMMANDS
 	cmds := commands()
 	sort.Slice(cmds, func(i, j int) bool { return cmds[i].name < cmds[j].name })
 	for _, c := range cmds {
-		// Widened from 9 to 10 when `broadcast` (9 characters) landed: at 9 the
-		// column was still aligned but the longest name touched its summary.
-		fmt.Fprintf(&b, "  %-10s %s\n", c.name, c.summary)
+		// Widened from 10 to 12 when `client-cert` (11 characters) landed, for
+		// the reason it was widened from 9 to 10 when `broadcast` did: at the
+		// old width the longest name touched its own summary.
+		fmt.Fprintf(&b, "  %-12s %s\n", c.name, c.summary)
 	}
-	b.WriteString(`  help       show help for a command
+	b.WriteString(`  help         show help for a command
 
 FLAGS (accepted before or after the command)
   --bus <url>       base URL of the bus                       (env ` + client.EnvBusURL + `)

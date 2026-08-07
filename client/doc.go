@@ -58,19 +58,32 @@
 // subprocess produces exactly the codes a caller expects without copying a
 // switch statement that will drift.
 //
-// # Transport, and the pinned bus certificate
+// # Transport, and the two halves of mutual TLS
 //
 // newHTTPClient is the single seam where a transport is constructed, and
 // pinnedTLSConfig (pin.go) is the single place DEFAULT VERIFICATION IS
 // REPLACED. Invariant 11 makes TLS mandatory, with self-signed certificates,
 // mutual authentication and the bus's fingerprint pinned from the invite blob.
-// The pin half of that is implemented here (MTLS-PIN, 2026-08-07) — though no
-// bus serves TLS yet (MTLS-LISTENER), so nothing exercises it against a real
-// bus. The client-certificate half is not written at all (MTLS-CLIENTCERT);
-// when it is, tls.Config.Certificates belongs in pinnedTLSConfig — NOT in
-// newHTTPClient's unpinned fallback literal, which the pinned branch replaces
-// wholesale, so a certificate put there is silently dropped on every real
-// connection.
+//
+// Both halves now exist, in two files, and they are worth keeping apart in your
+// head because they fail differently:
+//
+//   - VERIFYING the bus — pin.go. The fingerprint from the invite decides
+//     whether the certificate on the other end is the one it was supposed to
+//     be (MTLS-PIN, 2026-08-07).
+//   - PRESENTING our own — clientcert.go. An Ed25519 self-signed certificate,
+//     minted on first use and stored 0600 beside the credential store
+//     (MTLS-CLIENTCERT, 2026-08-07). It is offered through
+//     GetClientCertificate in the SAME pinnedTLSConfig literal — never in
+//     newHTTPClient's unpinned fallback, which the pinned branch replaces
+//     wholesale, so a certificate put there is silently dropped on every real
+//     connection.
+//
+// The bus does NOT ask for a client certificate yet (MTLS-CLIENTAUTH is the
+// task that starts asking), so the presenting half is offered and ignored
+// today. That order is deliberate and must not be reversed: a bus that requires
+// a client certificate before any client can present one locks out every
+// enrolled agent.
 //
 // The rule to know: an https bus whose certificate fingerprint this client has
 // not been told IN ADVANCE is REFUSED. There is no trust-on-first-use, not as a
