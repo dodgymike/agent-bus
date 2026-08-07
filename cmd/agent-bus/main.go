@@ -85,6 +85,21 @@ type Config struct {
 }
 
 func main() {
+	// Subcommand dispatch, BEFORE flag parsing, and deliberately the smallest
+	// form of it that works: exactly one intercepted word. Everything else
+	// reaches parseFlags unchanged, so `agent-bus -listen …` behaves exactly as
+	// it always has. This costs nothing today because parseFlags already refuses
+	// any non-flag argument ("unexpected argument"), so no invocation that used
+	// to work is being redirected.
+	//
+	// `agent-bus invite mint` is the operator's invite-minting surface, and it is
+	// a subcommand on the SERVER binary rather than an HTTP route because the
+	// minting authority is FILESYSTEM ACCESS to the data directory (DECISIONS.md
+	// E4). See cmd/agent-bus/invite.go.
+	if len(os.Args) > 1 && os.Args[1] == inviteCommandName {
+		os.Exit(runInviteCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -109,6 +124,16 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 
 	fs := flag.NewFlagSet(prog, flag.ContinueOnError)
 	fs.SetOutput(out)
+	// The subcommand is announced in -h, because an operator who cannot find it
+	// has no way to bootstrap invite-only enrolment and nothing else in the
+	// binary hints that a subcommand exists at all. Printed AFTER the flags so
+	// the server's own usage stays the first thing read.
+	fs.Usage = func() {
+		fmt.Fprintf(out, "Usage of %s:\n", prog)
+		fs.PrintDefaults()
+		fmt.Fprintf(out, "\nSubcommands:\n  %s %s mint    mint a single-use, expiring invite (requires the bus to be STOPPED)\n"+
+			"                        run `%s %s mint -h` for details\n", prog, inviteCommandName, prog, inviteCommandName)
+	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
 	fs.DurationVar(&cfg.PollTimeout, "poll-timeout", defaultPollTimeout, "maximum time a long-poll waits before returning empty, e.g. 30s")

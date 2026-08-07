@@ -3,8 +3,15 @@
 // internal/wal's two-phase path and rebuilt by replay.
 //
 // This is task INVITE-STORE. It is the STORE only: it registers no HTTP route
-// (INVITE-GATE), ships no operator wrapper (INVITE-MINT / INVITE-REVOKE), and
-// does not enrol anybody. What it owns is the state machine and its durability.
+// (INVITE-GATE), ships no revocation surface (INVITE-REVOKE), and does not enrol
+// anybody. What it owns is the state machine and its durability.
+//
+// The OPERATOR-FACING MINT landed separately as INVITE-MINT (2026-08-07): the
+// `agent-bus invite mint` subcommand in cmd/agent-bus/invite.go, authorised by
+// FILESYSTEM ACCESS to the data directory rather than by anything on the wire
+// (DECISIONS.md, E4). It is a caller of Store.Mint and adds nothing to this
+// package. NOTHING CONSUMES AN INVITE YET — enrolment is still ungated until
+// INVITE-GATE lands, so a minted invite is durable but inert.
 //
 // # 1. Why it exists — build to this, not just to the API
 //

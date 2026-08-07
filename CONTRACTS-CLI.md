@@ -26,6 +26,140 @@ Two binaries live here:
 Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` on a startup failure
 (e.g. bind failure), `0` on a clean signal-driven shutdown.
 
+The binary also takes exactly ONE subcommand, dispatched before flag parsing on the first non-flag
+argument. Everything else reaches the server flag set unchanged.
+
+---
+
+### `agent-bus invite mint` — the operator's invite-minting surface
+
+Added 2026-08-07 by `INVITE-MINT`. Source: `cmd/agent-bus/invite.go`.
+
+```
+agent-bus invite mint -data-dir <dir> -bus-address <url> [-ttl <dur>] [-label <text>] [-json]
+```
+
+**It is a subcommand on the SERVER binary, not an HTTP route.** Minting authority is **filesystem
+access** to the data directory — the same model as `wal-mac.key` and the bus's private keys
+(`DECISIONS.md` E4, 2026-08-02). Nothing new is exposed on the wire, so bootstrapping invite-only
+enrolment adds no network-reachable privilege.
+
+**THE BUS MUST BE STOPPED.** Minting appends an invite record through the two-phase WAL path and takes
+the data directory's exclusive `dirlock`, which a running bus holds. This is structural, not a
+limitation to be worked around: two processes appending to one log destroys it.
+
+**SCOPE: mint only.** `POST /v1/enroll` still accepts callers with no invite — that is `INVITE-GATE`.
+A record written here is durable and is replayed by the bus (both existing WAL appliers ignore an
+unrecognised `Entry.Kind`), but nothing consumes it yet.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | The bus's data directory. **Never created, and neither is any part of the bus identity in it** — it must already hold BOTH the `bus-id` file and `bus-tls.crt` (exit `4` otherwise). A typo that minted a second bus identity would yield an invite pinning a certificate no running bus serves; a regenerated `bus-id` would rename the bus away from its own certificate. |
+| `-bus-address` | *(none — REQUIRED)* | The base URL an agent dials, e.g. `https://bus.example:8443`. **No default**, deliberately: a guessed address produces an invite pointing somewhere the operator did not mean. Validated and canonicalised by the same rule as `agent-busctl --bus`: scheme `http` or `https`; **`http` ONLY to a loopback host** (`localhost`, or an IP literal `net.IP.IsLoopback` accepts); userinfo, query and fragment rejected. Canonicalised identically to `client.parseBusURL` — scheme and host lower-cased, a default port (`:80`/`:443`) dropped, one trailing `/` trimmed — because the client uses this string as an idempotency **scope key**, so two spellings of one bus would be two scopes. **One deliberate divergence:** an IPv6 literal is re-bracketed when a default port is dropped (`https://[::1]:443` → `https://[::1]`, not `https://::1`), because the unbracketed form is not a parseable URL host and would put an undiallable address in the trust anchor. `client.canonicalHost` still has that bug and fails closed; filed as a follow-up against `client/`. |
+| `-ttl` | `24h` (`invite.DefaultTTL`) | How long the invite stays redeemable. Maximum `168h` (`invite.MaxTTL`); an over-long value is **REFUSED, not clamped** (exit `1`). |
+| `-label` | *(empty)* | An operator note recorded on the invite, ≤ 128 bytes (`invite.MaxLabelLen`). **Never shown to whoever redeems the invite** — it is echoed only in this command's own output. |
+| `-json` | off | Emit the invite blob as one JSON object on **stdout**. |
+| `-log-level` | `warn` | Severity floor for recovery/durability lines on stderr (`debug`, `info`, `warn`, `error`). |
+
+**There is no `-invite-id` and no `-invite-secret` flag, and none may be added.** Invariant 1: the
+server mints both from `crypto/rand`. `invite.MintRequest` has no field for either, which makes this
+structural rather than a rule this command has to remember;
+`TestInviteMintRejectsClientSuppliedSecret` pins both halves.
+
+#### Exit codes (`agent-bus invite`)
+
+| Code | Meaning | Remedy |
+| --- | --- | --- |
+| `0` | The invite was minted and is durable. | — |
+| `1` | The mint failed and **no invite was returned** (WAL, I/O, capacity, an over-long `-ttl`, a failed log close). | Read the message; retry. |
+| `2` | Usage: bad flag, unknown subcommand, positional argument, or a bad `-bus-address`. | `agent-bus invite mint -h` |
+| `3` | The data directory is **locked** — a bus is running. | Stop the bus, mint, start it again. |
+| `4` | The data directory does not hold a usable bus identity: missing, not a directory, no `bus-id` file, no `bus-tls.crt`, or a certificate whose CommonName names a **different bus** than the `bus-id` file. | Start the bus once if it has **never run**; **restore the missing file from backup** if it has. |
+
+`1` almost always means nothing was written, but the contract does not claim that: if the record was
+written and then the log **Close** failed, a durable OPEN invite remains whose secret was discarded.
+It is unusable, but it holds a slot until it expires, and the error names its id so it can be revoked.
+
+**Every exit-`4` refusal writes nothing whatsoever**, and both halves of that are load-bearing:
+
+- It is checked **before the `dirlock` is taken**, because `dirlock.Acquire` creates `bus.lock`, and
+  the server decides whether a data directory "has history" by whether it was EMPTY at startup. A lone
+  `bus.lock` left by a premature mint made the operator's *first* `agent-bus` start refuse to boot and
+  demand `-backfill-suffix-floors`.
+- It checks the **`bus-id` file as well as the certificate**, because `ids.LoadOrCreateBusID` *creates*
+  a bus id when the file is absent. Checking only the certificate meant a directory whose `bus-id` had
+  been lost got a freshly minted one persisted **before** the CommonName cross-check refused — leaving
+  the bus permanently renamed away from its own certificate, with every agent id it had ever issued
+  (`<bus-id>.<agent-id>`, invariant 2) naming a bus that no longer exists.
+
+Both are pinned by tests:
+`TestInviteMintSubcommand/a_refusal_on_a_virgin_data_directory_leaves_it_COMPLETELY_untouched` and
+`TestInviteMintSubcommand/a_lost_bus-id_file_is_REFUSED,_never_regenerated`.
+
+`-h` / `--help` print to **stdout** and exit `0`, at both `agent-bus invite -h` and
+`agent-bus invite mint -h`; only errors go to stderr.
+
+`3` and `4` are distinct from `1` because their remedies are opposite — one says *stop* the bus, the
+other says *start* it — and a caller that cannot tell them apart has to parse English.
+
+#### The invite blob (`--json` success shape)
+
+This is the **TRUST ANCHOR** of `DECISIONS.md` E6. The four load-bearing fields are `bus_id`,
+`bus_address`, `bus_cert_fingerprint` and `invite_secret`: together they let an agent find the bus and
+verify it **before its first connection**, with no trust-on-first-use window. Whoever can substitute
+this blob can point an agent at a bus of their choosing, so the channel it travels over is
+load-bearing.
+
+```json
+{
+  "ok": true,
+  "invite_id": "inv-abcdefghijklmnop",
+  "bus_id": "bus-…",
+  "bus_address": "https://bus.example:8443",
+  "bus_cert_fingerprint": "<64 lowercase hex>",
+  "invite_secret": "<43-char base64url>",
+  "created_at": "2026-08-07T12:00:00Z",
+  "expires_at": "2026-08-08T12:00:00Z",
+  "label": "for the deploy runner",
+  "transport_insecure": true
+}
+```
+
+- `bus_cert_fingerprint` is `sha256.Sum256(cert.Raw)` of the bus's leaf certificate, rendered as
+  **exactly 64 LOWERCASE hex characters** — byte-identical to what `--bus-fingerprint` /
+  `client.ParseBusFingerprint` accepts, and to the bus's `bus_cert_fingerprint=…` startup log line.
+  Uppercase is not produced and would not be accepted.
+- `invite_secret` is 32 bytes of `crypto/rand` in `base64.RawURLEncoding`. It is **printed exactly
+  once and is not recoverable**: only its SHA-256 digest is durable, and the plaintext is never in the
+  WAL, a log line or an error. A lost secret means revoke and re-mint.
+- `label` is omitted when empty. In the **human** output it is rendered with `%q`, so control/ANSI
+  bytes in an operator-supplied label cannot reach the terminal raw; `--json` needs no equivalent
+  because `encoding/json` escapes everything below `0x20`, and it round-trips the label verbatim.
+- `transport_insecure` is **omitted unless true**, so it is only ever a positive assertion of risk. It
+  is `true` when `bus_address` is plaintext `http`, meaning the invite secret will cross the wire in
+  cleartext at redemption and `bus_cert_fingerprint` pins **nothing** (invariant 11; the TLS listener
+  is `MTLS-LISTENER` and has not landed). It exists because the matching stderr `WARN` is invisible to
+  an agent that discarded stderr — invariant 7's second audience needs a field it can branch on.
+
+**This is the mint command's OUTPUT, not a settled wire shape.** There is deliberately no single
+packed token — no base64 blob, no bespoke encoding — because the shape `client.EnrolOptions.Invite`
+will carry is settled by `INVITE-CLIENT`, and inventing one here would be the same class of mistake as
+hand-picking a record-type number.
+
+Failure shape, also on **stdout** so an agent that redirected stderr still gets a parseable answer:
+
+```json
+{ "ok": false, "error": "…", "remedy": "…", "exit_code": 3 }
+```
+
+`ok` is present and first in both shapes, so a caller branches on one field.
+
+**Residual risk, until `MTLS-LISTENER` lands:** an `http://` `-bus-address` is accepted (loopback
+only) and logs a `WARN` — the invite secret will cross the wire **in cleartext** at redemption, and
+the fingerprint in the blob pins nothing until the bus serves `https`. Exposure is bounded only by the
+`-listen 127.0.0.1:8080` loopback default; do not expose the bus on a non-loopback interface before
+mTLS ships (`DECISIONS.md` E8).
+
 ---
 
 ## `cmd/agent-busctl` — the client
@@ -46,7 +180,7 @@ Global flags are accepted **before or after** the subcommand, so both `agent-bus
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--bus <url>` | `AGENT_BUS_URL` | *(the selected identity's recorded URL; `enrol` requires it explicitly)* | Base URL of the bus. `https` anywhere; **`http` ONLY to a loopback host** (`127.0.0.1`, `::1`, `localhost`) — see "In flight" below. A path prefix is allowed; **userinfo, query and fragment are rejected**. Canonicalised: host lower-cased, default port dropped, trailing `/` trimmed. |
-| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | *(the selected identity's recorded fingerprint)* | (added 2026-08-07, `MTLS-PIN`) SHA-256 of the bus certificate's DER, as **exactly 64 LOWERCASE hex characters** — no `0x`, no colons, no whitespace. **REQUIRED for any `https` bus and REFUSED for an `http` one.** See "Certificate pinning" below. |
+| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | *(the selected identity's recorded accept-set)* | (added 2026-08-07, `MTLS-PIN`) SHA-256 of the bus certificate's DER, as **exactly 64 LOWERCASE hex characters** — no `0x`, no colons, no whitespace. **REQUIRED for any `https` bus and REFUSED for an `http` one.** Since `MTLS-ROTATE` (2026-08-07) the stored identity may hold **up to two** accepted certificates; this flag **narrows** the connection to one of them. See "Certificate pinning" below. |
 | `--identity <dir>` | `AGENT_BUS_IDENTITY` | `$XDG_CONFIG_HOME/agent-bus` (`os.UserConfigDir()` + `/agent-bus`) | The credential store **DIRECTORY** — not an agent id. |
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | *(the stored selection)* | Act as one stored identity for this command only, changing nothing on disk. **Parallel agents sharing a store should use this, not `use`.** |
 | `--json` | — | off | Machine-readable JSON on stdout. |
@@ -55,12 +189,17 @@ Global flags are accepted **before or after** the subcommand, so both `agent-bus
 **Resolution order, deterministic:** explicit flag → environment variable → the selected identity's
 recorded value (`--bus` and `--bus-fingerprint` only) → built-in default.
 
-**`--bus-fingerprint` is the ONE documented exception to that order**, and it is deliberate. When an
-explicit fingerprint and the stored identity's fingerprint name **different** certificates for the
-**same** bus, neither wins: the command fails with exit `2` and names both values. Letting the flag
-win would be the precedence rule and the wrong answer — "it stopped working so I passed the
-fingerprint the other end gave me" is exactly how a substituted certificate gets accepted, and it
-would turn a detected substitution into a successful one. Agreement is not a conflict.
+**`--bus-fingerprint` is the ONE documented exception to that order**, and it is deliberate. Since
+`MTLS-ROTATE` (2026-08-07) the stored identity may accept a **set** of up to two certificates (see
+"Certificate pinning" below). When the explicit fingerprint names a certificate **already in that
+set**, it **narrows** the connection to that one certificate for this invocation. When it names a
+certificate **outside** the set, neither wins: the command fails with exit `2` and names both the
+flag's value and the full stored set. Letting the flag win would be the precedence rule and the wrong
+answer — "it stopped working so I passed the fingerprint the other end gave me" is exactly how a
+substituted certificate gets accepted, and it would turn a detected substitution into a successful
+one. Agreement is not a conflict. **The refusal itself is unchanged from `MTLS-PIN`; only the remedy
+is new** — confirm the presented value out of band, then `agent-busctl pin add <fingerprint>` to
+widen the stored set. The flag itself never widens anything.
 
 `--help` / `-h` / `agent-busctl help <command>` print help and exit `0`.
 
@@ -72,20 +211,21 @@ would turn a detected substitution into a successful one. Agreement is not a con
 | `whoami [--all] [--verify]` | Show the identity commands act as; `--all` lists them; `--verify` performs a real session handshake | only with `--verify` |
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
+| `pin list \| add <fingerprint> \| remove <fingerprint>` | (added 2026-08-07, `MTLS-ROTATE`) List, widen or narrow the bus certificates an identity accepts — see "Certificate pinning" below | **no — purely local**, reads/writes the credential store only |
 | `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
 | `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
 | `broadcast [body]` | **BROKEN as of 2026-08-07.** The subcommand is still registered and still builds a request; the bus answers **501** because a broadcast has no canonical audience under signing format v1. Surfaces as **exit 6** — see below. | yes — `POST /v1/mint` then `POST /v1/broadcast`, which refuses |
 | `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
 
 **There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand**, and the registry in
-`cmd/agent-busctl/root.go` is exactly the eight rows above. This matters because several error remedies in
+`cmd/agent-busctl/root.go` is exactly the nine rows above. This matters because several error remedies in
 `client/store.go`, `client/client.go` and `client/keyring.go` tell the operator to "run
 `agent-busctl keygen`" or to add a key with `agent-busctl trust` — **those commands do not exist**. The
 capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
 `Client.TrustedKeys()`), so today they are reachable by an agent EMBEDDING the client and not by one
 shelling out. Recorded as an open item, not as a satisfied requirement; see `CONTRACTS-AGENT.md`.
 
-### Certificate pinning — CONTRACT (`MTLS-PIN`, 2026-08-07)
+### Certificate pinning — CONTRACT (`MTLS-PIN`, 2026-08-07; rotation amended by `MTLS-ROTATE`, 2026-08-07)
 
 Bus certificates are **self-signed**, there is **no certificate authority**, and there is **no
 trust-on-first-use** (invariant 11). The fingerprint is therefore the only thing that says which bus
@@ -93,12 +233,13 @@ is on the other end, and the client must be told it **before** its first connect
 
 | Situation | Behaviour | Kind / exit |
 | --- | --- | --- |
-| `https` bus, fingerprint known (flag, env, or stored identity) | The bus's leaf certificate is verified against the pin on every handshake | — |
+| `https` bus, fingerprint known (flag, env, or a member of the stored accept-set) | The bus's leaf certificate is verified against the pin on every handshake — matching **any** accepted member succeeds, which is what makes a rollover survivable | — |
 | `https` bus, **no** fingerprint anywhere | **REFUSED before any connection is made.** No TOFU: nothing is sent, nothing is remembered | `config` / **3** |
 | `http` bus **with** a fingerprint | **REFUSED.** A plaintext connection has no certificate, so the pin cannot be checked, and silently ignoring it would fake a check that never ran | `usage` / **2** |
 | Fingerprint present but malformed | Refused at client construction, before any I/O | `usage` / **2** |
-| Flag and stored identity disagree for the same bus | Refused; the error names both values | `usage` / **2** |
-| Bus presents a **different** certificate | **Hard failure. Never retried.** The error names the pinned and the presented fingerprint and the remedy | `network` / **5** |
+| `--bus-fingerprint` names a certificate **outside** the stored accept-set | Refused; the error names the flag's value and the full stored set | `usage` / **2** |
+| Bus presents a certificate that is not **any** member of the accept-set | **Hard failure. Never retried.** The error names the accepted set and the presented fingerprint and the remedy | `network` / **5** |
+| Stored accept-set holds more than `MaxBusPins` (2) certificates (only reachable by hand-editing the store) | Refused **at connect time**, not at load — `pin list`/`pin remove` still work to repair it | `config` / **3** |
 
 - **The pin is `sha256(cert.Raw)`** — the DER of the **leaf**, exactly as it arrived on the wire.
   Only `rawCerts[0]` is considered. This is the same construction the server uses
@@ -106,19 +247,91 @@ is on the other end, and the client must be told it **before** its first connect
   import `internal/` (invariant 7). Divergence would fail closed: no pin would ever match.
 - **Textual form: 64 lowercase hex characters, and nothing else.** Uppercase is rejected rather than
   folded, and the colon-separated spelling other tools print is rejected. One value, one spelling.
-- **`enrol` records the fingerprint with the identity** (`bus_fingerprint` in `identities.json`), so
-  it is supplied **once**, from the invite, and every later command against that bus verifies without
-  being told again — "the trusted path must be the easy path". The stored value is only ever the pin
-  that was already in force; it is **never** derived from the certificate the bus presented, because
-  that would be TOFU wearing the costume of a pin. The stored pin is used only for the bus URL it was
-  stored against.
+- **`enrol` records the fingerprint as the first (and usually only) member of the identity's
+  accept-set** (`bus_fingerprints` in `identities.json` — see "The accept-set is a bounded SET, since
+  `MTLS-ROTATE`" below), so it is supplied **once**, from the invite, and every later command against
+  that bus verifies without being told again — "the trusted path must be the easy path". A member of
+  the set is **never** derived from a certificate the bus presented, because that would be TOFU
+  wearing the costume of a pin. The stored set is used only for the bus URL it was stored against.
 - **There is no flag, environment variable or `Config` field that disables verification**, silently
   or otherwise, and three tests in `client/guard_test.go` enforce that structurally (see "The client
-  package" below).
-- **Recovery from a genuine rotation** is: confirm the new fingerprint out of band (the bus logs
-  `bus_cert_fingerprint=…` at startup), then `agent-busctl logout <agent-id>` and enrol again with
-  `--bus-fingerprint <new>`. Serving two certificates during rollover (invariant 11) is `MTLS-ROTATE`
-  and does not exist yet.
+  package" below). Nothing added by `MTLS-ROTATE` changes this.
+
+#### The accept-set is a bounded SET, since `MTLS-ROTATE` (2026-08-07)
+
+An identity no longer pins exactly one certificate — it accepts a **set**, bounded at
+`client.MaxBusPins` = **2**: the outgoing certificate and the incoming one, which is exactly the width
+of the two-certificate rollover `DECISIONS.md` E3 describes.
+
+- **Membership is granted, never learned.** A fingerprint enters the set only by an explicit operator
+  act — the invite's fingerprint at `enrol`, or `agent-busctl pin add` with a value confirmed **out of
+  band**. Nothing ever adds the certificate a bus happened to present during a handshake; that would
+  be trust-on-first-use, which invariant 11 rules out by name.
+- **`pin add` at the cap is REFUSED, never evicting the oldest** — eviction would silently decide,
+  on the operator's behalf, which certificate stops being trusted.
+- **`pin remove` of the LAST pin is REFUSED.** An `https` identity with an empty accept-set cannot
+  connect at all, so removing the last one would be a lockout dressed as a tidy-up.
+  `agent-busctl logout <agent-id>` is the command that means "stop using this identity".
+- A hand-edited store holding more than `MaxBusPins` is refused **at connect time, not at load**, so
+  `pin list` and `pin remove` still work to fix it.
+- **`--bus-fingerprint` / `AGENT_BUS_FINGERPRINT` still only NARROWS**: it may name a certificate
+  already in the stored set (the connection then accepts only that one), and a fingerprint **outside**
+  the set is still a hard refusal, not a precedence question. Widening is only ever `pin add`.
+
+#### `agent-busctl pin` — list / add / remove accepted certificates
+
+```
+agent-busctl pin list
+agent-busctl pin add <fingerprint>
+agent-busctl pin remove <fingerprint>
+```
+
+**Purely LOCAL** — nothing is sent to the bus. `pin` only reads and writes the credential store
+(`client.Store.AddBusPin` / `Store.RemoveBusPin`, via `Client.AddBusPin` / `Client.RemoveBusPin`). It
+takes no flags of its own beyond the globals (`--as` / `--identity` / `--json`).
+
+- `pin list` — prints the current accept-set; makes no change.
+- `pin add <fingerprint>` — confirm the value **out of band** first (the bus's
+  `bus_cert_fingerprint=…` startup log line, or the invite), then widen the accept-set by one.
+  Re-adding a fingerprint already held succeeds as a no-op — the obvious retry after an interrupted
+  rollover. Refused at `MaxBusPins`, and refused on an identity enrolled against an `http` bus (a
+  plaintext connection presents no certificate, so a pin there would be a check that never runs —
+  re-enrol against the `https` URL instead). The gate is the **scheme, not an empty accept-set**: an
+  `https` identity that holds *no* pin — which a downgrade can produce, see below — may gain one, and
+  `pin add` is its recovery rather than a full re-enrolment.
+- `pin remove <fingerprint>` — retire one certificate. Refused if it is the last one held, and refused
+  (not a silent no-op) if the fingerprint given is not currently held, so a mistyped value cannot be
+  reported as success while the real one stays accepted.
+
+All three forms answer with the identity's **full resulting accept-set**, never a diff, so a script
+driving a rollover reads the resulting state instead of reconstructing it:
+
+```json
+{"agent_id":"bus-abc.planner-1","bus_url":"https://127.0.0.1:8443",
+ "bus_fingerprints":["<old-64-hex>","<new-64-hex>"],"max_bus_fingerprints":2}
+```
+
+`bus_fingerprints` is **always present and never null** (an empty accept-set prints `[]`), and
+`max_bus_fingerprints` is the cap (`client.MaxBusPins`), so a caller can tell "one slot free" from
+"add will be refused" without hard-coding the number.
+
+Exit codes: `0` ok; `2` `usage` — unknown subcommand, wrong argument count, a malformed fingerprint,
+`pin add` at the cap, or `pin remove` of the last pin; `3` `config` — no identity enrolled or selected.
+
+**Recovery from a genuine rotation**, in order:
+
+1. Confirm the new fingerprint **out of band** — the bus logs `bus_cert_fingerprint=…` at startup.
+2. `agent-busctl pin add <new>` — the identity now accepts both the outgoing and the incoming
+   certificate.
+3. Once the bus has stopped serving the old certificate, `agent-busctl pin remove <old>` to narrow
+   back to one.
+
+`agent-busctl logout <agent-id>` followed by re-enrolling with `--bus-fingerprint <new>` remains the
+heavier alternative, and is still the right answer when the goal is to drop the OLD certificate
+outright rather than accept it alongside the new one for a window. (Enrolling straight over an
+existing identity without the `logout` is refused — the stored identity still pins the old
+certificate.)
+
 - **NOT yet checked:** certificate expiry and validity dates. Disabling the default chain check
   disables those too, and the pin answers "which bus", not "is this certificate still fit to use".
   That is `MTLS-VERIFY`, and it is stated here rather than implied so nobody reads more into the pin
@@ -130,6 +343,11 @@ is on the other end, and the client must be told it **before** its first connect
   the exported `BusFingerprint` / `ParseBusFingerprint` exist so such an embedder can reuse this
   construction rather than invent a second one. **Nothing in this package or the CLI ever sets it**,
   and no flag or env var reaches it.
+- **Split with `MTLS-LISTENER`:** `MTLS-ROTATE` is the **client** half only — the accept-set, `pin
+  add`/`pin remove`, and matching any set member during the handshake are implemented and enforced by
+  `client/`. The **server** half (a bus actually serving two certificates through a rollover) is
+  `MTLS-LISTENER`, which has not landed, and **no bus serves TLS at all yet** (see "In flight" below).
+  None of the rotation behaviour described above has been exercised against a real bus.
 
 ### Signed sends: `agent-busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
 
@@ -230,13 +448,23 @@ No code changes meaning; some commands give one a more specific sense:
 
 | Command | Fields |
 | --- | --- |
-| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprint` (**`omitempty`** — present only when a certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path` |
+| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprints` (array, **`omitempty`** — present only when at least one certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path` |
 | `whoami` | the identity fields above, plus `is_current` (bool), and `session` (`agent_id`, `expires_at`, `refresh_at`, `lifetime_seconds`) with `--verify` |
 | `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
 | `logout` | `removed` (array of agent ids), `current_agent_id` (string), `server_notified` |
+| `pin` (`list`/`add`/`remove`) | `agent_id`, `bus_url`, `bus_fingerprints` (array, **never null** — an empty accept-set prints `[]`), `max_bus_fingerprints` (int, `client.MaxBusPins`). See "Certificate pinning" above. |
 | `agents` | `agents` (array of `agent_id`/`bus_id`/`name`/`enrolled_at`), `count`, `ok` |
 | `send`, `broadcast` | `message_id`, `seq`, `from`, `broadcast`, `to`, `sent_at`, `content_sha256`, `replayed`, `idempotency_key`, `ok` |
+
+**BREAKING JSON CHANGE (`MTLS-ROTATE`, 2026-08-07): `Identity` no longer carries `bus_fingerprint`
+(a single string).** It now carries `bus_fingerprints` — an array of strings, `omitempty` — and that
+is the shape everywhere an `Identity` is emitted: `enrol`, `whoami`, `whoami --all`, `use`, and the new
+`pin`. A consumer reading `.bus_fingerprint` must move to `.bus_fingerprints[]` (e.g. `.bus_fingerprints[0]`
+for "the one I enrolled with", or iterate the array to check every accepted certificate). This surface
+shipped the same day as `bus_fingerprint` itself (`MTLS-PIN`, commit `61e6067`), and **no bus serves
+TLS yet**, so there is no deployed consumer of the old field — which is the justification for changing
+the shape outright rather than keeping both.
 
 **`is_current` is a bool; `current_agent_id` is a string.** They are deliberately different keys: one
 name that is a bool in one subcommand and a string in another makes `jq .current` unpredictable.
@@ -338,11 +566,31 @@ This is the load-bearing part of `watch`, and it applies whether the output is h
 | Path | Mode | Contents |
 | --- | --- | --- |
 | `<identity-dir>/` | `0700` | The store. Tightened on open if it already exists looser. |
-| `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the pinned `bus_fingerprint` (2026-08-07, `omitempty`), the current selection, and in-flight (`pending`) enrolments. |
+| `<identity-dir>/identities.json` | `0600` | Format version `1` (**not bumped by `MTLS-ROTATE`** — see below). Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the pinned `bus_fingerprints` **array** (up to `MaxBusPins` = 2, `omitempty`; a single-pin `MTLS-PIN` store is migrated on load — see below), the current selection, and in-flight (`pending`) enrolments. |
 | `<identity-dir>/identities.lock` | `0600` | Exclusive lock for read-modify-write; treated as abandoned after 30s. |
 | `<identity-dir>/trusted-keys/` | `0700` | (added 2026-08-07) The local trust store — `client.TrustedKeysDirName`. One `0600` file per peer, **named `<fully-qualified-agent-id>.pub`**, holding the standard base64 of that peer's 32-byte Ed25519 **messaging** public key. Deliberately the dullest format that works: one key, one file, no index, so an operator can inspect/add/remove with `cat`/`cp`/`rm` during an incident and a damaged file costs trust in one peer rather than all. A file over `4 KiB` is refused unread. The `0600`/`0700` modes protect **INTEGRITY, not secrecy** — these are public keys; whoever can write this directory decides whose signatures this agent accepts. |
 | `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_url`) pair — no key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
 | `<identity-dir>/cursors.lock` | `0600` | A **separate** exclusive lock from `identities.lock` — a cursor advances far more often than a credential changes, and sharing one lock would put `watch` in needless contention with `enrol`/`use`/`logout`. |
+
+**The `identities.json` accept-set field is migrated, one-way, on load (`MTLS-ROTATE`, 2026-08-07).**
+A store written by the single-pin `MTLS-PIN` build carries a scalar `bus_fingerprint` per identity;
+`(*Store).load` folds that into the new `bus_fingerprints` array the first time the file is read, and
+the store format version (`1`) is **deliberately not bumped** for this — an additive field migration,
+same reasoning as `messaging_key_seed`. The migration only happens **in memory**: nothing is written
+back until something else writes the store for another reason, but from that point on the legacy
+`bus_fingerprint` key is gone and only `bus_fingerprints` remains. This is intentionally **one-way**:
+a **downgrade** to a single-pin binary reading a store that now only has `bus_fingerprints` sees **no**
+pin for that identity and therefore **refuses** to speak `https` to the bus (`transportSecurity`)
+rather than connecting unverified. That fail-closed direction — a downgrade loses a pin and stops,
+never loses a pin and proceeds — is what makes the one-way migration acceptable.
+
+A downgrade that **writes** the store has a second consequence, stated here because stating only the
+read half reads as reassurance: the older binary re-marshals the credentials without a
+`bus_fingerprints` field it does not know, and the accept-set is **permanently lost from the file**.
+Trust is not silently downgraded — the identity is simply unpinned and `https` is refused — but it is
+unrecoverable from disk, so the operator must re-pin. That is exactly why `pin add` is gated on the
+URL **scheme** rather than on the set being empty: the recovery is `agent-busctl pin add <hex>`, not a
+re-enrolment.
 
 **`cursors.json` fails OPEN, unlike `identities.json`.** A damaged file, one that fails to parse, or
 one written by an unknown format version is **not fatal**: it is ignored, a warning is printed to
@@ -460,11 +708,15 @@ a *later* retry the same logical send rather than a second message.
   followed, because Go's default policy would forward the `Authorization` header across an
   `https`→`http` downgrade on the same port.
   **The client-side half of pinning is IMPLEMENTED AND ENFORCED BY THE CLIENT** (`MTLS-PIN`,
-  2026-08-07) — deliberately ahead of the listener, because a fingerprint nobody checks defends
-  nothing. It is code-only: no bus serves TLS yet, so nothing exercises it end to end against a real
-  bus, and the behaviour described under "Certificate pinning" above is what `client/` does, not
-  something a running deployment has demonstrated. The **client certificate** half of mutual TLS is still to come
-  (`MTLS-CLIENTCERT`); `tls.Config.Certificates` is unset today, and it belongs in
+  2026-08-07, **rotation support added by `MTLS-ROTATE`, same day**) — deliberately ahead of the
+  listener, because a fingerprint nobody checks defends nothing. It is code-only: **no bus serves TLS
+  yet**, so nothing exercises it end to end against a real bus, and the behaviour described under
+  "Certificate pinning" above (including the accept-set and `agent-busctl pin`) is what `client/` does,
+  not something a running deployment has demonstrated. Serving TWO certificates during a rollover is
+  therefore a **split**: the client can now accept a set of two and `pin add`/`pin remove` manage it
+  (`MTLS-ROTATE`, done); a bus actually **serving** two certificates through a rollover window is the
+  server half and is `MTLS-LISTENER`, which has not landed. The **client certificate** half of mutual
+  TLS is still to come (`MTLS-CLIENTCERT`); `tls.Config.Certificates` is unset today, and it belongs in
   **`client.pinnedTLSConfig`** — *not* in `newHTTPClient`'s unpinned fallback literal, which the
   pinned branch replaces wholesale, so a client certificate put there would be silently dropped on
   every pinned (i.e. every real) connection.
@@ -493,9 +745,10 @@ Exported surface as of 2026-08-02:
 | --- | --- |
 | `Config`, `DefaultConfig`, `Config.ApplyEnv`, `DefaultIdentityDir`, `RetryPolicy`, `HTTPDoer` | Configuration and the transport escape hatch |
 | `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout`, `EnvBusFingerprint` | The env var names above |
-| `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint`, `Identity.BusFingerprint` | (2026-08-07, `MTLS-PIN`) Certificate pinning. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not the bus I pinned" without parsing a message; `BusFingerprintError` carries both fingerprints. There is **no** exported (or unexported) way to turn the check off. |
+| `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint` | (2026-08-07, `MTLS-PIN`) One certificate fingerprint. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not a certificate I accept" without parsing a message; `BusFingerprintError` carries both the accepted set and the presented fingerprint. There is **no** exported (or unexported) way to turn the check off. |
+| `BusPinSet`, `NewBusPinSet`, `ParseBusPinSet`, `MaxBusPins`, `Identity.BusFingerprints`, `Client.AddBusPin`, `Client.RemoveBusPin` | (2026-08-07, `MTLS-ROTATE`) The accept-**set**. `BusPinSet` replaces a bare `BusFingerprint` wherever an identity's accepted certificates are resolved or verified against (`Client.doer`, `pinnedTLSConfig`); it is bounded at `MaxBusPins` = 2 and every membership change goes through `With`/`Without`, never direct mutation. **`Identity.BusFingerprint` (singular) no longer exists** — see the BREAKING JSON CHANGE note above. `Client.AddBusPin`/`RemoveBusPin` are the Go API the `pin add`/`pin remove` subcommands are a thin shell over, so an embedding agent can survive a rotation without shelling out. |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
-| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()` |
+| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()`, and (2026-08-07, `MTLS-ROTATE`) `AddBusPin()`, `RemoveBusPin()` |
 | `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
 | `EnrolOptions`, `EnrolResult`, `SessionInfo`, `LogoutResult` | Operation inputs and results |
 | `SendOptions`, `BroadcastOptions`, `SendResult`, `AgentSummary`, `AgentList`, `ReadOptions`, `Batch`, `Message`, `WatchOptions`, `WatchStats` | Messaging inputs, results and the wire-faithful `Message`/`Batch` types |
