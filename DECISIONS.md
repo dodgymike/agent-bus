@@ -2917,3 +2917,49 @@ they are short-lived credentials, and writing live ones to disk would store **re
 to buy exactly one saved round trip. The startup WARN was rewritten to say precisely this — the old
 one claimed the roster was lost, which is now the opposite of the truth, and a false reassurance in
 either direction on this line is worse than no line.
+
+---
+
+## 2026-08-07 — Four rulings: refuse-to-boot exception, format break, binary rename, redeploy
+
+### 1. A missing floors file is FATAL — a named exception to invariant 6
+
+A data directory with history but no `agent-suffixes` file **refuses to boot**. Remedy: restore the
+file, or restart once with `-backfill-suffix-floors`.
+
+This deviates from invariant 6 (always-restart) deliberately, and the carve-out is the same one
+already accepted for `wal-mac.key`: **always-restart exists so MEDIA DAMAGE cannot hold the bus
+hostage, not so MISCONFIGURATION is survived silently.** A deleted floors file is the latter — it is
+operator error or an attack, it is recoverable in exactly one restart, and starting anyway would
+resume every agent name from suffix 1 and re-mint ids that are live, violating invariant 1, which
+was reaffirmed WITHOUT narrowing.
+
+Note the asymmetry this fixes: a *tampered* floors file already failed closed, while a *deleted* one
+failed open. Corruption hit an explicit error path; deletion hit a "backfill" path that looked
+correct and quietly under-counted. Failing closed on both is the point.
+
+**Consequence:** `CONTRACTS-ONDISK.md` still states unqualified *"Recovery ALWAYS reaches a running
+server"*. That is now false and must name this exception, or an operator meeting the refusal has no
+document to search.
+
+### 2. The `store.RecordVersion` 1→2 break is ACCEPTED
+
+Existing v1 message records are discarded at recovery, and a rollback discards v2 the same way. **No
+migration is possible** rather than merely unwritten: signed messages have nothing to migrate *from*,
+and accepting unsigned legacy records would reintroduce exactly the downgrade SIGN-6 exists to
+forbid.
+
+**Enrolments and invites are unaffected, so no agent re-enrols.** Only message history is lost. No
+production data exists; the only affected directory is the local test deployment.
+
+### 3. The CLI binary is renamed `busctl` → `agent-busctl`
+
+`busctl` is systemd's D-Bus tool and would shadow it on `PATH`. Cheap now, breaking once anyone
+scripts against it. The rename touches `cmd/`, every doc that names it, and `CONTRACTS-CLI.md`'s
+contract surface.
+
+### 4. The running deployment is redeployed fresh
+
+The Compose deployment predates messaging, signing and the durable roster, so it cannot carry a
+message. The format break above makes its volume unusable regardless, and its contents are throwaway
+test state — so a fresh teardown including the volume, rebuilt from current HEAD.
