@@ -155,10 +155,47 @@ is obvious from a file listing — which is exactly why they are spelled out her
 | The bus **SIGNING** key | Every attestation this bus ever made becomes unverifiable and the pin held by **every peer bus** is dead — a federation-wide event requiring re-peering, not a local outage. |
 
 **The TLS key and the signing key are two different keys with two different jobs, and one is not a
-backup of the other** — see §8.5, which is where the distinction is normative. Their on-disk
-filenames are settled by the task that creates them (`MTLS-BUSCERT`), **not** by this section: at the
-time of writing neither key file is produced by anything on the startup path, so a data directory
-today still holds `wal-mac.key` alone. Backup procedure written now should be written for three.
+backup of the other** — see §8.5, which is where the distinction is normative.
+
+**The filenames are settled, and a running bus now produces them** (`MTLS-BUSCERT`, 2026-08-07).
+`cmd/agent-bus` calls `buscert.LoadOrCreate` on startup — after the data-directory lock and before
+the listener — so the three secrets of the table above live at these paths:
+
+| file | mode | secret? | contents |
+|---|---|---|---|
+| `<data-dir>/wal-mac.key` | `0600` | **SECRET** | the WAL/audit-log MAC key (`internal/wal`, §4 above) |
+| `<data-dir>/bus-tls.crt` | `0644` | PUBLIC | one PEM `CERTIFICATE` block: the self-signed bus certificate whose fingerprint clients pin |
+| `<data-dir>/bus-tls.key` | `0600` | **SECRET** | one PEM `PRIVATE KEY` block, PKCS#8 Ed25519 — the key inside that certificate |
+| `<data-dir>/bus-signing.key` | `0600` | **SECRET** | one PEM `PRIVATE KEY` block, PKCS#8 Ed25519 — the SEPARATE attestation key peer buses pin |
+
+The certificate is `0644` deliberately: it is sent to every client on every handshake and its
+fingerprint is published in invite blobs, so it is public by construction. Both **bus key** files are
+`0600`, and a **bus** key file with any group-or-other permission bit set is a **fatal** startup
+error, not a warning. That check is `internal/buscert`'s and applies to `bus-tls.key` and
+`bus-signing.key` only: `wal-mac.key` is read with a plain `os.ReadFile` and its mode is **not**
+enforced on load (`internal/wal/mackey.go`), so a loosened `wal-mac.key` is a real exposure that
+nothing refuses — do not read the row above as a promise that it is checked. Also fatal for the bus
+material: a key or certificate that is malformed, truncated, of the wrong PEM block type, not
+Ed25519, or not matched to the certificate; so is a certificate outside its validity window; and so
+is finding **some but not all** of the three present. Nothing is ever silently regenerated —
+regenerating the TLS key breaks every client that pinned the old fingerprint (there is no TOFU), and
+regenerating the signing key kills the pin held by every peer bus. Fresh material is minted **only**
+when all three are absent, and that start says so once, loudly, at `warn`:
+
+```
+level=warn msg="bus certificate and signing key GENERATED: …" data_dir=… cert=…/bus-tls.crt fingerprint=<64 hex> not_after=<RFC3339>
+```
+
+Generating the material is all this does. **The listener is still plaintext HTTP** — serving TLS is a
+separate task (`MTLS-LISTENER`) that must not land before clients can speak it — which is why the
+`server started` line reports `tls=false` alongside `bus_cert_fingerprint`.
+
+**Back up all THREE secrets, plus the log.** `wal-mac.key` + the log alone is not a backup of this
+bus: restore it without `bus-tls.key` and no client that pinned the certificate can connect; restore
+it without `bus-signing.key` and every peer bus's pin is dead and re-peering is required. A backup
+that omits any one of the three restores a bus that cannot do its job, and none of the three is
+regenerable. A backup that contains all of them is worth exactly as much to a thief as the data
+directory itself; protect it accordingly.
 
 ## 5. Format version 1 — legacy, and how it is upgraded
 

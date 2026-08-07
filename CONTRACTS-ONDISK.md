@@ -133,10 +133,13 @@ corruption means media damage or tampering.
   resumes from the log's own high-water mark, which is correct **unless the log has ALSO been
   damaged or quarantined**.
 
-**Recovery still ALWAYS reaches a running server — this file adds NO refuse-to-start behaviour.** A
-quarantine still starts a fresh log; it just starts it above the floor instead of at 1. Every index
-skip is logged loudly (WARN, or ERROR after a quarantine) naming from/to/indices skipped and the
-floor file's path.
+**This file adds NO refuse-to-start behaviour, and recovery from LOG DAMAGE still always reaches a
+running server.** A quarantine still starts a fresh log; it just starts it above the floor instead
+of at 1. Every index skip is logged loudly (WARN, or ERROR after a quarantine) naming
+from/to/indices skipped and the floor file's path. That "always" is about media damage to the log
+and is NOT unconditional for startup as a whole — three named MISCONFIGURATION carve-outs are fatal,
+and they are listed together under "Recovery always reaches a running server — with three named
+exceptions" below.
 
 **Scope limit, stated plainly and not softened:** the AUDIT log writer (`wal.OpenWriter`,
 `wal.KindAudit`) attaches NO floor — only `wal.Open` (the WAL proper) does. An audit log's discarded
@@ -205,7 +208,8 @@ agent-bus: opening the write-ahead log in "<data-dir>": <wal error>
 ```
 where `<wal error>` is whatever `internal/wal` reports — for example a corrupt file header reads
 `wal: <data-dir>/bus.wal: corrupt at offset 0: bad magic "XXXXXXXX", want "AGNTBUSW"` (the exact
-wording is set by `internal/wal/format.go`'s `corruptf`, not by `cmd/agent-bus`). **Recovery ALWAYS reaches a running server** (decision of 2026-08-02, invariant 6).
+wording is set by `internal/wal/format.go`'s `corruptf`, not by `cmd/agent-bus`). **Recovery from LOG
+DAMAGE always reaches a running server** (decision of 2026-08-02, invariant 6).
 Damaged records are repaired in place where possible, and otherwise QUARANTINED — the unusable log
 is moved aside with its bytes preserved on disk, and the bus starts. A bad magic, a wrong format
 version, a commit naming no open prepare, or a payload that will not decode no longer refuse to
@@ -217,6 +221,31 @@ defect (rated P0), not the discard itself, because a server quietly serving an e
 eating a log is indistinguishable to an operator from one that had nothing to serve. Reaching the
 fatal path above now means recovery could not complete at all (an unreadable file, a failed
 quarantine), not merely that the log was damaged.
+
+### Recovery always reaches a running server — with three named exceptions (corrected 2026-08-07)
+
+**This paragraph corrects an unqualified claim that was VERIFIED FALSE at the time of writing.** The
+sentence above, and its twin in the `wal-index-floor` section, both used to read "Recovery ALWAYS
+reaches a running server" with no carve-out. An operator who met one of the refusals below had no
+document to search, which is the failure this correction exists to fix.
+
+The decision of 2026-08-02 is about **MEDIA DAMAGE TO THE LOG**: when acknowledged bytes rot, the bus
+chooses availability over retention, discards loudly and starts. It has never applied to
+**MISCONFIGURATION or LOST KEY MATERIAL** — a class where starting anyway would silently reuse
+identities or make already-durable records unverifiable, and where the damage of booting is
+unbounded and invisible while the damage of refusing is one restart. Three carve-outs are fatal
+today. All three name the offending path and a remedy, and none of the three is ever "repaired" by
+regenerating the missing file:
+
+| refusal | condition | remedy |
+|---|---|---|
+| `wal-mac.key` missing or wrong | the log positively identifies itself as a format-version-2 log with content (`PROTOCOL.md` §4/§6) | restore the key from backup; it is never regenerated over an existing v2 log, because that makes every record unverifiable |
+| `agent-suffixes` missing | the data directory HAS history (it was non-empty at startup, or the log holds records) — `DECISIONS.md` 2026-08-07, `AUTH-3-FU-FAILOPEN`, and the seal-line ruling in `cmd/agent-bus/suffixfloors.go` | restore the floors file from backup; or, only if the directory genuinely never issued an agent id, restart ONCE with `-backfill-suffix-floors` |
+| bus key material unusable or partial | any of `bus-tls.crt` / `bus-tls.key` / `bus-signing.key` malformed, expired, group-or-other-readable, or present-but-incomplete (`MTLS-BUSCERT`, see the section on those three files below) | restore the named file from backup; the bus never re-mints, because a new TLS key breaks every pinned client and a new signing key kills every peer bus's pin |
+
+A CORRUPT `agent-suffixes` (`ids.ErrSuffixFileCorrupt`) and a CORRUPT `wal-index-floor`
+(`wal.ErrIndexFloorCorrupt`) are fatal on the same reasoning and with no override at all; they are
+listed in their own sections rather than repeated here.
 
 **New INFO log line, asserted on by tests — treat its shape as part of this contract.** After a
 successful open, `run()` logs one line naming what recovery found:
@@ -581,7 +610,18 @@ their field and its decoder together, in one build.
 > `61b7c9a`), which PERSISTS AND FSYNCS each name's floor BEFORE issuing the suffix and derives
 > nothing from history — so no tail repair and no log quarantine can rewind it, which makes the
 > "known residual hole" below structural to derivation and absent from write-ahead. It is wired in
-> `cmd/agent-bus/suffixfloors.go`. `AUTH-7` must NOT derive floors from `EnrolmentSuffixesInWAL`.
+> `cmd/agent-bus/suffixfloors.go`. The roster-wiring task (**`MSG-FU-ROSTERSOURCE`**, Spec Server
+> `public_id` `fa26036c` — this line used to name `AUTH-7`, a label that is not in the backlog) must
+> NOT derive floors from `EnrolmentSuffixesInWAL` alone.
+>
+> **This relabel is PARTIAL and is not this file's to finish.** The `AUTH-7` → `MSG-FU-ROSTERSOURCE`
+> correction is the acceptance criterion of a task of its own (Spec Server `public_id` `6fd8c8c5`,
+> "Correct stale wave label AUTH-7 to its real task identity across code and docs"), which was
+> `todo` and unclaimed when this line was written. Only the two `CONTRACTS-ONDISK.md` occurrences
+> were corrected here, as a side effect of the durable-enrolment paragraph below being rewritten
+> from false to true; roughly a dozen Go comments (`cmd/agent-bus/main.go`, `internal/auth`) still
+> say `AUTH-7`. Whoever claims `6fd8c8c5` should expect this file to be already done and the code
+> not to be.
 >
 > `EnrolmentSuffixesInWAL` is kept, not deleted, for one reason: the production derivation in
 > `cmd/agent-bus/suffixfloors.go` folds only `store.RecordKind`, so the two cover COMPLEMENTARY
@@ -612,18 +652,37 @@ change — no build of `agent-bus` before AUTH-3 ever wrote an `"agent"`-kind en
 entire value of settling `ENROL-SHAPE` first, and that value is now spent: any log written by an
 AUTH-3-or-later build already carries the full field set above.
 
-**NOT YET WIRED — read this before treating enrolment as durable in a running bus.**
-`cmd/agent-bus/main.go` still constructs `auth.NewService(auth.Options{Minter: minter})` with no
-roster injected, which means `auth.Service` falls back to its default, `MemoryRoster` — the
-in-memory implementation that writes nothing, fsyncs nothing, and is lost entirely on restart.
-`WALRoster`, `Encode`/`Decode` and `EnrolmentSuffixesInWAL` exist, are unit- and crash-tested, and are
-correct; none of it is on the path a deployed bus takes. Nothing in this section describes SHIPPED
-runtime behaviour until the follow-up wiring task (`AUTH-7`) lands and `main.go` constructs a
-`WALRoster` and attaches it to the process's `*wal.Log`. **`AUTH-7` must NOT derive startup suffix
-floors from `EnrolmentSuffixesInWAL`** — see the correction above; the allocator is built by
-`ids.OpenNameSuffixes` in `cmd/agent-bus/suffixfloors.go`, which is already wired. A reader must not
-come away believing a running bus persists enrolments today.
-introduced by this task.
+**WIRED — this section describes SHIPPED runtime behaviour** (corrected 2026-08-07; shipped at
+`aad611c`, "Durable roster + signed sends: two agents survive a restart"). This paragraph previously
+read "NOT YET WIRED", said `cmd/agent-bus/main.go` "still constructs
+`auth.NewService(auth.Options{Minter: minter})` with no roster injected", and told the reader not to
+treat enrolment as durable. **Every clause of that is now false**, and it named a task label
+(`AUTH-7`) that does not exist in the backlog: the real Part 1 is **`MSG-FU-ROSTERSOURCE`** (Spec
+Server `public_id` `fa26036c`, which is a task id and NOT a commit sha — do not try to `git show` it;
+the code landed at `aad611c`). The label correction here is deliberately partial — see the note in
+the blockquote above, and task `6fd8c8c5`, which owns the rest of it.
+
+What `run()` actually does, in the fixed three-step order `auth.WALRoster`'s type doc spells out:
+
+1. `authRoster := auth.NewWALRoster(lg)` — the roster is the log's APPLIER, so it must exist first;
+2. `wal.Open(wal.LogOptions{…, Applier: authRoster})` — replay REBUILDS the roster inside `Open`,
+   which is what makes an enrolment survive a restart;
+3. `authRoster.Attach(walLog)` — only now may it accept a LIVE enrolment, and every `Put` is
+   prepared, committed and fsynced before `Enrol` returns (invariant 4).
+
+It is then passed as `auth.NewService(auth.Options{Minter: minter, Roster: authRoster})`, so
+`MemoryRoster` is no longer reachable from `cmd/`. An agent that has enrolled does NOT have to
+re-enrol after a restart; its **session** is still in-memory only and must be re-established, which
+is a deliberate, permanent exception rather than a gap — see the `SESSIONS are in-memory only`
+startup WARN, which states exactly that split.
+
+**The startup suffix floors are still NOT derived from `EnrolmentSuffixesInWAL` alone**, and that
+constraint outlived the wiring task — see the correction above. The allocator is
+`ids.OpenNameSuffixes` in `cmd/agent-bus/suffixfloors.go`; `EnrolmentSuffixesInWAL` is folded in only
+as one half of a per-name MAXIMUM on the one-time backfill path, where it can raise a floor and never
+lower one.
+
+No new route, CLI flag, env var, record type or `ondisk-format-version` was introduced by this task.
 
 ## The durable invite record (INVITE-STORE, added 2026-08-07)
 
@@ -862,3 +921,133 @@ the same fingerprint, so `internal/idem` answers `OutcomeRetry` and replays the 
 route, CLI flag, env var or header is introduced by the `"seqfloor"` record itself.** The HTTP
 surface this wave DID change (`POST /v1/mint`, `POST /v1/send`, `POST /v1/broadcast`) is in
 `CONTRACTS-HTTP.md`.
+
+## Three new files in the data directory: the bus certificate and its two keys (MTLS-BUSCERT, `internal/buscert`, added 2026-08-07)
+
+`internal/buscert` mints and loads the bus's TLS identity — the **bus certificate** it presents in
+every handshake — plus a second, independent key that attests agent key bundles to peer buses. All
+three files live directly in `<data-dir>`, alongside the existing `bus.lock` and `wal-mac.key`.
+
+| file | mode | secret? | encoding | contents |
+| --- | --- | --- | --- | --- |
+| `bus-tls.crt` (`buscert.CertFileName`) | `0644` | PUBLIC | one PEM `CERTIFICATE` block | the DER of the self-signed **bus certificate** (leaf) whose fingerprint clients pin |
+| `bus-tls.key` (`buscert.TLSKeyFileName`) | `0600` | SECRET | one PEM `PRIVATE KEY` block, PKCS#8 Ed25519 | the private key inside the bus certificate; authenticates the CONNECTION |
+| `bus-signing.key` (`buscert.SigningKeyFileName`) | `0600` | SECRET | one PEM `PRIVATE KEY` block, PKCS#8 Ed25519 | a SEPARATE key that attests agent key bundles; PINNED BY PEER BUSES at peering |
+
+`bus-tls.crt` is public **by construction** — it is sent to every client on every handshake and its
+fingerprint is already published in invite blobs — so `0644` is not a security-relevant relaxation;
+forcing `0600` would only collide with an operator-supplied certificate mounted `0644` (E7). Both key
+files are `0600` and are refused outright if any group-or-other permission bit is set.
+
+**Why two keys, not one:** `DECISIONS.md` 2026-08-07 ("The bus TLS key and the bus SIGNING key are
+SEPARATE") — the two rotations have incompatible blast radii. Rotating the TLS key affects only this
+bus's own clients; rotating the signing key invalidates the pins held by **every peer bus**, a
+federation-wide event. The failure domains are also kept apart: a compromised TLS key can only
+impersonate the bus to its clients, while a compromised signing key can forge attestations for every
+agent on the bus — strictly worse. Sharing one key would drag every routine TLS rotation up to
+federation-wide cost, and the two are generated from two independent `ed25519.GenerateKey` calls;
+neither is ever derived from the other.
+
+**Three long-lived secrets now live in the data dir, not one:** `wal-mac.key` (owned by
+`internal/wal`), `bus-tls.key` and `bus-signing.key`. **A backup that copies the logs but omits any
+one of the three restores a bus that cannot do its job:**
+
+- without `wal-mac.key`, no record in the WAL or the audit log verifies;
+- without `bus-tls.key`, the bus cannot present the certificate its clients already pinned;
+- without `bus-signing.key`, every attestation this bus ever made is unverifiable, and every peer's
+  pin on it is dead.
+
+None of the three can be regenerated in place — see the generation rule below.
+
+**Generation happens exactly once, on a virgin data directory.** `buscert.LoadOrCreate` mints fresh
+material only when all three files are ABSENT. Any other split — some present, some missing — is
+FATAL (`buscert.ErrIncomplete`), and the error names exactly which files are present and which are
+missing. A missing file is **never** regenerated next to surviving ones: a fresh TLS key silently
+breaks every client that pinned the old fingerprint (there is no TOFU — E6), and a fresh signing key
+invalidates every peer bus's pin, a federation-wide event. A crash mid-first-generation lands in this
+same `ErrIncomplete` state; the only remedy is an OPERATOR removing the named files by hand and
+restarting to mint a clean set — the bus never deletes them itself.
+
+**The fingerprint construction is fixed:** `sha256.Sum256(cert.Raw)` — the DER of the leaf, not a
+re-encoding — rendered as **lowercase hex**. This is the same construction already durable in
+`internal/invite.Record.CertFingerprint` and `internal/auth.CertBinding.Fingerprint`; a digest over
+the SPKI, or over a PEM re-encoding, would be a second, incompatible identity for the same
+certificate, so this package offers exactly one.
+
+**Certificate validity: 365 days** when self-generated (`DECISIONS.md`, MTLS-DESIGN: "Both the bus
+TLS certificate (`MTLS-BUSCERT`) and the client TLS certificate (`MTLS-CLIENTCERT`) default to 365
+days when self-generated"). `NotBefore` is backdated 5 minutes to absorb clock skew between bus and
+client at first contact. A certificate found outside its validity window at load is FATAL
+(`buscert.ErrExpired`) — the bus refuses to start rather than silently regenerate (which would break
+every existing pin) or start anyway (which would fail every handshake with nothing in this bus's own
+logs to explain why). Rotation — E3's two-certificate rollover — is a separate, not-yet-written task.
+
+**Other fatal load conditions**, briefly: a key file readable by group or other
+(`buscert.ErrPermissions`); a key or certificate path that is not a regular file; malformed or
+truncated PEM; the wrong PEM block type; more than one PEM block in a file; a non-Ed25519 key; or a
+private key that does not match the certificate — all `buscert.ErrMalformed`.
+
+**Status: WIRED — a running bus produces these three files** (`MTLS-BUSCERT`, 2026-08-07). This
+paragraph previously read "UNWIRED: nothing imports `internal/buscert` yet", which was true and is
+now false. `cmd/agent-bus/buscert.go`'s `openBusCertMaterial` calls `buscert.LoadOrCreate` from
+`run()`, positioned AFTER `dirlock.Acquire` (generation WRITES to the data dir, and a start refused
+at the lock must still touch nothing but `bus.lock` — `TestRunRefusesALockedDataDir`), AFTER
+`ids.LoadOrCreateBusID` (the bus id is the certificate's descriptive CommonName), and BEFORE
+`wal.Open` (fail-fast: a start that will refuse over unusable key material should refuse before
+recovery has repaired or quarantined a byte of the log). Verified on a throwaway data directory: a
+first start leaves `bus-tls.crt` `0644`, `bus-tls.key` `0600` and `bus-signing.key` `0600` beside
+`wal-mac.key`.
+
+**The `-listen` host becomes a subject alternative name.** `certHosts` adds the host half of
+`-listen` to the loopback set `internal/buscert` always includes, because a client checks the name it
+DIALLED against the SANs (Go dropped the CommonName fallback in 1.15). Wildcard binds — `:8080`,
+`0.0.0.0:…`, `[::]:…` — contribute nothing and are dropped. **SANs are fixed at generation and
+material is never re-minted**, so moving a bus from a loopback bind to a public address after its
+first start leaves a certificate that does not name the new address; the remedy is the same
+deliberate operator act as any other certificate change, not a restart with a different flag.
+
+**Two operator-visible log lines, and their levels are contract** (asserted by
+`cmd/agent-bus/buscert_test.go`):
+
+```
+level=warn msg="bus certificate and signing key GENERATED: …"  data_dir=… cert=<dir>/bus-tls.crt fingerprint=<64 lowercase hex> not_after=<RFC3339>
+level=info msg="bus certificate and signing key loaded"        data_dir=… cert=<dir>/bus-tls.crt fingerprint=<64 lowercase hex> not_after=<RFC3339>
+```
+
+The `warn` line fires **exactly once per data directory** — it is the only notice an operator gets
+that the fingerprint every client must pin has come into existence, and seeing it twice on one
+directory means the material was lost and re-minted. **Neither line carries private key MATERIAL** —
+and it does not claim to hide the key PATHS: the WARN names both key filenames in its prose and logs
+`data_dir` as a field, so the paths are trivially reconstructible. That is deliberate and harmless
+(the filenames are fixed public constants, documented here), because an operator being told which
+files to back up is the whole point of the line. The `server started` line gained two fields:
+`bus_cert_fingerprint=<64 lowercase hex>` (public by construction — this is the value handed to
+clients to pin) and `tls=false`.
+
+**A crashed first generation can leave an orphan `bus-*.key.tmp-*` file, and nothing sweeps it.**
+`buscert`'s writer creates each file as a same-directory temp, `fchmod`s it to its final mode, writes
+and fsyncs it, then renames; a crash between the write and the rename leaves a `0600` file holding a
+real, never-used Ed25519 private key. It is inert — no start ever reads it, and the directory is
+still `ErrIncomplete` until an operator resolves it — but it is a live private key that will be
+picked up by a backup. Delete any `bus-tls.key.tmp-*` / `bus-signing.key.tmp-*` / `bus-tls.crt.tmp-*`
+you find; treat it as key material until it is gone.
+
+**`tls=false` is not a placeholder to be edited; it is the state.** This task GENERATES AND LOADS
+ONLY. `internal/httpapi` is unchanged, `http.Server` still has no `TLSConfig`, and the listener is
+still `net.Listen("tcp", …)` + `srv.Serve(ln)` — a plaintext `GET /healthz` behaves exactly as it did
+before. Serving TLS is `MTLS-LISTENER` and must NOT land before a client can speak it
+(`MTLS-CLIENTCERT`): server-side enforcement ahead of client-side capability is a total outage, and
+this repo has shipped one already. `cmd/agent-bus`'s `TestCmdDoesNotServeTLS` is an AST-level guard
+on that constraint and is to be DELETED by `MTLS-LISTENER`, never weakened.
+
+**Failure mode:** every unusable state is FATAL. `run()` returns an error, `main()` prints it to
+stderr prefixed `agent-bus: ` and exits `1`, and nothing binds a listener:
+```
+agent-bus: preparing the bus certificate and key material: the bus certificate and key material in "<data-dir>" could not be loaded, and it is NEVER regenerated over a partial or unusable set (…): buscert: <path> …
+```
+A refused start regenerates nothing and deletes nothing: the surviving files are byte-identical
+afterwards and a missing one stays missing.
+
+**No new HTTP route, CLI flag, env var, record type or `ondisk-format-version` is introduced**, and
+there is still no agent-facing surface — no `scripts/bus-*.sh` wrapper and no `AGENT_PROTOCOL.md`
+entry, because agents never see a bus's TLS or signing key material directly.

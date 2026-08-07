@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -623,9 +624,15 @@ func TestBusCertLeavesNoTemporaryFiles(t *testing.T) {
 // TestBusCertHandshakeVerifiesUnderStandardVerification is the highest-value
 // gap: it proves the SANs and key usages the template sets are actually
 // SUFFICIENT for a real Go client doing standard verification, not merely
-// that the fields look plausible on the parsed struct. InsecureSkipVerify
-// must never appear here (DECISIONS.md E7) -- the client instead trusts the
-// loaded leaf directly, exactly as a pinning client would.
+// that the fields look plausible on the parsed struct.
+//
+// Verification is NEVER disabled here. tls.Config's skip-verification field is
+// not set and must never appear anywhere in this tree, including in tests
+// (DECISIONS.md, 2026-08-02, "E7: no plaintext escape hatch"); the client
+// instead trusts the loaded leaf directly, exactly as a pinning client would.
+// The field is not named in this comment on purpose -- client/transport.go
+// makes the same choice for the same reason -- so that grepping the tree for
+// its name finds only real uses rather than the rules forbidding them.
 func TestBusCertHandshakeVerifiesUnderStandardVerification(t *testing.T) {
 	_, m := mint(t, buscert.Options{})
 
@@ -853,4 +860,67 @@ func containsIP(haystack []net.IP, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestBusCertRefusesASigningKeyIdenticalToTheTLSKey pins the one collapse of
+// the two-key separation that generation cannot cause and tls.X509KeyPair
+// cannot catch.
+//
+// X509KeyPair proves only that the TLS key matches the CERTIFICATE; it never
+// looks at the signing key. So a restore or a copy that put one key under both
+// names would load, serve, sign and peer perfectly happily with a single key
+// doing both jobs -- silently turning a stolen TLS key (impersonates the bus to
+// its clients) into a stolen signing key (forges attestations for every agent
+// on the bus, and every peer believes them). That is precisely the outcome the
+// separate-keys decision exists to prevent, so it is refused at load.
+func TestBusCertRefusesASigningKeyIdenticalToTheTLSKey(t *testing.T) {
+	dir, _ := mint(t, buscert.Options{})
+
+	tlsKey, err := os.ReadFile(filepath.Join(dir, buscert.TLSKeyFileName))
+	if err != nil {
+		t.Fatalf("read the TLS key: %v", err)
+	}
+	// The operator mistake, exactly: one key written under both names.
+	signingPath := filepath.Join(dir, buscert.SigningKeyFileName)
+	if err := os.WriteFile(signingPath, tlsKey, buscert.KeyFileMode); err != nil {
+		t.Fatalf("overwrite the signing key: %v", err)
+	}
+
+	_, err = buscert.LoadOrCreate(dir, buscert.Options{})
+	if !errors.Is(err, buscert.ErrMalformed) {
+		t.Fatalf("LoadOrCreate with the TLS key copied over the signing key: got %v, want ErrMalformed", err)
+	}
+	// The message must name BOTH files: an operator reading it has to know which
+	// two paths are the same key, not merely that something is wrong.
+	msg := err.Error()
+	for _, want := range []string{buscert.SigningKeyFileName, buscert.TLSKeyFileName} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error does not name %s: %s", want, msg)
+		}
+	}
+}
+
+// TestBusCertValidityIsTheDecidedPeriod pins the validity period to the value
+// DECISIONS.md settled (MTLS-DESIGN: both the bus and the client certificate
+// "default to 365 days when self-generated"), not to a number this package
+// picked for itself. It shipped at 730 days once; this test is what stops that
+// drifting back.
+func TestBusCertValidityIsTheDecidedPeriod(t *testing.T) {
+	const decided = 365 * 24 * time.Hour
+	if buscert.CertValidity != decided {
+		t.Fatalf("CertValidity = %v, want %v (DECISIONS.md, MTLS-DESIGN)", buscert.CertValidity, decided)
+	}
+
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	_, m := mint(t, buscert.Options{Now: fixedNow(now)})
+
+	if got, want := m.NotAfter().UTC(), now.Add(decided).UTC(); !got.Equal(want) {
+		t.Errorf("NotAfter = %s, want %s", got.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	// NotBefore is backdated so a few seconds of clock skew between a fresh bus
+	// and its first client is not a "certificate is not yet valid" handshake
+	// failure, which is the most confusing way for a new deployment to fail.
+	if !m.Certificate().NotBefore.Before(now) {
+		t.Errorf("NotBefore = %s, want it backdated before %s", m.Certificate().NotBefore, now)
+	}
 }

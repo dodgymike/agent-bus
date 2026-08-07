@@ -49,18 +49,27 @@ const KeyFileMode os.FileMode = 0o600
 // would collide with an operator-supplied certificate mounted 0644 (E7).
 const CertFileMode os.FileMode = 0o644
 
-// CertValidity is how long a freshly minted bus certificate is valid for: two
-// years.
+// CertValidity is how long a freshly minted bus certificate is valid for: 365
+// days.
 //
-// The tension is worth stating plainly rather than hiding behind a constant.
-// There is no rotation machinery yet (E3's two-certificates rollover is a
-// separate, unwritten task), so this expiry is a SCHEDULED OUTAGE: the day it
-// passes, the bus refuses to start and every client's pin is stale. Two years
-// is chosen to be long enough that rotation certainly lands first, and short
-// enough that a key does not live forever. The only mitigation available today
-// is that Material.NotAfter is exported, so a startup log line can report the
-// remaining life while there is still time to act on it.
-const CertValidity = 730 * 24 * time.Hour
+// The number is NOT chosen here. DECISIONS.md's MTLS-DESIGN entry settles it:
+// "Both the bus TLS certificate (MTLS-BUSCERT) and the client TLS certificate
+// (MTLS-CLIENTCERT) default to 365 days when self-generated" -- long enough
+// that holding a valid certificate is not itself an operational burden, short
+// enough that one leaked and never rotated does not stay valid indefinitely,
+// and deliberately SYMMETRIC with the client certificate so operators have one
+// cadence to plan around rather than two. It is explicitly distinct from the
+// SIGNING key's rotation cadence, which is allowed to run longer because its
+// blast radius is federation-wide.
+//
+// The tension that remains is worth stating plainly rather than hiding behind
+// the constant: there is no rotation machinery yet (E3's two-certificates
+// rollover is a separate, unwritten task), so this expiry is a SCHEDULED
+// OUTAGE -- the day it passes, the bus refuses to start and every client's pin
+// is stale. The only mitigation available today is that Material.NotAfter is
+// exported, so a startup log line can report the remaining life while there is
+// still time to act on it.
+const CertValidity = 365 * 24 * time.Hour
 
 // clockSkewAllowance backdates NotBefore. A bus and its client disagreeing by a
 // few seconds at first start must not turn into a "certificate is not yet
@@ -363,9 +372,34 @@ func load(certPath, tlsKeyPath, signingKeyPath string, opts Options, generated b
 			msg:   fmt.Sprintf("buscert: %s does not hold a parseable X.509 certificate", certPath),
 			cause: err}
 	}
-	if _, ok := leaf.PublicKey.(ed25519.PublicKey); !ok {
+	leafPub, ok := leaf.PublicKey.(ed25519.PublicKey)
+	if !ok {
 		return nil, &certErr{sentinel: ErrMalformed,
 			msg: fmt.Sprintf("buscert: the certificate in %s carries a %T public key, want ed25519.PublicKey", certPath, leaf.PublicKey)}
+	}
+
+	// THE TWO KEYS MUST BE DIFFERENT KEYS, and this is the only place that can
+	// still be true and unchecked.
+	//
+	// Generation always mints two independent keypairs, so this cannot fire on
+	// material this package created. It fires on material an OPERATOR assembled
+	// -- a restore that copied one key over both names, a paste into the wrong
+	// file -- and that is exactly where the mistake lands, because tls.X509KeyPair
+	// below proves only that the TLS key matches the CERTIFICATE and says nothing
+	// about the signing key at all. Without this check the bus would start,
+	// serve, sign and peer perfectly happily with ONE key doing both jobs.
+	//
+	// It is worth four lines because the whole point of the separation
+	// (DECISIONS.md 2026-08-07) is that the two compromises are not equally bad:
+	// a stolen TLS key impersonates the bus to its clients, a stolen signing key
+	// forges attestations for every agent on the bus and every peer believes
+	// them. Collapsing them silently makes the lesser compromise automatically
+	// become the greater one -- the decision's own words, and the one outcome it
+	// exists to prevent.
+	if signingKey.Public().(ed25519.PublicKey).Equal(leafPub) {
+		return nil, &certErr{sentinel: ErrMalformed,
+			msg: fmt.Sprintf("buscert: the signing key in %s is the SAME key as the TLS key in %s. These must be two independent keypairs: the TLS key authenticates the connection, the signing key attests agent key bundles to peer buses, and they are kept apart so that a compromise of one is not automatically a compromise of the other. This is what a restore or a copy that put one key under both names looks like. Restore the real signing key.",
+				signingKeyPath, tlsKeyPath)}
 	}
 
 	// tls.X509KeyPair is the stdlib's own check that the private key belongs to
@@ -687,6 +721,19 @@ type fileSpec struct {
 // is safe precisely because these are files nothing has ever read: leaving a
 // partial set behind would instead convert a transient write error into a
 // permanent ErrIncomplete that needs an operator's hands.
+//
+// THE RESIDUAL, stated because it is real and is deliberately NOT swept: a
+// CRASH -- not an error return -- between the write and the rename leaves a
+// bus-tls.key.tmp-* or bus-signing.key.tmp-* holding a real Ed25519 private key
+// at 0600. LoadOrCreate looks only at the three canonical names, so the next
+// start considers the directory virgin, mints a fresh set, and nothing ever
+// removes the orphan. It is litter rather than an exposure -- the key is 0600
+// and was never used by anything, so it authenticates nothing and verifies
+// nothing -- but it lands in backups, so an operator who finds one may safely
+// delete it. It is left rather than swept because sweeping would mean deleting
+// files by GLOB in a directory that holds every secret this bus has, and a
+// glob that is one character wrong is a far worse failure than a stray temp
+// file.
 func writeAll(dir string, files []fileSpec) error {
 	var temps, renamed []string
 	cleanup := func() {

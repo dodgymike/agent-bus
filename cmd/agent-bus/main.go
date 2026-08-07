@@ -239,6 +239,22 @@ func run(cfg Config) error {
 		lg.Warn("TEST-ONLY -bus-id override in use; the server is authoritative on ids, do not use this in production", "bus_id", busID)
 	}
 
+	// The bus's own cryptographic identity: the self-signed bus certificate, the
+	// key inside it, and the SEPARATE signing key (MTLS-BUSCERT). Generated only
+	// on a data directory holding none of the three, loaded on every start after
+	// that, and FATAL on anything else -- see cmd/agent-bus/buscert.go, which also
+	// explains why this sits after the lock and the bus id but before wal.Open.
+	//
+	// IT DOES NOT SERVE TLS, and adding that here would be a regression rather
+	// than a completion: the listener below is deliberately unchanged, because no
+	// client can speak TLS yet (MTLS-CLIENTCERT) and server-side enforcement
+	// ahead of client-side capability is a total outage. The Material is used for
+	// the log lines and the startup summary only.
+	busMaterial, err := openBusCertMaterial(cfg.DataDir, busID, cfg.Listen, lg)
+	if err != nil {
+		return fmt.Errorf("preparing the bus certificate and key material in %q: %w", cfg.DataDir, err)
+	}
+
 	// Open the durable write path, and REPLAY it, here: strictly after the
 	// exclusive lock above and strictly before the server begins serving.
 	//
@@ -544,6 +560,14 @@ func run(cfg Config) error {
 		serveErr <- srv.Serve(ln)
 	}()
 
+	// bus_cert_fingerprint is PUBLIC by construction -- it is the digest of a
+	// certificate that will be sent to every client on every handshake -- and it
+	// is the value an operator has to hand to a client to pin (E6, no TOFU), so
+	// the startup summary is exactly where it belongs. tls=false is stated
+	// EXPLICITLY rather than left to be inferred from the absence of a field: a
+	// bus that now holds a certificate but still serves plaintext is a state an
+	// operator could easily read the wrong way round, and the fix for that is
+	// MTLS-LISTENER, not a quieter log line.
 	lg.Info("server started",
 		"addr", ln.Addr().String(),
 		"bus_id", busID,
@@ -551,6 +575,8 @@ func run(cfg Config) error {
 		"poll_timeout", cfg.PollTimeout.String(),
 		"log_level", cfg.LogLevel.String(),
 		"version", version,
+		"tls", false,
+		"bus_cert_fingerprint", busMaterial.Fingerprint().String(),
 	)
 
 	return waitAndShutdown(lg, srv, cancelRoot, sigCh, serveErr)
