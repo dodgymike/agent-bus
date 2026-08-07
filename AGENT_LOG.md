@@ -1228,3 +1228,82 @@ Re-verified after those three edits: `go build ./...` + `go vet` clean, `gofmt -
 `go test -race -count=1 ./internal/hub/ ./internal/idem/ ./internal/wal/ ./internal/httpapi/` all `ok`,
 with the proof command above returning the identical `verdict=PASS ... tests_run=11 top_level=7
 failed=0`.
+
+---
+
+## 2026-08-07 — DEPLOY-2-FU-CONTAINERNAME: the runtime proof that was still missing (`e9dd20b4`)
+
+**Chain run: implementer (prior wave) → reviewer → security → documentation.** spec-keeper flips the
+task in a separate follow-up call. test-engineer skipped — this is a Compose-config verification task
+with no Go code to exercise; the "test" IS the proof_cmd below.
+
+**The gap this closes.** The one-line code fix (dropping the hardcoded `container_name: agent-bus`
+from `docker-compose.yml`) already landed on 2026-08-03 as part of commit `518e71b`, and a reviewer
+PASSed that diff the same day. But the task stayed `in_progress`, because the entire point of the fix
+— two instances of this compose file running simultaneously on one host under different project names
+— had never actually been watched happen: every `docker`/`docker compose` invocation from an agent
+shell failed with `cannot create user data directory`, traced to the docker snap's confinement not
+resolving through `$HOME` being a symlink (`/home/mike` → `/mnt/sdb4/mike/mike`). That was filed
+separately as `637fca2f` (ENV: docker CLI unusable for agents).
+
+**What changed this session.** Nothing in `docker-compose.yml` — it was already correct. What's new is
+a working invocation path: the real snap docker binary at `/snap/docker/current/bin/docker` (not the
+broken `/snap/bin/docker` wrapper on PATH) talking to the daemon over `DOCKER_HOST=unix:///run/docker.sock`.
+That combination works from an agent shell, so this task could finally be proven rather than merely
+argued.
+
+**Proof, by execution.** With a PRE-EXISTING production deployment already running on this host
+(compose project `agentbus`, container `agent-bus`, holding the real WAL + MAC key in volume
+`agentbus_agent-bus-data` — never disturbed):
+
+1. `docker compose -p abproof1 up -d --build`, then, while `abproof1` was still up, `docker compose -p
+   abproof2 up -d --build` — both came up (`abproof1-agent-bus-1`, `abproof2-agent-bus-1`), both
+   reached `healthy`, both answered `wget http://127.0.0.1:8080/healthz` with `{"status":"ok"}` from
+   inside their own containers, simultaneously, on the same host. This is the capability the bug
+   structurally blocked.
+2. The live `agent-bus` container's `Id` (`960d707b2c03…`) and `State.StartedAt`
+   (`2026-08-03T13:06:09Z`) were confirmed identical before and after — untouched.
+3. Ran the task's own `proof_cmd`, translated into real executable shell, through
+   `scripts/proof-check.sh`:
+   ```
+   ! grep -q "container_name" docker-compose.yml && docker compose -p agentbus-proof up -d --build \
+     && sleep 8 \
+     && docker compose -p agentbus-proof ps --format json | grep -q "\"Health\":\"healthy\"" \
+     && docker compose -p agentbus-proof exec -T agent-bus wget -q -O - http://127.0.0.1:8080/healthz \
+     && docker ps --format "{{.Names}}" | grep -qx agent-bus \
+     && docker compose -p agentbus-proof down -v
+   ```
+   → `proof-check: verdict=PASS class=file-assertion,build exit=0 tests_run=0 top_level=0 skipped=0
+   failed=0 empty_pkgs=0`.
+4. All throwaway projects (`abproof1`, `abproof2`, `agentbus-proof`) torn down with `down -v` scoped
+   only to those project names — never `agentbus`. Post-cleanup `docker ps -a` / `volume ls` / `network
+   ls` show only the original `agent-bus` container and `agentbus_agent-bus-data` volume.
+
+**Reviewer verdict: PASS.** Independently reproduced the same two-simultaneous-instance result with its
+own throwaway projects (`revcheck1`/`revcheck2`), confirmed the live container's `Id`/`StartedAt`
+unchanged before and after its own run too, confirmed no stray containers/networks/volumes from either
+run, and confirmed scope (`docker-compose.yml` only, already committed, no new diff; no Go source
+touched).
+
+**Security verdict: PASS.** Confirmed via `git show 518e71b -- docker-compose.yml` that the landed
+change is a pure one-line removal touching nothing else — Docker-daemon-visible naming only, no
+credential/authn/authz surface, no interaction with the loopback-only binding constraint or invariant
+11. Independently inspected the live daemon and found the running `agent-bus` container attached only
+to its own project network/volume with no host port binding, and — the interesting corroborating
+detail — its `.Image` field pins to the specific image ID (`sha256:4717689b0c22…`), now untagged/
+dangling, while the mutable `agent-bus:local` tag moved on to a fresh build (`0e691ebe521e…`) during
+this session's rebuilds. That's direct proof the running container is pinned to an image ID, not a
+tag, so re-tagging during the proof runs could never have affected it. No findings. TLS-seam comment
+(docker-compose.yml lines ~64-68) confirmed still accurate and unrelated to this fix.
+
+**On-disk / protocol contract:** none — this is a deployment-config-only change, no wire format, no
+route, no env var.
+
+**Follow-up filed, not this task's to fix:** `637fca2f` (ENV: docker CLI unusable for agents under
+snap confinement) can likely be downgraded or closed now that the working invocation path
+(`/snap/docker/current/bin/docker` + `DOCKER_HOST=unix:///run/docker.sock`) is demonstrated and
+documented here — left for spec-keeper/triage to decide, not resolved as part of this task.
+
+Proof-check verdict quoted above is the completion evidence; `commit_sha` for this task is `518e71b`
+(the fix itself), since this session added no new tracked-file changes to `docker-compose.yml` — only
+ran and documented the verification the task was waiting on.

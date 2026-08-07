@@ -1798,3 +1798,35 @@ it is the whole reason `AUTH-3` was blocked rather than merely deprioritised.
 
 **None required, if this lands before `AUTH-3`.** Nothing is persisted today. That is the entire
 value of settling it now, and it evaporates the moment durable enrolment ships.
+
+---
+
+## 2026-08-07 — DEPLOY-2-FU-CONTAINERNAME: the working docker invocation for agent shells on this box
+
+**Decision.** Record the concrete workaround for the previously-filed environment defect (`637fca2f`,
+"docker CLI unusable for agents") rather than leave it only in an agent's transcript, because every
+future docker-based `proof_cmd` on this box — including all of `DEPLOY-3` — depends on it.
+
+**The recipe:** use the real snap binary directly, not the broken PATH wrapper, and point it at the
+daemon socket explicitly:
+```
+DOCKER_HOST=unix:///run/docker.sock /snap/docker/current/bin/docker ...
+DOCKER_HOST=unix:///run/docker.sock /snap/docker/3505/usr/libexec/docker/cli-plugins/docker-compose ...
+```
+`/snap/bin/docker` (what's on PATH by default) fails with `cannot create user data directory:
+/home/mike/snap/docker/3505: Not a directory`, because `$HOME` (`/home/mike`) is a symlink to
+`/mnt/sdb4/mike/mike` and the snap's confinement does not resolve through it. Going straight at the
+already-running daemon over its Unix socket sidesteps that entirely — the CLI's per-user data
+directory is only needed for `docker context`/config bookkeeping the socket path bypasses.
+
+**Rationale for recording this as a decision, not just a log line:** `637fca2f` was filed 2026-08-02
+as "NEEDS THE USER (environment change, outside an agent's remit)". This session (2026-08-07) found
+that framing was too pessimistic — no environment change was needed, only the right binary + socket
+path — and used it to bring up two `agent-bus` compose instances simultaneously and pass
+`DEPLOY-2-FU-CONTAINERNAME`'s proof (see `AGENT_LOG.md`, same date). Any future task whose `proof_cmd`
+shells out to `docker`/`docker compose` should use this recipe before reporting UNVERIFIABLE.
+
+**Not decided here:** whether to bake this into `scripts/proof-check.sh` or a wrapper (e.g. a
+`scripts/bus-docker.sh` shim that resolves the right binary/socket automatically) so agents don't have
+to rediscover it by hand each time. Left as a candidate follow-up for whoever next touches
+`637fca2f` or picks up `DEPLOY-3`.
