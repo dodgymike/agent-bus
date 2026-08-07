@@ -2245,3 +2245,41 @@ reintroduce the whole hole for any peer not yet seen, which is every peer, once.
   peering breaks at once and re-peering becomes indistinguishable from an attack.
 - **An unpeered bus's messages cannot be verified**, by construction. That is the intended behaviour,
   not a gap — but it must be stated in `PROTOCOL.md` so nobody "fixes" it later with a TOFU fallback.
+
+---
+
+## 2026-08-07 — The bus TLS key and the bus SIGNING key are SEPARATE
+
+**Decision (user).** *"separate keys"*. Settles the sub-question left open by the cross-bus key-trust
+entry above.
+
+A bus holds two long-lived keypairs, with different jobs, different lifetimes and independent
+rotation:
+
+- **The TLS key** authenticates the CONNECTION. Its fingerprint travels in the invite blob (E6) and is
+  pinned by clients.
+- **The SIGNING key** attests AGENT KEY BUNDLES. It is pinned by PEERS at peering time (the entry
+  above) and is what makes a relayed signature verifiable at the far end.
+
+**Why separate, given one key is simpler.** The rotations have incompatible blast radii. Rotating the
+TLS key affects clients connecting to this bus, and the two-certificate rollover already decided (E3)
+makes that non-disruptive. Rotating the SIGNING key invalidates pins held by **every peer bus**, which
+is a federation-wide event. With one key, every routine TLS rotation would become a federation-wide
+event too — so the operationally cheap rotation would inherit the cost of the expensive one, and the
+predictable result is that neither gets rotated.
+
+Separating them also keeps the failure domains apart: a compromised TLS key lets an attacker
+impersonate the bus to clients, which is bad; a compromised signing key lets it forge attestations for
+any agent on the bus, which is worse. One key means the lesser compromise automatically becomes the
+greater one.
+
+**Consequences.**
+
+- Two key files in the data dir, alongside `wal-mac.key`, both mode 0600. That makes **three** secrets
+  in the data dir now — a backup that omits any of them is a bus that cannot do its job, and the
+  backup guidance in `PROTOCOL.md` must say so explicitly rather than naming `wal-mac.key` alone.
+- A peer pins **two** things: the TLS certificate fingerprint (connection) and the bus signing key
+  (attestations). They are obtained at different moments and must not be conflated in code or docs.
+- Both are generated with stdlib per invariant 9 — `crypto/ed25519` for signing, `crypto/tls` +
+  `crypto/x509` for the certificate. Never hand-rolled, never assembled from primitives.
+- Rotation of each follows the two-key rollover rule independently.
