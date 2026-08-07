@@ -20,7 +20,7 @@ index so existing references and muscle memory land somewhere useful instead of 
 | [`CONTRACTS-CLI.md`](CONTRACTS-CLI.md) | Server / CLI flags (`cmd/agent-bus`) and environment variables. |
 | [`CONTRACTS-HTTP.md`](CONTRACTS-HTTP.md) | HTTP routes, headers, enrolment/sessions, and authentication (the `authMiddleware` contract, the allow-list, the credential model). |
 | [`CONTRACTS-ONDISK.md`](CONTRACTS-ONDISK.md) | Durable record types / wire protocol versions, on-disk files in the data directory (`bus.lock`, `bus.wal`), and the write-ahead log at startup. **This is the plane most in flux** (DUR / on-disk format version 2 work is active) — it benefits most from being isolated in its own file. |
-| [`CONTRACTS-AGENT.md`](CONTRACTS-AGENT.md) | The agent-facing surface (`cmd/busctl` and the one surviving wrapper `scripts/bus-serve.sh`; `AGENT_PROTOCOL.md`) and repo tooling scripts (`scripts/spec-cloud.sh`, `scripts/proof-check.sh`) that are NOT agent-facing but are documented alongside it. |
+| [`CONTRACTS-AGENT.md`](CONTRACTS-AGENT.md) | The agent-facing surface (`cmd/agent-busctl` and the one surviving wrapper `scripts/bus-serve.sh`; `AGENT_PROTOCOL.md`) and repo tooling scripts (`scripts/spec-cloud.sh`, `scripts/proof-check.sh`) that are NOT agent-facing but are documented alongside it. |
 
 Two known-wrong passages were moved **unchanged, wrong exactly as before** — fixing their content is
 explicitly out of scope for the split itself and is tracked by other tasks, not this one:
@@ -317,8 +317,8 @@ carries the detail; this entry is the index and the list of breaks.
 |---|---|
 | `POST /v1/mint` (NEW), `POST /v1/send` (BREAKING request), `POST /v1/broadcast` (now 501), `timestamp_ms` + `signature` on the read path, the roster/session durability table | `CONTRACTS-HTTP.md` |
 | `store.RecordVersion` 1 → **2** and its bidirectional break; the new `wal.Entry.Kind` value `"seqfloor"`; sequence numbers advancing in jumps | `CONTRACTS-ONDISK.md` |
-| `busctl send`'s two-step; `busctl broadcast` exiting 6; the MESSAGING keypair and `messaging_key_seed`; `<identity-dir>/trusted-keys/`; the new `client` exported surface | `CONTRACTS-CLI.md` |
-| Invariant 7's status — `busctl keygen` and `busctl trust` DO NOT EXIST | `CONTRACTS-AGENT.md` |
+| `agent-busctl send`'s two-step; `agent-busctl broadcast` exiting 6; the MESSAGING keypair and `messaging_key_seed`; `<identity-dir>/trusted-keys/`; the new `client` exported surface | `CONTRACTS-CLI.md` |
+| Invariant 7's status — `agent-busctl keygen` and `agent-busctl trust` DO NOT EXIST | `CONTRACTS-AGENT.md` |
 | The reserve-then-send flow as an agent performs it | `AGENT_PROTOCOL.md` |
 
 **Reservations used, none hand-picked:** `store.RecordVersion = 2` from the Spec Server
@@ -346,6 +346,6 @@ session handshake — but not the enrolment.
 
 **Honest limits, so nothing here is oversold.** No messaging public key is registered at enrolment
 and CRYPTO-4 does not exist, so a recipient can obtain a sender's messaging public key ONLY out of
-band; recipient-side verification is not yet wired into `client.Read`; and `busctl` has no `keygen`
+band; recipient-side verification is not yet wired into `client.Read`; and `agent-busctl` has no `keygen`
 or `trust` subcommand. Signing works end to end and the signature is carried and returned. Automatic
 verification on receive does not happen yet.
