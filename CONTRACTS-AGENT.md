@@ -4,13 +4,13 @@ Split out of `CONTRACTS.md` (2026-08-02) — see that file for the index of all 
 the rest of the surface (CLI/env, HTTP, on-disk). This is a pure content move: everything below this
 header is unchanged from the prior single-file `CONTRACTS.md`, verbatim.
 
-## Agent-facing surface (`cmd/busctl`, `scripts/bus-serve.sh`) and `AGENT_PROTOCOL.md`
+## Agent-facing surface (`cmd/agent-busctl`, `scripts/bus-serve.sh`) and `AGENT_PROTOCOL.md`
 
 **The paragraph that stood here — "No wrapper is due this wave … `AGENT_PROTOCOL.md` does not exist
 in the repo" — is FALSE and is corrected below.** It described the CORE wave, when the only routes
 were `/healthz` and `/v1/info`.
 
-**The agent-facing surface is `cmd/busctl`, not `scripts/bus-*.sh`.** Invariant 7 was amended on
+**The agent-facing surface is `cmd/agent-busctl`, not `scripts/bus-*.sh`.** Invariant 7 was amended on
 2026-08-02 (`DECISIONS.md`, "The Go CLI replaces the shell wrappers"): a Go CLI over the importable
 `github.com/dodgymike/agent-bus/client` package satisfies the invariant in the wrappers' place, and
 serves a third audience the wrappers never could — an agent that EMBEDS the client. `AGENT_PROTOCOL.md`
@@ -29,25 +29,25 @@ exists and is the usage doc; `CONTRACTS-CLI.md` is the exact flag/JSON/exit-code
 Recorded as an open question rather than quietly treated as met. Invariant 7 requires every
 capability to ship with its agent-facing entry point **in the same task**:
 
-1. **`POST /v1/mint`** has no dedicated entry point. It is not a hole in practice — `busctl send`
+1. **`POST /v1/mint`** has no dedicated entry point. It is not a hole in practice — `agent-busctl send`
    performs the reserve-then-send two-step internally and an agent never issues the mint itself — but
    the route exists on the wire with no way to drive it alone, so it is named here rather than left
    for someone to discover.
-2. **`busctl keygen`** — printing this agent's own MESSAGING public key so a peer can trust it —
+2. **`agent-busctl keygen`** — printing this agent's own MESSAGING public key so a peer can trust it —
    **does not exist**. The capability exists only as `client.Client.MessagingPublicKey()`. Several
    error remedies in `client/store.go` and `client/keyring.go` tell the operator to run
-   `busctl keygen`; following that advice fails with "unknown subcommand".
-3. **`busctl trust`** — adding a peer's messaging public key to `<identity-dir>/trusted-keys/` —
+   `agent-busctl keygen`; following that advice fails with "unknown subcommand".
+3. **`agent-busctl trust`** — adding a peer's messaging public key to `<identity-dir>/trusted-keys/` —
    **does not exist** either. The capability exists only as `client.Client.TrustPeer()`.
-   `client/client.go`'s own doc comment refers to `busctl trust` as though it were shipped.
+   `client/client.go`'s own doc comment refers to `agent-busctl trust` as though it were shipped.
 
-Consequence, stated plainly: **an agent that shells out to `busctl` cannot today publish its
+Consequence, stated plainly: **an agent that shells out to `agent-busctl` cannot today publish its
 messaging key or trust a peer's**, so it cannot participate in end-to-end verification at all. Only
 an agent embedding the `client` package can. Since verification is not wired into `client.Read`
 either (see `CONTRACTS-CLI.md`), nothing is currently *blocked* by this — but the two gaps must close
 together, and neither should be reported as done.
 
-`POST /v1/broadcast` needs no entry point: `busctl broadcast` already exists and the route now
+`POST /v1/broadcast` needs no entry point: `agent-busctl broadcast` already exists and the route now
 refuses (501). That is a regression to be re-opened by SIGN-3, not a missing wrapper.
 
 ## Repo tooling scripts (`scripts/*.sh`, NOT agent-facing)

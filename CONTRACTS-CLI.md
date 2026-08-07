@@ -6,7 +6,7 @@ the rest of the surface (HTTP, on-disk, agent-facing).
 Two binaries live here:
 
 - **`cmd/agent-bus`** — the SERVER.
-- **`cmd/busctl`** — the CLIENT, added 2026-08-02 by CLI-1/CLI-2. Per the amended invariant 7 it
+- **`cmd/agent-busctl`** — the CLIENT, added 2026-08-02 by CLI-1/CLI-2. Per the amended invariant 7 it
   **replaces the `scripts/bus-*.sh` wrappers** as their subcommands land. Its flags, exit codes and
   JSON shapes are a contract with two consumers — a human and an agent shelling out — plus a third,
   an agent **embedding** the Go package it is a thin shell over.
@@ -28,18 +28,18 @@ Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` o
 
 ---
 
-## `cmd/busctl` — the client
+## `cmd/agent-busctl` — the client
 
-Binary directory `cmd/busctl`; the importable package it shells over is
+Binary directory `cmd/agent-busctl`; the importable package it shells over is
 `github.com/dodgymike/agent-bus/client` (top-level, deliberately **not** under `internal/` — see
 "The client package" below).
 
 ```
-busctl [flags] <command> [flags]
+agent-busctl [flags] <command> [flags]
 ```
 
-Global flags are accepted **before or after** the subcommand, so both `busctl --json enrol …` and
-`busctl enrol --json …` work.
+Global flags are accepted **before or after** the subcommand, so both `agent-busctl --json enrol …` and
+`agent-busctl enrol --json …` work.
 
 ### Global flags
 
@@ -54,7 +54,7 @@ Global flags are accepted **before or after** the subcommand, so both `busctl --
 **Resolution order, deterministic:** explicit flag → environment variable → the selected identity's
 recorded value (`--bus` only) → built-in default.
 
-`--help` / `-h` / `busctl help <command>` print help and exit `0`.
+`--help` / `-h` / `agent-busctl help <command>` print help and exit `0`.
 
 ### Subcommands (as of 2026-08-02)
 
@@ -69,15 +69,15 @@ recorded value (`--bus` only) → built-in default.
 | `broadcast [body]` | **BROKEN as of 2026-08-07.** The subcommand is still registered and still builds a request; the bus answers **501** because a broadcast has no canonical audience under signing format v1. Surfaces as **exit 6** — see below. | yes — `POST /v1/mint` then `POST /v1/broadcast`, which refuses |
 | `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
 
-**There is no `busctl keygen` and no `busctl trust` subcommand**, and the registry in
-`cmd/busctl/root.go` is exactly the eight rows above. This matters because several error remedies in
+**There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand**, and the registry in
+`cmd/agent-busctl/root.go` is exactly the eight rows above. This matters because several error remedies in
 `client/store.go`, `client/client.go` and `client/keyring.go` tell the operator to "run
-`busctl keygen`" or to add a key with `busctl trust` — **those commands do not exist**. The
+`agent-busctl keygen`" or to add a key with `agent-busctl trust` — **those commands do not exist**. The
 capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
 `Client.TrustedKeys()`), so today they are reachable by an agent EMBEDDING the client and not by one
 shelling out. Recorded as an open item, not as a satisfied requirement; see `CONTRACTS-AGENT.md`.
 
-### Signed sends: `busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
+### Signed sends: `agent-busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
 
 `client.Send` reserves, signs, then sends. The whole two-step is invisible from the command line —
 the flags, the positional body and the JSON output shape are all unchanged — but it is visible in a
@@ -100,7 +100,7 @@ client's generic remedy text for a 409 currently says "an idempotency key was re
 content; use a fresh key for new content", which is **wrong advice for this case**
 (`client/transport.go`'s `statusError` has no `ErrUnknownMint` branch). Reported, not fixed here.
 
-**`busctl broadcast` exits 6, not 7.** `client/transport.go` maps any status `>= 500` that is not
+**`agent-busctl broadcast` exits 6, not 7.** `client/transport.go` maps any status `>= 500` that is not
 429/503 to `KindServer`, and 501 falls there, so a refused broadcast is reported as "the bus reported
 an internal error" with the bus's own explanation appended. It is **not retried** (`isRetryable`
 retries `KindServer` only on 429/503), so there is no retry loop — but the exit code and wording do
@@ -116,9 +116,9 @@ deliberate refusal as a server fault. Recorded as a known rough edge.
 (retry a specific earlier send/broadcast — see "Send/broadcast idempotency" below). The body itself
 is a **positional argument** — `send`'s second (after `<to-agent-id>`), `broadcast`'s first — not a
 flag. Both commands **permute flags and positionals** (`parseWithPositionals` in
-`cmd/busctl/send.go`) so `busctl send <to> --json` parses as intended: Go's plain
+`cmd/agent-busctl/send.go`) so `agent-busctl send <to> --json` parses as intended: Go's plain
 `flag.FlagSet.Parse` stops at the first non-flag argument and hands everything after it back as
-positionals, so before that helper existed `busctl send <to> --json` read `"--json"` itself as the
+positionals, so before that helper existed `agent-busctl send <to> --json` read `"--json"` itself as the
 message body and **delivered it as the message**, silently. Any future command that adds a
 positional needs the same helper, or it will reproduce that exact bug.
 
@@ -159,7 +159,7 @@ No code changes meaning; some commands give one a more specific sense:
 - `6` — a fatal 503 (the bus's write path cannot durably accept messages, signalled by **no**
   `Retry-After` header) is `KindServer`, so it is exit **6**, not `5`. `5` stays reserved for the bus
   being unreachable at all — refused, DNS, timeout, TLS. See "The 503 split" below. **Also `6`
-  (2026-08-07): `busctl broadcast`, because the bus's deliberate `501` falls into the generic
+  (2026-08-07): `agent-busctl broadcast`, because the bus's deliberate `501` falls into the generic
   `>= 500` branch.** Not retried, but not distinguishable from a real server fault by exit code alone
   — read the message text, which carries the bus's own explanation.
 
@@ -244,7 +244,7 @@ a signature against `sent_at` fails every time. The signed bytes are reconstruct
 `body` is **always present**, standard base64 — the authoritative, lossless form, true for any bytes
 at all. `text` is present **only** when the body is valid UTF-8, free of control characters other
 than tab/newline/CR, and free of the Unicode bidi and zero-width characters that can reorder or hide
-what a terminal renders (`isBidiOrInvisible` in `cmd/busctl/watch.go` — the same forgery class as an
+what a terminal renders (`isBidiOrInvisible` in `cmd/agent-busctl/watch.go` — the same forgery class as an
 ANSI escape, spelled in Unicode). It is **omitted, never rewritten**, otherwise: a lossily-rewritten
 body would be worse than no field at all, since a consumer would have no way to tell what it read is
 not what was sent.
@@ -316,7 +316,7 @@ compromised, and silently fixing the mode destroys the only evidence.
 
 **Session tokens are never written to disk.** They are bearer credentials with at most an hour of
 life that do not survive a bus restart, so persisting them would trade a stealable token at rest for
-two saved round trips. Each `busctl` process performs its own handshake.
+two saved round trips. Each `agent-busctl` process performs its own handshake.
 
 ### The MESSAGING keypair — a second key, distinct from the AUTH key (added 2026-08-07)
 
@@ -377,7 +377,7 @@ would be lost while both sent conflicting payloads under the same key.
 ### Send/broadcast idempotency (invariant 10)
 
 The idempotency key for `send`/`broadcast` is minted **once per invocation** — before the payload is
-marshalled — and reused across every internal transport retry, so a send retried inside `busctl` can
+marshalled — and reused across every internal transport retry, so a send retried inside `agent-busctl` can
 never become two messages. Omit `--idempotency-key` and one is minted for you; it is always printed
 back (human output and `--json`'s `idempotency_key` field), because it is the only handle that makes
 a *later* retry the same logical send rather than a second message.
@@ -418,7 +418,7 @@ Top-level, **not** under `internal/`: invariant 7's third audience is an agent t
 client, and Go forbids another module from importing an `internal/` path, so the requirement would be
 silently foreclosed by a directory name. Its exported surface is a public API subject to
 compatibility care, and it must **not** import anything under `internal/` — mechanically enforced by
-CLI-1's proof clause `! go list -deps ./cmd/busctl | grep -q 'agent-bus/internal/'`.
+CLI-1's proof clause `! go list -deps ./cmd/agent-busctl | grep -q 'agent-bus/internal/'`.
 
 Constants shared with the server are **pinned literals** with a comment naming the server-side
 definition they mirror (`client.SessionSigningContext`, `client.AgentNamePattern`, the route paths).
@@ -459,10 +459,10 @@ stop on rather than back off forever, or an operator-visible fault becomes a sil
 
 | Var | Consumed by | Meaning |
 | --- | --- | --- |
-| `AGENT_BUS_URL` | `busctl` | Bus base URL (`--bus`) |
-| `AGENT_BUS_IDENTITY` | `busctl` | Credential store directory (`--identity`) |
-| `AGENT_BUS_AGENT_ID` | `busctl` | Act as this stored identity (`--as`) |
-| `AGENT_BUS_TIMEOUT` | `busctl` | Per-operation timeout (`--timeout`) |
+| `AGENT_BUS_URL` | `agent-busctl` | Bus base URL (`--bus`) |
+| `AGENT_BUS_IDENTITY` | `agent-busctl` | Credential store directory (`--identity`) |
+| `AGENT_BUS_AGENT_ID` | `agent-busctl` | Act as this stored identity (`--as`) |
+| `AGENT_BUS_TIMEOUT` | `agent-busctl` | Per-operation timeout (`--timeout`) |
 
 `cmd/agent-bus` still reads no environment variables; every server knob is a flag.
 (`scripts/bus-serve.sh` has its own `AGENT_BUS_RUN_DIR` / `AGENT_BUS_DATA_DIR` / `AGENT_BUS_LISTEN`

@@ -12,10 +12,10 @@ func whoamiCommand() command {
 	return command{
 		name:    "whoami",
 		summary: "show the identity this shell acts as",
-		help: `busctl whoami — show which identity commands will act as.
+		help: `agent-busctl whoami — show which identity commands will act as.
 
 USAGE
-  busctl whoami [--verify] [--all]
+  agent-busctl whoami [--verify] [--all]
 
 WHAT IT DOES
   Prints the current identity from the credential store. Nothing is sent to
@@ -32,7 +32,7 @@ FLAGS
 
 WHICH IDENTITY
   --as <agent-id> (or ` + client.EnvAgentID + `) for one command, without changing
-  anything; ` + "`busctl use`" + ` to change the stored selection. Parallel agents
+  anything; ` + "`agent-busctl use`" + ` to change the stored selection. Parallel agents
   sharing a credential store should prefer --as.
 
 EXIT CODES
@@ -86,7 +86,7 @@ func runWhoami(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl whoami", diagnostics, err)
+		return flagError("agent-busctl whoami", diagnostics, err)
 	}
 	if err := requireNoArgs("whoami", fs.Args()); err != nil {
 		return err
@@ -104,7 +104,7 @@ func runWhoami(ctx context.Context, env *cliEnv, args []string) error {
 				Kind:    client.KindUsage,
 				Op:      "whoami",
 				Message: "--all and --verify cannot be combined",
-				Remedy:  "verify one identity at a time: `busctl whoami --verify --as <agent-id>`",
+				Remedy:  "verify one identity at a time: `agent-busctl whoami --verify --as <agent-id>`",
 			}
 		}
 		return runWhoamiAll(env, c)
@@ -161,7 +161,7 @@ func runWhoamiAll(env *cliEnv, c *client.Client) error {
 			Kind:    client.KindEmpty,
 			Op:      "whoami",
 			Message: "no identities are enrolled",
-			Remedy:  "enrol with `busctl enrol --bus <url> --name <name>`",
+			Remedy:  "enrol with `agent-busctl enrol --bus <url> --name <name>`",
 		}
 	}
 	res := whoamiListResult{Identities: ids, CurrentAgentID: current, Pending: pending}
@@ -177,7 +177,7 @@ func runWhoamiAll(env *cliEnv, c *client.Client) error {
 			fmt.Fprintf(w, "\nunfinished enrolments — the bus may already have applied these:\n")
 			for _, p := range pending {
 				fmt.Fprintf(w, "  %s at %s, started %s\n", p.Name, p.BusURL, p.CreatedAt)
-				fmt.Fprintf(w, "    resume: busctl enrol --bus %s --name %s --idempotency-key %s\n",
+				fmt.Fprintf(w, "    resume: agent-busctl enrol --bus %s --name %s --idempotency-key %s\n",
 					p.BusURL, p.Name, p.IdempotencyKey)
 			}
 		}

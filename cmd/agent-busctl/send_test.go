@@ -111,7 +111,7 @@ func TestCLISendReusesIdempotencyKeyOnRetry(t *testing.T) {
 // The FAILURE path is where the idempotency key earns its keep, and it is the
 // path that dropped it.
 //
-// `busctl send --help` promises "The key is always printed back, because it is
+// `agent-busctl send --help` promises "The key is always printed back, because it is
 // the ONLY handle that makes a LATER retry the same logical send rather than a
 // second message." That promise is only worth anything on a failure: on success
 // the caller already knows the message landed. The genuinely AMBIGUOUS failures
@@ -127,7 +127,7 @@ func TestCLISendReusesIdempotencyKeyOnRetry(t *testing.T) {
 // message, would be worse than none: it would look like a retry handle and
 // produce a duplicate message when used.
 
-// TestCLISendFailureReportsIdempotencyKey drives `busctl send --json` against a
+// TestCLISendFailureReportsIdempotencyKey drives `agent-busctl send --json` against a
 // bus that answers 500 on EVERY attempt — an ambiguous failure by construction,
 // since a 500 says nothing about whether the write was applied.
 func TestCLISendFailureReportsIdempotencyKey(t *testing.T) {
@@ -255,7 +255,7 @@ func TestCLISendFailureReportsExplicitIdempotencyKey(t *testing.T) {
 // message was applied, so the key is the only thing that makes the retry safe.
 //
 // The failure is injected by HIJACKING the connection on /v1/send and closing
-// it, rather than by pointing busctl at a dead address. That distinction is
+// it, rather than by pointing agent-busctl at a dead address. That distinction is
 // load-bearing: a bus that is not listening fails during the SESSION handshake,
 // long before a key is minted or a body is marshalled, so it would prove
 // nothing about the write path. Killing the connection on the send itself
@@ -525,7 +525,7 @@ func TestCLISendBodySourceIsUnambiguous(t *testing.T) {
 // TestCLISendBodyIsVerbatim checks a body is sent BYTE FOR BYTE — including a
 // trailing newline.
 //
-// This is what makes the content hash reproducible: `printf 'x\n' | busctl
+// This is what makes the content hash reproducible: `printf 'x\n' | agent-busctl
 // send` and `sha256sum` must agree. Trimming a newline would silently change
 // that hash and corrupt every binary and structured payload.
 func TestCLISendBodyIsVerbatim(t *testing.T) {
@@ -574,7 +574,7 @@ func TestCLISendBodyIsVerbatim(t *testing.T) {
 	}
 }
 
-// TestCLIBroadcastSendsNoRecipient checks `busctl broadcast` goes to the
+// TestCLIBroadcastSendsNoRecipient checks `agent-busctl broadcast` goes to the
 // broadcast route with NO `to` field: the bus fans it out, it is not addressed,
 // and the recipient list comes back empty rather than enumerated.
 func TestCLIBroadcastSendsNoRecipient(t *testing.T) {
@@ -626,13 +626,13 @@ func TestCLIBroadcastSendsNoRecipient(t *testing.T) {
 }
 
 // TestCLIBroadcastRefused501ExitsRejectedNotServer is the end-to-end version of
-// the SIGN-6 client fix: `busctl broadcast` against a bus that answers 501
+// the SIGN-6 client fix: `agent-busctl broadcast` against a bus that answers 501
 // (the deliberate, permanent refusal — a broadcast cannot be signed under
 // signing format v1) must exit 7 (client.ExitRejected), not 6, and the message
 // an agent sees must say plainly that this is a refusal, not a fault, that
 // NOTHING was applied, and it must not tell the agent to retry.
 //
-// Before this fix `busctl broadcast` reported this as "the bus reported an
+// Before this fix `agent-busctl broadcast` reported this as "the bus reported an
 // INTERNAL ERROR", exit 6, with "may or may not have been APPLIED" and a
 // `retry with --idempotency-key` instruction — which is exactly the retry loop
 // SIGN-6(6) forbids for a TERMINAL rejection.

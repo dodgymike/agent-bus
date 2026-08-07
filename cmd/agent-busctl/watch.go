@@ -15,10 +15,10 @@ func watchCommand() command {
 	return command{
 		name:    "watch",
 		summary: "stream messages addressed to you as they arrive",
-		help: `busctl watch — stream messages addressed to you, as they arrive.
+		help: `agent-busctl watch — stream messages addressed to you, as they arrive.
 
 USAGE
-  busctl watch [--json] [--replay] [--cursor <c>] [--limit N]
+  agent-busctl watch [--json] [--replay] [--cursor <c>] [--limit N]
                [--poll-timeout <dur>] [--count N] [--for <dur>] [--no-cursor]
 
 WHAT IT DOES
@@ -97,7 +97,7 @@ STOPPING
                short rather than overrunning).
 
   A BOUNDED watch (--count or --for) that ends having printed NOTHING exits 8,
-  so ` + "`busctl watch --for 30s --count 1`" + ` can be used as "wait for one message"
+  so ` + "`agent-busctl watch --for 30s --count 1`" + ` can be used as "wait for one message"
   and the caller can branch on the timeout without parsing text. An UNBOUNDED
   watch stopped by a signal always exits 0, however many messages it saw.
 
@@ -137,7 +137,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl watch", diagnostics, err)
+		return flagError("agent-busctl watch", diagnostics, err)
 	}
 	if err := requireNoArgs("watch", fs.Args()); err != nil {
 		return err
@@ -150,7 +150,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 	if *pollTimeout <= 0 {
 		return &client.Error{
 			Kind:    client.KindUsage,
-			Op:      "busctl watch",
+			Op:      "agent-busctl watch",
 			Message: "--poll-timeout must be positive, got " + pollTimeout.String(),
 			Remedy:  "pass a positive duration, e.g. --poll-timeout " + client.DefaultPollTimeout.String(),
 		}
@@ -158,7 +158,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 	if *pollTimeout > client.MaxPollTimeout {
 		return &client.Error{
 			Kind:    client.KindUsage,
-			Op:      "busctl watch",
+			Op:      "agent-busctl watch",
 			Message: "--poll-timeout " + pollTimeout.String() + " is above the bus's ceiling of " + client.MaxPollTimeout.String(),
 			Remedy:  "use at most --poll-timeout " + client.MaxPollTimeout.String() + "; the bus refuses a longer poll rather than clamping it, and a poll that times out loses nothing",
 		}
@@ -173,7 +173,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 	if *replay && *cursor != "" {
 		return &client.Error{
 			Kind:    client.KindUsage,
-			Op:      "busctl watch",
+			Op:      "agent-busctl watch",
 			Message: "--replay and --cursor both name a start position",
 			Remedy:  "pass --replay to re-read the whole retained window, or --cursor <c> to start at one position — not both",
 		}
@@ -198,7 +198,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		// STDERR, never stdout: a warning inside the NDJSON stream would break
 		// the consumer this command exists for.
 		for _, w := range c.Store().Warnings()[warned:] {
-			fmt.Fprintf(env.stderr, "busctl: WARNING: %s\n", w)
+			fmt.Fprintf(env.stderr, "agent-busctl: WARNING: %s\n", w)
 		}
 	}()
 
@@ -243,7 +243,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		OnRetry: func(err error, delay time.Duration) {
 			// STDERR, always. A retry notice on stdout would land in the middle
 			// of a JSON stream and break the consumer this command exists for.
-			fmt.Fprintf(env.stderr, "busctl watch: %s; retrying in %s\n", err, delay.Round(time.Millisecond))
+			fmt.Fprintf(env.stderr, "agent-busctl watch: %s; retrying in %s\n", err, delay.Round(time.Millisecond))
 		},
 		// No OnPoll. A heartbeat printed on every timed-out poll would be noise
 		// in a human feed and a foreign record in a machine stream.
@@ -261,7 +261,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		if stats.Cursor != "" {
 			resume = "; resume with --cursor " + stats.Cursor
 		}
-		fmt.Fprintf(env.stderr, "busctl watch: %d message(s) over %d poll(s)%s\n",
+		fmt.Fprintf(env.stderr, "agent-busctl watch: %d message(s) over %d poll(s)%s\n",
 			stats.Delivered, stats.Polls, resume)
 	}
 
@@ -274,7 +274,7 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindEmpty,
 			Op:      "watch",
 			Message: "no messages arrived before the watch finished",
-			Remedy:  "wait longer (--for), or check the sender is using your fully-qualified id from `busctl agents`",
+			Remedy:  "wait longer (--for), or check the sender is using your fully-qualified id from `agent-busctl agents`",
 		}
 	}
 	return nil
@@ -419,7 +419,7 @@ func isBidiOrInvisible(r rune) bool {
 // id and timestamp are chosen by the bus. Rendered verbatim to a terminal, a
 // body containing "\x1b[2K\r" erases the line just printed and repaints it with
 // whatever the sender likes — so a message can forge the appearance of a
-// message from someone else, or of a busctl status line. client/sanitize.go
+// message from someone else, or of a agent-busctl status line. client/sanitize.go
 // documents exactly this attack for server-supplied text.
 //
 // This duplicates client.safeText because that function is UNEXPORTED and this

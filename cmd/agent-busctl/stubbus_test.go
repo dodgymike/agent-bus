@@ -37,7 +37,7 @@ const (
 
 // stubBus is a fake agent-bus for the CLI's authenticated subcommands.
 //
-// Every messaging route authenticates, so a test of `busctl send` still has to
+// Every messaging route authenticates, so a test of `agent-busctl send` still has to
 // serve the whole credential handshake: session/begin issues a token, the
 // client SIGNS THE TOKEN THE BUS CHOSE (Ed25519 over
 // client.SessionSigningContext + token), session/complete verifies it against
@@ -171,7 +171,7 @@ func newStubBus(t *testing.T, agentID string, route http.HandlerFunc) *stubBus {
 		case "/v1/mint":
 			// SERVED BY THE STUB ITSELF, like the session handshake above. Since
 			// SIGN-1's reserve-then-send every send is a two-call handshake, so a
-			// test asserting one thing about `busctl send` would otherwise have to
+			// test asserting one thing about `agent-busctl send` would otherwise have to
 			// hand-roll a minter first — and several copies of it is several
 			// places for the handshake to drift.
 			bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -272,14 +272,14 @@ func (b *stubBus) calls(path string) []stubRequest {
 	return out
 }
 
-// cliResult is one busctl invocation's observable output.
+// cliResult is one agent-busctl invocation's observable output.
 type cliResult struct {
 	Code   int
 	Stdout string
 	Stderr string
 }
 
-// args prefixes the global flags that point busctl at this stub bus. --identity
+// args prefixes the global flags that point agent-busctl at this stub bus. --identity
 // is ALWAYS passed: without it the CLI would fall back to DefaultIdentityDir
 // and a test would read and write the developer's real credential store.
 func (b *stubBus) args(rest ...string) []string {

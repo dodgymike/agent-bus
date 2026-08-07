@@ -22,12 +22,12 @@ import (
 // idempotencyHelp is the paragraph both commands carry verbatim.
 //
 // It is spelled out in full on both because invariant 10's distinction is the
-// one thing a caller MUST get right, and "see busctl send --help" is not a
+// one thing a caller MUST get right, and "see agent-busctl send --help" is not a
 // thing anyone reads before retrying a failed broadcast at 3am.
 const idempotencyHelp = `IDEMPOTENCY — HOW TO RETRY SAFELY
   Every send carries an idempotency key. Omit --idempotency-key and one fresh
   random key is minted for the whole invocation and reused across every
-  internal transport retry, so a send that is retried inside busctl can never
+  internal transport retry, so a send that is retried inside agent-busctl can never
   become two messages. The key is always printed back, because it is the ONLY
   handle that makes a LATER retry the same logical send rather than a second
   message.
@@ -49,18 +49,18 @@ const idempotencyHelp = `IDEMPOTENCY — HOW TO RETRY SAFELY
 const bodyHelp = `WHERE THE BODY COMES FROM
   Exactly ONE source, and it is an error to give two:
 
-    a positional argument   busctl send <to> 'hello'   (quote it — one word
-                            per argument, and busctl will not join them)
+    a positional argument   agent-busctl send <to> 'hello'   (quote it — one word
+                            per argument, and agent-busctl will not join them)
     --file <path>           read the body from a file; '-' means stdin
     --stdin                 read the body from stdin
     none of them            stdin is read anyway when it is a pipe or a
-                            redirect, so ` + "`echo hi | busctl send <to>`" + ` composes.
-                            When stdin is a TERMINAL, busctl says so on stderr
+                            redirect, so ` + "`echo hi | agent-busctl send <to>`" + ` composes.
+                            When stdin is a TERMINAL, agent-busctl says so on stderr
                             and reads until Ctrl-D.
 
   Flags may appear before or after the positional arguments. A body that
   begins with a dash needs a "--" first, so it is not read as a flag:
-  ` + "`busctl send <to> -- --this-is-the-body`" + `.
+  ` + "`agent-busctl send <to> -- --this-is-the-body`" + `.
 
   A body is sent VERBATIM — every byte, including a trailing newline, whether
   it came from an argument, a file or a pipe. Nothing is trimmed, added or
@@ -79,11 +79,11 @@ func sendCommand() command {
 	return command{
 		name:    "send",
 		summary: "send a direct message to one agent",
-		help: `busctl send — send a direct message to one agent.
+		help: `agent-busctl send — send a direct message to one agent.
 
 USAGE
-  busctl send <to-agent-id> [body] [flags]
-  echo 'hello' | busctl send <to-agent-id>
+  agent-busctl send <to-agent-id> [body] [flags]
+  echo 'hello' | agent-busctl send <to-agent-id>
 
 WHAT IT DOES
   Delivers one message to one agent and returns only once the bus has made it
@@ -91,10 +91,10 @@ WHAT IT DOES
   fsynced). A success here means the message is on disk, not merely received.
 
   <to-agent-id> is the FULLY-QUALIFIED ` + "`<bus-id>.<agent-id>`" + `; a bare name is
-  refused. List them with ` + "`busctl agents`" + `.
+  refused. List them with ` + "`agent-busctl agents`" + `.
 
   A direct message is visible to the named recipient ONLY — not to you, not to
-  anyone else. You will not see it come back on ` + "`busctl watch`" + `.
+  anyone else. You will not see it come back on ` + "`agent-busctl watch`" + `.
 
 FLAGS
   --file <path>            read the body from a file; '-' means stdin
@@ -126,11 +126,11 @@ func broadcastCommand() command {
 	return command{
 		name:    "broadcast",
 		summary: "send a message to every other agent on the bus",
-		help: `busctl broadcast — send one message to every other agent on the bus.
+		help: `agent-busctl broadcast — send one message to every other agent on the bus.
 
 USAGE
-  busctl broadcast [body] [flags]
-  echo 'starting build' | busctl broadcast
+  agent-busctl broadcast [body] [flags]
+  echo 'starting build' | agent-busctl broadcast
 
 WHAT IT DOES
   Delivers one message to every agent enrolled on the bus, and returns only
@@ -181,7 +181,7 @@ func runSend(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl send", diagnostics, err)
+		return flagError("agent-busctl send", diagnostics, err)
 	}
 	env.out.json = env.g.json
 
@@ -190,7 +190,7 @@ func runSend(ctx context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "send",
 			Message: "no recipient",
-			Remedy:  "pass the fully-qualified `<bus-id>.<agent-id>`: `busctl send <to> 'message'`; list them with `busctl agents`",
+			Remedy:  "pass the fully-qualified `<bus-id>.<agent-id>`: `agent-busctl send <to> 'message'`; list them with `agent-busctl agents`",
 		}
 	}
 	to := rest[0]
@@ -221,7 +221,7 @@ func runBroadcast(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl broadcast", diagnostics, err)
+		return flagError("agent-busctl broadcast", diagnostics, err)
 	}
 	env.out.json = env.g.json
 
@@ -260,9 +260,9 @@ type bodySource struct {
 // # Why this exists, and what went wrong without it
 //
 // flag.FlagSet.Parse STOPS at the first non-flag argument and hands everything
-// after it back as positionals. Every other busctl subcommand takes no
+// after it back as positionals. Every other agent-busctl subcommand takes no
 // positionals, so this never mattered — but `send` takes a recipient, and a
-// plain Parse therefore made `busctl send <to> --json` treat "--json" as THE
+// plain Parse therefore made `agent-busctl send <to> --json` treat "--json" as THE
 // MESSAGE BODY and send it. Silently. A smoke test caught exactly that: a
 // piped body was discarded and the literal text "--json" was delivered instead.
 // Refusing ambiguity is this command's stated job, so quietly sending a flag as
@@ -271,7 +271,7 @@ type bodySource struct {
 // The loop is the usual permutation: parse, take one positional, parse the
 // rest, repeat. A literal "--" is honoured first and everything after it is
 // positional VERBATIM, so a body that begins with a dash can still be sent as
-// an argument: `busctl send <to> -- --not-a-flag`.
+// an argument: `agent-busctl send <to> -- --not-a-flag`.
 func parseWithPositionals(fs *flag.FlagSet, args []string) ([]string, error) {
 	var tail []string
 	for i, a := range args {
@@ -324,9 +324,9 @@ func (b *bodySource) adoptPositional(rest []string, op string) error {
 		// argv would send something the caller did not write.
 		return &client.Error{
 			Kind:    client.KindUsage,
-			Op:      "busctl " + op,
+			Op:      "agent-busctl " + op,
 			Message: fmt.Sprintf("unexpected argument %q after the message body", rest[1]),
-			Remedy:  "quote the whole body as ONE argument, or pipe it: `busctl " + op + " ... 'a b c'`",
+			Remedy:  "quote the whole body as ONE argument, or pipe it: `agent-busctl " + op + " ... 'a b c'`",
 		}
 	}
 	b.arg, b.hasArg = rest[0], true
@@ -340,7 +340,7 @@ func (b *bodySource) adoptPositional(rest []string, op string) error {
 // two were named would silently send the wrong bytes, and the caller would
 // discover it by comparing content hashes long afterwards.
 func (b *bodySource) read(ctx context.Context, env *cliEnv, op string) ([]byte, error) {
-	op = "busctl " + op
+	op = "agent-busctl " + op
 
 	named := make([]string, 0, 3)
 	if b.hasArg {
@@ -372,7 +372,7 @@ func (b *bodySource) read(ctx context.Context, env *cliEnv, op string) ([]byte, 
 		body, err = readBodyFile(ctx, op, b.file)
 	default:
 		// --stdin, --file -, or nothing at all. "Nothing at all" reads stdin
-		// too: that is what makes `echo hi | busctl send <to>` compose, and it
+		// too: that is what makes `echo hi | agent-busctl send <to>` compose, and it
 		// is safe because the only case where a human could be left waiting is
 		// a real terminal, which is announced first.
 		//
@@ -381,7 +381,7 @@ func (b *bodySource) read(ctx context.Context, env *cliEnv, op string) ([]byte, 
 		// whichever flag got you there, and the line costs a machine nothing:
 		// a pipe is never a terminal, so it is never printed to one.
 		if env.stdinIsTTY {
-			fmt.Fprintf(env.stderr, "busctl: reading the message body from the terminal; end with Ctrl-D\n")
+			fmt.Fprintf(env.stderr, "agent-busctl: reading the message body from the terminal; end with Ctrl-D\n")
 		}
 		body, err = readBodyStream(ctx, op, env.stdin, "stdin")
 	}
@@ -437,7 +437,7 @@ func readBodyFile(ctx context.Context, op, path string) ([]byte, error) {
 // io.ReadAll on a TERMINAL blocks until EOF, and nothing about a context makes
 // an in-flight read(2) return. That would merely be annoying, except that
 // main.go installs signal.NotifyContext, which SUPPRESSES the default SIGINT
-// terminate for the whole process: `busctl send <to>` with a real terminal on
+// terminate for the whole process: `agent-busctl send <to>` with a real terminal on
 // stdin and no body source therefore hung, and Ctrl-C did not stop it. Only
 // Ctrl-D or SIGKILL did — a command that ignores Ctrl-C is the worst kind of
 // papercut, because the escape hatch a user reaches for is the one that is gone.

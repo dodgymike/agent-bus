@@ -1,4 +1,4 @@
-// Command busctl is the agent-bus client.
+// Command agent-busctl is the agent-bus client.
 //
 // It is the ONLY sanctioned way to talk to a bus: nobody hand-writes HTTP
 // (invariant 7), and this binary replaces the scripts/bus-*.sh wrappers as
@@ -44,7 +44,7 @@ func main() {
 // Stat + ModeCharDevice is the stdlib-only check (invariant 8); an ioctl-based
 // isatty would be a dependency for a sharper answer than either caller needs.
 // It is deliberately conservative at the edges: /dev/null is also a character
-// device, so `busctl send x </dev/null` takes the "terminal" branch — it prints
+// device, so `agent-busctl send x </dev/null` takes the "terminal" branch — it prints
 // the notice, reads EOF immediately and fails with "empty body". It never hangs.
 // An unstattable descriptor reports false: guessing "terminal" would make `send`
 // park on a stdin nobody is going to write to.

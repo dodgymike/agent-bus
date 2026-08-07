@@ -20,7 +20,7 @@ import (
 // server-attested key-bundle endpoint — does not exist. There is therefore NO
 // WAY to obtain a sender's messaging public key FROM THE BUS. A recipient can
 // verify a sender only if it obtained that sender's key OUT OF BAND and put it
-// here, with `busctl trust <agent-id> <base64-key>`.
+// here, with `agent-busctl trust <agent-id> <base64-key>`.
 //
 // The consequence is not hidden and must not be softened: on a bus where nobody
 // has exchanged keys, EVERY message is unverifiable, every body is discarded,
@@ -178,7 +178,7 @@ func (r *DirKeyRing) Trust(agentID string, pub ed25519.PublicKey) error {
 	if len(pub) != MessagingPublicKeySize {
 		return newError(KindUsage, "trust",
 			fmt.Sprintf("a messaging public key is %d bytes, got %d", MessagingPublicKeySize, len(pub)),
-			"pass the base64 key exactly as the peer printed it with `busctl keygen`")
+			"pass the base64 key exactly as the peer printed it with `agent-busctl keygen`")
 	}
 	path, err := r.path(agentID)
 	if err != nil {
@@ -267,7 +267,7 @@ func (r *DirKeyRing) path(agentID string) (string, error) {
 	if _, err := qualifyingBusID(agentID); err != nil {
 		return "", newError(KindUsage, "trust",
 			"not a fully-qualified agent id: "+safeText(agentID, 60),
-			"use the fully-qualified `<bus-id>.<agent-id>`; find it with `busctl agents`")
+			"use the fully-qualified `<bus-id>.<agent-id>`; find it with `agent-busctl agents`")
 	}
 	return filepath.Join(r.dir, agentID+trustedKeyFileSuffix), nil
 }

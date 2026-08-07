@@ -122,7 +122,7 @@ type exitCodeEntry struct {
 // # The parse rule is written down HERE because the ambiguity IS the defect
 //
 // These tables are laid out in two columns. That layout is readable and it is
-// also how `busctl watch` came to document a fatal 503 under exit 5 while the
+// also how `agent-busctl watch` came to document a fatal 503 under exit 5 while the
 // code returned 6: with codes 1 and 5 on the same physical line, a continuation
 // line indented under the RIGHT column reads, to a human skimming the file, as
 // belonging to whichever number their eye last landed on. So the rule a machine
@@ -130,7 +130,7 @@ type exitCodeEntry struct {
 //
 //  1. The block is the run of consecutive NON-BLANK lines immediately after a
 //     line whose trimmed text is "EXIT CODES". A blank line ends it. That
-//     matters for `busctl agents`, which follows its table with an indented
+//     matters for `agent-busctl agents`, which follows its table with an indented
 //     prose paragraph beginning "8 is rare in practice…"; folding that in would
 //     invent a second entry for 8.
 //  2. The right column begins at ONE offset for the whole block, DISCOVERED
@@ -140,7 +140,7 @@ type exitCodeEntry struct {
 //     "409: this key was used…" from being mistaken for a column of its own.
 //  3. A line is cut into a left cell and a right cell at that offset ONLY IF
 //     the two characters immediately before it are both spaces. Otherwise the
-//     whole line is one wide left cell — which is what `busctl send`'s "2 bad
+//     whole line is one wide left cell — which is what `agent-busctl send`'s "2 bad
 //     usage: no recipient, no body, two body sources, body too large" is, and
 //     slicing it at the column would have manufactured a nonsense continuation
 //     for whatever entry sat above it on the right.
@@ -272,7 +272,7 @@ func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 // defines and against what each of those codes MEANS.
 //
 // This exists because a help text is a contract an agent reads and branches on,
-// and it is the one part of the contract no compiler checks. `busctl watch`
+// and it is the one part of the contract no compiler checks. `agent-busctl watch`
 // documented a fatal 503 under exit 5 while client.ExitCode returned 6 for it;
 // nothing failed, because prose cannot be wrong at build time.
 //

@@ -14,14 +14,14 @@ func agentsCommand() command {
 	return command{
 		name:    "agents",
 		summary: "list the agents enrolled on this bus",
-		help: `busctl agents — list the agents enrolled on this bus.
+		help: `agent-busctl agents — list the agents enrolled on this bus.
 
 USAGE
-  busctl agents [--json]
+  agent-busctl agents [--json]
 
 WHAT IT DOES
   Asks the bus for its roster and prints every agent's FULLY-QUALIFIED id,
-  ` + "`<bus-id>.<agent-id>`" + `. That id — all of it — is what ` + "`busctl send`" + ` takes: the
+  ` + "`<bus-id>.<agent-id>`" + `. That id — all of it — is what ` + "`agent-busctl send`" + ` takes: the
   bus prefix is what makes an id unambiguous once buses relay to each other,
   so it is never shortened, elided or truncated here. If a row would be too
   wide, this command drops a COLUMN (ENROLLED first, then BUS, which is only
@@ -63,7 +63,7 @@ func runAgents(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl agents", diagnostics, err)
+		return flagError("agent-busctl agents", diagnostics, err)
 	}
 	if err := requireNoArgs("agents", fs.Args()); err != nil {
 		return err
@@ -86,7 +86,7 @@ func runAgents(ctx context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindEmpty,
 			Op:      "agents",
 			Message: "the bus reports no enrolled agents",
-			Remedy:  "check --bus points at the bus you enrolled with; if it was rebuilt, re-enrol with `busctl enrol`",
+			Remedy:  "check --bus points at the bus you enrolled with; if it was rebuilt, re-enrol with `agent-busctl enrol`",
 		}
 	}
 

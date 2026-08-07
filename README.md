@@ -2,12 +2,12 @@
 
 A small, very durable inter-agent message bus, written in Go. Claude Code agents enrol with it,
 wait on an HTTP long-poll, and DM each other. Multiple buses relay to each other.
-Agents drive it entirely through the `busctl` CLI (or the importable `client` package it shells
+Agents drive it entirely through the `agent-busctl` CLI (or the importable `client` package it shells
 over) — **an agent should never have to construct an HTTP call.**
 
 ## Status (2026-08-07)
 
-Enrolment, sessions, direct messaging and long-poll all work, and the client is `cmd/busctl` — see
+Enrolment, sessions, direct messaging and long-poll all work, and the client is `cmd/agent-busctl` — see
 [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) for the agent-facing walkthrough. Relay between buses is
 written but **not registered on any listener**, so cross-bus messaging does not work yet.
 
@@ -17,8 +17,8 @@ Three things an operator must know before upgrading an existing bus:
   survive a restart and a crash. **Agents no longer re-enrol after a restart.** Sessions are
   memory-only by design, so each agent redoes the session handshake — but not the enrolment.
 - **A signature is mandatory on every message.** `POST /v1/send` requires a sender-supplied
-  Ed25519 signature over the bus-minted message id and sequence; `busctl send` handles the whole
-  two-step for you. **`busctl broadcast` / `POST /v1/broadcast` now answer `501` and do not work** —
+  Ed25519 signature over the bus-minted message id and sequence; `agent-busctl send` handles the whole
+  two-step for you. **`agent-busctl broadcast` / `POST /v1/broadcast` now answer `501` and do not work** —
   a broadcast has no signable audience under the current signing format, and the route fails closed
   rather than carrying unsigned traffic. Send N direct messages instead until that is settled.
 - **Upgrading DISCARDS the existing message history.** The durable message record moved from
@@ -107,18 +107,18 @@ these) returns a JSON error, not the bare 200 above.
 ## Quickstart
 
 ```sh
-go build -o /tmp/agent-bus/busctl ./cmd/busctl
+go build -o /tmp/agent-bus/agent-busctl ./cmd/agent-busctl
 scripts/bus-serve.sh start                       # start a local bus
 
-busctl --bus http://127.0.0.1:8080 enrol --name planner
-busctl --bus http://127.0.0.1:8080 enrol --name builder --keep-current
-busctl agents                                    # fully-qualified ids
+agent-busctl --bus http://127.0.0.1:8080 enrol --name planner
+agent-busctl --bus http://127.0.0.1:8080 enrol --name builder --keep-current
+agent-busctl agents                                    # fully-qualified ids
 
-busctl --as <bus>.builder-1 watch &              # long-poll for messages
-busctl --as <bus>.planner-1 send <bus>.builder-1 'hello'
+agent-busctl --as <bus>.builder-1 watch &              # long-poll for messages
+agent-busctl --as <bus>.planner-1 send <bus>.builder-1 'hello'
 ```
 
-`busctl broadcast` is deliberately refused by the bus — see the status note above.
+`agent-busctl broadcast` is deliberately refused by the bus — see the status note above.
 [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) is the full agent-facing doc (every flag, exit code and
 idempotency rule); [`CONTRACTS-CLI.md`](./CONTRACTS-CLI.md) is the exact reference.
 
@@ -133,7 +133,7 @@ here to avoid the two going out of sync.
 - [`DECISIONS.md`](./DECISIONS.md) — dated design decisions and their rationale
 - [`CONTRACTS.md`](./CONTRACTS.md) — index of every route, flag, env var, and record type; the
   detail lives in `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, `CONTRACTS-CLI.md`, `CONTRACTS-AGENT.md`
-- [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) — agent-facing instructions (`busctl`)
+- [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) — agent-facing instructions (`agent-busctl`)
 - [`PROTOCOL.md`](./PROTOCOL.md) — the on-disk format and the canonical signing format
 - [`AGENT_LOG.md`](./AGENT_LOG.md) — per-task work log
 - [`SPEC.md`](./SPEC.md) — generated mirror of the Spec Server backlog (never hand-edit)

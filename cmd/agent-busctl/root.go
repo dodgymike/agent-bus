@@ -20,7 +20,7 @@ var flagErrHelp = flag.ErrHelp
 // globals are the flags every subcommand accepts.
 //
 // They are registered on the ROOT flag set and again on each subcommand's, so
-// both `busctl --json enrol …` and `busctl enrol --json …` work. Agents write
+// both `agent-busctl --json enrol …` and `agent-busctl enrol --json …` work. Agents write
 // the second form and humans write either; refusing one of them would be a
 // papercut with no upside.
 type globals struct {
@@ -85,7 +85,7 @@ func (e *cliEnv) client() (*client.Client, error) {
 		// env var refuses.
 		return nil, &client.Error{
 			Kind:    client.KindUsage,
-			Op:      "busctl",
+			Op:      "agent-busctl",
 			Message: "--timeout must be positive, got " + e.g.timeout.String(),
 			Remedy:  "pass a positive duration such as --timeout 30s",
 		}
@@ -107,7 +107,7 @@ func (e *cliEnv) client() (*client.Client, error) {
 	// warnings rather than failures because refusing to run would not make an
 	// already-exposed private key any less exposed.
 	for _, w := range c.Store().Warnings() {
-		fmt.Fprintf(e.stderr, "busctl: WARNING: %s\n", w)
+		fmt.Fprintf(e.stderr, "agent-busctl: WARNING: %s\n", w)
 	}
 	return c, nil
 }
@@ -116,10 +116,10 @@ func (e *cliEnv) client() (*client.Client, error) {
 type command struct {
 	name string
 
-	// summary is the one-line description in `busctl --help`.
+	// summary is the one-line description in `agent-busctl --help`.
 	summary string
 
-	// help is the full text for `busctl help <name>` and `busctl <name> -h`.
+	// help is the full text for `agent-busctl help <name>` and `agent-busctl <name> -h`.
 	// It is written to answer the question a reader actually has, not to
 	// restate the flag list the flag package already prints.
 	help string
@@ -175,7 +175,7 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	g := &globals{}
 	out := &output{stdout: stdout, stderr: stderr}
 
-	rootFS := flag.NewFlagSet("busctl", flag.ContinueOnError)
+	rootFS := flag.NewFlagSet("agent-busctl", flag.ContinueOnError)
 	var rootErrs bytes.Buffer
 	rootFS.SetOutput(&rootErrs)
 	rootFS.Usage = func() {}
@@ -187,11 +187,11 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			return client.ExitOK
 		}
 		out.json = g.json
-		return out.Fail(flagError("busctl", &rootErrs, err))
+		return out.Fail(flagError("agent-busctl", &rootErrs, err))
 	}
 	// --json is honoured for the errors raised below. Note this only covers a
 	// flag given BEFORE the command name; flag.Parse stops at the first
-	// non-flag argument, so `busctl bogus --json` never sees it here. The
+	// non-flag argument, so `agent-busctl bogus --json` never sees it here. The
 	// error path after cmd.run re-reads it for the after-the-name case.
 	out.json = g.json
 
@@ -235,7 +235,7 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			return client.ExitOK
 		}
 		// Re-read --json here, not only inside the subcommand. A global flag
-		// given AFTER the command name (`busctl whoami --json --badflag`) is
+		// given AFTER the command name (`agent-busctl whoami --json --badflag`) is
 		// parsed by the subcommand's flag set, which then fails, so the
 		// subcommand never reached its own `out.json = g.json` line — and the
 		// agent that asked for JSON got human text on the one path where it
@@ -250,7 +250,7 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 // and its diagnostics captured rather than printed, so a parse failure becomes
 // a classified *client.Error like every other failure.
 func newCommandFlagSet(name string, g *globals) (*flag.FlagSet, *bytes.Buffer) {
-	fs := flag.NewFlagSet("busctl "+name, flag.ContinueOnError)
+	fs := flag.NewFlagSet("agent-busctl "+name, flag.ContinueOnError)
 	buf := &bytes.Buffer{}
 	fs.SetOutput(buf)
 	fs.Usage = func() {}
@@ -287,9 +287,9 @@ func unknownCommandError(name string) error {
 	sort.Strings(known)
 	return &client.Error{
 		Kind:    client.KindUsage,
-		Op:      "busctl",
+		Op:      "agent-busctl",
 		Message: fmt.Sprintf("unknown command %q", name),
-		Remedy:  "known commands: " + strings.Join(known, ", ") + " — run `busctl --help`",
+		Remedy:  "known commands: " + strings.Join(known, ", ") + " — run `agent-busctl --help`",
 	}
 }
 
@@ -302,18 +302,18 @@ func requireNoArgs(name string, args []string) error {
 	}
 	return &client.Error{
 		Kind:    client.KindUsage,
-		Op:      "busctl " + name,
+		Op:      "agent-busctl " + name,
 		Message: fmt.Sprintf("unexpected argument %q", args[0]),
-		Remedy:  "run `busctl " + name + " --help`",
+		Remedy:  "run `agent-busctl " + name + " --help`",
 	}
 }
 
 func writeRootHelp(w io.Writer) {
 	var b strings.Builder
-	b.WriteString(`busctl — the agent-bus client.
+	b.WriteString(`agent-busctl — the agent-bus client.
 
 USAGE
-  busctl [flags] <command> [flags]
+  agent-busctl [flags] <command> [flags]
 
 COMMANDS
 `)
@@ -342,13 +342,13 @@ EXIT CODES
   4  credential rejected
 
 NOTES
-  No busctl command is ever interactive. Credentials come from the store or
+  No agent-busctl command is ever interactive. Credentials come from the store or
   the environment, never from a prompt, because an agent shelling out has no
   terminal to answer one.
 
-  ` + "`busctl watch`" + ` streams NDJSON whenever stdout is not a terminal, one
+  ` + "`agent-busctl watch`" + ` streams NDJSON whenever stdout is not a terminal, one
   message per line, flushed as it arrives. Delivery is AT-LEAST-ONCE, so a
-  handler must be idempotent on message_id: run ` + "`busctl watch --help`" + ` for the
+  handler must be idempotent on message_id: run ` + "`agent-busctl watch --help`" + ` for the
   cursor and re-delivery contract before you write one.
 
   Credentials live in a 0600 file under the credential store directory

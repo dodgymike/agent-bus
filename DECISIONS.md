@@ -2963,3 +2963,50 @@ contract surface.
 The Compose deployment predates messaging, signing and the durable roster, so it cannot carry a
 message. The format break above makes its volume unusable regardless, and its contents are throwaway
 test state — so a fresh teardown including the volume, rebuilt from current HEAD.
+
+---
+
+## 2026-08-07 — CLI-1-FU-BINARYNAME shipped: `cmd/busctl` → `cmd/agent-busctl`, closing the SS1 open question
+
+This closes the open question raised in the "2026-08-02 — The client is `client/` + `cmd/busctl`"
+entry above ("Known collision, flagged not resolved") and confirmed as ruling #3 in the preceding
+"Four rulings" entry: `busctl` is systemd's D-Bus introspection tool, present in the base install on
+Debian/Ubuntu/Fedora/Arch, so `go install ./cmd/busctl` or dropping the built binary on `PATH`
+SHADOWS the system tool. Cheap to fix before anyone scripts against the name; breaking to fix after.
+The rename is `busctl` → `agent-busctl`, mechanical, no behaviour change.
+
+**What moved.** `cmd/busctl/` → `cmd/agent-busctl/` via `git mv` (history preserved). Every literal
+program-name string that prints to a user — `--help` text, usage lines, error `Op`/`Remedy` fields,
+the `flag.NewFlagSet` name, the stderr `%s: ` prefix in `output.go`, the package doc comment — renamed
+alongside it, in both `cmd/agent-busctl/**` and every doc/comment in `client/**` that names the
+binary by example (`` `busctl send` ``, `` `busctl enrol --bus ...` ``, etc.). `client/transport.go`'s
+`userAgent` constant also moved to `"agent-busctl"`: it is informational only (no server-side code or
+test keys on its literal value), so it is not a wire-compatibility concern, unlike the next point.
+
+**What deliberately did NOT move: the idempotency-key prefix.** `client/enrol.go`'s
+`newIdempotencyKey` mints keys prefixed literally `"busctl-"` — e.g. `busctl-47938fc0bbbb90f8c25d92fcd2043362`
+— and that prefix is **wire-visible**: it is part of the key value the server durably remembers under
+invariant 10 (idempotency, everywhere). Renaming it would not relabel a display string, it would
+change the identity of every key this client mints from this build forward — a client retrying a send
+that straddled the rename would present a "new" key for what the server (and the operator) understand
+to be the same logical retry. Left exactly `"busctl-"`, with a comment at the call site recording why.
+The one documented example of the prefix (`AGENT_PROTOCOL.md`, "Retrying an ambiguous failure") is
+likewise left as `busctl-<hex>`, with a note explaining the asymmetry to the reader.
+
+**Docs updated to match:** `CONTRACTS-CLI.md`, `CONTRACTS-AGENT.md`, `AGENT_PROTOCOL.md`, `README.md`
+— including the `go build -o .../agent-busctl ./cmd/agent-busctl` one-time-build instructions and
+CLI-1's isolation proof clause (now `! go list -deps ./cmd/agent-busctl | grep -q
+'agent-bus/internal/'`, reverified PASS). `Dockerfile` and `scripts/*.sh` were grepped and confirmed
+to contain zero `busctl` references — no change needed there.
+
+**Deliberately NOT touched (append-only / not owned):** `AGENT_LOG.md` and prior `DECISIONS.md`
+entries are historical records of what was true at the time and keep saying `busctl`/`cmd/busctl`
+where they described that state; `SPEC.md` and `CONTRACTS.md` are generated/owned elsewhere.
+
+**Known stale reference, not fixed here (outside this task's ownership):** the recorded `proof_cmd`
+on Spec Server task `f801d128-0317-4d38-a8bc-77588d44d63d` (DEPLOY-REDEPLOY) reads
+`go build -o /tmp/busctl ./cmd/busctl`; the path is now stale. Flagged for spec-keeper to correct the
+recorded proof command, not edited directly (task state is server-owned, never hand-edited). Also
+noted, not fixed: `.gitignore`'s `/busctl` entry and a descriptive comment in
+`internal/httpapi/composition_test.go` that names `busctl` — both outside this task's file-ownership
+boundary.

@@ -18,7 +18,7 @@ import (
 // long-poll subcommand needs it:
 //
 //   - HUMAN: a readable block on stdout.
-//   - JSON: exactly ONE object on stdout, so `busctl ... --json | jq` works
+//   - JSON: exactly ONE object on stdout, so `agent-busctl ... --json | jq` works
 //     without the caller knowing how many lines to expect.
 //   - NDJSON (Stream): one compact object PER LINE, flushed as it is produced,
 //     so a long poll can be consumed incrementally rather than buffered to
@@ -143,7 +143,7 @@ func (o *output) Fail(err error) int {
 		// Falling through to the human rendering is better than emitting
 		// nothing at all; the exit code is still correct.
 	}
-	fmt.Fprintf(o.stderr, "busctl: %s\n", payload.Error)
+	fmt.Fprintf(o.stderr, "agent-busctl: %s\n", payload.Error)
 	if payload.Remedy != "" {
 		fmt.Fprintf(o.stderr, "  try: %s\n", payload.Remedy)
 	}

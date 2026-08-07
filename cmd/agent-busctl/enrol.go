@@ -12,10 +12,10 @@ func enrolCommand() command {
 	return command{
 		name:    "enrol",
 		summary: "enrol with a bus and store the credential",
-		help: `busctl enrol — join a bus and store the credential.
+		help: `agent-busctl enrol — join a bus and store the credential.
 
 USAGE
-  busctl enrol --bus <url> --name <name> [flags]
+  agent-busctl enrol --bus <url> --name <name> [flags]
 
 WHAT IT DOES
   Generates an Ed25519 key pair locally, sends ONLY the public half, and
@@ -46,7 +46,7 @@ RETRIES — WHAT TO DO WHEN AN ENROLMENT DOES NOT ANSWER
   "replayed" in the output says that is what happened.
 
   Do NOT reuse a key for a different name or a different bus. The bus treats
-  that as a protocol violation and disconnects the client, so busctl refuses
+  that as a protocol violation and disconnects the client, so agent-busctl refuses
   it locally first.
 
 EXIT CODES
@@ -71,7 +71,7 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl enrol", diagnostics, err)
+		return flagError("agent-busctl enrol", diagnostics, err)
 	}
 	if err := requireNoArgs("enrol", fs.Args()); err != nil {
 		return err

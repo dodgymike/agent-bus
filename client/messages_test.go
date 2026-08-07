@@ -110,8 +110,8 @@ func TestCLISendRequiresFullyQualifiedRecipient(t *testing.T) {
 			if !errors.As(err, &e) {
 				t.Fatalf("error is not a *client.Error: %v", err)
 			}
-			if !strings.Contains(e.Remedy, "busctl agents") {
-				t.Fatalf("Remedy = %q, want it to name `busctl agents` as the way to find the real id", e.Remedy)
+			if !strings.Contains(e.Remedy, "agent-busctl agents") {
+				t.Fatalf("Remedy = %q, want it to name `agent-busctl agents` as the way to find the real id", e.Remedy)
 			}
 			if got := atomic.LoadInt32(&doer.calls); got != 0 {
 				t.Fatalf("HTTP calls = %d, want 0 — a malformed recipient must never be sent", got)
@@ -457,7 +457,7 @@ func TestCLIAgentsRejectsMalformedRosterEntry(t *testing.T) {
 	}{
 		{
 			name: "control character in agent_id",
-			bad:  map[string]string{"agent_id": "bus-x.evil\x1b[2K\rbusctl: ok-1", "name": "evil", "enrolled_at": "2026-08-02T08:00:00Z"},
+			bad:  map[string]string{"agent_id": "bus-x.evil\x1b[2K\ragent-busctl: ok-1", "name": "evil", "enrolled_at": "2026-08-02T08:00:00Z"},
 			want: "characters an agent id cannot contain",
 		},
 		{

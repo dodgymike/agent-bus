@@ -17,7 +17,7 @@ import (
 //
 // The damage is concrete. A response body of
 //
-//	{"error":"boom[2K\rbusctl: enrolled as bus1.admin\nall clear"}
+//	{"error":"boom[2K\ragent-busctl: enrolled as bus1.admin\nall clear"}
 //
 // rendered verbatim to a terminal erases the line, overwrites it, and prints a
 // fabricated success line. Terminal escapes can also set the window title and,
@@ -98,7 +98,7 @@ func safeText(s string, max int) string {
 // bidirectional text (Arabic, Hebrew) renders correctly from its own character
 // properties; these codepoints exist to OVERRIDE that.
 //
-// NOTE: cmd/busctl/watch.go carries a near-identical predicate for message
+// NOTE: cmd/agent-busctl/watch.go carries a near-identical predicate for message
 // BODIES. The duplication is tracked by CLI-3-FU-SAFETEXT, which exports one
 // renderer from this package and deletes the CLI's copy; until then the two must
 // be kept in step.
@@ -157,8 +157,8 @@ func validateServerField(op, field, value string) error {
 // was the one printed field with no safe alphabet. Rejecting controls and
 // capping the length still admitted every other codepoint in Unicode, including
 // U+202E RIGHT-TO-LEFT OVERRIDE — and this value is printed, unpadded, at the
-// START of a line by `busctl watch` (humanTime) and inside a column by
-// `busctl agents` (shortTimestamp). One override character there visually
+// START of a line by `agent-busctl watch` (humanTime) and inside a column by
+// `agent-busctl agents` (shortTimestamp). One override character there visually
 // reorders the rest of the line, so the audit trail can be made to read as
 // though a message came from a different agent. There is no legitimate instant
 // that needs a character outside this set.
@@ -185,7 +185,7 @@ func validateServerTimestamp(op, field, value string) error {
 //
 // It was previously checked with validateServerField, which admits up to 256
 // characters of [A-Za-z0-9._-] — a shape test so loose that "not-a-hash" passes
-// it. The value is printed by `busctl send` and carried in every --json record,
+// it. The value is printed by `agent-busctl send` and carried in every --json record,
 // and a caller comparing it against its own digest is entitled to assume it is
 // at least the right KIND of thing.
 //

@@ -109,7 +109,7 @@ func TestCLINegativeTimeoutIsUsageError(t *testing.T) {
 }
 
 // TestCLIJSONHonouredOnFlagParseErrorAfterSubcommand checks fix 12:
-// `busctl whoami --json --badflag` still renders a parseable JSON error
+// `agent-busctl whoami --json --badflag` still renders a parseable JSON error
 // object, because --json appears (and is parsed successfully) BEFORE the
 // flag.FlagSet hits the unknown flag and fails.
 func TestCLIJSONHonouredOnFlagParseErrorAfterSubcommand(t *testing.T) {

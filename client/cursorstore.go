@@ -28,8 +28,8 @@ import (
 //     O_EXCL, then renames — the copy is short-lived, but multiplying the number
 //     of them by three orders of magnitude is not free).
 //   - It would also put the watch loop in LOCK CONTENTION with enrolment: the
-//     store lock is held across a read-modify-write, so a `busctl watch` and a
-//     `busctl enrol` in another terminal would serialise against each other for
+//     store lock is held across a read-modify-write, so a `agent-busctl watch` and a
+//     `agent-busctl enrol` in another terminal would serialise against each other for
 //     no reason at all.
 //
 // So: cursors.json, mode 0600, in the same 0700 directory, with its OWN lock
@@ -112,7 +112,7 @@ func (s *Store) CursorPath() string { return filepath.Join(s.dir, cursorsFileNam
 //     messages from the start of the retained window, which at-least-once
 //     delivery already permits and which any correct handler already tolerates
 //     (it must deduplicate on message_id regardless). Refusing to start
-//     `busctl watch` because a position hint is damaged would trade a harmless
+//     `agent-busctl watch` because a position hint is damaged would trade a harmless
 //     replay for an outage.
 //
 // The error return exists for a caller BUG — an empty key — not for a store
@@ -184,7 +184,7 @@ func (s *Store) SetCursor(agentID, busURL, cursor string) error {
 }
 
 // ClearCursor forgets the position for (agentID, busURL). It is a no-op when
-// there is none, so `busctl watch --replay` need not check first.
+// there is none, so `agent-busctl watch --replay` need not check first.
 func (s *Store) ClearCursor(agentID, busURL string) error {
 	const op = "cursor store"
 	if agentID == "" || busURL == "" {
@@ -398,7 +398,7 @@ func (s *Store) lockCursors() (func(), error) {
 		if time.Now().After(deadline) {
 			return nil, newError(KindConfig, op,
 				"timed out waiting for the cursor lock "+path,
-				"another busctl process is updating the cursor file; retry, or remove the lock file if no other process is running")
+				"another agent-busctl process is updating the cursor file; retry, or remove the lock file if no other process is running")
 		}
 		time.Sleep(lockPollInterval)
 	}

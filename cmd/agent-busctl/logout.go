@@ -12,11 +12,11 @@ func logoutCommand() command {
 	return command{
 		name:    "logout",
 		summary: "forget an identity LOCALLY (the bus is not told)",
-		help: `busctl logout — delete a stored credential from THIS MACHINE.
+		help: `agent-busctl logout — delete a stored credential from THIS MACHINE.
 
 USAGE
-  busctl logout [<agent-id|name>]
-  busctl logout --all
+  agent-busctl logout [<agent-id|name>]
+  agent-busctl logout --all
 
 READ THIS FIRST — THE BUS IS NOT TOLD
   This is a LOCAL operation only. The bus has no leave route yet, so the
@@ -54,7 +54,7 @@ func runLogout(_ context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl logout", diagnostics, err)
+		return flagError("agent-busctl logout", diagnostics, err)
 	}
 	env.out.json = env.g.json
 
@@ -64,7 +64,7 @@ func runLogout(_ context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "logout",
 			Message: fmt.Sprintf("expected at most one identity, got %d", len(rest)),
-			Remedy:  "run `busctl logout <agent-id>` or `busctl logout --all`",
+			Remedy:  "run `agent-busctl logout <agent-id>` or `agent-busctl logout --all`",
 		}
 	}
 	if *all && len(rest) == 1 {
@@ -72,7 +72,7 @@ func runLogout(_ context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "logout",
 			Message: "--all takes no identity argument",
-			Remedy:  "run `busctl logout --all`, or name a single identity without --all",
+			Remedy:  "run `agent-busctl logout --all`, or name a single identity without --all",
 		}
 	}
 
@@ -110,7 +110,7 @@ func runLogout(_ context.Context, env *cliEnv, args []string) error {
 		if res.Current != "" {
 			fmt.Fprintf(w, "now acting as %s\n", res.Current)
 		} else {
-			fmt.Fprintf(w, "no identity is selected; enrol with `busctl enrol --bus <url> --name <name>`\n")
+			fmt.Fprintf(w, "no identity is selected; enrol with `agent-busctl enrol --bus <url> --name <name>`\n")
 		}
 	})
 }

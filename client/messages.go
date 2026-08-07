@@ -292,7 +292,7 @@ type ReadOptions struct {
 //	no_trusted_key             you have never been given this sender's key.
 //	                           Today this is the ORDINARY state of the world —
 //	                           see keyring.go's blocker note — and the remedy is
-//	                           `busctl trust`, not an investigation.
+//	                           `agent-busctl trust`, not an investigation.
 //	malformed_trusted_key      the key you hold is not a 32-byte Ed25519 key.
 //	                           An OPERATOR fault: the trust store is damaged.
 //	no_signature               the message carried none. This is the exact case
@@ -1007,17 +1007,17 @@ func validateRecipient(op, to string) error {
 		// validateSendBody for why naming a flag that does not exist is worse
 		// than saying nothing.
 		return usagef(op,
-			"pass the fully-qualified <bus-id>.<agent-id> as the first argument: `busctl send <to> 'message'`; list them with `busctl agents`",
+			"pass the fully-qualified <bus-id>.<agent-id> as the first argument: `agent-busctl send <to> 'message'`; list them with `agent-busctl agents`",
 			"no recipient")
 	}
 	if !serverIDPattern.MatchString(to) {
 		return usagef(op,
-			"a recipient is 1-256 bytes of [A-Za-z0-9._-]; find the exact id with `busctl agents`",
+			"a recipient is 1-256 bytes of [A-Za-z0-9._-]; find the exact id with `agent-busctl agents`",
 			"recipient %q is not a well-formed agent id", safeText(to, 60))
 	}
 	if _, _, ok := splitQualifiedID(to); !ok {
 		return usagef(op,
-			"use the fully-qualified `<bus-id>.<agent-id>`, not the short name; find it with `busctl agents`",
+			"use the fully-qualified `<bus-id>.<agent-id>`, not the short name; find it with `agent-busctl agents`",
 			"recipient %q is not fully qualified", safeText(to, 60))
 	}
 	return nil
@@ -1057,7 +1057,7 @@ func resolveIdempotencyKey(op, key string) (string, error) {
 // makes the retry the SAME logical send. A caller told only "it failed", who
 // then retries with a freshly minted key, has not retried at all — it has sent
 // a SECOND message, which is precisely the double-apply invariant 10 exists to
-// prevent. So `busctl send --help`'s promise that "the key is always printed
+// prevent. So `agent-busctl send --help`'s promise that "the key is always printed
 // back" has to hold on the failure path or it is worth nothing.
 //
 // # Why the remedy is only added to SOME failures
@@ -1196,6 +1196,6 @@ func annotateBroadcastRefused(op string, err error) error {
 		"set to sign against — that is SIGN-3's open question); nothing was applied, the bus refused before " +
 		"reading the message body"
 	e.Remedy = "this is deliberate and will not change until SIGN-3 decides a canonical broadcast audience — " +
-		"do not retry; send the message directly to each recipient with `busctl send` (or Client.Send) instead"
+		"do not retry; send the message directly to each recipient with `agent-busctl send` (or Client.Send) instead"
 	return e
 }

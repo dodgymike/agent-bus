@@ -22,7 +22,7 @@ import (
 // The easy version collects stdout in a bytes.Buffer, waits for the command to
 // finish, and asserts the result parses as NDJSON. That proves NOTHING about
 // the property this command exists for: an implementation that buffered every
-// record and flushed at exit would pass it identically — and `busctl watch` is
+// record and flushed at exit would pass it identically — and `agent-busctl watch` is
 // not meant to exit, so a stream that only became parseable at exit would be
 // useless.
 //
@@ -146,7 +146,7 @@ func TestCLIWatchStreamsNDJSONIncrementally(t *testing.T) {
 // A message body is bytes chosen by ANOTHER AGENT. Rendered verbatim to a
 // terminal, "\x1b[2K\r" erases the line just printed and repaints it with
 // whatever the sender likes — so a message can forge the appearance of a
-// message from someone else, or of a busctl status line. A lone U+009B is CSI
+// message from someone else, or of a agent-busctl status line. A lone U+009B is CSI
 // on some terminals, which is as dangerous as ESC-[.
 //
 // Nothing a terminal can act on may reach stdout on the human path. The other
@@ -167,7 +167,7 @@ func TestCLIWatchHumanFeedNeutralisesTerminalEscapes(t *testing.T) {
 	//             on the terminals that honour it
 	//   \t        a tab, which would break the continuation indent
 	//   \n        a real newline, which MUST survive
-	const hostile = "before\x1b[2K\rbusctl: enrolled as bus-x.admin\u009b2K\tafter\nsecond line"
+	const hostile = "before\x1b[2K\ragent-busctl: enrolled as bus-x.admin\u009b2K\tafter\nsecond line"
 
 	// A second body that is not valid UTF-8 at all (a LONE 0x9b byte, not the
 	// two-byte encoding of U+009B). There is no honest rendering of that, so it
@@ -247,7 +247,7 @@ func TestCLIWatchHumanFeedNeutralisesTerminalEscapes(t *testing.T) {
 	}
 	// Controls are REPLACED in place, not dropped: dropping the ESC out of
 	// "adm\x1bin" would splice it into the convincing token "admin".
-	if !strings.Contains(res.Stdout, "before [2K busctl: enrolled as bus-x.admin 2K after") {
+	if !strings.Contains(res.Stdout, "before [2K agent-busctl: enrolled as bus-x.admin 2K after") {
 		t.Fatalf("the controls were not replaced IN PLACE with spaces: %q", res.Stdout)
 	}
 
@@ -334,7 +334,7 @@ func TestCLIWatchPipedDefaultsToNDJSON(t *testing.T) {
 // which are deliberately different.
 //
 // A BOUNDED watch (--count / --for) that delivered nothing exits 8, so
-// `busctl watch --for 30s --count 1` is a usable "wait for one message" and the
+// `agent-busctl watch --for 30s --count 1` is a usable "wait for one message" and the
 // caller branches on the code rather than parsing text. An UNBOUNDED watch was
 // stopped by a signal, which is a success however many messages it saw.
 func TestCLIWatchBoundedEmptyExitsEmpty(t *testing.T) {
@@ -389,7 +389,7 @@ func TestCLIWatchBoundedEmptyExitsEmpty(t *testing.T) {
 
 // TestWatchFatalUnavailableExitCodeMatchesDocumentedTable pins the ONE fact
 // that a help text can get wrong without anything failing to build: the number
-// `busctl watch` documents for a fatal 503 must be the number it actually
+// `agent-busctl watch` documents for a fatal 503 must be the number it actually
 // exits with.
 //
 // # Why both halves are observed rather than asserted
@@ -439,11 +439,11 @@ func TestWatchFatalUnavailableExitCodeMatchesDocumentedTable(t *testing.T) {
 		}
 	}
 	if len(documented) == 0 {
-		t.Fatalf("`busctl watch --help` no longer documents the fatal 503 anywhere in its EXIT CODES table; this check has nothing left to compare and would pass vacuously.\nentries: %v", entries)
+		t.Fatalf("`agent-busctl watch --help` no longer documents the fatal 503 anywhere in its EXIT CODES table; this check has nothing left to compare and would pass vacuously.\nentries: %v", entries)
 	}
 	for _, e := range documented {
 		if e.Code != res.Code {
-			t.Fatalf("`busctl watch --help` documents the fatal 503 under exit %d (%q), but the command actually exits %d.\n"+
+			t.Fatalf("`agent-busctl watch --help` documents the fatal 503 under exit %d (%q), but the command actually exits %d.\n"+
 				"A fatal 503 is the bus reporting a failure of its own (client.ExitServer = %d), not a bus that could not be reached (client.ExitNetwork = %d). "+
 				"An agent branching on the documented number would mis-handle the one failure it most needs to stop on.",
 				e.Code, e.Text, res.Code, client.ExitServer, client.ExitNetwork)
@@ -535,7 +535,7 @@ func TestCLIWatchDiagnosticsNeverReachStdout(t *testing.T) {
 			t.Fatalf("stdout line %d is not a JSON object — a diagnostic leaked into the stream: %v (%q)", i, err, line)
 		}
 	}
-	if strings.Contains(res.Stdout, "retrying") || strings.Contains(res.Stdout, "busctl watch:") {
+	if strings.Contains(res.Stdout, "retrying") || strings.Contains(res.Stdout, "agent-busctl watch:") {
 		t.Fatalf("a diagnostic reached stdout: %q", res.Stdout)
 	}
 }

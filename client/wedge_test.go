@@ -369,7 +369,7 @@ func TestVerificationSeamCannotBeWedged(t *testing.T) {
 // key is registered at enrolment, so before any out-of-band exchange every
 // sender is unverifiable. The cursor must still reach the end of the batch, or a
 // fresh agent's first poll wedges it for ever and it never sees the message that
-// arrives after somebody finally runs `busctl trust`.
+// arrives after somebody finally runs `agent-busctl trust`.
 func TestVerificationSeamSurvivesAnAllBadBatch(t *testing.T) {
 	_, strangerPriv := newWedgeKeypair(t)
 	ring := NewDirKeyRing(t.TempDir()) // trusts NOBODY
@@ -439,7 +439,7 @@ func TestVerifySignedMessageDoesNotPanicOnMalformedPublicKey(t *testing.T) {
 		{name: "one byte long", pub: make([]byte, MessagingPublicKeySize+1)},
 		{name: "a single byte", pub: ed25519.PublicKey{0x01}},
 		// The shape an operator produces by pasting a PRIVATE key, or by
-		// pasting a signature, into `busctl trust`.
+		// pasting a signature, into `agent-busctl trust`.
 		{name: "a 64-byte value", pub: make([]byte, 64)},
 	} {
 		tc := tc

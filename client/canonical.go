@@ -483,7 +483,7 @@ func signSignedMessage(priv ed25519.PrivateKey, m signedMessage) ([]byte, error)
 // crypto/ed25519.Verify PANICS when len(publicKey) != ed25519.PublicKeySize. It
 // does not return false. That asymmetry is a remote denial of service the moment
 // a key reaches this path from anywhere an attacker influences — a trust-store
-// file on damaged media, a key pasted by hand into `busctl trust` — because a
+// file on damaged media, a key pasted by hand into `agent-busctl trust` — because a
 // MALFORMED SIGNATURE is handled safely and returns false while a MALFORMED KEY
 // takes the process down.
 //

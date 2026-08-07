@@ -12,10 +12,10 @@ func useCommand() command {
 	return command{
 		name:    "use",
 		summary: "switch to another enrolled identity",
-		help: `busctl use — choose which enrolled identity commands act as.
+		help: `agent-busctl use — choose which enrolled identity commands act as.
 
 USAGE
-  busctl use <agent-id|name>
+  agent-busctl use <agent-id|name>
 
 WHAT IT DOES
   Records the selection in the credential store, so later commands act as
@@ -55,7 +55,7 @@ func runUse(_ context.Context, env *cliEnv, args []string) error {
 		if err == flagErrHelp {
 			return err
 		}
-		return flagError("busctl use", diagnostics, err)
+		return flagError("agent-busctl use", diagnostics, err)
 	}
 	env.out.json = env.g.json
 
@@ -67,14 +67,14 @@ func runUse(_ context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "use",
 			Message: "no identity named",
-			Remedy:  "run `busctl use <agent-id>`; list the enrolled identities with `busctl whoami --all`",
+			Remedy:  "run `agent-busctl use <agent-id>`; list the enrolled identities with `agent-busctl whoami --all`",
 		}
 	default:
 		return &client.Error{
 			Kind:    client.KindUsage,
 			Op:      "use",
 			Message: fmt.Sprintf("expected one identity, got %d", len(rest)),
-			Remedy:  "run `busctl use <agent-id>`",
+			Remedy:  "run `agent-busctl use <agent-id>`",
 		}
 	}
 

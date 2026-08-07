@@ -427,5 +427,11 @@ func newIdempotencyKey() (string, error) {
 		return "", wrapError(KindInternal, "enrol",
 			"cannot generate an idempotency key: the system random source failed", "", err)
 	}
+	// The "busctl-" prefix is DELIBERATELY NOT renamed to "agent-busctl-"
+	// alongside the CLI binary rename (CLI-1-FU-BINARYNAME, DECISIONS.md
+	// 2026-08-07). This value is wire-visible: it is the idempotency key the
+	// server durably remembers (invariant 10), so changing it would not
+	// rename a label, it would change the identity of every key this client
+	// mints going forward. Leave it exactly "busctl-".
 	return "busctl-" + hex.EncodeToString(buf[:]), nil
 }

@@ -102,7 +102,7 @@ type Config struct {
 
 	// KeyRing is the trust store the READ path verifies senders against. Nil
 	// means a DirKeyRing under IdentityDir/TrustedKeysDirName, which is what New
-	// installs and what `busctl trust` writes.
+	// installs and what `agent-busctl trust` writes.
 	//
 	// It is a knob so an embedding agent can source trust from wherever it
 	// already keeps it. It is NOT a way to turn verification off: a KeyRing that

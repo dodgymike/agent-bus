@@ -14,7 +14,7 @@ import (
 // misparsed as a public one fails silently, so refusing to guess is the only
 // safe move. A cursor is a POSITION HINT. Losing it re-delivers from the start
 // of the retained window, which at-least-once delivery already permits and any
-// correct handler already tolerates — so refusing to start `busctl watch`
+// correct handler already tolerates — so refusing to start `agent-busctl watch`
 // because a hint is damaged would trade a harmless replay for an outage.
 //
 // Every damaged form must therefore yield "" plus a Store WARNING and NO error.

@@ -22,7 +22,7 @@ import (
 var agentIDPattern = regexp.MustCompile(`^bus-[a-z0-9]+\.testagent-\d+$`)
 
 // TestCLIEnrolEndToEnd is the load-bearing test for CLI-1/CLI-2: it builds
-// and runs the REAL agent-bus server as a subprocess, then drives busctl's
+// and runs the REAL agent-bus server as a subprocess, then drives agent-busctl's
 // in-process run() entry point against it exactly the way an agent would
 // (enrol, whoami, whoami --verify, logout), asserting on the real wire
 // protocol rather than a mock.

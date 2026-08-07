@@ -127,7 +127,7 @@ func (c *Client) messagingKey() (ed25519.PrivateKey, error) {
 // to verify anything this agent sends. There is no route that publishes it: no
 // messaging key is registered at enrolment and CRYPTO-4 (the server-attested key
 // bundle) does not exist, so until it lands the exchange is a human copying this
-// string into the peer's `busctl trust`. Say so when you print it.
+// string into the peer's `agent-busctl trust`. Say so when you print it.
 func (c *Client) MessagingPublicKey() (Identity, string, error) {
 	cred, err := c.credential()
 	if err != nil {
@@ -150,12 +150,12 @@ func (c *Client) MessagingPublicKey() (Identity, string, error) {
 // TrustPeer records encoded (standard base64 of a 32-byte Ed25519 messaging
 // public key) as the key agentID's messages are verified with.
 //
-// It lives in this package rather than in the CLI because cmd/busctl is a THIN
-// shell over it (see cmd/busctl/main.go): anything implemented only there is
+// It lives in this package rather than in the CLI because cmd/agent-busctl is a THIN
+// shell over it (see cmd/agent-busctl/main.go): anything implemented only there is
 // something an agent EMBEDDING the client cannot reach, and an embedder that
 // cannot populate its own trust store cannot verify anything at all.
 //
-// The key must have come from OUT OF BAND — the peer ran `busctl keygen` and a
+// The key must have come from OUT OF BAND — the peer ran `agent-busctl keygen` and a
 // human, or a deployment system, carried the string across. A key learned from
 // the bus, or from beside a signature, is worth nothing: see keyring.go.
 func (c *Client) TrustPeer(agentID, encoded string) (TrustedKey, error) {
@@ -168,7 +168,7 @@ func (c *Client) TrustPeer(agentID, encoded string) (TrustedKey, error) {
 	pub, err := decodeMessagingPublicKey(strings.TrimSpace(encoded))
 	if err != nil {
 		return TrustedKey{}, newError(KindUsage, "trust", err.Error(),
-			"pass the base64 key exactly as the peer printed it with `busctl keygen`")
+			"pass the base64 key exactly as the peer printed it with `agent-busctl keygen`")
 	}
 	if err := ring.Trust(agentID, pub); err != nil {
 		return TrustedKey{}, err
@@ -203,7 +203,7 @@ func (c *Client) now() time.Time {
 // credential resolves the identity this client acts as, caching the result.
 //
 // The selection order is: Config.AgentID (from --as / AGENT_BUS_AGENT_ID),
-// else whatever `busctl use` last selected. It never falls back to "the only
+// else whatever `agent-busctl use` last selected. It never falls back to "the only
 // identity in the store" when a selection exists but dangles — guessing which
 // identity to act as is how a message ends up sent from the wrong agent.
 func (c *Client) credential() (Credential, error) {

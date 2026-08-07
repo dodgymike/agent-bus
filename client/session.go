@@ -331,11 +331,11 @@ func annotateSessionError(err error, agentID string) error {
 		// while a stale credential stayed in the local store.
 		e.Kind = KindAuth
 		e.Message = "the bus does not know " + agentID
-		e.Remedy = "this identity was enrolled with a different bus, or the bus lost its state; enrol again with `busctl enrol --bus <url> --name <name>`"
+		e.Remedy = "this identity was enrolled with a different bus, or the bus lost its state; enrol again with `agent-busctl enrol --bus <url> --name <name>`"
 	case http.StatusUnauthorized:
 		e.Kind = KindAuth
 		e.Message = "the bus rejected the signature for " + agentID
-		e.Remedy = "the stored private key does not match the key the bus recorded; enrol again with `busctl enrol --bus <url> --name <name>`"
+		e.Remedy = "the stored private key does not match the key the bus recorded; enrol again with `agent-busctl enrol --bus <url> --name <name>`"
 	}
 	return e
 }

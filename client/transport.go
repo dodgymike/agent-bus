@@ -29,7 +29,7 @@ const maxResponseBytes = 1 << 20
 
 // userAgent identifies this client to the bus. It carries no version yet;
 // when the binary gains one it is appended here.
-const userAgent = "busctl"
+const userAgent = "agent-busctl"
 
 // dial timings for the default transport. All finite: an agent shelling out
 // must never be left hanging on a bus that accepted the TCP connection and
@@ -307,11 +307,11 @@ func statusError(op string, resp *http.Response, body []byte) *Error {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
 		e.Kind = KindAuth
 		e.Message = "the bus rejected this credential: " + detail
-		e.Remedy = "the session may have expired or the bus may have restarted; retry, and if it persists re-enrol with `busctl enrol`"
+		e.Remedy = "the session may have expired or the bus may have restarted; retry, and if it persists re-enrol with `agent-busctl enrol`"
 	case resp.StatusCode == http.StatusNotFound:
 		e.Kind = KindRejected
 		e.Message = "the bus answered 404: " + detail
-		e.Remedy = "this bus build may not serve that route yet; check `busctl --help` and the bus version"
+		e.Remedy = "this bus build may not serve that route yet; check `agent-busctl --help` and the bus version"
 	case resp.StatusCode == http.StatusConflict:
 		e.Kind = KindRejected
 		e.Message = "the bus refused the request: " + detail

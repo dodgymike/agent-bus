@@ -35,7 +35,7 @@ func TestSafeTextNeutralisesControlBytes(t *testing.T) {
 		{"valid UTF-8", "héllo wörld 日本語", 200},
 		{
 			"the exact hostile string from the incident",
-			"boom\x1b[2K\rbusctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a",
+			"boom\x1b[2K\ragent-busctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a",
 			200,
 		},
 		{"oversized input truncated on a rune boundary", strings.Repeat("日本語", 100), 50},
@@ -79,7 +79,7 @@ func TestSafeTextNeutralisesControlBytes(t *testing.T) {
 // appear intact right after a bare newline (i.e. the LF that would have made
 // it look like a new, separate line of output is gone).
 func TestSafeTextHostileStringSpecificNeutralisation(t *testing.T) {
-	hostile := "boom\x1b[2K\rbusctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a"
+	hostile := "boom\x1b[2K\ragent-busctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a"
 	out := safeText(hostile, 200)
 	for _, bad := range []string{"\x1b", "\r", "\n", "\a"} {
 		if strings.Contains(out, bad) {
@@ -95,7 +95,7 @@ func TestSafeTextHostileStringSpecificNeutralisation(t *testing.T) {
 // call, and asserts the resulting *client.Error has no control bytes anywhere
 // in its rendered message.
 func TestDecodeServerErrorViaHTTPServer(t *testing.T) {
-	hostile := "boom\x1b[2K\rbusctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a"
+	hostile := "boom\x1b[2K\ragent-busctl: enrolled as bus1.admin\nall clear\x1b]0;pwned\a"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -174,7 +174,7 @@ func TestValidateServerFieldRejectsHostileAgentID(t *testing.T) {
 // through.
 //
 // It matters on the error path specifically. The bus chooses the text of its
-// `{"error":"..."}` body, that text becomes Error.Message, and cmd/busctl
+// `{"error":"..."}` body, that text becomes Error.Message, and cmd/agent-busctl
 // prints it to stderr on the SAME line that now carries the idempotency-key
 // remedy. A U+202E run reverses the rest of the line, so an unfiltered bus could
 // reorder "do NOT retry until the bus can durably accept again" into something a

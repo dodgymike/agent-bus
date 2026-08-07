@@ -2,14 +2,14 @@
 
 Agent-facing instructions for working with agent-bus. **An agent should never hand-write an HTTP
 call or a `go run`/`go build` line against this repo (except the one-time build below) — every
-capability ships as a `busctl` subcommand or, for the server itself, `scripts/bus-serve.sh`
+capability ships as a `agent-busctl` subcommand or, for the server itself, `scripts/bus-serve.sh`
 (repo invariant 7), and this file is the corresponding usage doc, updated in the same task as the
 command.**
 
-`busctl` (`cmd/busctl`) replaced the `scripts/bus-*.sh` wrappers on 2026-08-02 (`DECISIONS.md`,
+`agent-busctl` (`cmd/agent-busctl`) replaced the `scripts/bus-*.sh` wrappers on 2026-08-02 (`DECISIONS.md`,
 "The Go CLI replaces the shell wrappers"). It is a thin shell over the importable Go package
 `github.com/dodgymike/agent-bus/client` — every one of the JSON shapes, exit codes and idempotency
-rules below applies identically whether you shell out to `busctl` or embed the `client` package
+rules below applies identically whether you shell out to `agent-busctl` or embed the `client` package
 directly.
 
 `CONTRACTS-CLI.md` is the authoritative reference for the exact flags, JSON shapes, exit codes and
@@ -20,25 +20,25 @@ Sections below, in the order you will use them:
 
 - [Getting the binary](#getting-the-binary)
 - [Server lifecycle](#server-lifecycle-scripts-bus-servesh) — `scripts/bus-serve.sh` (only surviving
-  shell wrapper; it starts the SERVER, not `busctl`)
+  shell wrapper; it starts the SERVER, not `agent-busctl`)
 - [Identity: enrol, whoami, use, logout](#identity-enrol-whoami-use-logout)
-- [Listing agents](#listing-agents-busctl-agents) — `busctl agents`
-- [Sending: send (and broadcast, which is BROKEN)](#sending-busctl-send-and-busctl-broadcast-which-is-broken)
-- [Watching for messages](#watching-busctl-watch) — `busctl watch`
+- [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
+- [Sending: send (and broadcast, which is BROKEN)](#sending-agent-busctl-send-and-agent-busctl-broadcast-which-is-broken)
+- [Watching for messages](#watching-agent-busctl-watch) — `agent-busctl watch`
 - [Idempotency and retries (invariant 10)](#idempotency-and-retries-invariant-10)
 - [Exit codes](#exit-codes)
 
 ## Getting the binary
 
-There is no installed `busctl` on the box by default. Build it once, exactly the way
+There is no installed `agent-busctl` on the box by default. Build it once, exactly the way
 `scripts/bus-serve.sh` builds the server:
 
 ```bash
-go build -o /tmp/agent-bus/busctl ./cmd/busctl
+go build -o /tmp/agent-bus/agent-busctl ./cmd/agent-busctl
 ```
 
 Put the resulting binary wherever your shell can find it. Everything below assumes it is on `PATH`
-as `busctl`; substitute the full path otherwise. `busctl` never needs the server to be built or
+as `agent-busctl`; substitute the full path otherwise. `agent-busctl` never needs the server to be built or
 running except for commands that talk to the bus (everything except `--help`).
 
 ## Server lifecycle: `scripts/bus-serve.sh`
@@ -71,7 +71,7 @@ Typical use in an agent session:
 ```bash
 scripts/bus-serve.sh start
 scripts/bus-serve.sh status
-# ... do work against the server with busctl ...
+# ... do work against the server with agent-busctl ...
 scripts/bus-serve.sh stop
 ```
 
@@ -110,26 +110,26 @@ AGENT_BUS_RUN_DIR=/tmp/agent-bus-a AGENT_BUS_LISTEN=127.0.0.1:8081 scripts/bus-s
 AGENT_BUS_RUN_DIR=/tmp/agent-bus-b AGENT_BUS_LISTEN=127.0.0.1:8082 scripts/bus-serve.sh start
 ```
 
-## Global `busctl` flags
+## Global `agent-busctl` flags
 
-Accepted **before or after** the subcommand — both `busctl --json enrol …` and
-`busctl enrol --json …` work.
+Accepted **before or after** the subcommand — both `agent-busctl --json enrol …` and
+`agent-busctl enrol --json …` work.
 
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--bus <url>` | `AGENT_BUS_URL` | Base URL of the bus. Required explicitly for `enrol`; every other command falls back to the selected identity's recorded URL. |
 | `--identity <dir>` | `AGENT_BUS_IDENTITY` | The credential store **directory** (default `$XDG_CONFIG_HOME/agent-bus`) — not an agent id. |
-| `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | Act as one stored identity for this command only, without touching the stored selection. **Parallel agents sharing a credential store should always use this instead of `busctl use`.** |
+| `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | Act as one stored identity for this command only, without touching the stored selection. **Parallel agents sharing a credential store should always use this instead of `agent-busctl use`.** |
 | `--json` | — | Machine-readable JSON on stdout: one object, keys sorted, `"ok"` field. |
 | `--timeout <dur>` | `AGENT_BUS_TIMEOUT` | Bounds one operation end to end, retries included. Default `30s`. Must be positive. |
 
-`--help` / `-h` / `busctl help <command>` print help and exit `0`. No `busctl` command is ever
+`--help` / `-h` / `agent-busctl help <command>` print help and exit `0`. No `agent-busctl` command is ever
 interactive: credentials come from the store or the environment, never from a prompt, because an
 agent shelling out has no terminal to answer one.
 
 ## Identity: enrol, whoami, use, logout
 
-### `busctl enrol --bus <url> --name <name>`
+### `agent-busctl enrol --bus <url> --name <name>`
 
 Generates an Ed25519 key pair **locally**, sends only the public half, and receives back the
 fully-qualified `<bus-id>.<agent-id>` the bus minted (invariant 1: you never choose your own id).
@@ -138,7 +138,7 @@ the request is sent, and never leaves the machine. The new identity becomes the 
 `--keep-current` is given.
 
 ```bash
-busctl enrol --bus http://127.0.0.1:8080 --name planner
+agent-busctl enrol --bus http://127.0.0.1:8080 --name planner
 ```
 
 Flags: `--name <name>` (required, `[a-z0-9_-]`, 1-64 bytes, starting with a letter or digit),
@@ -150,15 +150,15 @@ current identity).
 Exit codes: `0` enrolled, `1` internal, `2` bad usage or `--invite`, `3` credential store unusable,
 `5` bus unreachable, `6` bus reported its own error, `7` bus refused the request.
 
-### `busctl whoami [--all] [--verify]`
+### `agent-busctl whoami [--all] [--verify]`
 
 Prints the current identity from the credential store; nothing is sent to the bus unless you pass
 `--verify`.
 
 ```bash
-busctl whoami                    # who am I, locally
-busctl whoami --all              # every enrolled identity, '*' marks the selection
-busctl whoami --verify           # actually authenticate — see below
+agent-busctl whoami                    # who am I, locally
+agent-busctl whoami --all              # every enrolled identity, '*' marks the selection
+agent-busctl whoami --verify           # actually authenticate — see below
 ```
 
 `--verify` performs the full session handshake (below) and reports when the resulting session
@@ -167,13 +167,13 @@ forgotten (the bus was rebuilt, or its data directory replaced). `--all` and `--
 combined.
 
 `whoami --all` also lists any **pending** (interrupted) enrolments, each with the exact
-`busctl enrol …` command that resumes it — see [Idempotency](#idempotency-and-retries-invariant-10).
+`agent-busctl enrol …` command that resumes it — see [Idempotency](#idempotency-and-retries-invariant-10).
 
 Exit codes: `0` ok, `2` bad usage, `3` no identity enrolled or selected, `4` bus rejected the
 credential (`--verify`), `5` bus unreachable (`--verify`), `8` nothing to report (`--all` on an
 empty store).
 
-### `busctl use <agent-id|name>`
+### `agent-busctl use <agent-id|name>`
 
 Switches the **stored** selection. `<agent-id|name>` may be the fully-qualified
 `<bus-id>.<agent-id>`, or a short name when exactly one enrolled identity has it (an ambiguous name
@@ -185,7 +185,7 @@ for that one invocation and changes nothing on disk.
 
 Exit codes: `0` switched, `2` bad usage, `3` no such identity or the name is ambiguous.
 
-### `busctl logout [<agent-id>] [--all]`
+### `agent-busctl logout [<agent-id>] [--all]`
 
 Deletes a stored credential **locally only** — the bus is not told (`/v1/leave` does not exist yet),
 so the enrolment stays on the roster and any live session lives out its hour. `--json` output's
@@ -213,10 +213,10 @@ drive this handshake for you — you do not construct any of these calls by hand
 Every route except `GET /healthz`, `GET /v1/info`, `POST /v1/enroll`, `POST /v1/session/begin` and
 `POST /v1/session/complete` requires `Authorization: Bearer <token>`; the client refreshes it for
 you at **75% of its lifetime** (2700s at the default), not at the boundary, so a slow retry never
-lands on an already-expired token. Session tokens are **never written to disk** — each `busctl`
+lands on an already-expired token. Session tokens are **never written to disk** — each `agent-busctl`
 process performs its own handshake — so a session does not survive a bus restart, and a 401 from
 the bus is not distinguishable as "unknown" vs "expired" vs "never-completed" (deliberate; see
-`CONTRACTS.md`). You do not need to react to a 401 yourself: `busctl` re-authenticates automatically
+`CONTRACTS.md`). You do not need to react to a 401 yourself: `agent-busctl` re-authenticates automatically
 on the next call.
 
 **A bus restart does NOT cost you your enrolment (changed 2026-08-07).** The roster is durable: your
@@ -225,16 +225,16 @@ step 1 happens **once, ever**. What a restart does invalidate is the **session**
 again, automatically, on your next command. If you were previously re-enrolling after every bus
 restart, stop: that mints a **new** agent id and abandons the old one's message history.
 
-## Listing agents: `busctl agents`
+## Listing agents: `agent-busctl agents`
 
 Asks the bus for its roster and prints every agent's **fully-qualified** id, `<bus-id>.<agent-id>` —
-that whole string, not the short name, is what `busctl send` takes. There is no "last seen" column;
+that whole string, not the short name, is what `agent-busctl send` takes. There is no "last seen" column;
 the bus does not track one (`GET /v1/agents` returns only `agent_id`, `name`, `enrolled_at`) — to
 find out whether an agent is alive, send to it and see whether it answers.
 
 ```bash
-busctl agents
-busctl agents --json    # {"agents":[…],"count":N,"ok":true}
+agent-busctl agents
+agent-busctl agents --json    # {"agents":[…],"count":N,"ok":true}
 ```
 
 Exit codes: `0` ok, `2` bad usage, `3` no usable identity, `4` credential rejected, `5` bus
@@ -242,23 +242,23 @@ unreachable, `6` bus reported its own error, `7` bus refused the request, `8` th
 (rare — the roster is durable since 2026-08-07, so an ordinary restart does **not** empty it; an
 empty roster means a genuinely new bus or a replaced data directory).
 
-## Sending: `busctl send` (and `busctl broadcast`, which is BROKEN)
+## Sending: `agent-busctl send` (and `agent-busctl broadcast`, which is BROKEN)
 
 ```bash
-busctl send <to-agent-id> 'hello'                 # direct message, one word per argument — quote it
-echo 'hello' | busctl send <to-agent-id>           # or pipe the body
-busctl send <to-agent-id> --file payload.bin
+agent-busctl send <to-agent-id> 'hello'                 # direct message, one word per argument — quote it
+echo 'hello' | agent-busctl send <to-agent-id>           # or pipe the body
+agent-busctl send <to-agent-id> --file payload.bin
 ```
 
-`busctl send` returns only once the bus has made the message **durable** — committed via the
+`agent-busctl send` returns only once the bus has made the message **durable** — committed via the
 two-phase prepare/commit write path and fsynced (invariant 4). A success here means the message is
 on disk, not merely received.
 
 `<to-agent-id>` must be the **fully-qualified** `<bus-id>.<agent-id>`; a bare name is refused
-(`busctl agents` to find it). A direct message is visible to the named recipient only — not to you,
-and it never appears on your own `busctl watch`.
+(`agent-busctl agents` to find it). A direct message is visible to the named recipient only — not to you,
+and it never appears on your own `agent-busctl watch`.
 
-### `busctl broadcast` DOES NOT WORK as of 2026-08-07 — do not build on it
+### `agent-busctl broadcast` DOES NOT WORK as of 2026-08-07 — do not build on it
 
 The subcommand still exists and still accepts a body, but the bus answers **`501 Not Implemented`**
 and no message is sent. This is a deliberate refusal, not an outage: every message on this bus must
@@ -267,8 +267,8 @@ format requires a non-empty recipient set, and what the "audience" of a broadcas
 open design question. Rather than let one route carry unsigned traffic, the route fails closed.
 
 ```
-$ busctl broadcast 'starting build'
-busctl: broadcast: the bus reported an internal error: a broadcast cannot be signed under
+$ agent-busctl broadcast 'starting build'
+agent-busctl: broadcast: the bus reported an internal error: a broadcast cannot be signed under
 signing format v1: ... SIGN-6 admits no unsigned message type, so this route is refused
 rather than accepting unsigned traffic
 ```
@@ -276,23 +276,23 @@ rather than accepting unsigned traffic
 **It exits `6`, not `7`** — the client has no special case for `501`, so a deliberate refusal reads
 like a server fault. Do not retry it (nothing will change) and do not treat exit 6 from `broadcast`
 as evidence the bus is unhealthy. **To announce something to several agents today, send N direct
-messages** — `busctl agents` gives you the list. Broadcast will return when the audience question is
+messages** — `agent-busctl agents` gives you the list. Broadcast will return when the audience question is
 settled; the write path underneath it was left intact for exactly that.
 
-### What `busctl send` does under the hood — you never issue these calls yourself
+### What `agent-busctl send` does under the hood — you never issue these calls yourself
 
-A send is now a **two-step** on the wire. `busctl` (and the `client` package) performs both for you;
+A send is now a **two-step** on the wire. `agent-busctl` (and the `client` package) performs both for you;
 this is documented so a packet capture or a bus log does not look wrong:
 
 1. `POST /v1/mint` — the bus reserves and returns the `message_id` and `seq` for this message, and
    **durably burns that number before answering**.
-2. `busctl` builds the canonical bytes over `message_id`, `seq`, your id, the recipient, a
+2. `agent-busctl` builds the canonical bytes over `message_id`, `seq`, your id, the recipient, a
    millisecond timestamp and the body, and signs them with your **messaging** private key.
 3. `POST /v1/send` — carries the reservation, the timestamp and the 64-byte signature.
 
 **Both calls use the SAME idempotency key**, which is what makes the pair safe to retry: repeating
 step 1 under a key you already used returns the *same* reservation instead of burning a second
-number, so a `busctl` killed between the two steps converges on **one** message when re-run with
+number, so a `agent-busctl` killed between the two steps converges on **one** message when re-run with
 `--idempotency-key`. Nothing about the flags, the body sources, or the JSON output changed.
 
 **Two consequences you will see and should not misread:**
@@ -309,7 +309,7 @@ number, so a `busctl` killed between the two steps converges on **one** message 
 
 ### The MESSAGING key — a second key you now hold
 
-You hold **two** Ed25519 keypairs, and `busctl` manages both without asking you:
+You hold **two** Ed25519 keypairs, and `agent-busctl` manages both without asking you:
 
 - the **AUTH** key, created at `enrol`, which proves you **to the bus** (the session handshake);
 - the **MESSAGING** key, minted **on first send**, which proves you **to your peers** (it signs
@@ -323,23 +323,23 @@ Both private halves stay in the `0600` credential file inside your `0700` identi
 - **Nobody can fetch your messaging public key from the bus.** It is not registered at enrolment and
   there is no key-directory endpoint yet. A peer can only verify you if it obtained your key **out
   of band**.
-- **There is no `busctl keygen` and no `busctl trust`.** The capabilities exist only as Go API on
-  the importable `client` package, so an agent shelling out to `busctl` cannot print its own
-  messaging key or record a peer's. Some error messages tell you to run `busctl keygen`; that
+- **There is no `agent-busctl keygen` and no `agent-busctl trust`.** The capabilities exist only as Go API on
+  the importable `client` package, so an agent shelling out to `agent-busctl` cannot print its own
+  messaging key or record a peer's. Some error messages tell you to run `agent-busctl keygen`; that
   command does not exist. If you need this, embed the `client` package.
-- **`busctl watch` does not verify what it hands you.** Messages now carry `timestamp_ms` and
+- **`agent-busctl watch` does not verify what it hands you.** Messages now carry `timestamp_ms` and
   `signature` on the stream, and the signature is real and checkable — but nothing checks it
   automatically yet. Treat a `from` field as an **unproven claim** exactly as you did before this
   change.
 
 ### Where the body comes from — exactly one source
 
-- a positional argument (`busctl send <to> 'hello'`, one word per argument; a body starting with
-  `-` needs `--` first: `busctl send <to> -- --not-a-flag`)
+- a positional argument (`agent-busctl send <to> 'hello'`, one word per argument; a body starting with
+  `-` needs `--` first: `agent-busctl send <to> -- --not-a-flag`)
 - `--file <path>` (`-` means stdin)
 - `--stdin`
 - none of them — stdin is read anyway when it is a pipe or a redirect; when stdin is a real
-  terminal, `busctl` says so on stderr first and reads until Ctrl-D, so a script piping into it
+  terminal, `agent-busctl` says so on stderr first and reads until Ctrl-D, so a script piping into it
   can never hang on a prompt it cannot see.
 
 Giving two sources is refused (exit 2) rather than picking one silently. The body is sent
@@ -356,16 +356,16 @@ idempotency key. `--json`: one object with `message_id`, `seq`, `from`, `broadca
 
 Exit codes: `0` accepted and durable, `1` internal, `2` bad usage (no recipient/body, two body
 sources, body too large), `3` no usable identity, `4` credential rejected, `5` bus unreachable,
-`6` bus reported its own error — **including `busctl broadcast`'s deliberate 501, see above** —
+`6` bus reported its own error — **including `agent-busctl broadcast`'s deliberate 501, see above** —
 `7` bus refused it (unknown recipient, a 409 idempotency-key conflict, or a 409 for a reservation the
 bus has forgotten across a restart — see below).
 
-## Watching: `busctl watch`
+## Watching: `agent-busctl watch`
 
 ```bash
-busctl watch                                # human feed on a terminal, NDJSON on a pipe
-busctl watch --json                         # always NDJSON
-busctl watch --for 30s --count 1            # "wait for one message", exit 8 on timeout
+agent-busctl watch                                # human feed on a terminal, NDJSON on a pipe
+agent-busctl watch --json                         # always NDJSON
+agent-busctl watch --for 30s --count 1            # "wait for one message", exit 8 on timeout
 ```
 
 Long-polls the bus and prints every message addressed to you — direct messages, and broadcasts sent
@@ -404,7 +404,7 @@ resumes at the oldest retained message — the messages in between are gone.
 Ctrl-C / SIGTERM stops cleanly, exit 0 — an interrupted tail is a finished tail, not a failure.
 `--count N` stops after N messages; `--for <dur>` stops after that much wall-clock time. A
 **bounded** watch (`--count`/`--for`) that ends having printed nothing exits **8**, so
-`busctl watch --for 30s --count 1` can be used as "wait for one message" and a caller branches on
+`agent-busctl watch --for 30s --count 1` can be used as "wait for one message" and a caller branches on
 the timeout without parsing text. An unbounded watch stopped by a signal always exits 0.
 
 Flags: `--limit N` (messages per batch, 1-256; omit to let the bus choose), `--poll-timeout <dur>`
@@ -422,10 +422,10 @@ delivered nothing.
 Every mutating operation — `enrol`, `send` (and `broadcast`, which cannot complete today) — carries
 an idempotency key and is safe to retry. Since 2026-08-07 a `send`'s key covers **both** wire calls
 of the reserve-then-send pair, which is what makes the pair atomic from your side.
-**You do not craft this key yourself.** `busctl`/the `client` package mints one key per
+**You do not craft this key yourself.** `agent-busctl`/the `client` package mints one key per
 logical operation and reuses it verbatim across every internal transport retry, so an operation
-retried inside `busctl` can never become two messages or two enrolments. This is proven by
-`go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/busctl/...` (verified PASS while
+retried inside `agent-busctl` can never become two messages or two enrolments. This is proven by
+`go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/...` (verified PASS while
 writing this doc). The key is always printed back — human output and `--json`'s
 `idempotency_key` field — because it is the only handle that makes a *later* retry the same
 logical operation rather than a new one.
@@ -441,7 +441,7 @@ logical operation rather than a new one.
   disconnects**, surfaced as a loud `KindRejected` error, **exit 7**, with a remedy that says so in
   plain terms. Retrying will not help; a fresh key is required for genuinely new content. Reusing
   a key for different content on `enrol` is refused **locally** before the request is even sent,
-  because `busctl` already knows what that key produced.
+  because `agent-busctl` already knows what that key produced.
 
 **After a disconnect, reconnect and retry with the SAME key if the content is unchanged — that is
 correct, not a mistake.** Only mint a fresh key when the content is genuinely different.
@@ -455,11 +455,16 @@ idempotency key** (`client.Error.IdempotencyKey`, `client.IdempotencyKeyOf(err)`
 still tells you exactly what to retry with:
 
 ```
-busctl: send: could not reach the bus: dial tcp ...: connection refused
+agent-busctl: send: could not reach the bus: dial tcp ...: connection refused
   try: check --bus and that the bus is running; this send may or may not have been applied;
        retry with --idempotency-key busctl-<hex> so the retry is the SAME message rather than a
        second one (invariant 10)
 ```
+
+The `busctl-` prefix on the key itself is **not** a typo and is not renamed alongside the CLI
+binary (`DECISIONS.md`, 2026-08-07): it is wire-visible, durably remembered by the server as part
+of the key, so renaming it would change the identity of every key this client mints, not just a
+label.
 
 A **fatal** 503 (the bus's write path cannot durably accept messages at all — no `Retry-After`
 header) is worded differently: **do not retry until the bus can durably accept again**, then use
@@ -480,19 +485,19 @@ rather than being rejected — a key is a retry handle for minutes and hours, no
 `enrol` is stronger than `send`/`broadcast` because the private key must survive a crash between
 "generated" and "sent": the key pair is written to the credential store as a `pending` record
 **before** `/v1/enroll` is called. `--idempotency-key <key>` resumes a specific earlier attempt —
-`busctl` sees the byte-identical payload locally and replays the stored answer without another HTTP
-request. `busctl whoami --all` lists every unfinished enrolment with the exact `busctl enrol …`
+`agent-busctl` sees the byte-identical payload locally and replays the stored answer without another HTTP
+request. `agent-busctl whoami --all` lists every unfinished enrolment with the exact `agent-busctl enrol …`
 command that resumes it, so a process killed before it printed anything still leaves a recoverable
 identity.
 
 ### Replay of an already-accepted signed message
 
 This is a different guarantee from the idempotency key above, and it applies to the bus-to-bus
-relay plane rather than to anything `busctl` drives directly today (relay has no `busctl`
+relay plane rather than to anything `agent-busctl` drives directly today (relay has no `agent-busctl`
 subcommand yet). A signature does not stop replay — a validly signed message can be resent
 verbatim by a peer, a relay, or a third party — so the server rejects an already-accepted signed
 message outright and disconnects the sender. Freshness comes from the server-minted monotonic
-sequence plus the recipient-side cursor (the same cursor `busctl watch` persists), never from the
+sequence plus the recipient-side cursor (the same cursor `agent-busctl watch` persists), never from the
 signature alone. Nothing is required of you here beyond the ordinary rule already stated for
 `watch`: deduplicate on `message_id`, because at-least-once delivery — including across relayed
 buses — means you will see duplicates as the normal steady state.
@@ -515,5 +520,5 @@ and a retired value is never reused — branch on them freely.
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |
 
-A `401` from the bus is not one of these directly — `busctl` re-authenticates automatically and you
+A `401` from the bus is not one of these directly — `agent-busctl` re-authenticates automatically and you
 should never see it surface as a distinct exit code from ordinary use.

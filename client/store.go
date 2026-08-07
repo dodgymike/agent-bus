@@ -134,7 +134,7 @@ type Credential struct {
 	//
 	// Nothing sends it, nothing prints it, and there is no route that accepts
 	// one. Only the PUBLIC half is ever handed out, and only out of band —
-	// `busctl keygen` prints it for a human to pass to a peer. When CRYPTO-4
+	// `agent-busctl keygen` prints it for a human to pass to a peer. When CRYPTO-4
 	// lands, the public half is what gets registered; this field stays here.
 	MessagingKeySeed string `json:"messaging_key_seed,omitempty"`
 
@@ -163,13 +163,13 @@ func (c Credential) PrivateKey() (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, wrapError(KindConfig, "credential",
 			"the stored private key for "+c.AgentID+" is not valid base64",
-			"the credential store is damaged; re-enrol with `busctl enrol --name <name>`",
+			"the credential store is damaged; re-enrol with `agent-busctl enrol --name <name>`",
 			err)
 	}
 	if len(seed) != ed25519.SeedSize {
 		return nil, newError(KindConfig, "credential",
 			fmt.Sprintf("the stored private key for %s is %d bytes, expected %d", c.AgentID, len(seed), ed25519.SeedSize),
-			"the credential store is damaged; re-enrol with `busctl enrol --name <name>`")
+			"the credential store is damaged; re-enrol with `agent-busctl enrol --name <name>`")
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }
@@ -187,19 +187,19 @@ func (c Credential) MessagingPrivateKey() (ed25519.PrivateKey, error) {
 	if c.MessagingKeySeed == "" {
 		return nil, newError(KindConfig, "messaging key",
 			"identity "+c.AgentID+" has no messaging key yet",
-			"run `busctl keygen` to mint one, then hand the printed public key to your peers")
+			"run `agent-busctl keygen` to mint one, then hand the printed public key to your peers")
 	}
 	seed, err := base64.StdEncoding.Strict().DecodeString(c.MessagingKeySeed)
 	if err != nil {
 		return nil, wrapError(KindConfig, "messaging key",
 			"the stored messaging key for "+c.AgentID+" is not valid base64",
-			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `busctl keygen`, then re-distribute the new public key to your peers",
+			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `agent-busctl keygen`, then re-distribute the new public key to your peers",
 			err)
 	}
 	if len(seed) != ed25519.SeedSize {
 		return nil, newError(KindConfig, "messaging key",
 			fmt.Sprintf("the stored messaging key for %s is %d bytes, expected %d", c.AgentID, len(seed), ed25519.SeedSize),
-			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `busctl keygen`, then re-distribute the new public key to your peers")
+			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `agent-busctl keygen`, then re-distribute the new public key to your peers")
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }
@@ -254,7 +254,7 @@ func (s *Store) EnsureMessagingKey(ref string) (Credential, error) {
 		if i < 0 {
 			return newError(KindConfig, "messaging key",
 				"identity "+cred.AgentID+" is not in the credential store",
-				"enrol with `busctl enrol --bus <url> --name <name>`")
+				"enrol with `agent-busctl enrol --bus <url> --name <name>`")
 		}
 		if d.Credentials[i].MessagingKeySeed == "" {
 			seed := make([]byte, ed25519.SeedSize)
@@ -469,7 +469,7 @@ func (s *Store) load() (storeData, error) {
 	if d.Version != storeFormatVersion {
 		return storeData{}, newError(KindConfig, "store",
 			fmt.Sprintf("the credential store %s is format version %d, but this build understands version %d", s.Path(), d.Version, storeFormatVersion),
-			"upgrade busctl, or move the store aside and re-enrol")
+			"upgrade agent-busctl, or move the store aside and re-enrol")
 	}
 	return d, nil
 }
@@ -595,7 +595,7 @@ func (s *Store) lock() (func(), error) {
 		if time.Now().After(deadline) {
 			return nil, newError(KindConfig, "store",
 				"timed out waiting for the credential store lock "+path,
-				"another busctl process is updating the store; retry, or remove the lock file if no other process is running")
+				"another agent-busctl process is updating the store; retry, or remove the lock file if no other process is running")
 		}
 		time.Sleep(lockPollInterval)
 	}
@@ -717,7 +717,7 @@ func resolveIn(d storeData, ref string) (Credential, error) {
 		}
 		return Credential{}, newError(KindConfig, "identity",
 			"the selected identity "+d.Current+" is not in the credential store",
-			"pick one with `busctl use <agent-id>`, or list them with `busctl whoami --all`")
+			"pick one with `agent-busctl use <agent-id>`, or list them with `agent-busctl whoami --all`")
 	}
 	if i := findCredential(d.Credentials, ref); i >= 0 {
 		return d.Credentials[i], nil
@@ -734,7 +734,7 @@ func resolveIn(d storeData, ref string) (Credential, error) {
 	case 0:
 		return Credential{}, newError(KindConfig, "identity",
 			"no enrolled identity matches "+ref,
-			"list them with `busctl whoami --all`, or enrol with `busctl enrol --bus <url> --name <name>`")
+			"list them with `agent-busctl whoami --all`, or enrol with `agent-busctl enrol --bus <url> --name <name>`")
 	default:
 		ids := make([]string, 0, len(matches))
 		for _, m := range matches {
@@ -751,11 +751,11 @@ func noIdentityError(d storeData) *Error {
 	if len(d.Credentials) == 0 {
 		return newError(KindConfig, "identity",
 			"no identity has been enrolled",
-			"enrol with `busctl enrol --bus <url> --name <name>`")
+			"enrol with `agent-busctl enrol --bus <url> --name <name>`")
 	}
 	return newError(KindConfig, "identity",
 		"no identity is selected",
-		"select one with `busctl use <agent-id>`, or list them with `busctl whoami --all`")
+		"select one with `agent-busctl use <agent-id>`, or list them with `agent-busctl whoami --all`")
 }
 
 func findCredential(creds []Credential, agentID string) int {
