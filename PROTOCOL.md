@@ -27,6 +27,12 @@ A reader refuses a version it does not implement rather than guessing at the lay
 ever emits the current version** — there is no downgrade write, and no file ever contains a mixture
 of versions, because the version lives in the file header and a v2 writer never emits a v1 frame.
 
+**This table covers the WAL frame layout only (versions 1 and 2).** The `ondisk-format-version`
+namespace is shared by every on-disk file format this project defines, not only the WAL: version 3
+is the `agent-suffixes` file (§9) and version 4 is the `wal-index-floor` file (§11). Each is
+documented in its own section rather than folded into this table, because neither shares this
+table's frame layout at all.
+
 All integers are big-endian, so a hex dump reads left to right.
 
 ## 2. File kinds
@@ -798,18 +804,38 @@ but a suffix-floors file that "recovers" by regenerating from empty resumes ever
 mints straight over agent ids already on disk, breaking invariant 1 outright. A loud, unrecoverable
 startup refusal is the only response that does not risk that.
 
+**A MISSING file is a second, distinct fatal case — added by `AUTH-3-FU-FAILOPEN`, 2026-08-07 — and
+is not the same thing as corruption.** `OpenNameSuffixes` on an absent file returns an empty,
+`existed=false` allocator rather than an error; that alone is not fatal at the `internal/ids` layer.
+What is fatal is `cmd/agent-bus`'s own policy on top of it: if the data directory otherwise **has
+history** — it was non-empty at startup, or the WAL
+holds records — a missing `agent-suffixes` file means the directory's already-issued suffixes cannot
+be proven, and starting anyway would resume every name at 1 and re-mint a live agent's id. `run()`
+refuses in that case, naming the file path and two remedies: restore it from backup, or — **only** if
+the directory genuinely never issued an agent id — restart exactly once with the `-backfill-suffix-
+floors` flag (`CONTRACTS-CLI.md`), which derives the floors from the durable log instead of trusting
+an absent file. See `cmd/agent-bus/suffixfloors.go` and `CONTRACTS-ONDISK.md`'s "Recovery always
+reaches a running server — with three named exceptions" for the operator-facing table this feeds.
+
 **Relationship to the WAL.** The floors are **not** derived from the WAL and are **not** stored in it.
 That is the load-bearing design choice recorded in `DECISIONS.md` (2026-08-07,
 "MSG-FU-SUFFIXFLOOR") — see that entry for the full rationale, including why deriving from committed
-WAL replay or from the live roster is wrong, and for the residual that still applies to a data
-directory that predates this file.
+WAL replay or from the live roster is wrong (except as the explicit, operator-invoked `-backfill-
+suffix-floors` fallback above), and for the residual that still applies to a data directory that
+predates this file.
 
-**Production wiring — NOT yet done.** This section documents the file `internal/ids` now knows how to
-read and write. `cmd/agent-bus/main.go` does not call `ids.OpenNameSuffixes` anywhere today; it still
-constructs a fresh `ids.NewNameSuffixes()` on every start, so no `agent-suffixes` file is written or
-read by a running bus yet, and the restart re-minting bug this file exists to close is unchanged in
-production. See `CONTRACTS.md` (2026-08-07 entry) and `AGENT_LOG.md` (2026-08-07) for the full
-scope statement.
+**Production wiring — DONE (`AUTH-3-FU-FAILOPEN`, 2026-08-07).** This section previously said
+`cmd/agent-bus/main.go` never called `ids.OpenNameSuffixes` and that a restarting bus therefore still
+re-minted agent ids. That is now **false**, and stale text of that severity is worse than none, so it
+is corrected here rather than left standing (the same correction already made in `CONTRACTS.md` and
+`internal/ids/doc.go`, `cb79486`, which this file missed at the time). `ids.NewNameSuffixes()` — the
+in-memory-only constructor — has been removed from `cmd/` entirely; the call site that used to build
+it now carries a comment stating it "is gone from cmd/ and MUST NOT come back, on any path, including
+as a fallback for a failed open or a failed seal." `cmd/agent-bus/suffixfloors.go`'s
+`openSuffixAllocator` calls `ids.OpenNameSuffixes(dataDir)` on every startup — ahead of the agent-id
+minter and the auth service — so every enrolment goes through the durable allocator. An `agent-
+suffixes` file **is** written and read by a running bus today, and a restart does **not** re-mint a
+live agent id.
 
 ## 10. Loop prevention and the relay envelope (RELAY-2 / RELAY-3 / SIGN-7, 2026-08-07 — NOT SERVED)
 
@@ -862,7 +888,8 @@ The fingerprint (`relayFingerprint`) covers the message's identity-defining cont
 origin message id, sender, the broadcast flag, size, content hash, the sender's signed timestamp, and
 the recipient list **sorted** (see below, and §8.5: sorted because the *signature* sorts, so the two
 agree about what "the same payload" means) — and nothing about how this particular copy was routed.
-In a meshed or cyclic
+**Delivery is at-least-once, never exactly-once — that is the foundational fact invariant 10 exists
+to absorb, not an edge case this format works around.** In a meshed or cyclic
 topology, the *same* message legitimately arrives at one bus by more than one route, and each copy
 carries a *different* `bus_path` — that is the normal steady state, not an edge case. If the path were
 covered by the fingerprint, the second arrival would present the same idempotency key (the origin
@@ -937,3 +964,106 @@ code for both would send an operator hunting an attack on what is the ordinary d
 unfinished federation. `unpeered_bus` is *not* a "not yet", and must never be answered as one: nothing
 the sending peer can do on a retry establishes a pin, and there is deliberately no trust-on-first-use
 path that would make the code unreachable.
+
+## 11. The WAL record-index floor — `<data-dir>/wal-index-floor` (`f56c723`, `1ca7f83`, 2026-08-07)
+
+Reference implementation: `internal/wal/indexfloor.go`, introduced by commit `f56c723` and
+hardened to a keyed MAC by commit `1ca7f83` (both git commits — distinct from the Spec Server
+task ids, not git shas, named next). Full operational rationale — the two P0 defects this file
+closes (Spec Server tasks `e120153b` and `db350e39`) and how invariants 1 and 6 were reconciled
+without narrowing either — is in `CONTRACTS-ONDISK.md`'s "durable WAL record-index floor" section
+and `DECISIONS.md`, 2026-08-07; this section pins the bytes.
+
+**A fourth on-disk file kind**, alongside §2's WAL and audit magics and §9's `agent-suffixes` file:
+outside the WAL, atomically replaced, not part of the record stream. Its format version is **4**, in
+the same `ondisk-format-version` namespace as §1 (values 1/2, the WAL frame layout) and §9 (value 3,
+`agent-suffixes`) — one registry of "numbers that mean an on-disk layout" for the whole data
+directory, exactly as §9 already states for its own version. **§1's table above covers only the WAL
+frame layout (versions 1/2); versions 3 (§9) and 4 (this section) are documented in their own
+sections because their layouts have nothing else in common with §3's frame format.**
+
+**Path and mode.** `<data-dir>/wal-index-floor`, mode `0600` — the same posture as `wal-mac.key`
+(§4) and `agent-suffixes` (§9).
+
+**Layout — a header line, then a three-line body:**
+
+```
+agent-bus-wal-index-floor v4 hmac-sha256=<64 hex>
+reserved <decimal uint64>
+written <decimal uint64>
+sealed <0|1>
+```
+
+**The tag is a keyed HMAC-SHA256, under the SAME `wal-mac.key` every WAL frame is authenticated
+under (§3.2, §4) — not a separate key.** It covers `agent-bus-wal-index-floor v4\n` followed by the
+body, i.e. every byte of the file except the tag field itself; covering the version line binds the
+tag to the format version so a future body can never be replayed as a v4 one. Computed with
+`crypto/hmac` + `crypto/sha256` exactly as the frame MAC is, and compared with `hmac.Equal` — never
+`==` or `bytes.Equal` (§3.2, §7).
+
+**This replaced an UNKEYED `sha256=` digest on 2026-08-07, and the replacement was not cosmetic.** A
+security gate proved the unkeyed digest forgeable with no key at all — flip `sealed 0` to `sealed 1`,
+recompute the plain SHA-256 by hand — and a reopened bus reissued indices at 2268 of 2289 measured
+truncation offsets, while every frame it went on to write still carried a valid MAC, because the
+server itself computes that one. **The on-disk format version was NOT bumped for this change**: see
+below for why the older shapes remain readable rather than being retired by a version bump.
+
+**Three fields, and there is deliberately no field that can rewind a floor:**
+- `reserved` — no WAL record index above this value has ever been authorised by this data directory.
+- `written` — every WAL record index at or below this value is burned: written to the log, or
+  permanently skipped by recovery.
+- `sealed` — `1` means the run that wrote the file reached a clean `Writer.Close`, so `written` is
+  exact rather than a lower bound. It is exempt from the monotonicity rule below: it is cleared to
+  `0` at every `begin`, fsynced before the writer may append, so a crash can only ever leave it `0` —
+  clearing it can only make the next start *more* conservative, never less.
+- `reserved` and `written` are strictly non-decreasing, enforced in code. Always `written <=
+  reserved`; a loaded file where that fails is corrupt.
+
+**Read in THREE shapes, written in only one — a deliberate compatibility carve-out, not residual
+mess:**
+
+| shape | written by | read as |
+|---|---|---|
+| `hmac-sha256=` + 3-line body | the current writer | authenticated; `sealed` trusted |
+| `sha256=` + 3-line body | the same-day pre-HMAC revision | digest checked, `sealed` discarded and forced `false`, logged at WARN, rewritten keyed at the next start |
+| `sha256=` + 2-line body (no `sealed` line) | `f56c723`, which shipped to `main` | same as the row above — there is no `sealed` line to read |
+
+Neither older shape gets the version bumped, because neither is a layout an *older* binary would
+misread into a *lower* floor — the one thing the version field defends (§1). The two-line shape was
+briefly treated as corrupt on the premise that "v4 never shipped without `sealed`"; that premise was
+false (`f56c723` is in `main` and writes exactly that), so a routine upgrade hit
+`ErrIndexFloorCorrupt` and refused to start over a shape this binary itself once wrote. Discarding a
+legacy file's `sealed` bit costs at most one burned reservation block on the first start after
+upgrade; trusting an unauthenticated `sealed` bit would have cost invariant 1.
+
+**Write ordering matches §9's discipline exactly:** a temp file in the same directory is written,
+fsynced, renamed over the target, and then the **directory** is fsynced. A crash can therefore never
+leave a torn floor file — a read failure means either the file is genuinely absent (benign) or the
+bytes are damaged or tampered with, never a partial write.
+
+**Consumption at `Open`.** `wal.Open` resumes indexing at the **maximum** of the replayed high-water
+mark, one past the highest index the repair pass observed, and `written+1` from this file — **plus
+`reserved+1`** whenever the previous run's seal reads `0`. Reservation during a run is amortised in
+blocks of 64 (`indexReserveBlock`), fsynced *ahead* of the index it authorises; `Writer.Append`
+poisons the writer rather than ever issuing an index that outruns its own reservation. The file is
+read **after** `wal-mac.key` has been settled (§4, §6), not before: reading it first would make a
+merely wrong key surface as a corrupt floor and point an operator at deleting it — the one remedy
+that forfeits invariant 1.
+
+**Failure posture — three states, parallel to §9's but its own, equally strict, ruling:**
+- **Missing** is benign — a data directory written before this file existed — and yields a floor of
+  zero, logged at WARN when the directory is not otherwise fresh.
+- **Unverified**: if `wal-mac.key` was absent and freshly minted for *this* open, nothing the
+  previous identity wrote can verify, floor included. The numbers are still kept — they are only ever
+  consumed as a *raise*, so they can only make the next start more conservative — while `sealed` is
+  discarded, and the file is logged at **ERROR**.
+- **Corrupt** — bad header, unknown version, a tag that fails under the directory's own key, a
+  malformed number, or `written > reserved` — is **fatal** (`wal.ErrIndexFloorCorrupt`) and the file
+  is **never regenerated**, for the identical reason §9 gives for `agent-suffixes`: regenerating
+  either file risks resuming an index (and, through `internal/hub`'s derivation, a message sequence)
+  below numbers already handed out, silently, with nothing downstream able to detect it.
+
+**Scope limit, stated plainly.** Only `wal.Open` — the WAL proper — attaches a floor. The **audit**
+log writer (`wal.OpenWriter`, `wal.KindAudit`) attaches none, so an audit log's discarded tail
+record index can still be reissued; this file protects the WAL's record indices and, through
+`internal/hub`'s derivation, message ids — it does not protect the audit trail.

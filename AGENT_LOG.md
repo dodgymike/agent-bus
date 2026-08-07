@@ -2372,3 +2372,121 @@ unauthenticated floor claiming `reserved = 2^64-2` gets RE-SIGNED under a valid 
 which is the one state deletion cannot produce and the only place "no worse than deletion" fails.
 
 **No commit was made** — an integrator owns that.
+
+## 2026-08-07 — DOCS-2: `PROTOCOL.md` completeness/accuracy pass against HEAD (`documentation`)
+
+`PROTOCOL.md` already existed (939 lines) when this task was picked up, so this was a gap-closing
+pass against the current code and `CONTRACTS-*.md`, not a from-scratch write. Three findings, all
+verified against HEAD before editing, not assumed:
+
+1. **§9 (`agent-suffixes`) carried a STALE, now-FALSE claim.** It said `cmd/agent-bus/main.go` never
+   called `ids.OpenNameSuffixes` and that a restarting bus still re-minted agent ids. `AUTH-3-FU-
+   FAILOPEN` wired that in; `cb79486` corrected the same false claim in `CONTRACTS.md` and
+   `internal/ids/doc.go` on 2026-08-07 but **missed `PROTOCOL.md`**, which still said "NOT yet done"
+   at HEAD (`git show HEAD:PROTOCOL.md | grep` confirmed it). Corrected in place, and the section now
+   also documents the second fatal case `AUTH-3-FU-FAILOPEN` added — a MISSING `agent-suffixes` file
+   on a data directory that has history — which §9 never mentioned even before it went stale.
+2. **On-disk format version 4 (`wal-index-floor`, `e120153b`/`db350e39`, keyed HMAC since `1ca7f83`)
+   was completely absent from `PROTOCOL.md`**, despite `CONTRACTS-ONDISK.md` fully specifying it and
+   `internal/wal/indexfloor.go` shipping it with a crash-injection suite. Added as new §11 (append-
+   only; §1's and §9's cross-referenced section numbers are unchanged, since `CONTRACTS.md`,
+   `CONTRACTS-HTTP.md` and `DECISIONS.md` all cite `PROTOCOL.md` §1/§3.2/§4/§6/§8.x/§9/§10 by number
+   and renumbering would silently break those references). §1's table gained a one-line pointer
+   noting versions 3/4 exist and where they live, matching `CONTRACTS-ONDISK.md`'s own namespace note.
+3. **The literal phrase "at-least-once" was absent from `PROTOCOL.md`** even though the concept is
+   argued at length in §10 and the ORIGINAL DOCS-2 task explicitly mandated stating it. Added one
+   sentence in §10's idempotency-fingerprint discussion, the place the doc was already making the
+   argument without naming it.
+
+**Checked and found NOT stale** (verified, not assumed): the `record-type` table (§3.3, still 4
+values, matches `internal/wal/format.go`); `GET /v1/discovery` and `bus_fingerprints` (both are
+correctly out of `PROTOCOL.md`'s stated on-disk-only scope — HTTP wire shape lives in
+`CONTRACTS-HTTP.md`, the client's `identities.json` pin-set lives in `CONTRACTS-CLI.md`, and a
+`CONTRACTS-ONDISK.md` task for the latter is already filed separately in the backlog, P2); the
+`agent-busctl` binary name (not mentioned in `PROTOCOL.md` at all, so nothing to correct); the
+IDEM-11 `idem` field on the PREPARE payload (deliberately payload-opaque per §3.2's own framing-layer
+scope, and fully owned by `CONTRACTS-ONDISK.md` already — not duplicated here).
+
+**Proof, RED confirmed before the change, then GREEN:**
+```
+$ git show HEAD:PROTOCOL.md | grep -n "Production wiring — NOT yet done"   # RED: found (line 807)
+$ git show HEAD:PROTOCOL.md | grep -n "wal-index-floor"                    # RED: no output
+$ git show HEAD:PROTOCOL.md | grep -ni "at-least-once"                     # RED: no output
+$ bash scripts/proof-check.sh \
+  '! grep -q "Production wiring — NOT yet done" PROTOCOL.md && \
+   grep -q "Production wiring — DONE" PROTOCOL.md && \
+   grep -q "wal-index-floor" PROTOCOL.md && grep -qi "at-least-once" PROTOCOL.md'
+verdict=PASS class=file-assertion exit=0
+```
+
+**Files changed:** `PROTOCOL.md` only (138 insertions, 10 deletions — the deletions are the two
+stale sentences in §9 that were replaced, not removed content). No source file, `CONTRACTS-*.md`, or
+`AGENT_PROTOCOL.md` was touched — none of this task's findings required a route, flag, or agent-
+facing surface to change, only the maintainer-facing on-disk-format doc catching up to code already
+at HEAD. No commit was made — an integrator owns that.
+
+## 2026-08-07 — DOCS-2 CORRECTION: the "append" above was actually an INSERT, and two identifiers in the new §11 heading looked like git shas but were not (`documentation`)
+
+**The entry directly above this one is WRONG about the file's own structure, and this entry corrects
+it rather than editing it in place** (the original had already been read by the integrator and the
+coordinator; the false claim needs a visible correction, not a silent rewrite). The integrator
+refused the commit and caught both defects; neither was self-caught.
+
+1. **§11 was INSERTED at line 948 of a 1067-line file, not appended.** The pre-existing relay
+   signature error-code subsection — `unsigned`/`bad_signature`/`unpeered_bus`, the 400-vs-403 split,
+   `ErrUnpeeredBus` — sat at what was then lines 1049–1067 and is §10's content, not §11's. Inserting
+   §11 ahead of it left that content physically inside the "## 11. The WAL record-index floor"
+   heading. The prior entry's own justification for appending — preserving the `§1`/`§3.2`/`§4`/`§6`/
+   `§8.x`/`§9`/`§10` cross-references other docs cite by number — was correct in *intent* but the edit
+   did not execute it: the section *numbers* survived, the section *contents* did not, which is a
+   worse failure than a renumbering would have been, because nothing about the heading text signals
+   it happened. `PROTOCOL.md:593` ("§10 carries the concrete envelope, the caps and the status
+   codes") and `CONTRACTS.md:265` ("See PROTOCOL.md §8.5 and §10") were both silently degraded by
+   this.
+   
+   **Fixed by relocation only, no wording change:** the §11 block (heading through its closing
+   "Scope limit, stated plainly" paragraph) was moved to genuinely follow §10's relay error-code
+   subsection, restoring that subsection to §10 and making §11 the file's true last section.
+   Mechanically verified as a pure reorder before applying — `diff <(sort <old>) <(sort <new>)`
+   reported an identical line multiset — so no sentence was altered or dropped in the move, only its
+   position changed (the heading's citation was separately fixed, see point 2). Re-verified after:
+   `grep -nE '^## ' PROTOCOL.md` puts §11 last with nothing after it, the file's last line is §11's
+   own closing sentence about the audit trail, and the `unpeered_bus`/`ErrUnpeeredBus` table is once
+   again physically under §10.
+
+2. **§11's heading cited `` `e120153b`/`db350e39` `` in the same backtick styling used elsewhere in
+   this document for real git shas (`cb79486`, `1ca7f83`, `f56c723`) — but both are Spec Server task
+   public ids, not commits.** `git show e120153b` finds nothing. Fixed by citing the actual commits
+   that landed the file instead — `f56c723` (introduced `internal/wal/indexfloor.go`, unkeyed) and
+   `1ca7f83` (hardened it to the keyed HMAC this section documents) — both verified with `git log`
+   against real history before use, and the Spec Server task ids are now named explicitly in prose
+   ("Spec Server tasks `e120153b` and `db350e39`") rather than left to be inferred from styling alone.
+
+**Re-run of the original three RED/GREEN greps, against the corrected file:**
+```
+$ grep -n "Production wiring — NOT yet done" PROTOCOL.md   # (no output — still fixed)
+$ grep -n "wal-index-floor" PROTOCOL.md | head -3           # present, §1/§11
+$ grep -ni "at-least-once" PROTOCOL.md                       # present, §10
+$ bash scripts/proof-check.sh \
+  '! grep -q "Production wiring — NOT yet done" PROTOCOL.md && \
+   grep -q "Production wiring — DONE" PROTOCOL.md && \
+   grep -q "wal-index-floor" PROTOCOL.md && grep -qi "at-least-once" PROTOCOL.md'
+verdict=PASS class=file-assertion exit=0
+```
+Plus two new structural checks the previous pass never ran: `grep -nE '^## ' PROTOCOL.md | tail -1`
+names §11 as the last heading in the file, and the file's last line is §11's own "does not protect
+the audit trail" sentence rather than §10's relay content — confirming the relocation actually landed
+where intended, not merely that both sections' text still exists somewhere in the file.
+
+**Files changed:** `PROTOCOL.md` (reordered, plus the heading-citation fix — net five-line delta
+from the reorder point-of-view, since the §11 heading gained two extra lines of citation prose) and
+this `AGENT_LOG.md` entry. Nothing else. Not yet handed back to the integrator by this agent — the
+task orchestrator relayed the refusal and will re-route.
+
+**A note on why point 1 happened at all, for whoever reviews the next append-vs-insert claim in this
+repo:** the original edit was performed with the `Edit` tool's string-replacement anchored on the
+text immediately *preceding* the intended insertion point (the end of the file's *visible* §10
+prose), without first re-reading the file to confirm that prose was in fact the file's last content.
+It was not — the relay error-code subsection came after it. The lesson generalises: "append" claims
+made from an `old_string` anchor should be verified against `tail`/`wc -l` on the CURRENT file
+immediately before the edit, not inferred from what was true when the section was last read.
