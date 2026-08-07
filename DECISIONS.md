@@ -1655,3 +1655,81 @@ pinning needs a **per-identity client certificate** and a **per-bus fingerprint*
 is a function of `Config` alone — so the seam is in the right place but at the wrong TIME, and the
 TLS task will need to build it lazily or key a small cache by `(agentID, busURL)`. Written down now
 because the person doing that work should not have to rediscover it.
+
+## 2026-08-07 — The applied-key table gets a per-agent fair share, enforced only under pressure (IDEM-11-FU-FAIRSHARE)
+
+A security-gate P1 raised on the IDEM-11 wave: the applied-key table (`internal/idem`) was bounded
+ONLY bus-wide — `idem.MaxEntries` = 65536, fail-closed, nothing ever evicted. One authenticated agent,
+buggy or hostile, could fill it, after which EVERY other agent's mutating operations were refused with
+`ErrCapacity` for up to the full `RetentionWindow` (50h10m22s) — even agents holding zero keys of their
+own — because entries are evicted by age alone, never under pressure. Idempotency exists so a
+well-behaved client can retry safely (invariant 10); a bound that lets one client revoke that safety
+from everybody else defeats the invariant it was written to serve.
+
+**The fix:** a per-agent fair share, enforced only once the table crosses `idem.PressureLine`
+(`maxEntries/2` — the crossover where free space stops exceeding used space). Above the line, an
+agent may hold at most `maxEntries/(agents+1)` records, where `agents` is the count of distinct agents
+currently holding at least one retained record; at its share, an admission attempt is refused with
+`idem.ErrAgentQuota` (`hub.ErrAgentQuota` at the hub layer). Below the line, nothing changes — a bus
+that never approaches its cap sees no behaviour difference at all. See `internal/idem/retention.go`
+for the full term-by-term derivation and `CONTRACTS-ONDISK.md`'s IDEM-11-FU-FAIRSHARE section for the
+shipped contract.
+
+**Why the divisor is `agents + 1` and not `agents`.** The `+1` is the agent that has not arrived yet,
+and it is load-bearing, not a safety margin. With a divisor of `agents`, a lone agent's share is the
+whole table (`maxEntries/1`), so the exact attack in the finding — one agent, acting alone, filling
+everything before any victim holds a single record — passes straight through and the rule buys
+nothing. The victim cannot be counted in the divisor precisely because it holds nothing, which is the
+condition of being starved; a bucket that only counts agents already holding records is blind to the
+agent being denied its first one. The phantom slot is what reserves room for it before it exists.
+
+**Why it fails CLOSED and evicts nothing**, rather than reclaiming the oldest record to make room: the
+same reason the bus-wide cap already takes this posture. Evicting a live key silently turns that key's
+next legitimate retry into a SECOND effect — the double-apply invariant 10 exists to prevent — and it
+does so quietly, to the client that is behaving correctly by retrying. A refused operation is
+recoverable and loud; a duplicated one is neither recoverable nor visible to the client it happened to.
+The alternative posture (evict-oldest) was considered and rejected on this basis alone.
+
+**Why the bucket is keyed on the agent id, and why that is safe HERE specifically.** A `Record` exists
+only because an authenticated, server-minted, fully-qualified `<bus-id>.<agent-id>` (invariant 2)
+performed a mutating operation — the bucket key is therefore a PROVEN identity, not an attacker-chosen
+label. A flooder cannot make its keys land in a victim's bucket; it can only fill its own, so a refusal
+at the share is always self-inflicted. This project got the opposite wrong once already:
+`auth.BeginSession`'s removed `MaxPendingPerAgent` cap was keyed on an `agentID` an UNAUTHENTICATED
+caller supplies at enrolment time, which turned it into a targeted denial of service against any named
+agent (see `internal/auth/session.go`'s "There is deliberately NO per-agent cap" note). The two places
+this project got it right beforehand — `hub.Wait`'s `MaxWaitersPerAgent` and `auth.CompleteSession`'s
+per-agent active-session cap, both keyed on ids proven by a live session or an Ed25519 signature — are
+the model this rule follows, not a coincidence of style.
+
+**Why the replay path is exempt.** The fair share is a LIVE ADMISSION policy — a decision about
+whether to accept an operation that has not happened yet — never a property of a stored record.
+`hub.Apply` calls `idem.Store.Recover`, which is `Store.Remember` minus exactly the per-agent check (it
+still enforces the bus-wide cap and still validates the record). A record on disk is proof that
+admission ALREADY succeeded; re-testing it at replay can only ever disagree with a decision already
+acted on, and the disagreement is not a stricter bus, it is a LOST key whose next retry becomes a
+second message — the exact failure this rule exists to prevent, reintroduced by the mechanism meant to
+prevent it. Two concrete triggers, not a theoretical one: a backwards clock makes the replayed retained
+set a SUPERSET of what was live (safe for expiry's own predicate, unsafe for admission), and a log
+written BEFORE this change can legitimately hold one agent above the new share, so the first restart
+after the upgrade would otherwise drop that agent's already-accepted keys. Covered by
+`TestReplayNeverRefusesWhatTheLivePathAccepted`.
+
+**The accepted cost.** A SOLE agent on a bus can now hold at most `maxEntries/2` = 32768 applied keys
+instead of 65536, halving its sustained throughput ceiling (~0.36 -> ~0.18 accepted mutating ops/sec,
+sustained over the retention window). That halving is the price of the guarantee and is judged worth
+it: the alternative is one agent being able to deny idempotency to the whole bus for up to 50 hours.
+The general sustained-ceiling concern is already tracked by IDEM-11-FU-THROUGHPUT.
+
+**Two residual surfaces, recorded by the security gate as follow-ups and NOT fixed here:**
+
+- The divisor counts every distinct agent holding a record, so many cheap identities shrink everyone's
+  share — this rule mitigates one agent starving others, it does not bound how many agents can exist.
+  The root fix is enrolment authentication (INVITE-GATE); enrolment is unauthenticated today.
+- Below the pressure line, admission is first-come first-served with no reclamation: an agent that
+  grew its holding during the free-growth phase keeps that outsized allocation even after the bus
+  crosses into pressure, because the share only ever REFUSES new admissions, it never claws back what
+  is already held.
+
+Not deployed: this is a code-only change to `internal/idem` and `internal/hub`, uncommitted at the
+time this decision was recorded.

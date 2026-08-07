@@ -438,9 +438,18 @@ func TestStoreCapacityFailsClosed(t *testing.T) {
 	now := base
 	s := idem.NewStore(idem.StoreOptions{Window: time.Hour, MaxEntries: 2, Now: func() time.Time { return now }})
 
-	for i, key := range []string{"k1", "k2"} {
-		if err := s.Remember(mustRecord(t, key, fp(byte(i+1)), base)); err != nil {
-			t.Fatalf("Remember %s: %v", key, err)
+	// The table is filled by TWO agents, deliberately. Since
+	// IDEM-11-FU-FAIRSHARE a SOLE agent's ceiling is its fair share
+	// (maxEntries/2), so one agent can no longer reach the BUS-WIDE cap at all —
+	// that is the documented price of the fair share (retention.go), not a
+	// change to what this test is about. The subject here is still the bus-wide
+	// cap: it fails closed and evicts nothing.
+	for _, r := range []idem.Record{
+		mustRecord(t, "k1", fp(1), base),
+		agentRecord("bus1.bob-1", "k2", 2, base),
+	} {
+		if err := s.Remember(r); err != nil {
+			t.Fatalf("Remember %s: %v", r.Key, err)
 		}
 	}
 	if !s.Full() {
@@ -449,6 +458,14 @@ func TestStoreCapacityFailsClosed(t *testing.T) {
 	err := s.Remember(mustRecord(t, "k3", fp(3), base))
 	if !errors.Is(err, idem.ErrCapacity) {
 		t.Fatalf("Remember at the cap: err = %v, want ErrCapacity", err)
+	}
+	// And it is the BUS-WIDE cap specifically. A per-agent fair-share refusal
+	// deliberately satisfies ErrCapacity too, so the assertion above alone would
+	// still pass if the two checks inside Remember were ordered the wrong way
+	// round and the share fired first — which would make this test silently
+	// stop covering the subject named in its own title.
+	if errors.Is(err, idem.ErrAgentQuota) {
+		t.Fatalf("Remember at the cap: err = %v also satisfies ErrAgentQuota, so the refusal came from the per-agent share and not from the bus-wide cap this test is about", err)
 	}
 	// Nothing was evicted to make room.
 	sc, scErr := idem.NewAgentScope(testAgent, idem.OpSend, "k1")

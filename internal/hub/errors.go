@@ -1,6 +1,9 @@
 package hub
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors. Every one is checkable with errors.Is, and the HTTP layer
 // maps them to status codes BY SENTINEL and never by matching error text — the
@@ -50,6 +53,25 @@ var (
 	// message. A refused send is recoverable; a duplicated one is not.
 	ErrCapacity = errors.New("hub: at a capacity limit")
 
+	// ErrAgentQuota reports that ONE AGENT is at its fair share of the
+	// applied-key table while that table is under pressure
+	// (idem.ErrAgentQuota; see internal/idem/retention.go for the derivation).
+	// The table is NOT full and no other agent is affected — the refusal is
+	// self-inflicted by the agent it names, and it is keyed on a PROVEN
+	// identity, so no third party can consume another agent's share.
+	//
+	// Every error carrying it ALSO satisfies errors.Is(err, ErrCapacity); see
+	// agentQuotaError for why that is required rather than tidy.
+	//
+	// STATUS CODE CAVEAT, recorded here so it is not silently "fixed" in
+	// passing: the HTTP layer maps ErrCapacity to 503 with a Retry-After, and
+	// 503 ("the SERVER is overloaded") is arguably the wrong answer for a cap
+	// that only this one client has reached — 429 is the better fit. That is
+	// already tracked, across all three per-agent caps at once, by task
+	// AUTH-1-FU-ACTIVECAP-RETRYAFTER. Do NOT change the status here: a per-cap
+	// drive-by fix is how the three end up answering differently.
+	ErrAgentQuota = errors.New("hub: at a per-agent fair-share limit")
+
 	// ErrPoisoned reports a hub that has stopped accepting writes because an
 	// internal invariant failed. See Hub.publish for the one condition that
 	// sets it: a message whose sequence number came out ABOVE the WAL index
@@ -64,3 +86,35 @@ var (
 	// memory alone.
 	ErrNotDurable = errors.New("hub: no durable write path")
 )
+
+// agentQuotaError is the refusal returned when an agent is at its fair share of
+// the applied-key table. It matches BOTH ErrAgentQuota and ErrCapacity under
+// errors.Is, and BOTH matches are required:
+//
+//   - ErrAgentQuota is the precise fact, for a caller that wants to say WHICH
+//     client to look at.
+//   - ErrCapacity is the class the HTTP layer already maps
+//     (internal/httpapi/messages.go: ErrCapacity -> 503 + Retry-After). That
+//     mapping is outside this package's boundary, so an error that did not
+//     satisfy errors.Is(err, ErrCapacity) would fall through the switch and the
+//     route would silently degrade from a considered 503 to a generic 500 —
+//     turning a "retry later" into "the server broke", for a condition that is
+//     entirely routine.
+//
+// It is a TYPE with an Is method rather than a double fmt.Errorf("%w … %w")
+// because go.mod pins go 1.19 and multi-%w wrapping arrived in go 1.20. Do not
+// "simplify" it back to one wrap; whichever sentinel were dropped, one of the
+// two consumers above breaks silently.
+type agentQuotaError struct{ detail string }
+
+// newAgentQuotaError builds the refusal with the same text shape a
+// fmt.Errorf("%w: …", ErrAgentQuota) would have produced.
+func newAgentQuotaError(format string, a ...interface{}) error {
+	return &agentQuotaError{detail: fmt.Sprintf(format, a...)}
+}
+
+func (e *agentQuotaError) Error() string { return ErrAgentQuota.Error() + ": " + e.detail }
+
+func (e *agentQuotaError) Is(target error) bool {
+	return target == ErrAgentQuota || target == ErrCapacity
+}

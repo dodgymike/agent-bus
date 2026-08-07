@@ -154,6 +154,21 @@ type Options struct {
 	// store package defaults (1 day / 1 GiB).
 	MaxAge   time.Duration
 	MaxBytes int64
+
+	// MaxIdempotencyEntries bounds the applied-key table for THIS hub. 0 means
+	// idem's derived default, which is the MaxIdempotencyEntries CONSTANT in
+	// this package (65536). The field and the constant share a name because
+	// they are the same bound at different scopes — a Go field and a package
+	// constant do not collide — and 0 here is exactly that constant.
+	//
+	// WHY IT IS CONFIGURABLE AT ALL, stated honestly: it is not a tuning knob
+	// anybody is expected to turn in production. It exists because the
+	// per-agent FAIR SHARE (IDEM-11-FU-FAIRSHARE) is only exercisable by
+	// actually FILLING a table, and filling the real 65536-entry table means
+	// 65536 durable, fsynced writes — a test nobody will run, and therefore a
+	// security property nobody would ever check. A configurable bound is what
+	// makes the property PROVABLE rather than asserted.
+	MaxIdempotencyEntries int
 }
 
 // Hub owns message fan-out, the applied-key table and the long-poll waiter
@@ -208,9 +223,19 @@ type Hub struct {
 	// inspect endpoint.
 	idem *idem.Store
 
+	// idemMaxEntries is the applied-key bound actually in force — the constant
+	// MaxIdempotencyEntries unless Options.MaxIdempotencyEntries overrode it.
+	// Set once in Open, read-only afterwards; it exists so a refusal quotes the
+	// bound this hub is running with rather than the compiled-in default.
+	idemMaxEntries int
+
 	// idemCapWarned records that the replay-time capacity warning has already
-	// been emitted, so a large log produces ONE line rather than one per
-	// message. Written only during Open, before the hub is reachable.
+	// been emitted, so a large log produces ONE line rather than one per message.
+	// Written only during Open, before the hub is reachable.
+	//
+	// There is deliberately no companion flag for the per-agent fair share:
+	// replay calls idem.Store.Recover, which does not adjudicate the share at
+	// all, so no replayed record can be refused for it BY CONSTRUCTION.
 	idemCapWarned bool
 
 	// poisoned, once set, is never cleared. See ErrPoisoned. Guarded by
@@ -305,7 +330,11 @@ func Open(o Options) (*Hub, error) {
 	// Built after h.now is normalised so the applied-key table and the message
 	// store read the SAME clock: two clocks would let a test (or a future
 	// injected clock) expire messages and keys against different "now"s.
-	h.idem = idem.NewStore(idem.StoreOptions{Now: h.now})
+	h.idem = idem.NewStore(idem.StoreOptions{Now: h.now, MaxEntries: o.MaxIdempotencyEntries})
+	// Read the bound BACK from the store rather than re-deriving the 0-means-
+	// default rule here: one place decides what the bound is, and the refusals
+	// below then quote the bound actually in force instead of the constant.
+	h.idemMaxEntries = h.idem.Stats().MaxEntries
 
 	// # Deriving the sequence floor — read this before changing it
 	//
@@ -409,6 +438,23 @@ func (h *Hub) Store() *store.Store { return h.store }
 // Apply implements wal.Applier: it folds one committed entry into the serving
 // copy. It runs during recovery, before anything can reach this hub.
 //
+// # THAT IS TRUE ONLY BECAUSE main PASSES A NIL Applier — read this before the
+// # migration described in the ReplayFunc comment
+//
+// wal.Applier's own contract says the opposite: once a Hub is registered as
+// wal.LogOptions.Applier, Apply is called for LIVE commits too, and it "cannot
+// tell them apart" (internal/wal/log.go). Today cmd/agent-bus/main.go passes
+// Applier: nil and reaches this only through the Options.Replay closure, so
+// "runs during recovery" holds.
+//
+// It must not be allowed to stop holding by accident. Apply inserts through
+// idem.Store.Recover, which DELIBERATELY SKIPS the per-agent fair share because
+// a record on disk is proof that admission already succeeded (see Recover's
+// doc). On a live commit that exemption is wrong: it would admit past the share
+// and make publish's own Admit/Remember pair — and the poison guard that backs
+// it — dead code. Whoever performs that migration must split this function by
+// call site FIRST: Recover for replay, Remember for live.
+//
 // # A record it cannot understand is DISCARDED, LOUDLY
 //
 // Returning an error here would abort recovery and refuse to start the bus.
@@ -468,16 +514,24 @@ func (h *Hub) Apply(c wal.Committed) error {
 	if !ok {
 		return nil
 	}
-	if err := h.idem.Remember(rec); err != nil {
+	// It is Recover, NOT Remember, and that is load-bearing: Recover omits the
+	// per-agent fair share (idem.Store.Recover). Replay is not ADMITTING
+	// anything — every record here was already admitted, acknowledged and
+	// fsynced by the run that accepted it — and re-adjudicating an accepted
+	// record can only make two runs of the same log disagree, silently dropping
+	// a key whose next retry would then become a SECOND message.
+	if err := h.idem.Recover(rec); err != nil {
 		if errors.Is(err, idem.ErrCapacity) {
-			// Not fatal, but the operator must know: the rebuilt table is a
-			// PREFIX of the durable one, so keys beyond the cap will not
+			// Not fatal, but the operator must know: the rebuilt table holds the
+			// records replay reached FIRST and none after the cap — a prefix of
+			// the durable log's applied keys in commit order, minus whatever the
+			// retention window had already expired. Keys beyond the cap will not
 			// suppress a retry that the pre-restart bus would have suppressed.
 			// Logged ONCE — one line per message would bury it.
 			if !h.idemCapWarned {
 				h.idemCapWarned = true
-				h.log.Warn("the applied-key table reached its cap during recovery, so the rebuilt table is a PREFIX of the durable one: keys beyond the cap will not suppress a retry",
-					"max_entries", MaxIdempotencyEntries,
+				h.log.Warn("the applied-key table reached its cap during recovery, so the rebuilt table holds only the applied keys replay reached BEFORE the cap (a prefix in commit order, less whatever the retention window had already expired): keys beyond the cap will not suppress a retry",
+					"max_entries", h.idemMaxEntries,
 					"prepare_index", c.PrepareIndex,
 				)
 			}
@@ -678,12 +732,25 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		return out, nil
 	}
 
-	// Full() expires first, so a table of keys already past the retention
-	// window does not refuse a send that has room. Checked BEFORE the sequence
-	// is minted: a sequence spent on a send that will be refused is a sequence
-	// burned for nothing, and invariant 1 forbids reusing it.
-	if h.idem.Full() {
-		return Result{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, MaxIdempotencyEntries)
+	// ADMISSION. Admit expires first, so a table of keys already past the
+	// retention window does not refuse a send that has room, and it applies BOTH
+	// bounds: the bus-wide cap and this sender's per-agent FAIR SHARE of it
+	// (IDEM-11-FU-FAIRSHARE — one agent must never be able to fill the table and
+	// deny every other agent its own first applied key).
+	//
+	// Checked BEFORE the sequence is minted: a sequence spent on a send that will
+	// be refused is a sequence burned for nothing, and invariant 1 forbids
+	// reusing it.
+	if err := h.idem.Admit(sc); err != nil {
+		// The per-agent case is checked FIRST because it is the more specific
+		// one: an idem fair-share refusal deliberately satisfies BOTH sentinels
+		// (see idem.ErrAgentQuota), so testing ErrCapacity first would report
+		// "the bus is full" about a table that is not full and mislead the
+		// operator into looking at the bus instead of at one client.
+		if errors.Is(err, idem.ErrAgentQuota) {
+			return Result{}, newAgentQuotaError("agent %q is at its per-agent share of the applied-key table, which the bus is holding in reserve so no other agent is starved of its own first key; nothing is evicted to make room, because evicting a key turns the next retry of it into a second message: %s", sender, err)
+		}
+		return Result{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, h.idemMaxEntries)
 	}
 
 	seq, err := h.seq.Next()
@@ -800,10 +867,11 @@ func (h *Hub) publish(sender string, broadcast bool, recipients []string, body [
 		// divergence between memory and the durable record, exactly like a
 		// failed store.Append above, and it gets the same answer: POISON.
 		//
-		// It cannot happen — Full() was checked under this same lock and Encode
-		// already validated the record — but "cannot happen" is precisely the
-		// class of failure that must not be allowed to corrupt the applied-key
-		// table silently.
+		// It cannot happen — h.idem.Admit was checked under this same lock, and
+		// it applies the identical predicate Remember does (the bus-wide cap AND
+		// this sender's fair share), while Encode already validated the record —
+		// but "cannot happen" is precisely the class of failure that must not be
+		// allowed to corrupt the applied-key table silently.
 		h.poisoned = fmt.Errorf("%w: message %s is committed on disk but its applied-key record was rejected by the serving table, so a retry of key %q would produce a second message: %s", ErrPoisoned, m.ID, key, err)
 		h.log.Error("POISONED: a committed message's applied-key record could not be remembered, so a retry would be applied twice; refusing all further sends",
 			"message_id", m.ID,

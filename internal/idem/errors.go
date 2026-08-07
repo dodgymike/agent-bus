@@ -1,6 +1,9 @@
 package idem
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // The sentinel errors of this package. A caller reacts to a failure with
 // errors.Is against one of these, never by matching error text — the text is
@@ -59,4 +62,52 @@ var (
 	// next retry into a SECOND effect, which is the double-apply invariant 10
 	// forbids; a refused operation is recoverable, a duplicated one is not.
 	ErrCapacity = errors.New("idem: the applied-key table is full")
+
+	// ErrAgentQuota reports that ONE AGENT is at its FAIR SHARE of the
+	// applied-key table while the table is under pressure (see PressureLine and
+	// the share derivation in retention.go).
+	//
+	// It is a DIFFERENT FACT from ErrCapacity and that is exactly why it is a
+	// separate sentinel: the table is NOT full, every other agent is completely
+	// unaffected, and the refusal is SELF-INFLICTED by the agent it names. An
+	// operator reading ErrCapacity should reach for the bus's global bound; an
+	// operator reading ErrAgentQuota should reach for the one client named in
+	// the message. Collapsing the two would send them to the wrong place.
+	//
+	// Like ErrCapacity it fails CLOSED and evicts NOTHING — see agentQuotaError
+	// and Store.Remember.
+	ErrAgentQuota = errors.New("idem: the agent is at its fair share of the applied-key table")
 )
+
+// agentQuotaError is the error returned when the per-agent fair share refuses
+// an operation. It matches BOTH ErrAgentQuota and ErrCapacity under errors.Is,
+// and BOTH matches are load-bearing:
+//
+//   - ErrAgentQuota is the specific fact — this one agent is at its share while
+//     the table is under pressure — and is what a caller checks FIRST when it
+//     wants to say something accurate about which client to look at.
+//   - ErrCapacity is the general class the refusal belongs to: "refused at a
+//     bound, nothing was applied, retry later". Every caller that predates the
+//     fair share (and every layer above it, up to the HTTP status mapping)
+//     already reacts correctly to that class, and a per-agent refusal that did
+//     NOT match it would silently fall through those checks into a
+//     generic-internal-error path. Adding a bound must not change how an
+//     existing refusal is classified.
+//
+// It is a TYPE with an Is method rather than a double fmt.Errorf("%w … %w"),
+// because go.mod pins go 1.19 and multi-%w wrapping arrived in go 1.20. Do not
+// "simplify" it back to a single wrap: whichever sentinel were dropped, one of
+// the two callers above would break, and it would break silently.
+type agentQuotaError struct{ detail string }
+
+// newAgentQuotaError builds the refusal with the same text shape a
+// fmt.Errorf("%w: …", ErrAgentQuota) would have produced.
+func newAgentQuotaError(format string, a ...interface{}) error {
+	return &agentQuotaError{detail: fmt.Sprintf(format, a...)}
+}
+
+func (e *agentQuotaError) Error() string { return ErrAgentQuota.Error() + ": " + e.detail }
+
+func (e *agentQuotaError) Is(target error) bool {
+	return target == ErrAgentQuota || target == ErrCapacity
+}

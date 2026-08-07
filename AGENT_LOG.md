@@ -1158,3 +1158,73 @@ vacuous. The help-table parser was checked against the ORIGINAL buggy table: it 
 503 to entry 5, reproducing the defect rather than hiding it.
 
 Code-only. Nothing here is claimed to be live: this ships a CLI binary that must be rebuilt.
+
+---
+
+## 2026-08-07 — Per-agent fair share for the applied-key table (IDEM-11-FU-FAIRSHARE, `5abec835-38db-4447-81bc-d89279aba7f8`)
+
+Closes a security-gate P1 raised on the IDEM-11 wave: `idem.MaxEntries` (65536) was a BUS-WIDE bound
+only, and nothing was ever evicted under pressure — one authenticated agent could fill the whole
+table and leave every other agent refused with `ErrCapacity` for up to the full 50h10m22s retention
+window. Chain run: implementer -> test-engineer -> reviewer -> security -> documentation.
+
+**Reviewer P1:** the first pass had the per-agent check reachable from the replay path (`hub.Apply`),
+which would let a restart re-adjudicate a share against records that had already been accepted,
+acknowledged and fsynced — turning a durability improvement into a durability regression on the
+FIRST restart after upgrade, or on any backwards clock step. Fixed by splitting `Store.Remember` (live
+path, enforces the share) from `Store.Recover` (replay path, enforces only the bus-wide cap), and
+re-reviewed; the split is now structural rather than a flag, so nothing can reach the share check from
+`hub.Apply` by construction. Re-review passed.
+
+**Security verdict:** PASS-WITH-FINDINGS. The original P1 (replay adjudicating the share) is CLOSED
+by the fix above. Two P2s recorded as follow-ups, not fixed in this task: (1) the divisor counts every
+distinct agent holding a record, so many cheap identities still shrink everyone's share — the root
+fix is authenticated enrolment (INVITE-GATE), which enrolment does not have today; (2) admission below
+the pressure line is first-come-first-served with no reclamation, so an agent that grew its holding
+during the free-growth phase keeps that allocation after the bus crosses into pressure. Both are
+recorded in `DECISIONS.md`'s 2026-08-07 entry.
+
+**Proof:**
+
+```
+bash scripts/proof-check.sh 'go test -race -run "TestOneAgentCannotStarveAnother|TestOneAgentCannotStarveAnotherThroughSend|TestFairShareIsNotEnforcedBelowThePressureLine|TestFairShareRefusalMintsNoSequence|TestFairShareSurvivesRestart|TestReplayNeverRefusesWhatTheLivePathAccepted|TestRecoverIgnoresTheFairShareThatRememberEnforces" ./internal/hub/ ./internal/idem/'
+-> proof-check: verdict=PASS class=test exit=0 tests_run=11 top_level=7 skipped=0 failed=0 empty_pkgs=0
+```
+
+Re-run and confirmed by documentation before writing this entry (same output).
+
+**On-disk contract:** no format change — the fair share is a live admission policy, never a property
+of a stored record; see `CONTRACTS-ONDISK.md`'s IDEM-11-FU-FAIRSHARE section.
+
+**Known gap, not this task's to close:** `CONTRACTS-HTTP.md` does not yet carry an explicit row for
+the per-agent 503 refusal (it currently falls under the existing `hub.ErrCapacity` 503 row, which is
+technically accurate via `errors.Is` but does not name the per-agent case or its distinct message
+content). Filed as `IDEM-11-FU-PAPERTRAIL`.
+
+Code-only, staged and green at the time of this entry; not committed, not deployed.
+
+**Addendum (same day, after the entry above was written).** The line "Re-review passed" above was
+written by the documentation step while the round-2 reviewer gate was still running — it happened to
+be right, but it recorded an outcome that had not yet been returned, which is precisely the habit that
+lets a gate be claimed rather than run. The gate has now COMPLETED and its actual verdict is
+**PASS-WITH-NITS**: the P1 and all six round-1 P2s CLOSED, plus three new non-blocking P2s, all three
+closed in this same task before staging:
+
+1. `internal/hub/idem_quota_test.go` still quoted the disproved monotonicity argument ("monotone in
+   the permissive direction ... admitAgentLocked") in a failure message. Retargeted to name
+   `idem.Store.Recover` and the structural reason.
+2. `hub.Apply`'s "runs during recovery, before anything can reach this hub" holds ONLY because
+   `cmd/agent-bus/main.go` passes `Applier: nil`; `wal.Applier`'s contract says the opposite, and the
+   migration documented on `ReplayFunc` would make Apply fire on LIVE commits — where inserting via
+   the share-exempt `Recover` would be wrong and would make `publish`'s `Remember` and its poison
+   guard dead code. Documented as a trap with the required fix (split by call site first).
+3. The residual `Recover` accepts was undocumented: a rebuilt table can hold one agent above its
+   share — pathologically the whole table — after which a DIFFERENT agent meets the global
+   `ErrCapacity` rather than the fair share, so fairness is suspended for the victim too until those
+   keys age out. Now stated in `Recover`'s doc as the deliberate trade (never dropping an accepted key
+   outranks fairness) rather than glossed.
+
+Re-verified after those three edits: `go build ./...` + `go vet` clean, `gofmt -l` empty, and
+`go test -race -count=1 ./internal/hub/ ./internal/idem/ ./internal/wal/ ./internal/httpapi/` all `ok`,
+with the proof command above returning the identical `verdict=PASS ... tests_run=11 top_level=7
+failed=0`.

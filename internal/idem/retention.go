@@ -151,3 +151,91 @@ const (
 	// is defined as this constant so the number cannot move in one place only.
 	MaxEntries = MaxRetainedBytes / MaxRecordBytes
 )
+
+// The PER-AGENT FAIR SHARE (IDEM-11-FU-FAIRSHARE), derived the same way: every
+// number traceable, nothing round because it is round.
+//
+// # The defect it closes
+//
+// MaxEntries alone is a BUS-WIDE bound and nothing else. One agent — buggy or
+// hostile, but in either case AUTHENTICATED — can occupy the whole table, after
+// which EVERY other agent's mutating operations are refused with ErrCapacity for
+// up to the full RetentionWindow (50h10m22s) even though those agents hold not a
+// single key of their own. Idempotency exists so a well-behaved client can retry
+// safely (invariant 10); a bound that lets one client revoke that safety from
+// everybody else defeats the invariant it was written to serve.
+//
+// # The rule
+//
+//	under pressure : len(records) >= maxEntries / 2      (PressureLine)
+//	fair share     : maxEntries / (agents + 1)
+//	admission      : not under pressure                       -> admit
+//	                 under pressure and held >= fair share    -> REFUSE (ErrAgentQuota)
+//	                 otherwise                                -> admit
+//
+// where `agents` is the number of DISTINCT agents currently holding at least one
+// retained record. Both numbers are computed from the STORE'S OWN maxEntries
+// (StoreOptions.MaxEntries may override it), never from the constant — a bound
+// that only exists at 65536 entries is a bound no test can ever demonstrate.
+//
+// # Why the pressure line is maxEntries/2, and why it is a DERIVED crossover
+//
+// It is the fill level at which the table's FREE space stops exceeding its USED
+// space: count >= maxEntries - count, i.e. count >= maxEntries/2. That is a
+// crossover, not a round number that happens to be a half.
+//
+// BELOW it, whatever one agent has consumed is BY CONSTRUCTION still available
+// to everyone else — free space is the larger half — so there is nothing to
+// protect and the rule stays entirely out of the way. A bus that never
+// approaches its cap sees NO behaviour change from the fair share whatsoever.
+// ABOVE it, free space is the scarcer half and the share is the only thing
+// standing between one agent and every other agent on the bus.
+//
+// (Integer division rounds DOWN for an odd maxEntries, so the line engages one
+// record earlier than the exact crossover. That is the conservative direction
+// and is left as is.)
+//
+// # Why the divisor is agents+1 and NOT agents
+//
+// The "+1" is THE AGENT THAT HAS NOT ARRIVED YET, and it is load-bearing rather
+// than a safety fudge. With a divisor of `agents`, a lone agent's share is the
+// WHOLE table (1 agent -> maxEntries/1), so the exact attack in the finding —
+// ONE agent, acting alone, filling everything before any victim holds a single
+// record — passes straight through and the rule buys nothing at all. The victim
+// cannot be counted in the divisor, because it holds nothing PRECISELY BECAUSE
+// it is being starved: a bucket that only counts agents already holding records
+// is blind to the agent being denied its first one. The phantom slot is what
+// reserves room for it.
+//
+// # The price, stated plainly rather than hidden
+//
+// A SOLE agent on the bus can now hold at most maxEntries/2 applied keys instead
+// of maxEntries, which HALVES its sustained ceiling (the throughput consequence
+// above becomes ~0.18 accepted mutating operations per second sustained for a
+// single-agent bus). That is the cost of the guarantee and it is the right
+// trade: the alternative is one agent denying idempotency to the whole bus for
+// 50 hours.
+//
+// # It fails CLOSED and evicts NOTHING — the same decision as the global cap
+//
+// An agent at its share is REFUSED; its oldest entry is NOT dropped to make
+// room. Evicting a live key silently turns that key's next legitimate retry into
+// a SECOND effect — the double-apply invariant 10 exists to prevent — and it
+// would do it quietly, to the agent that is behaving CORRECTLY by retrying. A
+// refused operation is recoverable and loud; a duplicated one is neither. This
+// is the identical posture ErrCapacity already takes and must read as the same
+// decision, not a different one.
+const (
+	// PressureLine is the fill level at which the per-agent fair share starts
+	// being enforced, for the DEFAULT MaxEntries: 32768.
+	//
+	// IT IS EXPORTED FOR DOCUMENTATION, NOT FOR CALLERS, and deliberately has no
+	// caller inside this package: admission derives the line from the STORE'S OWN
+	// maxEntries (pressureLineLocked), because a bound that only exists at 65536
+	// entries is a bound no test can ever demonstrate. What this constant exists
+	// for is a single citable number — CONTRACTS-ONDISK.md and the derivation
+	// above both name it, so the documented figure and the default derivation
+	// cannot drift apart. A Store built with StoreOptions.MaxEntries derives its
+	// own line the same way, from its own bound (see Stats.UnderPressure).
+	PressureLine = MaxEntries / 2
+)

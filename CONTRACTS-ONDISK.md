@@ -274,3 +274,87 @@ not discovered by an operator watching a key that should have expired keep answe
 
 No new HTTP route, CLI flag, header, or env var was introduced by IDEM-11 — see the sections above,
 which remain the complete index for those planes.
+
+## The applied-key store's per-agent fair share (IDEM-11-FU-FAIRSHARE, added 2026-08-07)
+
+**Nothing about the on-disk shape changed.** No field was added to `recordJSON` (the table above is
+still complete), no WAL record type or `ondisk-format-version` was reserved, and the PREPARE payload's
+`idem` field is unchanged from what IDEM-11 shipped. The fair share is a LIVE ADMISSION policy — a
+decision about whether to accept an operation that has not happened yet — never a property of a stored
+record, so there is nothing for a record to carry and no migration for an existing log.
+
+**The defect it closes:** `MaxEntries` (65536, above) was a BUS-WIDE bound only, and entries are
+evicted solely by age, never under pressure. One authenticated agent could occupy the whole table,
+after which every OTHER agent's mutating operations were refused with `ErrCapacity` for up to the full
+`RetentionWindow` (50h10m22s) — even agents holding zero keys of their own.
+
+**The rule** (`internal/idem/retention.go`'s derivation; enforced by `internal/idem/store.go`'s
+`admitAgentLocked`, called from both `Store.Admit` and `Store.Remember`):
+
+```
+under pressure : retained >= maxEntries/2          (idem.PressureLine, for the default 65536 bound)
+fair share      : maxEntries / (agents + 1)          agents = distinct agents holding >= 1 record
+admission       : not under pressure                     -> admit
+                  under pressure and held >= fair share  -> refuse (idem.ErrAgentQuota / hub.ErrAgentQuota)
+                  otherwise                                -> admit
+```
+
+`idem.PressureLine` is exported for exactly this citation — it names the fill level at which the
+table's FREE space stops exceeding its USED space (a derived crossover, not a chosen round number).
+**Below the pressure line, nothing changes**: a bus that never approaches its cap sees no behaviour
+difference from this rule at all.
+
+The `+1` in the divisor is the agent that has not arrived yet. With a divisor of `agents`, a lone
+agent's share would be the whole table, so the exact attack the rule exists to close — one agent,
+acting alone, filling the table before any victim holds a single record — would pass straight through:
+the victim cannot be counted in a bucket it holds nothing in, precisely because it is the one being
+starved. The phantom slot reserves its room before it exists.
+
+**The cost, stated plainly:** a SOLE agent on a bus can now hold at most `maxEntries/2` = 32768 applied
+keys instead of 65536, halving its sustained throughput ceiling (~0.36 -> ~0.18 accepted mutating
+ops/sec, sustained over the retention window). Task IDEM-11-FU-THROUGHPUT already tracks the
+sustained-ceiling concern generally; this is not a new instance of it, just a lower number for the
+single-agent case.
+
+**It fails CLOSED and evicts nothing** — the identical posture the bus-wide cap already takes, and for
+the identical reason: evicting a live key silently turns that key's next legitimate retry into a
+SECOND effect, which invariant 10 forbids. A refused operation is recoverable; a duplicated one is not.
+
+**The replay path does not adjudicate the share.** `hub.Apply` calls `idem.Store.Recover`
+(`internal/idem/store.go`), never `Remember`. `Recover` is `Remember` minus exactly the per-agent
+check — it still validates the record, still expires first, and still enforces the bus-wide
+`MaxEntries` cap the same way `Remember` does; only `admitAgentLocked` is skipped. A record on disk is
+proof that admission ALREADY succeeded (acknowledged to the client and fsynced); re-testing that
+decision at replay could only ever disagree with a decision already acted on, and the disagreement is
+not a stricter bus, it is a LOST key — the client's next legitimate retry of it becomes a SECOND
+message, delivered by the very mechanism added to prevent exactly that. Two concrete cases make this a
+real hazard rather than a tidiness argument: a clock stepping backwards makes the replayed retained set
+a SUPERSET of what was live (the safe direction for expiry's own predicate, the unsafe one here), and a
+log written BEFORE this change can already hold one agent above the new share, so the FIRST restart
+after upgrading would otherwise drop that agent's already-accepted keys. Both are exercised by
+`TestReplayNeverRefusesWhatTheLivePathAccepted` (`internal/hub/idem_quota_test.go`). `byAgent` counters
+ARE rebuilt during recovery, so an agent recovered above its own share stays frozen — refused until its
+own keys age out — exactly as it would have been pre-restart; only the ADJUDICATION at replay time is
+skipped, not the bookkeeping.
+
+**Error surface:** `idem.ErrAgentQuota` and `hub.ErrAgentQuota` (`internal/idem/errors.go`,
+`internal/hub/errors.go`). `go.mod` pins go 1.19 (no multi-`%w`), so each package's refusal is a small
+type whose `Is` matches BOTH its own quota sentinel and that package's `ErrCapacity` — required, not
+tidy: `internal/httpapi` maps `hub.ErrCapacity` to 503 with `Retry-After: 5`, and a refusal that missed
+that second match would silently fall through to a generic 500. **The wire behaviour is therefore
+unchanged by this task**: a per-agent refusal is still a plain 503 with the same fixed body
+(`"server at capacity, retry later"`) — the agent name, its holding, the fair share and the agent count
+appear ONLY in the server's operator log (the message `admitAgentLocked` builds), never in the client
+response. `CONTRACTS-HTTP.md` does not yet carry an explicit row for this refusal (task
+IDEM-11-FU-PAPERTRAIL). Whether 503 is the right status for a per-agent (rather than bus-wide) cap is
+a separate, already-tracked question — `AUTH-1-FU-ACTIVECAP-RETRYAFTER` covers it once across all
+three per-agent caps — and was deliberately not touched here.
+
+**New Go-level option:** `hub.Options.MaxIdempotencyEntries` (`internal/hub/hub.go`) bounds the applied-
+key table for one hub; 0 (the default) means the derived `idem.MaxEntries` / `hub.MaxIdempotencyEntries`
+constant (65536). It is not a CLI flag or an environment variable — it exists so the fair share is
+PROVABLE in a test: filling the real 65536-entry table to exercise the rule means 65536 durable,
+fsynced writes, which is a test nobody would run.
+
+No new WAL record type, `ondisk-format-version`, HTTP route, CLI flag, header, or env var was
+introduced by this task.
