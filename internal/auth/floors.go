@@ -26,14 +26,31 @@ import (
 //   - An agent id is also durable inside a store "message" record, as the sender
 //     and in the recipient list. Those records are Kind == store.RecordKind and
 //     this function does not look at them at all.
-//   - On any data directory the SHIPPED binary has written, that subset is
-//     EMPTY and the message records are the entire population — because
-//     enrolment is still memory-only (see doc.go). Reproduced by the security
-//     gate: a WAL holding sender bus-abc.worker-9 returns an EMPTY map and a NIL
-//     error, which is indistinguishable from a fresh bus and is exactly the
-//     claim ids.Seal accepts. Sealing it re-mints worker-1..worker-9 onto
-//     different keypairs — the mass identity reuse this whole area exists to
-//     prevent.
+//   - That subset was once EMPTY, and on a pre-AUTH-7 data directory it still
+//     is: enrolment records only began reaching the WAL when the durable roster
+//     was wired into cmd/agent-bus/main.go (commit aad611c — the wave was
+//     labelled "AUTH-7", which is not a real task key; cite the sha, it stays
+//     checkable), so on anything the binary wrote before that, the message
+//     records are the entire population.
+//     Reproduced by the security gate: a WAL holding sender bus-abc.worker-9
+//     returns an EMPTY map and a NIL error, which is indistinguishable from a
+//     fresh bus and is exactly the claim ids.Seal accepts. Sealing it re-mints
+//     worker-1..worker-9 onto different keypairs — the mass identity reuse this
+//     whole area exists to prevent.
+//   - A DURABLE ENROLMENT DOES NOT CLOSE THAT, and this is the bullet to read
+//     twice. This paragraph used to say enrolment was "still memory-only" as a
+//     PRESENT FACT; that stopped being true when AUTH-7 landed, and the
+//     tempting inference — the subset is no longer empty, so the map has become
+//     sealable — is WRONG. Two holes remain and either one alone is fatal.
+//     (a) A message record still names its sender and its recipients, and this
+//     function does not look at message records; those suffixes are burned all
+//     the same. (b) A PREPARE torn by a crash carries a suffix that WAS issued
+//     and that no scan of this log can ever name again, because the bytes that
+//     named it never reached the platter. Hole (b) is not a thought experiment:
+//     TestAuthCrashInjectionTornPrepare (crash point D) SIGKILLs a real process
+//     mid-prepare and then asserts that this function reports worker:1 for a
+//     bus that had already issued worker-7. A floor must cover every id ever
+//     issued. This map covers the ones that happened to survive.
 //
 // So: a caller may use this to CROSS-CHECK, to audit, or to answer "what did the
 // enrolment path actually write". A caller may NOT hand the result to
