@@ -51,26 +51,33 @@
 // allocator serves its first Next / NextSuffix. (Whether the floor hub derives
 // is the RIGHT one is hub's claim to defend, not this package's.)
 //
-// NameSuffixes/DurableNameSuffixes do NOT have that wiring yet, and this is
-// stated plainly rather than implied by the mechanism's existence.
-// cmd/agent-bus/main.go:327 still builds a fresh ids.NewNameSuffixes() on every
-// start, and a grep of the tree turns up ZERO production callers of
-// OpenNameSuffixes anywhere outside this package. Agent ids are durable TODAY,
-// inside WAL message bodies rather than inside any enrolment record:
-// store.Message.Sender is a fully-qualified agent id on every message, and
-// .Recipients holds them for a DIRECTED message (a broadcast is stored as a
-// flag, so a broadcast-only recipient leaves no such trace). hub.publish encodes
-// that record and writes it through the two-phase path, and the log has no
-// compaction, so those bytes stay. A suffix burned by any agent that has sent a
-// message, or been addressed by name, therefore outlives the restart, and the
-// fresh counter still mints straight over it — the next start hands name-1 out
-// again, to whatever keypair enrols first. That is re-minting a live agent id
-// across restart, the exact failure invariant 1 forbids, and it is UNCHANGED by
-// suffixstore.go landing: this package now HAS a mechanism that closes it
-// (DurableNameSuffixes), but nothing in cmd/agent-bus calls it yet. Wiring
-// main.go to OpenNameSuffixes — deriving legacy-dir backfill floors and calling
-// RaiseFloor before the first Seal, exactly as hub already does for Sequence —
-// is the remaining half of MSG-FU-SUFFIXFLOOR, tracked as a separate follow-up
-// (AUTH-3 is the enrolment half of the same debt). Until it lands, do not read
-// this package's contents as evidence the restart bug is fixed in production.
+// NameSuffixes/DurableNameSuffixes HAVE that wiring now, and this paragraph is
+// corrected accordingly: it used to say cmd/agent-bus/main.go built a fresh
+// ids.NewNameSuffixes() on every start and that a grep of the tree turned up
+// ZERO production callers of OpenNameSuffixes. Both are now false.
+// ids.NewNameSuffixes() has been removed from cmd/ entirely — the call site
+// that used to build it, in main.go's run(), now carries a comment stating it
+// "is gone from cmd/ and MUST NOT come back, on any path, including as a
+// fallback for a failed open or a failed seal." cmd/agent-bus/suffixfloors.go's
+// openSuffixAllocator calls OpenNameSuffixes(dataDir) on every startup, deriving
+// and raising legacy-dir backfill floors before the first Seal exactly as hub
+// already does for Sequence, and main.go's run() calls openSuffixAllocator
+// ahead of the agent-id minter and the auth service. Agent ids are durable
+// TODAY for two independent reasons that both now hold: inside WAL message
+// bodies (store.Message.Sender is a fully-qualified agent id on every message,
+// and .Recipients holds them for a DIRECTED message; hub.publish writes that
+// record through the two-phase path and the log has no compaction, so those
+// bytes stay), and — since this wiring landed — inside the dedicated,
+// write-ahead agent-suffixes file that persists and fsyncs floor[name] = n
+// BEFORE the suffix it authorises is ever handed out. A restarting bus
+// therefore does NOT re-mint a live agent id: the next start resumes strictly
+// above every suffix this data directory has issued. The one remaining
+// operator-facing gap is a data directory that predates the agent-suffixes
+// file and has history but no floors file — that case REFUSES to boot unless
+// the operator passes -backfill-suffix-floors, a one-time migration opt-in
+// documented in CONTRACTS.md's MSG-FU-SUFFIXFLOOR entry and in
+// DECISIONS.md (2026-08-07, "Four rulings: refuse-to-boot exception, format
+// break, binary rename, redeploy", §1). Read this package's contents as
+// evidence the restart-reuse bug IS fixed in production, with that one migration
+// case as the documented exception.
 package ids

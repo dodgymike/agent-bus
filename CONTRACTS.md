@@ -37,9 +37,29 @@ task lands the correction, and both are already filed.
 
 ## 2026-08-07 — MSG-FU-SUFFIXFLOOR: new on-disk file + new `internal/ids` Go surface
 
-**No new HTTP route, no new env var, no new CLI flag, no `scripts/bus-*.sh` change.** Say that
-explicitly so a reader does not go looking for one: this task's surface is a data-directory file and
-a package-internal Go API, nothing an agent or an operator invokes directly.
+**No new HTTP route, no new env var, no `scripts/bus-*.sh` change** — those three still hold. **This
+task DOES ship one new CLI flag**, documented in the table below; an earlier version of this entry
+said "no new CLI flag", which was false the moment the operator opt-in below shipped. The
+"no `scripts/bus-*.sh` change" half is a real GAP, not a virtue, stated so it is not mistaken for one:
+`scripts/bus-serve.sh` has no way to pass `-backfill-suffix-floors`, so there is no sanctioned wrapper
+path for the legacy-directory migration (invariant 7) — tracked separately as
+`5a900716-1916-44ac-bd5a-ff695146adc8`, not fixed here.
+
+**New CLI flag, belongs in `CONTRACTS-CLI.md` (out of this task's file boundary, so recorded here
+instead — fold it into that file's flag table the next time it is touched):**
+
+| | |
+|---|---|
+| Flag | `-backfill-suffix-floors` |
+| Type / default | `bool`, default `false` |
+| Registered | `cmd/agent-bus/main.go` `parseFlags`, stored on `Config.BackfillSuffixFloors` |
+| Consumed by | `openSuffixAllocator` (`cmd/agent-bus/suffixfloors.go`), as its `allowBackfill` parameter |
+| Contract | A **one-time operator opt-in, never needed in normal operation**. It is required, and required ONLY, to start a data directory that HAS history (non-empty at process start, or the WAL holds records) but is missing `<data-dir>/agent-suffixes` — a state that otherwise REFUSES to boot, because a missing floors file on a dir with history cannot be told apart from a lost witness of already-issued agent ids (invariant 1). Setting it derives floors from the durable log (`walAgentIDFloors`: the per-name maximum of message-record sender/recipients and enrolment records) and raises them into the newly-opened, empty allocator before it seals. It is a no-op — logged as unnecessary — on a directory that already has a floors file, or that was genuinely empty at startup. Leaving it set permanently defeats the refusal that protects invariant 1 on this path; the startup log tells the operator to remove it once the one migration restart it exists for has run. |
+
+Full semantics — the refusal it bypasses, the counter-arguments considered and rejected, and the log
+levels the seal line picks — live in the comment above `alloc.Seal()` inside
+`cmd/agent-bus/suffixfloors.go`'s `openSuffixAllocator`, and in `DECISIONS.md` (2026-08-07, "Four
+rulings: refuse-to-boot exception, format break, binary rename, redeploy", §1).
 
 **New on-disk file, belongs in `CONTRACTS-ONDISK.md` (out of this task's file boundary, so recorded
 here instead — fold it into that file's tables the next time it is touched):**
@@ -70,12 +90,20 @@ Full byte-layout prose lives in `PROTOCOL.md` §9 (new section, this task) rathe
 | `(*DurableNameSuffixes) Path() string` | method | The file path, for operator messages and tests. |
 | `ErrSuffixFileCorrupt` | var (error) | Sentinel for any on-disk verification failure. Fatal, non-recoverable by regeneration. |
 
-**Scope of this task, stated so the gap is not mistaken for closed:** this ships the mechanism inside
-`internal/ids` only. `cmd/agent-bus/main.go:327` still calls `ids.NewNameSuffixes()` and there are
-**zero production callers of `OpenNameSuffixes`** anywhere in the tree. A restarting bus therefore
-still re-mints agent ids today — see `DECISIONS.md` (2026-08-07) and `AGENT_LOG.md` (2026-08-07) for
-the full picture, and `internal/ids/doc.go` for the in-package statement of the same gap. Wiring
-`main.go` to this allocator is a separate, not-yet-filed follow-up.
+**Wiring status — corrected.** This entry originally said `cmd/agent-bus/main.go:327` still called
+`ids.NewNameSuffixes()` and that `OpenNameSuffixes` had zero production callers, and that a restarting
+bus therefore still re-minted agent ids. All three clauses are now FALSE and are corrected here rather
+than left standing. `ids.NewNameSuffixes()` has been removed from `cmd/` entirely — the call site in
+`main.go`'s `run()` carries a comment stating it "is gone from cmd/ and MUST NOT come back, on any
+path, including as a fallback for a failed open or a failed seal." `cmd/agent-bus/suffixfloors.go`'s
+`openSuffixAllocator` calls `ids.OpenNameSuffixes(dataDir)` on every startup and is itself invoked from
+`main.go`'s `run()`, ahead of the agent-id minter and the auth service, so every enrolment goes through
+the durable allocator. A restarting bus therefore does **not** re-mint agent ids: enrolled agent ids
+and the floors that protect them survive both a graceful restart and a `SIGKILL`. The one remaining
+operator-facing gap this wiring introduced — the `-backfill-suffix-floors` flag, for a legacy directory
+that predates the floors file — is documented in the new-CLI-flag table above. See `DECISIONS.md`
+(2026-08-07, "Four rulings: refuse-to-boot exception, format break, binary rename, redeploy") and
+`internal/ids/doc.go` for the allocator-side detail.
 
 ## 2026-08-07 — RELAY-2 / RELAY-3: bus-to-bus relay + roster sync (NOT REGISTERED)
 
