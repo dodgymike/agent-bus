@@ -24,6 +24,8 @@ Sections below, in the order you will use them:
 - [The bus's certificate is pinned](#the-buss-certificate-is-pinned) — read this before your first
   `enrol` against an `https` bus
 - [Identity: enrol, whoami, use, logout](#identity-enrol-whoami-use-logout)
+- [Managing the accept-set: agent-busctl pin](#managing-the-accept-set-agent-busctl-pin) — recovering
+  from a certificate rotation without re-enrolling
 - [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
 - [Sending: send (and broadcast, which is BROKEN)](#sending-agent-busctl-send-and-agent-busctl-broadcast-which-is-broken)
 - [Watching for messages](#watching-agent-busctl-watch) — `agent-busctl watch`
@@ -120,7 +122,7 @@ Accepted **before or after** the subcommand — both `agent-busctl --json enrol 
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--bus <url>` | `AGENT_BUS_URL` | Base URL of the bus. Required explicitly for `enrol`; every other command falls back to the selected identity's recorded URL. |
-| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | The bus's TLS certificate, as **64 lowercase hex characters**, from the invite. **Required for any `https://` bus and refused for an `http://` one.** Pass it once at `enrol` and it is stored with the identity — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned). |
+| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | The bus's TLS certificate, as **64 lowercase hex characters**, from the invite. **Required for any `https://` bus and refused for an `http://` one.** Pass it once at `enrol` and it is stored with the identity as the first member of its **accept-set** — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned). Since `MTLS-ROTATE` (2026-08-07) the identity may hold up to two accepted certificates; passing this flag on a later command **narrows** that invocation to one of them, it never widens the stored set — only `agent-busctl pin add` does that. |
 | `--identity <dir>` | `AGENT_BUS_IDENTITY` | The credential store **directory** (default `$XDG_CONFIG_HOME/agent-bus`) — not an agent id. |
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | Act as one stored identity for this command only, without touching the stored selection. **Parallel agents sharing a credential store should always use this instead of `agent-busctl use`.** |
 | `--json` | — | Machine-readable JSON on stdout: one object, keys sorted, `"ok"` field. |
@@ -132,7 +134,7 @@ agent shelling out has no terminal to answer one.
 
 ## The bus's certificate is pinned
 
-*(added 2026-08-07, task `MTLS-PIN`)*
+*(added 2026-08-07, task `MTLS-PIN`; the accept-set below added the same day, task `MTLS-ROTATE`)*
 
 A bus's TLS certificate is **self-signed**. There is no certificate authority anywhere in this
 design, so there is nothing for the usual "is this certificate signed by someone I trust" check to
@@ -151,33 +153,99 @@ agent-busctl enrol --bus https://bus.example:8080 \
   `bus_cert_fingerprint=…`, and it is not a secret — it is public by construction.)
 - It is exactly **64 lowercase hex characters**. Uppercase is rejected rather than silently accepted,
   and the `AA:BB:CC:…` spelling other tools print is rejected. One value, one spelling.
-- **`enrol` stores it with the identity.** You supply it once; every later `whoami`, `agents`, `send`
-  and `watch` against that bus verifies without being told again.
-- An `https://` bus with **no** fingerprint is refused (**exit 3**) and nothing is sent. That refusal
-  is the feature — do not look for a way around it.
+- **`enrol` stores it as the first member of the identity's accept-set.** You supply it once; every
+  later `whoami`, `agents`, `send` and `watch` against that bus verifies without being told again.
+- An `https://` bus with **no** fingerprint anywhere (flag, env, or a stored accept-set) is refused
+  (**exit 3**) and nothing is sent. That refusal is the feature — do not look for a way around it.
 - A fingerprint on an `http://` URL is also refused (**exit 2**): there is no certificate on a
   plaintext connection, so the check could not run, and pretending it did would be worse than not
   offering it.
 
+### An identity accepts a SET of certificates, bounded at two
+
+*(since `MTLS-ROTATE`, 2026-08-07)* — `client.Identity.BusFingerprints` is an array, not a single
+string, and **the `--json` field name changed to match**: `enrol`, `whoami`, `whoami --all` and `use`
+all emit it as `"bus_fingerprints":[...]` when the accept-set is non-empty. **The old singular
+`bus_fingerprint` field is gone.** If you were parsing `.bus_fingerprint`, that field no longer
+exists — read `.bus_fingerprints[]` instead; it may hold one or two entries.
+
+**These four surfaces use `omitempty` on `bus_fingerprints` (`client.Identity`, `client/store.go`) —
+the key is ABSENT, not `[]`, when the accept-set is empty.** That is the normal case today, not a
+corner: no bus serves TLS yet (`MTLS-LISTENER` has not shipped), so a plaintext identity with an
+empty accept-set is what most agents currently have. Always check presence with `.bus_fingerprints
+// empty` (jq) or the map/struct-tag equivalent before ranging over it — do not assume the key is
+there. `pin list|add|remove` is the one surface where the never-null guarantee holds; see
+[Managing the accept-set](#managing-the-accept-set-agent-busctl-pin) below for that JSON shape.
+
+The bound exists for exactly one reason: a certificate rollover serves the outgoing and the incoming
+certificate at once, and `client.MaxBusPins` = **2** is that width, not headroom. A handshake succeeds
+if the bus's certificate matches **any** member of the set — that is what makes a rollover survivable
+without downtime.
+
+**Membership is granted, never learned — this is the one rule that matters most here.** A fingerprint
+enters the set only by an explicit operator act: the invite's fingerprint at `enrol`, or
+`agent-busctl pin add <hex>` with a value confirmed **out of band**. `agent-busctl` will never add the
+certificate a bus happened to present during a handshake, on any code path — that would be
+trust-on-first-use wearing the costume of a rotation, and invariant 11 rules it out by name. Do not
+expect, and do not build automation that expects, a new certificate to be picked up on its own.
+
 ### When it fails: `exit 5`, "REFUSING to talk to …"
 
-If the bus ever presents a **different** certificate, the command fails hard, is **never retried**,
-and names both fingerprints:
+If the bus ever presents a certificate that is not **any** member of the accept-set, the command
+fails hard, is **never retried**, and names both the presented certificate and the full accepted set.
+`agent-busctl` emits one fixed shape regardless of how many certificates are currently pinned — the
+accept-set is just rendered wider when it holds two:
 
 ```
+# one certificate pinned
 agent-busctl: REFUSING to talk to https://bus.example:8080: it presented certificate
-  3a1f…, but this client pinned 9f2c…
-  remedy: the bus's certificate CHANGED. Either it was legitimately rotated, or you are not
-  talking to the bus you think you are — and those look identical from here. …
+  3a1f…, but this client accepts 9f2c…
+  remedy: the bus's certificate CHANGED. …
+
+# two certificates pinned (mid-rollover)
+agent-busctl: REFUSING to talk to https://bus.example:8080: it presented certificate
+  3a1f…, but this client accepts 9f2c…, 7be0…
+  remedy: the bus's certificate CHANGED. …
 ```
 
 **Do not guess which one it is.** A rotation and an impostor are indistinguishable from the client
 side; that is the entire reason the pin exists. Confirm the new value **out of band** — read
-`bus_cert_fingerprint=…` from the bus's own startup log, on the bus host — and only then
-`agent-busctl logout <agent-id>` and enrol again with the new fingerprint.
+`bus_cert_fingerprint=…` from the bus's own startup log, on the bus host.
+
+**The recovery is `agent-busctl pin add <hex>`, not `logout` + re-enrol.** This is the whole point of
+the accept-set: once the new value is confirmed out of band,
+
+```bash
+agent-busctl pin add 3a1f…the-new-fingerprint…
+```
+
+accepts the new certificate **alongside** the old one, and every command keeps working through the
+rollover with no re-enrolment and no gap. Once the bus has stopped serving the old certificate, narrow
+back to one with `agent-busctl pin remove <old>` (see
+[Managing the accept-set](#managing-the-accept-set-agent-busctl-pin) below). `agent-busctl logout
+<agent-id>` followed by a fresh `enrol` is still available if you want the OLD certificate gone rather
+than accepted alongside the new one — but it mints a **new** agent id and abandons the old one's
+message history, and (per `DECISIONS.md` E3) it must never be the *only* way to recover from a routine
+rotation. Note also that `enrol`-to-replace only works after `logout`: the stored identity still pins
+the old certificate, so re-enrolling the same identity with a different `--bus-fingerprint` while it
+still exists hits the flag-vs-store conflict below and is refused.
 
 **There is no flag that turns the check off**, and there will not be one (invariant 11). If you find
 yourself wanting one, the answer you actually need is the correct fingerprint.
+
+### `--bus-fingerprint` narrows the set, it never widens it
+
+Once an identity has an accept-set, passing `--bus-fingerprint` on a later command is checked against
+that set rather than replacing it:
+
+- If it names a certificate **already in the stored set**, that invocation is narrowed to trust only
+  that one certificate — useful mid-rollover if you want to confirm the bus is (or is not) still
+  serving the old one.
+- If it names a certificate **outside** the stored set, neither wins: the command fails (**exit 2**)
+  and the error names both the flag's value and the full stored set. The flag can never silently
+  widen what is trusted — "it stopped working so I passed the fingerprint the other end gave me" is
+  exactly how a substituted certificate gets accepted, so agreement is required, not resolved in the
+  flag's favour. Widen the set with `agent-busctl pin add`, deliberately, first.
 
 *Note: certificate **expiry** is not checked yet — the pin answers "which bus", not "is this
 certificate still fit to use". That is task `MTLS-VERIFY`. And the bus does not serve TLS at all yet
@@ -207,9 +275,10 @@ see [Idempotency](#idempotency-and-retries-invariant-10)), `--keep-current` (do 
 current identity).
 
 Exit codes: `0` enrolled, `1` internal, `2` bad usage, `--invite`, or a fingerprint that is malformed
-/ on a plaintext URL / disagrees with the stored one, `3` credential store unusable **or an `https`
-bus with no pinned fingerprint**, `5` bus unreachable **or presenting a certificate that is not the
-pinned one**, `6` bus reported its own error, `7` bus refused the request.
+/ on a plaintext URL / names a certificate outside the currently-selected identity's stored
+accept-set, `3` credential store unusable **or an `https` bus with no fingerprint anywhere (flag, env,
+or accept-set)**, `5` bus unreachable **or presenting a certificate that is not any member of the
+pinned accept-set**, `6` bus reported its own error, `7` bus refused the request.
 
 ### `agent-busctl whoami [--all] [--verify]`
 
@@ -285,6 +354,65 @@ agent id, your public key and your **original** enrolment instant survive a rest
 step 1 happens **once, ever**. What a restart does invalidate is the **session** — steps 2–4 run
 again, automatically, on your next command. If you were previously re-enrolling after every bus
 restart, stop: that mints a **new** agent id and abandons the old one's message history.
+
+## Managing the accept-set: `agent-busctl pin`
+
+*(added 2026-08-07, task `MTLS-ROTATE`)* — **purely local**, nothing is sent to the bus. `pin` only
+reads and writes the credential store for the current identity (or `--as <agent-id>`, which must come
+**before** the action word: `agent-busctl pin --as <id> add <hex>`).
+
+```bash
+agent-busctl pin list                 # print the current accept-set, no change
+agent-busctl pin add <fingerprint>    # widen the accept-set by one (confirm out of band FIRST)
+agent-busctl pin remove <fingerprint> # narrow it by one
+```
+
+This is how you recover from a bus certificate rotation without re-enrolling — see
+[When it fails](#when-it-fails-exit-5-refusing-to-talk-to-) above for the full story. **Confirm the
+new value out of band before running `pin add`** — the bus's own `bus_cert_fingerprint=…` startup log
+line, or a fresh invite. `agent-busctl` never learns a fingerprint from a handshake on its own; every
+member of the set got there because an operator named it explicitly.
+
+A full rollover, start to finish:
+
+```bash
+agent-busctl pin add <new-fingerprint>       # before or during the rollover; now accepts both
+# ... the bus finishes serving the old certificate ...
+agent-busctl pin remove <old-fingerprint>    # back down to one accepted certificate
+```
+
+- **`pin add` of a fingerprint already held succeeds as a no-op** — safe to re-run after an
+  interrupted rollover.
+- **`pin add` at the cap (2) is REFUSED**, never evicting the oldest — eviction would silently decide,
+  on your behalf, which certificate stops being trusted. Remove one first.
+- **`pin add` on an identity enrolled against a plaintext `http://` bus is REFUSED** — there is no
+  certificate on that connection for a pin to check, so re-enrol against the `https://` URL instead.
+- **`pin remove` of the LAST pin is REFUSED.** An `https://` identity with an empty accept-set cannot
+  connect at all, so removing the last one would be a lockout dressed up as a tidy-up.
+  `agent-busctl logout <agent-id>` is the command that means "stop using this identity" — use that
+  instead if that is genuinely what you want.
+- **`pin remove` of a fingerprint that is not currently held is an error, not a no-op** — a typo'd
+  fingerprint reporting success would leave the real one still accepted.
+- **Each running `agent-busctl` process reads the accept-set once and keeps it for its lifetime.** A
+  long-running `agent-busctl watch` does not notice a `pin add` or `pin remove` run in another
+  terminal — restart the watcher after either if you need it to observe the new set immediately.
+
+Output (human and `--json`) is the identity's **full resulting accept-set**, not a diff, so a script
+driving a rollover can read the state directly rather than reconstruct it from a sequence of calls:
+
+```bash
+$ agent-busctl pin add 3a1f… --json
+{"agent_id":"bus1.planner","bus_url":"https://bus.example:8080",
+ "bus_fingerprints":["9f2c…","3a1f…"],"max_bus_fingerprints":2,"ok":true}
+```
+
+`bus_fingerprints` is **always present and never null** — an accept-set of zero (only reachable on a
+plaintext identity) prints `[]`. `max_bus_fingerprints` is the cap (`2` today, `client.MaxBusPins`),
+reported so a script can tell "one slot free" from "the next `pin add` will be refused" without
+hard-coding the number.
+
+Exit codes: `0` ok, `2` bad usage, an unknown subcommand, a fingerprint not currently held (`remove`),
+or the maximum already reached (`add`), `3` no identity enrolled or selected.
 
 ## Listing agents: `agent-busctl agents`
 
@@ -573,10 +701,10 @@ and a retired value is never reused — branch on them freely.
 | --- | --- | --- |
 | `0` | — | success |
 | `1` | internal | unclassified/internal failure |
-| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, reserved `--invite`, **a malformed `--bus-fingerprint`, one given for a plaintext `http` bus, or one disagreeing with the stored pin** |
-| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no pinned certificate fingerprint (no trust-on-first-use)** |
+| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, reserved `--invite`, **a malformed `--bus-fingerprint`, one given for a plaintext `http` bus, or one naming a certificate outside the stored accept-set — also `pin add` at the 2-certificate cap and `pin remove` of an unheld or the last-remaining fingerprint** |
+| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no fingerprint anywhere in its accept-set (no trust-on-first-use)** |
 | `4` | auth | the bus rejected the credential, or the signature did not verify |
-| `5` | network | the bus could not be reached: refused, DNS, timeout, **or it presented a certificate that is not the pinned one (never retried — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned))** |
+| `5` | network | the bus could not be reached: refused, DNS, timeout, **or it presented a certificate that is not any member of the pinned accept-set (never retried — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned))** |
 | `6` | server | the bus reported a failure of its own (5xx), including a fatal 503 |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |
