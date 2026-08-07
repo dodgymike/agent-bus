@@ -313,6 +313,17 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
    (record types, wire protocol versions, on-disk files, WAL), `CONTRACTS-AGENT.md` (agent-facing
    wrappers, repo tooling scripts) — see `CONTRACTS.md` for the full index if unsure which one. And
    — if the agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `scripts/bus-*.sh` wrappers.
+    - **ALWAYS commit with an explicit pathspec: `git commit -m '…' -- <paths>`.** `git add <paths>`
+      does NOT scope a later commit — a bare `git commit` takes the WHOLE index, including anything a
+      concurrently-running agent has staged. This has produced four mis-titled commits in this repo,
+      one of which left `main` un-compilable for several commits because half of a change was swept
+      into an unrelated docs commit while the other half stayed in the working tree. The working tree
+      looked green throughout, which is why nobody noticed. Never `git add` then bare-`git commit`
+      while any other agent is running.
+    - **A green tree is not a GATED tree.** Do not commit an agent's work until it reports its
+      reviewer AND security gates as COMPLETED, not merely dispatched. Committing mid-review has
+      shipped two real security holes here (a relay SSRF and an unbounded input), both caught by
+      gates that were still running when the commit landed.
 10. **Tidy-up & git hygiene — a task is NOT complete until ALL of these hold:**
     - `git status --porcelain` is EMPTY. Every file you created or changed, including outside the
       Edit tool (gofmt, chmod, generators, renames), is committed or gitignored. New files MUST be
