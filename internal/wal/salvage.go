@@ -79,9 +79,28 @@ type Discard struct {
 // region whose frame header did not survive, because then it is not known what
 // was in it -- and "I do not know what I just deleted" is worse news than "I
 // deleted a prepare that never committed".
+//
+// A ZERO-LENGTH DISCARD IS EXEMPT FROM THAT SECOND RULE, and the distinction is
+// the whole of this function's judgement. `!TypeKnown` was written for a
+// discarded BYTE REGION whose frame header was unreadable: bytes were removed
+// and nobody can say what they were. A HOLE IN THE INDEX SEQUENCE HAS NO BYTES.
+// Nothing was read, nothing was deleted, and Length is 0 to say exactly that --
+// the range may simply be indices a crash reserved and never used. Reporting
+// that at ERROR is how one flipped bit in a tail turned into a permanent
+// "MissingRecords=251" at ERROR on every start for ever, which is the loss
+// channel crying wolf: the mirror image of the silent-discard defect invariant 6
+// names as the real P0.
+//
+// The exemption is deliberately narrow: it applies ONLY when nothing was
+// discarded (Length == 0). Anything that actually removed bytes it could not
+// identify -- one byte or a megabyte -- stays ERROR, and an explicit Severe
+// still overrides everything.
 func (d Discard) severe() bool {
-	if d.Severe || !d.TypeKnown {
+	if d.Severe {
 		return true
+	}
+	if !d.TypeKnown {
+		return d.Length != 0
 	}
 	return d.Type == TypeCommit
 }

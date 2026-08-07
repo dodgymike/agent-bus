@@ -186,24 +186,30 @@ func replay(path string, c codec, fn func(Committed) error) (Recovered, error) {
 		if r.FirstIndex == 0 {
 			r.FirstIndex = rec.Index
 		}
-		// A hole in the index sequence is a record that is not in the file:
-		// discarded by an earlier recovery, lost from the media, or an index
-		// recovery deliberately skipped so that nothing was reissued. It is not
-		// an error -- a repaired log has holes by design, because survivors are
-		// never renumbered -- but it IS a loss (or at worst a burned number), and
-		// it is reported on every start for as long as it exists. Silence here is
-		// what let a lost sector look like a clean boot.
+		// A hole in the index sequence is a record that is not in the file. It is
+		// NOT an assertion of loss, and the Reason below must never make one: the
+		// range may have been lost from the media, discarded by an earlier
+		// recovery, or BURNED BY A RESERVATION THAT A CRASH NEVER USED -- the
+		// durable index floor authorises indices in blocks, so any run that does
+		// not close cleanly leaves up to indexReserveBlock-1 indices that no
+		// record ever carried and nobody ever lost.
 		//
-		// MissingRecords therefore counts SKIPPED-BUT-NEVER-USED indices too, and
-		// is an UPPER BOUND on loss rather than an exact count. That is the right
-		// direction to be wrong in: over-reporting a hole invites an operator to
-		// look, under-reporting one hides a lost sector.
+		// A repaired log has holes by design, because survivors are never
+		// renumbered. What is reported here is that a hole EXISTS, on every start
+		// for as long as it exists -- silence is what let a lost sector look like
+		// a clean boot -- and the discard is Length 0 because nothing was read and
+		// nothing was deleted, which is also what keeps it at WARN rather than
+		// ERROR (see Discard.severe).
+		//
+		// MissingRecords is therefore an UPPER BOUND on loss, not a count of it.
+		// That is the right direction to be wrong in: over-reporting a hole
+		// invites an operator to look, under-reporting one hides a lost sector.
 		if expectIndex != 0 && rec.Index > expectIndex {
 			r.MissingRecords += rec.Index - expectIndex
 			r.addDiscard(Discard{Stage: "replay", Offset: rec.Offset, Length: 0,
 				Index: expectIndex, TypeKnown: false,
-				Reason: fmt.Sprintf("records %d..%d are missing from the index sequence: lost from the file, discarded by an earlier recovery which -- correctly -- did not renumber the survivors, or skipped by recovery advancing the index past a hole so that no index is reissued (see the durable index floor, <data-dir>/%s)",
-					expectIndex, rec.Index-1, IndexFloorFileName)})
+				Reason: fmt.Sprintf("records %d..%d are absent from the index sequence. This is NOT on its own a statement that they were lost: they were either lost from the file, or discarded by an earlier recovery which -- correctly -- did not renumber the survivors, or BURNED BY A RESERVATION A CRASH NEVER USED (the durable index floor at <data-dir>/%s authorises indices in blocks of %d, and an index this data directory has authorised is never authorised again). Nothing was read or deleted here, so MissingRecords is an UPPER BOUND on loss rather than a count of it",
+					expectIndex, rec.Index-1, IndexFloorFileName, indexReserveBlock)})
 		}
 		expectIndex = rec.Index + 1
 
@@ -506,9 +512,23 @@ type Recovered struct {
 	Discarded    []Discard
 	DiscardCount int
 
-	// MissingRecords is how many record indices are absent from the file: the
-	// size of the holes a previous repair (or a bad sector) left behind. It is
-	// reported on every start, not only the one that made the hole.
+	// MissingRecords is how many record indices are ABSENT from the file: the
+	// total size of the interior holes in its index sequence. It is reported on
+	// every start, not only the one that made the hole.
+	//
+	// IT IS AN UPPER BOUND ON LOSS, NOT A COUNT OF IT. A hole has three possible
+	// causes and this layer cannot tell them apart: a record lost from the media,
+	// a record discarded by an earlier recovery (which correctly did not renumber
+	// the survivors), or an index range BURNED BY A RESERVATION A CRASH NEVER
+	// USED. The last is the common one -- the durable index floor authorises
+	// indices in blocks, so any run that does not close cleanly leaves up to
+	// indexReserveBlock-1 indices that no record ever carried. Reading this field
+	// as "records lost" over-states the damage by that much.
+	//
+	// Only INTERIOR holes are counted. Where the file STARTS is reported
+	// separately as FirstIndex, because a log legitimately begins high after a
+	// quarantine and reporting that as loss on every start is a channel that
+	// cries wolf.
 	MissingRecords uint64
 
 	// Repaired describes what the recovery pass removed or rebuilt BEFORE this

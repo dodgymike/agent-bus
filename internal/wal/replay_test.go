@@ -1976,8 +1976,15 @@ func TestWALReplayReportsIndexHoles(t *testing.T) {
 		if !sameCommitted(got, want) {
 			t.Fatalf("start %d: recovery served %s, want %s", start, showCommitted(got), showCommitted(want))
 		}
-		assertLogged(t, out, "ERROR", "wal discarded a damaged record",
-			"stage=replay", "records 3..4 are missing from the index sequence")
+		// WARN, not ERROR, and the level is the assertion. A hole has NO BYTES:
+		// nothing was read and nothing was deleted, and the range may even be
+		// indices a crash reserved and never used. ERROR here is how one flipped
+		// bit turned into a permanent, alarming line on every start for ever --
+		// a loss channel that cries wolf. A discard that actually removed bytes
+		// it could not identify is still ERROR (see Discard.severe).
+		assertLogged(t, out, "WARN", "wal discarded a damaged record",
+			"stage=replay", "records 3..4 are absent from the index sequence",
+			"UPPER BOUND on loss")
 		assertLogged(t, out, "", "wal replayed", "missing_records=2")
 	}
 }

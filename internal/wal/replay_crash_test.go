@@ -342,9 +342,22 @@ func TestWALReplayCrashBetweenPrepareAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write after the crash: %v", err)
 	}
-	if c.PrepareIndex != burned+1 {
-		t.Fatalf("the first write after the crash got prepare index %d, want %d: the burned index must never be reissued",
-			c.PrepareIndex, burned+1)
+	// THE INDEX RESUMES ABOVE THE DURABLE CEILING, not merely above the burned
+	// prepare. The child died on SIGKILL, so it never sealed the index floor, so
+	// the floor on disk says sealed 0 -- and an unsealed floor means recovery
+	// cannot know what the previous run wrote (a truncation at a clean frame
+	// boundary, a rewrite, or a deleted bus.wal are all invisible). It therefore
+	// resumes one past everything the dead run ever AUTHORISED, which is the
+	// block wal.Open reserved before its first append.
+	//
+	// This asserted burned+1 (= 6) until 2026-08-07. That was safe only for the
+	// exact bytes this test produces; the reviewer's probe showed 25 of 2289
+	// truncation offsets on a similar log reissuing an index under the same rule.
+	// Indices 6..64 are burned unused: holes are legal and permanent, and
+	// invariant 1 beats gap-freeness.
+	if want := uint64(indexReserveBlock) + 1; c.PrepareIndex != want {
+		t.Fatalf("the first write after the crash got prepare index %d, want %d: the burned index must never be reissued, and a run that did not close cleanly resumes above the durable ceiling rather than above what its surviving bytes happen to show",
+			c.PrepareIndex, want)
 	}
 	assertIndicesUnique(t, path)
 }
@@ -416,8 +429,13 @@ func TestWALReplayCrashInsideApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write after the crash: %v", err)
 	}
-	if c.PrepareIndex != r.NextIndex {
-		t.Errorf("the first write after the crash got prepare index %d, want %d", c.PrepareIndex, r.NextIndex)
+	// Above the durable CEILING, for the same reason as the test above: the child
+	// was SIGKILLed and never sealed the floor, so `written` is a lower bound and
+	// only `reserved` bounds the run from above. r.NextIndex here is the FILE's
+	// answer (7); the bus resumes at indexReserveBlock+1 and burns 7..64.
+	if want := uint64(indexReserveBlock) + 1; c.PrepareIndex != want {
+		t.Errorf("the first write after the crash got prepare index %d, want %d (one past the durable ceiling; the file's own answer is %d)",
+			c.PrepareIndex, want, r.NextIndex)
 	}
 	assertIndicesUnique(t, path)
 }
@@ -516,8 +534,8 @@ func TestWALCrashTornFrameTailIsRepaired(t *testing.T) {
 		t.Errorf("Recovered() = %+v, want 2 applied, 0 aborted, no dangling", rec)
 	}
 
-	// (5) The first write after recovery resumes ABOVE EVERYTHING THE DEAD PROCESS
-	// EVER AUTHORISED, at indexReserveBlock+1.
+	// (5) The first write after recovery resumes ABOVE THE TORN FRAME'S INDEX, at
+	// 6 -- never at 5.
 	//
 	// This block used to assert {5 6}, and called the reissue "deliberate and
 	// documented": the frame never completed its fsync, so no id inside it can have
@@ -527,22 +545,27 @@ func TestWALCrashTornFrameTailIsRepaired(t *testing.T) {
 	// was finished, fsynced, acknowledged and then corrupted, so "nothing observed
 	// it" is not a fact recovery has access to.
 	//
-	// Where the number comes from, so it is not mistaken for a magic constant: the
-	// child ran wal.Open, which reserved a block of indexReserveBlock indices
-	// AHEAD of the first append and fsynced that reservation before writing a
-	// byte. The child was then SIGKILLed, so it never sealed the reservation back
-	// down. The torn tail sets LostUnidentified, which tells Open the file's own
-	// arithmetic is a lower bound, so Open resumes one past the durable CEILING --
-	// every index this data directory has ever authorised. Indices 5..256 are
-	// burned unused. That gap is the deliberate price of the block reservation:
-	// holes are legal and permanent, and invariant 1 beats gap-freeness.
-	wantPrepare := uint64(indexReserveBlock) + 1
+	// WHERE 6 COMES FROM, and why it is not the durable ceiling. Read
+	// crashMidFrameWrite: this child CLOSES THE LOG CLEANLY and only then writes
+	// the torn frame by hand, because a SIGKILL cannot tear a write on its own.
+	// The clean close SEALS the floor -- written = 4, sealed = 1 -- and a sealed
+	// floor says `written` is EXACT, so the ceiling is not consulted and the
+	// reserved block is not burned. Index 5 is still stepped over, by the OTHER
+	// source in the maximum: the repair pass OBSERVED the torn frame's declared
+	// index and reports 6 (Repaired.NextIndex above). Both halves of the
+	// derivation are therefore live in this one assertion, which is why the
+	// number is 6 and not 5 and not indexReserveBlock+1.
+	//
+	// It asserted indexReserveBlock+1 between 2026-08-07 and the seal-bit fix,
+	// when the ceiling was taken on any LostUnidentified repair. That burned a
+	// block for a run that had told us exactly what it wrote.
+	const wantPrepare = uint64(6)
 	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"seq":9}`)})
 	if err != nil {
 		t.Fatalf("Write after the repair: %v", err)
 	}
 	if c.PrepareIndex != wantPrepare || c.CommitIndex != wantPrepare+1 {
-		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {%d %d}: recovery must resume above every index the killed process authorised, not at the one the torn frame carried ({5 6} is the old, rejected reissue)",
+		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {%d %d}: recovery must resume above the index the torn frame carried ({5 6} is the old, rejected reissue)",
 			c.PrepareIndex, c.CommitIndex, wantPrepare, wantPrepare+1)
 	}
 	assertIndicesUnique(t, path)

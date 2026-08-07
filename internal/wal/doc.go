@@ -79,18 +79,42 @@
 // One file per data directory: IndexFloorFileName ("wal-index-floor"), mode
 // 0600, on-disk format version 4 (RESERVED in the Spec Server
 // `ondisk-format-version` namespace, not chosen by eye -- 1 and 2 are the WAL
-// frame format above, 3 is ids/agent-suffixes). A header line carrying a
-// SHA-256 of the body, then two lines:
+// frame format above, 3 is ids/agent-suffixes). A header line carrying an
+// HMAC-SHA256 TAG, then three lines:
 //
-//	agent-bus-wal-index-floor v4 sha256=<64 hex>
+//	agent-bus-wal-index-floor v4 hmac-sha256=<64 hex>
 //	reserved <decimal uint64>
 //	written  <decimal uint64>
+//	sealed   <0|1>
+//
+// THE TAG IS KEYED WITH THE DATA DIRECTORY'S OWN wal-mac.key -- the same key
+// every WAL frame is authenticated under -- and covers the version line plus the
+// body, i.e. the whole file except the tag field. Invariant 6 requires a keyed
+// MAC here and never an unkeyed checksum, and the reason is concrete: under the
+// unkeyed SHA-256 this file briefly carried, flipping `sealed 0` to `sealed 1`
+// and recomputing the digest BY HAND -- reading no key, touching no log byte --
+// made the reopened bus reissue indices at 2268 of 2289 truncation offsets, with
+// every frame it then wrote carrying a valid MAC because the server computes it.
+//
+// VERSION 4 READS TWO OLDER SHAPES and writes only the current one: an unkeyed
+// `sha256=` header over a three-line body, and the TWO-LINE body that commit
+// f56c723 (which is in main) writes. Both are read with `sealed` forced to
+// FALSE, because an unkeyed digest cannot support a trust claim, and both are
+// rewritten with a keyed tag at the next begin. See indexfloor.go.
 //
 // `reserved` is the highest index this data directory has EVER AUTHORISED;
 // `written` is the highest index that is BURNED -- written to the log or
 // permanently skipped by recovery. Both are strictly non-decreasing, always
-// written <= reserved, and NEITHER IS EVER LOWERED. There is deliberately no
-// clean-shutdown flag and no field that can rewind.
+// written <= reserved, and NEITHER IS EVER LOWERED.
+//
+// `sealed` says whether THE RUN THAT WROTE THE FILE CLOSED CLEANLY, and it is
+// the one field that goes down: begin fsyncs it to 0 before the Writer may
+// append anything, and only a clean Writer.Close sets it to 1. When it is 1,
+// `written` is EXACT and Open trusts it; when it is 0, Open resumes above
+// `reserved` instead. Clearing it can only ever make the next start MORE
+// conservative, which is why it does not contradict "no field that can rewind a
+// floor" -- there is still no clean-shutdown optimisation that RELEASES a
+// reservation, and both numeric fields remain monotonic.
 //
 // It exists because deriving the next index from the log ALONE reissues ids, in
 // two ways that were both reported as defects and both reversed by the user:
@@ -101,25 +125,53 @@
 // structural rather than something every repair path must remember: no
 // truncation, rewrite or quarantine can lower a number that was never in the
 // file. Open resumes above the maximum of the replayed high-water mark, what the
-// repair pass observed, and this floor.
+// repair pass observed, and this floor's `written` -- plus, whenever `sealed` is
+// 0, this floor's `reserved`.
 //
 // The floor is written AHEAD of the index it authorises, in blocks of
-// indexReserveBlock, so the amortised cost is about one extra fsync per 256
-// appends. The price of the block is that a crash may burn up to 255 unused
-// indices, which appear as a HOLE in the log's index sequence. Holes are legal,
-// permanent and correct -- invariant 1 beats gap-freeness.
+// indexReserveBlock (64). A floor write is a temp file + fsync + rename +
+// directory fsync -- roughly THREE sync operations, not one -- so the amortised
+// cost is about 3 syncs per 64 appends, call it ~5% on the send path's sync
+// count. Both figures are UNMEASURED arithmetic, not a profile.
+//
+// The price of the block is that a crash burns up to 63 unused indices, which
+// appear as a HOLE in the log's index sequence. That happens on EVERY crash, not
+// only a damaged one, because the ceiling is keyed on `sealed` rather than on
+// detected damage -- see indexfloor.go for why detected damage can never be a
+// sound trigger. A CLEAN close/reopen burns nothing. Holes are legal, permanent
+// and correct -- invariant 1 beats gap-freeness.
 //
 // A MISSING floor file is benign (a data directory written by a binary that
 // predates it) and yields a zero floor with a WARN; making it fatal would brick
 // every deployed bus on upgrade, which is the bricking upgradeV1 exists to
-// avoid. A file that EXISTS but does not verify is FATAL, wraps
-// ErrIndexFloorCorrupt, and is NEVER regenerated -- regenerating resumes the
-// index below numbers already handed out, silently, and nothing downstream can
-// detect that. That is the same narrow exception already granted for the MAC key
-// and the persisted bus id: damage to the directory's IDENTITY, not to the log,
-// and the error names a one-step remedy so a bus is never permanently bricked.
-// A crash cannot produce it -- the write is temp file, fsync, rename, directory
-// fsync -- so corruption means media damage or tampering.
+// avoid. A file that EXISTS but does not verify UNDER THIS DIRECTORY'S OWN KEY
+// is FATAL, wraps ErrIndexFloorCorrupt, and is NEVER regenerated -- regenerating
+// resumes the index below numbers already handed out, silently, and nothing
+// downstream can detect that. That is the same narrow exception already granted
+// for the MAC key and the persisted bus id: damage to the directory's IDENTITY,
+// not to the log. A crash cannot produce it -- the write is temp file, fsync,
+// rename, directory fsync -- so it means media damage or tampering.
+//
+// The error names a remedy AND ITS COST. It used to say "delete it and restart;
+// the bus resumes from the log's own high-water mark, which is correct unless
+// the log has ALSO been damaged". That caveat is UNSOUND: a log truncated at a
+// record boundary is byte-for-byte a shorter log, so nobody can satisfy it, and
+// following it after a crash reissued an index at 2268 of 2289 measured
+// truncation offsets. It now says plainly that deleting the file FORFEITS
+// INVARIANT 1 for that data directory unless the previous run closed cleanly.
+//
+// A file that cannot be verified because the KEY IS GONE -- the directory had no
+// wal-mac.key at open and recovery minted one -- is a RE-FOUNDED DIRECTORY, not
+// a damaged floor. It is read WITHOUT authentication (numbers kept, since they
+// are only ever consumed as a raise; `sealed` discarded) and logged at ERROR.
+// Refusing there would brick a bus over a lost key in a directory recovery has
+// already decided may be re-founded, and an attacker who could forge that file
+// could equally DELETE it, which no MAC can prevent -- what the MAC buys is that
+// the forgery is no longer SILENT.
+//
+// THE FLOOR IS READ AFTER THE MAC KEY IS SETTLED, not before. Reading it first
+// made a merely WRONG key surface as a corrupt floor, sending the operator to
+// delete it when the fix was to restore the key.
 //
 // # Format version 1, and the upgrade
 //

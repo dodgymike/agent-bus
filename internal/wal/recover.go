@@ -633,26 +633,45 @@ const maxDiscardsLogged = 16
 // logDiscards writes one record per discard, at ERROR when what was lost was
 // acknowledged (a commit record) or is unidentifiable, and WARN otherwise. The
 // total is always emitted, so a capped list never hides how much went.
+//
+// SEVERE DISCARDS ARE LOGGED FIRST, and that ordering is a correctness property
+// rather than a presentation choice. The cap used to take the first
+// maxDiscardsLogged discards IN FILE ORDER, so sixteen trivial ones at the head
+// of a file crowded out a dangling COMMIT further in -- an ACKNOWLEDGED WRITE
+// THAT IS NOW LOST -- and the whole recovery then emitted not one ERROR line.
+// Invariant 6 permits discarding damage only because every discard is logged
+// "loudly and specifically"; a cap that evicts the loudest message is exactly the
+// silent-discard defect wearing a different hat, and silent discard was rated P0.
+//
+// The cap itself stays: a file that is damage end to end must not turn one
+// restart into a hundred thousand log lines. What changes is WHICH entries the
+// cap keeps. Offsets are in every line, so file order is still recoverable by
+// anyone who wants it.
 func logDiscards(logger *logging.Logger, path string, discards []Discard, total int) {
-	for i, d := range discards {
-		if i == maxDiscardsLogged {
-			break
-		}
-		kv := []interface{}{
-			"path", path, "stage", d.Stage, "offset", d.Offset, "bytes", d.Length,
-			"record_index", d.indexLabel(), "record_type", d.typeLabel(), "reason", d.Reason,
-		}
-		if d.severe() {
-			logger.Error("wal discarded a damaged record", kv...)
-		} else {
-			logger.Warn("wal discarded a damaged record", kv...)
+	logged := 0
+	emit := func(wantSevere bool) {
+		for _, d := range discards {
+			if logged == maxDiscardsLogged {
+				return
+			}
+			if d.severe() != wantSevere {
+				continue
+			}
+			logged++
+			kv := []interface{}{
+				"path", path, "stage", d.Stage, "offset", d.Offset, "bytes", d.Length,
+				"record_index", d.indexLabel(), "record_type", d.typeLabel(), "reason", d.Reason,
+			}
+			if wantSevere {
+				logger.Error("wal discarded a damaged record", kv...)
+			} else {
+				logger.Warn("wal discarded a damaged record", kv...)
+			}
 		}
 	}
+	emit(true)  // every severe discard that fits, first
+	emit(false) // then the rest, in file order
 	if total > 0 {
-		logged := len(discards)
-		if logged > maxDiscardsLogged {
-			logged = maxDiscardsLogged
-		}
 		logger.Warn("wal recovery discarded damaged regions", "path", path,
 			"discards", total, "logged_individually", logged)
 	}

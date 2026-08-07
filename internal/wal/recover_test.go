@@ -2641,3 +2641,57 @@ func TestWALV2HeaderDamageWithTheRightKeyStillRepairs(t *testing.T) {
 		t.Errorf("the write after the header rebuild got prepare index %d, want 7", c.PrepareIndex)
 	}
 }
+
+// TestWALSevereDiscardIsNeverCrowdedOutOfTheLog is the P2 a security gate raised
+// against the discard-logging cap, and it is invariant 6's requirement stated as
+// a test.
+//
+// Recovery is permitted to throw damage away ONLY because it says so out loud
+// and specifically -- silent discard is the actual defect, and it was rated P0.
+// The per-discard log line is capped at maxDiscardsLogged so a file that is
+// damage end to end cannot turn one restart into a hundred thousand lines. That
+// cap used to select in FILE ORDER, so a run of trivial discards at the head of
+// a file could crowd out a DANGLING COMMIT further in -- an acknowledged write
+// that is now lost, the single most important thing recovery can report -- and
+// the whole recovery would then emit no ERROR at all.
+//
+// The fix is to spend the cap on severe discards first. This test fails against
+// the file-order version: with maxDiscardsLogged trivial discards ahead of it,
+// the severe one gets no line.
+func TestWALSevereDiscardIsNeverCrowdedOutOfTheLog(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.LevelDebug)
+	const path = "/srv/bus/bus.wal"
+
+	// Enough trivial discards to fill the cap twice over, then the severe one
+	// LAST -- the position that used to guarantee it was dropped.
+	var discards []Discard
+	for i := 0; i < maxDiscardsLogged*2; i++ {
+		discards = append(discards, Discard{
+			Stage: "framing", Offset: int64(100 + i), Length: 48,
+			Index: uint64(i + 1), Type: TypePrepare, TypeKnown: true,
+			Reason: "an uncommitted prepare",
+		})
+	}
+	discards = append(discards, Discard{
+		Stage: "replay", Offset: 9999, Length: 64,
+		Index: 4242, Type: TypeCommit, TypeKnown: true,
+		Reason: "the prepare this commit accepted is gone: AN ACKNOWLEDGED WRITE IS LOST",
+	})
+
+	logDiscards(logger, path, discards, len(discards))
+	out := buf.String()
+
+	assertLogged(t, out, "ERROR", "wal discarded a damaged record",
+		"path="+path, "record_index=4242", "record_type=commit")
+
+	// The cap still holds: loudness must not have been bought with unboundedness.
+	if n := len(logLinesWith(out, "wal discarded a damaged record")); n != maxDiscardsLogged {
+		t.Errorf("%d individual discard lines were emitted, want exactly %d: the cap exists so a file that is damage end to end cannot flood the operator log", n, maxDiscardsLogged)
+	}
+	// And the exact total is still reported, so a capped list never hides how
+	// much actually went.
+	assertLogged(t, out, "WARN", "wal recovery discarded damaged regions",
+		"discards="+strconv.Itoa(len(discards)),
+		"logged_individually="+strconv.Itoa(maxDiscardsLogged))
+}

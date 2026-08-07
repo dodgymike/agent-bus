@@ -81,57 +81,106 @@ writeup and how invariants 1 and 6 were reconciled without narrowing either.
 `<data-dir>/wal-index-floor` (mode `0600`, on-disk format version **4** — RESERVED via the Spec
 Server `ondisk-format-version` namespace on 2026-08-07, never hand-picked; `1`/`2` are the WAL frame
 format above, `3` is `agent-suffixes`) is a small, atomically-replaced file living OUTSIDE the WAL,
-implemented in `internal/wal/indexfloor.go`. Format, mirroring `agent-suffixes`: a header line
-carrying a SHA-256 of the body, then a two-line body:
+implemented in `internal/wal/indexfloor.go`. Format: a header line carrying an **HMAC-SHA256 tag**,
+then a three-line body:
 
 ```
-agent-bus-wal-index-floor v4 sha256=<64 hex>
+agent-bus-wal-index-floor v4 hmac-sha256=<64 hex>
 reserved <decimal uint64>
 written <decimal uint64>
+sealed <0|1>
 ```
 
-The SHA-256 is an INTEGRITY check against media damage and accidental editing, **not
-authentication** — anyone who can write the file can recompute it, the same posture the
-`agent-suffixes` digest already takes.
+**The tag is a KEYED MAC, not a checksum (invariant 6), keyed with the data directory's own
+`wal-mac.key` — the same key every WAL frame is authenticated under.** It covers
+`agent-bus-wal-index-floor v4\n` followed by the body, i.e. the whole file except the tag field
+itself; covering the version line binds the tag to the format version so a future body cannot be
+replayed as a v4 one. Computed and verified with stdlib `crypto/hmac` + `crypto/sha256` exactly as
+`internal/wal/format.go`'s frame MAC is, and compared with `hmac.Equal` — never `==` or
+`bytes.Equal`, because a tag comparison that leaks timing is a forgery oracle.
 
-**Two fields, both STRICTLY NON-DECREASING and enforced as such in code. There is deliberately no
-clean-shutdown flag and no field that can rewind:**
+*This replaced an UNKEYED SHA-256 on 2026-08-07 after a security gate proved the seal forgeable with
+no key at all: flip `sealed 0` to `sealed 1`, recompute the digest by hand, and the reopened bus
+reissued indices at 2268 of 2289 truncation offsets — while every frame it then wrote carried a valid
+MAC, because the server itself computes it. See `DECISIONS.md`, 2026-08-07.*
+
+**VERSION 4 ACCEPTS THREE SHAPES ON READ AND WRITES ONLY THE FIRST.** The version number is NOT
+bumped for the older two, because neither is a layout an older binary would misread into a LOWER
+floor, which is the only thing the version field defends:
+
+| shape | written by | read as |
+| --- | --- | --- |
+| `hmac-sha256=` + 3-line body | current | authenticated; `sealed` TRUSTED |
+| `sha256=` + 3-line body | the same-day pre-HMAC revision | digest verified; `sealed` **discarded**, forced `false`; WARN; rewritten keyed at the next start |
+| `sha256=` + 2-line body | **`f56c723`, which is in `main`** | same as above (there is no `sealed` line to read) |
+
+The two-line body was briefly declared CORRUPT on the premise that "v4 never shipped". **That premise
+was false** — `f56c723` is in `main` and writes exactly that — so a routine upgrade hit
+`ErrIndexFloorCorrupt`, refused to start, and pointed the operator at a remedy that reissues ids.
+Discarding a legacy file's `sealed` bit costs at most one burned reservation block on the first start
+after upgrade; trusting it costs invariant 1.
+
+**Three fields. `reserved` and `written` are STRICTLY NON-DECREASING and enforced as such in code;
+there is deliberately no field that can rewind a floor:**
 - `reserved` — no WAL record index above this value has EVER been authorised by this data directory.
 - `written` — every WAL record index at or below this value is BURNED: it has either been written to
   the log, or permanently SKIPPED by recovery.
+- `sealed` — `1` means the run that wrote the file reached a clean `Writer.Close`, so `written` is
+  EXACT rather than a lower bound. It is EXEMPT from the monotonicity rule (it goes `1`→`0` at every
+  `begin`, fsynced before the writer may append, so a crash can only ever leave `0`), and clearing it
+  can only make the next start MORE conservative.
 - Always `written <= reserved`; a loaded file where that fails is corrupt.
 
 **Written AHEAD of the index it authorises.** `Writer.Append` reserves the index durably BEFORE
 stamping it into a frame, and POISONS the writer if the reservation cannot be made. Reservation is
-amortised in blocks of `indexReserveBlock = 256`, so the disk is touched roughly once per 256
-appends — about one extra fsync per 256 the WAL already performs under invariant 4, not one per
-append (which would double the fsync count on the send path). The price of the block: a crash may
-permanently burn up to 255 unused indices, which show up as a HOLE in the WAL's index sequence.
-Holes are legal and permanent here — invariant 1 beats gap-freeness.
+amortised in blocks of `indexReserveBlock = 64`. A floor write is a temp file + fsync + rename +
+directory fsync — roughly THREE syncs — so a block of 64 costs about 3 extra syncs per 64 appends,
+call it ~5% on the fsync count of the send path. (**UNMEASURED**: that is arithmetic on sync counts,
+not a profile, and `64` is a knob nobody has benchmarked.) The price of the block: a crash burns up to
+63 unused indices, which show up as a HOLE in the WAL's index sequence. Holes are legal and permanent
+here — invariant 1 beats gap-freeness.
 
-**`wal.Open` resumes at the MAXIMUM of three sources** — see the 2026-08-07 addendum in "The
-write-ahead log at startup" below for the full statement: the replayed high-water mark, one past the
-highest index the repair pass OBSERVED (identified discards included, `Repair.NextIndex`), and
-`written+1` from this floor — plus `reserved+1` when recovery lost bytes it could not enumerate
-(`Repair.LostUnidentified`: a framing-stage region discard, an exhausted forward search, or a
-quarantine).
+**`wal.Open` resumes at the MAXIMUM of** the replayed high-water mark, one past the highest index the
+repair pass OBSERVED (`Repair.NextIndex`), and `written+1` from this floor — **plus `reserved+1`
+whenever the previous run did not close cleanly (`sealed 0`)**. The trigger is the seal bit and NOT
+`Repair.LostUnidentified`: "did this recovery find damage" is unknowable, because a truncation at a
+clean frame boundary is byte-for-byte a legitimately shorter log. `LostUnidentified` remains exported
+and is still good diagnostics; it is no longer a correctness trigger.
+
+**Read AFTER the MAC key is settled.** `wal.Open` reads this file after `macKeyFor`/`repairLog` have
+ruled on the key, not before. Reading it first made a merely WRONG key surface as a corrupt floor and
+pointed the operator at deleting it — a remedy that forfeits invariant 1 when the actual fix was to
+restore the key.
 
 **Written atomically:** a temp file in the same directory is written, fsynced, renamed into place,
 and then the directory itself is fsynced. A crash can therefore never produce a corrupt floor file —
-corruption means media damage or tampering.
+corruption means media damage or tampering. Temp files a crash left behind are reaped at the next
+open by `os.ReadDir` + prefix match, **never `filepath.Glob`**: `-data` is a path, and interpolating
+it into a glob PATTERN let `-data /srv/bus[1]` unlink a SIBLING directory's temp file while missing
+its own, and `-data /srv/bus[` disable the reaper permanently via `ErrBadPattern`.
 
-**MISSING vs CORRUPT is the load-bearing distinction, and the two are handled oppositely:**
+**MISSING vs UNVERIFIED vs CORRUPT — three states, handled differently:**
 - **MISSING is benign** — a data directory written by a binary that predates this file — and yields a
   zero floor, logged at WARN when the directory is not otherwise fresh. Refusing to start over a
   missing file would brick every already-deployed bus on upgrade, which is exactly the bricking the
   existing `upgradeV1` path exists to avoid.
-- **CORRUPT (bad header, unknown version, checksum mismatch, malformed number, or `written >
-  reserved`) is FATAL**, wraps the exported sentinel `wal.ErrIndexFloorCorrupt`, and is **NEVER
-  regenerated** — regenerating it would resume the WAL record index (and the message sequence
-  derived from it) below numbers already handed out, silently, with nothing downstream able to
-  detect it. The error names a one-step operator remedy: delete the file and restart; the bus then
-  resumes from the log's own high-water mark, which is correct **unless the log has ALSO been
-  damaged or quarantined**.
+- **UNVERIFIED is loud but not fatal.** If `wal-mac.key` was ABSENT when the directory was opened and
+  recovery minted a new one, nothing the previous identity wrote can verify — floor included. That is
+  a re-founded directory, not a damaged floor, so the file is read WITHOUT authentication: its
+  numbers are kept (they are only ever consumed as a RAISE, so they can only make the start more
+  conservative) while `sealed` is discarded, and it is logged at **ERROR**. An attacker who could
+  forge that file could equally DELETE it, which no MAC can prevent; what the MAC buys is that the
+  forgery is no longer SILENT.
+- **CORRUPT (bad header, unknown version, a tag that fails under the directory's OWN key, malformed
+  number, or `written > reserved`) is FATAL**, wraps the exported sentinel
+  `wal.ErrIndexFloorCorrupt`, and is **NEVER regenerated** — regenerating it would resume the WAL
+  record index (and the message sequence derived from it) below numbers already handed out, silently,
+  with nothing downstream able to detect it. The error tells the operator to restore the file from a
+  backup, and states plainly that **deleting it FORFEITS INVARIANT 1 for that data directory unless
+  the previous run shut down cleanly**. The old wording ("delete it and restart; correct unless the
+  log has ALSO been damaged") was unsound and is gone: a log truncated at a record boundary is
+  byte-for-byte identical to a shorter one, so no operator can satisfy that caveat, and following it
+  reissued an index at 2268 of 2289 measured truncation offsets.
 
 **This file adds NO refuse-to-start behaviour, and recovery from LOG DAMAGE still always reaches a
 running server.** A quarantine still starts a fresh log; it just starts it above the floor instead
@@ -279,10 +328,13 @@ db350e39).** `wal.Open` now computes the index its first append will use as the 
 sources, not the log's own arithmetic: (1) the replayed high-water mark, (2) one past the highest
 index the repair pass OBSERVED (`Repair.NextIndex`, now including identified discards — it used to
 be one past the highest SURVIVOR, which was defect `e120153b`), and (3) `written+1` from the durable
-record-index floor at `<data-dir>/wal-index-floor` — plus `reserved+1` from that same floor when
-recovery lost bytes it could not enumerate (`Repair.LostUnidentified`). See "On-disk files in the
-data directory" above for the floor file itself, and `DECISIONS.md` (2026-08-07) for why deriving
-the mark from the log alone, on its own, was the defect rather than an accepted limit.
+record-index floor at `<data-dir>/wal-index-floor` — plus `reserved+1` from that same floor
+**whenever the previous run did not close cleanly (`sealed 0`)**. The ceiling was briefly conditional
+on `Repair.LostUnidentified` instead; that is unsound, because a truncation at a clean frame boundary
+is byte-for-byte a legitimately shorter log and so "did recovery find damage" is not a question
+anything can answer. See "On-disk files in the data directory" above for the floor file itself, and
+`DECISIONS.md` (2026-08-07) for why deriving the mark from the log alone, on its own, was the defect
+rather than an accepted limit.
 
 ## The durable applied-key store (IDEM-11, added 2026-08-03)
 

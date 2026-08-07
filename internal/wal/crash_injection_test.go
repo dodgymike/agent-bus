@@ -714,10 +714,12 @@ func TestCrashInjectionMidCommitWriteKill(t *testing.T) {
 	// The number is indexReserveBlock+1 and it is derived, not magic: the child ran
 	// wal.Open, which fsynced a reservation for a block of indexReserveBlock
 	// indices BEFORE the first append, and was then SIGKILLed without ever sealing
-	// it. The torn tail sets Repair.LostUnidentified, so Open stops trusting the
-	// file's arithmetic and resumes one past the durable CEILING. Indices 6..256
-	// are burned unused -- the deliberate price of amortising the floor write, and
-	// cheaper than any chance of reissuing an id.
+	// it. An UNSEALED floor means recovery cannot know what the dead run wrote --
+	// a truncation at a clean frame boundary, a rewrite or a deleted bus.wal all
+	// leave no evidence -- so Open stops trusting the file's arithmetic and
+	// resumes one past the durable CEILING. Indices 6..64 are burned unused: the
+	// deliberate price of amortising the floor write, and cheaper than any chance
+	// of reissuing an id.
 	l, err := Open(LogOptions{Dir: dir})
 	if err != nil {
 		t.Fatalf("Open to resume: %v", err)
@@ -924,7 +926,9 @@ func TestCrashInjectionDiscardPathsRecoverAndLog(t *testing.T) {
 			wantLog: []logExpect{
 				{"ERROR", "wal discarded a damaged record", []string{"stage=framing", "record_index=2", "record_type=commit", "the next intact record was found at offset"}},
 				{"WARN", "wal rewrote a damaged log, keeping every intact record", []string{"kept=5"}},
-				{"ERROR", "wal discarded a damaged record", []string{"stage=replay", "are missing from the index sequence"}},
+				// WARN: a hole discarded no bytes (Length 0), so it is not the
+				// "I do not know what I just deleted" case that earns ERROR.
+				{"WARN", "wal discarded a damaged record", []string{"stage=replay", "are absent from the index sequence", "UPPER BOUND on loss"}},
 			},
 			wantNote: "one flipped bit must cost one record, not the four committed records behind it",
 		},
@@ -1358,31 +1362,33 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 	const finalIndex = 40      // the highest index the fixture writes
 	const firstFreeInFile = 41 // one past it: the reviewer's probe saw 33 here
 
-	// wantNextIndex is where the index resumes, and it is ABOVE what the file
-	// alone would give. The reason is the ONE JUNK BYTE these cases append, and it
-	// is deliberate rather than incidental:
+	// wantNextIndex is where the index resumes: exactly one past the highest
+	// index the fixture wrote, with NO burned block.
 	//
-	// A scrap smaller than a frame header is discarded as a FRAMING-STAGE REGION,
-	// not as a record -- there is nothing in one byte to read an index out of. That
-	// sets Repair.LostUnidentified, which is recovery saying "the bytes I threw
-	// away belonged to a record whose index I cannot name". Open then stops
-	// trusting the file's arithmetic and resumes one past the durable CEILING: the
-	// highest index this data directory ever AUTHORISED, which the fixture's own
-	// wal.Open reserved in a block of indexReserveBlock before its first append.
-	// Indices 41..256 are burned unused.
+	// The fixture CLOSES THE LOG CLEANLY before the damage is applied, so the
+	// durable index floor carries sealed 1 and written 40 -- and a sealed floor
+	// says `written` is EXACT, i.e. 40 is the highest index ever written to this
+	// data directory's log. The ONE JUNK BYTE appended below is discarded as a
+	// framing-stage REGION (there is nothing in one byte to read an index out of)
+	// and sets Repair.LostUnidentified, but that flag is DIAGNOSTIC now, not a
+	// correctness trigger: it cannot be evidence of a record above 40, because
+	// the seal already ruled one out. So the ceiling is not consulted and nothing
+	// is burned.
 	//
-	// That is the correct trade and not a regression. The scrap plausibly belongs
-	// to record 41, whose index was reserved and fsynced before any byte of it was
-	// written; reissuing 41 would give two records one id, and a burned block costs
-	// nothing but a hole. Holes are legal and permanent (invariant 1 beats
-	// gap-freeness).
+	// It asserted indexReserveBlock+1 between 2026-08-07 and the seal-bit fix,
+	// when the ceiling was taken on any LostUnidentified repair -- burning 41..256
+	// on a fixture that had told recovery exactly what it wrote. The conditional
+	// that produced that number was ALSO the P0 the reviewer proved: keying the
+	// ceiling on detected damage reissues indices whenever damage is
+	// undetectable, which a truncation at a frame boundary always is.
 	//
-	// IT IS NOT WHAT THIS TEST IS ABOUT, and the two assertions are kept separate
-	// below precisely so that the original point cannot be lost in it: ONE damaged
-	// record must cost ONE record, never the eight committed records behind it.
-	// That is security's DUR-11 finding, and it is proved by the SURVIVOR and
-	// APPLIED-ENTRY sweeps, which are unchanged and must stay exactly as strong.
-	const wantNextIndex = indexReserveBlock + 1
+	// NONE OF THAT IS WHAT THIS TEST IS ABOUT, and the assertions are kept
+	// separate below precisely so that the original point cannot be lost in it:
+	// ONE damaged record must cost ONE record, never the eight committed records
+	// behind it. That is security's DUR-11 finding, and it is proved by the
+	// SURVIVOR and APPLIED-ENTRY sweeps, which are unchanged and must stay
+	// exactly as strong.
+	const wantNextIndex = firstFreeInFile
 
 	buildFixture := func(t *testing.T) (dir, path string, recs []Record, acked []Committed) {
 		t.Helper()
@@ -1460,7 +1466,7 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 		// second cascade, and the survivor sweeps below are what prove the
 		// difference.
 		if rec.NextIndex != wantNextIndex {
-			t.Fatalf("NextIndex = %d, want %d (one past the durable ceiling): the trailing junk byte cannot be attributed to a readable index, so recovery resumes above every index this data directory ever authorised rather than guessing from the file",
+			t.Fatalf("NextIndex = %d, want %d (one past the highest index the fixture wrote): the fixture closed cleanly, so the durable floor says written=40 is EXACT and no reservation may be burned",
 				rec.NextIndex, wantNextIndex)
 		}
 		// Only the length was wrong, so the record's own checksum proves it
@@ -1519,7 +1525,7 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 		// see the note on wantNextIndex. Forwards is always safe; backwards is the
 		// defect.
 		if rec.NextIndex != wantNextIndex {
-			t.Fatalf("NextIndex = %d, want %d (one past the durable ceiling): the trailing junk byte is a region discard with no readable index, so recovery resumes above every index this data directory ever authorised",
+			t.Fatalf("NextIndex = %d, want %d (one past the highest index the fixture wrote): the fixture closed cleanly, so the durable floor says written=40 is EXACT and the junk byte cannot imply a record above it",
 				rec.NextIndex, wantNextIndex)
 		}
 		want := make([]uint64, 0, 2*txns)

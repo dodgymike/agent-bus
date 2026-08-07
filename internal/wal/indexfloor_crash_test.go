@@ -296,6 +296,11 @@ func TestWALIndexFloorCrashNeverReissuesAnIndex(t *testing.T) {
 		// nothing was skipped and the log must therefore stay quiet.
 		wantLoud      string
 		wantLoudLevel string
+		// wantNext, when non-zero, is the EXACT index the restart must resume at.
+		// The relational assertions below (strictly above the child's highest)
+		// are the safety property; this pins the number so a change of policy has
+		// to be made deliberately rather than absorbed.
+		wantNext uint64
 		// crossesBlock requires the child to have written PAST indexReserveBlock,
 		// so reserve() genuinely touched the disk mid-run. It is asserted rather
 		// than assumed: if the fixture ever shrinks below the boundary, the whole
@@ -305,29 +310,47 @@ func TestWALIndexFloorCrashNeverReissuesAnIndex(t *testing.T) {
 		note         string
 	}{
 		{
-			// RESERVING AN INDEX IS NOT ISSUING IT. Open fsynced a reservation for
-			// a whole block before the child could append, and the child then died
-			// without using any of it. Nothing was handed out, so nothing may be
-			// burned -- taking the ceiling here would put a 255-index hole in every
-			// crashed bus's log for nothing.
+			// A CRASH BURNS THE RESERVATION, and this row is where that policy is
+			// most visible: Open fsynced a reservation for a whole block before
+			// the child could append, the child died without using any of it, and
+			// the next start still resumes past the whole block.
+			//
+			// THIS ROW EXPECTED 1 UNTIL 2026-08-07, on the argument that a
+			// reservation is not an issue. The argument is sound; the PREMISE it
+			// needed is not. To resume at 1 safely, recovery must know that no
+			// frame in 1..64 was ever written -- and after a crash it cannot know
+			// that, because a truncation at a clean frame boundary, a rewrite, or
+			// a deleted bus.wal all leave a file that is byte-indistinguishable
+			// from one that never held those records. A reviewer's probe reissued
+			// an index at 25 of 2289 truncation offsets on exactly that reasoning.
+			// The bit that IS knowable is "did the previous run close cleanly",
+			// and a killed child leaves sealed 0.
 			name: "died before appending anything, log intact",
 			txns: 0, damage: damageNone,
-			note: "a reservation is not an issue: an unused block must not be burned",
+			wantNext:      indexReserveBlock + 1,
+			wantLoud:      "wal resumed the record index above what the log file alone would have given",
+			wantLoudLevel: "WARN",
+			note:          "a crashed run leaves sealed 0, so its reservation is burned: the alternative is trusting a file that cannot testify",
 		},
 		{
 			// The ordinary crash: whole frames on disk (a SIGKILL cannot tear a
 			// write -- the page cache outlives the process), one unresolved
-			// prepare, no seal. The log is readable, so the ceiling branch must
-			// NOT fire and there must be no hole.
+			// prepare, no seal. The log is READABLE -- and that is precisely the
+			// case that used to reissue, because "readable" and "complete" are not
+			// the same claim and only the second one would justify trusting it.
 			name: "died mid-transaction, log intact",
 			txns: 8, damage: damageNone,
-			note: "an intact log after a crash leaves no hole: the ceiling branch is conditional, not unconditional",
+			wantNext:      indexReserveBlock + 1,
+			wantLoud:      "wal resumed the record index above what the log file alone would have given",
+			wantLoudLevel: "WARN",
+			note:          "an intact-LOOKING log after a crash proves nothing about what was deleted before this start; sealed 0 is the only honest reading",
 		},
 		{
 			// e120153b: the tail record is discarded, and its index must be
 			// stepped over rather than handed back.
 			name: "died mid-transaction, tail torn",
 			txns: 8, damage: damageTornTail,
+			wantNext:      indexReserveBlock + 1,
 			wantLoud:      "wal resumed the record index above what the log file alone would have given",
 			wantLoudLevel: "WARN",
 			note:          "a discarded tail record's index is burned, never reissued",
@@ -339,6 +362,7 @@ func TestWALIndexFloorCrashNeverReissuesAnIndex(t *testing.T) {
 			name: "died mid-transaction, whole log quarantined",
 			txns: 8, damage: damageQuarantine,
 			wantQuarantine: true,
+			wantNext:       indexReserveBlock + 1,
 			wantLoud:       "wal resumed the record index above the durable floor after a quarantine",
 			wantLoudLevel:  "ERROR",
 			note:           "a quarantine must not reissue the bus's entire history",
@@ -438,9 +462,8 @@ func TestWALIndexFloorCrashNeverReissuesAnIndex(t *testing.T) {
 				t.Fatalf("Recovered().NextIndex = %d, but the killed process was handed index %d: recovery is REISSUING an index this data directory already authorised (invariant 1, reaffirmed WITHOUT narrowing on 2026-08-02). %s.\nchild indices: %v\nrepair: %+v",
 					rec.NextIndex, child.highest, tc.note, child.indices, rec.Repaired)
 			}
-			if tc.txns == 0 && rec.NextIndex != 1 {
-				t.Errorf("Recovered().NextIndex = %d after a crash that appended NOTHING, want 1: %s -- burning the reserved block here would put a permanent hole in every crashed bus's log for no reason",
-					rec.NextIndex, tc.note)
+			if tc.wantNext != 0 && rec.NextIndex != tc.wantNext {
+				t.Errorf("Recovered().NextIndex = %d, want exactly %d: %s", rec.NextIndex, tc.wantNext, tc.note)
 			}
 
 			// (5) AND THE INDICES IT ACTUALLY HANDS OUT ARE ALL NEW.
@@ -470,14 +493,21 @@ func TestWALIndexFloorCrashNeverReissuesAnIndex(t *testing.T) {
 			} else {
 				assertNotLogged(t, out, "wal resumed the record index above what the log file alone would have given")
 				assertNotLogged(t, out, "wal resumed the record index above the durable floor after a quarantine")
-				if rec.MissingRecords != 0 {
-					t.Errorf("MissingRecords = %d after a crash that left the log INTACT, want 0: a loss channel that cries wolf is the mirror image of a silent discard. Discards: %+v",
-						rec.MissingRecords, rec.Discarded)
-				}
+			}
+			// NO FALSE ALARM ON THIS START, in every row. The burned block sits
+			// ABOVE everything in the file, so it is not an interior hole and
+			// replay must not count it as one -- a loss channel that cries wolf is
+			// the mirror image of a silent discard. (The hole becomes interior on
+			// the NEXT start, once records exist above it; it is reported at WARN
+			// there, and its Reason says the range may be a burned reservation
+			// rather than a loss.)
+			if rec.MissingRecords != 0 {
+				t.Errorf("MissingRecords = %d on the start that made the jump, want 0: nothing is missing from between the records this file holds. Discards: %+v",
+					rec.MissingRecords, rec.Discarded)
 			}
 
 			// (7) The floor on disk covers everything the dead process had.
-			reserved, written := readFloorFile(t, dir)
+			reserved, written, _ := readFloorFile(t, dir)
 			if written < child.highest {
 				t.Errorf("the durable floor says %d indices are burned, but the killed process was handed up to %d: the burn must be recorded before the Log is returned, or the NEXT crash forgets it",
 					written, child.highest)
@@ -540,9 +570,13 @@ func TestWALIndexFloorWriteAheadOrderingLeavesNoReissue(t *testing.T) {
 		// txns is how many transactions exist in the log before the simulated
 		// crash state is imposed.
 		txns int
-		// floor is the (reserved, written) pair the crash would have left in
-		// <data-dir>/wal-index-floor. It is written OVER whatever is there.
+		// floor is the (reserved, written, sealed) triple the crash would have
+		// left in <data-dir>/wal-index-floor. It is written OVER whatever is
+		// there. sealed FALSE is the crash shape -- begin fsyncs sealed 0 before
+		// a byte can be appended and only a clean Writer.Close ever sets it -- so
+		// every row that models a crash leaves it false.
 		reserved, written uint64
+		sealed            bool
 		// quarantine truncates the log to nine bytes, so the file's own answer
 		// for "what index comes next" is 1.
 		quarantine bool
@@ -552,33 +586,71 @@ func TestWALIndexFloorWriteAheadOrderingLeavesNoReissue(t *testing.T) {
 	}{
 		{
 			// POINT 1: a crash BEFORE THE FIRST APPEND. Open's begin fsynced
-			// reserved=256, written=0, and the process died. Nothing was issued,
-			// so nothing may be burned.
+			// reserved=indexReserveBlock, written=0, sealed=0, and the process
+			// died.
+			//
+			// THIS ROW EXPECTED 1 UNTIL 2026-08-07, on the argument that "a
+			// reservation is not an issue, so burning it costs a hole for
+			// nothing". The reviewer's probe killed that argument: the trigger for
+			// consulting the ceiling used to be "did this recovery find damage",
+			// and a truncation at a clean frame boundary is byte-indistinguishable
+			// from a shorter log, so the ceiling was skipped in exactly the cases
+			// that needed it and 25 of 2289 truncation offsets reissued an index.
+			// The trigger is now "did the previous run close cleanly", which is
+			// knowable -- and a crashed run leaves sealed 0, so the block IS
+			// burned. That is the price, and it is why the block came down from
+			// 256 to 64.
 			name: "before the first append",
-			txns: 0, reserved: indexReserveBlock, written: 0,
+			txns: 0, reserved: indexReserveBlock, written: 0, sealed: false,
+			wantNext: indexReserveBlock + 1,
+			why:      "a crashed run leaves sealed 0, so the next start takes the ceiling: it is >= every index that run could have authorised, because nothing is stamped into a frame before its reservation is fsynced",
+		},
+		{
+			// POINT 1b: THE SAME FLOOR, CLEANLY SEALED. This is the row that
+			// proves the seal bit is doing work rather than the ceiling simply
+			// having become unconditional: identical numbers, sealed 1, and the
+			// reservation is NOT burned.
+			name: "before the first append, but the run closed cleanly",
+			txns: 0, reserved: indexReserveBlock, written: 0, sealed: true,
 			wantNext: 1,
-			why:      "a reservation is not an issue; burning it would cost a hole on every crash for nothing",
+			why:      "sealed 1 means written is EXACT, so written+1 already dominates every index ever written and the ceiling would only burn a hole",
 		},
 		{
 			// POINT 2: a crash BETWEEN THE FLOOR WRITE AND THE FRAME WRITE.
 			// reserve() persisted a new ceiling for an index that no frame ever
-			// carried. Index 41 was AUTHORISED but never ISSUED, so resuming at 41
-			// is correct -- it is not a reissue, because nobody was ever told it.
+			// carried.
+			//
+			// This expected 41 until 2026-08-07 ("an authorised-but-unissued index
+			// is free"). It is free only if recovery can PROVE no frame carried
+			// it, and after a crash it cannot: the log may have been truncated at
+			// a frame boundary, rewritten, or deleted, and none of those leave
+			// evidence. sealed 0 therefore means the ceiling, not the file.
 			name: "between the floor write and the frame write",
-			txns: 20, reserved: 512, written: 40,
-			wantNext: 41,
-			why:      "an authorised-but-unissued index is free; only an ISSUED one is burned",
+			txns: 20, reserved: 512, written: 40, sealed: false,
+			wantNext: 513,
+			why:      "after a crash the file's high-water mark is a lower bound, not the answer; only the ceiling bounds it from above",
 		},
 		{
 			// POINT 3: a crash AFTER A FRAME'S FSYNC BUT BEFORE THE NEXT FLOOR
-			// UPDATE. This is the ordinary steady state -- the floor is amortised,
-			// so for 255 out of every 256 appends the floor is deliberately BEHIND
-			// the log. The log's own high-water mark is then the higher of the two
-			// and is what must be used.
+			// UPDATE. The floor is amortised, so for 63 out of every 64 appends it
+			// is deliberately BEHIND the log.
+			//
+			// The maximum is still taken -- the file's 41 is used when it is the
+			// larger -- but a crashed run also takes the ceiling, and here the
+			// ceiling (64) is above the file (41), so the block is burned.
 			name: "after a frame fsync, before the next floor update",
-			txns: 20, reserved: indexReserveBlock, written: 0,
+			txns: 20, reserved: indexReserveBlock, written: 0, sealed: false,
+			wantNext: indexReserveBlock + 1,
+			why:      "the floor lags the log by design, so the maximum of the two is taken -- and a crashed run adds the ceiling to that maximum",
+		},
+		{
+			// POINT 3b: the same state after a CLEAN close, where `written` is
+			// exact at 40 and the file agrees. No hole at all: this is the
+			// ordinary restart, and it is the property the seal bit buys back.
+			name: "a clean close with the floor exactly at the log's high-water mark",
+			txns: 20, reserved: indexReserveBlock, written: 40, sealed: true,
 			wantNext: 41,
-			why:      "the floor lags the log by design; the maximum of the two is the answer, not the floor alone",
+			why:      "a clean cycle must leave the index sequence dense; burning a block on every ordinary restart would put a permanent hole in every bus's log",
 		},
 		{
 			// POINT 4: THE INDUCTION HOLE, and the subtlest state in the whole
@@ -589,18 +661,28 @@ func TestWALIndexFloorWriteAheadOrderingLeavesNoReissue(t *testing.T) {
 			// to justify a jump, and cheerfully resume at 1 -- reissuing every
 			// index the jumped run had authorised.
 			name: "a run that jumped, wrote nothing, and crashed",
-			txns: 0, reserved: 512, written: 512,
+			txns: 0, reserved: 512, written: 512, sealed: false,
 			wantNext: 513,
-			why:      "the jump is durable even though no record carries it; otherwise 'only jump when damaged' has an induction hole",
+			why:      "the jump is durable even though no record carries it; without it, an empty undamaged log after a jumped run resumes at 1",
 		},
 		{
 			// POINT 5: the floor was pushed past the block boundary and the log
 			// was then lost ENTIRELY. The file says 1; only the ceiling can say
 			// otherwise, and it must be believed.
 			name: "the floor crossed a block boundary and the log was then quarantined",
-			txns: 20, reserved: 512, written: 40, quarantine: true,
+			txns: 20, reserved: 512, written: 40, sealed: false, quarantine: true,
 			wantNext: 513,
 			why:      "a quarantine takes the log's answer away, so the ceiling is the only bound left",
+		},
+		{
+			// POINT 5b: THE SAME QUARANTINE AFTER A CLEAN CLOSE. `written` is
+			// exact, so the bus resumes one past it rather than one past a
+			// reservation -- the quarantine still cannot rewind the index, but it
+			// no longer costs a block either.
+			name: "a quarantine after a clean close",
+			txns: 20, reserved: 512, written: 40, sealed: true, quarantine: true,
+			wantNext: 41,
+			why:      "written is exact after a clean close, so a quarantine costs no burned indices at all -- and still cannot rewind below 41",
 		},
 	}
 
@@ -612,7 +694,7 @@ func TestWALIndexFloorWriteAheadOrderingLeavesNoReissue(t *testing.T) {
 			// The simulated crash state, imposed directly on the two files. This
 			// is the step that is NOT a crash, and it is why the doc comment above
 			// says so out loud.
-			writeFloorFile(t, dir, "", encodeFloorBody(tc.reserved, tc.written))
+			writeFloorFile(t, dir, "", encodeFloorBody(tc.reserved, tc.written, tc.sealed))
 			if tc.quarantine {
 				truncate(t, filepath.Join(dir, WALFileName), 9)
 			}

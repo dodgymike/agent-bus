@@ -257,17 +257,24 @@ func Open(opts LogOptions) (*Log, error) {
 	}
 	path := filepath.Join(opts.Dir, WALFileName)
 
-	// THE DURABLE INDEX FLOOR IS OPENED FIRST, before a byte of the log is
-	// examined, and a failure here is FATAL and returned as-is. It is read-only
-	// at this point -- nothing is written until begin below -- but it must exist
-	// as a value before recovery runs, because recovery's answer is only half of
-	// the start index. A CORRUPT floor refuses the start (see
-	// ErrIndexFloorCorrupt for why that does not contradict invariant 6); a
-	// MISSING one is benign and yields a zero floor, which is exactly the
-	// pre-2026-08-07 behaviour.
-	floor, err := openIndexFloor(opts.Dir)
-	if err != nil {
-		return nil, err // openIndexFloor already names the path and the remedy
+	// DOES THIS DATA DIRECTORY ALREADY HAVE A MAC KEY? Probed here, read-only,
+	// before recovery can create one, and used for exactly one judgement further
+	// down: whether a floor file that fails its keyed tag is DAMAGE (the key is
+	// this directory's own, so the bytes are wrong) or a RE-FOUNDED DIRECTORY (the
+	// key was lost and recovery minted a new one, under which nothing the old
+	// identity wrote can possibly verify). Those two states call for opposite
+	// responses and are indistinguishable after the fact, so the question is asked
+	// while the answer still exists.
+	//
+	// A malformed or unreadable key is fatal here exactly as it is below; a
+	// MISSING one is not diagnosed here at all, because macKeyFor owns that
+	// judgement and duplicating it would let the two drift.
+	hadKeyAtOpen := true
+	if _, kerr := loadMACKey(macKeyPath(opts.Dir)); kerr != nil {
+		if !errors.Is(kerr, ErrMACKeyMissing) {
+			return nil, kerr
+		}
+		hadKeyAtOpen = false
 	}
 
 	// ---------------------------------------------------------------------
@@ -346,6 +353,72 @@ func Open(opts LogOptions) (*Log, error) {
 		repair = legacyRepair
 	}
 
+	// ---------------------------------------------------------------------
+	// THE DURABLE INDEX FLOOR (invariant 1: ids are never reused, INCLUDING
+	// across restarts). It is read HERE -- after the MAC key has been settled,
+	// before the start index is derived, and before a single byte is appended.
+	//
+	// # Why not earlier, which is where it used to be
+	//
+	// The floor is AUTHENTICATED WITH HMAC-SHA256 UNDER THIS DATA DIRECTORY'S
+	// wal-mac.key (invariant 6: integrity is a keyed MAC, never an unkeyed
+	// checksum). YOU CANNOT JUDGE A MAC'D FILE BEFORE YOU KNOW WHICH KEY IS THE
+	// RIGHT ONE, and settling that is precisely what the passes above do:
+	// macKeyFor decides whether an absent key may be generated or is fatal, and
+	// repairLog raises ErrMACKeyMismatch for a key that is present but wrong.
+	//
+	// Reading the floor first put those two verdicts in the wrong order and
+	// produced a DANGEROUS misdiagnosis: a merely WRONG key made the floor fail
+	// its tag, so the operator was told the floor was corrupt and pointed at a
+	// remedy (delete it) that FORFEITS INVARIANT 1 -- when the actual fix was to
+	// restore the key and nothing was wrong with the floor at all. Two failures
+	// with opposite remedies must not be collapsed into the more destructive one.
+	//
+	// THE MOVE NARROWS THAT MISDIAGNOSIS, IT DOES NOT ELIMINATE IT, and saying so
+	// is the point of this paragraph. ErrMACKeyMismatch is raised only for a log
+	// that identifies itself as version 2 AND is longer than its own file header.
+	// A wrong key over a log with NO READABLE RECORD -- a bare 48-byte header,
+	// which is what a fresh clean run and a POST-QUARANTINE directory both leave
+	// -- still reaches the floor first and still reports a corrupt floor. Both
+	// gates measured it. What closes the remaining gap is not ordering but the
+	// error TEXT: indexFloorCorrupt names wal-mac.key as the first thing to check,
+	// ahead of the remedy. See there.
+	//
+	// THE COST OF THE MOVE, stated rather than hidden: a corrupt floor is now
+	// refused AFTER repairLog has run, and repairLog DESTROYS BYTES -- truncateAt
+	// truncates permanently and the mid-file rewrite renames a temp over the
+	// original; only a QUARANTINE preserves the file by renaming it aside. An
+	// earlier draft of this comment claimed repairLog "never deletes bytes without
+	// moving them aside", and a reviewer measured that false (839 bytes before a
+	// refused Open, 789 after, nothing moved aside). The move is still right, for
+	// a narrower reason: the bytes repairLog removes are damage it has already
+	// LOGGED before touching the file, and they are bytes any successful start
+	// would have discarded anyway -- whereas the misdiagnosis above cost an id
+	// space. Note also that this still runs BEFORE replay, so a refusal here can
+	// never leave the caller holding a partially rebuilt Applier.
+	//
+	// hadKeyAtOpen distinguishes the two ways a keyed tag can fail to verify. See
+	// openIndexFloor.
+	floor, err := openIndexFloor(opts.Dir, c.key, hadKeyAtOpen)
+	if err != nil {
+		return nil, err // openIndexFloor already names the path and the remedy
+	}
+	// AN UNAUTHENTICATED FLOOR IS ANNOUNCED, LOUDLY, EVERY TIME. Its `sealed` bit
+	// has been DISCARDED as untrustworthy (readIndexFloorFile), so this start
+	// takes the ceiling and burns at most one reservation block. That hole is
+	// legal and correct, but an operator who sees it in the index sequence
+	// deserves to know why, and these are the only lines that say so.
+	switch {
+	case floor.legacyUnauthenticated():
+		opts.Logger.Warn("wal upgraded the durable record index floor to a keyed MAC",
+			"path", floor.Path(), "key", macKeyPath(opts.Dir),
+			"why", "the file carried an UNKEYED sha256 digest, which anyone able to write the data directory can recompute; a forged `sealed 1` would reissue WAL record indices, and therefore message ids, silently. Its sealed bit has been discarded as untrustworthy, so this start resumes above the durable ceiling and burns at most one reservation block; the file is rewritten with an HMAC-SHA256 tag below")
+	case floor.unverified():
+		opts.Logger.Error("wal could not verify the durable record index floor and read it WITHOUT authentication",
+			"path", floor.Path(), "key", macKeyPath(opts.Dir),
+			"why", "this data directory had no MAC key when it was opened, so recovery minted a new one and nothing the previous identity wrote can verify under it. The floor's numbers are still used, but ONLY TO RAISE the start index, and its `sealed` bit has been discarded. If this key was not meant to be lost, STOP THE BUS AND RESTORE IT: an unverified floor is no better protection than no floor at all")
+	}
+
 	var apply func(Committed) error
 	if opts.Applier != nil {
 		apply = opts.Applier.Apply
@@ -383,6 +456,11 @@ func Open(opts LogOptions) (*Log, error) {
 	// DERIVING THE START INDEX (invariant 1: ids are never reused, INCLUDING
 	// across restarts -- reaffirmed WITHOUT narrowing on 2026-08-02).
 	//
+	// THE PROPERTY, in one sentence a reviewer can check: THE START INDEX IS
+	// ALWAYS STRICTLY GREATER THAN EVERY INDEX THIS DATA DIRECTORY HAS EVER
+	// WRITTEN TO A LOG, NO MATTER WHAT HAPPENED TO THE LOG -- truncated at any
+	// offset, rewritten, quarantined, or deleted outright.
+	//
 	// The index the next append uses is the MAXIMUM of three sources, and each
 	// one covers a hole the others leave:
 	//
@@ -392,35 +470,53 @@ func Open(opts LogOptions) (*Log, error) {
 	//	floor.burned()+1   one past everything durably BURNED -- written, or
 	//	                   permanently skipped by an earlier recovery
 	//
-	// plus, when recovery lost bytes it could not enumerate, floor.ceiling()+1:
+	// plus, WHENEVER THE PREVIOUS RUN DID NOT CLOSE CLEANLY, floor.ceiling()+1:
 	// one past everything this data directory has EVER AUTHORISED.
 	//
-	// Three points make this correct, and they are the ones easiest to get
-	// wrong:
+	// # Why the trigger is "did the previous run close cleanly", not "did this
+	// # recovery find damage"
 	//
-	//  1. THE FLOOR'S `written` IS RAISED TO start-1 AT EVERY Open (see
-	//     floor.begin below). So a run that SKIPPED indices -- because a
-	//     quarantine or an unidentifiable discard forced it to -- and then wrote
-	//     nothing at all and crashed cannot have that skip forgotten: the skip is
-	//     durable even though no record carries it. That is exactly what lets the
-	//     ceiling branch be CONDITIONAL rather than unconditional. Without it,
-	//     "only jump when this recovery found damage" has an induction hole: the
-	//     NEXT start sees an intact (or empty) file, no damage, and happily
-	//     resumes below the indices the damaged run already authorised.
+	// Until 2026-08-07 the ceiling was taken only when repair.LostUnidentified
+	// was set -- only when recovery could PROVE the log had lost something. THAT
+	// CAN NEVER BE SOUND, and a reviewer proved it with a probe rather than an
+	// argument: a truncation at a CLEAN FRAME BOUNDARY is byte-indistinguishable
+	// from a log that was simply shorter, so salvage sees no damage, nothing is
+	// proved, and the indices past the cut are handed straight back out. 25 of
+	// 2289 truncation offsets over a 12-message log reissued an index, and they
+	// were exactly the frame boundaries. The degenerate case is worse still:
+	// crash without a Close and then delete bus.wal, and recovery reports an
+	// empty log with no damage at all and resumes at index 1, while `reserved`
+	// sits on disk unread.
 	//
-	//  2. RESERVING AN INDEX IS NOT ISSUING IT. The floor's ceiling runs up to
-	//     indexReserveBlock-1 indices ahead of anything used; nothing was ever
-	//     told those numbers and no record carries them. So a clean log's own
-	//     high-water mark is a SOUND start, and the common case burns no gap at
-	//     all. Taking the ceiling unconditionally would burn up to a block on
-	//     every single restart, for nothing.
+	// "Did the previous run close cleanly" IS knowable -- see indexfloor.go's
+	// `sealed` bit, which begin clears (fsynced) before a byte can be appended
+	// and only Writer.Close's seal ever sets. So that is the trigger now.
 	//
-	//  3. THE CEILING IS CONSULTED ONLY WHEN RECOVERY LOST SOMETHING IT COULD
-	//     NOT IDENTIFY. A discarded byte range may have held records whose
-	//     indices were never readable, so the file's arithmetic is a lower bound
-	//     there and only the floor can bound it from above. A normal restart --
-	//     clean shutdown or crash -- never takes this branch and never leaves a
-	//     hole.
+	// # The induction that actually holds
+	//
+	//  1. A RUN THAT CRASHES LEAVES sealed 0. The next start therefore takes
+	//     ceiling+1, which is >= every index that run could possibly have
+	//     authorised -- because nothing is ever stamped into a frame until the
+	//     ceiling covering it has been fsynced (Writer.Append reserves first).
+	//     The price is a hole of at most indexReserveBlock-1.
+	//  2. A RUN THAT CLOSES CLEANLY LEAVES sealed 1 AND AN EXACT `written`. Then
+	//     written+1 already dominates every index ever put in a frame, the
+	//     ceiling adds nothing but a hole, and NO indices are burned. This is the
+	//     ordinary restart, and it is why the seal bit buys back the property
+	//     that a clean cycle leaves the index sequence dense.
+	//  3. `begin` DURABLY RAISES `written` TO start-1 AT EVERY Open (below). So a
+	//     run that jumped the index -- because a quarantine or an unidentifiable
+	//     discard forced it to -- and then wrote nothing at all is not forgotten
+	//     even though no record carries the jump.
+	//
+	// repair.LostUnidentified IS NO LONGER A CORRECTNESS TRIGGER. It is kept
+	// because it is exported, documented, tested, consumed by cmd/agent-bus, and
+	// still good DIAGNOSTICS -- "recovery threw away bytes it could not
+	// enumerate" is worth an operator knowing. But it is not needed here, and
+	// making the ceiling conditional on it is precisely the defect above: when
+	// sealed 1, written+1 already dominates and the ceiling would only burn a
+	// hole; when sealed 0, the ceiling is taken regardless of what the repair
+	// pass did or did not manage to prove.
 	// ---------------------------------------------------------------------
 	fileNext := rec.NextIndex
 	if repair.NextIndex > fileNext {
@@ -438,7 +534,7 @@ func Open(opts LogOptions) (*Log, error) {
 	if b := floor.burned() + 1; b > start {
 		start = b
 	}
-	if repair.LostUnidentified {
+	if !floor.sealedClean() {
 		if c := floor.ceiling() + 1; c > start {
 			start = c
 		}
@@ -452,13 +548,19 @@ func Open(opts LogOptions) (*Log, error) {
 	// and db350e39 actually were.
 	rec.NextIndex = start
 
-	// Read BEFORE begin, and that ordering is not incidental: begin CREATES the
-	// file, so existedAtOpen() answers "yes" from the moment it returns. Asking
-	// afterwards makes the migration warning below dead code that no test can
-	// ever see -- which is exactly what happened on the first cut of this
-	// function, and it was caught by a test that was written to expect the
-	// warning rather than to expect the silence.
+	// Read BEFORE begin. This is BELT-AND-BRACES now rather than load-bearing:
+	// existedAtOpen() answers "was the file there when this data directory was
+	// OPENED", and persistLocked no longer flips it, so asking after begin would
+	// give the same answer. It used to flip it, which made the migration warning
+	// below dead code no test could ever see -- caught by a test written to
+	// expect the warning rather than the silence. The snapshot stays so that this
+	// site does not depend on that accessor staying honest.
 	migrating := !floor.existedAtOpen()
+
+	// Captured BEFORE begin raises it, for the head-loss check further down. Once
+	// begin has run, floor.burned() is start-1 and the comparison would be
+	// tautological.
+	burnedBeforeThisRun := floor.burned()
 
 	// The floor is written and FSYNCED BEFORE the Log is returned, and therefore
 	// before anything can append. Until this succeeds, the jump above exists only
@@ -494,6 +596,47 @@ func Open(opts LogOptions) (*Log, error) {
 		opts.Logger.Warn("wal created the durable record index floor for an existing data directory",
 			"path", floor.Path(), "start_index", start,
 			"note", "this data directory predates the durable index floor; until this file existed, a quarantine or an unidentifiable discard could still have reissued record indices and the message ids derived from them")
+	}
+	// HEAD LOSS: records that were BURNED by an earlier run but that this file
+	// does not start above.
+	//
+	// replay.go reports INTERIOR holes only. It deliberately stopped reporting a
+	// gap before the FIRST record, because a log legitimately starts high -- a
+	// fresh log after a quarantine begins above the durable floor -- and claiming
+	// "records 1..756 are missing" on every start is a loss channel that cries
+	// wolf. But that removed a real signal, and replay cannot restore it: replay
+	// has no access to the floor and must not gain one, because being
+	// floor-independent is exactly what keeps it usable as a read-only fsck on a
+	// file with no data directory around it.
+	//
+	// So the check lives HERE, where the floor IS available, and it is the honest
+	// version: an index at or below burnedBeforeThisRun was written or
+	// permanently skipped by some earlier run, so if the file now starts ABOVE
+	// that mark plus one, the records in between are in no file this recovery can
+	// see.
+	//
+	// IT IS A WEAKER SIGNAL THAN THE INTERIOR-HOLE CHECK, and the difference is
+	// worth stating so nobody reads more into it than it says:
+	//
+	//   - It cannot distinguish LOST from BURNED. A range here may have been
+	//     skipped by a reservation a crash never used, discarded by an earlier
+	//     recovery, or genuinely lost. It is an upper bound, exactly like
+	//     Recovered.MissingRecords.
+	//   - It only sees the HEAD. Records lost from the middle or the end of a
+	//     file whose surviving head still starts at the right index are invisible
+	//     to it; the interior-hole check catches the middle, and nothing catches
+	//     a truncated tail whose indices were never recorded anywhere but the
+	//     ceiling.
+	//   - It says nothing at all when the floor is missing (a migrated data
+	//     directory reports burned 0), which is the case with the least
+	//     information and the one most likely to have lost something.
+	if rec.FirstIndex > 0 && rec.FirstIndex > burnedBeforeThisRun+1 {
+		opts.Logger.Warn("wal recovered a log that starts above the durable index floor",
+			"path", path, "first_index", rec.FirstIndex,
+			"burned_before_this_run", burnedBeforeThisRun,
+			"missing_from", burnedBeforeThisRun+1, "missing_to", rec.FirstIndex-1,
+			"index_floor", floor.Path(),
+			"note", "records in that range were burned by an earlier run but are in no file this recovery can see: lost from the media, discarded by an earlier recovery, or an index range a crash reserved and never used. It is an UPPER BOUND on loss, not a count of it")
 	}
 
 	if rec.Records > 0 {

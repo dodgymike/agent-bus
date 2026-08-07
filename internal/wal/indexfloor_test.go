@@ -49,23 +49,63 @@ import (
 // touched.
 // ---------------------------------------------------------------------------
 
-// encodeFloorBody renders the canonical two-line body for a floor file.
-func encodeFloorBody(reserved, written uint64) string {
-	return fmt.Sprintf("reserved %d\nwritten %d\n", reserved, written)
+// encodeFloorBody renders the canonical THREE-line body for a floor file.
+//
+// The third line is the `sealed` bit added on 2026-08-07: 1 means the run that
+// wrote the file closed cleanly, so `written` is EXACT. A hand-written fixture
+// must say which, because the whole start-index derivation now turns on it --
+// sealed 0 is the crash shape and makes the next start take the ceiling.
+func encodeFloorBody(reserved, written uint64, sealed bool) string {
+	digit := 0
+	if sealed {
+		digit = 1
+	}
+	return fmt.Sprintf("reserved %d\nwritten %d\nsealed %d\n", reserved, written, digit)
 }
 
-// writeFloorFile lays a floor file down by hand.
+// floorKey returns the data directory's wal-mac.key, CREATING it if it is not
+// there yet.
+//
+// The floor is authenticated with HMAC-SHA256 under that key (invariant 6:
+// integrity is a keyed MAC, never an unkeyed checksum), so a hand-written
+// fixture needs it just as the real writer does. Using the real key file rather
+// than an invented constant keeps the fixtures in the same world as a running
+// bus: the key a test signs a floor with is the key wal.Open will verify it
+// under.
+func floorKey(t *testing.T, dir string) []byte {
+	t.Helper()
+	path := macKeyPath(dir)
+	key, err := loadMACKey(path)
+	if err == nil {
+		return key
+	}
+	if !errors.Is(err, ErrMACKeyMissing) {
+		t.Fatalf("loading the MAC key %s: %v", path, err)
+	}
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	key, err = createMACKey(path)
+	if err != nil {
+		t.Fatalf("creating the MAC key %s: %v", path, err)
+	}
+	return key
+}
+
+// writeFloorFile lays a floor file down by hand, in the CURRENT shape: a keyed
+// HMAC-SHA256 header over a three-line body.
 //
 // header == "" means "compute the CANONICAL header for this body", which is what
-// the line-level corruption cases need: readIndexFloorFile verifies the SHA-256
-// before it parses a single number, so a fixture with a stale digest would only
-// ever exercise the digest check and would silently never reach the parser it
-// was written to test.
+// the line-level corruption cases need: readIndexFloorFile verifies the tag
+// before it parses a single number, so a fixture with a stale tag would only
+// ever exercise the tag check and would silently never reach the parser it was
+// written to test.
+//
+// writeLegacyFloorFile is the companion for the two PRE-HMAC shapes.
 func writeFloorFile(t *testing.T, dir, header, body string) string {
 	t.Helper()
 	if header == "" {
-		sum := sha256.Sum256([]byte(body))
-		header = indexFloorMagic + " v" + strconv.Itoa(indexFloorFileVersion) + " sha256=" + hex.EncodeToString(sum[:])
+		header = indexFloorHeaderPrefix() + " " + indexFloorTagHMAC + hex.EncodeToString(indexFloorTag(floorKey(t, dir), []byte(body)))
 	}
 	path := filepath.Join(dir, IndexFloorFileName)
 	if err := os.WriteFile(path, []byte(header+"\n"+body), 0o600); err != nil {
@@ -74,24 +114,47 @@ func writeFloorFile(t *testing.T, dir, header, body string) string {
 	return path
 }
 
-// readFloorFile reads back the two numbers on disk, through the package's own
-// reader, so a test never has to reimplement the format it is checking.
-func readFloorFile(t *testing.T, dir string) (reserved, written uint64) {
+// writeLegacyFloorFile lays down a floor file in the UNKEYED shape every
+// agent-bus up to and including f56c723 wrote: `sha256=<hex of the body>`.
+//
+// It exists because that shape is a LIVE upgrade path, not a museum piece --
+// f56c723 is in main -- and because the security property that matters most
+// about it is that its `sealed` bit is forgeable and must therefore be
+// discarded.
+func writeLegacyFloorFile(t *testing.T, dir, body string) string {
 	t.Helper()
-	r, w, existed, err := readIndexFloorFile(filepath.Join(dir, IndexFloorFileName))
+	sum := sha256.Sum256([]byte(body))
+	header := indexFloorMagic + " v" + strconv.Itoa(indexFloorFileVersion) + " sha256=" + hex.EncodeToString(sum[:])
+	path := filepath.Join(dir, IndexFloorFileName)
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	if err := os.WriteFile(path, []byte(header+"\n"+body), 0o600); err != nil {
+		t.Fatalf("writing the legacy floor fixture %s: %v", path, err)
+	}
+	return path
+}
+
+// readFloorFile reads back the three fields on disk, through the package's own
+// reader, so a test never has to reimplement the format it is checking.
+func readFloorFile(t *testing.T, dir string) (reserved, written uint64, sealed bool) {
+	t.Helper()
+	ff, err := readIndexFloorFile(filepath.Join(dir, IndexFloorFileName), floorKey(t, dir), true)
 	if err != nil {
 		t.Fatalf("reading back the floor in %s: %v", dir, err)
 	}
-	if !existed {
+	if !ff.existed {
 		t.Fatalf("no floor file in %s: it must be created before the first append", dir)
 	}
-	return r, w
+	return ff.reserved, ff.written, ff.sealed
 }
 
-// mustOpenFloor opens the floor in dir and fails the test if it will not.
+// mustOpenFloor opens the floor in dir under the directory's real MAC key and
+// fails the test if it will not. The key is created if absent, exactly as a
+// first Open would create it.
 func mustOpenFloor(t *testing.T, dir string) *indexFloor {
 	t.Helper()
-	f, err := openIndexFloor(dir)
+	f, err := openIndexFloor(dir, floorKey(t, dir), true)
 	if err != nil {
 		t.Fatalf("openIndexFloor(%s): %v", dir, err)
 	}
@@ -140,45 +203,70 @@ func TestWALIndexFloorRoundTripsAndOnlyEverRises(t *testing.T) {
 			reopened.burned(), reopened.ceiling(), f.burned(), f.ceiling())
 	}
 
-	// seal raises `written` and never touches `reserved` downwards.
-	if err := f.seal(100); err != nil {
-		t.Fatalf("seal(100): %v", err)
+	// The `sealed` bit round-trips too, and begin leaves it FALSE. That ordering
+	// is what makes the bit trustworthy: begin fsyncs sealed 0 before the Writer
+	// may append anything, so a crash can only ever leave 0 behind.
+	if _, _, sealed := readFloorFile(t, dir); sealed {
+		t.Error("begin() wrote sealed 1: a run that has not closed yet must never claim a clean close, or a crash would inherit the claim")
 	}
-	if got := f.burned(); got != 100 {
-		t.Errorf("after seal(100) burned() = %d, want 100", got)
+	if reopened.sealedClean() {
+		t.Error("sealedClean() = true after begin: the file says 0, so a fresh reader must too")
+	}
+
+	// seal raises `written`, never lowers `reserved`, and is the ONE call that
+	// sets the sealed bit. `highest` is deliberately below the block boundary so
+	// that "sealing does not move the ceiling" is the property under test rather
+	// than an arithmetic accident of the block size.
+	const sealedHighest = indexReserveBlock / 2
+	if err := f.seal(sealedHighest); err != nil {
+		t.Fatalf("seal(%d): %v", sealedHighest, err)
+	}
+	if got := f.burned(); got != sealedHighest {
+		t.Errorf("after seal(%d) burned() = %d, want %d", sealedHighest, got, sealedHighest)
 	}
 	if got := f.ceiling(); got != indexReserveBlock {
-		t.Errorf("after seal(100) ceiling() = %d, want it left at %d: sealing records what was used, it does not release a reservation", got, indexReserveBlock)
+		t.Errorf("after seal(%d) ceiling() = %d, want it left at %d: sealing records what was used, it does not release a reservation", sealedHighest, got, indexReserveBlock)
+	}
+	if !f.sealedClean() {
+		t.Error("sealedClean() = false after seal(): seal is the only writer of the bit, and a clean close must set it or every restart burns a block")
+	}
+	if _, _, sealed := readFloorFile(t, dir); !sealed {
+		t.Error("seal() did not put sealed 1 on disk: the bit is worth nothing unless the NEXT process can read it")
 	}
 
 	// A LOWER seal narrows NOTHING. This is the case a "we shut down cleanly, so
 	// we can give the spare indices back" optimisation would get wrong, and the
 	// type has no field that could express it.
 	if err := f.seal(3); err != nil {
-		t.Fatalf("seal(3) after seal(100): %v", err)
+		t.Fatalf("seal(3) after seal(%d): %v", sealedHighest, err)
 	}
-	if got := f.burned(); got != 100 {
-		t.Errorf("seal(3) lowered burned() to %d after seal(100): a clean close may never narrow the floor", got)
+	if got := f.burned(); got != sealedHighest {
+		t.Errorf("seal(3) lowered burned() to %d after seal(%d): a clean close may never narrow the floor", got, sealedHighest)
 	}
 	if got := f.ceiling(); got != indexReserveBlock {
 		t.Errorf("seal(3) moved ceiling() to %d, want %d unchanged", got, indexReserveBlock)
 	}
 
 	// A LOWER begin is likewise absorbed: recovery may only ever resume higher.
+	// And it CLEARS the sealed bit -- the one field here that legitimately goes
+	// down, because clearing it only ever makes the NEXT start more conservative.
 	if err := f.begin(2); err != nil {
-		t.Fatalf("begin(2) after seal(100): %v", err)
+		t.Fatalf("begin(2) after seal(%d): %v", sealedHighest, err)
 	}
-	if got := f.burned(); got != 100 {
-		t.Errorf("begin(2) lowered burned() to %d, want it held at 100", got)
+	if got := f.burned(); got != sealedHighest {
+		t.Errorf("begin(2) lowered burned() to %d, want it held at %d", got, sealedHighest)
 	}
-	if got := f.ceiling(); got < 100 {
-		t.Errorf("begin(2) left ceiling() at %d, below burned() 100: an index cannot be burned without having been authorised", got)
+	if got := f.ceiling(); got < sealedHighest {
+		t.Errorf("begin(2) left ceiling() at %d, below burned() %d: an index cannot be burned without having been authorised", got, sealedHighest)
+	}
+	if f.sealedClean() {
+		t.Error("begin() left sealed 1 on a floor that had been sealed: a new run must clear the bit BEFORE it can append, or a crash inherits the previous run's clean-close claim and the next start resumes too low")
 	}
 
-	r, w := readFloorFile(t, dir)
-	if r != f.ceiling() || w != f.burned() {
-		t.Errorf("the file holds {reserved:%d written:%d} but memory holds {%d %d}: memory must never claim more than disk does",
-			r, w, f.ceiling(), f.burned())
+	r, w, s := readFloorFile(t, dir)
+	if r != f.ceiling() || w != f.burned() || s != f.sealedClean() {
+		t.Errorf("the file holds {reserved:%d written:%d sealed:%v} but memory holds {%d %d %v}: memory must never claim more than disk does",
+			r, w, s, f.ceiling(), f.burned(), f.sealedClean())
 	}
 	if w > r {
 		t.Errorf("the file claims %d burned but only %d reserved", w, r)
@@ -218,8 +306,10 @@ func TestWALIndexFloorPersistRefusesToLower(t *testing.T) {
 		wantMsg          string
 	}{
 		{
+			// Below the ceiling begin(101) left behind (101 + indexReserveBlock -
+			// 1), so this is a genuine decrease of `reserved`.
 			name:     "a lower reserved",
-			reserved: 300, writeN: 100,
+			reserved: 100 + indexReserveBlock - 2, writeN: 100,
 			wantMsg: "refusing to lower the durable index floor",
 		},
 		{
@@ -242,13 +332,13 @@ func TestWALIndexFloorPersistRefusesToLower(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			f := mustOpenFloor(t, dir)
-			if err := f.begin(101); err != nil { // written 100, reserved 356
+			if err := f.begin(101); err != nil { // written 100, reserved 100+indexReserveBlock
 				t.Fatalf("begin(101): %v", err)
 			}
-			beforeR, beforeW := readFloorFile(t, dir)
+			beforeR, beforeW, _ := readFloorFile(t, dir)
 
 			f.mu.Lock()
-			err := f.persistLocked(tc.reserved, tc.writeN)
+			err := f.persistLocked(tc.reserved, tc.writeN, false)
 			f.mu.Unlock()
 			if err == nil {
 				t.Fatalf("persistLocked(%d, %d) succeeded from {reserved:%d written:%d}: the floor is monotonic by construction",
@@ -263,7 +353,7 @@ func TestWALIndexFloorPersistRefusesToLower(t *testing.T) {
 
 			// AND NOTHING WAS WRITTEN. A refusal that had already replaced the
 			// file would have done the damage it was refusing to do.
-			if r, w := readFloorFile(t, dir); r != beforeR || w != beforeW {
+			if r, w, _ := readFloorFile(t, dir); r != beforeR || w != beforeW {
 				t.Errorf("the file moved to {reserved:%d written:%d} despite the refusal, want {%d %d}", r, w, beforeR, beforeW)
 			}
 			if f.ceiling() != beforeR || f.burned() != beforeW {
@@ -283,7 +373,7 @@ func TestWALIndexFloorPersistRefusesToLower(t *testing.T) {
 // refusing would buy nothing and cost everything.
 func TestWALIndexFloorMissingFileIsBenign(t *testing.T) {
 	dir := t.TempDir()
-	f, err := openIndexFloor(dir)
+	f, err := openIndexFloor(dir, floorKey(t, dir), true)
 	if err != nil {
 		t.Fatalf("openIndexFloor on a directory with no floor file = %v, want no error: a missing floor is the MIGRATION case, and making it fatal bricks every deployed bus on upgrade", err)
 	}
@@ -300,7 +390,7 @@ func TestWALIndexFloorMissingFileIsBenign(t *testing.T) {
 	}
 
 	// An empty dir string is a programming error, not a missing file.
-	if _, err := openIndexFloor(""); err == nil {
+	if _, err := openIndexFloor("", nil, true); err == nil {
 		t.Error("openIndexFloor(\"\") succeeded; an empty data directory is a bug upstream, not a benign absence")
 	}
 }
@@ -321,17 +411,21 @@ func TestWALIndexFloorMissingFileIsBenign(t *testing.T) {
 // what invariant 6 forbids -- so "the message names the fix" is what makes the
 // refusal legitimate rather than a policy regression.
 func TestWALIndexFloorCorruptFileIsFatalAndNamesTheRemedy(t *testing.T) {
-	goodBody := encodeFloorBody(512, 300)
+	goodBody := encodeFloorBody(512, 300, false)
 	goodSum := sha256.Sum256([]byte(goodBody))
-	goodHeader := indexFloorMagic + " v" + strconv.Itoa(indexFloorFileVersion) + " sha256=" + hex.EncodeToString(goodSum[:])
 
 	cases := []struct {
 		name string
-		// header == "" means "compute the canonical header for body", so a
-		// body-level case is not intercepted by the digest check.
-		header  string
-		body    string
-		wantMsg string
+		// header == "" means "compute the canonical KEYED header for body", so a
+		// body-level case is not intercepted by the tag check.
+		header string
+		body   string
+		// tamperBody, when set, is swapped in AFTER the canonical keyed header
+		// has been computed over body -- so the tag is a real one produced by the
+		// real key, and only the bytes it covers have changed. That is the
+		// forgery shape, and it cannot be built by pre-computing a header.
+		tamperBody string
+		wantMsg    string
 	}{
 		{
 			name:    "no header line at all",
@@ -361,75 +455,116 @@ func TestWALIndexFloorCorruptFileIsFatalAndNamesTheRemedy(t *testing.T) {
 			wantMsg: "may encode a higher floor this binary cannot see",
 		},
 		{
-			name:    "no digest in the header",
+			name:    "neither a keyed tag nor a legacy digest",
 			header:  indexFloorMagic + " v4 crc32=deadbeef",
 			body:    goodBody,
-			wantMsg: "has no sha256= digest",
+			wantMsg: "has no hmac-sha256= tag and no legacy sha256= digest",
 		},
 		{
-			name:    "a short digest",
+			name:    "a short keyed tag",
+			header:  indexFloorMagic + " v4 hmac-sha256=abcd",
+			body:    goodBody,
+			wantMsg: "is not 32 hex bytes",
+		},
+		{
+			name:    "a keyed tag that is not hex",
+			header:  indexFloorMagic + " v4 hmac-sha256=" + strings.Repeat("z", 64),
+			body:    goodBody,
+			wantMsg: "is not 32 hex bytes",
+		},
+		{
+			name:    "a short legacy digest",
 			header:  indexFloorMagic + " v4 sha256=abcd",
 			body:    goodBody,
 			wantMsg: "is not 32 hex bytes",
 		},
 		{
-			name:    "a digest that is not hex",
+			name:    "a legacy digest that is not hex",
 			header:  indexFloorMagic + " v4 sha256=" + strings.Repeat("z", 64),
 			body:    goodBody,
 			wantMsg: "is not 32 hex bytes",
 		},
 		{
-			name:    "a digest that does not match the body",
-			header:  goodHeader,
-			body:    encodeFloorBody(512, 301), // one digit different
+			// THE FORGERY CASE, and the reason the tag is keyed. The body is
+			// edited under the tag the real writer produced.
+			name:       "a keyed tag that does not match the body",
+			body:       goodBody,
+			tamperBody: encodeFloorBody(512, 301, false), // one digit different
+			wantMsg:    "fails its HMAC-SHA256 tag",
+		},
+		{
+			name:    "a legacy digest that does not match the body",
+			header:  indexFloorMagic + " v4 sha256=" + hex.EncodeToString(goodSum[:]),
+			body:    encodeFloorBody(512, 301, false), // one digit different
 			wantMsg: "fails its own checksum",
 		},
 		{
-			name:    "a missing body line",
-			body:    "reserved 512\n",
-			wantMsg: "expected exactly 2",
+			// A TWO-LINE BODY IS ACCEPTED under the legacy unkeyed digest (that is
+			// the shape main ships) -- but never under a KEYED tag, because no
+			// agent-bus has ever written that combination.
+			name:    "a two-line body under a keyed tag",
+			body:    "reserved 512\nwritten 300\n",
+			wantMsg: "no agent-bus has ever written that combination",
 		},
 		{
 			name:    "an extra body line",
-			body:    encodeFloorBody(512, 300) + "extra 1\n",
-			wantMsg: "expected exactly 2",
+			body:    encodeFloorBody(512, 300, false) + "extra 1\n",
+			wantMsg: "its body has 4 lines",
 		},
 		{
 			name:    "the fields in the wrong order",
-			body:    "written 300\nreserved 512\n",
+			body:    "written 300\nreserved 512\nsealed 0\n",
 			wantMsg: `expected a "reserved" line`,
 		},
 		{
 			name:    "a leading zero",
-			body:    "reserved 0512\nwritten 300\n",
+			body:    "reserved 0512\nwritten 300\nsealed 0\n",
 			wantMsg: "has a leading zero",
 		},
 		{
 			name:    "a signed number",
-			body:    "reserved +512\nwritten 300\n",
+			body:    "reserved +512\nwritten 300\nsealed 0\n",
 			wantMsg: "must be decimal digits only",
 		},
 		{
 			name:    "a negative number",
-			body:    "reserved 512\nwritten -1\n",
+			body:    "reserved 512\nwritten -1\nsealed 0\n",
 			wantMsg: "must be decimal digits only",
 		},
 		{
 			name:    "an empty field",
-			body:    "reserved \nwritten 300\n",
+			body:    "reserved \nwritten 300\nsealed 0\n",
 			wantMsg: "is empty",
 		},
 		{
 			name:    "a number that overflows 64 bits",
-			body:    "reserved 18446744073709551616\nwritten 300\n",
+			body:    "reserved 18446744073709551616\nwritten 300\nsealed 0\n",
 			wantMsg: "is not a 64-bit decimal number",
 		},
 		{
 			// The file contradicting itself: an index cannot have been USED before
 			// it was AUTHORISED.
 			name:    "written above reserved",
-			body:    encodeFloorBody(300, 512),
+			body:    encodeFloorBody(300, 512, false),
 			wantMsg: "contradicts itself",
+		},
+		{
+			name:    "a missing sealed line",
+			body:    "reserved 512\nwritten 300\nsealedish 0\n",
+			wantMsg: `expected a "sealed" line`,
+		},
+		{
+			// The sealed bit has exactly two spellings, for the same reason a
+			// number has exactly one: the digest is over the body, so a second
+			// spelling of the same state is a second file claiming it.
+			name:    "sealed spelled as a word",
+			body:    "reserved 512\nwritten 300\nsealed true\n",
+			wantMsg: "must be exactly 0 or 1",
+		},
+		{
+			name:    "sealed with a value that is neither 0 nor 1",
+			body:    "reserved 512\nwritten 300\nsealed 2\n",
+			wantMsg: "must be exactly 0 or 1",
 		},
 	}
 
@@ -445,10 +580,23 @@ func TestWALIndexFloorCorruptFileIsFatalAndNamesTheRemedy(t *testing.T) {
 				}
 			} else {
 				writeFloorFile(t, dir, tc.header, tc.body)
+				if tc.tamperBody != "" {
+					// The tag stays; the bytes it covers change. Under an unkeyed
+					// digest an attacker simply recomputes it -- under an HMAC
+					// they cannot, and that is the property under test.
+					raw := readFile(t, path)
+					nl := bytes.IndexByte(raw, '\n')
+					if nl < 0 {
+						t.Fatalf("the fixture has no header line")
+					}
+					if err := os.WriteFile(path, append(append([]byte{}, raw[:nl+1]...), tc.tamperBody...), 0o600); err != nil {
+						t.Fatalf("tampering with the fixture: %v", err)
+					}
+				}
 			}
 			before := readFile(t, path)
 
-			f, err := openIndexFloor(dir)
+			f, err := openIndexFloor(dir, floorKey(t, dir), true)
 			if err == nil {
 				t.Fatalf("openIndexFloor succeeded on a corrupt floor (%+v); a floor that does not verify may be LOWER than the one persisted, and resuming from it reissues ids nothing downstream can detect", f)
 			}
@@ -461,14 +609,29 @@ func TestWALIndexFloorCorruptFileIsFatalAndNamesTheRemedy(t *testing.T) {
 			if !strings.Contains(err.Error(), path) {
 				t.Errorf("err = %q, want it to name the file %s", err, path)
 			}
-			// THE ONE-STEP REMEDY. This is what keeps a refusal over a corrupt
-			// IDENTITY file compatible with invariant 6: the bus is never
-			// permanently bricked, because the error says exactly what to do.
-			if !strings.Contains(err.Error(), "delete "+path+" and restart") {
-				t.Errorf("err = %q, want it to name the one-step operator remedy (\"delete %s and restart\"); without it this error is a permanently bricked bus, which invariant 6 forbids", err, path)
+			// THE REMEDY, AND ITS COST. A refusal over a corrupt IDENTITY file
+			// is compatible with invariant 6 only because the error says what to
+			// do -- but the way OUT of it must not silently break invariant 1,
+			// which the previous wording did. See the next test for the full
+			// argument; every cell asserts both halves so no future edit can drop
+			// the cost while keeping the remedy.
+			if !strings.Contains(err.Error(), "If you delete "+path) {
+				t.Errorf("err = %q, want it to name the last-resort operator remedy for %s; without any way out this error is a permanently bricked bus, which invariant 6 forbids", err, path)
 			}
-			if !strings.Contains(err.Error(), "It will NOT be regenerated") {
+			if !strings.Contains(err.Error(), "FORFEITS INVARIANT 1") {
+				t.Errorf("err = %q, want it to say plainly that deleting the file FORFEITS INVARIANT 1 for this data directory; a remedy that silently reissues ids is worse than no remedy", err)
+			}
+			if !strings.Contains(err.Error(), "will NOT be regenerated") {
 				t.Errorf("err = %q, want it to say the file is not regenerated automatically, and why", err)
+			}
+			// THE KEY IS NAMED FIRST. The reorder in log.go narrows the
+			// wrong-key-looks-like-a-corrupt-floor misdiagnosis but does not
+			// eliminate it: a wrong key over a log with no readable record --
+			// which is what a POST-QUARANTINE directory leaves -- still lands
+			// here. The text is what closes the rest of that gap, so it is
+			// asserted rather than left to survive by luck.
+			if !strings.Contains(err.Error(), "CHECK "+MACKeyFileName+" FIRST") {
+				t.Errorf("err = %q, want it to name %s as the FIRST thing to check: this file is authenticated under that key, so a wrong key makes an intact floor look corrupt, and the remedy for that is the opposite of the remedy for real corruption", err, MACKeyFileName)
 			}
 
 			// A REFUSAL CHANGES NOTHING ON DISK. Recovery that "helpfully"
@@ -490,9 +653,9 @@ func TestWALIndexFloorCorruptFragmentIsClipped(t *testing.T) {
 	dir := t.TempDir()
 	const floodLen = 64 << 10
 	flood := strings.Repeat("A", floodLen)
-	writeFloorFile(t, dir, flood+" v4 sha256=deadbeef", encodeFloorBody(1, 1))
+	writeFloorFile(t, dir, flood+" v4 sha256=deadbeef", encodeFloorBody(1, 1, false))
 
-	_, err := openIndexFloor(dir)
+	_, err := openIndexFloor(dir, floorKey(t, dir), true)
 	if err == nil {
 		t.Fatal("openIndexFloor succeeded on a floor file with a 64 KiB header line")
 	}
@@ -521,7 +684,7 @@ func TestWALIndexFloorIOFailureIsNotReportedAsCorruption(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, IndexFloorFileName), 0o700); err != nil {
 			t.Fatalf("creating a directory in the floor's place: %v", err)
 		}
-		_, err := openIndexFloor(dir)
+		_, err := openIndexFloor(dir, floorKey(t, dir), true)
 		if err == nil {
 			t.Fatal("openIndexFloor succeeded when the floor's path is a directory")
 		}
@@ -538,13 +701,13 @@ func TestWALIndexFloorIOFailureIsNotReportedAsCorruption(t *testing.T) {
 			t.Skip("running as root: mode 000 does not deny this process, so there is no I/O failure to observe")
 		}
 		dir := t.TempDir()
-		path := writeFloorFile(t, dir, "", encodeFloorBody(10, 5))
+		path := writeFloorFile(t, dir, "", encodeFloorBody(10, 5, false))
 		if err := os.Chmod(path, 0o000); err != nil {
 			t.Fatalf("chmod 000: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
-		_, err := openIndexFloor(dir)
+		_, err := openIndexFloor(dir, floorKey(t, dir), true)
 		if err == nil {
 			t.Fatal("openIndexFloor succeeded on a mode-000 floor file")
 		}
@@ -620,7 +783,7 @@ func TestWALIndexFloorReserveOnlyTouchesDiskAtTheBlockBoundary(t *testing.T) {
 	// reader. (The fsync itself is not observable from a test process; what is
 	// observable, and is what a crash test then exercises, is that the file has
 	// already been replaced by the time reserve returns.)
-	if r, _ := readFloorFile(t, dir); r != f.ceiling() {
+	if r, _, _ := readFloorFile(t, dir); r != f.ceiling() {
 		t.Errorf("the file holds reserved=%d but memory holds %d: the ceiling must be on disk BEFORE the index is used", r, f.ceiling())
 	}
 
@@ -887,7 +1050,7 @@ func TestWALIndexFloorRejectsAnImplausibleForgedIndex(t *testing.T) {
 	if got := l.Recovered().NextIndex; got != 3 {
 		t.Fatalf("Recovered().NextIndex = %d, want 3: one forged frame header must not be able to move the index space", got)
 	}
-	reserved, written := readFloorFile(t, dir)
+	reserved, written, _ := readFloorFile(t, dir)
 	if reserved > uint64(indexReserveBlock)+3 {
 		t.Errorf("the durable ceiling is %d after one forged frame claiming index %d: a single unverified header has permanently exhausted the id space, which is a restart-proof denial of service",
 			reserved, forged)
@@ -953,7 +1116,7 @@ func TestWALIndexFloorMigratesAnExistingDataDirectory(t *testing.T) {
 	if got := l.IndexFloorPath(); got != floorPath {
 		t.Errorf("Log.IndexFloorPath() = %q, want %q", got, floorPath)
 	}
-	reserved, written := readFloorFile(t, dir)
+	reserved, written, _ := readFloorFile(t, dir)
 	if written != 6 {
 		t.Errorf("the migrated floor claims %d indices burned, want 6 (start-1): recording the start is what stops a run that jumped and then wrote nothing from having the jump forgotten", written)
 	}
@@ -983,36 +1146,24 @@ func TestWALIndexFloorMigratesAnExistingDataDirectory(t *testing.T) {
 	_ = path
 }
 
-// TestWALIndexFloorAnnouncesTheMigrationWindow is separated from the migration
-// test above because IT CURRENTLY FAILS, and it is failing on the
-// IMPLEMENTATION rather than on the expectation.
+// TestWALIndexFloorAnnouncesTheMigrationWindow is the MIGRATION WARNING, kept
+// as its own test because it has been broken twice by the same mechanism.
 //
 // THE CLAIM. A data directory that already holds WAL records but no floor file
 // was written by a binary that predates the file. Until that file exists, a
 // quarantine or an unidentifiable discard could still have reissued record
 // indices -- and the message ids internal/hub derives from them. That window is
 // real, it closes silently, and an operator is owed the fact that their data
-// directory has just been migrated. log.go says exactly this in the comment
-// above the branch, so the intent is not in doubt.
+// directory has just been migrated.
 //
-// THE DEFECT, at internal/wal/log.go:485:
-//
-//	if err := floor.begin(start); err != nil { ... }   // line 458
-//	...
-//	if !floor.existedAtOpen() && (rec.Records > 0 || ...) {   // line 485
-//
-// floor.begin persists, and indexfloor.go's persistLocked sets f.existed = true
-// (line 352). So by the time the branch is evaluated, existedAtOpen() is ALWAYS
-// true and the warning is UNREACHABLE ON EVERY PATH. It is dead code.
-//
-// THE FIX IS ONE LINE and belongs to the implementer, not to this test: capture
-// the flag BEFORE the begin --
-//
-//	migrating := !floor.existedAtOpen()
-//
-// -- and test `migrating` at line 485. This test is deliberately left RED rather
-// than rewritten to assert the silence, because asserting the silence would
-// enshrine the defect exactly the way the old reissue tests enshrined e120153b.
+// THE DEFECT IT WAS WRITTEN RED AGAINST, and the reason it is still here: the
+// branch was evaluated AFTER floor.begin, and persistLocked used to set
+// f.existed = true, so existedAtOpen() was ALWAYS true by the time the branch
+// ran and the warning was dead code on every path. Both halves are fixed now --
+// log.go snapshots the flag before begin (belt), and persistLocked no longer
+// touches f.existed at all, so the accessor means what its name says (braces).
+// Either fix alone would make this test pass, which is exactly why both exist:
+// a future edit that undoes one is still caught.
 func TestWALIndexFloorAnnouncesTheMigrationWindow(t *testing.T) {
 	dir, _, _, _ := buildWAL(t,
 		opPrepare("message", `{"n":1}`), // 1
@@ -1096,8 +1247,17 @@ func TestWALIndexFloorSurvivesAQuarantine(t *testing.T) {
 		t.Fatalf("Recovered().NextIndex = %d after a quarantine, but index %d had already been handed to a client: a quarantine must not reissue the bus's history (defect db350e39). The floor lives OUTSIDE the log precisely so a quarantine cannot take it.",
 			rec.NextIndex, highest)
 	}
-	if want := uint64(indexReserveBlock) + 1; rec.NextIndex != want {
-		t.Errorf("Recovered().NextIndex = %d, want %d: one past the durable CEILING -- everything this data directory ever authorised", rec.NextIndex, want)
+	// EXACTLY one past the highest index the run actually wrote -- not one past
+	// the reserved block. The run that wrote those four transactions CLOSED
+	// CLEANLY, so the floor carries sealed 1 and `written` is EXACT at 8; the
+	// ceiling is not consulted and no index is burned. The quarantine still
+	// cannot rewind the index (assertion 2 above), which is the property that
+	// matters; it simply no longer costs a hole.
+	//
+	// This asserted indexReserveBlock+1 before the seal bit existed, when the
+	// ceiling was taken on any repair that reported LostUnidentified.
+	if want := uint64(2*4) + 1; rec.NextIndex != want {
+		t.Errorf("Recovered().NextIndex = %d, want %d: the run before the quarantine closed cleanly, so its `written` mark is exact and the quarantine burns nothing", rec.NextIndex, want)
 	}
 
 	c, err := l2.Write(Entry{Kind: "message", Body: json.RawMessage(`{"after":"quarantine"}`)})
