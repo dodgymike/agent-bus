@@ -328,6 +328,20 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
       into an unrelated docs commit while the other half stayed in the working tree. The working tree
       looked green throughout, which is why nobody noticed. Never `git add` then bare-`git commit`
       while any other agent is running.
+    - **A pathspec commit takes the WORKTREE, not the index — so `git add` does not protect you
+      either.** This is the other half of the trap above and it bites in the opposite direction.
+      `git commit -- <path>` commits that path's WORKING-TREE content, silently discarding whatever
+      you staged for it. So on a file showing `MM` in `git status --porcelain` — index clean, worktree
+      dirty — carefully staging only your own text and then committing by pathspec ships the OTHER
+      agent's unstaged edits under YOUR commit title. Caught 2026-08-07 by the integrator on
+      `DECISIONS.md`: the index held only the DISCOVERY-DOC section, while the worktree had gained a
+      full `## 2026-08-07 — MTLS-PIN` section from a concurrent agent — text asserting that
+      `client/pin.go` had landed, when that file was untracked and its test was red. It refused the
+      commit rather than putting a false dated claim in `main`. **Before any pathspec commit, check
+      `git status --porcelain -- <paths>` for an `MM`, and diff the worktree (`git diff HEAD -- …`),
+      never just the index (`git diff --cached -- …`).** This applies hardest to the shared
+      append-only files — `DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS*.md` — which several agents
+      append to at once by design.
     - **Do NOT commit work no agent has reported.** A package appearing in the tree and passing its
       tests is not a signal that it is finished — it may be mid-review, or mid-edit. Wait for the
       owning agent's report with gates COMPLETED. Committing on "it is green and it is there" has

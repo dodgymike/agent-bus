@@ -48,6 +48,17 @@ verdicts. "Dispatched" is not a status. A gate that has not returned has found n
 - **Always commit with an explicit pathspec: `git commit -m '…' -- <paths>`.** Never `git add` then a
   bare `git commit`; the bare form takes the WHOLE index. This is the single most repeated mistake
   here.
+- **But a pathspec commit takes the WORKTREE, not the index.** `git commit -- <path>` commits that
+  path's working-tree content and silently ignores what was staged for it. So a file showing `MM` —
+  index clean, worktree dirty — will ship a concurrent agent's UNSTAGED edits under your title, even
+  though the owning agent staged only its own text. Always inspect `git status --porcelain -- <paths>`
+  for `MM`, and diff with `git diff HEAD -- <paths>`, never `git diff --cached`. Found this way on
+  2026-08-07: `DECISIONS.md`'s index held only the committing task's section while its worktree had
+  gained another agent's, asserting a file had landed that was untracked with a red test. **Hold the
+  contaminated path back and commit the rest** — put the reasoning in the commit message so it is not
+  lost, name the held path in your report, and never edit or revert the other agent's text to
+  clear it. Expect this on the shared append-only files (`DECISIONS.md`, `AGENT_LOG.md`,
+  `CONTRACTS*.md`), which several agents append to concurrently by design.
 
 **3. HEAD compiles AFTER the commit.** Not the working tree — HEAD.
 ```
