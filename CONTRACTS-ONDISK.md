@@ -357,4 +357,299 @@ PROVABLE in a test: filling the real 65536-entry table to exercise the rule mean
 fsynced writes, which is a test nobody would run.
 
 No new WAL record type, `ondisk-format-version`, HTTP route, CLI flag, header, or env var was
+introduced by IDEM-11-FU-FAIRSHARE.
+
+## The durable enrolment record (AUTH-3, added 2026-08-07)
+
+Invariants 1 and 5 require that a server-minted agent id survive a restart, not just an in-memory
+process: state is held in memory for speed and REBUILT by replaying the durable store. AUTH-3 is
+that store for enrolment — `internal/auth`'s `record.go` (the on-disk shape, `Encode`/`Decode`),
+`roster.go` (`RosterEntry`, `CertBinding`, `MaxCertBindings`), `walroster.go` (`WALRoster`, the
+`wal.Applier` that rebuilds the roster by replay) and `floors.go` (`SuffixFloors`, the companion scan
+that recovers the per-name agent-id suffix high-water mark). Read `internal/auth/doc.go`'s package doc
+for the honest statement of what is and is not durable today; this section documents only the on-disk
+shape.
+
+**NO new WAL record type and NO `ondisk-format-version` bump. Nothing was reserved.**
+`wal.Entry.Kind` is a free-form APPLICATION STRING (`internal/wal/log.go`: "the application
+discriminator: `\"message\"`, `\"agent\"`, ..."), not a reserved on-disk record-type NUMBER — the
+numbers (`wal.Type`: `TypePrepare`, `TypeCommit`, ...) are owned by `internal/wal` and reserved
+through the Spec Server `ondisk-format-version`/record-type namespaces; `Entry.Kind` is not one of
+them and needs no reservation to add a new value. `"agent"` (`auth.RecordKind`) is moreover the exact
+name `internal/wal/log.go`'s own `Entry.Kind` doc already reserved this discriminator's name for, so
+it is the name the format was written expecting, not a name invented in this task. An enrolment rides
+in the existing PREPARE/COMMIT frames exactly as a message does — same two-phase write path, same
+fsync-at-prepare-and-again-at-commit, no new frame shape.
+
+**One WAL now carries at least two `Entry.Kind` values.** `auth.RecordKind = "agent"` /
+`auth.RecordVersion = 1` sit alongside the existing `store.RecordKind = "message"` /
+`store.RecordVersion = 1` (`internal/store/message.go`) in the SAME log file. Each applier is handed
+every committed entry regardless of kind and SILENTLY SKIPS the ones that are not its own —
+`WALRoster.Apply` returns `nil` immediately when `c.Entry.Kind != RecordKind`, the same shape
+`Hub.Apply` already uses for message records it does not own. Neither applier treats the other kind's
+records as damage.
+
+**The JSON shape** (`internal/auth/record.go`'s `recordJSON`, verified against the struct tags, not
+copied from a summary):
+
+```
+{"v":1,
+ "agent_id":"<bus-id>.<name>-<n>",
+ "name":"<name>",
+ "auth_pub":"<base64 std, 32 bytes>",
+ "msg_pub":"<base64 std, 32 bytes>",        // omitted while unpopulated
+ "invite_id":"<string>",                    // omitted while unpopulated
+ "epoch":"<RFC3339Nano UTC>",
+ "cert_bindings":[{"fp":"<hex, 32 bytes>",
+                   "bound_at":"<RFC3339Nano UTC>",
+                   "retired_at":"<RFC3339Nano UTC>"}],  // omitted while live
+ "enrolled_at":"<RFC3339Nano UTC>"}
+```
+
+| field | Go type | on-disk encoding | omitted when |
+| --- | --- | --- | --- |
+| `v` | `int` | `RecordVersion` (currently `1`) | never |
+| `agent_id` | `string` | fully-qualified `<bus-id>.<name>-<n>` (invariant 2) | never |
+| `name` | `string` | the short name, byte-identical to the name half of `agent_id` | never |
+| `auth_pub` | `ed25519.PublicKey` | **base64 standard encoding** (`encoding/base64`), 32 bytes | never |
+| `msg_pub` | `ed25519.PublicKey` | base64 standard encoding, 32 bytes | `RosterEntry.MessagingPublicKey` is empty (reserved, unpopulated) |
+| `invite_id` | `string` | verbatim | `RosterEntry.InviteID` is empty (reserved, unpopulated) |
+| `epoch` | `time.Time` | `RFC3339Nano`, UTC | never |
+| `cert_bindings` | `[]CertBinding` | array of `{"fp","bound_at","retired_at"}`, bounded to `MaxCertBindings` | `RosterEntry.CertBindings` is empty (reserved, unpopulated) |
+| `cert_bindings[].fp` | `[32]byte` | **hex** (`encoding/hex`), the fingerprint `sha256.Sum256(cert.Raw)` | never (present in every element) |
+| `cert_bindings[].bound_at` | `time.Time` | `RFC3339Nano`, UTC | never (present in every element) |
+| `cert_bindings[].retired_at` | `*time.Time` | `RFC3339Nano`, UTC | the binding is LIVE (`RetiredAt == nil`) |
+| `enrolled_at` | `time.Time` | `RFC3339Nano`, UTC | never |
+
+The encodings match the precedents already on disk rather than being picked per field: times are
+`RFC3339Nano` in UTC exactly as `idem.Record` writes `committed_at`; the certificate fingerprint is
+HEX, the same choice `idem` makes for its own `fp`; the public keys are BASE64 STANDARD ENCODING,
+which is what the enrolment wire format already uses for the same bytes, so an operator reading the
+log sees the same string the client sent. Every reserved field is `omitempty`, so **a record written
+today is byte-for-byte the record a pre-INVITE, pre-MTLS build would have written**, and the reserved
+keys appear on disk only once something actually populates them.
+
+**The reserved-but-unpopulated fields are on disk from record 1, deliberately.** `msg_pub`
+(SIGN/CRYPTO-3), `invite_id` (the INVITE epic) and `cert_bindings` (MTLS-BIND) are declared and
+encoded even though nothing writes them yet, per the ordering rule in `DECISIONS.md`'s
+2026-08-07 "ENROL-SHAPE" entry: nothing was persisted before AUTH-3, which made this the LAST MOMENT
+the durable record could be shaped without a migration — and because an agent id is bound to a
+keypair, a migration here is not a schema edit but a FORCED RE-ENROLMENT OF EVERY AGENT.
+`cert_bindings` is `MaxCertBindings = 16`, a BOUNDED HISTORY and not a current-value field — the same
+class of bound as the applied-key table's `MaxEntries`, for the same reason (an agent rotating a
+client certificate in a loop must not grow the record without limit, and every binding is decoded off
+disk during recovery, where the input is whatever the file holds rather than whatever a handler
+validated). Retirement is EXPLICIT: `retired_at` absent means the binding is LIVE, never
+implicit-by-supersession — a binding that silently aged out would be indistinguishable from one that
+was revoked, and those need different operator responses.
+
+**`Decode` is STRICT** (`encoding/json`'s `DisallowUnknownFields`, plus an explicit `v ==
+RecordVersion` equality check), matching `idem.DecodeRecord` and `wal.decodePayload`. The downgrade
+hazard that buys is the one `wal.Entry.Idem`'s CONTRACTS-ONDISK section above already states for the
+applied-key record, and it applies here unchanged: a binary built BEFORE a field existed, reading a
+log written AFTER it, sees EVERY enrolment record carrying that field as undecodable — and
+**an undecodable enrolment record is DISCARDED at replay** (`WALRoster.Apply`), so the agent it named
+is silently absent from the roster and must re-enrol, under a new id, because the old suffix is
+burned. The version check catches the ORDINARY form of that downgrade with a much better error
+message; `DisallowUnknownFields` only catches an additive field that did NOT move `RecordVersion` —
+the case this package intends to keep open for the INVITE/MTLS/SIGN epics, which must therefore land
+their field and its decoder together, in one build.
+
+**Recovery semantics** (`WALRoster.Apply`, `internal/auth/walroster.go`):
+
+- The roster is rebuilt entirely by REPLAY: `WALRoster` is constructed first (empty), handed to
+  `wal.Open` as the `Applier`, and every committed `"agent"`-kind entry is folded in before `Open`
+  returns — the same construction order `hub.Apply` uses for messages.
+- A DUPLICATE agent id KEEPS THE FIRST record and never overwrites. An overwrite would rebind a live
+  identity to a different keypair — the worst outcome available on this path (invariants 1 and 3), since
+  every DM addressed to that id would then route to the new key holder. The later record is logged at
+  ERROR and dropped; `Apply` does not return an error for it.
+- An undecodable record is discarded LOUDLY, at ERROR, with its prepare and commit indices, and the
+  bus still starts. This is invariant 6's recovery contract (2026-08-02): recovery always reaches a
+  running server, damaged records are discarded, and the absolute requirement is that every discard is
+  logged — availability over retention, not silence over damage.
+
+**`SuffixFloors` (`internal/auth/floors.go`) is a SECOND scan of the WAL, over raw PREPARE records —
+not derived from the committed roster.** Per points 3 and 7 of `ids.NameSuffixes`' doc, deriving the
+per-name suffix floor from the replayed (committed) roster is wrong twice over: it misses a suffix
+burned by a dangling prepare (allocated, prepare fsynced, crash before commit — on disk and in the
+audit log, but no committed roster entry mentions it), and it misses every agent that has since left.
+`SuffixFloors` instead walks every `wal.TypePrepare` record via `wal.ScanAll` and a deliberately
+LENIENT, non-`DisallowUnknownFields` decoder that reads only `agent_id` — a record too damaged for the
+strict `Decode` to accept still burned a suffix, and validation protects the roster while the floor is
+a claim about bytes that reached disk. An ABORTED prepare counts too. This is currently a genuinely
+SECOND full pass over the log (`wal.Open` already walks it once to replay); `ID-2-WIRING-OBSERVER`
+(`c31f6999-da4e-400d-ab55-178b82e2a42e`) is filed to fold the two into one pass via
+`wal.ReplayWithPrepares`. **Known residual hole, not fixed here:** `wal.Open`'s `RepairLog` may
+discard or quarantine records BEFORE this scan ever runs, and a discarded prepare's suffix becomes
+invisible, lowering the floor — tracked by `db350e39-3dde-4166-b241-b21fa4635359` (whole-log
+quarantine reissues every sequence) and `e120153b-9d8a-4b6a-bd4e-89431954496b` (recovery reissuing a
+discarded tail index).
+
+**Backward compatibility: an existing log needs no migration.** Nothing was persisted before this
+change — no build of `agent-bus` before AUTH-3 ever wrote an `"agent"`-kind entry — which was the
+entire value of settling `ENROL-SHAPE` first, and that value is now spent: any log written by an
+AUTH-3-or-later build already carries the full field set above.
+
+**NOT YET WIRED — read this before treating enrolment as durable in a running bus.**
+`cmd/agent-bus/main.go` still constructs `auth.NewService(auth.Options{Minter: minter})` with no
+roster injected, which means `auth.Service` falls back to its default, `MemoryRoster` — the
+in-memory implementation that writes nothing, fsyncs nothing, and is lost entirely on restart.
+`WALRoster`, `Encode`/`Decode` and `SuffixFloors` exist, are unit- and crash-tested, and are correct;
+none of it is on the path a deployed bus takes. Nothing in this section describes SHIPPED runtime
+behaviour until the follow-up wiring task (`AUTH-7`) lands and `main.go` constructs a `WALRoster`,
+attaches it to the process's `*wal.Log`, and derives startup suffix floors from `SuffixFloors`. A
+reader must not come away believing a running bus persists enrolments today.
 introduced by this task.
+
+## The durable invite record (INVITE-STORE, added 2026-08-07)
+
+Invariant 3 requires enrolment to be invite-only, and doc.go's opening line states the property
+everything here rests on: single use is decorative unless it survives a restart. INVITE-STORE is
+that store — `internal/invite`'s `record.go` (`RecordKind`, `State`, `Record`, the `recordJSON` wire
+shape, `Encode`/`DecodeRecord`), `retention.go` (the derived bounds) and `store.go` (`Store`, the
+in-memory table `wal.Applier` rebuilds by replay, and the mint/lookup/redeem/revoke lifecycle). Read
+`internal/invite/doc.go` for the full model and the honest statement of its one fail-open exception;
+this section documents only the on-disk shape. **Nothing in this section is reachable by an agent
+today** — this package registers no HTTP route (that is `INVITE-GATE`'s task) and ships no operator
+wrapper (`INVITE-MINT` / `INVITE-REVOKE`); it is the state machine and its durability, nothing more.
+
+**NO new WAL record type and NO `ondisk-format-version` bump. Nothing was reserved.**
+`wal.Entry.Kind = "invite"` (`invite.RecordKind`) is, exactly as `auth.RecordKind = "agent"` is
+documented above, a FREE-FORM APPLICATION DISCRIMINATOR — it sits inside the PREPARE payload, above
+the framing layer that `wal.Type` (`TypePrepare`, `TypeCommit`, ...) owns. `internal/wal/format.go`
+was not touched, and there was nothing to reserve from either the `record-type` or
+`ondisk-format-version` namespace above. This is written down explicitly so a future reader does not
+go and reserve a number nothing requires. An invite entry rides in the same two-phase
+prepare-fsync-commit-fsync frames as a message or an enrolment — no new frame shape, no new fsync.
+
+**A third `Entry.Kind` value now shares the log.** `invite.RecordKind = "invite"` sits alongside
+`store.RecordKind = "message"` and `auth.RecordKind = "agent"` in the same WAL file. `Store.Apply`
+skips any entry whose `Kind != RecordKind` silently and returns nil — the same shape `WALRoster.Apply`
+and `Hub.Apply` already use for kinds they do not own — so none of the three appliers treats another
+kind's records as damage.
+
+**The JSON shape** (`internal/invite/record.go`'s `recordJSON`, verified against the struct tags):
+
+```
+{"id":"inv-<20-32 lowercase base32 chars>",
+ "bus":"<bus id>",
+ "secret_sha256":"<hex, 32 bytes>",
+ "label":"<operator text>",                     // omitted while empty
+ "created_at":"<RFC3339Nano UTC>",
+ "expires_at":"<RFC3339Nano UTC>",
+ "state":"open"|"redeemed"|"revoked",
+ "redeemed_at":"<RFC3339Nano UTC>",              // present only when state=="redeemed"
+ "redeemed_by":"<bus-id>.<agent-id>",            // present only when state=="redeemed"
+ "redeem_key":"<client idempotency key>",        // present only when state=="redeemed"
+ "redeem_fp":"<hex, idem.FingerprintSize bytes>",// present only when state=="redeemed"
+ "result":<opaque JSON>,                         // omitted when empty/absent
+ "cert_sha256":"<hex, 32 bytes>",                // present only when state=="redeemed" AND a cert was bound
+ "revoked_at":"<RFC3339Nano UTC>",                // present only when state=="revoked"
+ "revoked_reason":"<operator text>"}              // present only when state=="revoked" and non-empty
+```
+
+| field | Go type | on-disk encoding | omitted when |
+| --- | --- | --- | --- |
+| `id` | `string` | server-minted, `^inv-[a-z2-7]{16,32}$` (`invite.InviteIDPattern`) | never |
+| `bus` | `string` | the bus this invite admits to, `<= MaxBusIDLen` (64) | never |
+| `secret_sha256` | `[DigestSize]byte` | **hex** (`encoding/hex`) — `HashSecret(secret)`, never the plaintext | never |
+| `label` | `string` | operator note, `<= MaxLabelLen` (128), never echoed to a client | empty |
+| `created_at` | `time.Time` | `RFC3339Nano`, UTC | never |
+| `expires_at` | `time.Time` | `RFC3339Nano`, UTC | never |
+| `state` | `State` | **fixed string** `"open"` / `"redeemed"` / `"revoked"` — never a number, so an operator reading the log with `head -c` and a pretty-printer can interpret it directly and it cannot silently change meaning if the constants are reordered | never |
+| `redeemed_at` | `time.Time` | `RFC3339Nano`, UTC | `State != StateRedeemed` |
+| `redeemed_by` | `string` | fully-qualified `<bus-id>.<agent-id>` (invariant 2) | `State != StateRedeemed` |
+| `redeem_key` | `string` | the client idempotency key that redeemed it, verbatim | `State != StateRedeemed` |
+| `redeem_fp` | `idem.Fingerprint` | **hex**, matching `idem`'s own `fp` encoding | `State != StateRedeemed` |
+| `result` | `json.RawMessage` | the minted redemption result, verbatim, compacted, capped at `idem.MaxResultBytes` (512) | empty/absent result |
+| `cert_sha256` | `[DigestSize]byte` | **hex** — `sha256.Sum256(cert.Raw)` of the client certificate bound at redemption | `CertFingerprint` is the zero value (DEFINED BUT UNUSED, see below) |
+| `revoked_at` | `time.Time` | `RFC3339Nano`, UTC | `State != StateRevoked` |
+| `revoked_reason` | `string` | operator note, `<= MaxReasonLen` (128), never echoed to a client | `State != StateRevoked` or empty |
+
+Times are `RFC3339Nano` in UTC and digests are hex, matching the precedent `idem.Record` and
+`auth.RosterEntry` already set on this log — an operator reading any of the three record kinds off
+disk sees the same conventions. `state` is deliberately a fixed string rather than the numeric
+`State` enum for the same reason `auth.RecordVersion`-style equality checks exist elsewhere: a
+numeric value in a durable record is unreadable without the source, and it silently changes meaning
+if the constants are ever reordered.
+
+**EVERY ENTRY CARRIES THE COMPLETE RECORD IN ITS POST-TRANSITION STATE, never a delta.** Two reasons,
+both load-bearing (doc.go section 3, restated here because it drives the wire shape): replay then
+needs no ordering logic beyond a monotonic upsert (`Store.upsertLocked` is the one place anything
+enters or changes in the table), and if an EARLIER record for an invite is discarded by recovery — a
+corrupt frame, a capacity discard — a surviving LATER record still reconstructs the invite in its
+SPENT state on its own. A delta scheme would leave the invite looking OPEN under the same loss, which
+is the one direction that can produce a second redemption. The upsert itself is MONOTONIC:
+`open -> redeemed` and `open -> revoked`, nothing else; a record that would move an invite backwards
+is refused and logged loudly, never applied.
+
+**The invite SECRET is never stored — only its SHA-256 digest.** `Record.SecretDigest` is the only
+form of the secret that reaches `Encode`, and the plaintext (`Minted.Secret`, `GenerateSecret`'s
+output — `SecretBytes` = 32 bytes of `crypto/rand`, base64.RawURLEncoding) exists only in `Store.Mint`'s
+return value and is never logged, echoed, or written to the WAL. This is concrete evidence, not just a
+design claim: `internal/invite/store_test.go`'s `TestInviteMintNeverStoresTheSecret` mints an invite
+through a real `*wal.Log` and asserts the plaintext secret appears nowhere in the resulting `bus.wal`
+bytes.
+
+**`CertFingerprint` is DEFINED BUT UNUSED, deliberately, from day one** — per `DECISIONS.md`'s
+2026-08-07 "ENROL-SHAPE" entry, which fixes `sha256.Sum256(cert.Raw)` as the one fingerprint
+computation so nobody invents a second, incompatible one for the same certificate. It is
+`Record.CertFingerprint [DigestSize]byte`; the ZERO value means "no certificate was bound", which is
+the only value anything writes today (`Store.Redeem`/`Redemption.Consume` accept a `Result.CertFingerprint`
+field, but nothing populates it with a real fingerprint yet). It rides on disk now, exactly as
+`auth.RosterEntry`'s reserved fields do, so `MTLS-BIND` adds a CHECK against an already-durable field
+rather than a schema change to records that already exist.
+
+**The bounds and retention, cited from `retention.go`'s own derivations rather than restated as picked
+numbers:**
+
+- `MaxRecordBytes = 2 KiB` — one retained record's worst-case footprint, summed field by field
+  (`retention.go`'s comment carries the full arithmetic: id, bus, three digests, redeemed_by,
+  redeem_key, result, label, revoked_reason, four timestamps, the state string, JSON punctuation and
+  Go map/struct overhead).
+- `MaxRetainedBytes = 16 MiB`, a QUARTER of `idem.MaxRetainedBytes` (64 MiB) — the difference is the
+  ARRIVAL RATE, not the record size: applied-key records arrive at client speed, invites are
+  operator-minted through the filesystem (`INVITE-MINT`), so a budget sized for machine-driven
+  traffic would be four times larger than any plausible use.
+- `MaxInvites = MaxRetainedBytes / MaxRecordBytes = 8192` — the hard cap on retained records. It
+  **fails closed and evicts nothing**, exactly as `idem.ErrCapacity` does, and is easier to justify
+  here: an evicted invite is an unknown, unredeemable one, so eviction could never produce a second
+  redemption — it would only make a live invite silently stop working, and a refused mint is loud and
+  recoverable instead.
+- `SpentRetention = idem.RetentionWindow` (50h10m22s) — cited BY REFERENCE from `IDEM-11`'s own
+  derivation, not re-derived, because the retry it must outlive (a client that never saw its
+  acknowledgement and is still retrying) is the same kind of retry `idem`'s window already covers.
+  It is also the diagnosis window: an expired or revoked record is kept past the moment it stopped
+  working, not dropped at that instant, so `ErrExpired`/`ErrRevoked` stay reachable by an operator
+  chasing a failed enrolment instead of collapsing to `ErrUnknownInvite`.
+- `DefaultTTL = 24h`, `MaxTTL = 7 * 24h` — an invite must survive the ordinary gap between an
+  operator minting it and an agent using it, and no longer than it has to, because the invite blob is
+  a bearer credential travelling over a channel this bus does not control (`DECISIONS.md`, E6). A TTL
+  requested over `MaxTTL` is **REJECTED (`ErrInvalidTTL`), never clamped**.
+- `ReservationTTL = 30s` — how long `Store.Begin`'s reservation may be held before `Consume` without
+  being reaped; roughly two orders of magnitude above the two fsyncs and one id mint the path actually
+  costs. It sweeps ONLY before `Consume` — after a successful `Consume` the reservation is no longer
+  sweepable, because the caller may already have committed a durable consumption record, and reaping
+  it back to open would admit a second redemption of an invite the log already says is spent. After
+  `Consume` only `Commit` or `Abort` resolves it, and an abandoned one stays locked until restart,
+  which is fail-closed.
+
+**THE FAIL-CLOSED RULE, AND ITS ONE HONEST EXCEPTION** (doc.go section 5, not flattened here). Dropping
+a whole invite makes it UNKNOWN, and an unknown invite is rejected — that covers expiry, the capacity
+bound, and a mint record discarded at replay. Such a drop can cost availability (a still-valid invite
+becomes unusable) and the ability to answer a retry with its original result. **It cannot produce a
+second redemption.** The exception: losing a SPEND record while its MINT record survives is
+**FAIL-OPEN** — the invite is then present and OPEN, and it can be redeemed again. The two ways to
+reach it are a consumption record that will not decode at replay (`Store.Apply`) and one refused by
+the monotonic upsert for disagreeing with the existing record's identity; both are logged at ERROR
+naming the invite. Neither is reachable by corruption alone — `internal/wal` verifies every frame with
+a keyed HMAC-SHA256 and discards what fails, so a record that decodes is a record this bus wrote,
+which leaves a bug in this package as the realistic cause. It is bounded, not eliminated, and an
+operator seeing that ERROR line should revoke the named invite rather than assume the discard was
+safe.
+
+**No new HTTP route, CLI flag, env var, or header was introduced by this task.** `INVITE-GATE` owns
+the `POST /v1/enroll` wire shape that will present an invite secret; `INVITE-MINT`/`INVITE-REVOKE` own
+the operator-facing surface for minting and revoking one. Nothing in this section is reachable by an
+agent yet.
