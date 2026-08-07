@@ -2490,3 +2490,100 @@ prose), without first re-reading the file to confirm that prose was in fact the 
 It was not — the relay error-code subsection came after it. The lesson generalises: "append" claims
 made from an `old_string` anchor should be verified against `tail`/`wc -l` on the CURRENT file
 immediately before the edit, not inferred from what was true when the section was last read.
+
+## 2026-08-07 — IDEM-17: crash-injection, restart mid-retry-window yields exactly one effect (P0)
+
+**Task:** IDEM-17 (`8b1e85fd-e4db-43eb-b665-1b429fe66e98`). Prove invariant 10 across a REAL crash:
+kill at chosen points in and around the client's retry window and assert exactly ONE effect after
+each. Test-only; no production code touched.
+
+**Files (both inside the boundary `internal/idem/**`):**
+- `internal/idem/crashinjection_test.go` — NEW, 1157 lines, `package idem_test`.
+- `internal/idem/doc.go` — comment-only, one new section (§10).
+
+**Prerequisite check first, as briefed.** IDEM-11 was still `in_progress`, so before assuming a
+surface I established what exists: IDEM-11's store LANDED in `518e71b` and is `in_progress` only for
+its own paper-trail follow-ups (`IDEM-11-FU-PAPERTRAIL`, `-FU-DOWNGRADE`). `internal/idem`'s
+`Store`/`Record`/retention are complete, the applied-key record rides in `wal.Entry.Idem` inside the
+SAME prepare payload as the effect, and `hub.Apply`/`recoverIdemRecord` rebuild it on replay. So the
+store was NOT too incomplete to test and no blocker was warranted.
+
+**Kill points injected** — all a real `syscall.Kill(getpid(), SIGKILL)` in a re-exec'd child, with
+the parent asserting `WaitStatus.Signaled() && Signal()==SIGKILL` so a child that merely failed its
+own assertions cannot masquerade as a crash:
+
+| point | durable state left | what the client's next move must yield |
+|---|---|---|
+| between the prepare and commit fsyncs | prepare only, no commit | key behaves as NEVER SEEN; verbatim replay is the ROUTINE `ErrUnknownMint`, never `ErrIdempotencyKeyReused`; re-mint under the same key applies as NEW |
+| after the commit fsync, before the ack | 1 committed message | verbatim replay returns the ORIGINAL result, `Replayed=true`, nothing re-applied |
+| after the ack, with an in-process retry already answered | 1 committed message | same, across the restart |
+| while a POST-RESTART retry was being answered | 1 committed message | a replay is itself crash-safe and writes nothing; a third recovery still finds one effect |
+| after the commit fsync of a BROADCAST | 1 committed broadcast | replay returns the original; a SEND under the same key string is a DIFFERENT scope and applies as NEW |
+
+Every row ends at exactly ONE committed message, ONE message in the serving copy and ONE applied-key
+record — except the broadcast row, which deliberately ends at TWO of each because it performed TWO
+operations under one key string.
+
+**The mandated honest-client test, and why the obvious one is not enough.** Existing coverage issued
+every post-restart retry through a helper that RE-MINTED first, which masks the property entirely. A
+real client holds a signed assignment and replays it verbatim; the reservation table is in memory and
+does NOT survive a restart. `TestIdemCrashInjectionRestartHonestRetryIsNeverPunished` therefore
+replays byte-for-byte with the ORIGINAL `SignedMint` and no re-mint, three times (a single replay
+passes even if the answer is consumed on first use), and `...RetryStormIsAnsweredOnce` does the same
+from 32 goroutines under `-race`. Separately,
+`TestIdemCrashInjectionRestartRemintingClientStillGetsOneEffect` exists because under SIGN-1's
+reserve-then-send a lost applied-key table presents as a REFUSAL, not a duplicate — the duplicate
+only appears when the client follows the documented remedy and re-mints. See DECISIONS.md (this
+date) for that argument in full.
+
+**RED-BEFORE, verbatim.** The behaviour already exists, so non-vacuity was proven by deliberate
+mutation in a scratchpad COPY — the repo itself was never mutated (`git status --porcelain
+internal/hub/ internal/wal/` was empty throughout):
+- M1 `hub.Apply` skips `recoverIdemRecord` → RED: *"the operation has now been APPLIED TWICE, which
+  is the exact duplicate invariant 10 forbids"*.
+- M2 the reservation lookup moved AHEAD of the applied-key lookup → RED across every honest-client
+  test: *"replay 1 was refused with ErrUnknownMint"*.
+- M4/M5/M6 the op dropped from the idempotency scope → RED: *"the broadcast replay returned
+  Broadcast = false: the op did not survive recovery"*.
+Both gates ran their OWN independent mutations rather than trusting these (security S1/S3, reviewer
+R1/R2), and reviewer's R2 confirmed the op-scoping half fails in the honest-client-punished
+direction the brief mandated.
+
+**Proof, verbatim:**
+```
+$ bash scripts/proof-check.sh 'go test -race -count=1 -run TestIdemCrashInjectionRestart ./internal/idem/'
+proof-check: verdict=PASS class=test exit=0 tests_run=11 top_level=8 skipped=1 failed=0 empty_pkgs=0
+```
+The one skip is `TestIdemCrashInjectionRestartChild`, the standard env-guarded crash-child harness.
+Also green: `go test -race -count=1 ./internal/idem/`, `go vet ./internal/idem/`, and
+`"$(go env GOROOT)/bin/gofmt" -l internal/idem/` with EMPTY output (judged by output, never by exit
+status). Verified against committed HEAD via `git archive HEAD` plus these two files, so the change
+consumes nothing uncommitted.
+
+**The stored `proof_cmd` was VACUOUS and was corrected.** It named
+`./internal/store/... ./internal/wal/...`, where no such test exists — `verdict=VACUOUS exit=0
+tests_run=0 empty_pkgs=2`. Caught by the reviewer as a P1 and corrected by spec-keeper to
+`./internal/idem/`. IDEM-17 was NOT completed on the vacuous proof.
+
+**Chain:** spec-keeper → implementation → reviewer → security → documentation. All ran; none skipped.
+- **reviewer: COMPLETED — PASS-WITH-NITS**, then re-verified and CONFIRMED against the final state.
+  Every actionable nit fixed (a `crashEnrolledAt` comment that over-claimed, an "applied 0 times"
+  message, two missing mint guards, and the broadcast gap the task text's "send/broadcast at minimum"
+  required). Its P1 was the vacuous `proof_cmd`, above.
+- **security: COMPLETED — PASS**, upgraded from PASS-WITH-FINDINGS on re-verification of the final
+  state, no new findings. Both of its actionable P2s fixed: the `os.Args[0]` re-exec fallback (which
+  `exec.Command` would have PATH-resolved) is now a hard failure, and an unreachable
+  `ErrUnknownMint` check is reordered specific-first so the misfiling diagnosis can fire.
+- **documentation: COMPLETED** — added `internal/idem/doc.go` §10 and confirmed no CONTRACTS-*.md /
+  PROTOCOL.md / AGENT_PROTOCOL.md update is owed (test-only: no route, flag, env var, record type or
+  wire version moved). I corrected one factual error it introduced — it said the crash lands "before
+  the prepare" when that point is AFTER the prepare fsync and before the commit fsync.
+
+Two diagnosis-only nits (a mint guard at the broadcast call site, and §10 mentioning broadcast)
+landed AFTER both gates re-verified; neither changes an assertion or a control-flow outcome.
+
+**Not committed** — an `integrator` owns that. **Follow-ups filed:** `IDEM-17-FU-PLACEMENT` (the
+suite drives `internal/hub` but lives in `internal/idem`, a file-ownership-boundary consequence, so
+`go test ./internal/hub/` does not run it), `IDEM-17-FU-CHILDNONCE` (repo-wide: every crash-child
+harness here is guarded by an env var alone), `IDEM-17-FU-CROSSAGENT` (no post-restart CROSS-AGENT
+oracle test; this task pinned the cross-OP half only).

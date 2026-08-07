@@ -284,6 +284,26 @@
 //     what makes the boundary honest (a derived window, plus Stats.Expired and
 //     Stats.OldestAge so the bound is observable rather than assumed).
 //
+// # 10. IDEM-17's durability evidence — added 2026-08-07
+//
+// crashinjection_test.go is a real kill -9 crash-injection suite proving
+// invariant 10 survives a restart mid-retry-window. It indexes its crash points
+// by where the SIGKILL falls relative to the CLIENT's retry — between the
+// prepare fsync and the commit fsync, after the commit fsync but before the
+// ack, after the ack with an in-process retry already answered, and while a
+// post-restart retry was itself being answered — on the BROADCAST path as well
+// as the directed one, which also pins that the scope's (agent, op, key) tuple
+// keeps its OP across recovery. Every one of them still yields
+// exactly ONE durable effect, and an honest client replaying its request
+// verbatim is ANSWERED rather than refused — the reservation table does not
+// survive a restart, so that last property is what would break first if the
+// mint lookup ever moved ahead of the applied-key lookup.
+//
+// It is the retry-window counterpart to IDEM-11's own durability evidence
+// (internal/hub/idem_crash_test.go), which indexes the same write path by the
+// DURABLE STATE recovery finds instead: a committed entry, a dangling prepare,
+// and a pre-IDEM-11 entry carrying no applied-key record at all.
+//
 // # FOLLOW-UP (not this task's scope, recorded so it is not lost)
 //
 // internal/auth already ships its own local validateIdempotencyKey(key) for
