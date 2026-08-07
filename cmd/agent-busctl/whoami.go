@@ -136,9 +136,7 @@ func runWhoami(ctx context.Context, env *cliEnv, args []string) error {
 	return env.out.Emit(res, func(w io.Writer) {
 		fmt.Fprintf(w, "%s\n", res.AgentID)
 		fmt.Fprintf(w, "  bus      %s (%s)\n", res.BusID, res.BusURL)
-		if res.BusFingerprint != "" {
-			fmt.Fprintf(w, "  cert     %s (pinned)\n", res.BusFingerprint)
-		}
+		writePinnedCerts(w, "  cert     ", res.BusFingerprints)
 		fmt.Fprintf(w, "  name     %s\n", res.Name)
 		fmt.Fprintf(w, "  enrolled %s\n", res.EnrolledAt)
 		if res.Session != nil {

@@ -129,7 +129,13 @@ func (f BusFingerprint) Equal(other BusFingerprint) bool {
 func (f BusFingerprint) IsZero() bool { return f == BusFingerprint{} }
 
 // pinnedTLSConfig builds the client TLS configuration for a bus whose
-// certificate fingerprint is pinned.
+// certificate fingerprints are pinned.
+//
+// pins is a SET (MTLS-ROTATE, 2026-08-07), normally of size one and of size two
+// for the duration of a rollover. See BusPinSet for why the set is bounded and
+// why membership is granted rather than learned; nothing below treats a larger
+// set as weaker, because every member got there by the same explicit operator
+// act that the single pin used to require.
 //
 // # Read this before changing anything below
 //
@@ -151,11 +157,11 @@ func (f BusFingerprint) IsZero() bool { return f == BusFingerprint{} }
 //
 //   - The pin check is NOT optional and NOT conditional. There is no branch in
 //     verifyPinnedBusCertificate that returns nil without having compared 32
-//     bytes.
-//   - A zero pin is refused inside the callback, not merely refused by callers.
-//     Every caller does check (see Client.transportFor), but a verifier that is
+//     bytes against a member of the set.
+//   - An EMPTY set is refused inside the callback, not merely refused by
+//     callers. Every caller does check (see Client.doer), but a verifier that is
 //     only safe because of what its callers do is one refactor from being
-//     unsafe.
+//     unsafe. Empty means ABSENT; it is never a wildcard.
 //   - guard_test.go asserts, by AST walk, that this file is the ONLY place in
 //     client/ or cmd/agent-busctl/ that disables default verification, that it
 //     does so at most once, and that the same tls.Config literal also sets
@@ -174,7 +180,8 @@ func (f BusFingerprint) IsZero() bool { return f == BusFingerprint{} }
 // strictly stronger without qualification. If one certificate were ever served
 // by two buses, a name check would distinguish them and the pin would not.
 // Nothing in this design does that today, and rotation (which serves two
-// certificates for ONE bus) is the opposite case and is safe.
+// certificates for ONE bus) is the opposite case and is safe — which is
+// precisely what the accept-set models.
 //
 // On the third, nothing substitutes, and this is a real gap rather than a
 // non-issue: DECISIONS.md chose a 365-day certificate lifetime explicitly as "a
@@ -186,7 +193,7 @@ func (f BusFingerprint) IsZero() bool { return f == BusFingerprint{} }
 //
 // Revocation is genuinely out of scope: there is no CA and therefore no CRL or
 // OCSP to consult. Revoking a bus certificate means re-issuing invites.
-func pinnedTLSConfig(pin BusFingerprint) *tls.Config {
+func pinnedTLSConfig(pins BusPinSet) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 
@@ -194,33 +201,46 @@ func pinnedTLSConfig(pin BusFingerprint) *tls.Config {
 		// (see this function's doc comment). It is replaced, never merely
 		// removed, by the callback on the next line.
 		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: pinVerifier(pin),
+		VerifyPeerCertificate: pinVerifier(pins),
 	}
 }
 
 // pinVerifier adapts verifyPinnedBusCertificate to crypto/tls's callback shape.
 //
+// pins is captured BY VALUE, and BusPinSet's slice is never mutated in place
+// (every method returns a fresh set), so the policy a live handshake is checked
+// against cannot change under it. A transport built for one set is discarded
+// wholesale when the set changes — see Client.doer.
+//
 // verifiedChains is ignored because it is ALWAYS nil here: crypto/tls documents
 // that it passes nil when default verification is disabled. Naming it and
 // ignoring it is deliberate — a future reader who assumes a chain is available
 // would write a check that never runs.
-func pinVerifier(pin BusFingerprint) func([][]byte, [][]*x509.Certificate) error {
+func pinVerifier(pins BusPinSet) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		return verifyPinnedBusCertificate(pin, rawCerts)
+		return verifyPinnedBusCertificate(pins, rawCerts)
 	}
 }
 
-// verifyPinnedBusCertificate is THE pin check. It returns nil only after
-// comparing the leaf certificate's fingerprint against a non-zero pin.
+// verifyPinnedBusCertificate is THE pin check. It returns nil only after the
+// leaf certificate's fingerprint has matched a member of a NON-EMPTY set.
 //
 // rawCerts[0] is the leaf, in the order the peer sent it (crypto/tls). Only the
-// leaf is considered: the pin names one certificate, and a bus that presented
-// the pinned certificate somewhere deeper in a chain it invented would not be
-// the pinned bus.
-func verifyPinnedBusCertificate(pin BusFingerprint, rawCerts [][]byte) error {
-	if pin.IsZero() {
+// leaf is considered: the set names certificates, and a bus that presented a
+// pinned certificate somewhere deeper in a chain it invented would not be the
+// pinned bus.
+//
+// Matching ANY member is the rotation property (MTLS-ROTATE) and it is NOT a
+// relaxation of the check: each member was placed there by the same explicit,
+// out-of-band operator act the single pin required, the set is bounded at
+// MaxBusPins, and this function still never returns nil without a 32-byte
+// comparison having succeeded. Nothing here can add to the set — this is a pure
+// read — which is what makes "a pin is never learned from a handshake" a
+// structural fact rather than a convention.
+func verifyPinnedBusCertificate(pins BusPinSet, rawCerts [][]byte) error {
+	if pins.IsEmpty() {
 		// Unreachable through Client, which refuses to build a pinned transport
-		// without a pin. Checked anyway: the zero pin means ABSENT, and an
+		// without a pin. Checked anyway: an empty set means ABSENT, and an
 		// absent pin must never be the thing that lets a handshake through.
 		return ErrBusFingerprintMismatch
 	}
@@ -228,8 +248,8 @@ func verifyPinnedBusCertificate(pin BusFingerprint, rawCerts [][]byte) error {
 		return ErrBusPresentedNoCertificate
 	}
 	got := busFingerprintOfDER(rawCerts[0])
-	if !pin.Equal(got) {
-		return &BusFingerprintError{Pinned: pin, Presented: got}
+	if !pins.Contains(got) {
+		return &BusFingerprintError{Pinned: pins, Presented: got}
 	}
 	return nil
 }
@@ -243,16 +263,24 @@ func verifyPinnedBusCertificate(pin BusFingerprint, rawCerts [][]byte) error {
 // matches nothing they can account for) — which is the ONE judgement this
 // error exists to support.
 type BusFingerprintError struct {
-	// Pinned is the fingerprint this client expected, from --bus-fingerprint,
-	// AGENT_BUS_FINGERPRINT, or the stored identity.
-	Pinned BusFingerprint
+	// Pinned is the SET of certificates this client would have accepted, from
+	// --bus-fingerprint, AGENT_BUS_FINGERPRINT, or the stored identity.
+	//
+	// It is a set rather than one value because a bus mid-rollover legitimately
+	// has two certificates (MTLS-ROTATE), and an error that named only one of
+	// them would send an operator hunting for a mismatch that is not there.
+	Pinned BusPinSet
 
 	// Presented is the fingerprint of the certificate the bus actually sent.
 	Presented BusFingerprint
 }
 
 func (e *BusFingerprintError) Error() string {
-	return fmt.Sprintf("the bus presented certificate %s, but %s is pinned",
+	if e.Pinned.Len() == 1 {
+		return fmt.Sprintf("the bus presented certificate %s, but %s is pinned",
+			e.Presented, e.Pinned)
+	}
+	return fmt.Sprintf("the bus presented certificate %s, but this client accepts only %s",
 		e.Presented, e.Pinned)
 }
 
@@ -272,23 +300,42 @@ func (e *BusFingerprintError) Unwrap() error { return ErrBusFingerprintMismatch 
 // than guessing which one the operator is looking at — and it forecloses the
 // third response, which is to disable the check.
 //
-// It names `logout` BEFORE `enrol`, and that ordering is not padding: the
-// stored identity still pins the OLD certificate, so an enrol carrying the new
-// fingerprint hits resolvePin's flag-vs-store conflict and is refused. An
-// earlier draft omitted the logout and the reviewer gate reproduced the dead
-// end — a remedy that does not work is worse than none, because the operator
-// concludes the tool is broken and goes looking for the flag that turns the
-// check off.
+// # Since MTLS-ROTATE the FIRST remedy is `pin add`, and that ordering matters
+//
+// A rollover is the common cause, and until this task the only recovery was
+// `logout` + re-enrol — which is a fleet-wide re-enrolment for a routine key
+// hygiene event, and DECISIONS.md E3 says that must never be required. Worse,
+// it made routine rotation indistinguishable from an incident, and a wedged
+// fleet is exactly the pressure under which somebody proposes letting
+// --bus-fingerprint override the stored pin (which would turn a DETECTED
+// substitution into an ACCEPTED one). `pin add` removes the pressure without
+// touching the check.
+//
+// The confirmation clause is not decoration. `pin add` is safe only because the
+// value is confirmed OUT OF BAND first; adding whatever the far end just
+// presented would be trust-on-first-use, so the remedy says where the genuine
+// value comes from before it says which command to run.
+//
+// The logout/enrol path is still named, second, because it is the right answer
+// when the operator wants the OLD certificate gone rather than accepted
+// alongside the new one. It names `logout` BEFORE `enrol`, and that ordering is
+// not padding: the stored identity still pins the old certificate, so an enrol
+// carrying the new fingerprint hits resolvePin's flag-vs-store conflict and is
+// refused. An earlier draft omitted the logout and the reviewer gate reproduced
+// the dead end — a remedy that does not work is worse than none, because the
+// operator concludes the tool is broken and goes looking for the flag that
+// turns the check off.
 func pinError(op, busURL string, err error) *Error {
 	var mismatch *BusFingerprintError
 	if errors.As(err, &mismatch) {
 		return wrapError(KindNetwork, op,
-			fmt.Sprintf("REFUSING to talk to %s: it presented certificate %s, but this client pinned %s",
+			fmt.Sprintf("REFUSING to talk to %s: it presented certificate %s, but this client accepts %s",
 				busURL, mismatch.Presented, mismatch.Pinned),
 			"the bus's certificate CHANGED. Either it was legitimately rotated, or you are not talking to the bus you think you are — and those look identical from here. "+
-				"Confirm the new value OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup). If it is genuine, re-pin in two steps, in this order: "+
-				"`agent-busctl logout <agent-id>` to drop the old pin, then `agent-busctl enrol --bus <url> --bus-fingerprint <new> --name <name>`. "+
-				"Enrolling without the logout is refused, because the stored identity still pins the old certificate. "+
+				"Confirm the presented value OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup). If it is genuine, accept it ALONGSIDE the old one for the rollover: "+
+				"`agent-busctl pin add "+mismatch.Presented.String()+"`, then `agent-busctl pin remove <old>` once the bus has stopped serving the old certificate. "+
+				"To replace the pin outright instead, `agent-busctl logout <agent-id>` then `agent-busctl enrol --bus <url> --bus-fingerprint <new> --name <name>` — "+
+				"enrolling without the logout is refused, because the stored identity still pins the old certificate. "+
 				"Do NOT work around this by turning verification off: there is no flag that does, on purpose.",
 			err)
 	}

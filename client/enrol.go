@@ -188,7 +188,7 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 	// pin has to come from the invite, before the handshake, and refusing here
 	// is what makes that true (invariant 11). Nothing is stored yet, so the pin
 	// can only be the explicit one.
-	busURL, pin, err := c.endpoint()
+	busURL, pins, err := c.endpoint()
 	if err != nil {
 		return EnrolResult{}, err
 	}
@@ -308,25 +308,34 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		return EnrolResult{}, err
 	}
 
-	// The pin is recorded ONLY as the empty string or as the fingerprint that
-	// was actually in force for the connection that just succeeded. It is not
+	// The accept-set is recorded ONLY as empty, or as the fingerprints that were
+	// actually in force for the connection that just succeeded. It is not
 	// copied from a flag we did not use, and it is never derived from the
 	// certificate the bus happened to present — deriving it here is exactly
 	// trust-on-first-use, wearing the costume of a stored pin.
-	storedPin := ""
-	if !pin.IsZero() {
-		storedPin = pin.String()
-	}
-
+	//
+	// It is USUALLY one fingerprint — the single --bus-fingerprint /
+	// AGENT_BUS_FINGERPRINT value — but NOT always, and an earlier draft of this
+	// comment claimed "at most one, by definition", which both gates showed to
+	// be false. resolvePins consults the CURRENTLY SELECTED identity, so
+	// enrolling a SECOND agent into the same credential store against a bus that
+	// is mid-rollover inherits that identity's two-pin set.
+	//
+	// That is correct rather than a hole: both members were granted for this
+	// exact bus URL by an explicit operator act, so nothing is trusted here that
+	// the operator has not already confirmed out of band. It is written down
+	// because the alternative — assuming one — is how a future reader
+	// "simplifies" this to pins.Strings()[0] and quietly halves a rollover.
+	// Joining a rollover LATER is still the deliberate path: `agent-busctl pin add`.
 	cred := Credential{
 		Identity: Identity{
-			AgentID:        body.AgentID,
-			BusID:          body.BusID,
-			Name:           body.Name,
-			BusURL:         busURL.String(),
-			BusFingerprint: storedPin,
-			PublicKey:      pubB64,
-			EnrolledAt:     body.EnrolledAt,
+			AgentID:         body.AgentID,
+			BusID:           body.BusID,
+			Name:            body.Name,
+			BusURL:          busURL.String(),
+			BusFingerprints: pins.Strings(),
+			PublicKey:       pubB64,
+			EnrolledAt:      body.EnrolledAt,
 		},
 		PrivateKeySeed: seedB64,
 		IdempotencyKey: idemKey,

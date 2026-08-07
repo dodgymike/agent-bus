@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,20 +83,38 @@ type Identity struct {
 	// the right bus without being told again.
 	BusURL string `json:"bus_url"`
 
-	// BusFingerprint is the SHA-256 of the bus certificate this identity
-	// enrolled against, as 64 lowercase hex characters, or "" when the
-	// enrolment was over plaintext loopback and there was no certificate.
+	// BusFingerprints is the SET of bus certificates this identity accepts,
+	// each the SHA-256 of a certificate's DER as 64 lowercase hex characters,
+	// in the order they were pinned. It is empty when the enrolment was over
+	// plaintext loopback and there was no certificate.
 	//
 	// It is stored so that "the trusted path is the easy path": the operator
 	// supplies the fingerprint ONCE, at enrolment, from the invite — every
 	// later command against this bus finds it here rather than needing the flag
-	// again, and a bus whose certificate has changed is refused with no further
-	// configuration. It is what makes this a PIN rather than a per-invocation
-	// assertion.
+	// again, and a bus whose certificate is outside the set is refused with no
+	// further configuration. It is what makes this a PIN rather than a
+	// per-invocation assertion.
+	//
+	// # Why a SET, since MTLS-ROTATE (2026-08-07)
+	//
+	// It held exactly one fingerprint when MTLS-PIN shipped, and the only
+	// recovery from a changed certificate was `logout` plus a full re-enrolment.
+	// DECISIONS.md E3 says a rotating bus serves TWO certificates during
+	// rollover precisely so that "rotation must never require every client to
+	// re-enrol — that would make routine key hygiene indistinguishable from a
+	// security incident". One slot could not express that, so the first routine
+	// rotation after MTLS-LISTENER would have wedged every enrolled agent at
+	// once — and a wedged fleet is the pressure under which somebody proposes
+	// letting --bus-fingerprint override the stored pin, turning a DETECTED
+	// substitution into an ACCEPTED one.
+	//
+	// The set is bounded at MaxBusPins and every member is placed by an explicit
+	// operator act (enrolment, or Store.AddBusPin after an OUT-OF-BAND
+	// confirmation). It is NEVER extended with a certificate a bus presented.
 	//
 	// PUBLIC, like everything else in Identity: a certificate fingerprint is in
 	// the bus's startup log and in every handshake. Safe to print, and printed
-	// by `agent-busctl whoami`.
+	// by `agent-busctl whoami` and `agent-busctl pin list`.
 	//
 	// omitempty, and storeFormatVersion is deliberately NOT bumped — the same
 	// additive reasoning as MessagingKeySeed below. A credential written before
@@ -103,8 +122,10 @@ type Identity struct {
 	// lock an agent out of a bus it is legitimately enrolled on over a field it
 	// never had. Such a credential simply has no pin, which is only usable
 	// against the plaintext loopback bus it was created for; an https bus with
-	// no pin is refused (transportSecurity).
-	BusFingerprint string `json:"bus_fingerprint,omitempty"`
+	// no pin is refused (transportSecurity). A credential written by the
+	// single-pin build carries `bus_fingerprint` instead, and Store.load folds
+	// it into this field — see migrateLegacyBusFingerprints.
+	BusFingerprints []string `json:"bus_fingerprints,omitempty"`
 
 	// PublicKey is the base64 (standard, padded) Ed25519 public key the bus
 	// recorded. Public by definition; safe to print.
@@ -495,7 +516,219 @@ func (s *Store) load() (storeData, error) {
 			fmt.Sprintf("the credential store %s is format version %d, but this build understands version %d", s.Path(), d.Version, storeFormatVersion),
 			"upgrade agent-busctl, or move the store aside and re-enrol")
 	}
+	migrateLegacyBusFingerprints(b, &d)
 	return d, nil
+}
+
+// migrateLegacyBusFingerprints folds the single-pin `bus_fingerprint` field
+// written by the MTLS-PIN build into Identity.BusFingerprints.
+//
+// # Why this is a second decode rather than a field on Identity
+//
+// The obvious shape — keep a legacy field on Identity, or give Identity an
+// UnmarshalJSON — is a trap in Go. Credential EMBEDS Identity, so an
+// UnmarshalJSON on Identity is PROMOTED to Credential and becomes the method
+// json uses for the whole credential: the private key seed would silently stop
+// being read, and every enrolled identity would lose its key on the next load.
+// A second, narrow decode has no such reach. Keeping a legacy exported field
+// instead would put two spellings of one fact in the struct, in --json output
+// and in the file, which is the disagreement Credential.MessagingPublicKey's
+// comment already argues against.
+//
+// The migration is one-way and silent-on-write: once anything writes the store,
+// the legacy key is gone and only `bus_fingerprints` remains.
+//
+// A DOWNGRADE has two distinct consequences and both must be stated, because
+// stating only the first reads as reassurance:
+//
+//   - An older binary READING that store sees no pin and therefore refuses to
+//     speak https to the bus (transportSecurity). It fails CLOSED, which is the
+//     right direction, rather than connecting unverified.
+//   - An older binary WRITING that store re-marshals the credentials without a
+//     `bus_fingerprints` field it does not know, and the accept-set is
+//     PERMANENTLY LOST. That is not a silent downgrade of trust — the identity
+//     is then unpinned and https is refused — but it is unrecoverable from the
+//     file, so the operator must re-pin. Store.AddBusPin deliberately permits an
+//     https identity with an empty set for exactly this case, so the recovery is
+//     `agent-busctl pin add <hex>` rather than a full re-enrolment.
+//
+// A record that already has bus_fingerprints is left alone: the new field wins,
+// so a store written by this build is never reinterpreted through the old one.
+func migrateLegacyBusFingerprints(raw []byte, d *storeData) {
+	var legacy struct {
+		Credentials []struct {
+			AgentID        string `json:"agent_id"`
+			BusFingerprint string `json:"bus_fingerprint"`
+		} `json:"identities"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		// Unreachable: the caller has already decoded this document. A failure
+		// here means no legacy values are recoverable, which leaves the affected
+		// identity unpinned — and unpinned means REFUSED over https, never
+		// unverified.
+		return
+	}
+	for _, l := range legacy.Credentials {
+		if l.BusFingerprint == "" {
+			continue
+		}
+		i := findCredential(d.Credentials, l.AgentID)
+		if i < 0 || len(d.Credentials[i].BusFingerprints) > 0 {
+			continue
+		}
+		d.Credentials[i].BusFingerprints = []string{l.BusFingerprint}
+	}
+}
+
+// AddBusPin adds pin to ref's accept-set, under the store lock.
+//
+// See Client.AddBusPin for what this is for and why the fingerprint must have
+// been confirmed out of band. The refusals here are the substantive part:
+//
+//   - A PLAINTEXT identity cannot gain a pin. It enrolled over http, where there
+//     is no certificate, so an accept-set for it would be a check that never
+//     runs — the same reason transportSecurity refuses --bus-fingerprint on an
+//     http URL. Re-enrol against the https URL instead.
+//   - At MaxBusPins the add is refused rather than evicting the oldest (see
+//     BusPinSet.With and MaxBusPins).
+//   - Adding a pin already held succeeds and writes nothing new, so re-running
+//     the command after an interrupted rollover is safe.
+//
+// It deliberately does NOT refuse an https identity whose set is EMPTY, even
+// though enrolment cannot produce one. The security gate found the wedge: a
+// downgrade to a build that does not know `bus_fingerprints` REWRITES the store
+// without the field, so an upgraded identity can legitimately be https and
+// unpinned — and refusing there would leave logout plus a full re-enrolment as
+// the only recovery, which is the outcome this whole task exists to remove.
+// On whether that "narrows" — an earlier draft said it strictly did, and the
+// security gate asked for both paths to be written down, because they differ:
+//
+//   - Against a set that already has members, adding does not narrow; it widens
+//     by one, bounded at MaxBusPins, every member operator-granted.
+//   - Against an EMPTY set it goes from "refused, no pin" to "exactly this one
+//     accepted". In lattice terms that is a widening too. It is justified
+//     because the new pin has IDENTICAL PROVENANCE to an enrolment pin — an
+//     operator argument, confirmed out of band — and because the state it
+//     replaces is unusable rather than safe.
+//
+// Either way, nothing is accepted that an operator did not name.
+func (s *Store) AddBusPin(ref string, pin BusFingerprint) (Identity, error) {
+	var out Identity
+	err := s.update(func(d *storeData) error {
+		i, cred, err := locateForPin(*d, ref)
+		if err != nil {
+			return err
+		}
+		current, err := ParseBusPinSet(cred.BusFingerprints)
+		if err != nil {
+			return err
+		}
+		if isPlaintextBusURL(cred.BusURL) {
+			return newError(KindUsage, "pin",
+				"identity "+cred.AgentID+" enrolled against "+cred.BusURL+", which is a plaintext URL and presents no certificate",
+				"a pin there would be a check that never runs. If this bus now serves TLS, enrol against its https URL with `agent-busctl enrol --bus <https-url> --bus-fingerprint <hex> --name <name>`")
+		}
+		updated, err := current.With(pin)
+		if err != nil {
+			return err
+		}
+		d.Credentials[i].BusFingerprints = updated.Strings()
+		out = d.Credentials[i].Identity
+		return nil
+	})
+	if err != nil {
+		return Identity{}, err
+	}
+	return out, nil
+}
+
+// RemoveBusPin retires pin from ref's accept-set, under the store lock.
+//
+// Removing the LAST pin is refused. An https identity with an empty set cannot
+// connect at all (transportSecurity), so the command would read as a tidy-up
+// and land as a lockout; `logout` is the operation that means "stop using this
+// identity", and it says so.
+//
+// Removing a pin that is not held is an error rather than a no-op: the operator
+// believes they retired a certificate, and letting a mistyped fingerprint
+// report success would leave the real one still accepted.
+//
+// It parses the stored set LENIENTLY, dropping entries it cannot read, where
+// AddBusPin refuses outright. The asymmetry is deliberate and the security gate
+// found the case that needs it: a single unparseable fingerprint in a
+// hand-edited store made this fail — while the over-cap message at
+// Client.storedPins points the operator at exactly this command to repair it.
+// Removal can only ever NARROW what is accepted, so proceeding past a garbage
+// entry cannot admit anything; refusing to proceed can lock the store shut.
+//
+// It does NOT repair every damaged shape, and the reviewer gate was right that
+// an earlier draft of this comment implied it did. A set of {garbage, valid}
+// still has no way out through these commands: removing the valid entry hits
+// the last-pin refusal below, and the garbage entry cannot even be NAMED,
+// because Client.RemoveBusPin parses its argument strictly (as it must — the
+// argument is operator input, not stored data). Such a store needs the file
+// edited or the identity re-enrolled. That is a hand-edit-only state, and
+// widening the argument parser to reach it would mean accepting a malformed
+// fingerprint on the command line, which is a worse trade.
+func (s *Store) RemoveBusPin(ref string, pin BusFingerprint) (Identity, error) {
+	var out Identity
+	err := s.update(func(d *storeData) error {
+		i, cred, err := locateForPin(*d, ref)
+		if err != nil {
+			return err
+		}
+		current := parseBusPinSetLenient(cred.BusFingerprints)
+		if !current.Contains(pin) {
+			return newError(KindUsage, "pin",
+				"identity "+cred.AgentID+" does not accept certificate "+pin.String(),
+				"it accepts "+current.String()+"; list them with `agent-busctl pin list`")
+		}
+		if current.Len() == 1 {
+			return newError(KindUsage, "pin",
+				"refusing to remove the last pinned certificate from identity "+cred.AgentID,
+				"an identity with no pin cannot connect to an https bus at all, so this would be a lockout rather than a tidy-up. Add the replacement first (`agent-busctl pin add <new>`) and retire this one after, or `agent-busctl logout "+cred.AgentID+"` if you mean to stop using the identity")
+		}
+		updated, _ := current.Without(pin)
+		d.Credentials[i].BusFingerprints = updated.Strings()
+		out = d.Credentials[i].Identity
+		return nil
+	})
+	if err != nil {
+		return Identity{}, err
+	}
+	return out, nil
+}
+
+// isPlaintextBusURL reports whether a recorded bus URL is an http one, i.e. one
+// that presents no certificate for a pin to check.
+//
+// It parses rather than prefix-matching, so "https://…" cannot be read as
+// plaintext by a sloppy comparison. An UNPARSEABLE URL is reported as NOT
+// plaintext: that direction merely allows a pin to be recorded against an
+// address nothing can connect to, whereas the other would refuse a legitimate
+// https identity over a stored value this function could not read.
+func isPlaintextBusURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http"
+}
+
+// locateForPin resolves ref to an index into d.Credentials, so a pin mutation
+// edits the stored record rather than a copy of it.
+func locateForPin(d storeData, ref string) (int, Credential, error) {
+	cred, err := resolveIn(d, ref)
+	if err != nil {
+		return 0, Credential{}, err
+	}
+	i := findCredential(d.Credentials, cred.AgentID)
+	if i < 0 {
+		return 0, Credential{}, newError(KindConfig, "pin",
+			"identity "+cred.AgentID+" is not in the credential store",
+			"list the enrolled identities with `agent-busctl whoami --all`")
+	}
+	return i, d.Credentials[i], nil
 }
 
 // save writes the store atomically: a fresh 0600 temp file in the same

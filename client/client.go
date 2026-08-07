@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,13 @@ type Client struct {
 	// pin is Config.BusFingerprint, parsed once in New so a typo fails at
 	// construction and names the flag rather than surfacing mid-handshake.
 	// Zero means "none was given explicitly"; the identity may still carry one.
+	//
+	// It is deliberately ONE fingerprint, not a set, even though the stored
+	// identity now holds a set. A flag is a per-invocation assertion about which
+	// certificate is on the other end, and it NARROWS — a caller who names one
+	// certificate is saying "this one", not "these as well". Widening the
+	// accept-set is an operator act on the STORE (Store.AddBusPin), so that it
+	// is deliberate, durable and auditable rather than a shell-history artefact.
 	pin BusFingerprint
 
 	// sleepFn overrides the backoff sleep in tests. Nil in production.
@@ -40,13 +48,13 @@ type Client struct {
 	//
 	// It cannot be built in New: the bus URL may come from the selected
 	// identity and the pinned fingerprint may come from the same record, so
-	// neither is known until the first request resolves them. httpPin is the
-	// fingerprint http was built for; when the resolved pin differs — the
-	// caller switched identity, or supplied one explicitly — the transport is
-	// rebuilt rather than reused, because a pooled connection was verified
-	// against the OLD pin.
-	http    HTTPDoer
-	httpPin BusFingerprint
+	// neither is known until the first request resolves them. httpPins is the
+	// accept-set http was built for; when the resolved set differs — the caller
+	// switched identity, supplied a fingerprint explicitly, or added/retired a
+	// pin — the transport is rebuilt rather than reused, because a pooled
+	// connection was verified against the OLD set.
+	http     HTTPDoer
+	httpPins BusPinSet
 
 	// cred caches the resolved credential so a command that touches the store
 	// twice does not read and parse it twice.
@@ -122,78 +130,104 @@ func New(cfg Config) (*Client, error) {
 // They are resolved as one thing on purpose: an address without its pin is the
 // input to a trust-on-first-use connection, and keeping the two in separate
 // functions is how a caller ends up with one and not the other.
-func (c *Client) endpoint() (*url.URL, BusFingerprint, error) {
+func (c *Client) endpoint() (*url.URL, BusPinSet, error) {
 	u, err := c.resolveBusURL()
 	if err != nil {
-		return nil, BusFingerprint{}, err
+		return nil, BusPinSet{}, err
 	}
-	pin, err := c.resolvePin(u)
+	pins, err := c.resolvePins(u)
 	if err != nil {
-		return nil, BusFingerprint{}, err
+		return nil, BusPinSet{}, err
 	}
-	return u, pin, nil
+	return u, pins, nil
 }
 
-// resolvePin returns the fingerprint the bus at u must present.
+// resolvePins returns the SET of certificates the bus at u may present.
 //
 // The order matches every other setting (CONTRACTS-CLI.md): the explicit
-// --bus-fingerprint / AGENT_BUS_FINGERPRINT value, else the one recorded on the
-// selected identity at enrolment. With one addition that is specific to a
-// security pin:
+// --bus-fingerprint / AGENT_BUS_FINGERPRINT value, else the set recorded on the
+// selected identity. With two additions that are specific to a security pin:
 //
-//   - The STORED pin is used only for the bus it was stored for. It is
+//   - The STORED set is used only for the bus it was stored for. It is
 //     recorded next to that identity's BusURL, and applying it to a different
 //     --bus would be pinning bus A's certificate on bus B — which fails every
 //     connection and reads as a broken client rather than as a mistake.
-//   - When both exist and DISAGREE, this is a hard refusal, not a precedence
-//     question. One of the two is wrong about which bus this is, and silently
-//     preferring the value that arrived on the command line is precisely how an
-//     operator is talked into re-pinning: "it did not work, so I passed the
-//     fingerprint the other end gave me". Refusing makes the disagreement
-//     visible, which is the only way it gets checked out of band.
+//   - An explicit fingerprint NARROWS the stored set to that one certificate;
+//     it never widens it. Passing --bus-fingerprint <one of the two we accept>
+//     mid-rollover is a legitimate way to insist on one side of the rollover,
+//     and it is strictly stronger than the stored set, so it is allowed. A
+//     fingerprint that is NOT in the stored set is a hard refusal, not a
+//     precedence question: one of the two is wrong about which bus this is, and
+//     silently preferring the value that arrived on the command line is exactly
+//     how an operator is talked into re-pinning ("it did not work, so I passed
+//     the fingerprint the other end gave me"). Refusing makes the disagreement
+//     visible, which is the only way it gets checked out of band. Widening is
+//     available — deliberately, durably and only through Store.AddBusPin.
 //
 // A missing or unreadable identity is NOT an error here — enrolment happens
 // before any identity exists, and that is the case that most needs a pin.
-func (c *Client) resolvePin(u *url.URL) (BusFingerprint, error) {
-	stored, err := c.storedPin(u)
+func (c *Client) resolvePins(u *url.URL) (BusPinSet, error) {
+	stored, err := c.storedPins(u)
 	if err != nil {
-		return BusFingerprint{}, err
+		return BusPinSet{}, err
 	}
 	switch {
 	case c.pin.IsZero():
 		return stored, nil
-	case stored.IsZero(), c.pin.Equal(stored):
-		return c.pin, nil
+	case stored.IsEmpty(), stored.Contains(c.pin):
+		return NewBusPinSet(c.pin), nil
 	default:
-		return BusFingerprint{}, newError(KindUsage, "config",
-			"--bus-fingerprint says "+c.pin.String()+" but the stored identity for "+u.String()+" pinned "+stored.String(),
-			"these name two different certificates and one of them is wrong. Confirm which is genuine OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup) before doing anything else; then either drop the flag, or `agent-busctl logout` that identity and enrol again against the fingerprint you confirmed")
+		remedy := "these name different certificates and one of them is wrong. Confirm which is genuine OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup) before doing anything else; " +
+			"then either drop the flag, or — if the bus is rotating and the new certificate is genuine — `agent-busctl pin add " + c.pin.String() + "` to accept it alongside the old one for the rollover. " +
+			"To replace the pin outright, `agent-busctl logout` that identity and enrol again against the fingerprint you confirmed"
+		return BusPinSet{}, newError(KindUsage, "config",
+			"--bus-fingerprint says "+c.pin.String()+" but the stored identity for "+u.String()+" accepts "+stored.String(),
+			remedy)
 	}
 }
 
-// storedPin returns the fingerprint recorded on the selected identity, but only
+// storedPins returns the accept-set recorded on the selected identity, but only
 // when that identity was enrolled with the bus at u.
-func (c *Client) storedPin(u *url.URL) (BusFingerprint, error) {
+func (c *Client) storedPins(u *url.URL) (BusPinSet, error) {
 	cred, err := c.credential()
 	if err != nil {
 		// No identity, or none selected. Not a pin problem: the caller is
 		// enrolling, and the operations that need an identity raise this
 		// themselves with a better message.
-		return BusFingerprint{}, nil
+		return BusPinSet{}, nil
 	}
-	if cred.BusFingerprint == "" || cred.BusURL != u.String() {
-		return BusFingerprint{}, nil
+	if len(cred.BusFingerprints) == 0 || cred.BusURL != u.String() {
+		return BusPinSet{}, nil
 	}
-	pin, err := ParseBusFingerprint(cred.BusFingerprint)
+	pins, err := ParseBusPinSet(cred.BusFingerprints)
 	if err != nil {
 		// Stored, and unreadable. Fail rather than fall back to "no pin": that
 		// fallback would turn a damaged credential store into an unpinned
 		// connection, which is the one outcome that must never happen quietly.
-		return BusFingerprint{}, newError(KindConfig, "config",
-			"the certificate fingerprint stored for identity "+cred.AgentID+" is not a valid fingerprint",
-			"the credential store may be damaged; pass --bus-fingerprint <hex> for this command, or `agent-busctl logout "+cred.AgentID+"` and enrol again")
+		// The remedy deliberately does NOT offer --bus-fingerprint. Both gates
+		// caught the earlier wording, which named it: resolvePins calls this
+		// function FIRST and returns its error before c.pin is ever consulted,
+		// so the flag could not have helped — and a remedy that does not work
+		// sends the operator looking for the flag that turns the check off (see
+		// pinError). Nor should the flag be made to override an unreadable
+		// store: that is precisely how a damaged store becomes an unpinned
+		// connection.
+		return BusPinSet{}, newError(KindConfig, "config",
+			"the certificate fingerprints stored for identity "+cred.AgentID+" are not all valid fingerprints",
+			"the credential store is damaged. Inspect it with `agent-busctl pin list`; if a readable pin remains, `agent-busctl pin remove <the unreadable one>` — otherwise `agent-busctl logout "+cred.AgentID+"` and enrol again with the fingerprint from the invite")
 	}
-	return pin, nil
+	if pins.Len() > MaxBusPins {
+		// Only reachable through a hand-edited store: AddBusPin refuses past the
+		// cap. Refused HERE, at connection time, rather than at load, so that
+		// `agent-busctl pin list` and `pin remove` — the two commands that fix
+		// it — still work. An accept-set that has grown without bound is the
+		// "accept every certificate this bus ever had" failure the cap exists to
+		// prevent, so it must not be quietly honoured.
+		return BusPinSet{}, newError(KindConfig, "config",
+			"identity "+cred.AgentID+" accepts "+strconv.Itoa(pins.Len())+" bus certificates, more than the maximum of "+strconv.Itoa(MaxBusPins),
+			"a rollover needs two at most, so a larger set means the store was edited by hand. Inspect it with `agent-busctl pin list` and retire the certificates the bus no longer serves with `agent-busctl pin remove <fingerprint>`")
+	}
+	return pins, nil
 }
 
 // doer returns the transport for one bus, building it on first use and reusing
@@ -201,7 +235,7 @@ func (c *Client) storedPin(u *url.URL) (BusFingerprint, error) {
 //
 // The security decision (transportSecurity) is made BEFORE the cache is
 // consulted, so a refusal cannot be skipped by an earlier call having succeeded.
-func (c *Client) doer(u *url.URL, pin BusFingerprint) (HTTPDoer, error) {
+func (c *Client) doer(u *url.URL, pins BusPinSet) (HTTPDoer, error) {
 	if c.cfg.HTTPClient != nil {
 		// The embedder's own transport. Documented on Config.HTTPClient as
 		// bypassing this package's TLS configuration entirely — including the
@@ -210,15 +244,15 @@ func (c *Client) doer(u *url.URL, pin BusFingerprint) (HTTPDoer, error) {
 		// package or the CLI ever sets it.
 		return c.cfg.HTTPClient, nil
 	}
-	if err := transportSecurity(u, pin); err != nil {
+	if err := transportSecurity(u, pins); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.http == nil || !c.httpPin.Equal(pin) {
+	if c.http == nil || !c.httpPins.Equal(pins) {
 		closeIdleConnections(c.http)
-		c.http = newHTTPClient(pin)
-		c.httpPin = pin
+		c.http = newHTTPClient(pins)
+		c.httpPins = pins
 	}
 	return c.http, nil
 }
@@ -226,9 +260,9 @@ func (c *Client) doer(u *url.URL, pin BusFingerprint) (HTTPDoer, error) {
 // closeIdleConnections drops the sockets of a transport that has been
 // superseded, instead of leaving them to IdleConnTimeout's 90 seconds.
 //
-// This is hygiene, NOT the security control — a transport built for pin A
-// structurally cannot accept a certificate matching pin B, so a lingering
-// socket could never carry a wrongly-verified request. What it avoids is a
+// This is hygiene, NOT the security control — a transport built for accept-set
+// A structurally cannot accept a certificate outside A, so a lingering socket
+// could never carry a wrongly-verified request. What it avoids is a
 // client that switched identity holding open connections to a bus it has
 // stopped talking to, which is confusing to anyone reading netstat during an
 // incident.
@@ -472,8 +506,73 @@ func (c *Client) forgetIdentity() {
 	c.session = nil
 	closeIdleConnections(c.http)
 	c.http = nil
-	c.httpPin = BusFingerprint{}
+	c.httpPins = BusPinSet{}
 	c.mu.Unlock()
+}
+
+// AddBusPin records fingerprint as a certificate identity ref will ALSO accept,
+// and returns the updated identity.
+//
+// # This is the operator act that makes a rollover survivable
+//
+// DECISIONS.md E3: a rotating bus serves TWO certificates during rollover so
+// clients can re-pin without downtime, and "rotation must never require every
+// client to re-enrol — that would make routine key hygiene indistinguishable
+// from a security incident". This is how a client is told about the incoming
+// certificate BEFORE it appears, or told to accept it after a refusal, without
+// dropping the outgoing one and without a re-enrolment.
+//
+// # fingerprint MUST have been confirmed out of band
+//
+// It is an argument, from the operator, and it is never the value the bus just
+// presented. Nothing in this package derives a fingerprint from a live
+// certificate and stores it — that is trust-on-first-use, which invariant 11
+// abolished, and TestPinIsNeverLearnedFromAHandshake is its standing guard. The
+// mismatch error prints the presented value precisely so a HUMAN can compare it
+// against the bus's `bus_cert_fingerprint=…` startup log before running this.
+//
+// It lives on Client, not only in the CLI, because cmd/agent-busctl is a THIN
+// shell (invariant 7): an agent that embeds this package must be able to survive
+// a rotation too.
+func (c *Client) AddBusPin(ref, fingerprint string) (Identity, error) {
+	pin, err := ParseBusFingerprint(strings.TrimSpace(fingerprint))
+	if err != nil {
+		return Identity{}, err
+	}
+	id, err := c.store.AddBusPin(ref, pin)
+	if err != nil {
+		return Identity{}, err
+	}
+	// The cached credential AND the cached transport are both stale now: the
+	// transport was built to accept the OLD set, and reusing it would leave the
+	// newly-accepted certificate refused until the process restarted.
+	c.forgetIdentity()
+	return id, nil
+}
+
+// RemoveBusPin retires fingerprint from identity ref's accept-set and returns
+// the updated identity.
+//
+// Retiring is as deliberate as adding, and for the same reason: a set that only
+// ever grows becomes "accept every certificate this bus has ever had", so a
+// certificate compromised two rotations ago would still be honoured. It is the
+// SECOND half of a rollover and skipping it leaves the fleet permanently wider
+// than it needs to be.
+//
+// Removing the last remaining pin is REFUSED (Store.RemoveBusPin). An identity
+// on an https bus with an empty set cannot connect at all, so the operation
+// would look like a tidy-up and land as a lockout.
+func (c *Client) RemoveBusPin(ref, fingerprint string) (Identity, error) {
+	pin, err := ParseBusFingerprint(strings.TrimSpace(fingerprint))
+	if err != nil {
+		return Identity{}, err
+	}
+	id, err := c.store.RemoveBusPin(ref, pin)
+	if err != nil {
+		return Identity{}, err
+	}
+	c.forgetIdentity()
+	return id, nil
 }
 
 // contextWithTimeout applies Config.Timeout when ctx has no deadline of its

@@ -77,7 +77,33 @@
 // flag, not as a fallback, not for tests. The fingerprint comes from the invite
 // (today: Config.BusFingerprint, AGENT_BUS_FINGERPRINT, or the selected
 // identity, which recorded it at enrolment), and a bus that presents a
-// different certificate is a hard, unretried failure.
+// certificate outside the accept-set is a hard, unretried failure.
+//
+// # Rotation: an identity accepts a SET of certificates, bounded at MaxBusPins
+//
+// A bus rotating its key serves TWO certificates during rollover (DECISIONS.md
+// E3), so an identity holds a SET of accepted fingerprints rather than one
+// (MTLS-ROTATE, 2026-08-07). Without that, the first routine rotation would
+// wedge every enrolled agent at once — and a wedged fleet is the pressure under
+// which somebody proposes letting --bus-fingerprint override the stored pin,
+// which would turn a DETECTED substitution into an ACCEPTED one. Rotation is
+// made to work; the check is not softened.
+//
+// A pin enters the set ONLY by an explicit operator act: the invite's
+// fingerprint at enrolment, or Client.AddBusPin (`agent-busctl pin add`) with a
+// value confirmed OUT OF BAND. It is NEVER learned from a handshake — that is
+// TOFU in a different hat — and Client.RemoveBusPin ends the rollover, because
+// a set that only ever grows becomes "accept every certificate this bus has
+// ever had". TestPinIsNeverLearnedFromAHandshake guards it. Its BEHAVIOURAL
+// half is the load-bearing one: the persisted set is unchanged across refused
+// and successful handshakes alike. Its structural half raises the cost — pin.go
+// holds raw certificate bytes and cannot reach the credential store, it is the
+// only non-test file deriving a fingerprint from DER, and the pin-writing calls
+// are confined to named files — but it is a cost, not a proof; see BusPinSet.
+//
+// An explicit --bus-fingerprint NARROWS the stored set to that one certificate
+// and never widens it; naming a certificate the identity does not accept is a
+// refusal, not a precedence question (Client.resolvePins).
 //
 // CERTIFICATE VERIFICATION IS NEVER DISABLED — it is REPLACED. pinnedTLSConfig
 // turns off the stdlib's default chain check, which cannot succeed against a

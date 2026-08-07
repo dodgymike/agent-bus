@@ -160,8 +160,8 @@ func TestClientPinsBusFingerprintAtEnrol(t *testing.T) {
 		if res.AgentID != "bus-testbus.planner" {
 			t.Errorf("agent id = %q, want the server-minted bus-testbus.planner", res.AgentID)
 		}
-		if res.BusFingerprint != pin.String() {
-			t.Errorf("result records fingerprint %q, want %q", res.BusFingerprint, pin.String())
+		if got := res.BusFingerprints; len(got) != 1 || got[0] != pin.String() {
+			t.Errorf("result records fingerprints %q, want exactly [%s]", got, pin)
 		}
 		if atomic.LoadInt32(&hits) != 1 {
 			t.Errorf("the bus saw %d enrol requests, want 1", atomic.LoadInt32(&hits))
@@ -176,8 +176,8 @@ func TestClientPinsBusFingerprintAtEnrol(t *testing.T) {
 		if len(ids) != 1 {
 			t.Fatalf("stored %d identities, want 1", len(ids))
 		}
-		if ids[0].BusFingerprint != pin.String() {
-			t.Errorf("stored identity pins %q, want %q — without this, every later command would need --bus-fingerprint again", ids[0].BusFingerprint, pin.String())
+		if got := ids[0].BusFingerprints; len(got) != 1 || got[0] != pin.String() {
+			t.Errorf("stored identity pins %q, want exactly [%s] — without this, every later command would need --bus-fingerprint again", got, pin)
 		}
 
 		// And the stored pin is enough on its own: a fresh client with NO
@@ -186,15 +186,15 @@ func TestClientPinsBusFingerprintAtEnrol(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New (second client): %v", err)
 		}
-		u, gotPin, err := c2.endpoint()
+		u, gotPins, err := c2.endpoint()
 		if err != nil {
 			t.Fatalf("resolving the endpoint from the stored identity alone: %v", err)
 		}
 		if u.String() != bus.URL() {
 			t.Errorf("resolved bus %q, want %q", u.String(), bus.URL())
 		}
-		if !gotPin.Equal(pin) {
-			t.Errorf("resolved pin %s, want the stored %s", gotPin, pin)
+		if !gotPins.Equal(NewBusPinSet(pin)) {
+			t.Errorf("resolved accept-set %s, want exactly the stored %s", gotPins, pin)
 		}
 	})
 
@@ -381,8 +381,8 @@ func TestPinnedRemedyActuallyWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("step 2 of the remedy (enrol with the new fingerprint) failed: %v — the printed remedy is a dead end", err)
 	}
-	if out.BusFingerprint != fingerprintOf(rotated).String() {
-		t.Errorf("the recovered identity pins %q, want the rotated %q", out.BusFingerprint, fingerprintOf(rotated))
+	if got := out.BusFingerprints; len(got) != 1 || got[0] != fingerprintOf(rotated).String() {
+		t.Errorf("the recovered identity pins %q, want exactly the rotated [%s]", got, fingerprintOf(rotated))
 	}
 
 	// And the ENROL-WITHOUT-LOGOUT shortcut is still refused, which is why the
@@ -417,32 +417,40 @@ func TestVerifyPinnedBusCertificateRejects(t *testing.T) {
 	b := newSelfSignedBusCert(t)
 	pinA := fingerprintOf(a)
 
+	pinB := fingerprintOf(b)
+	c := newSelfSignedBusCert(t)
+
 	tests := []struct {
 		name     string
-		pin      BusFingerprint
+		pins     BusPinSet
 		rawCerts [][]byte
 		wantErr  error
 	}{
-		{"the pinned certificate", pinA, a.Certificate, nil},
-		{"a different certificate", pinA, b.Certificate, ErrBusFingerprintMismatch},
-		{"no certificate at all", pinA, nil, ErrBusPresentedNoCertificate},
-		{"an empty leaf", pinA, [][]byte{{}}, ErrBusPresentedNoCertificate},
-		{"a zero pin never matches", BusFingerprint{}, a.Certificate, ErrBusFingerprintMismatch},
-		{"a zero pin with no certificate", BusFingerprint{}, nil, ErrBusFingerprintMismatch},
+		{"the pinned certificate", NewBusPinSet(pinA), a.Certificate, nil},
+		{"a different certificate", NewBusPinSet(pinA), b.Certificate, ErrBusFingerprintMismatch},
+		{"no certificate at all", NewBusPinSet(pinA), nil, ErrBusPresentedNoCertificate},
+		{"an empty leaf", NewBusPinSet(pinA), [][]byte{{}}, ErrBusPresentedNoCertificate},
+		{"an EMPTY set never matches", BusPinSet{}, a.Certificate, ErrBusFingerprintMismatch},
+		{"an empty set with no certificate", BusPinSet{}, nil, ErrBusFingerprintMismatch},
+		{"a set built from only the zero fingerprint is empty and matches nothing", NewBusPinSet(BusFingerprint{}), a.Certificate, ErrBusFingerprintMismatch},
+		// The rollover set: either member is accepted, and ONLY those two.
+		{"the first member of a rollover set", NewBusPinSet(pinA, pinB), a.Certificate, nil},
+		{"the second member of a rollover set", NewBusPinSet(pinA, pinB), b.Certificate, nil},
+		{"a third certificate against a rollover set", NewBusPinSet(pinA, pinB), c.Certificate, ErrBusFingerprintMismatch},
 		{
 			// The pinned certificate presented as an ISSUER rather than as the
 			// leaf. rawCerts[0] is the leaf by definition, and a bus that put
 			// the pinned certificate deeper in a chain it invented is not the
 			// pinned bus.
 			"the pinned certificate below the leaf",
-			pinA,
+			NewBusPinSet(pinA),
 			[][]byte{b.Certificate[0], a.Certificate[0]},
 			ErrBusFingerprintMismatch,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyPinnedBusCertificate(tc.pin, tc.rawCerts)
+			err := verifyPinnedBusCertificate(tc.pins, tc.rawCerts)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("rejected the pinned certificate: %v", err)
@@ -502,8 +510,8 @@ func TestPinConflictBetweenFlagAndStoreIsRefused(t *testing.T) {
 	}
 	if _, got, err := agreeing.endpoint(); err != nil {
 		t.Fatalf("repeating the stored fingerprint was refused: %v", err)
-	} else if !got.Equal(pin) {
-		t.Errorf("resolved pin %s, want %s", got, pin)
+	} else if !got.Equal(NewBusPinSet(pin)) {
+		t.Errorf("resolved accept-set %s, want %s", got, pin)
 	}
 }
 

@@ -131,11 +131,9 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 	return env.out.Emit(res, func(w io.Writer) {
 		fmt.Fprintf(w, "enrolled as %s\n", res.AgentID)
 		fmt.Fprintf(w, "  bus        %s (%s)\n", res.BusID, res.BusURL)
-		if res.BusFingerprint != "" {
-			// Echoed so the operator can compare it against the invite they
-			// were given, at the one moment they still have it to hand.
-			fmt.Fprintf(w, "  cert       %s (pinned)\n", res.BusFingerprint)
-		}
+		// Echoed so the operator can compare it against the invite they were
+		// given, at the one moment they still have it to hand.
+		writePinnedCerts(w, "  cert       ", res.BusFingerprints)
 		fmt.Fprintf(w, "  name       %s\n", res.Name)
 		fmt.Fprintf(w, "  enrolled   %s\n", res.EnrolledAt)
 		if res.Stored {

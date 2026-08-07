@@ -73,12 +73,13 @@ const (
 // TLS mandatory with SELF-SIGNED certificates and the bus's certificate
 // fingerprint PINNED — no CA, and explicitly no trust-on-first-use.
 //
-// pin is the fingerprint the bus's certificate must have. A ZERO pin means "no
-// pin", and is legal ONLY for a plaintext loopback URL: transportSecurity
-// refuses an https bus without one BEFORE this function is reached, so there is
-// no path on which an unpinned TLS transport is built. It is spelled as a
-// second branch here rather than an unconditional pinnedTLSConfig call because
-// a pinnedTLSConfig(zero) would be a config that disables the default check and
+// pins is the SET of certificates the bus may present — one normally, two for
+// the duration of a rollover (MTLS-ROTATE). An EMPTY set means "no pin", and is
+// legal ONLY for a plaintext loopback URL: transportSecurity refuses an https
+// bus without one BEFORE this function is reached, so there is no path on which
+// an unpinned TLS transport is built. It is spelled as a second branch here
+// rather than an unconditional pinnedTLSConfig call because a
+// pinnedTLSConfig(empty) would be a config that disables the default check and
 // then matches nothing — a confusing failure instead of a clear refusal.
 //
 // CERTIFICATE VERIFICATION IS NEVER DISABLED. It is REPLACED, on the pinned
@@ -95,13 +96,13 @@ const (
 // draws the wrong conclusion about which branch runs. Nothing else on Config
 // affects the transport: the timeout lives on the context, and the retry policy
 // lives in do(). If that changes, pass the field, not the whole Config.
-func newHTTPClient(pin BusFingerprint) HTTPDoer {
+func newHTTPClient(pins BusPinSet) HTTPDoer {
 	// The pinned configuration, or — for the plaintext loopback case that is
 	// all the bus serves until MTLS-LISTENER lands — the platform defaults with
 	// verification fully ON.
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-	if !pin.IsZero() {
-		tlsConfig = pinnedTLSConfig(pin)
+	if !pins.IsEmpty() {
+		tlsConfig = pinnedTLSConfig(pins)
 	}
 	return &http.Client{
 		Transport: &http.Transport{
@@ -210,17 +211,17 @@ type response struct {
 //     would hand back exactly the false sense of security this task exists to
 //     prevent. (Plaintext at all is already limited to loopback by
 //     parseBusURL.)
-func transportSecurity(u *url.URL, pin BusFingerprint) error {
+func transportSecurity(u *url.URL, pins BusPinSet) error {
 	switch u.Scheme {
 	case "https":
-		if pin.IsZero() {
+		if pins.IsEmpty() {
 			return newError(KindConfig, "config",
 				"no certificate fingerprint is pinned for "+u.String()+", and this client will not accept a certificate it was not told to expect",
 				"agent-bus certificates are self-signed, there is no certificate authority, and there is deliberately no trust-on-first-use: pass --bus-fingerprint <hex> (env "+
 					EnvBusFingerprint+") with the value from the invite, or enrol against this bus so the fingerprint is stored with the identity")
 		}
 	case "http":
-		if !pin.IsZero() {
+		if !pins.IsEmpty() {
 			return newError(KindUsage, "config",
 				"a certificate fingerprint is pinned for "+u.String()+", but that is a plaintext URL and has no certificate to check",
 				"use https:// so the fingerprint can actually be verified, or drop --bus-fingerprint / "+EnvBusFingerprint+" — it would otherwise look like a check that is not happening")
@@ -242,11 +243,11 @@ func transportSecurity(u *url.URL, pin BusFingerprint) error {
 
 // do executes req with retries and decodes the response.
 func (c *Client) do(ctx context.Context, req request) (*response, error) {
-	base, pin, err := c.endpoint()
+	base, pins, err := c.endpoint()
 	if err != nil {
 		return nil, err
 	}
-	doer, err := c.doer(base, pin)
+	doer, err := c.doer(base, pins)
 	if err != nil {
 		return nil, err
 	}

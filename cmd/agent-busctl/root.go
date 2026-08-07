@@ -147,6 +147,7 @@ func commands() []command {
 		whoamiCommand(),
 		useCommand(),
 		logoutCommand(),
+		pinCommand(),
 		agentsCommand(),
 		sendCommand(),
 		broadcastCommand(),
@@ -377,6 +378,11 @@ NOTES
   different certificate the command FAILS and says so — that is either a
   rotation or an impostor, and they look identical from here. There is no
   flag that turns the check off.
+
+  A ROTATION does not mean re-enrolling. A bus serves both certificates during
+  a rollover; ` + "`agent-busctl pin add <new>`" + ` accepts the incoming one alongside the
+  outgoing one, and ` + "`agent-busctl pin remove <old>`" + ` ends the rollover. Confirm the
+  new fingerprint OUT OF BAND first — nothing is ever pinned automatically.
 
   Enrolment is becoming invite-only and the bus is becoming TLS-only; both
   are in flight. See CONTRACTS-CLI.md for what is stable today.
