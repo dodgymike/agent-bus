@@ -1733,3 +1733,68 @@ The general sustained-ceiling concern is already tracked by IDEM-11-FU-THROUGHPU
 
 Not deployed: this is a code-only change to `internal/idem` and `internal/hub`, uncommitted at the
 time this decision was recorded.
+
+---
+
+## 2026-08-07 — ENROL-SHAPE: the final `/v1/enroll` shape and `auth.RosterEntry` field set
+
+Settles the P0 that blocked `AUTH-3`, `INVITE-STORE`, `INVITE-GATE`, `MTLS-BIND` and
+`AUTH-1-FU-POPKEY`. **Deliverable is this entry only** — `CONTRACTS-HTTP.md` documents SHIPPED
+behaviour and none of this has shipped.
+
+**Why one entry instead of three changes.** Three separately-filed tasks each rewrite `POST
+/v1/enroll`'s request body — the invite field, the client-cert fingerprint binding, and
+proof-of-possession. Landing them independently revises the same contract three times. Worse, the
+roster, sessions and the idempotency table are ALL in-memory today (`MemoryRoster`), so there is
+currently **nothing persisted to migrate** — and that window closes the moment `AUTH-3` makes the
+roster durable. Deciding the whole shape now costs a document; deciding it after `AUTH-3` costs three
+migrations and a forced re-enrolment of every agent.
+
+### The final `auth.RosterEntry` field set
+
+Today: `AgentID`, `Name`, `PublicKey`, `EnrolledAt`. The target adds four and renames one.
+
+- **`AuthPublicKey`** — renamed from `PublicKey`. With a messaging key alongside it, `PublicKey` no
+  longer says which key it is, and this codebase has repeatedly been bitten by names that quietly
+  stopped meaning what they said. The rename is free today and a breaking change once anything
+  persists it.
+- **`MessagingPublicKey`** — the second Ed25519 key. `SIGN` needs it, and auth/messaging separation
+  is already an invariant; storing them in one field would collapse a distinction the design depends
+  on.
+- **`InviteID`** — which invite this enrolment redeemed. This is provenance: it answers "who
+  authorised this agent onto the bus", and without it revocation and audit have nothing to join on.
+- **`Epoch`** — the enrolment epoch the hub already uses for the id-reuse fix. Currently derived;
+  storing it means the durable record carries it rather than reconstructing it on every boot.
+- **`CertBindings []CertBinding`** — a HISTORY, not a single fingerprint (see below).
+
+### Certificate bindings are a bounded history
+
+`CertBinding` = `{ Fingerprint [32]byte; BoundAt time.Time; RetiredAt *time.Time }`, where the
+fingerprint is `sha256.Sum256(cert.Raw)` — named explicitly so nobody invents a different one.
+
+A single current-fingerprint field would make a rotating agent look, for the duration of the
+rotation, like a *different agent* — which is precisely what invariant 1 says an id must never
+become. The bus already serves two certificates during its own rollover (2026-08-02); this is the
+client-side mirror of that decision, and the two should behave the same way or rotation is only half
+solved.
+
+Three rules, because a history is a place where bugs hide:
+
+1. **The history is BOUNDED.** An unbounded per-agent list is the same class of defect as the
+   unbounded applied-key table, and it is reachable by an agent that rotates in a loop.
+2. **Verification accepts any binding that is not retired.** Not "the newest" — during a rollover
+   both are legitimately live.
+3. **Retirement is EXPLICIT, never implicit-by-supersession.** An operator must be able to see when
+   an old certificate stopped being accepted. A binding that silently ages out is indistinguishable
+   from one that was revoked, and those need different responses.
+
+### Ordering rule
+
+**`AUTH-3` must encode this FULL field set, including fields nothing populates yet.** Writing the
+durable record once with reserved-but-empty fields is far cheaper than migrating it three times, and
+it is the whole reason `AUTH-3` was blocked rather than merely deprioritised.
+
+### Migration
+
+**None required, if this lands before `AUTH-3`.** Nothing is persisted today. That is the entire
+value of settling it now, and it evaporates the moment durable enrolment ships.
