@@ -2021,3 +2021,227 @@ the same shape.
 the persist-outside-the-log design; it also appears to be a near-duplicate of `MSG-FU-SEQHIGHWATER`
 (`6ebe51be`) and the two should be collapsed. Any test or comment asserting that ids may repeat after
 quarantine is asserting superseded behaviour and must be inverted, not preserved.
+
+## 2026-08-07 — RELAY-2 / RELAY-3: three decisions the relay plane rests on
+
+Recorded by `feature-runner` while landing RELAY-2 (message relay + ongoing roster sync) and RELAY-3
+(loop prevention via the traversed-bus path). All code is in `internal/relay`, which registers no
+route and is imported by nothing (`guards_test.go`); these decisions are therefore about shapes that
+are settled but not yet served.
+
+### 1. The relay idempotency fingerprint EXCLUDES `bus_path`
+
+**Decision.** `relayFingerprint` covers the message's identity-defining content — origin bus, origin
+message id, sender, broadcast flag, size, content hash, origin timestamp, recipients — and
+deliberately NOT the traversed bus path.
+
+**Why, and why the opposite is a trap.** The obvious implementation covers the whole envelope. It is
+wrong, and wrong in a way that only appears once the topology has more than two buses. In a mesh the
+SAME message reaches a bus by several routes, and each copy carries a different `bus_path` — that is
+the normal steady state, not an edge case. A path-covering fingerprint makes the second copy "same
+idempotency key, DIFFERENT payload", which is `idem.OutcomeViolation`, and invariant 10 mandates that
+a violation is rejected, logged **and the offending peer disconnected**. So covering the path would
+have correct peers disconnect each other as the ordinary behaviour of a correct mesh: a self-inflicted
+partition produced by the very mechanism meant to make retries safe. No two-node test would ever show
+it.
+
+**The rule that keeps it coherent:** the fingerprint covers CONTENT; the path is PER-COPY ROUTING
+METADATA. Changing the content is a violation; arriving by another route is not.
+
+`internal/relay/cycle_test.go` proves both halves — a full 3-bus mesh where each non-origin node
+receives the message twice and reports `duplicate:true` with zero violations, plus an explicit
+counterexample showing a hypothetical path-covering fingerprint *would* be adjudicated a violation.
+
+### 2. The relay idempotency key IS the origin's message id
+
+**Decision.** `ValidateRelayRequest` REFUSES any relay whose `Idempotency-Key` header is not
+byte-identical to the envelope's `message_id`.
+
+**Why it is a protocol rule and not a convention.** That identity is the only reason dedupe works in a
+cycle at all: it is what makes two copies arriving by two disjoint paths, from two different peers, at
+two different times, resolve to ONE `idem.Scope`. A peer free to mint a fresh key per hop would defeat
+invariant 10 **silently** — every copy would look new, every copy would be delivered, and nothing in
+the system would report an error. Silent failure is the reason this is enforced rather than
+documented.
+
+The shapes fit and the fit is executable rather than asserted (`relayKeyFitsIdemKey`, called from a
+test): `ids.MaxMessageIDLen` (85) < `idem.MaxKeyLen` (128), and every byte a message id can contain is
+a legal idempotency-key byte. A future widening of `ids.BusIDPattern` therefore fails a test here
+instead of quietly making relay undeliverable.
+
+### 3. A loop drop is HTTP 200, not an error status
+
+**Decision.** A message that has already traversed this bus is answered `200` with
+`{"accepted":false,"dropped_reason":"loop"}`.
+
+**Why.** Three reasons; the third is the load-bearing one and was NOT the reason first written down
+(the reviewer corrected it, and the correction is kept visible in the code comment rather than quietly
+swapped):
+
+1. A 5xx would have RELAY-4's retry/backoff re-deliver — forever — a message that can never be
+   accepted: the loop-prevention control would become the traffic amplifier it exists to prevent.
+   (This argument does not extend to a 4xx; a correct backoff policy does not retry those.)
+2. A 4xx would blame the sender for something it cannot know and cannot fix, and would be
+   indistinguishable from the malformed-envelope rejections that genuinely are its fault.
+3. **Structurally:** `Client.Relay` collapses every non-200 into `ErrPeerRefused`, so
+   `Forwarder.deliver` would count an ordinary cyclic drop as `Failed` and log it at Warn. A healthy
+   mesh's steady state would then be indistinguishable from a failing link, and `DropLoop` — the one
+   number that shows an operator the shape of their topology — would never be recorded at all.
+
+### What loop prevention is NOT, restated because it will be misread
+
+PROTOCOL.md §8.5 already settles it and this work does not reopen it: the traversed bus path is
+outside the signature and can never be inside it (it grows on every hop), so a lying peer can rewrite
+it, **including stripping us out of it, which defeats the check completely and is undetectable**.
+RELAY-3 bounds the TRAFFIC a cycle produces. It does not and cannot bound what a hostile peer
+delivers. Duplicate suppression rests on idempotency plus the origin identity; RELAY-3 COMPLEMENTS
+that and never substitutes for it, which is what invariant 10 requires in as many words.
+
+---
+
+## 2026-08-07 — MSG-FU-SUFFIXFLOOR (wiring): startup constructs the DURABLE suffix allocator, and every
+failure to prove the floors is FATAL
+
+Companion to the 2026-08-07 decision above ("the per-name agent-id suffix floor is a dedicated
+write-ahead file"). That decision shipped the allocator and explicitly recorded that `cmd/agent-bus`
+still built `ids.NewNameSuffixes()`, so a restarting bus still re-minted agent ids. This is the other
+half: the wiring, and the three judgement calls it forced.
+
+### 1. There is NO fallback to `ids.NewNameSuffixes()`, on any path — including a fresh data dir
+
+**Decision.** `cmd/agent-bus/main.go` constructs through `openSuffixAllocator`
+(`cmd/agent-bus/suffixfloors.go`): `ids.OpenNameSuffixes(dataDir)` → fold any derived backfill floors
+through `RaiseFloor` → `Seal()` **once**, error checked. Every failure returns an error from `run()`
+and the process exits non-zero. `ids.NewNameSuffixes` no longer appears in `cmd/` at all, and
+`TestNoFreshSuffixCounterInCmd` parses the package's AST on every run to keep it that way.
+
+**Why no "just for a fresh dir" fallback.** `OpenNameSuffixes` already handles a fresh dir — it
+reports `Existed() == false` and yields an empty floor map, which `Seal` then persists — so a
+fallback buys nothing and costs everything: it silently restores the defect while every other test
+stays green. That is the exact shape `ids.NewNameSuffixes`' own doc names as the one hole the seal
+does not close ("a caller whose per-name derivation FAILED and which then falls back to
+`NewNameSuffixes()` mints every name from 1, silently"). A loud, recoverable outage beats silent
+identity reuse; point 7 of the `ids.NameSuffixes` doc requires refusing to start rather than guessing.
+
+### 2. The legacy-dir backfill scans MESSAGE records, and a scan that cannot complete REFUSES TO BOOT
+
+**Decision.** On a data dir with no `agent-suffixes` file, the floors are derived from the SENDER and
+the RECIPIENTS of `store.RecordKind` records in the WAL (`walAgentIDFloors`). A derivation that
+cannot complete returns an error and startup FAILS.
+
+**Why those fields and nothing else.** They are fully-qualified agent ids (invariant 2), they are
+server-derived, and the WAL never compacts, so they are the ids that really are durable on a legacy
+dir. `auth.EnrolmentSuffixesInWAL` is deliberately NOT used: its own doc records that it scans only
+enrolment records, which are EMPTY on every dir the shipped binary has written, so sealing its result
+is indistinguishable from sealing an empty map on a bus with history. A generic walk folding every
+string that parses as an agent id was also rejected, and the reason is a security one: the
+`idempotency_key` is CLIENT-SUPPLIED and durable, so a client could set it to
+`<bus>.alpha-18446744073709551615` and permanently exhaust the name `alpha` for that bus, across
+every future restart. Only server-derived fields are read.
+
+**Known and stated in the code, not glossed:** the derivation is a LOWER BOUND. A broadcast stores a
+flag rather than a recipient list (deliberately — `store.Message.Broadcast`), so an agent that only
+ever received broadcasts leaves no trace in any record. That is structural to a DERIVED floor and is
+exactly what the written-ahead floor file removes; the backfill runs once per data dir and never
+again.
+
+### 3. The `wal.Open` ordering hazard: BOOT, log at ERROR, and say what is exposed
+
+**The conflict, stated rather than picked.** `internal/auth/floors.go` documents an ordering hazard
+with no clean fix at this layer, both halves of it reproduced: scanning BEFORE `wal.Open` reads an
+unrepaired file, so `wal.ScanAll`'s strict framing fails on an ORDINARY torn tail — a routine power
+loss would then make the derivation fail, and a failed derivation on a legacy dir refuses to boot.
+Scanning AFTER `wal.Open` reads the repaired file, so anything recovery removed is invisible and a
+floor can come out too low (reproduced: 5 → 2). Against that, DECISIONS.md 2026-08-02 ("Availability
+over retention") and the 2026-08-07 supersession say the bus ALWAYS restarts.
+
+**Decision.** Scan AFTER `wal.Open`, and distinguish two cases rather than collapsing them:
+
+- **The scan COMPLETES but recovery had repaired/discarded/quarantined something.** BOOT.
+  `openSuffixAllocator` consults `walLog.Recovered().Repaired` and logs at **ERROR**, naming the
+  exposure and every field of it (`repaired`, `rewritten`, `quarantined`, `lost_unidentified`,
+  `discard_count`, `discarded_bytes`). Refusing here would trade a real availability loss for a
+  narrow one: recovery removes records rarely, the ids in them are usually named by surviving records
+  too, and the alternative is a bus that will not start after an ordinary power loss.
+- **The scan CANNOT COMPLETE, on a dir with no floors file.** REFUSE. There is nothing to prove the
+  floors with, and sealing an empty map asserts "no suffix was ever written" — the precise false
+  claim that re-mints every live id. This is a deliberate, NARROW exception to "the bus always
+  restarts": it can only fire on the FIRST start against a legacy dir whose log cannot be read, never
+  on an ongoing start, because the first successful start writes the floors file and the backfill
+  never runs again.
+
+A partial map is never sealed: failure is TOTAL (`walAgentIDFloors` returns `(nil, err)`), because a
+derivation that got every floor it saw right but MISSED A NAME seals exactly as cleanly as a complete
+one, and every missed name then mints from 1 over ids already on disk.
+
+### 4. The scan runs on EVERY start, to cross-check a rewound floors file — and it RAISES, not just reports
+
+**Decision.** The WAL derivation runs even when `agent-suffixes` exists. When the file exists it is
+authoritative and no backfill happens, but a WAL suffix ABOVE the persisted floor for a name is a
+detectable INTEGRITY FAILURE — it cannot happen on a healthy dir, because the floor is written ahead
+of the suffix, so it means the floors file was rewound, restored from an older backup, or replaced.
+That is logged at **ERROR**, naming the file, the name, the persisted floor and the suffix found.
+
+**And the floor is RAISED, not merely reported.** Detection alone would leave the bus knowingly
+re-minting an id it can see on disk, which is the one outcome this whole area exists to prevent.
+`RaiseFloor` never lowers a floor, so folding the finding in cannot weaken the persisted authority,
+and `Seal` writes the merged map back. The posture "the floors file is authoritative" is unchanged:
+the WAL is never allowed to lower a floor, only to reveal that the file is missing one.
+
+**The cost, stated honestly.** `wal.ScanAll` materialises every record in memory and the WAL never
+compacts, so this is one extra sequential read plus a peak proportional to log size, on every start.
+It is affordable now and it is not affordable forever; a streaming scan seam in `internal/wal` is
+filed as a follow-up rather than left to be discovered under a large log.
+
+### What this does NOT do
+
+It does not make enrolment durable — the roster and all sessions are still in memory only (AUTH-3).
+The startup WARN that says so was NARROWED, not removed: its clause "and agent id suffixes restart
+from 1 for every name" became FALSE with this change, and a false WARN in the startup log is its own
+defect. `CONTRACTS-HTTP.md:330` quotes the old wording verbatim and is OUTSIDE this task's file
+ownership; updating it is filed as a follow-up.
+
+Acceptance criteria (c) and (d) of the task — flip `ids.NewNameSuffixes` to born-unsealed or delete
+it, and add a repo-wide guard that no production package calls it — live in `internal/ids`, which
+this task did not own. There are currently ZERO production callers of `ids.NewNameSuffixes` anywhere
+in the tree; both are filed as follow-ups for that package's owner.
+
+---
+
+## 2026-08-07 — Cross-bus key trust: pin the origin bus key at peering, NO TOFU
+
+**The hole this closes.** CRYPTO-4's messaging-key bundle is attested by the **local** bus. So when
+bus B hands a recipient a key for bus A's agent, **B can simply substitute its own key** — and the
+recipient's verification then succeeds against a key the attacker chose. Cross-bus signatures would
+verify against whatever the nearest bus says, which is worth nothing at all. Every other guarantee in
+the SIGN epic sits on top of this one.
+
+**Decision (user).** *"pin the bus key at peering, no TOFU"*. Concretely:
+
+- A relayed message's key bundle keeps **bus A's own attestation intact** — signed by **A's bus key**,
+  not re-attested by any intermediate.
+- **A's bus key is pinned at peering time.** A bus that has not been peered with cannot have its
+  agents' signatures trusted.
+- **No trust-on-first-use anywhere**, including as a fallback.
+
+**Why, beyond consistency.** This matches the invite-blob decision (E6, 2026-08-02) where the
+bus-cert fingerprint travels out of band precisely to eliminate the TOFU window — and peer enrolment
+already uses that same invite mechanism, so the material to pin is already in the handshake. But the
+stronger argument is specific to relay: TOFU's exposure window is *the moment of first contact*, and
+for a relay that is exactly when a hostile intermediate is best placed to act. A TOFU fallback would
+reintroduce the whole hole for any peer not yet seen, which is every peer, once.
+
+**Consequences.**
+
+- **Peering material must carry A's bus SIGNING key**, not merely its TLS certificate fingerprint.
+  Those are different jobs — the TLS key authenticates the *connection*, the signing key attests
+  *agent key bundles* — so pinning one does not give you the other.
+- **OPEN, and deliberately not decided here:** whether the bus signing key and the bus TLS key are the
+  same key. One key is simpler; two lets the connection key rotate on a different schedule from the
+  attestation key, which matters because rotating an attestation key invalidates pins held by every
+  peer. Recommendation: keep them separate, but this needs its own ruling before implementation.
+- **Rotation must follow the two-certificates rule** already decided for the bus's own TLS rollover
+  (E3, 2026-08-02): a bus rotating its signing key must serve both during a rollover window, or every
+  peering breaks at once and re-peering becomes indistinguishable from an attack.
+- **An unpeered bus's messages cannot be verified**, by construction. That is the intended behaviour,
+  not a gap — but it must be stated in `PROTOCOL.md` so nobody "fixes" it later with a TOFU fallback.
