@@ -150,8 +150,38 @@ one needs an explicit decision recorded in `DECISIONS.md`.
     - **The CLI must make the trusted path the easy path.** Whatever the scheme, `bus enrol` against
       a fresh bus has to work without the user hand-editing a trust store.
     - Never disable certificate verification to make something work, and never ship a flag that
-      does it silently. Per invariant 9 the TLS stack is stdlib `crypto/tls` — configured, never
-      reimplemented, and never with `InsecureSkipVerify` on a path a user can reach by accident.
+      does it silently — we read that as forbidding such a flag AT ALL, since a documented hole is
+      not better than a hidden one, it is a hole with a manual. Per invariant 9 the TLS stack is
+      stdlib `crypto/tls` — configured, never reimplemented.
+    - **`InsecureSkipVerify: true` is permitted in EXACTLY ONE FILE — `client/pin.go` — and only
+      paired with `VerifyPeerCertificate` (narrowed 2026-08-07, MTLS-PIN).** The earlier absolute
+      ban could not survive contact with this invariant's own requirements: self-signed, **no CA**,
+      **no TOFU**. Go's default chain verification cannot succeed and cannot be configured to — there
+      is no root to chain to, and the client holds a 32-byte fingerprint rather than the certificate,
+      so it cannot build an `x509.CertPool` either. `crypto/tls` supports exactly one way to
+      substitute a verification policy: disable the default chain check and supply
+      `VerifyPeerCertificate`. A ban with no exception would not have prevented the exception — it
+      would have pushed it into a package the guard does not scan, which is strictly worse than one
+      loud, reviewed occurrence.
+
+      **Read this before "fixing" that line: deleting it, or deleting the callback beside it, does
+      not harden anything — it silently disables pinning.** A `tls.Config` with the callback removed
+      still compiles, still completes handshakes, still returns working connections, and verifies
+      nothing. Every positive test passes either way.
+
+      What replaces the ban is stricter and mechanical, in `client/guard_test.go`: the literal must
+      appear in exactly one file **exactly once** (counted, so naming it in prose there fails too);
+      an **AST** walk — not a grep — requires any composite literal setting it `true` to set
+      `VerifyPeerCertificate` non-nil **in the same literal**, bans setting it by assignment (an
+      assignment can be conditional and far from the literal), and requires **at least one** such
+      paired literal to exist, so the guard cannot pass on a tree where pinning was deleted.
+
+      What is given up, exactly: CA chain building (there is none, by design) and **hostname
+      verification** — for which the pin substitutes and is strictly stronger, since a name check
+      asks "does this certificate claim this address" and the pin asks "is this the exact certificate
+      the invite named". **Certificate expiry is NOT checked** — a real gap owned by `MTLS-VERIFY`.
+      Full reasoning in `DECISIONS.md` (2026-08-07, MTLS-PIN §2), which supersedes the absolute
+      wording at `DECISIONS.md:1290` and `:2461` in place.
 
 ## Repository layout
 
