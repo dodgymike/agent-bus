@@ -34,23 +34,25 @@
 //     because it has a live caller (cmd/agent-bus/main.go) that must keep
 //     enrolling.
 //
-// Both allocators still owe their resume wiring, and one of those debts is
-// already overdue rather than merely pending. cmd/agent-bus/main.go builds a
-// fresh NewNameSuffixes on every start, which would be sound only while no agent
-// id reaches disk — and that is NOT the state of this tree. Agent ids are
-// durable TODAY, inside WAL message bodies rather than inside any enrolment
-// record: store.Message.Sender and .Recipients are fully-qualified agent ids,
-// hub.publish encodes that message and writes it through the two-phase path, and
-// the log has no compaction, so those bytes stay. A suffix burned by any agent
-// that has sent or received a message therefore outlives the restart, and the
+// The two allocators are at different stages of that wiring. Sequence's resume
+// floor is derived, raised and sealed today — internal/hub does it on open
+// (0bbbd27) — and it is the worked example of what every caller owes: RaiseFloor
+// from every floor source, then Seal exactly once, before the allocator serves
+// its first Next / NextSuffix. (Whether the floor hub derives is the RIGHT one
+// is hub's claim to defend, not this package's.) NameSuffixes has no such
+// wiring: cmd/agent-bus/main.go builds a fresh NewNameSuffixes on every start
+// and derives nothing, which would be sound only while no agent id reaches disk
+// — and that is NOT the state of this tree. Agent ids are durable TODAY, inside
+// WAL message bodies rather than inside any enrolment record:
+// store.Message.Sender is a fully-qualified agent id on every message, and
+// .Recipients holds them for a DIRECTED message (a broadcast is stored as a
+// flag, so a broadcast-only recipient leaves no such trace). hub.publish encodes
+// that record and writes it through the two-phase path, and the log has no
+// compaction, so those bytes stay. A suffix burned by any agent that has sent a
+// message, or been addressed by name, therefore outlives the restart, and the
 // fresh counter mints straight over it — the next start hands name-1 out again,
 // to whatever keypair enrols first. That is re-minting a live agent id across
 // restart, the exact failure invariant 1 forbids, and it is tracked as P0
 // MSG-FU-SUFFIXFLOOR, which must switch main.go to ResumeNameSuffixes with
 // floors derived from replay (AUTH-3 is the enrolment half of the same debt).
-// Deriving the message-sequence resume floor from WAL recovery is the matching,
-// separate wiring task for Sequence. Whatever the call sites look like by the
-// time you read this, the obligation on each is identical: RaiseFloor from every
-// floor source, then Seal exactly once, before the allocator serves its first
-// Next / NextSuffix.
 package ids

@@ -215,7 +215,14 @@ func (c *Client) Watch(ctx context.Context, opts WatchOptions, handle func(Messa
 	}
 	stats.Cursor = cursor
 
-	failures := 0
+	// TWO counters, deliberately separate. `failures` escalates the backoff
+	// after a transient FAILURE and is reset by any successful poll.
+	// `emptyPolls` escalates the backoff after a poll that SUCCEEDED and
+	// returned nothing without having timed out, and is reset only by a poll
+	// that actually delivered something. Sharing one counter made the second
+	// escalation unreachable: the reset on every successful Read ran first, so
+	// the empty path always went 0→1 and slept in [0, 200ms) for ever.
+	failures, emptyPolls := 0, 0
 	for {
 		if ctx.Err() != nil {
 			return stats, nil
@@ -290,14 +297,24 @@ func (c *Client) Watch(ctx context.Context, opts WatchOptions, handle func(Messa
 		// without the timeout flag. Backing off there costs nothing when it
 		// never occurs and stops a bus that answers instantly with nothing from
 		// spinning a core.
+		//
+		// The escalation is what makes that true, and it is why emptyPolls is
+		// its own counter (see its declaration). A bus answering /v1/wait
+		// instantly with {"messages":[],"timed_out":false} is refused a fixed
+		// [0, 200ms) sleep — that is ~10 requests a second, indefinitely, which
+		// is not protection. Consecutive empty polls escalate through the same
+		// jittered schedule the transport uses, up to Retry.MaxDelay; one poll
+		// that delivers a message clears it.
 		if len(batch.Messages) == 0 && !batch.TimedOut {
-			failures++
-			if failures > maxBackoffAttempt {
-				failures = maxBackoffAttempt
+			emptyPolls++
+			if emptyPolls > maxBackoffAttempt {
+				emptyPolls = maxBackoffAttempt
 			}
-			if serr := c.sleep(ctx, c.backoff(failures, nil)); serr != nil {
+			if serr := c.sleep(ctx, c.backoff(emptyPolls, nil)); serr != nil {
 				return stats, nil
 			}
+		} else if len(batch.Messages) > 0 {
+			emptyPolls = 0
 		}
 	}
 }

@@ -198,7 +198,7 @@ func runSend(ctx context.Context, env *cliEnv, args []string) error {
 		return err
 	}
 
-	body, err := src.read(env, "send")
+	body, err := src.read(ctx, env, "send")
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func runBroadcast(ctx context.Context, env *cliEnv, args []string) error {
 		return err
 	}
 
-	body, err := src.read(env, "broadcast")
+	body, err := src.read(ctx, env, "broadcast")
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func (b *bodySource) adoptPositional(rest []string, op string) error {
 // The ambiguity check is the point of this function: picking one source when
 // two were named would silently send the wrong bytes, and the caller would
 // discover it by comparing content hashes long afterwards.
-func (b *bodySource) read(env *cliEnv, op string) ([]byte, error) {
+func (b *bodySource) read(ctx context.Context, env *cliEnv, op string) ([]byte, error) {
 	op = "busctl " + op
 
 	named := make([]string, 0, 3)
@@ -369,7 +369,7 @@ func (b *bodySource) read(env *cliEnv, op string) ([]byte, error) {
 	case b.hasArg:
 		body = []byte(b.arg)
 	case b.file != "" && b.file != "-":
-		body, err = readBodyFile(op, b.file)
+		body, err = readBodyFile(ctx, op, b.file)
 	default:
 		// --stdin, --file -, or nothing at all. "Nothing at all" reads stdin
 		// too: that is what makes `echo hi | busctl send <to>` compose, and it
@@ -383,7 +383,7 @@ func (b *bodySource) read(env *cliEnv, op string) ([]byte, error) {
 		if env.stdinIsTTY {
 			fmt.Fprintf(env.stderr, "busctl: reading the message body from the terminal; end with Ctrl-D\n")
 		}
-		body, err = readBodyStream(op, env.stdin, "stdin")
+		body, err = readBodyStream(ctx, op, env.stdin, "stdin")
 	}
 	if err != nil {
 		return nil, err
@@ -404,7 +404,7 @@ func (b *bodySource) read(env *cliEnv, op string) ([]byte, error) {
 }
 
 // readBodyFile reads a file, refusing an oversized one by its real size.
-func readBodyFile(op, path string) ([]byte, error) {
+func readBodyFile(ctx context.Context, op, path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, &client.Error{
@@ -424,31 +424,75 @@ func readBodyFile(op, path string) ([]byte, error) {
 	if info, serr := f.Stat(); serr == nil && info.Mode().IsRegular() && info.Size() > client.MaxBodyBytes {
 		return nil, oversizeError(op, fmt.Sprintf("%d bytes", info.Size()))
 	}
-	return readBodyStream(op, f, path)
+	return readBodyStream(ctx, op, f, path)
 }
 
 // readBodyStream reads at most MaxBodyBytes+1 and refuses at +1.
 //
 // The extra byte is the whole trick: it is enough to KNOW the input is too
 // large without reading a 64 MiB paste into memory to be told 413 by the bus.
-func readBodyStream(op string, r io.Reader, what string) ([]byte, error) {
+//
+// # Why the read is in a goroutine, and why Ctrl-C would not work without it
+//
+// io.ReadAll on a TERMINAL blocks until EOF, and nothing about a context makes
+// an in-flight read(2) return. That would merely be annoying, except that
+// main.go installs signal.NotifyContext, which SUPPRESSES the default SIGINT
+// terminate for the whole process: `busctl send <to>` with a real terminal on
+// stdin and no body source therefore hung, and Ctrl-C did not stop it. Only
+// Ctrl-D or SIGKILL did — a command that ignores Ctrl-C is the worst kind of
+// papercut, because the escape hatch a user reaches for is the one that is gone.
+//
+// So the read runs on its own goroutine and hands its result over a BUFFERED
+// channel. The buffer is load-bearing: on the cancellation path nobody is left
+// to receive, and an unbuffered send would block that goroutine for ever while
+// it still holds the buffer. It is not "leaked" in any meaningful sense —
+// cancellation here means the process is on its way out — but it must never
+// write into memory the caller is also reading, which handing the slice over a
+// channel guarantees.
+//
+// Nothing changes for a pipe, a file, /dev/null or a closed stdin: those all
+// reach EOF on their own, the goroutine finishes, and the select takes the
+// result exactly as the direct call did.
+func readBodyStream(ctx context.Context, op string, r io.Reader, what string) ([]byte, error) {
 	if r == nil {
 		return nil, nil
 	}
-	body, err := io.ReadAll(io.LimitReader(r, client.MaxBodyBytes+1))
-	if err != nil {
+
+	type readResult struct {
+		body []byte
+		err  error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		body, err := io.ReadAll(io.LimitReader(r, client.MaxBodyBytes+1))
+		done <- readResult{body: body, err: err}
+	}()
+
+	var res readResult
+	select {
+	case res = <-done:
+	case <-ctx.Done():
+		return nil, &client.Error{
+			Kind:    client.KindUsage,
+			Op:      op,
+			Message: "interrupted while reading the message body from " + what + "; nothing was sent",
+			Remedy:  "pass the body as a quoted argument or with --file <path> so nothing has to be typed, or end the input with Ctrl-D",
+			Err:     ctx.Err(),
+		}
+	}
+	if res.err != nil {
 		return nil, &client.Error{
 			Kind:    client.KindUsage,
 			Op:      op,
 			Message: "cannot read the message body from " + what,
 			Remedy:  "check the input is readable",
-			Err:     err,
+			Err:     res.err,
 		}
 	}
-	if len(body) > client.MaxBodyBytes {
+	if len(res.body) > client.MaxBodyBytes {
 		return nil, oversizeError(op, fmt.Sprintf("more than %d bytes", client.MaxBodyBytes))
 	}
-	return body, nil
+	return res.body, nil
 }
 
 func oversizeError(op, size string) error {

@@ -286,6 +286,17 @@ func (c *Client) attempt(ctx context.Context, urlStr string, payload []byte, req
 //     capacity refusal on EVERY route carries it — so its absence is a reliable
 //     signal rather than a guess.
 //
+// The discriminator is the header's PRESENCE, not the delay parseRetryAfter got
+// out of it. Those are not the same test: parseRetryAfter deliberately returns 0
+// for the HTTP-date form, for `Retry-After: 0`, and for anything it cannot
+// parse. Keying the split on the parsed value therefore condemned a 503 whose
+// header was present but unparseable as "the bus cannot durably accept
+// messages" and stopped a watch permanently. A present-but-unparseable header is
+// now treated as TRANSIENT and falls back to the ordinary jittered backoff,
+// which is the safer of the two mistakes: retrying a genuinely fatal 503 wastes
+// a few requests, whereas giving up on a transient one takes a healthy watcher
+// off the bus until a human notices.
+//
 // The second case is marked fatal, which takes it out of the retry loop
 // (isRetryable) and is reported to callers by IsFatalUnavailable so a long-lived
 // watcher can stop and say so instead of looping forever on a dead bus.
@@ -305,7 +316,7 @@ func statusError(op string, resp *http.Response, body []byte) *Error {
 		e.Kind = KindRejected
 		e.Message = "the bus refused the request: " + detail
 		e.Remedy = "an idempotency key was reused with different content; use a fresh key for new content (invariant 10)"
-	case resp.StatusCode == http.StatusServiceUnavailable && e.retryAfter <= 0:
+	case resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("Retry-After") == "":
 		// NOT transient. See the 503 split in this function's doc comment.
 		e.Kind = KindServer
 		e.fatal = true

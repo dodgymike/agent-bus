@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -213,9 +214,19 @@ type storeData struct {
 type Store struct {
 	dir string
 
+	// warnMu guards warnings. It is a real requirement, not defensive tidiness:
+	// warnings are NOT "written once at open" — an earlier version of this
+	// comment said so and that claim is what made the unlocked read look safe.
+	// The cursor file is read when a watch STARTS, long after OpenStore
+	// returned, and every damaged-cursor condition appends here (cursorstore.go).
+	// An agent EMBEDDING this package — an explicit audience of invariant 7 —
+	// can therefore run Watch on one goroutine and Warnings on another, which
+	// without this lock is a data race on the slice header itself.
+	warnMu sync.Mutex
+
 	// warnings records conditions an operator must be TOLD about rather than
-	// silently repaired — see OpenStore. Written once at open, read-only
-	// afterwards.
+	// silently repaired — see OpenStore, and Cursor for the ones found later.
+	// Read and written only under warnMu.
 	warnings []string
 }
 
@@ -279,12 +290,17 @@ func OpenStore(dir string) (*Store, error) {
 }
 
 func (s *Store) warnf(format string, args ...interface{}) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
 	s.warnings = append(s.warnings, fmt.Sprintf(format, args...))
 }
 
 // Warnings returns conditions the operator should be told about, in the order
-// they were found. It returns a copy.
+// they were found. It returns a copy, taken under warnMu, so it is safe to call
+// from a goroutine other than the one driving the store.
 func (s *Store) Warnings() []string {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
 	out := make([]string, len(s.warnings))
 	copy(out, s.warnings)
 	return out

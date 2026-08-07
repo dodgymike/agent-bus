@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 )
 
@@ -65,18 +64,6 @@ const cursorFormatVersion = 1
 // survive are the ones actually in use. Worst case the file is roughly
 // 256 x (512-byte cursor + ids) — a couple of hundred KiB, bounded.
 const maxStoredCursors = 256
-
-// cursorWarnMu guards the one place this package appends to Store.warnings
-// after OpenStore has returned.
-//
-// Store documents `warnings` as "written once at open, read-only afterwards",
-// and Cursor breaks that: a damaged cursors.json is discovered when a watch
-// starts, not when the store is opened. The mutex makes concurrent cursor loads
-// safe against each other. It does NOT make a concurrent Warnings() read safe —
-// Store has no lock of its own and this file may not add one — so a caller that
-// wants the cursor warnings should read Warnings() from the goroutine that drove
-// the load. In practice the CLI loads a cursor once, at the top of `watch`.
-var cursorWarnMu sync.Mutex
 
 // cursorRecord is one persisted read position.
 //
@@ -240,10 +227,14 @@ func cursorUpdatedAt(rec cursorRecord) time.Time {
 	return t
 }
 
-// warnCursor records a warning about the cursor file. See cursorWarnMu.
+// warnCursor records a warning about the cursor file.
+//
+// It is a thin alias for warnf and exists only to mark, at every call site, that
+// this is a warning found LONG AFTER OpenStore returned — a damaged cursors.json
+// is discovered when a watch starts. That is why Store.warnings is guarded by a
+// mutex rather than treated as write-once; the locking lives in warnf, where
+// both writers and Warnings() can share it.
 func (s *Store) warnCursor(format string, args ...interface{}) {
-	cursorWarnMu.Lock()
-	defer cursorWarnMu.Unlock()
 	s.warnf(format, args...)
 }
 
