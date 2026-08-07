@@ -380,6 +380,12 @@ For tasks that require permission multiple times, write a script and ask permiss
 - **reliability-reviewer** — crash-consistency, recovery, delivery guarantees, relay partial failure.
 - **backlog-triage** — decides what deserves doing now and dispatches sub-agents. Never edits code.
 - **feature-runner** — runs ONE task end-to-end through the mandated chain, code-only, parallel-safe.
+- **integrator** — the ONLY agent permitted to `git commit`. Verifies gates COMPLETED, that the
+  commit is pathspec-scoped, that HEAD compiles afterwards, and that the message matches the
+  evidence — then commits, or REFUSES with a reason. Added 2026-08-07 because every commit-time
+  failure in this repo was mechanical and repeated: ungated code shipped three times, four
+  index-sweeping mis-titled commits, and one `main` left un-compilable because a package was verified
+  against the working tree rather than HEAD.
 
 **Review panel (full-system review):** before a large change or as a periodic audit, convene
 architecture-reviewer + reliability-reviewer + performance-reviewer + security + test-engineer

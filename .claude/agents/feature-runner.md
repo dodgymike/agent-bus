@@ -29,6 +29,15 @@ task explicitly asks.
 ## Parallel safety
 - You will be told your file-ownership boundary. NEVER edit a file outside it — other agents own the
   rest of the tree concurrently.
+- **If you discover you need a package outside your boundary, STOP and report it as a blocker.** Do
+  not widen your own scope, and do not work around it. Boundaries collided repeatedly in this repo
+  precisely because agents quietly reached one file further; the orchestrator can widen a boundary in
+  one message, which is far cheaper than untangling two agents' edits to the same file.
+- **Verify HEAD, not just your working tree.** `go build ./...` passing locally proves nothing about
+  what is committed when a dependency you need is sitting uncommitted beside you. If your change
+  consumes something another agent added, say so explicitly — a consumer that lands before its
+  definition breaks `main`, and that has happened here. The check is:
+  `T=$(mktemp -d); git archive HEAD | tar -x -C "$T"; (cd "$T" && go build ./...)`
 - CONTRACTS.md, DECISIONS.md, AGENT_LOG.md, SESSION_REPORT.md are shared
   append-only: ADD a new dated section, never rewrite existing lines.
 - Task state is NOT a file you edit: it lives in the Spec Server (project slug `agent-bus`) and is
@@ -45,13 +54,21 @@ task explicitly asks.
   response says "accepted". Never reorder that for speed.
 - **The log is append-only.** No in-place edits, no truncation except a verified-corrupt tail on
   recovery.
-- **Agents never hand-write HTTP.** Any new capability ships with a `scripts/bus-*.sh` wrapper and an
-  `AGENT_PROTOCOL.md` entry in the same task.
+- **Nobody hand-writes HTTP — the compiled Go CLI is THE client (invariant 7, amended 2026-08-02).**
+  Any new capability ships with a CLI SUBCOMMAND and an `AGENT_PROTOCOL.md` entry in the same task.
+  The `scripts/bus-*.sh` wrappers are RETIRED; do not add one. The CLI is a thin shell over the
+  importable `client/` package, which is deliberately NOT under `internal/` so agents can embed it.
 - Every route authenticates; inputs validated; failures degrade gracefully and are logged.
 
 ## Verify — and tell the truth
-- Run the NARROWEST relevant check: `go build ./...`, `go vet ./...`, `gofmt -l .`,
-  `go test -race -run <Name> ./<pkg>`.
+- Run the NARROWEST relevant check: `go build ./...`, `go vet ./...`,
+  `go test -race -run <Name> ./<pkg>`, and for formatting `go fmt ./...` or
+  `test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"`.
+- **NEVER call bare `gofmt`, and never judge `gofmt -l` by its exit status.** Bare `gofmt` is not on
+  PATH here and exits 127, so `test -z "$(gofmt -l .)"` PASSES because a command that fails to launch
+  prints nothing. And `gofmt -l` exits 0 EVEN WHEN IT LISTS FILES, so `gofmt -l . && echo CLEAN`
+  prints CLEAN over a list of unformatted files. Both have produced false passes in this repo. Judge
+  it by whether the OUTPUT is empty.
 - If a test fails, you are NOT done. Diagnose whether YOUR change caused it or it is pre-existing,
   name the exact failing test, and report the verdict. NEVER hand-wave "pre-existing failures" to
   declare success.
@@ -60,9 +77,19 @@ task explicitly asks.
 Mark the task `done` in the Spec Server backlog (via spec-keeper — never by editing the SPEC.md
 mirror), update CONTRACTS.md (every new/changed route, env
 var, table, contract), append AGENT_LOG.md + SESSION_REPORT.md, record any decisions in DECISIONS.md,
-and update `AGENT_PROTOCOL.md` + the `scripts/bus-*.sh` wrappers if the agent-facing surface moved.
+and update `AGENT_PROTOCOL.md` + the CLI subcommands if the agent-facing surface moved. Note
+`CONTRACTS.md` is now SPLIT into plane files — `CONTRACTS-HTTP.md`, `-ONDISK.md`, `-AGENT.md`,
+`-CLI.md` — with an index at the old path; update the plane your change touches, which is also what
+lets several agents document in parallel.
 
 ## Final report (always this shape)
+
+0. **GATE STATUS — first line, never omitted.** For reviewer and security, state COMPLETED or NOT
+   COMPLETED and the verdict. "Dispatched" is not a status; a gate that has not returned has found
+   nothing yet. The orchestrator commits on this line, and has shipped ungated code three times when
+   it was missing — including a relay SSRF and an unbounded input, both caught by gates still running
+   at the moment of the commit. If a gate returned CHANGES-REQUIRED and you fixed the findings, say
+   so and say whether it re-verified.
 1. Files changed.
 2. The contract/API surface you added (routes, params, env, helper signatures).
 3. Test result — verbatim output if anything is red.
