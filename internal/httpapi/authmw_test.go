@@ -605,15 +605,31 @@ func TestEveryRouteRequiresAuth(t *testing.T) {
 		}
 	})
 
-	t.Run("the allow-list is exactly these five paths", func(t *testing.T) {
+	t.Run("the allow-list is exactly these six paths", func(t *testing.T) {
 		// A GOLDEN list, on purpose. Every entry here is a path this server
 		// serves to an anonymous caller, so ADDING one must show up as a
 		// deliberate diff in a test file called "every route requires auth" --
 		// which is precisely the review moment this test exists to force. It is
 		// not a duplicate of the map in authmw.go; it is the second signature
 		// required to change it.
+		//
+		// DISCOVERY-DOC added exactly one entry: /v1/discovery. It earns its
+		// place because it is how a caller holding NOTHING BUT A URL learns how
+		// to enrol -- requiring a credential to learn how to obtain a credential
+		// is a circular gate, which is the same reason /v1/enroll and the two
+		// session routes are here. It is safe because the document it serves is
+		// a STATIC COMPILE-TIME CONSTANT plus this bus's id (which /v1/info
+		// already serves to the same anonymous caller): it describes the
+		// PROTOCOL, never the ROSTER, and reveals nothing about this bus's
+		// contents or its configuration -- notably NOT which routes this build
+		// registered, which is what the 401-not-404 choice below exists to
+		// withhold. That property is pinned exhaustively by
+		// TestDiscoveryDocumentIsStatic and TestDiscoveryDocumentLeaksNoBusState
+		// in discovery_test.go; if either of those goes slack, this entry stops
+		// being justified.
 		want := []string{
 			"/healthz",             // liveness; returns no state, called before any agent exists
+			"/v1/discovery",        // the protocol-discovery document: static, bus-state-free, and the only way a caller with just a URL learns to enrol
 			"/v1/enroll",           // creates an identity; there is no credential yet by definition
 			"/v1/info",             // pre-enrolment discovery: bus id, version, uptime
 			"/v1/session/begin",    // asks for the token to sign; called with no session at all

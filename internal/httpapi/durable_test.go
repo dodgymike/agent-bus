@@ -130,7 +130,16 @@ func TestServerDurable(t *testing.T) {
 							t.Fatalf("%s: GET /healthz leaked field %q: %v", tc.name, k, generic)
 						}
 					case "/v1/info":
-						if k != "bus_id" && k != "version" && k != "uptime_seconds" {
+						// "discovery" was added by DISCOVERY-DOC and is the ONLY
+						// field this exhaustive set has grown. It is safe here
+						// because it is a COMPILE-TIME CONSTANT PATH
+						// (httpapi.RouteDiscovery), identical in every build and
+						// in every server in this table: it carries no bus state
+						// whatsoever, so it cannot vary with Options.Durable,
+						// which is the property this subtest exists to pin. Any
+						// FURTHER field must fail here until it is proved to be
+						// equally state-free.
+						if k != "bus_id" && k != "version" && k != "uptime_seconds" && k != "discovery" {
 							t.Fatalf("%s: GET /v1/info leaked field %q: %v", tc.name, k, generic)
 						}
 					}

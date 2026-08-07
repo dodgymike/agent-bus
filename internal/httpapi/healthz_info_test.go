@@ -161,10 +161,23 @@ func TestHealthzInfo(t *testing.T) {
 		}
 
 		// Security-relevant assertion: the unauthenticated endpoint's field
-		// set must stay exactly {bus_id, version, uptime_seconds}. A future
-		// change that adds data-dir, listen addr, peer list or agent roster
-		// must fail this test.
-		wantKeys := map[string]bool{"bus_id": true, "version": true, "uptime_seconds": true}
+		// set must stay exactly {bus_id, version, uptime_seconds, discovery}.
+		// A future change that adds data-dir, listen addr, peer list or agent
+		// roster must fail this test.
+		//
+		// "discovery" is the ONE field added since this pin was written
+		// (DISCOVERY-DOC). It is safe, and the reason is the whole of why the
+		// count could be raised: its value is the COMPILE-TIME CONSTANT
+		// httpapi.RouteDiscovery -- the same string in every build, on every
+		// bus, at every moment -- so it carries NO bus state, no identity, no
+		// configuration and no timing. It is a pointer to where the protocol
+		// document lives, so a caller that knows only /v1/info can find it.
+		// TestDiscoveryPointerOnInfo (discovery_test.go) pins that value.
+		//
+		// Raising this count again requires proving the new field is equally
+		// state-free; anything derived from this bus's contents or wiring is
+		// exactly what this assertion exists to catch.
+		wantKeys := map[string]bool{"bus_id": true, "version": true, "uptime_seconds": true, "discovery": true}
 		if len(firstGeneric) != len(wantKeys) {
 			t.Fatalf("field count = %d, want %d; got fields %v", len(firstGeneric), len(wantKeys), keysOf(firstGeneric))
 		}

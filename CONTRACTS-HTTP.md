@@ -9,8 +9,9 @@ below this header is unchanged from the prior single-file `CONTRACTS.md`, verbat
 | Method | Path | Auth | Status | Response |
 | --- | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | 200 | `{"status":"ok"}` |
-| `GET` | `/v1/info` | none | 200 | `{"bus_id":"...","version":"...","uptime_seconds":0.0}` |
-| other | `/healthz`, `/v1/info` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET` |
+| `GET` | `/v1/info` | none | 200 | `{"bus_id":"...","version":"...","uptime_seconds":0.0,"discovery":"/v1/discovery"}` |
+| `GET` | `/v1/discovery` | none | 200 | **NEW 2026-08-07 (DISCOVERY-DOC).** The bounded, STATIC protocol-discovery document — observed ~6.1 KB in practice (varies only with the length of `bus_id`), well under the 16 KiB ceiling `discovery_test.go` enforces. See `### Discovery document` below for the full shape. |
+| other | `/healthz`, `/v1/info`, `/v1/discovery` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET` |
 | `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
 | `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
 | `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key` than its first use — a protocol violation, not a retry (invariant 10); response carries `Connection: close` (see `## Headers`) |
@@ -26,9 +27,74 @@ below this header is unchanged from the prior single-file `CONTRACTS.md`, verbat
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 405 | any method but `POST`; `Allow: POST` |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 413 | request body exceeds `httpapi.MaxAuthRequestBytes` (8 KiB) |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
-| any | any path off the five-entry allow-list (`/healthz`, `/v1/info`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
+| any | any path off the six-entry allow-list (`/healthz`, `/v1/info`, `/v1/discovery`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
 | any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
 | any | unregistered path, valid bearer token | valid bearer token | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope — because the middleware let the request through and the mux, honestly, has no route there. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope); that catch-all MUST be registered INSIDE the auth wrapper (through `(*Server).route`, so it is itself subject to `authMiddleware`) or it becomes the one unauthenticated route that leaks the surface. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
+
+### Discovery document (added 2026-08-07, DISCOVERY-DOC)
+
+`GET /v1/discovery` is an unauthenticated, bounded, STATIC document so a caller holding nothing but a
+bus URL can learn how to enrol without first needing a credential. `internal/httpapi/discovery.go` is
+the source of truth for the exact wording; this section pins the shape. The body is exactly ten
+top-level fields, in this order:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `service` | string | Constant: `"agent-bus"`. |
+| `description` | string | One-paragraph, constant description of what the bus does. |
+| `bus_id` | string | The **one** bus-specific value in the whole document — the same `bus_id` `/v1/info` already serves to the same anonymous caller. |
+| `paths_are_relative_to` | string | States that every `path` below is relative to the base URL the caller already fetched this document from, and explains why the document does NOT echo a self-URL (the `Host` header is client-supplied; a reflected URL could point a reader at an attacker's bus). |
+| `steps` | array of 8 strings | The ordered enrolment recipe, from fetching this document through generating a keypair, `POST /v1/enroll`, the session handshake, and `GET /v1/wait`/`POST /v1/mint`+`POST /v1/send`. |
+| `endpoints` | array of 11 objects | `{name, method, path, auth, purpose}` per entry; `auth` is `"none"` or `"bearer"`. |
+| `enrolment` | object | `{invite_required (bool), invite_note, you_supply, you_receive}`. |
+| `session` | object | `{model, lifetime_seconds, refresh_after_seconds, authorization_header, signing_context}`. |
+| `client` | object | `{binary, build, go_package, note}` — points at the compiled `agent-busctl` CLI and the importable `client` Go package (invariant 7). |
+| `limitations` | array of 5 strings | Blunt, verified-true-of-this-build negative claims — see below. |
+
+**Invariants that govern this document, and must not be relaxed by a future edit:**
+
+- **It describes the PROTOCOL, never the ROSTER.** No agent list, no agent count, no data-dir or
+  on-disk path, no listen address, no peer list, no key material, no uptime, no config value. The
+  only bus-specific value anywhere in the document is `bus_id`.
+- **The `endpoints` list is a STATIC, compile-time-constant list — it is NOT a projection of the
+  registered routes (`s.routes`/`Routes()`).** `authMiddleware` deliberately answers 401 rather than
+  404 on an unknown path so an anonymous caller cannot enumerate which routes this build serves (the
+  messaging and credential routes are registered only when `Options.Hub`/`Options.Auth` are non-nil).
+  A mux-derived endpoint list would hand out exactly the configuration that 401-not-404 choice exists
+  to withhold. `/v1/broadcast` is **deliberately absent** from `endpoints` for the same class of
+  reason stated differently: it is registered and authenticates, then answers 501 (see "Signed sends"
+  above), and advertising a route that refuses everything is worse than not advertising it — it is
+  instead named honestly in `limitations` entry 4.
+- **The document is built ONCE, in `httpapi.New`, and cannot grow with bus state.** Its only input is
+  `Identity.BusID()`, which is stable for the process lifetime; the handler (`handleDiscovery`) writes
+  the value stored on `*Server` at construction and computes nothing per request — no route
+  enumeration, no state read, no clock.
+- **`auth.SessionSigningContext` is deliberately NOT served.** `session.signing_context` says so and
+  points at the compiled client, which pins the prefix instead. It is documented as a value the
+  client must PIN (see "The signing contract" above): a client that learned the domain-separation
+  prefix from the server would sign whatever a man-in-the-middle chose to put in front of the token.
+
+The `limitations` array is blunt on purpose and must be restated exactly, never softened, if quoted
+elsewhere: (1) no transport security — plaintext HTTP, no TLS, loopback-only advised; (2) messages are
+signed but the bus checks the signature's SHAPE only and does **not** verify it against the sender's
+key — **by design, not a gap awaiting a release** ("the bus enforces shape, the recipient enforces
+authenticity"; a bus that verified would move the trust boundary onto itself), and the recipient
+cannot verify either today because nothing distributes messaging public keys, so every message must
+be treated as UNAUTHENTICATED; (3) no end-to-end encryption — bodies are held, **persisted to disk
+unencrypted** and served in the clear, so anyone who can read the data directory can read every
+stored body (only the append-only audit log omits bodies; the message store does not);
+(4) `POST /v1/broadcast` answers 501; (5) single bus only — cross-bus relay is not served yet, a
+recipient on another bus is a 404.
+
+`steps` distinguishes the **two separate Ed25519 keypairs**, which is the one thing a reader is most
+likely to get wrong: step 3's AUTH key is the only key the bus ever learns and is what authenticates
+you *to the bus*, while a message signature (step 8) is made with a **second, separate MESSAGING
+key** that is never sent to the bus. Since no endpoint distributes messaging public keys, no
+recipient can currently verify a message signature — which is why step 8 points at limitation 2.
+
+Both `session.lifetime_seconds` and `session.refresh_after_seconds` are **derived at construction**
+from `auth.SessionLifetime` and `auth.RefreshAfter()` rather than hand-copied, so the document cannot
+drift from the rule the server enforces; `TestDiscoverySessionConstantsMatchAuth` pins the equality.
 
 ### Messaging routes (added 2026-08-02 — MSG-1…5, POLL-1…3)
 
@@ -119,16 +185,23 @@ server-attested key-bundle endpoint) does not exist. So verification is possible
 key obtained **out of band**. That is the honest state of the world; there is no TOFU fallback, no
 "trust the key the bus handed over", and none may be added.
 
-`/v1/info`'s payload is deliberately minimal (see `DECISIONS.md`, 2026-08-02): `bus_id`, `version`,
-`uptime_seconds` only. A test pins the exact field set — do not add data-dir, listen address, peer
-list, or agent roster here without updating that test and recording the decision.
+`/v1/info`'s payload is deliberately minimal (see `DECISIONS.md`, 2026-08-02, and its 2026-08-07
+addendum on `/v1/discovery`): `bus_id`, `version`, `uptime_seconds`, and (added 2026-08-07,
+DISCOVERY-DOC) `discovery`. That fourth field is safe precisely because it adds no information: its
+value is the compile-time constant `httpapi.RouteDiscovery` (`"/v1/discovery"`), identical in every
+build and independent of this bus's identity, state and configuration — it exists only so a caller
+that already knows `/v1/info` can find the protocol-discovery document (`GET /v1/discovery`, see
+`### Discovery document` below) instead of guessing the path. A test pins the exact field set — do
+not add data-dir, listen address, peer list, or agent roster here without updating that test and
+recording the decision.
 
 **Authentication is now default-deny across the whole mux** (AUTH-2, with AUTH-6's fail-open fix
 folded into the same change). `authMiddleware` wraps `s.handler` before any route is dispatched, so a
 route is authenticated the moment it is registered through `(*Server).route` — nobody has to remember
 to protect it individually, which closes the exact risk AUTH-6 flagged (routes wired one at a time,
-easy to forget on the next addition). The allow-list is exactly the five paths named in the routes
-above; see `## Authentication` further down for the full contract.
+easy to forget on the next addition). The allow-list is exactly the six paths named in the routes
+above (added 2026-08-07: `/v1/discovery`); see `## Authentication` further down for the full
+contract.
 
 ## Messaging: delivery guarantee, cursors, retention (added 2026-08-02)
 
@@ -268,9 +341,9 @@ passes the hub as the WAL's `Applier`:
 | Header | Direction | Rule |
 | --- | --- | --- |
 | `X-Request-Id` | in/out | Inbound value accepted only if it matches `[A-Za-z0-9._-]{1,64}` (`httpapi.MaxRequestIDLen = 64`); otherwise replaced with a server-generated id (`crypto/rand` 16 hex chars, falling back to a `seq-<n>` counter). Always echoed on the response. |
-| `Authorization` | in | Required on every route off the five-entry allow-list (`## Authentication`). Exactly one header, form `Bearer <token>` (scheme case-insensitive); `<token>` must be non-empty, contain no space, be no longer than `httpapi.MaxBearerTokenLen` (512), and consist only of the base64url alphabet `[A-Za-z0-9_-]`. Zero headers, more than one, a non-`Bearer` scheme, or a token failing any of those checks is treated as "no usable credential" (401, `error="invalid_request"`) — distinct from a syntactically fine token that simply does not authenticate (401, `error="invalid_token"`). Never logged, echoed, truncated or hashed into any response or log line — only the resulting agent id ever leaves `authMiddleware`. |
+| `Authorization` | in | Required on every route off the six-entry allow-list (`## Authentication`). Exactly one header, form `Bearer <token>` (scheme case-insensitive); `<token>` must be non-empty, contain no space, be no longer than `httpapi.MaxBearerTokenLen` (512), and consist only of the base64url alphabet `[A-Za-z0-9_-]`. Zero headers, more than one, a non-`Bearer` scheme, or a token failing any of those checks is treated as "no usable credential" (401, `error="invalid_request"`) — distinct from a syntactically fine token that simply does not authenticate (401, `error="invalid_token"`). Never logged, echoed, truncated or hashed into any response or log line — only the resulting agent id ever leaves `authMiddleware`. |
 | `WWW-Authenticate` | out | On every 401: `Bearer realm="agent-bus", error="invalid_request"` when no usable credential was presented, or `Bearer realm="agent-bus", error="invalid_token"` when a well-formed token failed to authenticate (unknown, pending, or expired — the three are deliberately indistinguishable to the caller). |
-| `Allow` | out | Set to `GET` on a 405 from `/healthz`, `/v1/info`, `/v1/agents`, `/v1/messages` or `/v1/wait`. |
+| `Allow` | out | Set to `GET` on a 405 from `/healthz`, `/v1/info`, `/v1/discovery`, `/v1/agents`, `/v1/messages` or `/v1/wait`. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
 | `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, on `POST /v1/send`'s 201, and (added 2026-08-07) on `POST /v1/mint`'s 201, when the response was replayed rather than freshly applied — from the applied-key table for `enroll`/`send`, from the outstanding-reservation table for `mint`. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied (and, for `mint`, allocated) nothing. Not reachable on `/v1/broadcast`, which answers 501. |
@@ -442,7 +515,7 @@ refused 401 unless its **exact** `r.URL.Path` is on the allow-list, so a route a
 authenticated the instant it is registered through `(*Server).route` — nobody has to remember to wrap
 it, and forgetting is no longer possible for the surface `TestEveryRouteRequiresAuth` can see (below).
 
-**The allow-list is exactly five paths, matched by exact string equality** (no prefix match, no path
+**The allow-list is exactly six paths, matched by exact string equality** (no prefix match, no path
 cleaning, no trailing-slash tolerance — `/healthz/`, `//healthz`, `/HEALTHZ` are NOT allow-listed and
 get 401; the cost of being this strict is a 401 on a misspelled-but-harmless probe, the cost of being
 lenient is a normalisation mismatch between this check and the mux, which is how allow-list bypasses
@@ -452,6 +525,13 @@ get built):
   returns no state.
 - `/v1/info` — pre-enrolment discovery; an agent needs the bus id and version to decide whether to
   enrol at all.
+- `/v1/discovery` — **added 2026-08-07 (DISCOVERY-DOC).** How a caller holding nothing but this bus's
+  URL learns to enrol at all — requiring the credential it explains would make it unreachable by
+  everyone who needs it, the same circularity that puts `/v1/enroll` and the two session routes on
+  this list. It is safe to leave open because it reveals nothing about this bus's contents or
+  configuration: the document is a STATIC, compile-time-constant description of the PROTOCOL, never
+  the ROSTER, plus the one bus-specific value (`bus_id`) that `/v1/info` already serves to the same
+  anonymous caller. See `### Discovery document` below.
 - `/v1/enroll` — this is where an identity is created; there is by definition no credential yet.
 - `/v1/session/begin` — called with NO session at all; it is the request that asks the server for a
   token to sign.
@@ -494,6 +574,7 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `MaxBearerTokenLen` | `512` — the length cap above; two orders of magnitude of headroom over a real 43-character token, and still finite. |
 | `UnauthenticatedRoutes() []string` | The allow-list, sorted, returned as a COPY — the real map is the security boundary of this server and is not exported, so no caller can get a handle that mutates it. |
 | `IsUnauthenticatedRoute(path string) bool` | Exact-match check against the allow-list; what `authMiddleware` itself calls. |
+| `RouteDiscovery` | `"/v1/discovery"` — added 2026-08-07 (DISCOVERY-DOC). On the allow-list. `DiscoveryResponse` and its nested types (`DiscoveryEndpoint`, `DiscoveryEnrolment`, `DiscoverySession`, `DiscoveryClient`) live in `internal/httpapi/discovery.go`; see `### Discovery document` above for the shape. |
 | `PrincipalFromContext(ctx) (auth.Principal, bool)` | The authenticated identity, or `ok == false` on an allow-listed route (not an error condition — it is the definition of an unauthenticated route). |
 | `AgentIDFromContext(ctx) string` | The fully-qualified `<bus-id>.<agent-id>` (invariant 2) of the caller, or `""` when no principal is attached. |
 | `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. |

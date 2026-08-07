@@ -149,6 +149,21 @@ type Server struct {
 	now         func() time.Time
 	handler     http.Handler
 
+	// discovery is the STATIC protocol-discovery document served by
+	// GET /v1/discovery, built once in New and never mutated afterwards.
+	// Holding it here rather than assembling it per request is what makes
+	// "the discovery response cannot grow with bus state" structurally true:
+	// its only input is the bus id, which is stable for the process lifetime.
+	// See discovery.go.
+	discovery DiscoveryResponse
+
+	// discoveryJSON is discovery already marshalled, so serving it costs a
+	// write rather than a ~6 KiB marshal. That matters because /v1/discovery
+	// is UNAUTHENTICATED and unrate-limited: a tiny anonymous request must not
+	// be able to buy meaningful server CPU. Marshalled once in New, read-only
+	// afterwards, and never handed out except as bytes written to a response.
+	discoveryJSON []byte
+
 	// routes is every pattern registered on the mux, in registration order.
 	// Go 1.19's http.ServeMux cannot be enumerated, and an authentication
 	// wrapper that is only claimed to cover the whole surface is worth
@@ -187,9 +202,25 @@ func New(opts Options) *Server {
 		s.startedAt = s.now()
 	}
 
+	// Built AFTER the identity default is applied and BEFORE any request can
+	// be served, so the handler only ever writes a finished value.
+	s.discovery = newDiscoveryResponse(s.identity.BusID())
+
+	// Marshalling CANNOT fail here: every field is a string, int, bool or a
+	// slice/struct of those, with no channel, func, cycle or custom Marshaler
+	// anywhere in the shape. If it somehow did, s.discoveryJSON stays nil and
+	// handleDiscovery falls back to marshalling per request, which is slower
+	// but still correct -- a discovery document is not worth failing New over.
+	if b, err := json.Marshal(s.discovery); err == nil {
+		s.discoveryJSON = append(b, '\n')
+	}
+
 	mux := http.NewServeMux()
 	s.route(mux, "/healthz", s.handleHealthz)
 	s.route(mux, "/v1/info", s.handleInfo)
+	// Unauthenticated by necessity: it is how a caller holding only a URL
+	// learns to enrol. It is static and carries no bus state; see discovery.go.
+	s.route(mux, RouteDiscovery, s.handleDiscovery)
 
 	// Registered only when there is an auth service to serve them; see
 	// Options.Auth. These three ISSUE the credential every other route
@@ -291,10 +322,19 @@ type HealthResponse struct {
 // payload is deliberately minimal: bus id, version, uptime. Do not add data
 // dirs, listen addresses, peer lists, agent rosters or anything else an
 // unauthenticated caller has no business learning.
+//
+// Discovery is the one exception, and it is safe precisely because it adds no
+// information: it is the COMPILE-TIME CONSTANT RouteDiscovery, identical in
+// every build and independent of this bus's identity, state and configuration.
+// It exists so a caller that knows only /v1/info can find the protocol
+// document (GET /v1/discovery) instead of having to guess the path. This
+// endpoint stays a liveness and version probe; the protocol guide lives at
+// that other path so each can be pinned on its own. See discovery.go.
 type InfoResponse struct {
 	BusID         string  `json:"bus_id"`
 	Version       string  `json:"version"`
 	UptimeSeconds float64 `json:"uptime_seconds"`
+	Discovery     string  `json:"discovery"`
 }
 
 // handleHealthz serves GET /healthz: liveness only, no auth, no state.
@@ -318,6 +358,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		BusID:         s.identity.BusID(),
 		Version:       s.version,
 		UptimeSeconds: math.Round(uptime*1000) / 1000,
+		Discovery:     RouteDiscovery,
 	})
 }
 
@@ -354,6 +395,29 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, status int, v
 		return
 	}
 	body = append(body, '\n')
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead {
+		if _, err := w.Write(body); err != nil {
+			s.log.Debug("writing response failed",
+				"request_id", RequestIDFromContext(r.Context()),
+				"path", r.URL.Path,
+				"err", err,
+			)
+		}
+	}
+}
+
+// writePreformattedJSON writes an ALREADY-MARSHALLED body, for responses that
+// are computed once at construction rather than per request (see
+// Server.discoveryJSON). It sets exactly the headers writeJSON sets and
+// handles HEAD the same way -- deliberately, so the two paths cannot drift.
+//
+// body must include its trailing newline, and must NEVER be derived from
+// request input: the whole point is that it is a fixed, server-owned value.
+// Callers must not retain or mutate it afterwards.
+func (s *Server) writePreformattedJSON(w http.ResponseWriter, r *http.Request, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)

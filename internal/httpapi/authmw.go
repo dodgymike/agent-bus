@@ -25,14 +25,24 @@ const MaxBearerTokenLen = 512
 // the middleware is DEFAULT-DENY, so a route added tomorrow is authenticated
 // the moment it is registered and nobody has to remember to protect it.
 //
-// Five entries, and each one has to earn its place (invariant 3):
+// Six entries, and each one has to earn its place (invariant 3):
 //
 //   - "/healthz" -- liveness. A load balancer, an orchestrator's probe and a
 //     `docker compose` healthcheck all call it before any agent exists, and it
 //     returns no state whatsoever.
 //   - "/v1/info" -- pre-enrolment discovery. An agent needs the bus id and
 //     version to decide whether to enrol at all; the payload is deliberately
-//     kept to bus id, version and uptime for exactly this reason.
+//     kept to bus id, version, uptime and the constant discovery path for
+//     exactly this reason.
+//   - RouteDiscovery -- the protocol document, and the reason it is anonymous
+//     is circular in the way that makes it necessary: it is HOW A CALLER
+//     HOLDING ONLY A URL LEARNS TO ENROL, so requiring the credential it
+//     explains would make it unreachable by everyone who needs it. It is safe
+//     to hand out because it carries no bus state at all -- it is a static,
+//     compile-time constant document plus the bus id that "/v1/info" already
+//     serves to the same caller. In particular its endpoint list is NOT
+//     derived from the registered routes, so it does not disclose which
+//     optional surfaces this build serves. See discovery.go.
 //   - RouteEnroll -- this is where an identity is created. There is by
 //     definition no credential yet.
 //   - RouteSessionBegin -- called with NO SESSION AT ALL. It is the request
@@ -57,6 +67,7 @@ const MaxBearerTokenLen = 512
 var unauthenticatedRoutes = map[string]struct{}{
 	"/healthz":           {},
 	"/v1/info":           {},
+	RouteDiscovery:       {},
 	RouteEnroll:          {},
 	RouteSessionBegin:    {},
 	RouteSessionComplete: {},
