@@ -160,6 +160,25 @@ func run(cfg Config) error {
 		return fmt.Errorf("preparing -data-dir %q: %w", cfg.DataDir, err)
 	}
 
+	// Was this data dir EMPTY when the process started? Read here and nowhere
+	// else: this is the last instant at which the answer is knowable, because
+	// dirlock.Acquire below writes bus.lock and everything after it writes more.
+	//
+	// It exists for exactly one consumer, openSuffixAllocator, and it is the
+	// difference between two cases that are otherwise indistinguishable and want
+	// opposite log levels: a genuinely first start (no floors file, and that is
+	// expected) versus a data dir whose floors file has been LOST (no floors
+	// file, and agent ids this bus already issued may now be re-minted). The
+	// obvious discriminator -- "does the log hold records" -- is NOT sufficient
+	// today and was measured to be: enrolment is still memory-only, so a bus can
+	// issue alpha-1 and alpha-2, be restarted with agent-suffixes deleted, and
+	// still present a COMPLETELY EMPTY log. Emptiness of the directory catches
+	// that; the record count does not.
+	dataDirWasEmpty, err := dirIsEmpty(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("inspecting -data-dir %q: %w", cfg.DataDir, err)
+	}
+
 	// Take the exclusive lock on the data dir BEFORE anything reads or writes
 	// it -- before the bus id is loaded, and so before any future WAL replay,
 	// which is the whole point: replay must happen inside the lock. Two servers
@@ -173,8 +192,8 @@ func run(cfg Config) error {
 	// by the kernel if we die, so a crash leaves a lock FILE but no LOCK and the
 	// next start just works; Release never unlinks the file, because unlinking
 	// races two starters into two holders (see internal/dirlock).
-	lock, err := dirlock.Acquire(cfg.DataDir)
-	if err != nil {
+	lock, lockErr := dirlock.Acquire(cfg.DataDir)
+	if err := lockErr; err != nil {
 		// No %q of the dir here: every dirlock error already names it, and
 		// repeating the path twice in one line makes the refusal harder to read,
 		// not clearer.
@@ -306,25 +325,30 @@ func run(cfg Config) error {
 
 	// The enrolment and session authority. It is built AFTER the bus id is
 	// resolved (every agent id it mints is qualified with that id, invariant 2)
-	// and after the WAL is open, so the order here already matches the one
-	// AUTH-3 needs when enrolment starts writing through the two-phase path.
+	// and after the WAL is open, because the suffix allocator below reads the
+	// replayed log and the recovery outcome.
 	//
-	// ids.NewNameSuffixes() -- a FRESH counter, every name starting at suffix 1
-	// -- is correct ONLY because nothing in this path writes an agent id to
-	// disk. No enrolment is durable, so no suffix is ever burned on disk, so
-	// there is nothing a restarted counter could collide with (point 2 of the
-	// ids.NameSuffixes doc: a suffix that never reached disk may safely be
-	// reissued).
+	// The allocator is ids.DurableNameSuffixes, via openSuffixAllocator: it
+	// persists and fsyncs each name's floor BEFORE issuing the suffix that floor
+	// authorises, so a restart resumes strictly above every suffix this data dir
+	// has ever issued (invariant 1: ids are never reused, INCLUDING ACROSS
+	// RESTARTS). Agent ids are durable inside store message records -- Sender
+	// and Recipients are fully-qualified ids and the WAL never compacts -- so a
+	// counter that restarted at 1 would re-mint ids that are already on disk,
+	// handing a NEW agent holding a DIFFERENT keypair a previous agent's routing
+	// and authorization identity.
 	//
-	// AUTH-3 MUST replace this with ids.ResumeNameSuffixes, or with RaiseFloor
-	// folded over the replay stream, seeded from the HIGHEST SUFFIX EVER
-	// WRITTEN TO DISK for each name -- prepared or committed, still enrolled or
-	// long departed. Read "What a DURABLE implementation must guarantee" on
-	// ids.NameSuffixes first: deriving those floors from the committed roster
-	// is the obvious wiring and is WRONG, because it misses both dangling
-	// prepares and departed agents, and the failure mode is a NEW agent holding
-	// a DIFFERENT keypair inheriting a previous agent's identity.
-	alloc := ids.NewNameSuffixes()
+	// ids.NewNameSuffixes() -- the FRESH counter this used to build -- is gone
+	// from cmd/ and MUST NOT come back, on any path, including as a fallback for
+	// a failed open or a failed seal. OpenNameSuffixes already handles a fresh
+	// data dir (it reports Existed() == false and yields an empty floor map), so
+	// a fallback buys nothing and silently restores the defect while looking
+	// fixed. Every failure below is FATAL, deliberately: a loud, recoverable
+	// outage beats silent identity reuse.
+	alloc, err := openSuffixAllocator(cfg.DataDir, walLog, busID, dataDirWasEmpty, lg)
+	if err != nil {
+		return fmt.Errorf("preparing the agent id suffix allocator: %w", err)
+	}
 	minter, err := ids.NewAgentIDMinter(busID, alloc)
 	if err != nil {
 		return fmt.Errorf("creating the agent id minter: %w", err)
@@ -337,7 +361,26 @@ func run(cfg Config) error {
 	// Operator-visible, at WARN, on every start. This is not boilerplate: the
 	// bus is NOT yet durable for auth, and the honest signal belongs in the log
 	// where an operator sees it, not only in a doc comment.
-	lg.Warn("enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe, the roster and all sessions are LOST on restart, and agent id suffixes restart from 1 for every name. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery",
+	//
+	// NARROWED by MSG-FU-SUFFIXFLOOR. This line used to end "and agent id
+	// suffixes restart from 1 for every name", which became FALSE the moment
+	// openSuffixAllocator landed above -- the floors are now persisted and
+	// fsynced ahead of every suffix, so they survive restart. A false WARN in
+	// the startup log is its own defect: an operator who reads it would take
+	// precautions against a hazard that no longer exists and would distrust the
+	// clause that is still true. The rest of the sentence stands unchanged --
+	// the roster and the sessions really are in memory only.
+	//
+	// The clause was DELETED rather than negated, and that is deliberate. The
+	// security gate showed that the obvious replacement -- "agent id suffixes are
+	// durable and never restart from 1" -- is itself false in the one case an
+	// operator most needs the truth: a data dir whose floors file has been lost
+	// DOES resume names from 1. A single unconditional sentence cannot be right
+	// in both cases, so the claim now lives entirely in the "agent-id suffix
+	// floors" line that openSuffixAllocator emits, which knows which case it is
+	// in and picks INFO, WARN or ERROR accordingly. This line says only what is
+	// unconditionally true.
+	lg.Warn("enrolment and sessions are IN-MEMORY ONLY: they are NOT crash-safe and the roster and all sessions are LOST on restart. Do not treat an accepted enrolment as durable until AUTH-3 lands durable enrolment and recovery. For agent id suffix durability -- which is a SEPARATE question and is answered per data directory -- read the \"agent-id suffix floors\" line above",
 		"bus_id", busID,
 		"follow_up", "AUTH-3",
 	)
