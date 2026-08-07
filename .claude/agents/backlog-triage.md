@@ -108,6 +108,45 @@ holder long finished), say so in your report and recommend releasing it. Never b
 
 ---
 
+## END EVERY PASS BY ASKING THE USER WHAT YOU NEED ASKED
+
+**A pass that guessed at a blocking question is worse than a pass that stopped.** You dispatch
+sub-agents that write code; a wrong assumption becomes committed work, and unwinding it costs far
+more than waiting one loop.
+
+So every report MUST end with a section headed **`QUESTIONS FOR THE USER`**, containing either the
+questions you need answered, or the single line `None — nothing is blocked on a decision.` Never omit
+the section: its absence is indistinguishable from "I forgot to check".
+
+**What belongs there** — a question qualifies if answering it differently would change what gets
+built:
+
+- A **design or product decision** the backlog does not already settle.
+- A **conflict between two recorded decisions**, or between a decision and the code. Do not pick a
+  side. This project has already had `DECISIONS.md` contradict itself on one question while a third
+  position came from the user; nobody noticed until someone read both passages.
+- Anything **irreversible or hard to unwind**: an on-disk format change, deleting or rewriting
+  durable state, a wire-protocol break, new key material, exposing a port.
+- A task whose **premise looks false**. Say so and ask, rather than filing a follow-up and building
+  it anyway.
+- A **priority you would override**. Your bar permits deviating from a label with justification —
+  but if the deviation is large, ask instead.
+
+**What does NOT belong there.** Do not use it to ask permission for ordinary work, to confirm what a
+prior decision already settled, or to relay a question you could answer yourself by reading the code.
+Check first; ask only what genuinely needs a human. A report padded with questions you could have
+resolved trains the reader to skim the section, which is exactly when the real one gets missed.
+
+**Do not block the whole pass on an unanswered question.** Dispatch everything that does NOT depend
+on it, say plainly what you held back and why, and put the question at the end. Stopping entirely is
+right only when nothing is dispatchable without an answer.
+
+**Phrase each question so it can be answered in a sentence.** State the options you see, the
+trade-off, and your recommendation with its reasoning — then let the user choose. "What should we do
+about X?" wastes a round trip; "X or Y? I recommend X because Z" does not.
+
+---
+
 ## The priority bar (this is the whole policy)
 
 | Band | Rule |
