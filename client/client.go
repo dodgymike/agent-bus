@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,8 +22,12 @@ import (
 // command that turns out not to need the network costs nothing.
 type Client struct {
 	cfg   Config
-	http  HTTPDoer
 	store *Store
+
+	// pin is Config.BusFingerprint, parsed once in New so a typo fails at
+	// construction and names the flag rather than surfacing mid-handshake.
+	// Zero means "none was given explicitly"; the identity may still carry one.
+	pin BusFingerprint
 
 	// sleepFn overrides the backoff sleep in tests. Nil in production.
 	sleepFn func(context.Context, time.Duration) error
@@ -31,6 +36,18 @@ type Client struct {
 	nowFn func() time.Time
 
 	mu sync.Mutex
+	// http is the transport, built LAZILY.
+	//
+	// It cannot be built in New: the bus URL may come from the selected
+	// identity and the pinned fingerprint may come from the same record, so
+	// neither is known until the first request resolves them. httpPin is the
+	// fingerprint http was built for; when the resolved pin differs — the
+	// caller switched identity, or supplied one explicitly — the transport is
+	// rebuilt rather than reused, because a pooled connection was verified
+	// against the OLD pin.
+	http    HTTPDoer
+	httpPin BusFingerprint
+
 	// cred caches the resolved credential so a command that touches the store
 	// twice does not read and parse it twice.
 	cred *Credential
@@ -62,6 +79,17 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	// Same reasoning for the pin: a mistyped fingerprint is a usage error about
+	// a flag, and discovering it inside a TLS handshake would report it as a
+	// connection failure.
+	var pin BusFingerprint
+	if cfg.BusFingerprint != "" {
+		var err error
+		if pin, err = ParseBusFingerprint(cfg.BusFingerprint); err != nil {
+			return nil, err
+		}
+	}
+
 	dir := cfg.IdentityDir
 	if dir == "" {
 		var err error
@@ -85,7 +113,134 @@ func New(cfg Config) (*Client, error) {
 		cfg.KeyRing = NewDirKeyRing(filepath.Join(dir, TrustedKeysDirName))
 	}
 
-	return &Client{cfg: cfg, http: newHTTPClient(cfg), store: store}, nil
+	return &Client{cfg: cfg, pin: pin, store: store}, nil
+}
+
+// endpoint resolves the bus this client talks to AND the certificate
+// fingerprint pinned for it, together.
+//
+// They are resolved as one thing on purpose: an address without its pin is the
+// input to a trust-on-first-use connection, and keeping the two in separate
+// functions is how a caller ends up with one and not the other.
+func (c *Client) endpoint() (*url.URL, BusFingerprint, error) {
+	u, err := c.resolveBusURL()
+	if err != nil {
+		return nil, BusFingerprint{}, err
+	}
+	pin, err := c.resolvePin(u)
+	if err != nil {
+		return nil, BusFingerprint{}, err
+	}
+	return u, pin, nil
+}
+
+// resolvePin returns the fingerprint the bus at u must present.
+//
+// The order matches every other setting (CONTRACTS-CLI.md): the explicit
+// --bus-fingerprint / AGENT_BUS_FINGERPRINT value, else the one recorded on the
+// selected identity at enrolment. With one addition that is specific to a
+// security pin:
+//
+//   - The STORED pin is used only for the bus it was stored for. It is
+//     recorded next to that identity's BusURL, and applying it to a different
+//     --bus would be pinning bus A's certificate on bus B — which fails every
+//     connection and reads as a broken client rather than as a mistake.
+//   - When both exist and DISAGREE, this is a hard refusal, not a precedence
+//     question. One of the two is wrong about which bus this is, and silently
+//     preferring the value that arrived on the command line is precisely how an
+//     operator is talked into re-pinning: "it did not work, so I passed the
+//     fingerprint the other end gave me". Refusing makes the disagreement
+//     visible, which is the only way it gets checked out of band.
+//
+// A missing or unreadable identity is NOT an error here — enrolment happens
+// before any identity exists, and that is the case that most needs a pin.
+func (c *Client) resolvePin(u *url.URL) (BusFingerprint, error) {
+	stored, err := c.storedPin(u)
+	if err != nil {
+		return BusFingerprint{}, err
+	}
+	switch {
+	case c.pin.IsZero():
+		return stored, nil
+	case stored.IsZero(), c.pin.Equal(stored):
+		return c.pin, nil
+	default:
+		return BusFingerprint{}, newError(KindUsage, "config",
+			"--bus-fingerprint says "+c.pin.String()+" but the stored identity for "+u.String()+" pinned "+stored.String(),
+			"these name two different certificates and one of them is wrong. Confirm which is genuine OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup) before doing anything else; then either drop the flag, or `agent-busctl logout` that identity and enrol again against the fingerprint you confirmed")
+	}
+}
+
+// storedPin returns the fingerprint recorded on the selected identity, but only
+// when that identity was enrolled with the bus at u.
+func (c *Client) storedPin(u *url.URL) (BusFingerprint, error) {
+	cred, err := c.credential()
+	if err != nil {
+		// No identity, or none selected. Not a pin problem: the caller is
+		// enrolling, and the operations that need an identity raise this
+		// themselves with a better message.
+		return BusFingerprint{}, nil
+	}
+	if cred.BusFingerprint == "" || cred.BusURL != u.String() {
+		return BusFingerprint{}, nil
+	}
+	pin, err := ParseBusFingerprint(cred.BusFingerprint)
+	if err != nil {
+		// Stored, and unreadable. Fail rather than fall back to "no pin": that
+		// fallback would turn a damaged credential store into an unpinned
+		// connection, which is the one outcome that must never happen quietly.
+		return BusFingerprint{}, newError(KindConfig, "config",
+			"the certificate fingerprint stored for identity "+cred.AgentID+" is not a valid fingerprint",
+			"the credential store may be damaged; pass --bus-fingerprint <hex> for this command, or `agent-busctl logout "+cred.AgentID+"` and enrol again")
+	}
+	return pin, nil
+}
+
+// doer returns the transport for one bus, building it on first use and reusing
+// it while the pin is unchanged.
+//
+// The security decision (transportSecurity) is made BEFORE the cache is
+// consulted, so a refusal cannot be skipped by an earlier call having succeeded.
+func (c *Client) doer(u *url.URL, pin BusFingerprint) (HTTPDoer, error) {
+	if c.cfg.HTTPClient != nil {
+		// The embedder's own transport. Documented on Config.HTTPClient as
+		// bypassing this package's TLS configuration entirely — including the
+		// pin — because an embedder that supplies a transport owns its
+		// verification. It is not a way to relax anything: nothing in this
+		// package or the CLI ever sets it.
+		return c.cfg.HTTPClient, nil
+	}
+	if err := transportSecurity(u, pin); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.http == nil || !c.httpPin.Equal(pin) {
+		closeIdleConnections(c.http)
+		c.http = newHTTPClient(pin)
+		c.httpPin = pin
+	}
+	return c.http, nil
+}
+
+// closeIdleConnections drops the sockets of a transport that has been
+// superseded, instead of leaving them to IdleConnTimeout's 90 seconds.
+//
+// This is hygiene, NOT the security control — a transport built for pin A
+// structurally cannot accept a certificate matching pin B, so a lingering
+// socket could never carry a wrongly-verified request. What it avoids is a
+// client that switched identity holding open connections to a bus it has
+// stopped talking to, which is confusing to anyone reading netstat during an
+// incident.
+//
+// It is type-switched rather than typed, because HTTPDoer is deliberately the
+// narrow Do-only interface an embedder can satisfy; a doer that is not an
+// *http.Client simply has nothing to close.
+func closeIdleConnections(doer HTTPDoer) {
+	type idleCloser interface{ CloseIdleConnections() }
+	if c, ok := doer.(idleCloser); ok {
+		c.CloseIdleConnections()
+	}
 }
 
 // keyRing returns the trust store the read path verifies against.
@@ -244,10 +399,10 @@ func (c *Client) Use(ref string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	c.mu.Lock()
-	c.cred = nil
-	c.session = nil
-	c.mu.Unlock()
+	// forgetIdentity rather than clearing two fields by hand: the new identity
+	// may be on a different bus with a different pinned certificate, and the
+	// cached transport has to go with it.
+	c.forgetIdentity()
 	return id, nil
 }
 
@@ -303,12 +458,21 @@ func (c *Client) LogoutAll() (LogoutResult, error) {
 	return LogoutResult{Removed: removed, Current: "", ServerNotified: false}, nil
 }
 
-// forgetIdentity drops the cached credential and session after the store has
-// changed underneath them.
+// forgetIdentity drops the cached credential, session AND transport after the
+// store has changed underneath them.
+//
+// The transport goes too because a different identity may be enrolled with a
+// different bus, and therefore a different pinned certificate. Keeping it would
+// leave pooled connections that were verified against the previous identity's
+// pin — the connection would be reused, the new pin would never be checked, and
+// nothing would look wrong.
 func (c *Client) forgetIdentity() {
 	c.mu.Lock()
 	c.cred = nil
 	c.session = nil
+	closeIdleConnections(c.http)
+	c.http = nil
+	c.httpPin = BusFingerprint{}
 	c.mu.Unlock()
 }
 

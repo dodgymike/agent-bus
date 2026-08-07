@@ -58,16 +58,36 @@
 // subprocess produces exactly the codes a caller expects without copying a
 // switch statement that will drift.
 //
-// # Transport
+// # Transport, and the pinned bus certificate
 //
-// newHTTPClient is the single seam where a transport is constructed. Invariant
-// 11 makes TLS mandatory, with self-signed certificates, mutual authentication
-// and the bus's fingerprint pinned from the invite blob; when the bus serves
-// TLS, that configuration lands there and nowhere else.
+// newHTTPClient is the single seam where a transport is constructed, and
+// pinnedTLSConfig (pin.go) is the single place DEFAULT VERIFICATION IS
+// REPLACED. Invariant 11 makes TLS mandatory, with self-signed certificates,
+// mutual authentication and the bus's fingerprint pinned from the invite blob.
+// The pin half of that is implemented here (MTLS-PIN, 2026-08-07) — though no
+// bus serves TLS yet (MTLS-LISTENER), so nothing exercises it against a real
+// bus. The client-certificate half is not written at all (MTLS-CLIENTCERT);
+// when it is, tls.Config.Certificates belongs in pinnedTLSConfig — NOT in
+// newHTTPClient's unpinned fallback literal, which the pinned branch replaces
+// wholesale, so a certificate put there is silently dropped on every real
+// connection.
 //
-// CERTIFICATE VERIFICATION IS NEVER DISABLED. tls.Config's skip-verification
-// field is not set here, is not reachable through Config, and must not appear
-// anywhere in this tree including tests — it is deliberately not spelled out
-// in this comment either, so that grepping the tree for its name finds only
-// real uses (DECISIONS.md, 2026-08-02, "E7").
+// The rule to know: an https bus whose certificate fingerprint this client has
+// not been told IN ADVANCE is REFUSED. There is no trust-on-first-use, not as a
+// flag, not as a fallback, not for tests. The fingerprint comes from the invite
+// (today: Config.BusFingerprint, AGENT_BUS_FINGERPRINT, or the selected
+// identity, which recorded it at enrolment), and a bus that presents a
+// different certificate is a hard, unretried failure.
+//
+// CERTIFICATE VERIFICATION IS NEVER DISABLED — it is REPLACED. pinnedTLSConfig
+// turns off the stdlib's default chain check, which cannot succeed against a
+// self-signed certificate with no CA anywhere in the design, and substitutes an
+// exact-certificate comparison that is strictly stronger than the CA and
+// hostname checks it stands in for. Read pinnedTLSConfig's doc comment before
+// touching it: the difference between "we replaced verification" and "we
+// removed verification" is one callback, and the second still completes
+// handshakes and still passes every positive test. Three guards in
+// guard_test.go hold the two halves together, and there is no Config field,
+// flag or environment variable that relaxes any of it (DECISIONS.md,
+// 2026-08-02 "E7", amended 2026-08-07 by MTLS-PIN).
 package client

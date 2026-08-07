@@ -46,13 +46,21 @@ Global flags are accepted **before or after** the subcommand, so both `agent-bus
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--bus <url>` | `AGENT_BUS_URL` | *(the selected identity's recorded URL; `enrol` requires it explicitly)* | Base URL of the bus. `https` anywhere; **`http` ONLY to a loopback host** (`127.0.0.1`, `::1`, `localhost`) — see "In flight" below. A path prefix is allowed; **userinfo, query and fragment are rejected**. Canonicalised: host lower-cased, default port dropped, trailing `/` trimmed. |
+| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | *(the selected identity's recorded fingerprint)* | (added 2026-08-07, `MTLS-PIN`) SHA-256 of the bus certificate's DER, as **exactly 64 LOWERCASE hex characters** — no `0x`, no colons, no whitespace. **REQUIRED for any `https` bus and REFUSED for an `http` one.** See "Certificate pinning" below. |
 | `--identity <dir>` | `AGENT_BUS_IDENTITY` | `$XDG_CONFIG_HOME/agent-bus` (`os.UserConfigDir()` + `/agent-bus`) | The credential store **DIRECTORY** — not an agent id. |
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | *(the stored selection)* | Act as one stored identity for this command only, changing nothing on disk. **Parallel agents sharing a store should use this, not `use`.** |
 | `--json` | — | off | Machine-readable JSON on stdout. |
 | `--timeout <dur>` | `AGENT_BUS_TIMEOUT` | `30s` | Bounds ONE operation end to end, retries included. Any `time.ParseDuration` value; must be positive. |
 
 **Resolution order, deterministic:** explicit flag → environment variable → the selected identity's
-recorded value (`--bus` only) → built-in default.
+recorded value (`--bus` and `--bus-fingerprint` only) → built-in default.
+
+**`--bus-fingerprint` is the ONE documented exception to that order**, and it is deliberate. When an
+explicit fingerprint and the stored identity's fingerprint name **different** certificates for the
+**same** bus, neither wins: the command fails with exit `2` and names both values. Letting the flag
+win would be the precedence rule and the wrong answer — "it stopped working so I passed the
+fingerprint the other end gave me" is exactly how a substituted certificate gets accepted, and it
+would turn a detected substitution into a successful one. Agreement is not a conflict.
 
 `--help` / `-h` / `agent-busctl help <command>` print help and exit `0`.
 
@@ -60,7 +68,7 @@ recorded value (`--bus` only) → built-in default.
 
 | Command | Purpose | Network? |
 | --- | --- | --- |
-| `enrol --name <name>` | Generate an Ed25519 key pair, send only the public half, receive the server-minted `<bus-id>.<agent-id>`, store the credential | yes — `POST /v1/enroll` |
+| `enrol --name <name>` | Generate an Ed25519 key pair, send only the public half, receive the server-minted `<bus-id>.<agent-id>`, store the credential **and the bus's pinned certificate fingerprint** | yes — `POST /v1/enroll` |
 | `whoami [--all] [--verify]` | Show the identity commands act as; `--all` lists them; `--verify` performs a real session handshake | only with `--verify` |
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
@@ -76,6 +84,52 @@ recorded value (`--bus` only) → built-in default.
 capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
 `Client.TrustedKeys()`), so today they are reachable by an agent EMBEDDING the client and not by one
 shelling out. Recorded as an open item, not as a satisfied requirement; see `CONTRACTS-AGENT.md`.
+
+### Certificate pinning — CONTRACT (`MTLS-PIN`, 2026-08-07)
+
+Bus certificates are **self-signed**, there is **no certificate authority**, and there is **no
+trust-on-first-use** (invariant 11). The fingerprint is therefore the only thing that says which bus
+is on the other end, and the client must be told it **before** its first connection.
+
+| Situation | Behaviour | Kind / exit |
+| --- | --- | --- |
+| `https` bus, fingerprint known (flag, env, or stored identity) | The bus's leaf certificate is verified against the pin on every handshake | — |
+| `https` bus, **no** fingerprint anywhere | **REFUSED before any connection is made.** No TOFU: nothing is sent, nothing is remembered | `config` / **3** |
+| `http` bus **with** a fingerprint | **REFUSED.** A plaintext connection has no certificate, so the pin cannot be checked, and silently ignoring it would fake a check that never ran | `usage` / **2** |
+| Fingerprint present but malformed | Refused at client construction, before any I/O | `usage` / **2** |
+| Flag and stored identity disagree for the same bus | Refused; the error names both values | `usage` / **2** |
+| Bus presents a **different** certificate | **Hard failure. Never retried.** The error names the pinned and the presented fingerprint and the remedy | `network` / **5** |
+
+- **The pin is `sha256(cert.Raw)`** — the DER of the **leaf**, exactly as it arrived on the wire.
+  Only `rawCerts[0]` is considered. This is the same construction the server uses
+  (`internal/buscert.Fingerprint`), mirrored in `client/pin.go` because the client package may not
+  import `internal/` (invariant 7). Divergence would fail closed: no pin would ever match.
+- **Textual form: 64 lowercase hex characters, and nothing else.** Uppercase is rejected rather than
+  folded, and the colon-separated spelling other tools print is rejected. One value, one spelling.
+- **`enrol` records the fingerprint with the identity** (`bus_fingerprint` in `identities.json`), so
+  it is supplied **once**, from the invite, and every later command against that bus verifies without
+  being told again — "the trusted path must be the easy path". The stored value is only ever the pin
+  that was already in force; it is **never** derived from the certificate the bus presented, because
+  that would be TOFU wearing the costume of a pin. The stored pin is used only for the bus URL it was
+  stored against.
+- **There is no flag, environment variable or `Config` field that disables verification**, silently
+  or otherwise, and three tests in `client/guard_test.go` enforce that structurally (see "The client
+  package" below).
+- **Recovery from a genuine rotation** is: confirm the new fingerprint out of band (the bus logs
+  `bus_cert_fingerprint=…` at startup), then `agent-busctl logout <agent-id>` and enrol again with
+  `--bus-fingerprint <new>`. Serving two certificates during rollover (invariant 11) is `MTLS-ROTATE`
+  and does not exist yet.
+- **NOT yet checked:** certificate expiry and validity dates. Disabling the default chain check
+  disables those too, and the pin answers "which bus", not "is this certificate still fit to use".
+  That is `MTLS-VERIFY`, and it is stated here rather than implied so nobody reads more into the pin
+  than it gives.
+- **`client.Config.HTTPClient` bypasses all of this — both halves.** An embedder that supplies its
+  own transport bypasses the fingerprint check *and* the refusal to speak `https` to a bus with no
+  pin at all, because `Client.doer` returns the supplied transport before it consults
+  `transportSecurity`. That is the correct trade for an embedder who owns its own verification, and
+  the exported `BusFingerprint` / `ParseBusFingerprint` exist so such an embedder can reuse this
+  construction rather than invent a second one. **Nothing in this package or the CLI ever sets it**,
+  and no flag or env var reaches it.
 
 ### Signed sends: `agent-busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
 
@@ -176,7 +230,7 @@ No code changes meaning; some commands give one a more specific sense:
 
 | Command | Fields |
 | --- | --- |
-| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path` |
+| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprint` (**`omitempty`** — present only when a certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path` |
 | `whoami` | the identity fields above, plus `is_current` (bool), and `session` (`agent_id`, `expires_at`, `refresh_at`, `lifetime_seconds`) with `--verify` |
 | `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
@@ -284,7 +338,7 @@ This is the load-bearing part of `watch`, and it applies whether the output is h
 | Path | Mode | Contents |
 | --- | --- | --- |
 | `<identity-dir>/` | `0700` | The store. Tightened on open if it already exists looser. |
-| `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the current selection, and in-flight (`pending`) enrolments. |
+| `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the pinned `bus_fingerprint` (2026-08-07, `omitempty`), the current selection, and in-flight (`pending`) enrolments. |
 | `<identity-dir>/identities.lock` | `0600` | Exclusive lock for read-modify-write; treated as abandoned after 30s. |
 | `<identity-dir>/trusted-keys/` | `0700` | (added 2026-08-07) The local trust store — `client.TrustedKeysDirName`. One `0600` file per peer, **named `<fully-qualified-agent-id>.pub`**, holding the standard base64 of that peer's 32-byte Ed25519 **messaging** public key. Deliberately the dullest format that works: one key, one file, no index, so an operator can inspect/add/remove with `cat`/`cp`/`rm` during an incident and a damaged file costs trust in one peer rather than all. A file over `4 KiB` is refused unread. The `0600`/`0700` modes protect **INTEGRITY, not secrecy** — these are public keys; whoever can write this directory decides whose signatures this agent accepts. |
 | `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_url`) pair — no key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
@@ -402,15 +456,24 @@ a *later* retry the same logical send rather than a second message.
   does not serve TLS yet. Plaintext to anything else is refused, because `/v1/session/begin` returns
   the session token — a bearer credential — in a response body. That restriction is the client-side
   half of E8's sequencing constraint ("the bus must NOT be exposed on a non-loopback interface before
-  mTLS lands") and is DELETED once the TLS listener ships. When it does, certificates are
-  self-signed, mutual, and pinned from the invite with **no TOFU**. The whole transport is one seam
-  (`client.newHTTPClient`) so pinning drops in there and nowhere else. `InsecureSkipVerify` is not
-  set, is not reachable through `Config`, and appears in no `.go` file in the tree — a test asserts
-  it. Redirects are never followed, because Go's default policy would forward the `Authorization`
-  header across an `https`→`http` downgrade on the same port.
-- **The transport is built before the identity is resolved**, which will need revisiting: pinning
-  needs a per-identity client certificate and a per-bus fingerprint, neither of which is a function
-  of `Config` alone. Filed as a follow-up; the seam is in the right place, at the wrong time.
+  mTLS lands") and is DELETED once the TLS listener ships (`MTLS-LISTENER`). Redirects are never
+  followed, because Go's default policy would forward the `Authorization` header across an
+  `https`→`http` downgrade on the same port.
+  **The client-side half of pinning is IMPLEMENTED AND ENFORCED BY THE CLIENT** (`MTLS-PIN`,
+  2026-08-07) — deliberately ahead of the listener, because a fingerprint nobody checks defends
+  nothing. It is code-only: no bus serves TLS yet, so nothing exercises it end to end against a real
+  bus, and the behaviour described under "Certificate pinning" above is what `client/` does, not
+  something a running deployment has demonstrated. The **client certificate** half of mutual TLS is still to come
+  (`MTLS-CLIENTCERT`); `tls.Config.Certificates` is unset today, and it belongs in
+  **`client.pinnedTLSConfig`** — *not* in `newHTTPClient`'s unpinned fallback literal, which the
+  pinned branch replaces wholesale, so a client certificate put there would be silently dropped on
+  every pinned (i.e. every real) connection.
+- ~~**The transport is built before the identity is resolved**~~ — **fixed by `MTLS-PIN`**
+  (2026-08-07). The transport is now built **lazily**, on the first request, once the bus URL and its
+  pin have been resolved together (`Client.endpoint` → `Client.doer`), and is rebuilt when the pin
+  changes. `enrol`, `use` and `logout` drop it, so no connection verified under one identity's pin is
+  reused under another's. The remaining half of the original note stands: the per-identity **client
+  certificate** still has no home, and `MTLS-CLIENTCERT` gives it one.
 
 ### The client package (`github.com/dodgymike/agent-bus/client`)
 
@@ -429,7 +492,8 @@ Exported surface as of 2026-08-02:
 | Symbol | Purpose |
 | --- | --- |
 | `Config`, `DefaultConfig`, `Config.ApplyEnv`, `DefaultIdentityDir`, `RetryPolicy`, `HTTPDoer` | Configuration and the transport escape hatch |
-| `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout` | The env var names above |
+| `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout`, `EnvBusFingerprint` | The env var names above |
+| `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint`, `Identity.BusFingerprint` | (2026-08-07, `MTLS-PIN`) Certificate pinning. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not the bus I pinned" without parsing a message; `BusFingerprintError` carries both fingerprints. There is **no** exported (or unexported) way to turn the check off. |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
 | `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()` |
 | `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
@@ -463,6 +527,7 @@ stop on rather than back off forever, or an operator-visible fault becomes a sil
 | `AGENT_BUS_IDENTITY` | `agent-busctl` | Credential store directory (`--identity`) |
 | `AGENT_BUS_AGENT_ID` | `agent-busctl` | Act as this stored identity (`--as`) |
 | `AGENT_BUS_TIMEOUT` | `agent-busctl` | Per-operation timeout (`--timeout`) |
+| `AGENT_BUS_FINGERPRINT` | `agent-busctl` | The bus certificate to accept, 64 lowercase hex (`--bus-fingerprint`). Surrounding whitespace is trimmed, as for `AGENT_BUS_TIMEOUT`; nothing else about the value is repaired. **Not a secret** — a certificate fingerprint is published in the bus's startup log and derivable from any handshake — so an env var is a fit carrier for it, unlike a key. |
 
 `cmd/agent-bus` still reads no environment variables; every server knob is a flag.
 (`scripts/bus-serve.sh` has its own `AGENT_BUS_RUN_DIR` / `AGENT_BUS_DATA_DIR` / `AGENT_BUS_LISTEN`

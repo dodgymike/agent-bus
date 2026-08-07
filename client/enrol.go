@@ -179,9 +179,16 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			"enrolment needs an explicit bus: pass --bus <url> or set "+EnvBusURL)
 	}
 
-	// Resolve the bus URL before anything is written, so a malformed --bus
-	// does not leave a pending record behind.
-	busURL, err := c.resolveBusURL()
+	// Resolve the bus URL AND its pinned fingerprint before anything is
+	// written, so a malformed --bus or an https bus with no pin does not leave
+	// a pending record behind.
+	//
+	// endpoint rather than resolveBusURL: enrolment is the FIRST connection to
+	// this bus and therefore the one that must not be trust-on-first-use. The
+	// pin has to come from the invite, before the handshake, and refusing here
+	// is what makes that true (invariant 11). Nothing is stored yet, so the pin
+	// can only be the explicit one.
+	busURL, pin, err := c.endpoint()
 	if err != nil {
 		return EnrolResult{}, err
 	}
@@ -301,14 +308,25 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		return EnrolResult{}, err
 	}
 
+	// The pin is recorded ONLY as the empty string or as the fingerprint that
+	// was actually in force for the connection that just succeeded. It is not
+	// copied from a flag we did not use, and it is never derived from the
+	// certificate the bus happened to present — deriving it here is exactly
+	// trust-on-first-use, wearing the costume of a stored pin.
+	storedPin := ""
+	if !pin.IsZero() {
+		storedPin = pin.String()
+	}
+
 	cred := Credential{
 		Identity: Identity{
-			AgentID:    body.AgentID,
-			BusID:      body.BusID,
-			Name:       body.Name,
-			BusURL:     busURL.String(),
-			PublicKey:  pubB64,
-			EnrolledAt: body.EnrolledAt,
+			AgentID:        body.AgentID,
+			BusID:          body.BusID,
+			Name:           body.Name,
+			BusURL:         busURL.String(),
+			BusFingerprint: storedPin,
+			PublicKey:      pubB64,
+			EnrolledAt:     body.EnrolledAt,
 		},
 		PrivateKeySeed: seedB64,
 		IdempotencyKey: idemKey,

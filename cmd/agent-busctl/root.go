@@ -24,7 +24,17 @@ var flagErrHelp = flag.ErrHelp
 // the second form and humans write either; refusing one of them would be a
 // papercut with no upside.
 type globals struct {
-	bus      string
+	bus string
+
+	// busFingerprint is the certificate this client will accept from the bus.
+	//
+	// It is GLOBAL rather than a flag on `enrol` alone because it is needed
+	// before an identity exists (enrol) AND by any command aimed at a bus the
+	// store has no identity for. After a successful enrol it is stored with the
+	// identity and does not need repeating — that is what makes the trusted
+	// path the easy path (invariant 11).
+	busFingerprint string
+
 	identity string
 	as       string
 	json     bool
@@ -39,6 +49,8 @@ type globals struct {
 // already parsed.
 func (g *globals) register(fs *flag.FlagSet) {
 	fs.StringVar(&g.bus, "bus", g.bus, "base URL of the bus (env "+client.EnvBusURL+")")
+	fs.StringVar(&g.busFingerprint, "bus-fingerprint", g.busFingerprint,
+		"SHA-256 of the bus's TLS certificate, 64 lowercase hex, from the invite (env "+client.EnvBusFingerprint+")")
 	fs.StringVar(&g.identity, "identity", g.identity, "credential store DIRECTORY (env "+client.EnvIdentityDir+")")
 	fs.StringVar(&g.as, "as", g.as, "act as this stored identity without changing the stored selection (env "+client.EnvAgentID+")")
 	fs.BoolVar(&g.json, "json", g.json, "machine-readable JSON on stdout")
@@ -73,6 +85,7 @@ type cliEnv struct {
 func (e *cliEnv) client() (*client.Client, error) {
 	cfg := client.DefaultConfig()
 	cfg.BusURL = e.g.bus
+	cfg.BusFingerprint = e.g.busFingerprint
 	cfg.IdentityDir = e.g.identity
 	cfg.AgentID = e.g.as
 	switch {
@@ -328,6 +341,9 @@ COMMANDS
 
 FLAGS (accepted before or after the command)
   --bus <url>       base URL of the bus                       (env ` + client.EnvBusURL + `)
+  --bus-fingerprint <hex>
+                    the bus's TLS certificate, as 64 lowercase
+                    hex characters, from the invite           (env ` + client.EnvBusFingerprint + `)
   --identity <dir>  credential store DIRECTORY, not an agent  (env ` + client.EnvIdentityDir + `)
   --as <agent-id>   act as a stored identity for this command
                     only, without changing the selection      (env ` + client.EnvAgentID + `)
@@ -353,6 +369,14 @@ NOTES
 
   Credentials live in a 0600 file under the credential store directory
   (default: the user's config directory + /agent-bus). Never in a repository.
+
+  THE BUS'S CERTIFICATE IS PINNED. Bus certificates are self-signed and there
+  is no certificate authority, so an https bus is refused unless you say which
+  certificate to expect: --bus-fingerprint, from the invite. Pass it once at
+  enrol and it is stored with the identity. If the bus later presents a
+  different certificate the command FAILS and says so — that is either a
+  rotation or an impostor, and they look identical from here. There is no
+  flag that turns the check off.
 
   Enrolment is becoming invite-only and the bus is becoming TLS-only; both
   are in flight. See CONTRACTS-CLI.md for what is stable today.

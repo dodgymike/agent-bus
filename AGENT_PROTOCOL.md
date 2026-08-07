@@ -21,6 +21,8 @@ Sections below, in the order you will use them:
 - [Getting the binary](#getting-the-binary)
 - [Server lifecycle](#server-lifecycle-scripts-bus-servesh) — `scripts/bus-serve.sh` (only surviving
   shell wrapper; it starts the SERVER, not `agent-busctl`)
+- [The bus's certificate is pinned](#the-buss-certificate-is-pinned) — read this before your first
+  `enrol` against an `https` bus
 - [Identity: enrol, whoami, use, logout](#identity-enrol-whoami-use-logout)
 - [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
 - [Sending: send (and broadcast, which is BROKEN)](#sending-agent-busctl-send-and-agent-busctl-broadcast-which-is-broken)
@@ -118,6 +120,7 @@ Accepted **before or after** the subcommand — both `agent-busctl --json enrol 
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--bus <url>` | `AGENT_BUS_URL` | Base URL of the bus. Required explicitly for `enrol`; every other command falls back to the selected identity's recorded URL. |
+| `--bus-fingerprint <hex>` | `AGENT_BUS_FINGERPRINT` | The bus's TLS certificate, as **64 lowercase hex characters**, from the invite. **Required for any `https://` bus and refused for an `http://` one.** Pass it once at `enrol` and it is stored with the identity — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned). |
 | `--identity <dir>` | `AGENT_BUS_IDENTITY` | The credential store **directory** (default `$XDG_CONFIG_HOME/agent-bus`) — not an agent id. |
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | Act as one stored identity for this command only, without touching the stored selection. **Parallel agents sharing a credential store should always use this instead of `agent-busctl use`.** |
 | `--json` | — | Machine-readable JSON on stdout: one object, keys sorted, `"ok"` field. |
@@ -126,6 +129,60 @@ Accepted **before or after** the subcommand — both `agent-busctl --json enrol 
 `--help` / `-h` / `agent-busctl help <command>` print help and exit `0`. No `agent-busctl` command is ever
 interactive: credentials come from the store or the environment, never from a prompt, because an
 agent shelling out has no terminal to answer one.
+
+## The bus's certificate is pinned
+
+*(added 2026-08-07, task `MTLS-PIN`)*
+
+A bus's TLS certificate is **self-signed**. There is no certificate authority anywhere in this
+design, so there is nothing for the usual "is this certificate signed by someone I trust" check to
+consult — and there is deliberately **no trust-on-first-use** either, because the first connection is
+the one an attacker picks.
+
+So you must tell `agent-busctl` which certificate to expect, **before** it connects:
+
+```bash
+agent-busctl enrol --bus https://bus.example:8080 \
+  --bus-fingerprint 9f2c…64-lowercase-hex… \
+  --name planner
+```
+
+- The value comes from the **invite** you were given. (It is also what the bus prints at startup as
+  `bus_cert_fingerprint=…`, and it is not a secret — it is public by construction.)
+- It is exactly **64 lowercase hex characters**. Uppercase is rejected rather than silently accepted,
+  and the `AA:BB:CC:…` spelling other tools print is rejected. One value, one spelling.
+- **`enrol` stores it with the identity.** You supply it once; every later `whoami`, `agents`, `send`
+  and `watch` against that bus verifies without being told again.
+- An `https://` bus with **no** fingerprint is refused (**exit 3**) and nothing is sent. That refusal
+  is the feature — do not look for a way around it.
+- A fingerprint on an `http://` URL is also refused (**exit 2**): there is no certificate on a
+  plaintext connection, so the check could not run, and pretending it did would be worse than not
+  offering it.
+
+### When it fails: `exit 5`, "REFUSING to talk to …"
+
+If the bus ever presents a **different** certificate, the command fails hard, is **never retried**,
+and names both fingerprints:
+
+```
+agent-busctl: REFUSING to talk to https://bus.example:8080: it presented certificate
+  3a1f…, but this client pinned 9f2c…
+  remedy: the bus's certificate CHANGED. Either it was legitimately rotated, or you are not
+  talking to the bus you think you are — and those look identical from here. …
+```
+
+**Do not guess which one it is.** A rotation and an impostor are indistinguishable from the client
+side; that is the entire reason the pin exists. Confirm the new value **out of band** — read
+`bus_cert_fingerprint=…` from the bus's own startup log, on the bus host — and only then
+`agent-busctl logout <agent-id>` and enrol again with the new fingerprint.
+
+**There is no flag that turns the check off**, and there will not be one (invariant 11). If you find
+yourself wanting one, the answer you actually need is the correct fingerprint.
+
+*Note: certificate **expiry** is not checked yet — the pin answers "which bus", not "is this
+certificate still fit to use". That is task `MTLS-VERIFY`. And the bus does not serve TLS at all yet
+(`MTLS-LISTENER`), so today every real bus is `http://127.0.0.1:…` and no fingerprint is involved;
+this section is what happens the moment that changes, and it is already enforced.*
 
 ## Identity: enrol, whoami, use, logout
 
@@ -142,13 +199,17 @@ agent-busctl enrol --bus http://127.0.0.1:8080 --name planner
 ```
 
 Flags: `--name <name>` (required, `[a-z0-9_-]`, 1-64 bytes, starting with a letter or digit),
+`--bus-fingerprint <hex>` (**required for an `https` bus** — see
+[The bus's certificate is pinned](#the-buss-certificate-is-pinned)),
 `--invite <blob>` (**RESERVED, not implemented** — enrolment is becoming invite-only and passing
 this fails immediately, exit 2), `--idempotency-key <key>` (resume a specific earlier attempt —
 see [Idempotency](#idempotency-and-retries-invariant-10)), `--keep-current` (do not switch the
 current identity).
 
-Exit codes: `0` enrolled, `1` internal, `2` bad usage or `--invite`, `3` credential store unusable,
-`5` bus unreachable, `6` bus reported its own error, `7` bus refused the request.
+Exit codes: `0` enrolled, `1` internal, `2` bad usage, `--invite`, or a fingerprint that is malformed
+/ on a plaintext URL / disagrees with the stored one, `3` credential store unusable **or an `https`
+bus with no pinned fingerprint**, `5` bus unreachable **or presenting a certificate that is not the
+pinned one**, `6` bus reported its own error, `7` bus refused the request.
 
 ### `agent-busctl whoami [--all] [--verify]`
 
@@ -512,10 +573,10 @@ and a retired value is never reused — branch on them freely.
 | --- | --- | --- |
 | `0` | — | success |
 | `1` | internal | unclassified/internal failure |
-| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, reserved `--invite` |
-| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store |
+| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, reserved `--invite`, **a malformed `--bus-fingerprint`, one given for a plaintext `http` bus, or one disagreeing with the stored pin** |
+| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no pinned certificate fingerprint (no trust-on-first-use)** |
 | `4` | auth | the bus rejected the credential, or the signature did not verify |
-| `5` | network | the bus could not be reached: refused, DNS, timeout |
+| `5` | network | the bus could not be reached: refused, DNS, timeout, **or it presented a certificate that is not the pinned one (never retried — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned))** |
 | `6` | server | the bus reported a failure of its own (5xx), including a fatal 503 |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |

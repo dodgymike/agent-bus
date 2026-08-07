@@ -27,9 +27,39 @@ WHAT IT DOES
   directory) BEFORE the request is sent, and never leaves this machine. The
   new identity becomes the current one unless --keep-current is given.
 
+THE BUS'S CERTIFICATE — PASS IT ONCE, HERE
+  Bus certificates are SELF-SIGNED and there is no certificate authority, so
+  this client refuses an https bus unless it is told which certificate to
+  expect: --bus-fingerprint <64 lowercase hex>, the value the invite carries
+  (the bus also logs it at startup as bus_cert_fingerprint=…).
+
+  There is deliberately NO trust-on-first-use. Accepting whatever certificate
+  turns up on the first connection would mean the first connection is the one
+  that cannot be checked, and that is the one an attacker picks.
+
+  Enrol records the fingerprint with the identity, so every later command
+  against this bus verifies it without being told again. If the bus ever
+  presents a different certificate, those commands FAIL — either it was
+  rotated or you are talking to something else, and they look the same from
+  here.
+
+  To re-pin after confirming a new fingerprint OUT OF BAND, do it in two
+  steps, in this order:
+
+      agent-busctl logout <agent-id>
+      agent-busctl enrol --bus <url> --bus-fingerprint <new> --name <name>
+
+  Enrolling without the logout first is REFUSED: the stored identity still
+  pins the old certificate, and a flag that silently overrode it would turn a
+  detected certificate substitution into an accepted one.
+
 FLAGS
   --name <name>       the name to request. Lowercase [a-z0-9_-], 1-64 bytes,
                       starting with a letter or digit. Required.
+  --bus-fingerprint   the bus's TLS certificate fingerprint, from the invite.
+    <hex>             Required for an https bus; refused for a plaintext one,
+                      which has no certificate to check. Global flag, so it
+                      also works before the command name.
   --invite <blob>     RESERVED, not yet implemented. Enrolment is becoming
                       invite-only; the wire shape is still being settled, so
                       passing this fails immediately rather than guessing it.
@@ -101,6 +131,11 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 	return env.out.Emit(res, func(w io.Writer) {
 		fmt.Fprintf(w, "enrolled as %s\n", res.AgentID)
 		fmt.Fprintf(w, "  bus        %s (%s)\n", res.BusID, res.BusURL)
+		if res.BusFingerprint != "" {
+			// Echoed so the operator can compare it against the invite they
+			// were given, at the one moment they still have it to hand.
+			fmt.Fprintf(w, "  cert       %s (pinned)\n", res.BusFingerprint)
+		}
 		fmt.Fprintf(w, "  name       %s\n", res.Name)
 		fmt.Fprintf(w, "  enrolled   %s\n", res.EnrolledAt)
 		if res.Stored {

@@ -54,27 +54,54 @@ const (
 	idleConnTimeout = 90 * time.Second
 )
 
-// newHTTPClient builds the transport. It is THE ONLY place in this package
-// where an http.Client or a tls.Config is constructed.
+// newHTTPClient builds the transport for one bus. It is THE ONLY place in this
+// package where an http.Client is constructed, and pinnedTLSConfig (pin.go) is
+// the only place DEFAULT VERIFICATION IS REPLACED.
 //
-// That single-seam property is the point, and it is why this function exists
+// That second clause is deliberately narrower than "the only place a tls.Config
+// is built", which an earlier draft of this comment said and which is false —
+// the unpinned branch below builds one too, a few lines down. The distinction
+// matters for whoever lands MTLS-CLIENTCERT: tls.Config.Certificates belongs in
+// pinnedTLSConfig, NOT in the unpinned literal below, because the pinned branch
+// REPLACES that value wholesale. A client certificate added to the wrong one is
+// silently dropped on every pinned — i.e. every real — connection. It fails
+// closed (the handshake is refused), so it costs an afternoon rather than a
+// breach, which is exactly why it is worth a sentence here.
+//
+// The single-seam property is the point, and it is why this function exists
 // rather than an inline &http.Client{} at each call site: invariant 11 makes
-// TLS mandatory with SELF-SIGNED certificates, MUTUAL authentication, and the
-// bus's certificate fingerprint PINNED from the invite blob — no CA, and
-// explicitly no trust-on-first-use. When that lands it configures
-// tls.Config.Certificates (our client cert) and
-// tls.Config.VerifyPeerCertificate (the pinned fingerprint check) HERE, and
-// nowhere else.
+// TLS mandatory with SELF-SIGNED certificates and the bus's certificate
+// fingerprint PINNED — no CA, and explicitly no trust-on-first-use.
 //
-// CERTIFICATE VERIFICATION IS NEVER DISABLED. tls.Config's skip-verification
-// field is not set, is not settable through Config, and must never appear in
-// this tree — including in tests (DECISIONS.md, 2026-08-02, "E7: no plaintext
-// escape hatch"). Tests mint real certificates instead. The field is not named
-// in this comment on purpose, so that grepping the tree for its name finds
-// only real uses rather than the rules forbidding them.
-func newHTTPClient(cfg Config) HTTPDoer {
-	if cfg.HTTPClient != nil {
-		return cfg.HTTPClient
+// pin is the fingerprint the bus's certificate must have. A ZERO pin means "no
+// pin", and is legal ONLY for a plaintext loopback URL: transportSecurity
+// refuses an https bus without one BEFORE this function is reached, so there is
+// no path on which an unpinned TLS transport is built. It is spelled as a
+// second branch here rather than an unconditional pinnedTLSConfig call because
+// a pinnedTLSConfig(zero) would be a config that disables the default check and
+// then matches nothing — a confusing failure instead of a clear refusal.
+//
+// CERTIFICATE VERIFICATION IS NEVER DISABLED. It is REPLACED, on the pinned
+// path, by an exact-certificate check that is strictly stronger than the CA
+// chain and hostname checks it stands in for; see pinnedTLSConfig's doc comment
+// for what is and is not given up, and guard_test.go for the AST guard that
+// keeps the two halves together. There is no Config field, flag or environment
+// variable that turns verification off (DECISIONS.md, 2026-08-02, "E7: no
+// plaintext escape hatch"), and tests mint real certificates rather than asking
+// for one.
+// It takes NO Config. Client.doer returns an embedder's cfg.HTTPClient before
+// this function is reached, so a check for it here would be dead code — and
+// dead code in the one place TLS is configured is exactly where a future reader
+// draws the wrong conclusion about which branch runs. Nothing else on Config
+// affects the transport: the timeout lives on the context, and the retry policy
+// lives in do(). If that changes, pass the field, not the whole Config.
+func newHTTPClient(pin BusFingerprint) HTTPDoer {
+	// The pinned configuration, or — for the plaintext loopback case that is
+	// all the bus serves until MTLS-LISTENER lands — the platform defaults with
+	// verification fully ON.
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if !pin.IsZero() {
+		tlsConfig = pinnedTLSConfig(pin)
 	}
 	return &http.Client{
 		Transport: &http.Transport{
@@ -90,11 +117,11 @@ func newHTTPClient(cfg Config) HTTPDoer {
 				Timeout:   dialTimeout,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			// The zero tls.Config: the platform defaults, with verification
-			// ON. The pinning configuration replaces this whole value when
-			// invariant 11's listener lands; it is spelled out rather than
-			// left nil so there is one obvious line to change.
-			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+			// Chosen above: pinned when a fingerprint is in force, the
+			// platform defaults otherwise. Never nil — a nil TLSClientConfig
+			// is the platform default too, but spelling it out keeps one
+			// obvious line for a reader asking "what does this verify".
+			TLSClientConfig:       tlsConfig,
 			TLSHandshakeTimeout:   tlsHandshakeTimeout,
 			ResponseHeaderTimeout: responseHeaderTimeout,
 			IdleConnTimeout:       idleConnTimeout,
@@ -165,9 +192,61 @@ type response struct {
 	Header http.Header
 }
 
+// transportSecurity decides whether a transport may be built for this bus at
+// all. It is the NO-TRUST-ON-FIRST-USE rule, expressed as a refusal.
+//
+// Two conditions, each fail-closed:
+//
+//   - https with NO pin is REFUSED. This is the whole point of the task: the
+//     alternative — connect, remember whatever certificate turns up, and trust
+//     it thereafter — is trust-on-first-use, and invariant 11 rules it out
+//     explicitly ("there is no trust-on-first-use either"). The client learns
+//     the fingerprint from the invite BEFORE its first connection or it does
+//     not connect. A TOFU path is not offered as a flag, a fallback, or a test
+//     convenience.
+//   - http WITH a pin is REFUSED. There is no certificate on a plaintext
+//     connection, so the pin cannot be checked — and a caller who passed
+//     --bus-fingerprint believes it is being checked. Silently ignoring it
+//     would hand back exactly the false sense of security this task exists to
+//     prevent. (Plaintext at all is already limited to loopback by
+//     parseBusURL.)
+func transportSecurity(u *url.URL, pin BusFingerprint) error {
+	switch u.Scheme {
+	case "https":
+		if pin.IsZero() {
+			return newError(KindConfig, "config",
+				"no certificate fingerprint is pinned for "+u.String()+", and this client will not accept a certificate it was not told to expect",
+				"agent-bus certificates are self-signed, there is no certificate authority, and there is deliberately no trust-on-first-use: pass --bus-fingerprint <hex> (env "+
+					EnvBusFingerprint+") with the value from the invite, or enrol against this bus so the fingerprint is stored with the identity")
+		}
+	case "http":
+		if !pin.IsZero() {
+			return newError(KindUsage, "config",
+				"a certificate fingerprint is pinned for "+u.String()+", but that is a plaintext URL and has no certificate to check",
+				"use https:// so the fingerprint can actually be verified, or drop --bus-fingerprint / "+EnvBusFingerprint+" — it would otherwise look like a check that is not happening")
+		}
+	default:
+		// UNREACHABLE TODAY — parseBusURL admits only http and https — and
+		// present anyway, because a switch with no default fails OPEN here: an
+		// unknown scheme would require no pin and no plaintext check, which is
+		// the one outcome this function exists to prevent. That is the same
+		// standard verifyPinnedBusCertificate applies to itself, and applying a
+		// weaker one at the security seam because "the caller checks" is how
+		// the seam stops being one.
+		return newError(KindConfig, "config",
+			"cannot decide how to secure a connection to "+u.String()+": unsupported URL scheme "+strconv.Quote(u.Scheme),
+			"use an https:// bus URL (or http:// to a loopback address while the bus is still plaintext)")
+	}
+	return nil
+}
+
 // do executes req with retries and decodes the response.
 func (c *Client) do(ctx context.Context, req request) (*response, error) {
-	base, err := c.resolveBusURL()
+	base, pin, err := c.endpoint()
+	if err != nil {
+		return nil, err
+	}
+	doer, err := c.doer(base, pin)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +273,7 @@ func (c *Client) do(ctx context.Context, req request) (*response, error) {
 				return nil, err
 			}
 		}
-		resp, err := c.attempt(ctx, target.String(), payload, req)
+		resp, err := c.attempt(ctx, doer, target.String(), payload, req)
 		if err == nil {
 			return resp, nil
 		}
@@ -207,7 +286,12 @@ func (c *Client) do(ctx context.Context, req request) (*response, error) {
 }
 
 // attempt performs exactly one HTTP round trip.
-func (c *Client) attempt(ctx context.Context, urlStr string, payload []byte, req request) (*response, error) {
+//
+// doer is passed in rather than read from the Client because it is chosen per
+// bus, together with the certificate fingerprint pinned for that bus (see
+// Client.doer). A transport picked up from a field could outlive the pin it was
+// built for.
+func (c *Client) attempt(ctx context.Context, doer HTTPDoer, urlStr string, payload []byte, req request) (*response, error) {
 	var bodyReader io.Reader
 	if payload != nil {
 		bodyReader = bytes.NewReader(payload)
@@ -225,7 +309,7 @@ func (c *Client) attempt(ctx context.Context, urlStr string, payload []byte, req
 		httpReq.Header.Set("Authorization", "Bearer "+req.bearer)
 	}
 
-	httpResp, err := c.http.Do(httpReq)
+	httpResp, err := doer.Do(httpReq)
 	if err != nil {
 		// The RESOLVED url, not c.cfg.BusURL: when the address came from the
 		// stored identity, cfg.BusURL is empty and the message read "cannot
@@ -413,6 +497,13 @@ func networkError(op, busURL string, err error) *Error {
 	if errors.Is(err, context.Canceled) {
 		return wrapError(KindNetwork, op, "cancelled while talking to the bus at "+busURL, "", err)
 	}
+	// The pin check FIRST. A fingerprint mismatch is a different event from a
+	// certificate that failed the ordinary checks — it means the bus is not the
+	// bus we were told to expect — and it gets its own message and its own
+	// remedy rather than being folded into "did not verify".
+	if isPinError(err) {
+		return pinError(op, busURL, err)
+	}
 	if isCertificateError(err) {
 		return wrapError(KindNetwork, op,
 			"the bus's TLS certificate did not verify",
@@ -460,8 +551,10 @@ func isRetryable(err error) bool {
 		return false
 	}
 	// A certificate that does not verify will not verify on the next attempt
-	// either, and retrying an authentication failure looks like guessing.
-	if isCertificateError(err) {
+	// either, and retrying an authentication failure looks like guessing. A
+	// PINNED-fingerprint mismatch is the hardest of these: retrying it is
+	// retrying a connection to a bus we have decided is the wrong one.
+	if isPinError(err) || isCertificateError(err) {
 		return false
 	}
 	// A 503 the bus declined to put a Retry-After on is a durability fault, not

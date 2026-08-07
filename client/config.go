@@ -51,6 +51,15 @@ const (
 
 	// EnvTimeout overrides DefaultTimeout; any value time.ParseDuration takes.
 	EnvTimeout = "AGENT_BUS_TIMEOUT"
+
+	// EnvBusFingerprint is the SHA-256 fingerprint of the bus's TLS certificate
+	// that this client will accept, as 64 lowercase hex characters.
+	//
+	// It is the value the invite blob carries. It is NOT a secret — it is
+	// published in the bus's startup log and derivable by anyone who completes
+	// a handshake — so an environment variable is a perfectly good carrier for
+	// it, unlike a key.
+	EnvBusFingerprint = "AGENT_BUS_FINGERPRINT"
 )
 
 // RetryPolicy bounds how hard the client tries before giving up.
@@ -79,6 +88,25 @@ type Config struct {
 	// which has no identity yet — fails with KindUsage.
 	BusURL string
 
+	// BusFingerprint is the SHA-256 of the bus certificate's DER, as 64
+	// lowercase hex characters — the value the invite blob carries.
+	//
+	// # This is a PIN, and there is no alternative to it over https
+	//
+	// agent-bus certificates are self-signed and there is no certificate
+	// authority (invariant 11), so this is the ONLY thing that says which bus is
+	// on the other end. An https bus with no pin — from here, from
+	// EnvBusFingerprint, or from the selected identity — is REFUSED, because the
+	// alternative is trust-on-first-use and invariant 11 rules it out by name.
+	//
+	// Empty is legal for the plaintext-loopback case the bus still serves today
+	// (and only that case: parseBusURL refuses non-loopback http, and
+	// transportSecurity refuses a pin on a plaintext URL, since there would be
+	// no certificate to check it against).
+	//
+	// It is NOT SECRET. It is in the bus's startup log and in every handshake.
+	BusFingerprint string
+
 	// IdentityDir is the credential store directory. Empty means
 	// DefaultIdentityDir.
 	IdentityDir string
@@ -98,6 +126,25 @@ type Config struct {
 	// and, deliberately, the ONLY way to substitute a transport, so that
 	// newHTTPClient stays the single place TLS is configured. Leave it nil
 	// unless you mean it.
+	//
+	// # SETTING THIS TURNS OFF CERTIFICATE PINNING. Both halves of it.
+	//
+	// Spelled out on the field an embedder actually reads, not only on the
+	// interface below. Client.doer returns this value BEFORE it consults
+	// transportSecurity, so supplying one bypasses:
+	//
+	//   - the pinned-fingerprint check itself (your transport's tls.Config is
+	//     the one that runs), AND
+	//   - the refusal to speak https to a bus with NO pin at all — i.e. you
+	//     also take on the no-trust-on-first-use rule.
+	//
+	// That is the correct trade for an embedder who already owns its
+	// verification, and it is not a supported way to relax anything: nothing in
+	// this package or in cmd/agent-busctl ever sets it, and there is no flag or
+	// environment variable that reaches it. If you set it, verify the bus's
+	// certificate yourself — client.ParseBusFingerprint and
+	// client.BusFingerprint are exported so you can reuse the same construction
+	// rather than inventing a second one.
 	HTTPClient HTTPDoer
 
 	// KeyRing is the trust store the READ path verifies senders against. Nil
@@ -119,11 +166,12 @@ type Config struct {
 // interface so an embedder can supply an instrumented or policy-wrapped client
 // without this package depending on their type; *http.Client satisfies it.
 //
-// Supplying one BYPASSES newHTTPClient, and therefore bypasses the TLS
-// configuration this package will pin certificates in (invariant 11). That is
-// a deliberate, documented trade for embedders who already own their
-// transport — it is not a supported way to relax verification, and this
-// package will never ship a Config field that does.
+// Supplying one BYPASSES newHTTPClient, and therefore bypasses BOTH the pinned
+// certificate check AND the refusal to speak https to a bus with no pin
+// (invariant 11). See Config.HTTPClient above for what that leaves you
+// responsible for. It is a deliberate, documented trade for embedders who
+// already own their transport — it is not a supported way to relax
+// verification, and this package will never ship a Config field that does.
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -145,9 +193,19 @@ func DefaultConfig() Config {
 // result. It never overrides a value that is already set.
 //
 // THE RESOLUTION ORDER IS: explicit value (a CLI flag) > environment variable >
-// the selected identity's recorded value (applied later, at request time, and
-// only for BusURL) > built-in default. It is deterministic and it is
+// the selected identity's recorded value (applied later, at request time, for
+// BusURL and BusFingerprint) > built-in default. It is deterministic and it is
 // documented in CONTRACTS-CLI.md; do not add a step without updating both.
+//
+// BusFingerprint has ONE documented deviation, and it is deliberate: when an
+// explicit fingerprint and the stored identity's fingerprint name DIFFERENT
+// certificates for the SAME bus, neither wins and the operation is refused
+// (Client.resolvePin). Precedence is the right rule for an address and the
+// wrong rule for a security pin — "it stopped working so I passed the
+// fingerprint the other end gave me" is how a substituted certificate gets
+// accepted, and letting the flag win would turn a detected substitution into a
+// successful one. That deviation lives in resolvePin, not here: this function
+// only merges flags with the environment, and the flag > env half is normal.
 //
 // lookup is os.LookupEnv in production and a map in tests; passing it in keeps
 // this function pure and keeps the tests from mutating process state.
@@ -158,6 +216,17 @@ func (c Config) ApplyEnv(lookup func(string) (string, bool)) (Config, error) {
 	if c.BusURL == "" {
 		if v, ok := lookup(EnvBusURL); ok {
 			c.BusURL = v
+		}
+	}
+	if c.BusFingerprint == "" {
+		if v, ok := lookup(EnvBusFingerprint); ok {
+			// TrimSpace, matching how EnvTimeout is read below: surrounding
+			// whitespace on an environment value is a shell artefact, not part
+			// of the value. ParseBusFingerprint itself stays strict — it
+			// rejects uppercase, colons and any other spelling — so this
+			// tolerates a stray newline without tolerating a different
+			// fingerprint.
+			c.BusFingerprint = strings.TrimSpace(v)
 		}
 	}
 	if c.IdentityDir == "" {

@@ -82,6 +82,30 @@ type Identity struct {
 	// the right bus without being told again.
 	BusURL string `json:"bus_url"`
 
+	// BusFingerprint is the SHA-256 of the bus certificate this identity
+	// enrolled against, as 64 lowercase hex characters, or "" when the
+	// enrolment was over plaintext loopback and there was no certificate.
+	//
+	// It is stored so that "the trusted path is the easy path": the operator
+	// supplies the fingerprint ONCE, at enrolment, from the invite — every
+	// later command against this bus finds it here rather than needing the flag
+	// again, and a bus whose certificate has changed is refused with no further
+	// configuration. It is what makes this a PIN rather than a per-invocation
+	// assertion.
+	//
+	// PUBLIC, like everything else in Identity: a certificate fingerprint is in
+	// the bus's startup log and in every handshake. Safe to print, and printed
+	// by `agent-busctl whoami`.
+	//
+	// omitempty, and storeFormatVersion is deliberately NOT bumped — the same
+	// additive reasoning as MessagingKeySeed below. A credential written before
+	// pinning existed is still perfectly valid, and refusing to load it would
+	// lock an agent out of a bus it is legitimately enrolled on over a field it
+	// never had. Such a credential simply has no pin, which is only usable
+	// against the plaintext loopback bus it was created for; an https bus with
+	// no pin is refused (transportSecurity).
+	BusFingerprint string `json:"bus_fingerprint,omitempty"`
+
 	// PublicKey is the base64 (standard, padded) Ed25519 public key the bus
 	// recorded. Public by definition; safe to print.
 	PublicKey string `json:"public_key"`
