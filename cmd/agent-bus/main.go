@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -100,6 +101,17 @@ func main() {
 		os.Exit(runInviteCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `agent-bus healthcheck` is the liveness probe for a TLS-ONLY bus
+	// (MTLS-VERIFY). It is on the SERVER binary for the same reason `invite` is
+	// -- its input is filesystem access to the data directory, not a network
+	// privilege -- and because the runtime image ships this binary and no HTTP
+	// client that can be told to trust one self-signed certificate. See
+	// cmd/agent-bus/healthcheck.go. It takes no lock and writes nothing, so
+	// unlike `invite mint` it is meant to run against a RUNNING bus.
+	if len(os.Args) > 1 && os.Args[1] == healthcheckCommandName {
+		os.Exit(runHealthcheckCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -133,6 +145,8 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 		fs.PrintDefaults()
 		fmt.Fprintf(out, "\nSubcommands:\n  %s %s mint    mint a single-use, expiring invite (requires the bus to be STOPPED)\n"+
 			"                        run `%s %s mint -h` for details\n", prog, inviteCommandName, prog, inviteCommandName)
+		fmt.Fprintf(out, "  %s %s    probe GET /healthz over TLS, trusting only this data dir's certificate\n"+
+			"                        (safe against a RUNNING bus; run `%s %s -h` for details)\n", prog, healthcheckCommandName, prog, healthcheckCommandName)
 	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
@@ -270,11 +284,11 @@ func run(cfg Config) error {
 	// that, and FATAL on anything else -- see cmd/agent-bus/buscert.go, which also
 	// explains why this sits after the lock and the bus id but before wal.Open.
 	//
-	// IT DOES NOT SERVE TLS, and adding that here would be a regression rather
-	// than a completion: the listener below is deliberately unchanged, because no
-	// client can speak TLS yet (MTLS-CLIENTCERT) and server-side enforcement
-	// ahead of client-side capability is a total outage. The Material is used for
-	// the log lines and the startup summary only.
+	// THIS IS WHAT THE LISTENER SERVES (MTLS-LISTENER). The certificate loaded
+	// here is presented on every handshake below; there is no plaintext listener
+	// and no flag that makes one (invariant 11). So a failure here is not "the
+	// bus starts without TLS", it is "the bus does not start" -- which is the
+	// whole point of the refusal, and why every error on this path is FATAL.
 	busMaterial, err := openBusCertMaterial(cfg.DataDir, busID, cfg.Listen, lg)
 	if err != nil {
 		return fmt.Errorf("preparing the bus certificate and key material in %q: %w", cfg.DataDir, err)
@@ -570,11 +584,53 @@ func run(cfg Config) error {
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
+	// THE ONE LISTENER, AND IT IS TLS (MTLS-LISTENER, invariant 11).
+	//
+	// The TLS configuration is built BEFORE the bind, deliberately, and the
+	// reason is simply that a refused start must never have BOUND THE PORT AT
+	// ALL.
+	//
+	// An earlier version of this comment justified the ordering with TIME_WAIT.
+	// That was wrong and the reviewer gate caught it: a listening socket closed
+	// without ever accepting a connection does not enter TIME_WAIT, and Go sets
+	// SO_REUSEADDR on listeners regardless. The real property is the plain one --
+	// between the bind and the refusal there would be a window in which this
+	// process holds the address while having already decided not to serve, and
+	// anything probing the port in that window sees a socket that accepts and
+	// then dies. TestRunRefusesToStartWithoutUsableCert pins it by proving the
+	// address is still unbound after run() returns an error.
+	//
+	// busTLSConfig returns an error rather than a degraded config -- there is no
+	// plaintext listener to fall back to, so there is nothing to degrade TO.
+	tlsCfg, err := busTLSConfig(busMaterial)
+	if err != nil {
+		return fmt.Errorf("preparing the TLS configuration from the material in %q: %w", cfg.DataDir, err)
+	}
+
 	// Bind before serving so a busy port is a startup error, not a background one.
-	ln, err := net.Listen("tcp", cfg.Listen)
+	rawLn, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listening on %q: %w", cfg.Listen, err)
 	}
+	// tls.NewListener rather than srv.ServeTLS(ln, "", ""): the certificate is
+	// already loaded and parsed by internal/buscert, and ServeTLS's only extra
+	// service is re-reading it from two file paths, which would be a SECOND load
+	// of the same material and a second chance for the two to disagree. Every
+	// connection srv.Serve accepts below is therefore a *tls.Conn; net/http
+	// completes the handshake before the first byte of a request is read, bounds
+	// it by ReadHeaderTimeout above, and populates r.TLS from it.
+	//
+	// NOTHING MAY BE SERVED ON rawLn. It exists for exactly one statement -- being
+	// wrapped on the next line -- and a second srv.Serve(rawLn) anywhere would be
+	// a plaintext listener on the same port, serving every route in the clear
+	// while every test in this package still passed against the TLS one.
+	//
+	// TestCmdHasNoPlaintextListener enforces that mechanically: it fails if the
+	// result of net.Listen is used anywhere other than as the argument to
+	// tls.NewListener. (An earlier version of this comment claimed that guard
+	// existed when it did not -- the reviewer gate caught the claim, and the check
+	// was written rather than the claim deleted.)
+	ln := tls.NewListener(rawLn, tlsCfg)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -588,19 +644,37 @@ func run(cfg Config) error {
 	// bus_cert_fingerprint is PUBLIC by construction -- it is the digest of a
 	// certificate that will be sent to every client on every handshake -- and it
 	// is the value an operator has to hand to a client to pin (E6, no TOFU), so
-	// the startup summary is exactly where it belongs. tls=false is stated
-	// EXPLICITLY rather than left to be inferred from the absence of a field: a
-	// bus that now holds a certificate but still serves plaintext is a state an
-	// operator could easily read the wrong way round, and the fix for that is
-	// MTLS-LISTENER, not a quieter log line.
+	// the startup summary is exactly where it belongs.
+	//
+	// tls=true is stated EXPLICITLY, and it is now a FACT ABOUT THE LISTENER
+	// rather than a claim about intent: the addr below is a TLS listener or this
+	// line was never reached. It stays in the summary because an operator reading
+	// one line has to be able to tell which scheme to dial, and because the field
+	// flipping from false to true in a deployment's logs is the single clearest
+	// marker of the cutover this change forces on every existing deployment.
+	//
+	// client_auth is reported alongside it so the summary cannot be read as
+	// "mutual TLS is on". It is not, deliberately -- requiring a client
+	// certificate is MTLS-CLIENTAUTH and must not precede MTLS-CLIENTCERT.
+	//
+	// tls_min_version and client_auth are DERIVED FROM tlsCfg, not written as
+	// literals beside it. The reviewer gate found the literal form: with it,
+	// flipping ClientAuth to RequireAnyClientCert left the summary still saying
+	// client_auth=none and every test still passing -- a startup line that
+	// misreports the policy it is describing, under a comment claiming it states
+	// a fact about the listener. Deriving them makes that impossible: the only
+	// way to change what is logged is to change what is served.
 	lg.Info("server started",
 		"addr", ln.Addr().String(),
+		"scheme", "https",
 		"bus_id", busID,
 		"data_dir", cfg.DataDir,
 		"poll_timeout", cfg.PollTimeout.String(),
 		"log_level", cfg.LogLevel.String(),
 		"version", version,
-		"tls", false,
+		"tls", true,
+		"tls_min_version", tlsVersionName(tlsCfg.MinVersion),
+		"client_auth", clientAuthName(tlsCfg.ClientAuth),
 		"bus_cert_fingerprint", busMaterial.Fingerprint().String(),
 	)
 

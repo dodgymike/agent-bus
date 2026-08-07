@@ -153,6 +153,16 @@ func TestPinnedSkipIsAlwaysPairedWithAPinCheck(t *testing.T) {
 	const (
 		skipField   = "InsecureSkipVerify"
 		verifyField = "VerifyPeerCertificate"
+		// cacheField enables TLS session resumption, which SKIPS
+		// verifyField entirely. See the check below.
+		cacheField = "ClientSessionCache"
+		// connField IS called on a resumed handshake — crypto/tls invokes it
+		// inside the resumption branch, under its own comment "Make sure the
+		// connection is still being verified whether or not this is a
+		// resumption." It is therefore the supported way to keep the pin and
+		// expiry checks alive if resumption is ever wanted, and the guard must
+		// not reject the remedy it prescribes.
+		connField = "VerifyConnection"
 	)
 	var paired int
 	fset := token.NewFileSet()
@@ -167,9 +177,23 @@ func TestPinnedSkipIsAlwaysPairedWithAPinCheck(t *testing.T) {
 			case *ast.AssignStmt:
 				for _, lhs := range node.Lhs {
 					sel, ok := lhs.(*ast.SelectorExpr)
-					if ok && sel.Sel.Name == skipField {
+					if !ok {
+						continue
+					}
+					if sel.Sel.Name == skipField {
 						t.Errorf("%s: %s is set by ASSIGNMENT. It may only be set inside the single tls.Config composite literal in client/%s, where this guard can see that %s is set beside it.",
 							fset.Position(sel.Pos()), skipField, pinFile, verifyField)
+					}
+					// The literal check below cannot see this. The security gate
+					// reproduced the bypass over live TLS: with a cache attached
+					// by assignment — in transport.go, or two lines under the
+					// DO-NOT-ADD comment in pin.go itself — the second connection
+					// RESUMED and was accepted while the server served a
+					// completely unpinned certificate, because resumption skips
+					// VerifyPeerCertificate entirely.
+					if sel.Sel.Name == cacheField {
+						t.Errorf("%s: %s is set by ASSIGNMENT. A TLS session cache makes resumed handshakes SKIP %s, which silently disables the pinned-certificate and expiry checks on every resumed connection — demonstrated over a live handshake accepting an unpinned certificate. There is no supported place to set it; if resumption is ever needed, the checks must also run in VerifyConnection.",
+							fset.Position(sel.Pos()), cacheField, verifyField)
 					}
 				}
 			case *ast.CompositeLit:
@@ -208,7 +232,49 @@ func TestPinnedSkipIsAlwaysPairedWithAPinCheck(t *testing.T) {
 						fset.Position(node.Pos()), verifyField, skipField)
 					return true
 				}
+				// Counted BEFORE the cache check. Returning early here would
+				// leave paired at zero and fire the terminal "pinning was
+				// removed, or it moved somewhere this guard does not look"
+				// error as well — which would be flatly false about a file
+				// pairing them on the very next line. One mistake, one message.
 				paired++
+
+				// A session cache silently retires the callback we just proved
+				// is present: crypto/tls does NOT call VerifyPeerCertificate on a
+				// RESUMED handshake. Adding one for latency would bypass the pin
+				// check and the expiry check on every resumed connection, with
+				// every positive test still green — the same silent shape as
+				// deleting the callback, wearing a performance argument.
+				cache, hasCache := fields[cacheField]
+				if id, ok := cache.(*ast.Ident); hasCache && ok && id.Name == "nil" {
+					// An EXPLICIT nil disables resumption exactly as omitting the
+					// field does, and saying so out loud is if anything safer
+					// than silence. Failing it would be a guard that rejects a
+					// clearer spelling of the thing it wants.
+					hasCache = false
+				}
+				if hasCache {
+					// Only a complaint when the REMEDY is absent. crypto/tls DOES
+					// call VerifyConnection on a resumed handshake, so a literal
+					// carrying both is the supported way to have resumption and
+					// keep the checks. A guard that rejected that would be
+					// prescribing a fix and then refusing it.
+					conn, hasConn := fields[connField]
+					if id, ok := conn.(*ast.Ident); hasConn && ok && id.Name == "nil" {
+						// A nil callback is NOT the remedy — crypto/tls skips a
+						// nil VerifyConnection, so this shape resumes with no
+						// verification whatsoever: the exact bypass this branch
+						// exists to close, wearing the remedy's name. The
+						// VerifyPeerCertificate branch above already rejects its
+						// own nil for the same reason; not doing so here would
+						// leave this arm asymmetric with the file's own standard.
+						hasConn = false
+					}
+					if !hasConn {
+						t.Errorf("%s: this tls.Config sets %s alongside %s=true but no %s. crypto/tls does NOT call %s on a RESUMED handshake, so a session cache disables the pinned-certificate and expiry checks on every resumed connection — silently, while every positive test still passes (reproduced over live TLS: a resumed connection was accepted while the server served an unpinned certificate). If resumption is genuinely needed, run the same checks from %s, which IS called on resumption.",
+							fset.Position(node.Pos()), cacheField, skipField, connField, verifyField, connField)
+					}
+				}
 			}
 			return true
 		})

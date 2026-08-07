@@ -6,9 +6,15 @@
 #   docker compose ps           status; "healthy" once /healthz answers
 #   docker compose down         stop and remove the CONTAINER only -- the
 #                                named volume (and therefore the WAL, the bus
-#                                id, the dirlock and the MAC key) survives.
+#                                id, the dirlock, the MAC key AND the bus's
+#                                TLS certificate + private keys) survives.
 #                                `docker compose down -v` is what destroys it;
 #                                never run that against a bus you care about.
+#                                Since 2026-08-07 that is strictly worse than
+#                                it was: destroying the volume destroys the
+#                                certificate every enrolled agent has PINNED,
+#                                and there is no trust-on-first-use to re-learn
+#                                it, so every agent must be re-invited.
 #
 # ---------------------------------------------------------------------------
 # SECURITY CONSTRAINT -- READ BEFORE TOUCHING `command:` OR ADDING `ports:`.
@@ -20,11 +26,18 @@
 # section is declared: publishing 127.0.0.1:8080 would map nothing, because
 # a published port connects to the CONTAINER's interface, and this process
 # never binds it -- only its own loopback, inside its own network namespace.
-# That is not a bug in this file; it is invariant 11 (CLAUDE.md) enforced at
-# the deployment layer: enrolment and session material cross the wire in
-# CLEARTEXT today (no TLS -- the mTLS epic is in_progress as of 2026-08-02),
-# so nothing may reach this bus except a process that can already get inside
-# the container (`docker compose exec`), until mutual TLS ships.
+# WHY, UPDATED 2026-08-07 (MTLS-LISTENER). The original reason written here
+# was that enrolment and session material crossed the wire in CLEARTEXT. That
+# is no longer true: the bus serves TLS and ONLY TLS, and refuses to start
+# without usable key material. The loopback bind stays anyway, and the reason
+# it stays is invariant 11's own wording -- the loopback default "bounds
+# exposure, it does not replace TLS", and a bus deliberately exposed on a real
+# interface needs BOTH. What has actually changed is the RESIDUAL risk of
+# widening it: an on-path observer can no longer read a session token, but
+# there is still no client-certificate requirement (MTLS-CLIENTAUTH is not
+# shipped -- the client cannot yet present one, MTLS-CLIENTCERT), so anything
+# that can reach the port can still attempt enrolment. That is the remaining
+# reason not to widen this bind here.
 #
 # CONSEQUENCE, STATED PLAINLY: as shipped, no other container and no host
 # process can talk to this bus. That is the price of the constraint, not an
@@ -61,11 +74,13 @@
 #                                # deliberate, informed opt-in and not a "safe
 #                                # flag flip."
 #
-# TLS SEAM (do not implement yet): once the server speaks TLS with a
-# self-signed cert (invariant 11), the healthcheck below must switch from
-# plain `wget http://` to a TLS-aware probe that trusts that certificate, and
-# this file will need a way to hand the container certificate material (a
-# secret or a mounted volume) -- tracked, not solved, here.
+# TLS SEAM: CLOSED (MTLS-VERIFY, 2026-08-07). The healthcheck below is now a
+# TLS-aware probe that trusts the bus's own certificate. No secret and no
+# extra mount was needed after all: the bus MINTS its certificate and key into
+# its data directory on first start (internal/buscert), so the material is
+# already on the `agent-bus-data` volume and the probe reads it from there.
+# That is also why `docker compose down -v` is destructive in a new way -- it
+# destroys the certificate every enrolled agent has pinned, not just the WAL.
 # ---------------------------------------------------------------------------
 
 services:
@@ -101,7 +116,19 @@ services:
       # own HEALTHCHECK; repeated here so `docker compose ps` and
       # `depends_on: condition: service_healthy` (for a future DEPLOY-3
       # profile) are meaningful without relying on image-level defaults.
-      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      #
+      # https, VERIFIED, via the server binary's own `healthcheck` subcommand
+      # (MTLS-VERIFY, 2026-08-07). The `wget http://...` probe that stood here
+      # cannot succeed against a TLS-only bus, and busybox wget cannot be told
+      # to trust ONE self-signed certificate -- only to skip verification
+      # entirely, which invariant 11 forbids. The subcommand trusts exactly one
+      # root, /data/bus-tls.crt, and therefore also checks the hostname and the
+      # certificate's validity period. See cmd/agent-bus/healthcheck.go.
+      #
+      # -data-dir MUST match the `command:` above: the probe reads the bus's
+      # certificate from it, and pointing it at an empty directory reports a
+      # perfectly healthy bus as unhealthy.
+      test: ["CMD", "/usr/local/bin/agent-bus", "healthcheck", "-data-dir=/data", "-addr=127.0.0.1:8080", "-timeout=2s"]
       interval: 10s
       timeout: 3s
       start_period: 5s

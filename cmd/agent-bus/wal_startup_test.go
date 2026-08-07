@@ -170,7 +170,7 @@ func TestServerOpensWALOnStart(t *testing.T) {
 
 		// The server really served: proves wal.Open did not merely succeed but
 		// also returned in time for the listener to come up.
-		mustGetHealthz(t, addr)
+		mustGetHealthz(t, dir, addr)
 
 		// Shutdown: SIGTERM must be a clean exit 0 (the signal handler run()
 		// installs is only reachable in a real process), and Close must leave
@@ -281,7 +281,7 @@ func TestServerOpensWALOnStart(t *testing.T) {
 				openedIdx, startedIdx, proc.stderr())
 		}
 
-		mustGetHealthz(t, addr)
+		mustGetHealthz(t, dir, addr)
 
 		beforeSize := mustFileSize(t, walPath)
 		proc.signal(t, syscall.SIGTERM)
@@ -434,7 +434,7 @@ func TestServerQuarantinesACorruptLogAndStartsAnyway(t *testing.T) {
 	// (1, continued) IT STAYS UP AND SERVES. "Started" is not "serving": this
 	// is the assertion that the always-restart policy actually delivers a
 	// usable bus rather than a process that logs a banner and sits there.
-	mustGetHealthz(t, addr)
+	mustGetHealthz(t, dir, addr)
 
 	// And it is a normal server in every other respect: SIGTERM is a clean
 	// exit 0. Notably NOT the exit 1 this test demanded before the policy
@@ -525,7 +525,7 @@ func TestStartupSummaryLogsQuarantineFields(t *testing.T) {
 			msgWALOpened, got, "0", openedLine)
 	}
 
-	mustGetHealthz(t, addr)
+	mustGetHealthz(t, dir, addr)
 
 	proc.signal(t, syscall.SIGTERM)
 	if code := proc.awaitExit(t, shutdownTimeout); code != 0 {
@@ -655,12 +655,25 @@ func startServer(t *testing.T, dataDir string) *serverProc {
 // Only tests that need a flag outside the fixed four use it.
 func startServerArgs(t *testing.T, dataDir string, extra ...string) *serverProc {
 	t.Helper()
+	return startServerListen(t, dataDir, "127.0.0.1:0", extra...)
+}
+
+// startServerListen is startServerArgs with an explicit -listen.
+//
+// Almost every test wants the ephemeral "127.0.0.1:0" the two helpers above
+// pass, and MUST keep wanting it: a fixed port makes the suite fail when it is
+// run twice at once. The one legitimate caller is a test whose subject IS the
+// port -- proving a refused start left nothing listening on it
+// (TestRunRefusesToStartWithoutUsableCert) is impossible against a port the
+// kernel chose and the process never reported.
+func startServerListen(t *testing.T, dataDir, listen string, extra ...string) *serverProc {
+	t.Helper()
 
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(),
 		envRunServer+"=1",
 		envDataDir+"="+dataDir,
-		envListen+"=127.0.0.1:0",
+		envListen+"="+listen,
 		envLogLevel+"=debug",
 		envExtraArgs+"="+strings.Join(extra, " "),
 	)
@@ -809,12 +822,18 @@ func (p *serverProc) awaitExit(t *testing.T, bound time.Duration) int {
 
 // mustGetHealthz asserts GET /healthz answers 200 at addr, i.e. the process is
 // really serving and not merely alive.
-func mustGetHealthz(t *testing.T, addr string) {
+//
+// It takes dataDir because the bus serves TLS AND ONLY TLS (MTLS-LISTENER,
+// invariant 11): the certificate in that directory is the trust anchor, so a
+// caller must say WHICH bus it expects to be talking to. That is not
+// bookkeeping -- it is the assertion. A probe that trusted any certificate would
+// keep passing against a bus that had silently re-minted its key material, which
+// is the one failure buscert_test.go exists to catch.
+func mustGetHealthz(t *testing.T, dataDir, addr string) {
 	t.Helper()
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("http://" + addr + "/healthz")
+	resp, err := busTestClient(t, dataDir).Get(busURL(addr, "/healthz"))
 	if err != nil {
-		t.Fatalf("GET http://%s/healthz: %v", addr, err)
+		t.Fatalf("GET %s: %v", busURL(addr, "/healthz"), err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)

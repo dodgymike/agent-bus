@@ -24,6 +24,40 @@ exists and is the usage doc; `CONTRACTS-CLI.md` is the exact flag/JSON/exit-code
 | `scripts/spec-cloud.sh` | no | Authed `curl` shim for the Spec Server (task state) |
 | `scripts/proof-check.sh` | no | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something |
 
+### `scripts/bus-serve.sh` — the health probe is now https, and verified (`MTLS-LISTENER`/`MTLS-VERIFY`, 2026-08-07)
+
+The bus serves TLS and ONLY TLS (invariant 11 — see `CONTRACTS-HTTP.md`'s "## Transport" and
+`CONTRACTS-CLI.md`'s TLS paragraph). `bus-serve.sh`'s own probe had to move in the **same commit**, or
+`start`/`status` would report a healthy bus as failed and every other task's server-startup proof would
+break with it.
+
+- `HEALTH_URL` is now `https://<probe-addr>/healthz`, probed with
+  `curl -fsS --cacert "$DATA_DIR/bus-tls.crt"` — **`--cacert`, never `-k`**. The self-signed
+  certificate the bus writes into its own data directory IS the trust anchor (there is no CA and no
+  trust-on-first-use), so pointing `curl` at that exact file is a full verification against exactly one
+  certificate, including the hostname (SANs) and the validity period.
+- A new `probe_addr` helper rewrites a wildcard `AGENT_BUS_LISTEN` (`:8080`, `0.0.0.0:8080`,
+  `[::]:8080`) to loopback before building `HEALTH_URL` — the old `http://` probe built the unusable
+  URL `http://:8080/healthz` in that case, because the certificate deliberately does not name a
+  wildcard bind.
+- On success, `start` additionally prints: the `https://host:port` URL, the certificate path, the
+  **certificate fingerprint** scraped from the log (`bus_cert_fingerprint=…`), and a ready-to-paste
+  `agent-busctl enrol --bus … --bus-fingerprint … --name <name>` line — because there is no
+  trust-on-first-use, an agent needs the fingerprint out of band before its first connection, and this
+  is where a human or a driving script gets it without reading the log by hand.
+- Exit codes are **unchanged**: `start` 0/1/2, `status` 0/1/3, `stop` 0/2. A bus that refuses to start
+  over unusable certificate material (it never falls back to plaintext) still surfaces as `start`
+  exiting `1` with the log named in the failure message.
+
+**The container-internal probe is a different command, not this script.** `Dockerfile`'s `HEALTHCHECK`
+and `docker-compose.yml`'s `healthcheck.test` both invoke `agent-bus healthcheck` — a subcommand on the
+server binary, documented in `CONTRACTS-CLI.md` — rather than `curl`, because the Alpine runtime image
+ships no HTTP client that can be told to trust one self-signed certificate (busybox `wget`'s only
+relevant knob is `--no-check-certificate`, which verifies nothing, and invariant 11 forbids disabling
+verification to make something work). Both healthcheck definitions changed from
+`wget -q ... http://127.0.0.1:8080/healthz` to
+`["/usr/local/bin/agent-bus","healthcheck","-data-dir=/data","-addr=127.0.0.1:8080","-timeout=2s"]`.
+
 ### OPEN ITEM — invariant 7 is NOT satisfied for three capabilities (2026-08-07)
 
 Recorded as an open question rather than quietly treated as met. Invariant 7 requires every

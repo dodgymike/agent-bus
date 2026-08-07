@@ -10,20 +10,30 @@ package main
 // once-per-data-directory log line. It is factored out of main.go the way
 // suffixfloors.go is, so main.go holds one call site and one summary field.
 //
-// # SCOPE: GENERATE AND LOAD ONLY. This does NOT serve TLS.
+// # SCOPE: GENERATE AND LOAD. THE MATERIAL IS NOW SERVED (updated MTLS-LISTENER)
 //
-// Stated first because it is the thing most likely to be "finished" by mistake.
-// Nothing here touches http.Server.TLSConfig, net.Listen, srv.Serve, -listen or
-// its default; after this step a plaintext GET /healthz behaves exactly as it
-// did before. Switching the listener to TLS is MTLS-LISTENER and it MUST NOT
-// land before the client can speak TLS (MTLS-CLIENTCERT) -- server-side
-// enforcement ahead of client-side capability is not a rough edge, it is a
-// total outage, and this repo has already had one: signature enforcement landed
-// first and every send failed with curl exit 7. So the Material returned here
-// is deliberately used for LOGGING ONLY today. It is returned rather than
-// discarded because the tasks that consume it (the listener, the invite blob's
-// pinned fingerprint, peer attestation) all want this exact value, loaded once,
-// by the composition root.
+// This heading previously read "GENERATE AND LOAD ONLY. This does NOT serve
+// TLS", and every sentence under it argued that the listener was deliberately
+// left plaintext because no client could speak TLS yet. MTLS-LISTENER
+// (2026-08-07) made that false, and a stale scope comment is worse than none:
+// it is read by exactly the next person deciding what this file is allowed to
+// affect. What is true now:
+//
+// This file still only CHOOSES THE SANs, LOADS, and LOGS. It does not configure
+// TLS and does not touch the listener -- that is cmd/agent-bus/tlslisten.go and
+// the run() block that calls it. What changed is downstream: the Material
+// returned here is no longer used for logging alone, it is the certificate the
+// bus PRESENTS on every handshake. So a failure here is not "the bus starts
+// without TLS", it is "the bus does not start at all" -- there is no plaintext
+// listener to fall back to (invariant 11).
+//
+// The sequencing rule that comment defended still stands and has simply moved
+// on one step: MTLS-LISTENER waited for the client to be able to speak TLS and
+// pin (MTLS-PIN, MTLS-ROTATE), and the bus still does NOT require a CLIENT
+// certificate, because MTLS-CLIENTCERT -- the client generating one -- has not
+// shipped. Server-side enforcement ahead of client-side capability is not a
+// rough edge, it is a total outage, and this repo has already had one:
+// signature enforcement landed first and every send failed with curl exit 7.
 //
 // # WHY IT RUNS WHERE IT RUNS
 //

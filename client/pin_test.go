@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +36,27 @@ import (
 // not tell a pin mismatch from a match.
 func newSelfSignedBusCert(t *testing.T) tls.Certificate {
 	t.Helper()
+	return newBusCertValidBetween(t, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+}
+
+// newBusCertValidBetween mints the same shape of certificate over a CHOSEN
+// validity window, which is what the expiry tests need.
+//
+// The window is the only thing that varies. Everything else — the Ed25519 key,
+// the loopback SANs, the self-signature — is identical to a healthy bus
+// certificate, so a test that rejects one of these rejects it for its DATES and
+// for no other reason. A helper that also changed the key or the SANs would let
+// a rejection be attributed to the wrong cause.
+func newBusCertValidBetween(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
+	t.Helper()
+	return mintBusCert(t, notBefore, notAfter, nil)
+}
+
+// mintBusCert is the one place a test certificate is built. extra are additional
+// X.509 extensions, which the unhandled-critical-extension test needs and
+// nothing else uses.
+func mintBusCert(t *testing.T, notBefore, notAfter time.Time, extra []pkix.Extension) tls.Certificate {
+	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generating a key: %v", err)
@@ -46,14 +68,15 @@ func newSelfSignedBusCert(t *testing.T) tls.Certificate {
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "agent-bus test"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 		DNSNames:              []string{"localhost"},
+		ExtraExtensions:       extra,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
 	if err != nil {
@@ -450,7 +473,7 @@ func TestVerifyPinnedBusCertificateRejects(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyPinnedBusCertificate(tc.pins, tc.rawCerts)
+			err := verifyPinnedBusCertificate(tc.pins, tc.rawCerts, time.Now())
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("rejected the pinned certificate: %v", err)
@@ -464,6 +487,391 @@ func TestVerifyPinnedBusCertificateRejects(t *testing.T) {
 				t.Fatalf("error = %v, want one matching %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// leafOf parses a minted certificate so a test can read the window as X.509
+// ACTUALLY RECORDED IT.
+//
+// This matters for the boundary cases: ASN.1 stores times to the second, so the
+// NotAfter that comes back is a truncation of the time.Time handed to the
+// template. A boundary test written against the template value would be testing
+// a moment that is not in the certificate.
+func leafOf(t *testing.T, cert tls.Certificate) *x509.Certificate {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parsing the minted certificate: %v", err)
+	}
+	return leaf
+}
+
+// TestExpiredBusCertificateIsRejectedDespiteMatchingPin is the negative test
+// that carries MTLS-EXPIRY, and the words "DESPITE MATCHING PIN" are the whole
+// point.
+//
+// Before this task the client checked sha256-of-DER and nothing else, so a
+// certificate whose NotAfter was a day in the past was pinned, accepted and
+// enrolled against — demonstrated empirically by the MTLS-PIN security gate.
+// DECISIONS.md chose the 365-day lifetime as a leak-containment bound, and a
+// bound only the client can enforce, that the client does not enforce, is
+// decoration.
+//
+// # Why a POSITIVE test would be worth almost nothing here
+//
+// The failure mode is silent in the exact way the pin callback's is: a
+// verification path that returns nil still completes handshakes and still
+// returns working connections. Every positive test in this file passes whether
+// or not the validity window is checked at all. Only this test and its
+// not-yet-valid twin can tell the two trees apart, which is why they are the
+// registered proof command for the task.
+//
+// The assertions are layered deliberately: the connection is refused (the
+// security property), the bus received NOTHING (refused at the handshake, not
+// after the request went out), the error is distinguishable from a fingerprint
+// mismatch (they demand opposite responses), and it is not retryable (a
+// certificate does not un-expire).
+func TestExpiredBusCertificateIsRejectedDespiteMatchingPin(t *testing.T) {
+	cert := newBusCertValidBetween(t, time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour))
+	pin := fingerprintOf(cert)
+	var hits int32
+	bus := newTLSBus(t, cert, enrolHandler(&hits))
+
+	c, err := New(Config{BusURL: bus.URL(), BusFingerprint: pin.String(), IdentityDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Save:false, and the reason is a DEFECT this test found rather than a
+	// preference. Client.enrolFailed OVERWRITES the Remedy of any KindNetwork
+	// error with its idempotency-key hint whenever Save is set (enrol.go), so on
+	// the saving path the certificate remedy — this one, and MTLS-PIN's mismatch
+	// remedy too — never reaches the operator. That is in enrol.go, which this
+	// task does not own; it is filed as a follow-up. The security property is
+	// unaffected either way, and the Save:true path is exercised below.
+	_, err = c.Enrol(context.Background(), EnrolOptions{Name: "planner"})
+	if err == nil {
+		t.Fatal("ACCEPTED an EXPIRED bus certificate because its fingerprint matched the pin — the validity window is not being checked")
+	}
+
+	if !errors.Is(err, ErrBusCertificateExpired) {
+		t.Fatalf("error does not match ErrBusCertificateExpired, so a caller cannot branch on it: %#v (%v)", err, err)
+	}
+	// It must NOT read as a substitution. A mismatch means "you may be talking
+	// to the wrong bus"; this means "you are talking to the right bus and its
+	// certificate is stale". Conflating them sends an operator hunting for an
+	// attacker who is not there.
+	if errors.Is(err, ErrBusFingerprintMismatch) {
+		t.Errorf("an EXPIRED pinned certificate is reported as a fingerprint MISMATCH; these are different events with opposite remedies: %v", err)
+	}
+	if got := KindOf(err); got != KindNetwork {
+		t.Errorf("Kind = %q, want %q (nothing was applied: the handshake never completed)", got, KindNetwork)
+	}
+	if got := ExitCode(err); got != ExitNetwork {
+		t.Errorf("ExitCode = %d, want %d", got, ExitNetwork)
+	}
+	if !strings.Contains(err.Error(), pin.String()) {
+		t.Errorf("the message does not name the certificate %s: %v", pin, err)
+	}
+	// The clock is named FIRST because a skewed local clock produces this exact
+	// failure and no amount of re-pinning fixes it.
+	assertRemedyNames(t, err, "clock", "pin add", "bus_cert_fingerprint")
+	if isRetryable(err) {
+		t.Error("an expired certificate is classified retryable; it will not un-expire, and retrying hides it behind what looks like a flaky connection")
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("the bus received %d request(s) over an expired certificate; a refused handshake means the request never left this process", got)
+	}
+
+	// The SAVING path is refused too. Only the remedy differs there (see above);
+	// nothing about the refusal, or about the request never being sent, does.
+	if _, err := c.Enrol(context.Background(), EnrolOptions{Name: "planner", Save: true, MakeCurrent: true}); !errors.Is(err, ErrBusCertificateExpired) {
+		t.Errorf("Enrol(Save:true) over an expired certificate: error = %v, want ErrBusCertificateExpired", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("the bus received %d request(s); it must receive none on either enrolment path", got)
+	}
+
+	// The boundary, driven through the verifier so the moment can be chosen
+	// exactly. x509 owns the comparison; this pins WHICH SIDE of it we are on.
+	leaf := leafOf(t, cert)
+	pins := NewBusPinSet(pin)
+	if err := verifyPinnedBusCertificate(pins, cert.Certificate, leaf.NotAfter); err != nil {
+		t.Errorf("rejected at exactly NotAfter (%s); the window is inclusive of its final instant: %v", leaf.NotAfter.UTC().Format(time.RFC3339), err)
+	}
+	if err := verifyPinnedBusCertificate(pins, cert.Certificate, leaf.NotAfter.Add(time.Nanosecond)); !errors.Is(err, ErrBusCertificateExpired) {
+		t.Errorf("one nanosecond after NotAfter, error = %v, want ErrBusCertificateExpired", err)
+	}
+
+	// ORDER: identity before validity. A certificate that is BOTH unpinned and
+	// expired is reported as unpinned — the expiry of a stranger's certificate
+	// is a detail, and leading with it would bury the substitution.
+	other := newSelfSignedBusCert(t)
+	err = verifyPinnedBusCertificate(NewBusPinSet(fingerprintOf(other)), cert.Certificate, time.Now())
+	if !errors.Is(err, ErrBusFingerprintMismatch) {
+		t.Errorf("an unpinned AND expired certificate reports %v; it must report the fingerprint mismatch, which is the more serious of the two", err)
+	}
+}
+
+// TestNotYetValidBusCertificateIsRejected is the other end of the window, and it
+// is not a symmetry exercise.
+//
+// A check written as "reject if now is past NotAfter" passes the expiry test
+// above completely and accepts a certificate dated ten years into the future —
+// which is what an attacker with a stolen key and a machine whose clock they can
+// influence would present, and what a freshly generated certificate looks like
+// on a client whose clock is behind. Both ends are enforced because crypto/x509
+// enforces both ends; that is the argument for handing the decision to it rather
+// than writing the comparison here.
+func TestNotYetValidBusCertificateIsRejected(t *testing.T) {
+	cert := newBusCertValidBetween(t, time.Now().Add(time.Hour), time.Now().Add(48*time.Hour))
+	pin := fingerprintOf(cert)
+	var hits int32
+	bus := newTLSBus(t, cert, enrolHandler(&hits))
+
+	c, err := New(Config{BusURL: bus.URL(), BusFingerprint: pin.String(), IdentityDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Save:false so the remedy survives to be asserted — see the note in
+	// TestExpiredBusCertificateIsRejectedDespiteMatchingPin.
+	_, err = c.Enrol(context.Background(), EnrolOptions{Name: "planner"})
+	if err == nil {
+		t.Fatal("ACCEPTED a NOT-YET-VALID bus certificate because its fingerprint matched the pin")
+	}
+
+	if !errors.Is(err, ErrBusCertificateExpired) {
+		t.Fatalf("error does not match ErrBusCertificateExpired: %#v (%v)", err, err)
+	}
+	if got := KindOf(err); got != KindNetwork {
+		t.Errorf("Kind = %q, want %q", got, KindNetwork)
+	}
+	// The message must name the END OF THE WINDOW THAT WAS CROSSED. Telling an
+	// operator a certificate "expired" when it has not started yet is a wrong
+	// answer that survives every other assertion here.
+	if !strings.Contains(err.Error(), "NOT VALID UNTIL") {
+		t.Errorf("a not-yet-valid certificate is not described as such: %v", err)
+	}
+	if strings.Contains(err.Error(), "EXPIRED at") {
+		t.Errorf("a not-yet-valid certificate is described as EXPIRED: %v", err)
+	}
+	assertRemedyNames(t, err, "clock")
+	if isRetryable(err) {
+		t.Error("a not-yet-valid certificate is classified retryable")
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("the bus received %d request(s) over a not-yet-valid certificate; it must receive none", got)
+	}
+
+	leaf := leafOf(t, cert)
+	pins := NewBusPinSet(pin)
+	if err := verifyPinnedBusCertificate(pins, cert.Certificate, leaf.NotBefore); err != nil {
+		t.Errorf("rejected at exactly NotBefore (%s); the window is inclusive of its first instant: %v", leaf.NotBefore.UTC().Format(time.RFC3339), err)
+	}
+	if err := verifyPinnedBusCertificate(pins, cert.Certificate, leaf.NotBefore.Add(-time.Nanosecond)); !errors.Is(err, ErrBusCertificateExpired) {
+		t.Errorf("one nanosecond before NotBefore, error = %v, want ErrBusCertificateExpired", err)
+	}
+
+	// A healthy certificate still passes. Without this the two negative tests
+	// above would also be satisfied by a verifier that rejects EVERYTHING —
+	// which would be secure, useless, and would not be caught until the first
+	// real bus refused to talk to anybody.
+	healthy := newSelfSignedBusCert(t)
+	if err := verifyPinnedBusCertificate(NewBusPinSet(fingerprintOf(healthy)), healthy.Certificate, time.Now()); err != nil {
+		t.Fatalf("an in-date pinned certificate was rejected: %v", err)
+	}
+}
+
+// TestUnrecognisedCertificateDefectFailsClosed covers the CATCH-ALL arm of
+// checkBusCertificateValidity — the one that must never be the arm that lets
+// something through.
+//
+// The reviewer gate flagged this arm as live-reachable and asserted only in
+// prose. It is reachable: crypto/tls PARSES the peer chain but, with default
+// verification replaced, never calls Verify itself, so a certificate carrying a
+// critical extension Go does not understand arrives here intact. It is in date
+// and its fingerprint matches, so the only thing standing between it and an
+// accepted connection is the default arm returning non-nil.
+//
+// A default arm that returns nil accepts everything the author did not think
+// of, which is the same silent-accept shape as a verification callback that
+// returns nil — and it would be invisible, because the certificate is otherwise
+// perfectly healthy.
+func TestUnrecognisedCertificateDefectFailsClosed(t *testing.T) {
+	cert := mintBusCert(t, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour), []pkix.Extension{{
+		// A private-arc OID nothing implements, marked CRITICAL — which is
+		// precisely the instruction "refuse this certificate if you do not
+		// understand this extension".
+		Id:       asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 9, 9},
+		Critical: true,
+		Value:    []byte{0x05, 0x00}, // ASN.1 NULL
+	}})
+	pin := fingerprintOf(cert)
+
+	err := verifyPinnedBusCertificate(NewBusPinSet(pin), cert.Certificate, time.Now())
+	if err == nil {
+		t.Fatal("ACCEPTED a certificate carrying an unhandled CRITICAL extension; the catch-all arm is not failing closed")
+	}
+	if !errors.Is(err, ErrBusCertificateUnusable) {
+		t.Fatalf("error = %v, want ErrBusCertificateUnusable", err)
+	}
+	// It is IN DATE, so it must not be mislabelled as an expiry. "Expired" stays
+	// a precise claim; that is the whole reason there are two sentinels.
+	if errors.Is(err, ErrBusCertificateExpired) {
+		t.Errorf("an in-date certificate refused for a non-date reason reports as EXPIRED: %v", err)
+	}
+	// And it must be classified as a certificate problem, so it reaches
+	// pinError's message rather than a generic "cannot reach the bus", and is
+	// never retried.
+	if !isPinError(err) {
+		t.Error("not classified as a pin error; it would be reported as a transient network fault AND retried")
+	}
+
+	// End to end, over a real handshake, because that is the path the reviewer
+	// showed is reachable.
+	var hits int32
+	bus := newTLSBus(t, cert, enrolHandler(&hits))
+	c, err := New(Config{BusURL: bus.URL(), BusFingerprint: pin.String(), IdentityDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Enrol(context.Background(), EnrolOptions{Name: "planner"}); !errors.Is(err, ErrBusCertificateUnusable) {
+		t.Fatalf("Enrol over an undecipherable certificate: error = %v, want ErrBusCertificateUnusable", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("the bus received %d request(s); the handshake must be refused before anything is sent", got)
+	}
+}
+
+// TestPinVerifierReadsTheClockOnEveryHandshake guards a DESIGNED property that
+// nothing else tests: pinVerifier calls now() per handshake rather than
+// capturing a time when the transport is built.
+//
+// The reviewer gate found that mutating the verifier to sample the clock once,
+// at construction, reddened nothing — despite the property having a paragraph of
+// rationale. The consequence of getting it wrong is slow and silent: a
+// long-lived agent holds one transport for days, so a captured clock would go on
+// approving a certificate that expired hours ago, and the longer the process ran
+// the wronger it would get. Nothing would look broken.
+//
+// The test drives ONE verifier across a clock that crosses NotAfter between the
+// two calls. A captured clock passes the first and, wrongly, the second.
+func TestPinVerifierReadsTheClockOnEveryHandshake(t *testing.T) {
+	cert := newSelfSignedBusCert(t)
+	leaf := leafOf(t, cert)
+
+	// Sequential, single goroutine: the verifier is invoked directly rather than
+	// through a handshake, so there is nothing to race with.
+	at := leaf.NotAfter
+	verify := pinVerifier(NewBusPinSet(fingerprintOf(cert)), func() time.Time { return at })
+
+	if err := verify(cert.Certificate, nil); err != nil {
+		t.Fatalf("the first handshake, inside the validity window, was refused: %v", err)
+	}
+	at = leaf.NotAfter.Add(time.Nanosecond)
+	if err := verify(cert.Certificate, nil); !errors.Is(err, ErrBusCertificateExpired) {
+		t.Fatalf("the SAME verifier accepted the certificate after it expired: error = %v, want ErrBusCertificateExpired. "+
+			"The clock is being captured once instead of read per handshake, so a long-running agent would keep trusting an expired certificate", err)
+	}
+}
+
+// TestZeroClockIsRefusedRatherThanRepaired covers the guard at the top of
+// checkBusCertificateValidity.
+//
+// It is here because the security gate pointed out that the guard was itself an
+// untested fail-closed path — deleting the whole `if at.IsZero()` block reddened
+// nothing — which is the same shape as the finding it was written to answer. A
+// fail-closed arm nobody tests is a fail-closed arm until someone edits it.
+//
+// What it protects: x509 substitutes time.Now() for a zero CurrentTime, so the
+// VERDICT would be right, but BusCertificateExpiredError.Error() would compare
+// the zero At and name the WRONG END of the window — the gate observed an
+// expired certificate reported as "NOT VALID UNTIL … it is now 0001-01-01".
+func TestZeroClockIsRefusedRatherThanRepaired(t *testing.T) {
+	healthy := newSelfSignedBusCert(t)
+	err := verifyPinnedBusCertificate(NewBusPinSet(fingerprintOf(healthy)), healthy.Certificate, time.Time{})
+	if err == nil {
+		t.Fatal("ACCEPTED a certificate judged against the ZERO time; a caller with no clock has not judged anything")
+	}
+	if !errors.Is(err, ErrBusCertificateUnusable) {
+		t.Errorf("error = %v, want ErrBusCertificateUnusable", err)
+	}
+
+	// The case that motivated refusing rather than letting x509 repair it: an
+	// EXPIRED certificate must not come back described as not-yet-valid.
+	expired := newBusCertValidBetween(t, time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour))
+	err = verifyPinnedBusCertificate(NewBusPinSet(fingerprintOf(expired)), expired.Certificate, time.Time{})
+	if err == nil {
+		t.Fatal("ACCEPTED an expired certificate judged against the zero time")
+	}
+	if strings.Contains(err.Error(), "NOT VALID UNTIL") {
+		t.Errorf("an EXPIRED certificate is described as not-yet-valid when the clock is the zero time: %v", err)
+	}
+}
+
+// TestPinnedTLSConfigUsesALiveClock is the WIRING test, and it exists because
+// every other clock assertion in this file stops one level too early.
+//
+// TestPinVerifierReadsTheClockOnEveryHandshake proves pinVerifier reads its
+// clock per call — but it constructs the verifier itself, so it says nothing
+// about what pinnedTLSConfig HANDS it. The security gate found that mutating
+// that single line to capture a time at construction left the entire suite
+// green. This is the test that fails.
+//
+// It has to let real time pass, because the seam it is testing is precisely the
+// absence of an injectable clock on the production path. The window is short and
+// the wait is a poll rather than a fixed sleep, so the cost is a few seconds and
+// the outcome does not depend on how fast the machine is.
+//
+// # It RETRIES a stalled machine; it does NOT skip
+//
+// An earlier draft called t.Skipf when the window closed before the first check
+// could run. The security gate showed that hole is reachable UNDER THE MUTATION
+// rather than only on the honest path: with the clock frozen at construction and
+// a multi-second stall, the first check fails, the skip condition holds, and a
+// REAL REGRESSION reports green — and proof-check.sh reports VACUOUS only when
+// EVERY test skipped, so it would have said PASS. A test that can silently stop
+// proving anything is the same failure shape as the verifier that silently
+// returns nil, which is the thing this whole task is about. So a stall re-mints
+// and retries, and exhausting the attempts is a FAILURE, never a skip.
+//
+// margin cannot usefully go below ~2s: ASN.1 records NotAfter to the second, so
+// a shorter window risks a certificate that is already expired when it is built.
+func TestPinnedTLSConfigUsesALiveClock(t *testing.T) {
+	const (
+		margin   = 3 * time.Second
+		attempts = 3
+	)
+	for attempt := 1; ; attempt++ {
+		cert := newBusCertValidBetween(t, time.Now().Add(-time.Hour), time.Now().Add(margin))
+		leaf := leafOf(t, cert)
+
+		// The config is built ONCE, now, while the certificate is still valid.
+		cfg := pinnedTLSConfig(NewBusPinSet(fingerprintOf(cert)))
+		if cfg.VerifyPeerCertificate == nil {
+			t.Fatal("pinnedTLSConfig produced a config with no verification callback")
+		}
+
+		if err := cfg.VerifyPeerCertificate(cert.Certificate, nil); err != nil {
+			if attempt < attempts && time.Now().After(leaf.NotAfter) {
+				// The machine stalled past the window between minting and
+				// checking. Re-mint and try again rather than concluding
+				// anything — but never more than `attempts` times, so a genuine
+				// refusal cannot hide behind an infinite retry.
+				continue
+			}
+			t.Fatalf("the pinned config refused an in-date certificate on attempt %d of %d: %v", attempt, attempts, err)
+		}
+
+		// Let the certificate expire UNDER the already-built config.
+		for time.Now().Before(leaf.NotAfter.Add(50 * time.Millisecond)) {
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if err := cfg.VerifyPeerCertificate(cert.Certificate, nil); !errors.Is(err, ErrBusCertificateExpired) {
+			t.Fatalf("a config built BEFORE the certificate expired still accepts it: error = %v, want ErrBusCertificateExpired. "+
+				"pinnedTLSConfig is handing pinVerifier a clock captured at construction instead of time.Now, so a long-lived agent would trust an expired certificate for as long as its process runs", err)
+		}
+		return
 	}
 }
 

@@ -17,7 +17,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | namespace | reserved values | meaning |
 | --- | --- | --- |
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
-| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below) |
+| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below) |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -174,8 +174,13 @@ its own, and `-data /srv/bus[` disable the reaper permanently via `ErrBadPattern
 - **CORRUPT (bad header, unknown version, a tag that fails under the directory's OWN key, malformed
   number, or `written > reserved`) is FATAL**, wraps the exported sentinel
   `wal.ErrIndexFloorCorrupt`, and is **NEVER regenerated** — regenerating it would resume the WAL
-  record index (and the message sequence derived from it) below numbers already handed out, silently,
-  with nothing downstream able to detect it. The error tells the operator to restore the file from a
+  record index below numbers already handed out, silently, with nothing downstream able to detect it.
+  (*Corrected 2026-08-07: this used to add "and the message sequence derived from it". It no longer
+  is — see the retired counting argument below. The MESSAGE SEQUENCE is now raised independently by
+  `message-seq-floor`, so regenerating THIS file does not rewind it. `internal/wal/indexfloor.go`'s
+  own `indexFloorCorrupt` error string still carries the old parenthetical; it errs conservative —
+  it tells the operator to restore from backup either way — and is filed as a follow-up.*) The error
+  tells the operator to restore the file from a
   backup, and states plainly that **deleting it FORFEITS INVARIANT 1 for that data directory unless
   the previous run shut down cleanly**. The old wording ("delete it and restart; correct unless the
   log has ALSO been damaged") was unsound and is gone: a log truncated at a record boundary is
@@ -192,8 +197,20 @@ exceptions" below.
 
 **Scope limit, stated plainly and not softened:** the AUDIT log writer (`wal.OpenWriter`,
 `wal.KindAudit`) attaches NO floor — only `wal.Open` (the WAL proper) does. An audit log's discarded
-tail record index can therefore still be reissued; this file protects the WAL's record indices and,
-through `internal/hub`'s derivation, message ids — it does not protect the audit trail.
+tail record index can therefore still be reissued; this file protects the WAL's record indices — it
+does not protect the audit trail.
+
+**CORRECTED 2026-08-07 — this file no longer protects MESSAGE IDS, and the claim that it does is
+retired.** The sentence above used to end "…this file protects the WAL's record indices and, through
+`internal/hub`'s derivation, message ids". That was true when written and is now FALSE. It rested on
+a COUNTING argument — each message consumed one sequence and at least two record indices, so the
+indices outran the sequences for ever and this floor bounded the message sequence transitively. **The
+mint batching introduced by `SIGN-2`/`SIGN-6` broke that ratio**: `/v1/mint` hands a client a
+sequence BEFORE any record carries it, and burns `hub.MintBatchSize` (256) of them per floor record,
+so five mints consume five sequences against two indices. Message ids are now protected by a SECOND,
+independent file — `message-seq-floor`, documented in the next section — and **not** by this one.
+Measured: with that file removed, 247 of 248 truncation offsets reissued a sequence despite this
+floor being present and intact.
 
 **Migration residual, stated plainly and not softened:** on a data directory that predates this
 file, the floor reads as zero until the first `Open` under the new binary writes it. If such a
@@ -203,6 +220,141 @@ reissued. The window closes permanently after one successful start.
 New exported surface introduced by this file: `wal.IndexFloorFileName` (= `"wal-index-floor"`),
 `(*wal.Log).IndexFloorPath()`, `wal.Repair.LostUnidentified`, `wal.Recovered.FirstIndex`. No new
 HTTP route, CLI flag, env var, or header was introduced by this change.
+
+## On-disk files in the data directory: the durable MESSAGE-SEQUENCE floor (`MSG-FU-SEQHIGHWATER`, documented 2026-08-07)
+
+**This is a SECOND, INDEPENDENT floor file, and it is not a duplicate of `wal-index-floor` above.**
+The two guard DIFFERENT counters: `wal-index-floor` guards the WAL RECORD INDEX, this one guards the
+MESSAGE SEQUENCE that becomes the `<bus-id>-<seq>` message id a client signs. Anyone tempted to
+collapse them should read the next paragraph first — the argument that once tied the two together
+has been retired, deliberately, and reinstating it would reopen a P0.
+
+**Why `wal-index-floor` does NOT cover this transitively (the retired counting argument).** Before
+`SIGN-2`/`SIGN-6`, every sequence issued was `<=` the WAL index of the prepare carrying it — each
+message consumed one sequence and at least two indices, so the indices outran the sequences for
+ever, and the WAL's own durable index floor bounded this counter for free. **That argument is dead.**
+`/v1/mint` now hands a client a sequence BEFORE any record carries it, and it burns a BATCH of
+`hub.MintBatchSize` (256) numbers per floor record — five mints consume five sequences against two
+WAL indices. The counters are no longer related. `internal/hub/mint.go` and `hub.Open`'s
+floor-derivation comment both say so at length; **do not reinstate any reasoning that ties a
+sequence to a WAL index.**
+
+`<data-dir>/message-seq-floor` (mode `0600`, on-disk format version **5** — RESERVED via the Spec
+Server `ondisk-format-version` namespace, never hand-picked) is a small, atomically-replaced file
+living OUTSIDE the WAL, implemented in `internal/hub/seqfloorfile.go`. Format: a header line
+carrying an unkeyed SHA-256 digest, then a one-line body:
+
+```
+agent-bus-message-seq-floor v5 sha256=<64 hex>
+floor <decimal uint64>
+```
+
+The digest covers the BODY only. Numbers are canonical decimal (no sign, no leading zeros), so a
+floor has exactly one spelling and the file stays readable by eye — an operator diagnosing a bus
+should be able to `cat` it. An UNKNOWN version is a HARD ERROR, never a "read what you can": a file
+written by a newer binary may encode a HIGHER floor this one cannot see, and reading it partially
+would LOWER the floor, which is the one thing this file exists to make impossible.
+
+**The digest is INTEGRITY, not AUTHENTICATION, and that is a deliberate difference from
+`wal-index-floor`'s keyed HMAC.** Anyone who can write the file can recompute the digest. The
+justification, stated in the form a security gate accepted on 2026-08-07 rather than the weaker form
+first written here:
+
+- **The FLOOR VALUE is consumed only as a RAISE** — `hub.Open` folds it into a maximum over four
+  sources, `ids.Sequence.RaiseFloor` refuses a lower value, and `seqFloorFile.persistLocked` refuses
+  a decrease at the last point before the bytes. Verified across every path; none trusts the number
+  directly.
+- **Forging it LOW therefore achieves exactly what DELETING it achieves**, and no MAC prevents
+  deletion, because a missing file is deliberately non-fatal.
+- **Forging it HIGH is a real but bounded outcome, and is recorded here rather than omitted:** a
+  valid-digest `floor 18446744073709551615` seals the allocator at `MaxUint64`, every subsequent mint
+  fails permanently with `ids.ErrSequenceExhausted`, and the floor is monotonic so it can never be
+  lowered back. That is a denial of service, not an id reissue. The error names neither this file nor
+  the remedy; **the remedy is to move `message-seq-floor` aside and restart.**
+- **Both attacks require write access to the data directory**, which already holds `wal-mac.key`,
+  `bus-signing.key` and `bus-tls.key` — an adversary there owns the bus outright, and can reach the
+  identical DoS through a properly-MAC'd in-log `"seqfloor"` record. A keyed MAC here would buy
+  almost nothing. *Tracked as a consistency follow-up, not as a known hole.*
+
+*Note the argument above deliberately does NOT claim this file has no trust bit at all.
+`existedAtOpen()` is consumed DIRECTLY rather than as a raise (`hub.Open`, the quarantine report): a
+file that exists but carries a stale low floor flips the loud "message ids may repeat" ERROR into the
+reassuring one. That is a false negative in an operator report, not an id reissue — filed as a
+follow-up.*
+
+**The single field, and the invariant on it.** `floor` — every message sequence AT OR BELOW this
+value is BURNED: handed to a client, written to the log, or permanently skipped. It is strictly
+non-decreasing, and a decrease is REFUSED in code rather than silently accepted. There is
+deliberately NO second field and NO clean-shutdown flag: `wal-index-floor` needs `reserved`/`written`
+because its recovery distinguishes "authorised" from "consumed", whereas here the two collapse — a
+burned sequence is burned identically whether a message carried it or a crash wasted it. Gaps are
+CORRECT (`internal/ids/sequence.go` says so for the neighbouring counter). **A floor that can go down
+is the entire defect**, so no field exists that a future edit could reason downwards from.
+
+**The ordering contract: the floor is fsynced AHEAD of the number it authorises.** `Hub.Mint` raises
+and fsyncs the floor past the whole batch BEFORE handing any number out, so a number a client holds
+is always already covered by a durable floor. This is invariant 4's ordering one layer down —
+nothing is ISSUED before its floor is durable.
+
+**Startup derivation — the floor is the MAXIMUM of four durable facts** (`hub.Open`), of which
+**(0) is authoritative and (1)–(3) are defence in depth**:
+
+| # | source | why it is not sufficient alone |
+|---|---|---|
+| **0** | `message-seq-floor` (this file) | **authoritative** — the only one that survives a quarantine |
+| 1 | the log's high-water index, `wal.Recovered.NextIndex - 1` | read OUT OF the log; retired counting argument above |
+| 2 | the highest replayed `"seqfloor"` record (`hub.SeqFloorRecordKind`, see that section below) | read OUT OF the log — a quarantine discards it |
+| 3 | the highest sequence on a replayed message record | read OUT OF the log; also misses a DANGLING prepare's sequence |
+
+Sources (1)–(3) all drop together, to nearly zero, on exactly the start where the floor matters most.
+Each can only ever RAISE, never lower, so all four are kept.
+
+**Measured evidence (2026-08-07), the reason this file is not optional.** A truncation sweep over
+every offset of a mint-bearing WAL, resuming the bus at each one and measuring the sequence by
+performing a REAL mint rather than trusting an accessor:
+
+| data directory | offsets swept | offsets reissuing a sequence |
+|---|---|---|
+| with `message-seq-floor` present | 248 | **0** |
+| with `message-seq-floor` removed | 248 | **247** |
+
+The removed-file column is the pre-fix behaviour and the migration window, not a hypothetical.
+
+**Failure modes.** A MISSING file is NOT fatal — a data directory written by a binary that predates
+it is a legitimate benign cause, and refusing would brick every deployed bus on upgrade. `hub.Open`
+falls back to sources (1)–(3), logs at WARN when the directory is not otherwise fresh, and — **when
+the derived floor is non-zero** — CLOSES the window immediately by persisting it. When the derived
+floor is zero the write is skipped, which is the case the migration note below qualifies. A CORRUPT file (`hub.ErrSeqFloorFileCorrupt`) is
+FATAL and is **never regenerated**: regenerating resumes the sequence below numbers already handed
+out and already SIGNED, so two validly-signed messages would carry one message id and **both
+signatures would verify**. A crash can never produce that state — the write is temp file + fsync +
+rename + directory fsync — so corruption means media damage or tampering. The error names a one-step
+remedy and states its cost rather than handing over a command that is merely safe on most days.
+
+**Migration residual, stated plainly and not softened:** a data directory that predates this file and
+whose WAL is QUARANTINED on its very first start under the new binary still resumes below numbers it
+already issued. `hub.Open` reports exactly that, at **ERROR**, rather than pretending otherwise. This
+is the same one-start residual `wal-index-floor` carries, for the same reason.
+
+**Be precise about when the window actually closes — a successful start is not always enough.** A
+directory with HISTORY normally gets the file written at `Open`, because the derived floor is
+non-zero. But when the derived floor is `0` — a fresh directory, or a first start that is ALSO a
+quarantine, since a quarantine restarts `NextIndex` at 1 — `raise(0)` is a no-op that writes no file,
+and the window does NOT close merely because the start succeeded. In that case it closes as soon as
+this bus burns its first sequence, because the mint fsyncs the floor before handing any number out.
+Safety holds throughout (nothing was issued in the interim), but an operator told "one successful
+start" would have believed the window closed when it had not.
+
+**Upgrade/downgrade.** Existing data directories are unaffected on upgrade: the file is absent, that
+is benign, and the first `Open` writes it. **Downgrade is effectively one-way** — an older binary
+does not read `message-seq-floor`, so it silently derives the floor from the log alone and forfeits
+this protection; it does not, however, fail to start, and the file is left intact for a later
+upgrade.
+
+New exported surface introduced by this file: `hub.SeqFloorFileName` (= `"message-seq-floor"`),
+`hub.ErrSeqFloorFileCorrupt`. `hub.Options.DataDir` is REQUIRED for any hub with a durable write
+path, because this is where the file lives. No new HTTP route, CLI flag, env var, or header is
+introduced by it.
 
 ## The write-ahead log at startup (added 2026-08-02)
 
@@ -292,9 +444,11 @@ regenerating the missing file:
 | `agent-suffixes` missing | the data directory HAS history (it was non-empty at startup, or the log holds records) — `DECISIONS.md` 2026-08-07, `AUTH-3-FU-FAILOPEN`, and the seal-line ruling in `cmd/agent-bus/suffixfloors.go` | restore the floors file from backup; or, only if the directory genuinely never issued an agent id, restart ONCE with `-backfill-suffix-floors` |
 | bus key material unusable or partial | any of `bus-tls.crt` / `bus-tls.key` / `bus-signing.key` malformed, expired, group-or-other-readable, or present-but-incomplete (`MTLS-BUSCERT`, see the section on those three files below) | restore the named file from backup; the bus never re-mints, because a new TLS key breaks every pinned client and a new signing key kills every peer bus's pin |
 
-A CORRUPT `agent-suffixes` (`ids.ErrSuffixFileCorrupt`) and a CORRUPT `wal-index-floor`
-(`wal.ErrIndexFloorCorrupt`) are fatal on the same reasoning and with no override at all; they are
-listed in their own sections rather than repeated here.
+A CORRUPT `agent-suffixes` (`ids.ErrSuffixFileCorrupt`), a CORRUPT `wal-index-floor`
+(`wal.ErrIndexFloorCorrupt`) and a CORRUPT `message-seq-floor` (`hub.ErrSeqFloorFileCorrupt`) are
+fatal on the same reasoning and with no override at all; they are listed in their own sections rather
+than repeated here. Note the shared shape: all three are damaged IDENTITY files, not a damaged LOG,
+which is why refusing over them does not narrow invariant 6.
 
 **New INFO log line, asserted on by tests — treat its shape as part of this contract.** After a
 successful open, `run()` logs one line naming what recovery found:
@@ -948,9 +1102,18 @@ silently skips the kinds it does not own.
 | Frames | the ordinary PREPARE/COMMIT pair — no new frame shape, no new fsync discipline |
 | Undecodable at replay | **skipped LOUDLY at ERROR** (invariant 6: discard is sanctioned, SILENT discard is the defect) |
 
-`hub.Open` derives the resume floor as the **maximum** of `Recovered.NextIndex - 1`, the highest
-floor from replayed `"seqfloor"` records, and the highest applied message sequence — then seals. The
-`NextIndex - 1` term is KEPT as defence in depth; it can only raise the floor, never lower it.
+`hub.Open` derives the resume floor as the **maximum** of FOUR sources — the durable
+`message-seq-floor` FILE, `Recovered.NextIndex - 1`, the highest floor from replayed `"seqfloor"`
+records, and the highest applied message sequence — then seals. Every term can only raise the floor,
+never lower it.
+
+**CORRECTED 2026-08-07: this record is DEFENCE IN DEPTH, not the guarantee.** The three sources
+listed above are all read OUT OF THE LOG, and a QUARANTINE discards the log — so all three collapse
+together on exactly the start where the floor matters most. The authoritative source is the durable
+`<data-dir>/message-seq-floor` FILE (on-disk format version 5), which lives outside the log; see
+"the durable MESSAGE-SEQUENCE floor" above for the whole argument, the failure modes and the
+measured evidence. The "Written AHEAD" row below describes this RECORD's ordering, which is real but
+is not by itself what survives deep damage.
 
 **The operator-visible consequence: SEQUENCE NUMBERS NOW ADVANCE IN JUMPS.** A restart typically
 resumes at the next multiple of 256, and a mint that is never spent leaves a permanent hole.
@@ -970,9 +1133,11 @@ if the crash landed after the message became durable, the re-sent request carrie
 the same fingerprint, so `internal/idem` answers `OutcomeRetry` and replays the ORIGINAL result.
 
 **No new on-disk FILE, no `ondisk-format-version` bump, no new `record-type` number, and no new HTTP
-route, CLI flag, env var or header is introduced by the `"seqfloor"` record itself.** The HTTP
+route, CLI flag, env var or header is introduced by the `"seqfloor"` RECORD itself.** The HTTP
 surface this wave DID change (`POST /v1/mint`, `POST /v1/send`, `POST /v1/broadcast`) is in
-`CONTRACTS-HTTP.md`.
+`CONTRACTS-HTTP.md`. *The same wave DID also add an on-disk file and format version — the
+`message-seq-floor` FILE at `ondisk-format-version` 5, documented in its own section above. The
+sentence scopes to the record, not to the wave.*
 
 ## Three new files in the data directory: the bus certificate and its two keys (MTLS-BUSCERT, `internal/buscert`, added 2026-08-07)
 

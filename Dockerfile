@@ -115,15 +115,35 @@ EXPOSE 8080
 # internal/httpapi/server.go. Uses the flag defaults' host:port; if an
 # operator overrides -listen via CMD/command:, this must be overridden to
 # match (docker-compose.yml's healthcheck does exactly that for its own
-# invocation).
+# invocation), and so must -data-dir.
 #
-# TLS SEAM (do not implement yet -- see CLAUDE.md invariant 11 and the
-# mutual-TLS epic, in_progress as of 2026-08-02): once the server serves TLS
-# with a self-signed cert and no CA, plain `wget` here stops working and this
-# probe must move to HTTPS with certificate material the healthcheck can
-# trust. Tracked, not solved, here.
+# THE TLS SEAM IS CLOSED (MTLS-LISTENER + MTLS-VERIFY, 2026-08-07). The bus now
+# serves https and ONLY https, so the `wget http://...` probe that stood here
+# could never succeed again and had to move in the same commit -- a container
+# whose probe cannot pass is a container Docker restarts forever.
+#
+# It probes through the SERVER BINARY's own `healthcheck` subcommand rather
+# than through busybox `wget`, and that is a deliberate choice, not a
+# convenience. The bus certificate is SELF-SIGNED with no CA anywhere in the
+# design, and busybox wget cannot be told to trust ONE certificate: its only
+# relevant knob is --no-check-certificate, which does not verify differently,
+# it does not verify at all. CLAUDE.md invariant 11 is explicit that
+# certificate verification is never disabled to make something work. So the
+# probe moved into the binary that is already in this image (no second
+# artefact, no curl, Alpine's size argument intact) and it trusts exactly one
+# root: /data/bus-tls.crt, the certificate this bus wrote itself. Being a real
+# x509 verification it also checks the hostname and the VALIDITY PERIOD, so an
+# expired bus certificate reports unhealthy instead of serving on quietly.
+#
+# See cmd/agent-bus/healthcheck.go. Exit 0 healthy, 1 unhealthy, 2 bad usage.
+# Docker documents exit 2 as RESERVED, and the collision is stated rather than
+# hidden: 2 is only reachable by a malformed probe invocation (a typo in the
+# flags on this line or in a compose override), never by an unhealthy bus, and
+# Docker treats any non-zero status as unhealthy in practice. The alternative --
+# collapsing usage errors into 1 -- would make a typo here indistinguishable
+# from a dead bus, which is the harder failure to debug of the two.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -q -T 2 -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD ["/usr/local/bin/agent-bus", "healthcheck", "-data-dir=/data", "-addr=127.0.0.1:8080", "-timeout=2s"]
 
 ENTRYPOINT ["/usr/local/bin/agent-bus"]
 # Defaults mirror cmd/agent-bus's own flag defaults (defaultListen,

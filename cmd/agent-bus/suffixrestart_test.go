@@ -43,7 +43,10 @@ const suffixFileInDataDir = "agent-suffixes"
 // A FRESH keypair every call, on purpose: that is the whole hazard. A reused
 // suffix hands a DIFFERENT keypair the previous holder's identity, so the test
 // must not accidentally present the same key twice and make a reuse look benign.
-func enrolAgent(t *testing.T, addr, name string) string {
+//
+// dataDir names the bus: since MTLS-LISTENER the enrol route is https, verified
+// against that directory's certificate (busTestClient, tlsclient_test.go).
+func enrolAgent(t *testing.T, dataDir, addr, name string) string {
 	t.Helper()
 	pub, _, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -61,10 +64,9 @@ func enrolAgent(t *testing.T, addr, name string) string {
 		t.Fatalf("marshalling the enrol request: %v", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post("http://"+addr+"/v1/enroll", "application/json", bytes.NewReader(reqBody))
+	resp, err := busTestClient(t, dataDir).Post(busURL(addr, "/v1/enroll"), "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		t.Fatalf("POST http://%s/v1/enroll: %v", addr, err)
+		t.Fatalf("POST %s: %v", busURL(addr, "/v1/enroll"), err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -121,7 +123,7 @@ func TestRestartMintsStrictlyGreaterAgentIDSuffix(t *testing.T) {
 	// --- start 1: a fresh data dir ---
 	p1 := startServer(t, dir)
 	addr1 := p1.awaitServerStarted(t)
-	id1 := enrolAgent(t, addr1, name)
+	id1 := enrolAgent(t, dir, addr1, name)
 	n1 := suffixOf(t, id1)
 	if n1 != 1 {
 		t.Fatalf("first enrolment of %q on a FRESH data dir minted %q (suffix %d), want suffix 1", name, id1, n1)
@@ -141,7 +143,7 @@ func TestRestartMintsStrictlyGreaterAgentIDSuffix(t *testing.T) {
 	// --- start 2: same data dir, clean restart ---
 	p2 := startServer(t, dir)
 	addr2 := p2.awaitServerStarted(t)
-	id2 := enrolAgent(t, addr2, name)
+	id2 := enrolAgent(t, dir, addr2, name)
 	n2 := suffixOf(t, id2)
 	if n2 <= n1 {
 		t.Fatalf("after a CLEAN restart, re-enrolling %q minted %q (suffix %d), want STRICTLY GREATER than %d (%q).\nAn agent id is never reused, including across restarts (invariant 1): a reused id hands a new agent holding a different keypair the previous holder's routing and authorization identity.\n%s",
@@ -158,7 +160,7 @@ func TestRestartMintsStrictlyGreaterAgentIDSuffix(t *testing.T) {
 
 	p3 := startServer(t, dir)
 	addr3 := p3.awaitServerStarted(t)
-	id3 := enrolAgent(t, addr3, name)
+	id3 := enrolAgent(t, dir, addr3, name)
 	n3 := suffixOf(t, id3)
 	if n3 <= n2 {
 		t.Fatalf("after a KILL -9 restart, re-enrolling %q minted %q (suffix %d), want STRICTLY GREATER than %d (%q).\nThe floor must be fsynced BEFORE the suffix is issued, so a process that dies without warning still cannot reissue it.\n%s",
@@ -167,7 +169,7 @@ func TestRestartMintsStrictlyGreaterAgentIDSuffix(t *testing.T) {
 
 	// A DIFFERENT name is unaffected: the counters are per name, and the seal
 	// asserts that names absent from the floors were never written.
-	if n := suffixOf(t, enrolAgent(t, addr3, "beta")); n != 1 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr3, "beta")); n != 1 {
 		t.Fatalf("first enrolment of \"beta\" minted suffix %d, want 1: per-name counters are independent", n)
 	}
 }
@@ -222,15 +224,15 @@ func TestLegacyDataDirDoesNotReMintAgentIDs(t *testing.T) {
 		t.Fatalf("the backfill line is level=%q, want %q; a data dir with history and no floors file is not routine news\nline: %s", lvl, "error", floorsLine)
 	}
 
-	if n := suffixOf(t, enrolAgent(t, addr2, name)); n <= 5 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr2, name)); n <= 5 {
 		t.Fatalf("on a LEGACY data dir, enrolling %q minted suffix %d, want strictly greater than 5: %s.%s-5 is already durable in a WAL message record, and re-minting it hands a new keypair that agent's identity.\n%s",
 			name, n, busID, name, p2.stderr())
 	}
-	if n := suffixOf(t, enrolAgent(t, addr2, "beta")); n <= 3 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr2, "beta")); n <= 3 {
 		t.Fatalf("on a LEGACY data dir, enrolling \"beta\" minted suffix %d, want strictly greater than 3: a RECIPIENT id is as durable as a sender id.\n%s", n, p2.stderr())
 	}
 	// A name with no history on that dir still starts at 1.
-	if n := suffixOf(t, enrolAgent(t, addr2, "gamma")); n != 1 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr2, "gamma")); n != 1 {
 		t.Fatalf("enrolling \"gamma\" on the legacy dir minted suffix %d, want 1: the seal asserts that names absent from the derivation were never written", n)
 	}
 }
@@ -344,7 +346,7 @@ func TestFreshDataDirStartsWithoutTheBackfillOptIn(t *testing.T) {
 	// It is a usable bus, not just a process that logged a banner: enrolling
 	// requires a SEALED allocator (an unsealed one refuses every NextSuffix with
 	// ErrFloorUnproven), so this proves the floors were proven, not bypassed.
-	if n := suffixOf(t, enrolAgent(t, addr1, "alpha")); n != 1 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr1, "alpha")); n != 1 {
 		t.Fatalf("first enrolment on a fresh dir minted suffix %d, want 1", n)
 	}
 
@@ -364,7 +366,7 @@ func TestFreshDataDirStartsWithoutTheBackfillOptIn(t *testing.T) {
 	addr2 := p2.awaitServerStarted(t)
 	// And the floors are REAL, not merely present: alpha-1 is durable, so the
 	// restart must mint strictly above it.
-	if n := suffixOf(t, enrolAgent(t, addr2, "alpha")); n <= 1 {
+	if n := suffixOf(t, enrolAgent(t, dir, addr2, "alpha")); n <= 1 {
 		t.Fatalf("after a restart, enrolling \"alpha\" minted suffix %d, want strictly greater than 1\n%s", n, p2.stderr())
 	}
 	p2.signal(t, syscall.SIGTERM)

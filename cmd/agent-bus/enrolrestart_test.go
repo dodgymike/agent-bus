@@ -46,13 +46,17 @@ type busAgent struct {
 }
 
 // enrolNewAgent enrols name through the real HTTP route and keeps the keypair.
-func enrolNewAgent(t *testing.T, addr, name string) *busAgent {
+//
+// dataDir names the bus being talked to: since MTLS-LISTENER every request in
+// this file is https, verified against that directory's certificate. See
+// busTestClient in tlsclient_test.go.
+func enrolNewAgent(t *testing.T, dataDir, addr, name string) *busAgent {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("generating an Ed25519 keypair: %v", err)
 	}
-	body := mustPostJSON(t, addr, "/v1/enroll", "", map[string]string{
+	body := mustPostJSON(t, dataDir, addr, "/v1/enroll", "", map[string]string{
 		"name":       name,
 		"public_key": base64.StdEncoding.EncodeToString(pub),
 		// Unique per call: a repeated key is an idempotent REPLAY and returns
@@ -77,9 +81,9 @@ func enrolNewAgent(t *testing.T, addr, name string) *busAgent {
 // token on a. It does NOT enrol: it is the whole of what an already-enrolled
 // agent must do after a bus restart, and every call to it after one is a claim
 // that the roster survived.
-func (a *busAgent) authenticate(t *testing.T, addr string) {
+func (a *busAgent) authenticate(t *testing.T, dataDir, addr string) {
 	t.Helper()
-	begun := mustPostJSON(t, addr, "/v1/session/begin", "", map[string]string{"agent_id": a.id}, http.StatusOK)
+	begun := mustPostJSON(t, dataDir, addr, "/v1/session/begin", "", map[string]string{"agent_id": a.id}, http.StatusOK)
 	var challenge struct {
 		Token string `json:"token"`
 	}
@@ -94,7 +98,7 @@ func (a *busAgent) authenticate(t *testing.T, addr string) {
 	// response — a client that signed whatever prefix the server sent would be a
 	// signing oracle. This mirrors what a real wrapper must do.
 	sig := ed25519.Sign(a.priv, []byte(auth.SessionSigningContext+challenge.Token))
-	mustPostJSON(t, addr, "/v1/session/complete", "", map[string]interface{}{
+	mustPostJSON(t, dataDir, addr, "/v1/session/complete", "", map[string]interface{}{
 		"token":     challenge.Token,
 		"signature": base64.StdEncoding.EncodeToString(sig),
 	}, http.StatusOK)
@@ -102,24 +106,24 @@ func (a *busAgent) authenticate(t *testing.T, addr string) {
 }
 
 // mustPostJSON posts v and insists on wantStatus, returning the body.
-func mustPostJSON(t *testing.T, addr, path, token string, v interface{}, wantStatus int) []byte {
+func mustPostJSON(t *testing.T, dataDir, addr, path, token string, v interface{}, wantStatus int) []byte {
 	t.Helper()
-	status, body := postJSONTo(t, addr, path, token, v)
+	status, body := postJSONTo(t, dataDir, addr, path, token, v)
 	if status != wantStatus {
-		t.Fatalf("POST http://%s%s status = %d, want %d; body: %s", addr, path, status, wantStatus, body)
+		t.Fatalf("POST %s status = %d, want %d; body: %s", busURL(addr, path), status, wantStatus, body)
 	}
 	return body
 }
 
 // postJSONTo posts v and returns the status and body WITHOUT judging them, for
 // the one call that has to reason about which failure it got.
-func postJSONTo(t *testing.T, addr, path, token string, v interface{}) (int, []byte) {
+func postJSONTo(t *testing.T, dataDir, addr, path, token string, v interface{}) (int, []byte) {
 	t.Helper()
 	enc, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("marshalling the %s request: %v", path, err)
 	}
-	req, err := http.NewRequest(http.MethodPost, "http://"+addr+path, bytes.NewReader(enc))
+	req, err := http.NewRequest(http.MethodPost, busURL(addr, path), bytes.NewReader(enc))
 	if err != nil {
 		t.Fatalf("building the %s request: %v", path, err)
 	}
@@ -127,28 +131,27 @@ func postJSONTo(t *testing.T, addr, path, token string, v interface{}) (int, []b
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	return doRequest(t, req)
+	return doRequest(t, dataDir, req)
 }
 
 // getAuthed issues an authenticated GET and insists on wantStatus.
-func getAuthed(t *testing.T, addr, path, token string, wantStatus int) []byte {
+func getAuthed(t *testing.T, dataDir, addr, path, token string, wantStatus int) []byte {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+	req, err := http.NewRequest(http.MethodGet, busURL(addr, path), nil)
 	if err != nil {
 		t.Fatalf("building the %s request: %v", path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	status, body := doRequest(t, req)
+	status, body := doRequest(t, dataDir, req)
 	if status != wantStatus {
-		t.Fatalf("GET http://%s%s status = %d, want %d; body: %s", addr, path, status, wantStatus, body)
+		t.Fatalf("GET %s status = %d, want %d; body: %s", busURL(addr, path), status, wantStatus, body)
 	}
 	return body
 }
 
-func doRequest(t *testing.T, req *http.Request) (int, []byte) {
+func doRequest(t *testing.T, dataDir string, req *http.Request) (int, []byte) {
 	t.Helper()
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := busTestClient(t, dataDir).Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
 	}
@@ -168,9 +171,9 @@ type agentListEntry struct {
 }
 
 // listAgents reads GET /v1/agents as a, keyed by agent id.
-func listAgents(t *testing.T, addr string, a *busAgent) map[string]agentListEntry {
+func listAgents(t *testing.T, dataDir, addr string, a *busAgent) map[string]agentListEntry {
 	t.Helper()
-	body := getAuthed(t, addr, "/v1/agents", a.token, http.StatusOK)
+	body := getAuthed(t, dataDir, addr, "/v1/agents", a.token, http.StatusOK)
 	var out struct {
 		Agents []agentListEntry `json:"agents"`
 		Count  int              `json:"count"`
@@ -233,19 +236,19 @@ func TestTwoAgentsKeepTalkingAcrossARestartWithoutReEnrolling(t *testing.T) {
 	p1 := startServer(t, dir)
 	addr1 := p1.awaitServerStarted(t)
 
-	alpha := enrolNewAgent(t, addr1, "alpha")
-	beta := enrolNewAgent(t, addr1, "beta")
-	alpha.authenticate(t, addr1)
-	beta.authenticate(t, addr1)
+	alpha := enrolNewAgent(t, dir, addr1, "alpha")
+	beta := enrolNewAgent(t, dir, addr1, "beta")
+	alpha.authenticate(t, dir, addr1)
+	beta.authenticate(t, dir, addr1)
 
-	before := listAgents(t, addr1, alpha)
+	before := listAgents(t, dir, addr1, alpha)
 	if len(before) != 2 || before[alpha.id].AgentID == "" || before[beta.id].AgentID == "" {
 		t.Fatalf("before the restart GET /v1/agents = %+v, want exactly %s and %s", before, alpha.id, beta.id)
 	}
 	if before[alpha.id].EnrolledAt == "" {
 		t.Fatalf("the agent list carries no enrolled_at for %s: %+v", alpha.id, before)
 	}
-	sendBefore := trySend(t, addr1, alpha, beta.id, "before the restart", "dm-before")
+	sendBefore := trySend(t, dir, addr1, alpha, beta.id, "before the restart", "dm-before")
 
 	// --- the restart, by SIGKILL ---
 	//
@@ -271,10 +274,10 @@ func TestTwoAgentsKeepTalkingAcrossARestartWithoutReEnrolling(t *testing.T) {
 
 	// THE CLAIM, at its narrowest: the same keypair, the same server-minted id,
 	// a brand-new process, and no enrolment call anywhere between them.
-	alpha.authenticate(t, addr2)
-	beta.authenticate(t, addr2)
+	alpha.authenticate(t, dir, addr2)
+	beta.authenticate(t, dir, addr2)
 
-	after := listAgents(t, addr2, alpha)
+	after := listAgents(t, dir, addr2, alpha)
 	if len(after) != 2 {
 		t.Fatalf("after the restart GET /v1/agents returned %d agents, want 2: %+v\nA restarted bus that authenticates every agent and lists none is the exact failure AUTH-7 exists to prevent: the hub's roster must be the SAME roster the session was issued against.\n%s",
 			len(after), after, p2.stderr())
@@ -301,12 +304,12 @@ func TestTwoAgentsKeepTalkingAcrossARestartWithoutReEnrolling(t *testing.T) {
 	// the divergence between the two rosters, in the one place it is observable
 	// without a working send.
 	for _, a := range []*busAgent{alpha, beta} {
-		getAuthed(t, addr2, "/v1/messages", a.token, http.StatusOK)
+		getAuthed(t, dir, addr2, "/v1/messages", a.token, http.StatusOK)
 	}
 
 	// And the send path, through both roster gates. See the doc comment for why
 	// this discriminates on the refusal rather than demanding a 201 today.
-	sendAfter := trySend(t, addr2, alpha, beta.id, "after the restart", "dm-after")
+	sendAfter := trySend(t, dir, addr2, alpha, beta.id, "after the restart", "dm-after")
 	if sendAfter.status != sendBefore.status {
 		t.Fatalf("POST /v1/send answered %d before the restart and %d after it (bodies %q and %q); the restart must change nothing about how a send from a known agent to a known agent is treated\n%s",
 			sendBefore.status, sendAfter.status, sendBefore.body, sendAfter.body, p2.stderr())
@@ -333,9 +336,9 @@ type sendOutcome struct {
 // on this build can reach the durable write — see the test's doc comment. When
 // it is, this asserts the delivery too, without anybody having to remember to
 // come back: the 201 branch below is already written.
-func trySend(t *testing.T, addr string, from *busAgent, to, text, key string) sendOutcome {
+func trySend(t *testing.T, dataDir, addr string, from *busAgent, to, text, key string) sendOutcome {
 	t.Helper()
-	status, body := postJSONTo(t, addr, "/v1/send", from.token, map[string]string{
+	status, body := postJSONTo(t, dataDir, addr, "/v1/send", from.token, map[string]string{
 		"to":              to,
 		"body":            base64.StdEncoding.EncodeToString([]byte(text)),
 		"idempotency_key": key,

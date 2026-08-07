@@ -26,8 +26,30 @@ Two binaries live here:
 Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` on a startup failure
 (e.g. bind failure), `0` on a clean signal-driven shutdown.
 
-The binary also takes exactly ONE subcommand, dispatched before flag parsing on the first non-flag
-argument. Everything else reaches the server flag set unchanged.
+**The server serves TLS and ONLY TLS (invariant 11, `MTLS-LISTENER`, landed 2026-08-07).** `-listen`
+binds the one and only listener, and it is wrapped in `tls.NewListener` — built from the bus
+certificate and key in `-data-dir` (`bus-tls.crt` + `bus-tls.key`, `internal/buscert`) — before
+anything can `Serve` on it. There is no plaintext mode and **no flag that requests one**. Unusable key
+material makes the process **refuse to start**, exit `1`, naming the offending path; it never degrades
+to plaintext and never regenerates the material. TLS floor is **1.2** (matching `client/pin.go`'s
+`pinnedTLSConfig`), ALPN is pinned to `http/1.1`, and **`ClientAuth: tls.NoClientCert`** — no client
+certificate is requested or required yet. That is `MTLS-CLIENTAUTH`, still `todo`, and it must not land
+before `MTLS-CLIENTCERT` teaches the client to present one; do not read this listener as mutual TLS.
+The `server started` log line now carries `scheme=https tls=true tls_min_version=1.2 client_auth=none`
+alongside `addr` and `bus_cert_fingerprint=<64 hex>` — `tls=false` no longer appears. A plaintext
+request to the port never reaches a route: `crypto/tls` fails the handshake and `net/http` writes a
+bare `HTTP/1.0 400 Bad Request` + `Client sent an HTTP request to an HTTPS server.` onto the socket
+and closes it, before any handler or auth middleware runs — see `CONTRACTS-HTTP.md`'s `## Routes` for
+what those handlers answer once TLS has completed.
+
+**Every existing deployment now dials a different scheme.** `http://<bus>` gets that bare 400, never a
+route. An operator must rebuild the binary, restart the bus, and every client must dial `https://` with
+the bus's certificate fingerprint (there is no trust-on-first-use). Nothing on disk changed format and
+no existing WAL, enrolment or invite is invalidated — the certificate has been minted into the data dir
+since `MTLS-BUSCERT`; this change only starts serving with it.
+
+The binary now takes exactly ONE of TWO subcommands, dispatched before flag parsing on the first
+non-flag argument. Everything else reaches the server flag set unchanged.
 
 ---
 
@@ -137,9 +159,11 @@ load-bearing.
   because `encoding/json` escapes everything below `0x20`, and it round-trips the label verbatim.
 - `transport_insecure` is **omitted unless true**, so it is only ever a positive assertion of risk. It
   is `true` when `bus_address` is plaintext `http`, meaning the invite secret will cross the wire in
-  cleartext at redemption and `bus_cert_fingerprint` pins **nothing** (invariant 11; the TLS listener
-  is `MTLS-LISTENER` and has not landed). It exists because the matching stderr `WARN` is invisible to
-  an agent that discarded stderr — invariant 7's second audience needs a field it can branch on.
+  cleartext at redemption and `bus_cert_fingerprint` pins **nothing** over that connection (invariant
+  11) — this is now a choice the operator made in `-bus-address` rather than a gap forced by an
+  unlanded listener (`MTLS-LISTENER` landed 2026-08-07; see above). It exists because the matching
+  stderr `WARN` is invisible to an agent that discarded stderr — invariant 7's second audience needs a
+  field it can branch on.
 
 **This is the mint command's OUTPUT, not a settled wire shape.** There is deliberately no single
 packed token — no base64 blob, no bespoke encoding — because the shape `client.EnrolOptions.Invite`
@@ -154,11 +178,65 @@ Failure shape, also on **stdout** so an agent that redirected stderr still gets 
 
 `ok` is present and first in both shapes, so a caller branches on one field.
 
-**Residual risk, until `MTLS-LISTENER` lands:** an `http://` `-bus-address` is accepted (loopback
-only) and logs a `WARN` — the invite secret will cross the wire **in cleartext** at redemption, and
-the fingerprint in the blob pins nothing until the bus serves `https`. Exposure is bounded only by the
-`-listen 127.0.0.1:8080` loopback default; do not expose the bus on a non-loopback interface before
-mTLS ships (`DECISIONS.md` E8).
+**Residual risk, now that `MTLS-LISTENER` has landed (2026-08-07):** `-bus-address` still accepts
+`http://` for a loopback host, unchanged, for local testing. That is now the operator's choice, not a
+gap awaiting the listener — the bus CAN serve `https`, so an `-bus-address` pointed at a real
+deployment should be `https://`. An `http://` address still logs a `WARN`, the invite secret still
+crosses the wire **in cleartext** at redemption over that address, and the fingerprint in the blob
+still pins nothing over a plaintext connection (there is no certificate to pin). Exposure is bounded
+only by the `-listen 127.0.0.1:8080` loopback default; do not point `-bus-address` at a non-loopback
+`http://` deployment.
+
+---
+
+### `agent-bus healthcheck` — TLS-aware liveness probe
+
+Added 2026-08-07 by `MTLS-VERIFY`. Source: `cmd/agent-bus/healthcheck.go`.
+
+```
+agent-bus healthcheck [-data-dir <dir>] [-addr <host:port>] [-timeout <dur>]
+```
+
+**Why it exists at all.** `MTLS-LISTENER` makes the bus serve `https` and nothing else, which breaks
+any plaintext liveness probe pointed at it. The runtime image is Alpine with busybox `wget` and no
+`curl`, and busybox `wget` cannot be told to trust ONE self-signed certificate — its only relevant
+knob is `--no-check-certificate`, which verifies nothing, and invariant 11 forbids disabling
+verification to make something work. So the probe is a subcommand on the binary that already ships in
+the image, rather than a second artefact or a weakened check.
+
+**It is a subcommand on the SERVER binary, like `invite mint`, and for the same reason** (`DECISIONS.md`
+E4): its input is filesystem access to the data directory, not a network privilege. It differs from
+`invite mint` in one respect that matters — it takes **no lock and writes nothing**, so unlike minting
+it is safe, and expected, to run against a **running** bus holding the dirlock. It is deliberately
+**not** part of `agent-busctl`: an agent never runs it, since it needs no session, no enrolment and no
+identity, and it reads the bus's own data directory, which no agent has.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | Reads **only** `<data-dir>/bus-tls.crt`; never created, never locked. |
+| `-addr` | `127.0.0.1:8080` | Must match the bus's `-listen`. A wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`) is rewritten to `127.0.0.1`, because the certificate deliberately does not name a wildcard bind (`internal/buscert`). |
+| `-timeout` | `2s` | Bounds connect + TLS handshake + request + response. |
+
+Probes `GET https://<addr>/healthz`, trusting **that one certificate as the sole x509 root** — a full
+verification, not a bare pin, so it also enforces the **hostname** (against the certificate's SANs) and
+the **validity period**: an expired bus certificate reports unhealthy. There is no
+`InsecureSkipVerify` and none may be added — it is permitted in exactly one file in this repo
+(`client/pin.go`, paired with `VerifyPeerCertificate`), and this is not it.
+
+#### Exit codes (`agent-bus healthcheck`)
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Healthy: `GET /healthz` answered `200` over a verified TLS connection. Prints `ok <url>` on stdout. |
+| `1` | Unhealthy: unreachable, an unusable/untrusted certificate, a TLS failure, a timeout, or a non-`200` status — **one code**, deliberately, so a `HEALTHCHECK` line cannot be written to treat some failure modes as healthy. |
+| `2` | Bad usage (malformed flags). Distinct from `1` so a typo in a `HEALTHCHECK` line is not indistinguishable from a dead bus. Docker documents exit `2` as **reserved**; it is only reachable from a malformed probe invocation here, never from an unhealthy bus. |
+
+**Container healthchecks now invoke this subcommand, not `wget`.** Both `Dockerfile`'s `HEALTHCHECK`
+and `docker-compose.yml`'s `healthcheck.test` changed from
+`wget -q ... http://127.0.0.1:8080/healthz` to
+`["/usr/local/bin/agent-bus","healthcheck","-data-dir=/data","-addr=127.0.0.1:8080","-timeout=2s"]`,
+for the same reason stated above: busybox `wget` cannot trust one self-signed certificate without
+disabling verification outright.
 
 ---
 
@@ -332,10 +410,25 @@ outright rather than accept it alongside the new one for a window. (Enrolling st
 existing identity without the `logout` is refused — the stored identity still pins the old
 certificate.)
 
-- **NOT yet checked:** certificate expiry and validity dates. Disabling the default chain check
-  disables those too, and the pin answers "which bus", not "is this certificate still fit to use".
-  That is `MTLS-VERIFY`, and it is stated here rather than implied so nobody reads more into the pin
-  than it gives.
+- **Certificate expiry on the CLIENT side is NOT checked yet** — `MTLS-EXPIRY` owns it and is in
+  flight, not in `main`. `client/pin.go`'s `verifyPinnedBusCertificate` compares the fingerprint and
+  nothing else, so a bus certificate whose `NotAfter` is in the past is still accepted if the pin
+  matches. Disabling the default chain check (which the absence of a CA forces — see
+  `pinnedTLSConfig`) disables the validity-period check along with it, and nothing has yet been put
+  back in its place.
+
+  **This bullet was briefly WRONG in the other direction and the correction is recorded rather than
+  quietly reverted**, because it is the failure mode this repo keeps repeating: a 2026-08-07 revision
+  claimed the check "has been in place since `MTLS-PIN` … commit `61e6067`". It has not. `61e6067`
+  does not contain it, and never will; the code that revision was reading was `MTLS-EXPIRY`'s
+  *uncommitted* work sitting in the same worktree. Verified: `git show HEAD:client/pin.go` matches no
+  `NotAfter`, `NotBefore`, `ErrBusCertificateExpired` or `ParseCertificate`.
+
+  What `MTLS-VERIFY` (2026-08-07) DID add is the **server-side operator** check, which is a different
+  surface and does not substitute for the client one: `agent-bus healthcheck` performs a real x509
+  verification against the bus's own certificate, so it enforces the validity period *for the
+  operator's probe*. That makes an expired certificate show up as an unhealthy container. It does
+  nothing for an agent connecting from elsewhere.
 - **`client.Config.HTTPClient` bypasses all of this — both halves.** An embedder that supplies its
   own transport bypasses the fingerprint check *and* the refusal to speak `https` to a bus with no
   pin at all, because `Client.doer` returns the supplied transport before it consults
@@ -343,11 +436,15 @@ certificate.)
   the exported `BusFingerprint` / `ParseBusFingerprint` exist so such an embedder can reuse this
   construction rather than invent a second one. **Nothing in this package or the CLI ever sets it**,
   and no flag or env var reaches it.
-- **Split with `MTLS-LISTENER`:** `MTLS-ROTATE` is the **client** half only — the accept-set, `pin
-  add`/`pin remove`, and matching any set member during the handshake are implemented and enforced by
-  `client/`. The **server** half (a bus actually serving two certificates through a rollover) is
-  `MTLS-LISTENER`, which has not landed, and **no bus serves TLS at all yet** (see "In flight" below).
-  None of the rotation behaviour described above has been exercised against a real bus.
+- **Split with `MTLS-LISTENER`, corrected 2026-08-07:** `MTLS-ROTATE` is the **client** half only —
+  the accept-set, `pin add`/`pin remove`, and matching any set member during the handshake are
+  implemented and enforced by `client/`. `MTLS-LISTENER` has now landed and the bus **does** serve
+  `https` — see above — but it serves exactly ONE certificate, loaded once at startup
+  (`internal/buscert`, which still has "no rotation machinery yet" per its own doc comment). A bus
+  actually **serving two certificates through a rollover window** is a separate, still-unbuilt server
+  capability that this repo has not yet named a task for. So `agent-busctl pin add`/`pin remove` are
+  now exercised against a REAL, TLS-serving bus (single-certificate case), but the two-certificate
+  rollover half of the rotation story described above has still never been exercised end to end.
 
 ### Signed sends: `agent-busctl send` makes TWO calls (SIGN-2/SIGN-6, 2026-08-07)
 
@@ -462,9 +559,10 @@ No code changes meaning; some commands give one a more specific sense:
 is the shape everywhere an `Identity` is emitted: `enrol`, `whoami`, `whoami --all`, `use`, and the new
 `pin`. A consumer reading `.bus_fingerprint` must move to `.bus_fingerprints[]` (e.g. `.bus_fingerprints[0]`
 for "the one I enrolled with", or iterate the array to check every accepted certificate). This surface
-shipped the same day as `bus_fingerprint` itself (`MTLS-PIN`, commit `61e6067`), and **no bus serves
-TLS yet**, so there is no deployed consumer of the old field — which is the justification for changing
-the shape outright rather than keeping both.
+shipped the same day as `bus_fingerprint` itself (`MTLS-PIN`, commit `61e6067`), and **no bus served
+TLS yet at that point in the day** (`MTLS-LISTENER` landed later the same day), so there was no
+deployed consumer of the old field — which is the justification for changing the shape outright rather
+than keeping both.
 
 **`is_current` is a bool; `current_agent_id` is a string.** They are deliberately different keys: one
 name that is a bool in one subcommand and a string in another makes `jq .current` unpredictable.
@@ -700,26 +798,33 @@ a *later* retry the same logical send rather than a second message.
   fingerprint** and invite secret — but the wire shape is settled by task `ENROL-SHAPE`, and
   `/v1/enroll` is explicitly UNSTABLE until it, certificate binding and POPKEY all land. Inventing a
   field name here would be the same mistake as hand-picking a record-type number.
-- **TLS** (invariant 11): `http://` is accepted **only to a loopback host**, and only because the bus
-  does not serve TLS yet. Plaintext to anything else is refused, because `/v1/session/begin` returns
-  the session token — a bearer credential — in a response body. That restriction is the client-side
-  half of E8's sequencing constraint ("the bus must NOT be exposed on a non-loopback interface before
-  mTLS lands") and is DELETED once the TLS listener ships (`MTLS-LISTENER`). Redirects are never
-  followed, because Go's default policy would forward the `Authorization` header across an
-  `https`→`http` downgrade on the same port.
+- **TLS** (invariant 11): **the bus now serves `https`, and only `https`** (`MTLS-LISTENER`, landed
+  2026-08-07 — see the top of this file). `http://` is still accepted by the client, unchanged, but
+  **only to a loopback host**; that allowance is a client-side affordance for local testing, not a
+  restriction forced by an unlanded listener — it has **not** been deleted from `client/` by
+  `MTLS-LISTENER` landing, and doing so (if it happens) is a separate follow-up, not automatic
+  fallout of the server change. Plaintext to anything else is refused, because `/v1/session/begin`
+  returns the session token — a bearer credential — in a response body. Redirects are never followed,
+  because Go's default policy would forward the `Authorization` header across an `https`→`http`
+  downgrade on the same port.
   **The client-side half of pinning is IMPLEMENTED AND ENFORCED BY THE CLIENT** (`MTLS-PIN`,
-  2026-08-07, **rotation support added by `MTLS-ROTATE`, same day**) — deliberately ahead of the
-  listener, because a fingerprint nobody checks defends nothing. It is code-only: **no bus serves TLS
-  yet**, so nothing exercises it end to end against a real bus, and the behaviour described under
-  "Certificate pinning" above (including the accept-set and `agent-busctl pin`) is what `client/` does,
-  not something a running deployment has demonstrated. Serving TWO certificates during a rollover is
-  therefore a **split**: the client can now accept a set of two and `pin add`/`pin remove` manage it
-  (`MTLS-ROTATE`, done); a bus actually **serving** two certificates through a rollover window is the
-  server half and is `MTLS-LISTENER`, which has not landed. The **client certificate** half of mutual
-  TLS is still to come (`MTLS-CLIENTCERT`); `tls.Config.Certificates` is unset today, and it belongs in
-  **`client.pinnedTLSConfig`** — *not* in `newHTTPClient`'s unpinned fallback literal, which the
-  pinned branch replaces wholesale, so a client certificate put there would be silently dropped on
-  every pinned (i.e. every real) connection.
+  2026-08-07, **rotation support added by `MTLS-ROTATE`, same day**) — it shipped deliberately ahead of
+  the listener, because a fingerprint nobody checks defends nothing, and it is what a real TLS-serving
+  bus is now verified against. **Corrected 2026-08-07:** a bus now DOES serve TLS
+  (`MTLS-LISTENER`), so the earlier claim here — "no bus serves TLS yet, nothing exercises this end to
+  end" — no longer holds for the basic single-certificate case: `agent-busctl enrol
+  --bus-fingerprint` and the rest of the "Certificate pinning" behaviour above can now be run against a
+  real, TLS-serving `agent-bus` started via `scripts/bus-serve.sh` (see `CONTRACTS-AGENT.md`). What is
+  **still** unverified end to end is the **two-certificate rollover** specifically: the client can
+  accept a set of two and `pin add`/`pin remove` manage it (`MTLS-ROTATE`, done), but the bus itself
+  still serves exactly ONE certificate — `internal/buscert` has "no rotation machinery yet" — so no
+  running deployment has ever presented a client with a second, incoming certificate to roll onto. The
+  **client certificate** half of mutual TLS is still to come (`MTLS-CLIENTCERT`); `tls.Config.Certificates`
+  is unset today, and it belongs in **`client.pinnedTLSConfig`** — *not* in `newHTTPClient`'s unpinned
+  fallback literal, which the pinned branch replaces wholesale, so a client certificate put there would
+  be silently dropped on every pinned (i.e. every real) connection. The bus's own `ClientAuth` is
+  pinned to `tls.NoClientCert` until `MTLS-CLIENTAUTH` lands, and that task may not precede
+  `MTLS-CLIENTCERT` — see the TLS paragraph at the top of this file.
 - ~~**The transport is built before the identity is resolved**~~ — **fixed by `MTLS-PIN`**
   (2026-08-07). The transport is now built **lazily**, on the first request, once the bus URL and its
   pin have been resolved together (`Client.endpoint` → `Client.doer`), and is rebuilt when the pin

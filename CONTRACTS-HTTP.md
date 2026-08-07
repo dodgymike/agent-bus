@@ -4,6 +4,21 @@ Split out of `CONTRACTS.md` (2026-08-02) — see that file for the index of all 
 the rest of the surface (CLI/env, on-disk, agent-facing). This is a pure content move: everything
 below this header is unchanged from the prior single-file `CONTRACTS.md`, verbatim.
 
+## Transport (`MTLS-LISTENER`, added 2026-08-07)
+
+**Every route below is reachable over `https` ONLY.** Invariant 11: the server's single listener is
+wrapped in `tls.NewListener` before it accepts a connection, TLS floor `1.2`, ALPN pinned to
+`http/1.1`, and `ClientAuth: tls.NoClientCert` — a client certificate is **not** requested or required
+yet (that is `MTLS-CLIENTAUTH`, not shipped; do not read this listener as mutual TLS). See
+`CONTRACTS-CLI.md`'s CLI-flags section for the full statement and the `server started` log line.
+
+**A plaintext request to the port never reaches any row in the table below.** `crypto/tls` fails the
+handshake before `net/http` decodes a request line, and `net/http` itself writes a bare
+`HTTP/1.0 400 Bad Request` + `Client sent an HTTP request to an HTTPS server.` onto the raw socket and
+closes it — no route match, no `authMiddleware`, no handler. Read every "none"/"bearer" auth column
+below as "once TLS has completed", not as a statement about what a plaintext caller sees; a plaintext
+caller sees that one 400, identically, for every path including `/healthz`.
+
 ## Routes
 
 | Method | Path | Auth | Status | Response |
@@ -75,7 +90,17 @@ top-level fields, in this order:
   prefix from the server would sign whatever a man-in-the-middle chose to put in front of the token.
 
 The `limitations` array is blunt on purpose and must be restated exactly, never softened, if quoted
-elsewhere: (1) no transport security — plaintext HTTP, no TLS, loopback-only advised; (2) messages are
+elsewhere: (1) **TLS is on, mutual TLS is not, and TLS alone protects against a PASSIVE observer
+only** (rewritten 2026-08-07 by `MTLS-LISTENER` — it previously said "no transport security,
+plaintext HTTP", which the running bus made false): https only, no plaintext listener, a plaintext
+request never reaches a route; but the certificate is self-signed with **no CA and no
+trust-on-first-use**, so the caller **must pin the fingerprint** it got out of band, and **until it
+does, an ACTIVE on-path attacker can terminate TLS with its own certificate and read the session
+token — including on this document, which is unauthenticated and would be served by that same
+attacker**. The order of those clauses is deliberate and was set by the security gate: the
+reassurance must not precede the condition that makes it true. Separately, the bus does **not**
+request a **client** certificate, so TLS authenticates the BUS to the caller and never the caller to
+the bus — the session token remains the only thing proving who the caller is; (2) messages are
 signed but the bus checks the signature's SHAPE only and does **not** verify it against the sender's
 key — **by design, not a gap awaiting a release** ("the bus enforces shape, the recipient enforces
 authenticity"; a bus that verified would move the trust boundary onto itself), and the recipient
@@ -441,8 +466,15 @@ the third requires the token — it expires (`ChallengeTTL`), it is completed, o
 against it fails verification (`CompleteSession`'s single-attempt-per-pending-challenge rule). The
 token is 32 bytes of `crypto/rand` and the table is keyed on its SHA-256, so that third route is
 reachable only by whoever holds the token: the agent itself, or someone who observed it in flight.
-**There is no TLS in this server**, so that observer is a real threat model on any non-loopback
-listener, and the token's unguessability is load-bearing now that no other per-agent bound exists.
+**Corrected 2026-08-07 (`MTLS-LISTENER`):** the server now serves TLS ONLY (see "## Transport" above),
+so plainly sitting on the wire no longer suffices — the observer must also hold or forge the bus's
+pinned certificate, which is precisely what a caller who follows invariant 11's no-TOFU pinning refuses
+to accept from anyone else. Two things this does NOT close: `ClientAuth` is still `tls.NoClientCert`
+(`MTLS-CLIENTAUTH` has not landed), so any TCP peer that can complete the TLS handshake — not just the
+enrolled agent — can still attempt this route; and a caller that skips certificate verification (there
+is no such flag in this repo's own client, `client/pin.go`, but a hand-rolled one could) is back to the
+pre-TLS threat model. The token's unguessability therefore stays load-bearing against both of those,
+and against the fact that there is still no per-agent or per-source rate limiting on this route.
 
 ### Durability of the roster and sessions (CORRECTED 2026-08-07 by AUTH-7)
 

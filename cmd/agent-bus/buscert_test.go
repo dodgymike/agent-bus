@@ -2,10 +2,16 @@ package main
 
 // Tests for MTLS-BUSCERT's WIRING: a running bus must actually produce its
 // certificate and its two private keys, must load exactly those files on every
-// later start without minting new ones, must refuse to start over material it
-// cannot use, and must NOT have started serving TLS while doing any of it.
+// later start without minting new ones, and must refuse to start over material
+// it cannot use.
 //
-// The four claims map one-to-one onto the four tests below. Every one of them
+// A FOURTH claim used to live here -- "and must NOT have started serving TLS
+// while doing any of it", pinned by TestCmdDoesNotServeTLS. MTLS-LISTENER
+// retired it: the listener IS TLS now, so that test is deleted (see the marker
+// where it stood) and the guard that replaces it, in the opposite direction,
+// lives in tlslisten_test.go.
+//
+// The remaining claims map one-to-one onto the tests below. Every one of them
 // runs the REAL startup path in a subprocess through the harness in
 // wal_startup_test.go, because the whole point of this task is that the library
 // was complete and unreachable: a test that called buscert.LoadOrCreate itself
@@ -21,9 +27,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -64,13 +67,19 @@ func TestServerGeneratesBusKeyMaterialOnFirstStartAndReusesItAfter(t *testing.T)
 		proc := startServer(t, dir)
 		addr := proc.awaitServerStarted(t)
 
-		// THE LISTENER IS UNCHANGED. This is a PLAINTEXT http:// request, and it
-		// has to keep working: MTLS-BUSCERT generates and loads only, and turning
-		// the listener into TLS here would break every agent instantly because no
-		// client can speak it yet (MTLS-CLIENTCERT). If someone adds a TLSConfig
-		// to the http.Server, this line fails with a protocol error -- which is
-		// the point.
-		mustGetHealthz(t, addr)
+		// THE MATERIAL GENERATED ABOVE IS WHAT THE LISTENER SERVES. Since
+		// MTLS-LISTENER this is an https request VERIFIED against the certificate
+		// this very start wrote into dir (busTestClient loads it as the sole
+		// x509 root), so it is not merely "the bus answers": it is the proof that
+		// the file on disk and the certificate presented on the handshake are the
+		// same certificate. A start that generated one certificate and served
+		// another would pass every file assertion below and fail here.
+		//
+		// This comment used to read "THE LISTENER IS UNCHANGED. This is a
+		// PLAINTEXT http:// request" -- true for MTLS-BUSCERT, false the moment
+		// MTLS-LISTENER landed, and rewritten rather than left as a stale claim
+		// about the security posture of the thing under test.
+		mustGetHealthz(t, dir, addr)
 
 		// The files exist, with the modes the on-disk contract states. The two
 		// KEYS are 0600 (anything that can read one IS this bus, to a client or
@@ -138,13 +147,17 @@ func TestServerGeneratesBusKeyMaterialOnFirstStartAndReusesItAfter(t *testing.T)
 		}
 
 		// The startup summary carries the same value, and states plainly that
-		// this bus is still serving PLAINTEXT.
+		// this bus is serving TLS.
 		startedFields := parseLogfmt(proc.line(t, msgServerStarted))
 		if got := startedFields["bus_cert_fingerprint"]; got != firstFingerprint {
 			t.Errorf("%q reports bus_cert_fingerprint=%q, want %q", msgServerStarted, got, firstFingerprint)
 		}
-		if got := startedFields["tls"]; got != "false" {
-			t.Errorf("%q reports tls=%q, want %q: MTLS-BUSCERT generates and loads key material only, it does NOT serve TLS", msgServerStarted, got, "false")
+		// tls=true, NOT the tls=false this asserted under MTLS-BUSCERT. The
+		// listener is a tls.Listener now (invariant 11: there is no plaintext
+		// listener and no flag that makes one), so a summary reporting tls=false
+		// would be telling an operator to dial a scheme that cannot connect.
+		if got := startedFields["tls"]; got != "true" {
+			t.Errorf("%q reports tls=%q, want %q: MTLS-LISTENER serves https and only https, and this line is what an operator reads to learn which scheme to dial", msgServerStarted, got, "true")
 		}
 
 		proc.signal(t, syscall.SIGTERM)
@@ -160,7 +173,7 @@ func TestServerGeneratesBusKeyMaterialOnFirstStartAndReusesItAfter(t *testing.T)
 
 		proc := startServer(t, dir)
 		addr := proc.awaitServerStarted(t)
-		mustGetHealthz(t, addr)
+		mustGetHealthz(t, dir, addr)
 
 		// THE LOAD-BEARING ASSERTION OF THIS WHOLE FILE. Re-minting on a restart
 		// would break every client that pinned the first fingerprint and would
@@ -303,81 +316,20 @@ func TestServerRefusesToStartWithUnusableBusKeyMaterial(t *testing.T) {
 	}
 }
 
-// TestCmdDoesNotServeTLS is a SOURCE-LEVEL guard on the hard constraint of this
-// task, and it is deliberately blunt.
+// TestCmdDoesNotServeTLS WAS HERE, AND IS DELETED ON PURPOSE (MTLS-LISTENER).
 //
-// MTLS-BUSCERT generates and loads key material. Serving TLS is MTLS-LISTENER,
-// and it must not land before a client can speak TLS (MTLS-CLIENTCERT): this
-// repo has already shipped server-side enforcement ahead of client-side
-// capability once, and every send failed with curl exit 7 until it was reverted.
-// The healthz assertions above catch it at runtime; this catches it in review,
-// naming the file and the line.
+// It was a temporary scaffold: an AST guard asserting that cmd/agent-bus
+// referenced NONE of ServeTLS/ListenAndServeTLS/tls.NewListener/TLSConfig,
+// because MTLS-BUSCERT was generate-and-load only and serving TLS before a
+// client could speak it would have locked out every agent at the handshake. Its
+// own doc comment said to delete it, in full, in the task that legitimately made
+// the listener TLS. That task is this one.
 //
-// It is an AST walk and not a grep, so the prose in buscert.go and main.go that
-// explains WHY there is no TLSConfig does not trip it. When MTLS-LISTENER
-// legitimately lands, DELETE this test in that task -- do not weaken it.
-func TestCmdDoesNotServeTLS(t *testing.T) {
-	// The list is deliberately NARROW: it bans the symbols that MAKE A LISTENER
-	// SPEAK TLS, and nothing else.
-	//
-	// It used to also ban SigningPrivateKey, SigningPublicKey, TLSCertificate and
-	// CertificateRequest, on a "nothing may consume the material yet" reading.
-	// The reviewer gate was right to call that over-broad: peer attestation and
-	// the invite blob's pinned fingerprint are the whole POINT of loading this
-	// material, they are separate tasks, and none of them makes this bus serve
-	// TLS. A guard that fails an unrelated correct change teaches the next agent
-	// to delete the guard.
-	banned := map[string]string{
-		"ServeTLS":          "http.Server.ServeTLS serves TLS",
-		"ListenAndServeTLS": "http.Server.ListenAndServeTLS serves TLS",
-		"NewListener":       "tls.NewListener wraps a plaintext listener in TLS",
-		"TLSConfig":         "setting http.Server.TLSConfig makes the listener TLS",
-		"TLSNextProto":      "TLS protocol negotiation has no meaning on a plaintext listener",
-	}
-
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("reading the package directory: %v", err)
-	}
-	fset := token.NewFileSet()
-	checked := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, e.Name(), nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", e.Name(), err)
-		}
-		checked++
-
-		ast.Inspect(file, func(n ast.Node) bool {
-			var name string
-			var pos token.Pos
-			switch node := n.(type) {
-			case *ast.SelectorExpr:
-				name, pos = node.Sel.Name, node.Sel.Pos()
-			case *ast.KeyValueExpr:
-				id, ok := node.Key.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				name, pos = id.Name, id.Pos()
-			default:
-				return true
-			}
-			if why, bad := banned[name]; bad {
-				t.Errorf("%s references %s: %s. MTLS-BUSCERT is GENERATE AND LOAD ONLY -- the listener stays plaintext until a client can speak TLS (MTLS-CLIENTCERT), and switching it here breaks every agent at once. This guard exists to be DELETED, in full, by the task that legitimately makes this listener TLS (MTLS-LISTENER, once MTLS-CLIENTCERT has shipped) -- delete it there rather than trimming an entry out of it, because a half-deleted guard reads as though the remaining entries were considered and kept",
-					fset.Position(pos), name, why)
-			}
-			return true
-		})
-	}
-	// A guard that inspected nothing passes. Prove it read the package.
-	if checked == 0 {
-		t.Fatal("no non-test .go files were parsed; this guard proves nothing")
-	}
-}
+// Its replacement is the PERMANENT invariant in the opposite direction:
+// TestCmdHasNoPlaintextListener (cmd/agent-bus/tlslisten_test.go) requires
+// tls.NewListener to be PRESENT, bans InsecureSkipVerify, and bans any flag that
+// would make TLS optional. Deleting this one without adding that one is the
+// change to refuse in review.
 
 // TestCertHosts pins which extra subject alternative names the -listen address
 // contributes. It is a pure unit test of the one piece of judgement in
