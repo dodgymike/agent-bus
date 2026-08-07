@@ -200,6 +200,14 @@ Consequences:
   go fmt ./...                      # reformats in place; prints the files it changed
   "$(go env GOROOT)/bin/gofmt" -l . # lists unformatted files; empty output = clean
   ```
+  **And `gofmt -l` EXITS 0 EVEN WHEN IT LISTS FILES.** It reports by printing, not by status. So
+  `gofmt -l . && echo CLEAN` prints CLEAN over a list of unformatted files — a second false pass, in
+  a form the 127 case above does not cover. Observed 2026-08-07: a chain echoed `GOFMT_CLEAN` while
+  `gofmt -l` had just named `client/messages_test.go`. Judge it by whether the OUTPUT is empty, never
+  by its exit status:
+  ```
+  test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"   # correct: tests the output
+  ```
 - Tests run with `-race`. Concurrency here is the product; a data race is a P0.
 - Durability and recovery code must have **crash-injection tests** — a test that writes, kills at a
   chosen point in the write path, and asserts what recovery yields. "The code looks right" is not
@@ -320,6 +328,11 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
       into an unrelated docs commit while the other half stayed in the working tree. The working tree
       looked green throughout, which is why nobody noticed. Never `git add` then bare-`git commit`
       while any other agent is running.
+    - **Do NOT commit work no agent has reported.** A package appearing in the tree and passing its
+      tests is not a signal that it is finished — it may be mid-review, or mid-edit. Wait for the
+      owning agent's report with gates COMPLETED. Committing on "it is green and it is there" has
+      shipped ungated code three times (`518e71b`, `2451b4a`, `f56c723`), each time discovered only
+      when the agent later reported findings against code already in `main`.
     - **A green tree is not a GATED tree.** Do not commit an agent's work until it reports its
       reviewer AND security gates as COMPLETED, not merely dispatched. Committing mid-review has
       shipped two real security holes here (a relay SSRF and an unbounded input), both caught by
