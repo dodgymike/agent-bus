@@ -1,6 +1,6 @@
 # build output
 /agent-bus
-/busctl
+/agent-busctl
 /bin/
 *.test
 
