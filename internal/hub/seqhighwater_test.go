@@ -74,7 +74,7 @@ const mintsBeforeDamage = 5
 //
 // # Why nothing but the log is damaged
 //
-// A truncation of agent-bus.wal is what a torn write, a full disk or a media
+// A truncation of bus.wal (wal.WALFileName) is what a torn write, a full disk or a media
 // error at the tail actually looks like, and it is the one artifact recovery is
 // permitted to truncate, rewrite or quarantine wholesale. wal-mac.key and
 // wal-index-floor are copied through intact ON PURPOSE: the point is not that
@@ -84,9 +84,40 @@ func TestSequenceHighWaterSurvivesDeepDamage(t *testing.T) {
 	pristine, issued := mintThenCloseCleanly(t)
 	highest := issued[len(issued)-1]
 
+	// THE BAR IS THE DURABLE FLOOR, NOT THE HIGHEST NUMBER HANDED OUT, and the
+	// gap between them is wide enough to hide a real regression. Five mints hand
+	// out 1..5 but durably BURN 1..MintBatchSize (256), and seqfloorfile.go's
+	// stated invariant is about the burned range, not the issued one: "every
+	// message sequence AT OR BELOW this value is BURNED … This bus will never
+	// issue any of them again, whether or not a message ever carried one."
+	//
+	// Measuring against `highest` alone would accept any rewind inside [5, 256] —
+	// a security gate measured that blind band at 252 of the 256 burned numbers —
+	// and every one of those is a number the bus has promised never to issue.
+	// The floor is read from the file on disk, by the operator-facing parser in
+	// mint_test.go, so this bar is the durable claim rather than an in-memory one.
+	burned, existed := readSeqFloor(t, pristine)
+	if !existed {
+		t.Fatalf("the pristine data directory has no %s after %d mints; there is nothing durable to measure a resumed sequence against", hub.SeqFloorFileName, mintsBeforeDamage)
+	}
+	if burned < highest {
+		t.Fatalf("the durable floor (%d) is below the highest sequence handed out (%d); the floor is written BEFORE a number is issued, so this is the ordering guarantee itself failing", burned, highest)
+	}
+
 	walBytes, err := os.ReadFile(filepath.Join(pristine, wal.WALFileName))
 	if err != nil {
 		t.Fatalf("reading the pristine log: %v", err)
+	}
+	// A FLOOR UNDER THE FIXTURE ITSELF. The coverage assertion below pins the
+	// sweep to len(walBytes)+1 offsets, which a shrunken SWEEP cannot satisfy —
+	// but a shrunken LOG can: a 3-byte file yields 4 offsets and satisfies every
+	// check while exercising almost nothing. The two together are what make
+	// "exhaustive" mean something. 100 is a loose sanity bound, not a pin on the
+	// frame layout; the real file is 247 bytes and the number here should stay
+	// far enough below that to survive an ordinary format change.
+	if len(walBytes) < 100 {
+		t.Fatalf("the pristine log is only %d bytes after %d mints. This sweep's assertions are all relative to that length, so a log this small makes them vacuous — check that the mints are really writing a %q record",
+			len(walBytes), mintsBeforeDamage, hub.SeqFloorRecordKind)
 	}
 
 	cases := []struct {
@@ -96,8 +127,18 @@ func TestSequenceHighWaterSurvivesDeepDamage(t *testing.T) {
 		// before aad611c, and the state DECISIONS.md argued was safe.
 		removeSeqFloorFile bool
 		// wantReissues is the NEGATIVE CONTROL switch. When true the sweep MUST
-		// find at least one reissue, or it has lost its power to detect the
-		// defect and is proving nothing.
+		// find reissues, or it has lost its power to detect the defect and is
+		// proving nothing.
+		//
+		// IT DEPENDS ON A CONTESTED DESIGN CALL: that a MISSING floor file is not
+		// fatal (openSeqFloorFile argues this at length in seqfloorfile.go, and
+		// deliberately makes the OPPOSITE call to ids.OpenNameSuffixes). If that
+		// is ever hardened to refuse the start, openMintHub will t.Fatal in this
+		// arm and the tempting repair is to delete the arm. DO NOT. Rework it to
+		// accept the refusal AS the pass — a bus that refuses to start without its
+		// floor has also not reissued anything, which is the property being
+		// defended. Deleting the control removes the only thing standing between
+		// the other arm and a vacuous pass.
 		wantReissues bool
 	}{
 		{
@@ -120,20 +161,57 @@ func TestSequenceHighWaterSurvivesDeepDamage(t *testing.T) {
 			for offset := 0; offset <= len(walBytes); offset++ {
 				offsets++
 				seq := resumeAfterTruncation(t, pristine, walBytes, offset, tc.removeSeqFloorFile)
-				if seq <= highest {
+				if seq <= burned {
 					reissued = append(reissued, offset)
 				}
 			}
-			t.Logf("swept %d truncation offsets of %s (%d bytes); %d offsets REISSUED a sequence at or below %d (already handed out: %v)",
-				offsets, wal.WALFileName, len(walBytes), len(reissued), highest, issued)
+			// THE SWEEP'S OWN COVERAGE, asserted absolutely rather than relatively.
+			// Every proportional check below is a fraction OF offsets, so a sweep
+			// that quietly collapsed to two iterations would satisfy all of them
+			// while proving nothing. This is the one line that cannot be satisfied
+			// by a shrunken sweep.
+			if want := len(walBytes) + 1; offsets != want {
+				t.Fatalf("the sweep covered %d truncation offsets, want %d (every offset from an empty file to the intact %d-byte file, inclusive). A sweep that does not cover every offset is not the exhaustive proof this test is cited as",
+					offsets, want, len(walBytes))
+			}
+			t.Logf("swept %d truncation offsets of %s (%d bytes); %d offsets REISSUED a sequence at or below the durably burned floor %d (handed out: %v)",
+				offsets, wal.WALFileName, len(walBytes), len(reissued), burned, issued)
 
-			if tc.wantReissues && len(reissued) == 0 {
-				t.Fatalf("the NEGATIVE CONTROL found no reissue across %d truncation offsets. That does not mean the bus is safe; it means this sweep can no longer detect the defect it exists to detect, so the other arm proves nothing. Check that the log is really being copied and truncated, that %d mints still consume fewer WAL indices than sequences, and that the mint still allocates",
-					offsets, mintsBeforeDamage)
+			if tc.wantReissues {
+				// THREE assertions, not one, because "at least one offset
+				// reissued" is far weaker than the claim this arm is cited for.
+				// A sweep degraded to a single reissuing offset would satisfy a
+				// bare len != 0 and would still have lost almost all of its
+				// power — and the DECISIONS.md section quotes this arm as "247 of
+				// 248, and the one survivor is the undamaged file". Whatever a
+				// test is quoted for is what it has to check.
+				if len(reissued) == 0 {
+					t.Fatalf("the NEGATIVE CONTROL found no reissue across %d truncation offsets. That does not mean the bus is safe; it means this sweep can no longer detect the defect it exists to detect, so the other arm proves nothing. Check that the log is really being copied and truncated, that %d mints still consume fewer WAL indices than sequences, and that the mint still allocates",
+						offsets, mintsBeforeDamage)
+				}
+				// The UNDAMAGED file must survive: with the whole log intact the
+				// in-log "seqfloor" record still replays and bounds the sequence
+				// (hub.Open source (2)). If even that offset reissues, the
+				// defence-in-depth copy of the claim has been broken too, and the
+				// bus is now relying on a single artifact.
+				for _, off := range reissued {
+					if off == len(walBytes) {
+						t.Fatalf("with %s removed, even the UNDAMAGED log (offset %d, the full file) resumed the message sequence at or below the durably burned floor %d. The in-log %q record is the defence-in-depth copy of the burn claim and it should still bound the sequence when nothing is damaged; if it does not, the floor file is now the ONLY thing standing between this bus and a reissued message id",
+							hub.SeqFloorFileName, off, burned, hub.SeqFloorRecordKind)
+					}
+				}
+				// A large majority, pinned loosely. The exact count is a function
+				// of the frame layout and will move when the WAL format does;
+				// what must not move is that damage almost anywhere in the file
+				// defeats every log-derived source.
+				if min := offsets * 9 / 10; len(reissued) < min {
+					t.Fatalf("with %s removed only %d of %d truncation offsets reissued, fewer than the %d this sweep should find. Damage almost anywhere in the log defeats every log-derived floor source, so a sharp drop means the fixture has stopped exercising the defect rather than that the bus has got safer",
+						hub.SeqFloorFileName, len(reissued), offsets, min)
+				}
 			}
 			if !tc.wantReissues && len(reissued) != 0 {
-				t.Fatalf("with %s present, %d of %d truncation offsets resumed the message sequence at or below %d, a number already handed to a client: offsets %v. A client holds a signature over that assignment, so two validly-signed messages would carry one origin message id and nothing downstream can detect it (invariant 1)",
-					hub.SeqFloorFileName, len(reissued), offsets, highest, clipOffsets(reissued))
+				t.Fatalf("with %s present, %d of %d truncation offsets resumed the message sequence at or below the durably burned floor %d (highest actually handed to a client: %d): offsets %v. Every number up to that floor was fsynced as burned BEFORE any of them was issued, so reissuing one means a client may hold a signature over the assignment — two validly-signed messages would carry one origin message id and nothing downstream can detect it (invariant 1)",
+					hub.SeqFloorFileName, len(reissued), offsets, burned, highest, clipOffsets(reissued))
 			}
 		})
 	}
@@ -177,8 +255,23 @@ func mintThenCloseCleanly(t *testing.T) (string, []uint64) {
 	return dir, issued
 }
 
-// reopenNextIndex reports the record index a fresh open of dir would append at,
-// then closes the log again so the directory is left exactly as it was found.
+// reopenNextIndex reports the record index a fresh open of dir would append at.
+//
+// IT IS NOT A READ-ONLY PROBE, and saying so was wrong in an earlier draft. Every
+// wal.Open calls indexFloor.begin, which unconditionally rewrites
+// wal-index-floor with sealed=0 and a ceiling one reserve block above the start;
+// the Close below then re-seals it. So this probe RAISES the pristine directory's
+// recorded ceiling — to start+indexReserveBlock-1, which here is a move from 64
+// to 66 — before the sweep copies that directory once per offset.
+//
+// That is harmless HERE only because mintThenCloseCleanly closes cleanly, so
+// wal.Open takes burned()+1 and ignores the ceiling entirely (internal/wal's
+// sealedClean path). It stops being harmless the moment this fixture models a
+// CRASH instead of a clean close: the unsealed ceiling would then raise the
+// sweep's own baseline by a whole block and could float the resumed sequence
+// above every issued number, passing every assertion below for a reason that has
+// nothing to do with the property under test. If you change the close, re-read
+// this and re-check the guard in mintThenCloseCleanly.
 func reopenNextIndex(t *testing.T, dir string) uint64 {
 	t.Helper()
 	lg := openTestLog(t, dir, false)
