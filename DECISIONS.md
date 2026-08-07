@@ -1830,3 +1830,194 @@ shells out to `docker`/`docker compose` should use this recipe before reporting 
 `scripts/bus-docker.sh` shim that resolves the right binary/socket automatically) so agents don't have
 to rediscover it by hand each time. Left as a candidate follow-up for whoever next touches
 `637fca2f` or picks up `DEPLOY-3`.
+
+---
+
+## 2026-08-07 — MSG-FU-SUFFIXFLOOR: the per-name agent-id suffix floor is a dedicated write-ahead
+file, not derived from WAL replay
+
+**Decision.** The per-name agent-id suffix high-water mark (what the next `enrol "alpha"` on this bus
+must mint above) is persisted in its own atomically-replaced, fsynced file
+(`<data-dir>/agent-suffixes`, format version **3**, reserved through the Spec Server
+`ondisk-format-version` namespace 2026-08-07 by feature-runner — values 1 and 2 are the WAL's, never
+picked by eyeballing the list) rather than derived from folding WAL replay or the enrolled roster.
+`ids.DurableNameSuffixes` (`internal/ids/suffixstore.go`) writes `floor[name] = n`, fsynced, BEFORE
+`NextSuffix` returns `n` to any caller — so the floor is durable ahead of the suffix it authorises,
+and no derivation step is needed to resume correctly.
+
+**Rationale, from `ID2_WIRING_DEEPDIVE.md`.** A floor derived from **committed** WAL history is wrong
+on its own: a suffix burned by a dangling PREPARE that never committed is invisible to a fold over
+committed records, yet the number still reached disk and may already have been told to a client. A
+floor derived from the **roster** is wrong for a different reason: a departed agent's burned suffix
+disappears from the roster the moment it leaves, so the next agent to request that name would be
+minted straight over a departed agent's old id. Both derivations are the "obvious wiring" `NameSuffixes`'
+own doc (`internal/ids/agentmint.go`) already names as the trap; this decision sidesteps needing either
+one to be right, because the floor is no longer *derived* from anything — it is *written first*.
+
+The prepare-observer work that would let a derivation see dangling prepares
+(`ID-2-WIRING-OBSERVER`) is **not implemented**, which is precisely why derivation was the wrong tool
+here: there was no honest way to derive a correct floor from history alone without it, and this
+decision removes the dependency rather than waiting on it.
+
+**Because the floors are not in the WAL, no tail repair or log quarantine can ever rewind them.**
+`wal.RepairTail`/`RepairLog` operate on the WAL only; the suffix floors live in a file that discipline
+never touches, so no amount of WAL damage or the "always restart" recovery policy (§6,
+`PROTOCOL.md`) can lower a floor that was never stored there in the first place. This makes the
+"never rewind a floor" property structural rather than a rule the recovery path has to remember.
+
+**Rejected alternatives.**
+
+- **(a) Derive from `wal.Replay`'s committed fold.** Wrong per the rationale above — misses dangling
+  prepares. This is the FIX paragraph the original MSG-FU-SUFFIXFLOOR task description prescribed,
+  and it is deliberately NOT what shipped; see the residual and scope notes below for why.
+- **(b) Put the high-water mark in the WAL prepare header itself.** Rejected because it forces a WAL
+  format-version bump (the frame header in `PROTOCOL.md` §3.2 is not free to grow) and a downgrade
+  break for every deployed data directory, for a property a dedicated file gets more cheaply and
+  without touching the WAL's stable format at all.
+
+**The residual, stated honestly rather than glossed.** For a data directory that predates this file —
+one that already holds agent ids on disk (WAL message bodies, as senders and recipients) and has no
+`agent-suffixes` file — `OpenNameSuffixes` returns an allocator with empty floors and `Existed() ==
+false`. The caller MUST back-fill those floors through `RaiseFloor` before `Seal`, and that
+back-fill derivation is **exactly** the derivation this decision otherwise avoids needing — which
+still cannot see a suffix burned by a dangling prepare, because the prepare-observer work named above
+is not implemented. So on a **legacy** data directory the guarantee this file can honestly make is
+"no suffix that reached COMMITTED history is reissued", not the full "no suffix that ever reached
+disk is reissued". That gap closes for good once a directory has been served by `DurableNameSuffixes`
+from the start (no derivation, no gap — the floor is always written ahead) or once
+`ID-2-WIRING-OBSERVER` lands and the backfill derivation can see dangling prepares too. It is a
+migration-window limitation, not a permanent one.
+
+**Scope of what shipped, and what did not.** This decision and the file/API it describes are
+implemented entirely inside `internal/ids` (`OpenNameSuffixes`, `DurableNameSuffixes.RaiseFloor` /
+`Seal` / `NextSuffix`, `ErrSuffixFileCorrupt` — see `CONTRACTS.md`, 2026-08-07 entry, for the full
+Go surface). `cmd/agent-bus/main.go:327` still calls `ids.NewNameSuffixes()`, and there are **zero
+production callers of `OpenNameSuffixes`** anywhere in the tree — a restarting bus therefore still
+re-mints agent ids today. Wiring `main.go` to this allocator (deriving legacy-dir backfill floors,
+calling `RaiseFloor` over them, then `Seal` exactly once, the same shape `internal/hub` already
+follows for `Sequence`) is a separate, not-yet-completed piece of work. Do not read this decision as
+evidence the restart-reuse bug is fixed in a running bus; see `AGENT_LOG.md` (2026-08-07) for the full
+review-chain record of that gap.
+
+---
+
+## 2026-08-07 — INVITE-STORE: the idempotency scope for enrolment is THE INVITE
+
+Invariant 10 requires every mutating operation to carry a client idempotency key scoped to a durable
+namespace of previously-applied keys. Redemption of an invite is a mutating operation — it mints an
+agent id — and it happens on `POST /v1/enroll`, the one route that is by definition reached before
+any credential exists. This entry records the scope `internal/invite` was built to, so nobody
+re-litigates it when `INVITE-GATE` wires the route.
+
+### The scope is `(invite id, client idempotency key)`
+
+Neither of the two obvious alternatives works:
+
+- **PER-AGENT is impossible.** Enrolment is what MINTS the identity. There is no authenticated agent
+  id at the moment the idempotency key is presented — the whole point of the call is to produce one.
+- **BUS-WIDE is unsafe on an unauthenticated route.** A prior review of `idem`'s own bus-wide enrol
+  scope flagged the exact risk: any caller, holding no invite and no credential at all, could squat a
+  key ahead of a legitimate retry, because nothing about the route ties a key to a caller who is
+  entitled to use it.
+
+**The invite is the right namespace** because it is server-minted, single-use, and gated by a bearer
+secret — only the holder of that secret can write into it, so the namespace inherits the invite's own
+admission control for free. And because an invite is single-use it holds **at most one** redemption
+record, so this namespace has no table to exhaust and none of the capacity concerns a per-key table
+(`idem.Store`'s 65536-entry, 64 MiB bound) carries: there is nothing here for `IDEM-11-FU-FAIRSHARE`'s
+class of attack to target, because filling it costs exactly one invite.
+
+### The triage this scope produces (invariant 10 — not collapsed)
+
+`Store.Begin`'s ordering is the authoritative statement of this and is quoted here rather than
+re-derived, because re-deriving it in a second place is how the two go on to disagree:
+
+```
+correct secret, same key, same fingerprint      -> OutcomeReplay: the ORIGINAL result, verbatim
+correct secret, same key, DIFFERENT fingerprint -> ErrKeyReuse: reject, log, DISCONNECT
+correct secret, different key                   -> ErrAlreadyRedeemed: single use is spent
+wrong secret or unknown id                       -> ErrUnknownInvite
+```
+
+The secret is verified FIRST, before any of the above is reported, so a caller holding no secret
+learns nothing about whether an invite id exists or what state it is in — an unknown id is compared
+against a per-store dummy digest so the work is identical either way. Once a caller has proved it
+holds the secret, `ErrAlreadyRedeemed` and `ErrKeyReuse` are kept as DISTINCT sentinels rather than
+one collapsed error, because they demand opposite reactions: one says "you are too late", the other
+says "you are misbehaving", and collapsing them would make a legitimate retry indistinguishable from
+an attack in the server's own logs. (`errors.go` requires the HTTP layer to collapse these on the
+WIRE regardless — a client must not learn which of the four cases it hit — but the server-side
+sentinels stay separate so an operator still can.)
+
+### Second decision: redemption is a TWO-PHASE PARTICIPANT, not a one-shot
+
+Redemption must be ATOMIC with the effect it authorises — the roster write that creates the agent. A
+`wal.Entry` is exactly one transaction, so "atomic" means the consumption record and the roster
+record have to ride in the SAME entry, composed by `INVITE-GATE`/`AUTH-3`. `internal/invite` therefore
+exposes `Store.Begin -> Redemption.Consume -> the caller's write -> Commit/Abort`, not a single
+`Redeem` call. `Store.Redeem` (the standalone one-shot path) exists so the package is complete and
+provable on its own today, and its own doc says plainly that `INVITE-GATE` must NOT use it: splitting
+the consumption record from the roster write reopens exactly the window the participant API exists to
+close — a crash between the two would leave either an agent enrolled against an invite that is still
+open, or an invite spent on an enrolment that never happened.
+
+**A reservation is NOT sweepable after `Consume`.** Before `Consume`, `Store.sweepLocked`'s
+`ReservationTTL` (30s) reaper may reclaim an abandoned reservation and reopen the invite. After
+`Consume`, the caller may already have a durable consumption record built (though not yet committed),
+so reaping the reservation back to open would let a SECOND redemption in while the eventual commit
+still says the invite is spent. From that point only `Commit` or `Abort` resolves it, and an
+abandoned one stays locked until restart — fail-closed, on purpose.
+
+**A reservation must NOT be aborted on `wal.ErrDiverged`.** `wal.Txn.Commit` returns `ErrDiverged`
+AFTER the commit record has been appended and fsynced (`internal/wal/log.go`): by the time a caller
+sees that error, the invite is already durably SPENT on disk, and the failure belongs to a
+neighbouring applier, not to this write. `Store.Redeem` states the rule its callers must inherit
+verbatim: releasing the reservation on `ErrDiverged` would leave memory saying OPEN while disk says
+REDEEMED, and the next `Begin` would admit a SECOND redemption of a spent invite — the one outcome
+this whole package exists to prevent. So on `ErrDiverged` the `Redemption` is ABANDONED, still
+holding the invite, and a restart rebuilds the correct (spent) state from the durable log.
+`INVITE-GATE` must apply this same rule when it composes its own entry, not just `Store.Redeem`.
+
+---
+
+## 2026-08-07 — SUPERSEDES two earlier passages: no sequence reuse, and no refuse-to-start
+
+`DECISIONS.md` contained two passages that contradicted each other AND contradicted the user's later
+ruling. A triage pass found both. Recording the resolution here rather than editing them, because
+this file is append-only.
+
+**The two superseded passages:**
+
+1. **~line 1184 (ID-2-WIRING-SCHEMA addendum)** — after a whole-log quarantine the bus *"must refuse
+   to start rather than resume from zero… a caller that cannot prove its floor MUST refuse to start
+   rather than guess."* **SUPERSEDED** by the always-restart decision (2026-08-02, invariant 6),
+   which is newer and explicit: the bus must always reach a running server, discarding damaged
+   records and logging loudly. It must never refuse to boot over corruption.
+2. **~line 1541 (item 4)** — *"Message ids may repeat after a WAL QUARANTINE, and after damage deeper
+   than a torn tail"*, which narrowed invariant 1 to permit exactly that. **SUPERSEDED** by the
+   user's ruling of 2026-08-02: asked whether the salvage index reissue should be documented as a
+   narrowing, they answered **"no reuse"**, and on 2026-08-07 instructed *"fix the sequence reuse
+   bugs"*. Invariant 1 stands unnarrowed. Reuse is a DEFECT, not a documented limit.
+
+**Why both could be written in good faith, and the trap to avoid repeating.** Each passage solves the
+problem in isolation and they are individually reasonable. Together they are incoherent, because they
+answer the same question — *what happens when recovery destroys the evidence of what was minted?* —
+with opposite trade-offs. The lesson is that a decision recorded against a narrow task can silently
+contradict a project-wide invariant, and nothing catches it until someone reads both.
+
+**The resolution, which requires neither of them.** Both passages assume the high-water mark is
+derived from the log, which is what makes quarantine destroy it and forces the choice between
+refusing to start and reusing ids. **Persist the mark independently of the log** — a small fsynced
+file in the data dir, exactly as `bus-id` and `wal-mac.key` already work. Then quarantine still
+starts the bus (invariant 6) AND the sequence still resumes above everything ever minted
+(invariant 1). The dilemma was an artefact of where the state was kept.
+
+`internal/ids/suffixstore.go` (commit `61b7c9a`) already does exactly this for the per-name suffix
+floor, arrived at independently: it writes the floor BEFORE issuing the suffix, into its own file, so
+no tail repair and no quarantine can rewind it. The message-sequence high-water mark should follow
+the same shape.
+
+**Consequences.** `db350e39` inherits the superseded "must refuse" premise and needs re-scoping to
+the persist-outside-the-log design; it also appears to be a near-duplicate of `MSG-FU-SEQHIGHWATER`
+(`6ebe51be`) and the two should be collapsed. Any test or comment asserting that ids may repeat after
+quarantine is asserting superseded behaviour and must be inverted, not preserved.
