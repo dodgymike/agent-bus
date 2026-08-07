@@ -374,30 +374,28 @@ func (c *Client) submit(ctx context.Context, op, route string, body interface{},
 		retryable: true,
 	})
 	if err != nil {
-		return SendResult{IdempotencyKey: key}, annotateIdempotencyConflict(op, key, err)
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, annotateIdempotencyConflict(op, key, err))
 	}
 
 	// The bus is authoritative on ids (invariant 1) — authoritative, not
 	// unvalidated. Everything here is printed to a terminal and some of it is
 	// stored, and a hostile bus chooses every byte of it. See sanitize.go.
 	if err := validateServerField(op, "message id", result.MessageID); err != nil {
-		return SendResult{IdempotencyKey: key}, err
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, err)
 	}
 	if err := validateServerField(op, "sender id", result.From); err != nil {
-		return SendResult{IdempotencyKey: key}, err
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, err)
 	}
 	for _, to := range result.To {
 		if err := validateServerField(op, "recipient id", to); err != nil {
-			return SendResult{IdempotencyKey: key}, err
+			return SendResult{IdempotencyKey: key}, writeFailed(op, key, err)
 		}
 	}
-	if result.ContentSHA256 != "" {
-		if err := validateServerField(op, "content hash", result.ContentSHA256); err != nil {
-			return SendResult{IdempotencyKey: key}, err
-		}
+	if err := validateServerContentHash(op, "content hash", result.ContentSHA256); err != nil {
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, err)
 	}
 	if err := validateServerTimestamp(op, "sent_at", result.SentAt); err != nil {
-		return SendResult{IdempotencyKey: key}, err
+		return SendResult{IdempotencyKey: key}, writeFailed(op, key, err)
 	}
 
 	// A replay is signalled OUT OF BAND because the body of a replay is
@@ -616,10 +614,8 @@ func validateBatch(op string, b *Batch) error {
 				return err
 			}
 		}
-		if m.ContentSHA256 != "" {
-			if err := validateServerField(op, "content hash", m.ContentSHA256); err != nil {
-				return err
-			}
+		if err := validateServerContentHash(op, "content hash", m.ContentSHA256); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -653,8 +649,14 @@ func validateSendBody(op string, body []byte) error {
 		// Refusing an ambiguous or empty send rather than sending nothing: an
 		// empty body is almost always a caller that read from an empty file, an
 		// empty pipe or an unset variable, and the bus rejects it anyway.
+		//
+		// The remedy names the REAL surface: there is no --body flag. The body
+		// is a positional argument, --file <path>, or stdin. A remedy that names
+		// a flag which does not exist costs the reader a second failure ("flag
+		// provided but not defined: -body") on top of the first, which is the
+		// opposite of invariant 7's "errors that name the remedy".
 		return usagef(op,
-			"pass a non-empty body, e.g. --body 'text' or --body-file <path>; an empty send is refused rather than delivered",
+			"pass a non-empty body as a quoted argument, with --file <path>, or on stdin; an empty send is refused rather than delivered",
 			"no message body")
 	}
 	if len(body) > MaxBodyBytes {
@@ -675,7 +677,12 @@ func validateSendBody(op string, body []byte) error {
 // anything that could not be an id at all.
 func validateRecipient(op, to string) error {
 	if to == "" {
-		return usagef(op, "pass --to <bus-id>.<agent-id>; list them with `busctl agents`", "no recipient")
+		// Again: the recipient is POSITIONAL, not a --to flag. See
+		// validateSendBody for why naming a flag that does not exist is worse
+		// than saying nothing.
+		return usagef(op,
+			"pass the fully-qualified <bus-id>.<agent-id> as the first argument: `busctl send <to> 'message'`; list them with `busctl agents`",
+			"no recipient")
 	}
 	if !serverIDPattern.MatchString(to) {
 		return usagef(op,
@@ -710,6 +717,85 @@ func resolveIdempotencyKey(op, key string) (string, error) {
 		return "", err
 	}
 	return key, nil
+}
+
+// writeFailed stamps the idempotency key onto a failed send or broadcast, and
+// — for the AMBIGUOUS failures only — names the flag that retries it.
+//
+// # Why the key belongs on the error and not only on the result
+//
+// The failures where the key matters most are exactly the ones with no usable
+// result. A transport failure or a 5xx means the message MAY OR MAY NOT have
+// been applied: the request reached the bus, the answer did not come back, and
+// nothing on this side can tell the two apart. The key is the only thing that
+// makes the retry the SAME logical send. A caller told only "it failed", who
+// then retries with a freshly minted key, has not retried at all — it has sent
+// a SECOND message, which is precisely the double-apply invariant 10 exists to
+// prevent. So `busctl send --help`'s promise that "the key is always printed
+// back" has to hold on the failure path or it is worth nothing.
+//
+// # Why the remedy is only added to SOME failures
+//
+// It is added to KindNetwork and KindServer, which are the ambiguous ones. It is
+// deliberately NOT added to a 409, whose remedy already says the opposite and
+// correctly so: that key was used with different content, and retrying under it
+// is the protocol violation, not the fix. Nor to a KindRejected 404 (an unknown
+// recipient will be unknown next time either). Those failures still CARRY the
+// key — an embedder may want it — they just are not told to reuse it.
+//
+// # The key clause COMPOSES with the existing remedy, it does not replace it
+//
+// The transport's remedy is the DIAGNOSIS ("check --bus / AGENT_BUS_URL and that
+// the bus is running"); the key clause is the mechanics of retrying. Overwriting
+// the first with the second destroys the only sentence that says what is
+// actually wrong, so the clause is appended after "; " when a remedy is already
+// present, and stands alone only when there is none.
+//
+// # Why the fatal wording is different
+//
+// A 503 with no Retry-After is classified fatal (see the 503 split in
+// transport.go): the bus is refusing because its write path cannot durably
+// accept, and by invariant 4 refusing is exactly what it SHOULD do rather than
+// acknowledge something it might lose. Nothing on the client side clears that,
+// so telling the operator to "retry" would be both false and harmful — it
+// hammers a dead write path and contradicts IsFatalUnavailable, which still
+// reports the failure as not-retryable. For those the key is a handle for LATER,
+// once the bus can durably accept again; it is not an invitation to retry now.
+//
+// enrolFailed solves the same problem for enrolment, but it does NOT yet draw
+// either of these distinctions: it REPLACES the remedy rather than composing
+// with it (so `enrol` against an unreachable bus loses "check --bus /
+// AGENT_BUS_URL and that the bus is running"), it ignores e.fatal, and it never
+// sets Error.IdempotencyKey — so `enrol --json` reports no idempotency_key where
+// `send` does. Do not read the two as already consistent. Tracked as a
+// follow-up; when it is fixed the two should converge on this shape.
+func writeFailed(op, key string, err error) error {
+	// errors.As, not a type assertion — a wrapped *Error would otherwise slip
+	// through and lose both the key and the remedy.
+	var e *Error
+	if !errors.As(err, &e) {
+		return err
+	}
+	e.IdempotencyKey = key
+	switch e.Kind {
+	case KindNetwork, KindServer:
+		var clause string
+		if e.fatal {
+			clause = "this " + op + " may or may not have been applied; do NOT retry until the bus can durably accept again, then use --idempotency-key " + key +
+				" so the retry is the SAME message rather than a second one (invariant 10)"
+		} else {
+			clause = "this " + op + " may or may not have been applied; retry with --idempotency-key " + key +
+				" so the retry is the SAME message rather than a second one (invariant 10)"
+		}
+		// TrimRight so a remedy that already ends in a separator does not
+		// produce ";; " — the join must add exactly one.
+		if base := strings.TrimRight(e.Remedy, "; "); base != "" {
+			e.Remedy = base + "; " + clause
+		} else {
+			e.Remedy = clause
+		}
+	}
+	return e
 }
 
 // annotateIdempotencyConflict replaces the transport's generic 409 wording with

@@ -110,6 +110,22 @@ type Error struct {
 	// errors.Is/As still work through this type.
 	Err error
 
+	// IdempotencyKey is the key a failed MUTATING operation was sent under, or
+	// "" when the failure happened before a key existed (a local validation
+	// error) or the operation carries none.
+	//
+	// It is on the ERROR, not only on the result, because the failures where it
+	// matters most are the ones that have no result. A network error or a 5xx on
+	// a send is genuinely AMBIGUOUS — the message may or may not have been
+	// applied — and the key is the only thing that makes the retry the SAME
+	// logical send rather than a second message (invariant 10). A caller told
+	// only "it failed" has no safe way to try again: inventing a fresh key is
+	// not a retry, it is a duplicate.
+	//
+	// It is exported rather than reported only through Remedy text so that an
+	// embedding agent can act on it without parsing a sentence.
+	IdempotencyKey string
+
 	// retryAfter is the delay the bus asked for in a Retry-After header, or 0.
 	// Unexported because it is scheduling advice consumed by this package's
 	// backoff, not a fact a caller should branch on — the Kind is.
@@ -192,6 +208,21 @@ func IsFatalUnavailable(err error) bool {
 	return false
 }
 
+// IdempotencyKeyOf returns the key a failed mutating operation was sent under,
+// following the Unwrap chain like KindOf, or "" when there is none.
+//
+// It follows Unwrap for the same reason the others do: an *Error wrapped once
+// with fmt.Errorf on its way up a call stack is still the same failure, and a
+// caller that lost the key to a %w would be left unable to retry the send
+// safely — which is the entire point of carrying the key on the error.
+func IdempotencyKeyOf(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.IdempotencyKey
+	}
+	return ""
+}
+
 // ExitCode maps err to the process exit code a caller should use.
 //
 // This mapping lives HERE, in the importable package, rather than in the CLI:
@@ -238,6 +269,15 @@ type ErrorPayload struct {
 	Remedy   string `json:"remedy,omitempty"`
 	Status   int    `json:"status,omitempty"`
 	ExitCode int    `json:"exit_code"`
+
+	// IdempotencyKey is the retry handle for a failed mutating operation, under
+	// the SAME field name a successful send reports it under, so a consumer
+	// reads it the same way whichever it got.
+	//
+	// omitempty because most failures never had one — a usage error was never
+	// going to be applied — and a key field that is present but empty invites a
+	// retry under the empty string, which is not a key at all.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // NewErrorPayload renders err as the documented JSON failure shape.
@@ -254,6 +294,7 @@ func NewErrorPayload(err error) ErrorPayload {
 	if errors.As(err, &e) {
 		p.Remedy = e.Remedy
 		p.Status = e.Status
+		p.IdempotencyKey = e.IdempotencyKey
 	}
 	if p.Kind == KindInternal {
 		// "" is the zero value of Kind and would be omitted from a human's

@@ -50,6 +50,20 @@ func safeText(s string, max int) string {
 			// C1 controls. A single 0x9b is CSI on some terminals, so these
 			// are as dangerous as ESC-[ and are not merely "high bytes".
 			b.WriteByte(' ')
+		case isBidiOrInvisibleRune(r):
+			// The same forgery this function exists to stop, spelled in Unicode
+			// rather than ANSI — and NOT caught by any test above, because none
+			// of these is a control character. U+202E reverses the rest of the
+			// line, so a bus that answers 500 with a bidi run can reorder the
+			// text printed beside it. That matters more than it used to: the
+			// failure line now also carries the idempotency-key remedy, where a
+			// reordered "do NOT retry until the bus can durably accept again"
+			// could read as an invitation to retry a poisoned write path.
+			//
+			// Replaced with a space rather than dropped, for the same reason the
+			// controls are: dropping it would splice the text either side into
+			// one convincing token.
+			b.WriteByte(' ')
 		default:
 			b.WriteRune(r)
 		}
@@ -64,6 +78,42 @@ func safeText(s string, max int) string {
 		cut--
 	}
 	return strings.TrimSpace(out[:cut]) + "…"
+}
+
+// isBidiOrInvisibleRune reports whether r changes how text is DISPLAYED without
+// being visible itself.
+//
+// None of these is a C0, DEL or C1 control, so every ordinary control test
+// misses all of them:
+//
+//	U+200B..U+200F  zero-width space/non-joiner/joiner, and the LTR/RTL marks
+//	U+202A..U+202E  the legacy bidi embedding and override controls — U+202E
+//	                (RIGHT-TO-LEFT OVERRIDE) visually REVERSES the rest of the
+//	                line, which is how bus-chosen text can be made to read as
+//	                something else entirely
+//	U+2066..U+2069  the isolate forms of the same thing
+//	U+FEFF          zero-width no-break space (BOM) — invisible mid-string
+//
+// Server-supplied text has no legitimate use for any of them. Real
+// bidirectional text (Arabic, Hebrew) renders correctly from its own character
+// properties; these codepoints exist to OVERRIDE that.
+//
+// NOTE: cmd/busctl/watch.go carries a near-identical predicate for message
+// BODIES. The duplication is tracked by CLI-3-FU-SAFETEXT, which exports one
+// renderer from this package and deletes the CLI's copy; until then the two must
+// be kept in step.
+func isBidiOrInvisibleRune(r rune) bool {
+	switch {
+	case r >= 0x200b && r <= 0x200f:
+		return true
+	case r >= 0x202a && r <= 0x202e:
+		return true
+	case r >= 0x2066 && r <= 0x2069:
+		return true
+	case r == 0xfeff:
+		return true
+	}
+	return false
 }
 
 // serverIDPattern is the shape every id-like field the bus sends must have.
@@ -95,17 +145,65 @@ func validateServerField(op, field, value string) error {
 	return nil
 }
 
+// serverTimestampPattern is the character set an RFC3339-ish instant needs, and
+// nothing else.
+//
+// Digits, the letters (T, Z, and any alphabetic zone abbreviation a differently
+// formatted bus might use), ':', '+', '-', '.', and a space so "2026-08-02
+// 10:00:00Z" is still accepted. The bound is 64 bytes, which is roughly twice
+// RFC3339Nano's length.
+//
+// Why this is a WHITELIST and not merely a control-character check: a timestamp
+// was the one printed field with no safe alphabet. Rejecting controls and
+// capping the length still admitted every other codepoint in Unicode, including
+// U+202E RIGHT-TO-LEFT OVERRIDE — and this value is printed, unpadded, at the
+// START of a line by `busctl watch` (humanTime) and inside a column by
+// `busctl agents` (shortTimestamp). One override character there visually
+// reorders the rest of the line, so the audit trail can be made to read as
+// though a message came from a different agent. There is no legitimate instant
+// that needs a character outside this set.
+var serverTimestampPattern = regexp.MustCompile(`^[0-9A-Za-z:+.\- ]{1,64}$`)
+
 // validateServerTimestamp checks a timestamp field. It is stored and printed
-// but never routed on, so the bar is "cannot move a cursor", not "is a valid
-// RFC3339 instant" — a bus with a slightly different time format should not be
-// unusable.
+// but never routed on, so the bar is "cannot be made to display as something
+// else", not "is a valid RFC3339 instant" — a bus with a slightly different
+// time format should not be unusable. An empty value is fine: the bus is not
+// required to send one.
 func validateServerTimestamp(op, field, value string) error {
 	if value == "" {
 		return nil
 	}
-	if safeText(value, 64) != value || len(value) > 64 {
+	if !serverTimestampPattern.MatchString(value) {
 		return newError(KindServer, op,
-			"the bus returned a "+field+" containing control characters",
+			"the bus returned a "+field+" that is not a plain timestamp",
+			"this is not a well-formed agent-bus response; check that --bus points at the bus you intended")
+	}
+	return nil
+}
+
+// contentHashPattern is a hex SHA-256 and nothing else: 64 lowercase hex digits.
+//
+// It was previously checked with validateServerField, which admits up to 256
+// characters of [A-Za-z0-9._-] — a shape test so loose that "not-a-hash" passes
+// it. The value is printed by `busctl send` and carried in every --json record,
+// and a caller comparing it against its own digest is entitled to assume it is
+// at least the right KIND of thing.
+//
+// NOTE: the value is still not compared against the body. This checks the shape
+// only; end-to-end verification of the hash against the bytes we sent or
+// received is a deliberate behaviour change and is not made here.
+var contentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// validateServerContentHash checks a content_sha256 field. An empty value is
+// accepted — the bus does not always send one — but a present value must be a
+// hex SHA-256.
+func validateServerContentHash(op, field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !contentHashPattern.MatchString(value) {
+		return newError(KindServer, op,
+			"the bus returned a "+field+" that is not a hex SHA-256: "+safeText(value, 80),
 			"this is not a well-formed agent-bus response; check that --bus points at the bus you intended")
 	}
 	return nil

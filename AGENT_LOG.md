@@ -1083,3 +1083,78 @@ Invariant 7 wants a CLI subcommand shipped with every capability. The backlog al
 — `CLI-3` (watch), `CLI-4` (send/broadcast), `CLI-5` (agents) — so this wave delivers the HTTP
 surface and those three make it agent-facing. Until they land, an agent cannot use messaging through
 the sanctioned client. Stated in every task's `test_summary` rather than left for someone to discover.
+
+---
+
+## 2026-08-07 — Two busctl defects: the lost idempotency key, and an exit code the docs got wrong
+
+Two defects, both reported with file:line by the operator, both verified before and after.
+
+### 1. The idempotency key died on the failure path (Task `2b4ecf0b-7f01-436b-8135-811ff4963a0e`)
+
+`cmd/busctl/send.go` did `res, err := c.Send(...); if err != nil { return err }`. The key is minted
+by the CLIENT when the caller supplies none, so on an AMBIGUOUS failure — a network error, or a 5xx,
+where the message may or may not have been applied — the key was never shown and could not be
+recovered. Any retry therefore used a fresh key and became a SECOND message: invariant 10 defeated in
+precisely the lost-acknowledgement case it was written for. `send.go`'s own help already promised
+"The key is ALWAYS printed back".
+
+**Fixed in the client layer, not the CLI.** `send.go`'s existing comment argues the case: minting in
+`cmd/busctl` would put the one value that makes a retry safe outside the importable package, where an
+agent EMBEDDING the client could not reach it. So the error itself now carries the key —
+`client.Error.IdempotencyKey`, `client.IdempotencyKeyOf(err)` (follows Unwrap, like `KindOf`), and
+`ErrorPayload.IdempotencyKey` (`json:"idempotency_key,omitempty"`). `cmd/busctl/send.go` needed NO
+change: `output.Fail` renders the key as a JSON field under `--json` and via the `try:` remedy line
+in human mode.
+
+**The mechanism was reused, not reinvented.** `writeFailed` in `client/messages.go` mirrors the
+INTENT of `enrol.go`'s `enrolFailed`. It deliberately does NOT reuse the pending-RECORD mechanism:
+enrol writes a record because it must preserve KEY MATERIAL that makes the retry the same identity,
+whereas a send has no local secret to keep — the key alone suffices, and a disk write on every send
+would be cost with no benefit.
+
+**A regression caught in review, not by tests.** The first version REPLACED `e.Remedy`. That told a
+*fatal* 503 to retry — contradicting `IsFatalUnavailable`, which reports the same failure as
+not-retryable — and destroyed both the real diagnosis (a poisoned or non-durable write path) and the
+network case's "check --bus / AGENT_BUS_URL and that the bus is running". It now COMPOSES with `"; "`
+and uses distinct wording when `e.fatal`: the key is a handle for *after* an operator has fixed the
+bus, not an invitation to hammer a dead write path. Per invariant 4 the bus is refusing rather than
+losing data, so the send may still have been applied and the key still matters.
+
+### 2. Exit-code documentation contradicted the code (Task `797fb15f-...`)
+
+`cmd/busctl/watch.go` documented a fatal 503 under exit **5**; `client/errors.go` keeps it
+`KindServer` → `ExitServer` = **6**. The two-column help layout hid it — the parenthetical sat under
+5 while the code yielded 6. Verdict: **6 is right**, a fatal 503 IS the bus reporting a failure of
+its own. Nothing depended on 5 (checked). Docs corrected in `watch.go` and `CONTRACTS-CLI.md`,
+including the `Retry-After` header as the discriminator between the two 503s.
+
+The regression test DERIVES the assertion rather than restating it: it runs `busctl watch` against a
+stub bus answering 503 with no `Retry-After`, captures the REAL process exit code, parses the
+`EXIT CODES` block out of the help text, and asserts they agree. A companion test parses all eight
+subcommands' tables and checks every documented number against the `client.Exit*` constants. The
+two-column parse rule is documented in the test, because the ambiguity of that layout to a human
+reader is what caused the defect.
+
+### 3. Required by the security gate: bidi/zero-width text reaching the terminal
+
+`client/sanitize.go`'s `safeText` neutralised C0/C1/DEL but passed U+202E and friends through. The
+bus chooses its own `{"error":"..."}` text, and that text is now printed on the SAME stderr line as
+the new retry instruction — a right-to-left override can reorder "do NOT retry until the bus can
+durably accept again" into something a human reads as permission to retry. Fixed by adding
+`isBidiOrInvisibleRune` to `safeText`. `cmd/busctl/watch.go` already carried a near-identical
+predicate for message bodies; collapsing the two is already filed as `CLI-3-FU-SAFETEXT`.
+
+### Gates and evidence
+
+reviewer and security both ran to COMPLETION and both returned CHANGES-REQUIRED. Every blocking
+finding was fixed before hand-off: the false comment claiming `writeFailed` mirrors `enrolFailed`
+(it does not — `enrolFailed` still replaces the remedy and never sets the key; filed as a follow-up),
+two exit-code assertions tightened from "not 0" to `client.ExitServer`, and the bidi finding above.
+
+Every proof was confirmed **RED before the fix** by reverting each fix individually in a throwaway
+tree — including restoring the remedy-REPLACING `writeFailed` to prove the composition test is not
+vacuous. The help-table parser was checked against the ORIGINAL buggy table: it attributes the fatal
+503 to entry 5, reproducing the defect rather than hiding it.
+
+Code-only. Nothing here is claimed to be live: this ships a CLI binary that must be rebuilt.

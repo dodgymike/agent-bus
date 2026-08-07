@@ -387,6 +387,70 @@ func TestCLIWatchBoundedEmptyExitsEmpty(t *testing.T) {
 	})
 }
 
+// TestWatchFatalUnavailableExitCodeMatchesDocumentedTable pins the ONE fact
+// that a help text can get wrong without anything failing to build: the number
+// `busctl watch` documents for a fatal 503 must be the number it actually
+// exits with.
+//
+// # Why both halves are observed rather than asserted
+//
+// The exit code is taken from a REAL run: the stub bus answers /v1/wait with 503
+// and NO Retry-After, which is exactly the condition client/transport.go's "503
+// split" classifies as fatal — the bus saying its write path cannot durably
+// accept messages (invariant 4: it refuses rather than losing data). That is
+// KindServer, and KindServer maps to client.ExitServer.
+//
+// The documented code is PARSED out of watchCommand().help, not written into
+// this test. Hard-coding "the table says 6" would re-create the original defect
+// one layer up: the table drifted from the code once already, and a test that
+// carries its own copy of the answer cannot notice the next drift.
+func TestWatchFatalUnavailableExitCodeMatchesDocumentedTable(t *testing.T) {
+	var polls int32
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteWait {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&polls, 1)
+		// NO Retry-After. Its absence is the whole signal: with the header this
+		// is an ordinary capacity refusal the watch would retry for ever, and
+		// the test would hang instead of observing an exit code.
+		stubWriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the hub cannot durably accept messages"})
+	})
+
+	res := bus.run(t, "", false, false, "watch", "--json", "--poll-timeout", "5s")
+	if got := atomic.LoadInt32(&polls); got == 0 {
+		t.Fatalf("the bus was never polled; nothing exercised the fatal-503 path and this proof would be vacuous")
+	}
+
+	// Anchor: a fatal 503 is KindServer, so the client's own mapping says the
+	// process exits with client.ExitServer. Taken from the constant, not from a
+	// literal, so the anchor cannot drift either.
+	if res.Code != client.ExitServer {
+		t.Fatalf("a fatal 503 on /v1/wait exited %d, want client.ExitServer (%d) — a 503 with no Retry-After is KindServer; stdout=%q stderr=%q",
+			res.Code, client.ExitServer, res.Stdout, res.Stderr)
+	}
+
+	entries := parseExitCodeTable(t, "watch", watchCommand().help)
+	var documented []exitCodeEntry
+	for _, e := range entries {
+		if strings.Contains(e.Text, "503") {
+			documented = append(documented, e)
+		}
+	}
+	if len(documented) == 0 {
+		t.Fatalf("`busctl watch --help` no longer documents the fatal 503 anywhere in its EXIT CODES table; this check has nothing left to compare and would pass vacuously.\nentries: %v", entries)
+	}
+	for _, e := range documented {
+		if e.Code != res.Code {
+			t.Fatalf("`busctl watch --help` documents the fatal 503 under exit %d (%q), but the command actually exits %d.\n"+
+				"A fatal 503 is the bus reporting a failure of its own (client.ExitServer = %d), not a bus that could not be reached (client.ExitNetwork = %d). "+
+				"An agent branching on the documented number would mis-handle the one failure it most needs to stop on.",
+				e.Code, e.Text, res.Code, client.ExitServer, client.ExitNetwork)
+		}
+	}
+}
+
 // TestCLIWatchRejectsPollTimeoutAboveCeiling checks a poll timeout above the
 // bus's ceiling is REFUSED, not silently clamped — exactly as the bus refuses
 // it. A caller who asked for ten minutes and was quietly given five would

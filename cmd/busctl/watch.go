@@ -47,8 +47,16 @@ OUTPUT — THREE MODES, chosen for you
 
   So: ` + "`jq -r .text`" + ` for text traffic, ` + "`jq -r .body | base64 -d`" + ` for anything.
 
-  Diagnostics — retry notices, the closing summary — go to stderr and never
-  appear inside the stream.
+  Running diagnostics — retry notices, cursor-store warnings, the closing
+  summary — go to STDERR and never appear inside the stream.
+
+  ONE object does land on stdout: the FINAL failure object, when the command
+  fails under --json. That includes the exit-8 "nothing arrived" outcome of a
+  bounded watch, which is emitted as the LAST line of the stream. It is the
+  same failure shape every other subcommand emits on stdout under --json, and
+  keeping it there is what lets a consumer that captured only stdout still see
+  why the stream ended. Branch on the presence of an "ok" field: a failure
+  object always has one, and a message record never does.
 
 AT-LEAST-ONCE: YOUR HANDLER MUST BE IDEMPOTENT
   Delivery is AT-LEAST-ONCE. Duplicates are the NORMAL steady state, not an
@@ -104,9 +112,9 @@ FLAGS
   It bounds the individual request/response calls underneath.
 
 EXIT CODES
-  0 stopped cleanly             5 the bus is unreachable and will not recover
-  1 internal error                (a fatal 503: the bus cannot durably accept)
-  2 bad usage                   6 the bus reported an error of its own
+  0 stopped cleanly             5 the bus could not be reached
+  1 internal error              6 the bus reported an error of its own (incl. a
+  2 bad usage                     fatal 503: it cannot durably accept messages)
   3 no usable identity          7 the bus refused the request
   4 credential rejected         8 a bounded watch delivered nothing
 `,
@@ -156,10 +164,43 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 		}
 	}
 
+	// --replay and --cursor are BOTH start positions, and client.Watch resolves
+	// the explicit cursor first — so passing both silently makes --replay a
+	// no-op. `send` already refuses two body sources loudly rather than picking
+	// one; two start positions deserve the same treatment, for the same reason:
+	// quietly honouring one of two contradictory instructions sends the caller
+	// looking for the bug somewhere else entirely.
+	if *replay && *cursor != "" {
+		return &client.Error{
+			Kind:    client.KindUsage,
+			Op:      "busctl watch",
+			Message: "--replay and --cursor both name a start position",
+			Remedy:  "pass --replay to re-read the whole retained window, or --cursor <c> to start at one position — not both",
+		}
+	}
+
 	c, err := env.client()
 	if err != nil {
 		return err
 	}
+
+	// The cursor file is read INSIDE c.Watch, long after env.client() printed
+	// the warnings the store had at open. Everything cursorstore.go records —
+	// an unreadable cursors.json, an unparseable one, an unknown format
+	// version, an oversize or malformed stored cursor — would therefore be
+	// noted and never shown, and the operator would watch the whole retained
+	// window replay with no explanation at all. Remember the high-water mark
+	// now and drain whatever is added below, on EVERY return path.
+	// A defer, so the ERROR path reports them too: a watch that stopped because
+	// the store is broken is exactly when they matter most.
+	warned := len(c.Store().Warnings())
+	defer func() {
+		// STDERR, never stdout: a warning inside the NDJSON stream would break
+		// the consumer this command exists for.
+		for _, w := range c.Store().Warnings()[warned:] {
+			fmt.Fprintf(env.stderr, "busctl: WARNING: %s\n", w)
+		}
+	}()
 
 	// A pipe is a machine. Someone who redirected this into a file or a
 	// consumer, and did not think to pass --json, wants records — not a live
@@ -212,8 +253,16 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 	}
 
 	if !ndjson {
-		fmt.Fprintf(env.stderr, "busctl watch: %d message(s) over %d poll(s); resume with --cursor %s\n",
-			stats.Delivered, stats.Polls, stats.Cursor)
+		// The resume clause is omitted when there is no position to resume
+		// FROM: a watch that never received anything leaves stats.Cursor empty,
+		// and "resume with --cursor " (with nothing after it) is an instruction
+		// that cannot be followed.
+		resume := ""
+		if stats.Cursor != "" {
+			resume = "; resume with --cursor " + stats.Cursor
+		}
+		fmt.Fprintf(env.stderr, "busctl watch: %d message(s) over %d poll(s)%s\n",
+			stats.Delivered, stats.Polls, resume)
 	}
 
 	// A bounded watch that saw nothing is "nothing to report", not a failure —
@@ -299,9 +348,52 @@ func plainText(body []byte) (string, bool) {
 		case r == '\t' || r == '\n' || r == '\r':
 		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 			return "", false
+		case isBidiOrInvisible(r):
+			// Disqualifying rather than rewriting, for the same reason as any
+			// other control: `jq -r .text` strips the JSON escaping and pipes
+			// the result straight at a terminal, where a bidi override reorders
+			// the line. See isBidiOrInvisible.
+			return "", false
 		}
 	}
 	return string(body), true
+}
+
+// isBidiOrInvisible reports whether r is a Unicode character that changes how
+// text is DISPLAYED without being visible itself.
+//
+// None of these is a C0, DEL or C1 control, so the ordinary control checks miss
+// every one of them — and each is chosen by another agent when it appears in a
+// message body:
+//
+//	U+200B  zero-width space         invisible; splits a word that reads whole
+//	U+200C  zero-width non-joiner    invisible
+//	U+200D  zero-width joiner        invisible
+//	U+200E  left-to-right mark       changes the direction of what follows
+//	U+200F  right-to-left mark       changes the direction of what follows
+//	U+202A..U+202E  the legacy bidi embedding/override controls — U+202E
+//	                (RIGHT-TO-LEFT OVERRIDE) visually REVERSES the rest of the
+//	                line, which is how a body or an id can be made to read as
+//	                though it came from a different agent
+//	U+2066..U+2069  the isolate forms of the same thing
+//	U+FEFF  zero-width no-break space (BOM) — invisible mid-string
+//
+// A message body has no legitimate use for any of them. Real bidirectional text
+// (Arabic, Hebrew) renders correctly from its own character properties; these
+// codepoints exist to OVERRIDE that, which in a one-line feed is only ever a
+// forgery primitive.
+func isBidiOrInvisible(r rune) bool {
+	switch {
+	case r >= 0x200b && r <= 0x200f: // ZWSP, ZWNJ, ZWJ, LRM, RLM
+		return true
+	case r >= 0x202a && r <= 0x202e: // LRE, RLE, PDF, LRO, RLO
+		return true
+	case r >= 0x2066 && r <= 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	case r == 0xfeff: // BOM / zero-width no-break space
+		return true
+	}
+	return false
 }
 
 // writeHumanMessage renders one message for a terminal.
@@ -358,8 +450,10 @@ func writeHumanMessage(w io.Writer, m client.Message) {
 // terminalSafe replaces everything a terminal can act on with a space.
 //
 // C0 controls, DEL and C1 controls all go — C1 because a lone 0x9b is CSI on
-// some terminals, which is as dangerous as ESC-[. Invalid UTF-8 becomes U+FFFD.
-// Controls are REPLACED rather than dropped so a run of them cannot splice two
+// some terminals, which is as dangerous as ESC-[. So do the Unicode bidi and
+// zero-width characters (isBidiOrInvisible), which are not controls at all and
+// would otherwise pass through verbatim. Invalid UTF-8 becomes U+FFFD.
+// Everything is REPLACED rather than dropped so a run of them cannot splice two
 // words into one convincing token (a dropped ESC would turn "adm\x1bin" into
 // "admin").
 //
@@ -379,6 +473,13 @@ func terminalSafe(s string, keepNewlines bool) string {
 			// Tabs included: a tab in a body would break the indentation this
 			// renderer uses to show that a continuation line is not a new
 			// message.
+			b.WriteByte(' ')
+		case isBidiOrInvisible(r):
+			// Not a control by any of the tests above, but it reorders or hides
+			// what a human reads — the same forgery this function exists to
+			// stop, spelled in Unicode instead of ANSI. Replaced with a space
+			// for the same reason the controls are: dropping it would splice the
+			// text either side of it into one convincing token.
 			b.WriteByte(' ')
 		default:
 			b.WriteRune(r)

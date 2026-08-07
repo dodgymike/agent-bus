@@ -108,6 +108,326 @@ func TestCLISendReusesIdempotencyKeyOnRetry(t *testing.T) {
 	}
 }
 
+// The FAILURE path is where the idempotency key earns its keep, and it is the
+// path that dropped it.
+//
+// `busctl send --help` promises "The key is always printed back, because it is
+// the ONLY handle that makes a LATER retry the same logical send rather than a
+// second message." That promise is only worth anything on a failure: on success
+// the caller already knows the message landed. The genuinely AMBIGUOUS failures
+// — a network error, or a 5xx — are exactly the ones where the send may or may
+// not have been applied, so an operator who is not told the key has no way to
+// retry the same logical send. Inventing a fresh key for the retry is not a
+// retry at all: it is a SECOND message, which is precisely what invariant 10
+// exists to prevent.
+//
+// The load-bearing assertion in every one of these is not "a key was printed"
+// but "the key the OPERATOR is shown is the key the BUS was asked to apply".
+// A key that is merely well-formed, or minted a second time for the error
+// message, would be worse than none: it would look like a retry handle and
+// produce a duplicate message when used.
+
+// TestCLISendFailureReportsIdempotencyKey drives `busctl send --json` against a
+// bus that answers 500 on EVERY attempt — an ambiguous failure by construction,
+// since a 500 says nothing about whether the write was applied.
+func TestCLISendFailureReportsIdempotencyKey(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteSend {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "the write path fell over"})
+	})
+
+	res := bus.run(t, "", false, false, "send", "--json", "bus-x.other-1", "payload")
+	// Pin the EXACT code, not merely "not 0". A 500 is the bus reporting a
+	// failure of its own, so an agent branching on the exit code must see 6; a
+	// test that accepts any non-zero code would pass if the failure were
+	// misclassified as a usage error or an unreachable bus.
+	if res.Code != client.ExitServer {
+		t.Fatalf("send against a bus that answers 500 exited %d, want %d (client.ExitServer); stdout=%q stderr=%q",
+			res.Code, client.ExitServer, res.Stdout, res.Stderr)
+	}
+	assertFailureReportsWireKey(t, res, bus.calls(stubRouteSend))
+}
+
+// TestCLIBroadcastFailureReportsIdempotencyKey is the same contract on the
+// broadcast route. The two share a write path in the client, and a fix that
+// covered only `send` would leave the noisier of the two commands unable to be
+// retried safely.
+func TestCLIBroadcastFailureReportsIdempotencyKey(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteBroadcast {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "the write path fell over"})
+	})
+
+	res := bus.run(t, "", false, false, "broadcast", "--json", "all hands")
+	if res.Code != client.ExitServer {
+		t.Fatalf("broadcast against a bus that answers 500 exited %d, want %d (client.ExitServer); stdout=%q stderr=%q",
+			res.Code, client.ExitServer, res.Stdout, res.Stderr)
+	}
+	assertFailureReportsWireKey(t, res, bus.calls(stubRouteBroadcast))
+}
+
+// TestCLISendFailureNamesIdempotencyKeyInHumanMode is the human half of the
+// same contract: without --json the failure goes to stderr, and it must tell a
+// person what to DO, not merely what went wrong (invariant 7 — "errors that
+// name the remedy rather than the stack").
+//
+// Two things are required and they are not the same: the KEY, so the retry is
+// the same logical send, and the FLAG that takes it, so the reader does not
+// have to go looking for it in `--help` at 3am.
+func TestCLISendFailureNamesIdempotencyKeyInHumanMode(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteSend {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "the write path fell over"})
+	})
+
+	res := bus.run(t, "", false, false, "send", "bus-x.other-1", "payload")
+	if res.Code == client.ExitOK {
+		t.Fatalf("send against a bus that answers 500 exited %d, want a failure; stdout=%q stderr=%q", res.Code, res.Stdout, res.Stderr)
+	}
+	wire := idempotencyKeyOnWire(t, "send", bus.calls(stubRouteSend))
+
+	if !strings.Contains(res.Stderr, wire) {
+		t.Fatalf("human-mode stderr does not name the idempotency key the bus was asked to apply (%s):\n%s\n"+
+			"without it an operator cannot retry the SAME logical send, and a fresh key would be a second message", wire, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "--idempotency-key") {
+		t.Fatalf("human-mode stderr does not name the --idempotency-key flag:\n%s\n"+
+			"a key with no flag to pass it to is a fact, not a remedy", res.Stderr)
+	}
+	if strings.Contains(res.Stdout, wire) {
+		t.Fatalf("the key appeared on STDOUT in human mode: %q — diagnostics belong on stderr", res.Stdout)
+	}
+}
+
+// TestCLISendFailureReportsExplicitIdempotencyKey guards the regression coming
+// back in a NEW form: a fix that mints a fresh key for the error message would
+// satisfy "a key is printed" while being actively harmful. When the caller
+// named the key, the failure must report THAT key, byte for byte.
+func TestCLISendFailureReportsExplicitIdempotencyKey(t *testing.T) {
+	const explicit = "operator-chosen-key-1"
+
+	cases := []struct {
+		name  string
+		route string
+		args  []string
+	}{
+		{"send", stubRouteSend, []string{"send", "--json", "--idempotency-key", explicit, "bus-x.other-1", "payload"}},
+		{"broadcast", stubRouteBroadcast, []string{"broadcast", "--json", "--idempotency-key", explicit, "all hands"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.route {
+					http.NotFound(w, r)
+					return
+				}
+				stubWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "the write path fell over"})
+			})
+
+			res := bus.run(t, "", false, false, tc.args...)
+			if res.Code == client.ExitOK {
+				t.Fatalf("%s against a bus that answers 500 exited %d, want a failure; stdout=%q stderr=%q", tc.name, res.Code, res.Stdout, res.Stderr)
+			}
+			if wire := idempotencyKeyOnWire(t, tc.name, bus.calls(tc.route)); wire != explicit {
+				t.Fatalf("the bus was asked to apply key %q, want the one the caller passed (%q)", wire, explicit)
+			}
+			got := failureField(t, res, "idempotency_key")
+			if got != explicit {
+				t.Fatalf("the failure object reported idempotency_key = %q, want the caller's own key %q — a freshly minted key looks like a retry handle and produces a SECOND message when used", got, explicit)
+			}
+		})
+	}
+}
+
+// TestCLISendNetworkFailureReportsIdempotencyKey covers the genuinely ambiguous
+// case: the request reached the bus and the connection died before an answer
+// came back. Nobody — not the client, not the operator — can tell whether the
+// message was applied, so the key is the only thing that makes the retry safe.
+//
+// The failure is injected by HIJACKING the connection on /v1/send and closing
+// it, rather than by pointing busctl at a dead address. That distinction is
+// load-bearing: a bus that is not listening fails during the SESSION handshake,
+// long before a key is minted or a body is marshalled, so it would prove
+// nothing about the write path. Killing the connection on the send itself
+// produces a real KindNetwork failure with the key already on the wire, which
+// is what lets this test compare what the operator is shown against what the
+// bus was asked to apply.
+func TestCLISendNetworkFailureReportsIdempotencyKey(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteSend {
+			http.NotFound(w, r)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("the test server does not support hijacking; this failure cannot be made to look like a dead connection")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijacking the connection: %v", err)
+			return
+		}
+		// No response at all: the client sees the connection close mid-request,
+		// which is exactly the "it may or may not have been applied" case.
+		_ = conn.Close()
+	})
+
+	// --timeout bounds the whole operation including its retries, so a hung
+	// dial can never make this test slow.
+	res := bus.run(t, "", false, false, "send", "--json", "--timeout", "5s", "bus-x.other-1", "payload")
+	if res.Code != client.ExitNetwork {
+		t.Fatalf("send over a dropped connection exited %d, want %d (a transport failure); stdout=%q stderr=%q",
+			res.Code, client.ExitNetwork, res.Stdout, res.Stderr)
+	}
+	assertFailureReportsWireKey(t, res, bus.calls(stubRouteSend))
+}
+
+// TestCLISendFatalUnavailableTellsOperatorNotToRetryButKeepsTheKey is the
+// end-to-end guard on the ONE case where "report the key" and "say what to do"
+// pull in opposite directions.
+//
+// A 503 with NO Retry-After is the bus saying its write path cannot durably
+// accept messages at all (client/transport.go, "the 503 split"). It is
+// KindServer, so it is exit 6 — the bus reporting a failure of its OWN, not a
+// bus that could not be reached — and client.IsFatalUnavailable reports that
+// retrying will not clear it.
+//
+// The first fix for the lost-key defect replaced the remedy outright, which
+// produced a failure that told the operator to retry a bus the same client had
+// just classified as un-retryable, and threw away the actual diagnosis (a
+// poisoned or non-durable write path) on the way. Both halves have to hold at
+// once: the key survives, because per invariant 4 the bus is REFUSING rather
+// than losing data and this send may still have been applied — and the
+// instruction is to hold the key for later, not to hammer a dead write path.
+func TestCLISendFatalUnavailableTellsOperatorNotToRetryButKeepsTheKey(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteSend {
+			http.NotFound(w, r)
+			return
+		}
+		// NO Retry-After header. Its absence is the whole signal.
+		stubWriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the write path is poisoned"})
+	})
+
+	res := bus.run(t, "", false, false, "send", "bus-x.other-1", "payload")
+	if res.Code != client.ExitServer {
+		t.Fatalf("send against a fatal 503 exited %d, want %d (client.ExitServer): a fatal 503 is the bus reporting a failure of its own, not an unreachable bus; stdout=%q stderr=%q",
+			res.Code, client.ExitServer, res.Stdout, res.Stderr)
+	}
+
+	wire := idempotencyKeyOnWire(t, "send", bus.calls(stubRouteSend))
+	if !strings.Contains(res.Stderr, wire) {
+		t.Fatalf("a fatal 503 dropped the idempotency key (%s) from the operator's output:\n%s\n"+
+			"the bus is refusing rather than losing data (invariant 4), so this send may still have been applied and the key is the only handle that retries it as the SAME message", wire, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "do NOT retry") {
+		t.Fatalf("a fatal 503 did not tell the operator to hold off:\n%s\n"+
+			"client.IsFatalUnavailable reports this is not transient, so instructing a retry contradicts the client's own classification", res.Stderr)
+	}
+	// The anti-assertion: the non-fatal wording must not appear. This is the one
+	// that actually catches a regression to "replace the remedy" — the key and
+	// the flag are present in BOTH wordings, so only the absence of the plain
+	// retry instruction distinguishes them.
+	if strings.Contains(res.Stderr, "; retry with --idempotency-key") {
+		t.Fatalf("a fatal 503 was given the NON-FATAL retry instruction:\n%s\n"+
+			"retrying will not clear a poisoned write path; the key is a handle for after an operator has fixed the bus", res.Stderr)
+	}
+	// And the transport's own diagnosis must survive: it is what names the fault
+	// an operator actually has to go and fix.
+	if !strings.Contains(res.Stderr, "retrying will not clear it") {
+		t.Fatalf("the fatal-503 diagnosis was destroyed by the idempotency-key annotation:\n%s", res.Stderr)
+	}
+}
+
+// assertFailureReportsWireKey is the shared check: the command failed, its
+// --json failure object is parseable, and the idempotency_key it reports is the
+// one the bus was actually asked to apply.
+func assertFailureReportsWireKey(t *testing.T, res cliResult, calls []stubRequest) {
+	t.Helper()
+	if res.Code == client.ExitOK {
+		t.Fatalf("exit = %d, want a failure; stdout=%q stderr=%q", res.Code, res.Stdout, res.Stderr)
+	}
+	wire := idempotencyKeyOnWire(t, "write", calls)
+
+	if ok, _ := failureObject(t, res)["ok"].(bool); ok {
+		t.Fatalf(`the failure object has "ok": true; stdout=%q`, res.Stdout)
+	}
+	got := failureField(t, res, "idempotency_key")
+	if got != wire {
+		t.Fatalf("the failure object reported idempotency_key = %q, want %q — the key the bus was asked to apply.\n"+
+			"stdout=%q\nAn operator who is not shown this key cannot retry the same logical send; a fresh key would be a SECOND message (invariant 10).",
+			got, wire, res.Stdout)
+	}
+}
+
+// failureObject parses the one-object --json failure document on stdout.
+func failureObject(t *testing.T, res cliResult) map[string]interface{} {
+	t.Helper()
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &out); err != nil {
+		t.Fatalf("--json stdout is not one parseable JSON object: %v (%q)", err, res.Stdout)
+	}
+	return out
+}
+
+// failureField reads one string field out of the --json failure object.
+func failureField(t *testing.T, res cliResult, field string) string {
+	t.Helper()
+	out := failureObject(t, res)
+	raw, present := out[field]
+	if !present {
+		t.Fatalf("the --json failure object carries no %q field: %v", field, out)
+	}
+	s, ok := raw.(string)
+	if !ok {
+		t.Fatalf("the --json failure object's %q is %T (%v), want a string", field, raw, raw)
+	}
+	return s
+}
+
+// idempotencyKeyOnWire returns the key the bus SAW, having checked that every
+// attempt carried the same one.
+//
+// It fails loudly on zero attempts, because "the bus saw no write at all" would
+// otherwise let a caller's assertion pass against an empty comparison and turn
+// the whole proof vacuous.
+func idempotencyKeyOnWire(t *testing.T, op string, calls []stubRequest) string {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatalf("the bus saw no %s attempts at all — nothing reached the write path, so this proof would be vacuous", op)
+	}
+	var key string
+	for i, c := range calls {
+		body := c.JSON()
+		if body == nil {
+			t.Fatalf("%s attempt %d body is not a JSON object: %q", op, i, c.Body)
+		}
+		got, _ := body["idempotency_key"].(string)
+		if got == "" {
+			t.Fatalf("%s attempt %d carried no idempotency_key: %v — every mutating operation carries one (invariant 10)", op, i, body)
+		}
+		if i == 0 {
+			key = got
+			continue
+		}
+		if got != key {
+			t.Fatalf("%s attempt %d used idempotency key %q, want %q — one logical send is one key", op, i, got, key)
+		}
+	}
+	return key
+}
+
 // TestCLISendBodySourceIsUnambiguous checks the body comes from EXACTLY ONE
 // source, and that naming two is refused rather than resolved by a precedence
 // rule nobody would remember. Picking one silently would send the wrong bytes,

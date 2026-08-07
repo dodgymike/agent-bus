@@ -167,3 +167,52 @@ func TestValidateServerFieldRejectsHostileAgentID(t *testing.T) {
 		t.Fatalf("store has %d credentials after a rejected hostile agent_id, want 0: %+v", len(creds), creds)
 	}
 }
+
+// TestSafeTextNeutralisesBidiAndZeroWidth covers the family that every ordinary
+// control test MISSES: none of these codepoints is a C0, C1 or DEL control, so
+// the `r < 0x20`, `r == 0x7f` and `0x80..0x9f` arms all pass them straight
+// through.
+//
+// It matters on the error path specifically. The bus chooses the text of its
+// `{"error":"..."}` body, that text becomes Error.Message, and cmd/busctl
+// prints it to stderr on the SAME line that now carries the idempotency-key
+// remedy. A U+202E run reverses the rest of the line, so an unfiltered bus could
+// reorder "do NOT retry until the bus can durably accept again" into something a
+// human reads as permission to retry a poisoned write path.
+func TestSafeTextNeutralisesBidiAndZeroWidth(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Written as \u escapes on purpose: these characters are invisible or
+		// reorder their neighbours, so a literal in the source would misrepresent
+		// what the test actually asserts to whoever reads it next.
+		{"right-to-left override", "boom\u202edellorne :ltcsub", "boom dellorne :ltcsub"},
+		{"zero-width space splices words", "adm\u200bin", "adm in"},
+		{"left-to-right mark", "a\u200eb", "a b"},
+		{"isolate forms", "a\u2066b\u2069c", "a b c"},
+		{"byte order mark mid-string", "a\ufeffb", "a b"},
+		{"legitimate text is untouched", "the write path fell over", "the write path fell over"},
+		// Real bidirectional text renders correctly from its own character
+		// properties and must NOT be damaged — the override codepoints are the
+		// target, not Hebrew or Arabic.
+		{"real bidirectional text survives", "שלום", "שלום"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := safeText(tc.in, 0)
+			if got != tc.want {
+				t.Fatalf("safeText(%q) = %q, want %q\n"+
+					"these codepoints are invisible or reorder what follows them, and none is a control character, so nothing else in safeText catches them",
+					tc.in, got, tc.want)
+			}
+			for _, r := range got {
+				if isBidiOrInvisibleRune(r) {
+					t.Fatalf("safeText(%q) still contains U+%04X — it must be replaced, not passed through", tc.in, r)
+				}
+			}
+		})
+	}
+}

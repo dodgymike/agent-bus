@@ -64,9 +64,28 @@ recorded value (`--bus` only) → built-in default.
 | `whoami [--all] [--verify]` | Show the identity commands act as; `--all` lists them; `--verify` performs a real session handshake | only with `--verify` |
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
+| `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
+| `send <to-agent-id> [body]` | Send one direct message, durable before it returns (invariant 4) | yes — `POST /v1/send` |
+| `broadcast [body]` | Send one message to every other enrolled agent, durable before it returns | yes — `POST /v1/broadcast` |
+| `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
 
 `enrol` flags: `--name` (required), `--invite` (**reserved, currently rejected** — see below),
 `--idempotency-key` (resume an earlier attempt), `--keep-current` (do not switch the selection).
+
+`agents` flags: none beyond the globals.
+
+`send`/`broadcast` flags: `--file <path>` (`-` means stdin), `--stdin`, `--idempotency-key <key>`
+(retry a specific earlier send/broadcast — see "Send/broadcast idempotency" below). The body itself
+is a **positional argument** — `send`'s second (after `<to-agent-id>`), `broadcast`'s first — not a
+flag. Both commands **permute flags and positionals** (`parseWithPositionals` in
+`cmd/busctl/send.go`) so `busctl send <to> --json` parses as intended: Go's plain
+`flag.FlagSet.Parse` stops at the first non-flag argument and hands everything after it back as
+positionals, so before that helper existed `busctl send <to> --json` read `"--json"` itself as the
+message body and **delivered it as the message**, silently. Any future command that adds a
+positional needs the same helper, or it will reproduce that exact bug.
+
+`watch` flags: `--replay`, `--cursor <c>`, `--limit N`, `--poll-timeout <dur>`, `--count N`,
+`--for <dur>`, `--no-cursor` — see "`watch`: output modes and the cursor contract" below.
 
 **`logout` is LOCAL ONLY.** `/v1/leave` does not exist yet, so nothing is revoked: the enrolment
 stays on the roster and any live session lives out its hour. The JSON field `server_notified` reports
@@ -92,6 +111,17 @@ codes without copying a switch.
 
 `2` is usage rather than `1` to match Go's `flag` package and `cmd/agent-bus`.
 
+No code changes meaning; some commands give one a more specific sense:
+
+- `8` — `agents` on an empty roster, and a **bounded** `watch` (`--count`/`--for`) that delivered
+  nothing before it finished. An unbounded `watch` stopped by a signal is always `0`, however many
+  messages it saw.
+- `7` — a 409 idempotency-key conflict on `send`/`broadcast` (same key, different payload — the bus
+  disconnects), and an unknown recipient on `send`.
+- `6` — a fatal 503 (the bus's write path cannot durably accept messages, signalled by **no**
+  `Retry-After` header) is `KindServer`, so it is exit **6**, not `5`. `5` stays reserved for the bus
+  being unreachable at all — refused, DNS, timeout, TLS. See "The 503 split" below.
+
 ### JSON shapes — CONTRACT
 
 **Success** — exactly ONE JSON object on stdout, keys sorted, plus `"ok": true`:
@@ -110,6 +140,8 @@ codes without copying a switch.
 | `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
 | `logout` | `removed` (array of agent ids), `current_agent_id` (string), `server_notified` |
+| `agents` | `agents` (array of `agent_id`/`bus_id`/`name`/`enrolled_at`), `count`, `ok` |
+| `send`, `broadcast` | `message_id`, `seq`, `from`, `broadcast`, `to`, `sent_at`, `content_sha256`, `replayed`, `idempotency_key`, `ok` |
 
 **`is_current` is a bool; `current_agent_id` is a string.** They are deliberately different keys: one
 name that is a bool in one subcommand and a string in another makes `jq .current` unpredictable.
@@ -122,12 +154,83 @@ two human lines on **stderr** otherwise:
  "remedy":"check --bus / AGENT_BUS_URL and that the bus is running","exit_code":5}
 ```
 
-`status` is added when the failure carried an HTTP status.
+`status` is added when the failure carried an HTTP status. `idempotency_key` (`omitempty`) is added
+when the failed operation was a mutating one that had already minted a key — `send`/`broadcast` — and
+is **omitted** when the failure never had one (a local usage error caught before a key existed, e.g.
+a missing recipient). It matters because a network error or a 5xx on a send is genuinely ambiguous —
+the message may or may not have been applied — and the key is the only handle that makes a later
+retry the SAME logical send rather than a second message (invariant 10). In human mode the same key
+is named on stderr alongside the `--idempotency-key` flag that resumes it.
 
-**NDJSON — the streaming convention, fixed now.** A streaming subcommand (the long poll, when it
-lands) writes **one compact JSON object per line, flushed as it arrives**, with **no envelope, no
-`ok` field and no array brackets**, so a consumer can act on each record incrementally instead of
-buffering to completion. Diagnostics never go to stdout.
+**NDJSON — the streaming convention, now landed with `watch`.** A streaming subcommand writes **one
+compact JSON object per line, flushed as it arrives**, with **no envelope, no `ok` field and no array
+brackets**, so a consumer can act on each record incrementally instead of buffering to completion.
+Diagnostics never go to stdout.
+
+### `watch`: output modes and the NDJSON record shape
+
+`watch` picks its output form for you, from stdout alone — there is no flag that forces the human
+feed:
+
+| Condition | Output |
+| --- | --- |
+| `--json` | NDJSON |
+| no `--json`, stdout is **not** a terminal (a pipe or redirect) | NDJSON — a pipe is a machine |
+| no `--json`, stdout **is** a terminal | a readable live feed, one line (or indented block) per message |
+
+One NDJSON record per message, field by field:
+
+| Field | Meaning |
+| --- | --- |
+| `message_id` | the server-minted id, the key to deduplicate on |
+| `seq` | the server-minted monotonic sequence |
+| `from` | the fully-qualified sender id |
+| `broadcast` | whether this went to every agent except the sender |
+| `to` | the recipient list — one entry for a direct message, empty for a broadcast |
+| `bus_path` | bus ids traversed, oldest first |
+| `sent_at` | the bus's timestamp, verbatim |
+| `size` | body length in bytes, as the bus recorded it |
+| `content_sha256` | hex SHA-256 of the decoded body |
+| `body` | the decoded body |
+| `text` | the body as a string, present only under the conditions below |
+
+`body` is **always present**, standard base64 — the authoritative, lossless form, true for any bytes
+at all. `text` is present **only** when the body is valid UTF-8, free of control characters other
+than tab/newline/CR, and free of the Unicode bidi and zero-width characters that can reorder or hide
+what a terminal renders (`isBidiOrInvisible` in `cmd/busctl/watch.go` — the same forgery class as an
+ANSI escape, spelled in Unicode). It is **omitted, never rewritten**, otherwise: a lossily-rewritten
+body would be worse than no field at all, since a consumer would have no way to tell what it read is
+not what was sent.
+
+So: `jq -r .text` for text traffic, `jq -r .body | base64 -d` for anything (binary or otherwise
+disqualified). Running diagnostics — retry notices, cursor-store warnings, the closing summary — go
+to stderr and never appear inside the stream. The one exception: under `--json`, the FINAL failure
+object (including the exit-8 "nothing arrived" outcome of a bounded watch) is emitted as the last
+line of the stream on stdout, in the same shape every other subcommand's failure uses — branch on the
+presence of an `"ok"` field, which a failure object always has and a message record never does.
+
+### `watch`: the cursor contract
+
+This is the load-bearing part of `watch`, and it applies whether the output is human or NDJSON:
+
+- the read position (the "cursor") is **persisted by default**, per (identity, bus), in the
+  credential store directory;
+- the cursor **advances only after a whole batch has been handed to the caller** — poll, hand every
+  message in the batch to the caller, only then adopt and (if persisting) write the new cursor. A
+  process killed mid-batch **re-delivers that whole batch** on the next run; it never advances past
+  messages the caller was never given, and it never skips;
+- delivery is **at-least-once**: duplicates are the normal steady state (a cyclic relay topology with
+  at-least-once forwarding guarantees them, not just a crash), and a handler must be **idempotent on
+  `message_id`**;
+- a poll that times out with nothing is a `200` and a **normal** outcome, not an error — on a quiet
+  bus it is the steady state;
+- `--no-cursor` does **not persist** anything (a throwaway tail), but it still **starts from the
+  stored position** — the run's own `--help` says so plainly, and this doc does not soften it: the
+  next (persisting) run resumes wherever the stored cursor already was, unaffected by the throwaway
+  run;
+- `--replay` and `--cursor <c>` are **both start positions**; giving both is a usage error (exit `2`)
+  rather than one silently winning over the other — the same "refuse an ambiguous instruction rather
+  than guess" rule `send`/`broadcast` apply to a body given twice.
 
 ### Credential storage
 
@@ -136,6 +239,19 @@ buffering to completion. Diagnostics never go to stdout.
 | `<identity-dir>/` | `0700` | The store. Tightened on open if it already exists looser. |
 | `<identity-dir>/identities.json` | `0600` | Format version `1`. Enrolled identities **including Ed25519 private-key seeds**, the current selection, and in-flight (`pending`) enrolments. |
 | `<identity-dir>/identities.lock` | `0600` | Exclusive lock for read-modify-write; treated as abandoned after 30s. |
+| `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_url`) pair — no key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
+| `<identity-dir>/cursors.lock` | `0600` | A **separate** exclusive lock from `identities.lock` — a cursor advances far more often than a credential changes, and sharing one lock would put `watch` in needless contention with `enrol`/`use`/`logout`. |
+
+**`cursors.json` fails OPEN, unlike `identities.json`.** A damaged file, one that fails to parse, or
+one written by an unknown format version is **not fatal**: it is ignored, a warning is printed to
+stderr, and `watch` replays from the start of the retained window — the same outcome as an agent that
+had simply never watched before. This is the deliberate opposite of `identities.json`, which refuses
+outright on an unknown version (see `(*Store).load`): a credential misread is unrecoverable and
+dangerous (a private key misparsed as public fails silently), so refusing to guess is the only safe
+move there, while a cursor is a **position hint, not a credential** — losing it re-delivers messages,
+which at-least-once delivery already permits and which a correct handler already tolerates by
+deduplicating on `message_id`. Refusing to run because a position hint was damaged would trade a
+harmless replay for an outage.
 
 Written by atomic replace: an `O_EXCL` `0600` temp file in the same directory, fsynced, renamed, then
 the directory fsynced. Abandoned temp files are swept on the next write — each is a complete copy of
@@ -174,6 +290,23 @@ process killed after the bus minted an id does not lose the private key. Records
 The claim decision — already applied / resume / start new — is made in ONE locked read-modify-write.
 Two concurrent enrolments under one key would otherwise both generate a key pair, and one private key
 would be lost while both sent conflicting payloads under the same key.
+
+### Send/broadcast idempotency (invariant 10)
+
+The idempotency key for `send`/`broadcast` is minted **once per invocation** — before the payload is
+marshalled — and reused across every internal transport retry, so a send retried inside `busctl` can
+never become two messages. Omit `--idempotency-key` and one is minted for you; it is always printed
+back (human output and `--json`'s `idempotency_key` field), because it is the only handle that makes
+a *later* retry the same logical send rather than a second message.
+
+- **Same key + byte-identical body** is a legitimate retry. The bus answers from its applied-key
+  table, re-applies nothing, and returns the ORIGINAL result — `"replayed": true`, exit `0`.
+- **Same key + different content** is a protocol violation. The bus answers `409` **and disconnects**
+  — surfaced as its own loud `KindRejected` error, exit `7`. Retrying will not help; use a fresh key
+  for new content.
+- A key is remembered only as long as the message it produced is **retained** (1 day, or until 1 GiB
+  of messages push it out). A "retry" that arrives after that produces a **second message** rather
+  than being rejected — a key is a retry handle for minutes and hours, not for days.
 
 ### In flight — what will change
 
@@ -215,15 +348,24 @@ Exported surface as of 2026-08-02:
 | `Config`, `DefaultConfig`, `Config.ApplyEnv`, `DefaultIdentityDir`, `RetryPolicy`, `HTTPDoer` | Configuration and the transport escape hatch |
 | `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout` | The env var names above |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
-| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()` |
-| `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`) | Credential storage. The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
+| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()` |
+| `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
 | `EnrolOptions`, `EnrolResult`, `SessionInfo`, `LogoutResult` | Operation inputs and results |
-| `Error`, `Kind` (+ the `Kind*` constants), `KindOf`, `ExitCode`, `ErrorPayload`, `NewErrorPayload`, the `Exit*` constants | Errors and the exit-code contract |
+| `SendOptions`, `BroadcastOptions`, `SendResult`, `AgentSummary`, `AgentList`, `ReadOptions`, `Batch`, `Message`, `WatchOptions`, `WatchStats` | Messaging inputs, results and the wire-faithful `Message`/`Batch` types |
+| `Error`, `Kind` (+ the `Kind*` constants), `KindOf`, `ExitCode`, `ErrorPayload`, `NewErrorPayload`, the `Exit*` constants, `IsFatalUnavailable`, `IdempotencyKeyOf` | Errors and the exit-code contract |
 | `SessionSigningContext`, `AgentNamePattern` | Pinned protocol constants |
+| `MaxBodyBytes`, `MaxBatchLimit`, `DefaultBatchLimit`, `MaxPollTimeout`, `DefaultPollTimeout` | Protocol limits, pinned literals mirroring the server's own (see `client/messages.go`) |
 
 `Identity` is the redacted public half and `Credential` is `Identity` plus the secret seed; the split
 is structural, so no rendering path can marshal a private key by forgetting a redaction step.
 `Credential.String()` redacts. `SessionInfo` has **no token field at all**, not even a `json:"-"` one.
+
+**The 503 split.** A `503` with a `Retry-After` header is a transient capacity refusal and is retried
+with jittered backoff (`Watch`, and the transport's own retry loop, both honour it). A `503` with
+**no** `Retry-After` means the bus's write path cannot durably accept messages at all — not
+transient — and is **not** retried: it stops a `Watch` outright and is reported through
+`client.IsFatalUnavailable`, which every long-running caller (a supervisor, a `watch`) must check and
+stop on rather than back off forever, or an operator-visible fault becomes a silent one.
 
 ---
 
