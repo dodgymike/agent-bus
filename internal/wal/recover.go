@@ -49,53 +49,76 @@ type Repair struct {
 	// Removed is how many bytes that truncation discarded.
 	Removed int64
 
-	// NextIndex is the index the next append will use after the repair, which
-	// is one past the highest index that SURVIVED.
+	// NextIndex is one past the highest index THIS FILE WAS OBSERVED TO CARRY --
+	// survivors and identified discards alike (see repairPlan.HighestSeen).
+	//
+	// IT IS A STATEMENT ABOUT THE FILE, AND IT IS NOT ON ITS OWN THE INDEX THE
+	// NEXT APPEND USES. Open takes the MAXIMUM of three things: this value, the
+	// replayed high-water mark, and the DURABLE INDEX FLOOR in
+	// <data-dir>/wal-index-floor. The floor is what makes invariant 1 hold
+	// across a discard the file can no longer describe -- and, because it lives
+	// outside the log, across a quarantine that takes the file away entirely.
 	//
 	// IT IS ONLY MEANINGFUL WHEN A REPAIR HAPPENED. On the paths where nothing
 	// was repaired -- a clean file, a file that does not exist, a zero-length
 	// file -- it is left 0 and the writer establishes the real value itself. The
 	// quarantine path is the one exception that reports a value without a
-	// repair: it sets 1, because a fresh log genuinely does start there.
+	// repair: it reports 1, which is the honest answer to "where does THIS FILE
+	// start" for a file that is now empty, and is NOT the index the bus resumes
+	// at. That path also sets LostUnidentified, which sends Open to the floor.
 	//
 	// ---------------------------------------------------------------------
-	// WHAT REISSUING THAT INDEX DOES AND DOES NOT PROMISE (invariant 1, "ids
-	// are never reused, including across restarts").
+	// INVARIANT 1, AND THE TEXT THAT USED TO BE HERE.
 	//
-	// This comment previously claimed that an index is "only ever discarded
-	// when its fsync provably never completed". THAT CLAIM WAS FALSE, both
-	// reviewer and security said so, and it is now false by POLICY as well as
-	// in fact: recovery is required to discard damaged records so that the bus
-	// always restarts, and a record damaged by media rot may well have been
-	// fsynced and acknowledged. So here is the honest, narrower statement.
+	// This comment previously documented REISSUING a discarded tail record's
+	// index as accepted policy: "That record is discarded and its index is
+	// reissued. If it had been acknowledged, an id a client saw is handed out
+	// again. That is a real, accepted consequence..." THAT IS NO LONGER TRUE,
+	// and it was never accepted -- the user REVERSED it on 2026-08-02 by
+	// reaffirming invariant 1 WITHOUT narrowing: "Recovery may not reissue an
+	// index it has already handed out, EVEN FOR A RECORD IT DISCARDS: a salvage
+	// path that reuses the index of a damaged tail record is a DEFECT to fix,
+	// not a licence to narrow this invariant. When recovery discards a record,
+	// the sequence advances past the hole; it never rewinds."
 	//
-	// WHAT IS STILL TRUE, and is the property invariant 1 actually protects:
-	// ids that were OBSERVED are never reissued for as long as the records
-	// carrying them survive. Writer.Append publishes an index only after the
-	// frame is fsynced, nothing in this system is acknowledged before Append
-	// returns (invariant 4), and every surviving record keeps its original
-	// index through a repair -- rewriteLog never renumbers survivors, which is
-	// why a repaired log has HOLES rather than a dense sequence. So the normal
-	// crash case (a torn final frame whose Append never returned) reissues an
-	// index that nothing ever saw, and that is safe.
+	// It is spelled out here so that a future reader who finds the discard and
+	// the reissue plausible does not "restore" the old paragraph. Invariant 4
+	// WAS deliberately narrowed on the same day; this one was not, and the
+	// difference is the whole reason the durable floor exists.
 	//
-	// WHAT IS NO LONGER PROMISED: if the LAST record in the file is damaged,
-	// recovery cannot tell "a write that was interrupted" from "a write that
-	// completed, was acknowledged, and then had a bit flipped" -- the two are
-	// byte-indistinguishable, and no check inside this format can separate
-	// them. That record is discarded and its index is reissued. If it had been
-	// acknowledged, an id a client saw is handed out again. That is a real,
-	// accepted consequence of the availability-over-retention decision
-	// (DECISIONS.md, 2026-08-02): the alternative is a bus that will not start,
-	// and the user chose the restart. It is bounded to the tail, it is logged
-	// at ERROR with the offset, index and length, and it does not apply to any
-	// record with a surviving record behind it, because damage no longer
-	// cascades (see resyncFrom).
+	// WHAT HOLDS NOW: an index that this data directory ever authorised is never
+	// authorised again, whatever happens to the log. Survivors keep their
+	// indices through a repair (rewriteLog never renumbers), discarded records'
+	// indices are jumped OVER rather than reused, and the indices of records
+	// recovery can no longer even enumerate are covered by the durable ceiling.
+	// The price is HOLES in the index sequence, which are legal and permanent.
 	//
-	// This package does not mint application ids; internal/ids does, from the
-	// recovered high-water mark. Nothing there changes.
+	// WHAT IS STILL NOT PROMISED, because no change to id policy can fix it: the
+	// CONTENT of a damaged record is gone. Recovery cannot tell "a write that
+	// was interrupted" from "a write that completed, was acknowledged, and then
+	// had a bit flipped", so an acknowledged message may be lost to media damage
+	// (invariant 4 as narrowed 2026-08-02, DECISIONS.md "Availability over
+	// retention"). The loss is logged at ERROR with the offset, index and
+	// length. What no longer happens is that the id goes with it.
+	//
+	// This package does not mint application ids; internal/hub derives the
+	// message-sequence floor from the recovered high-water mark, which is why
+	// Open reports the index it will ACTUALLY use rather than the file's own
+	// arithmetic.
 	// ---------------------------------------------------------------------
 	NextIndex uint64
+
+	// LostUnidentified reports that recovery threw away bytes whose record
+	// indices it could not enumerate -- a discarded framing-stage region, a
+	// forward search that gave up, or a whole-file quarantine.
+	//
+	// WHAT IT LICENSES: when it is set, NextIndex is a LOWER BOUND on what this
+	// file once carried rather than the answer, so Open consults the DURABLE
+	// CEILING in <data-dir>/wal-index-floor -- the highest index this data
+	// directory ever authorised -- instead of trusting the file's own
+	// arithmetic. It is the flag that turns "the file can no longer say" into
+	// "ask something the file cannot damage".
+	LostUnidentified bool
 
 	// Reason is why the tail went, in the same words the log carries.
 	Reason string
@@ -210,7 +233,12 @@ func RepairTail(path string, kind Kind, logger *logging.Logger) (TailRepair, err
 //     rebuilding, or a record's length field was restored: surviving frames are
 //     copied to a temporary file and renamed over the original, atomically.
 //     Survivors keep their original indices, so a repaired log has HOLES in its
-//     index sequence -- renumbering would reuse ids and is never done.
+//     index sequence -- renumbering would reuse ids and is never done. And
+//     recovery may itself ADVANCE PAST A HOLE ON PURPOSE: the index resumes
+//     above every index the file was observed to carry, discarded records
+//     included, and above the durable floor in <data-dir>/wal-index-floor when
+//     the file can no longer say what it carried. Holes are therefore not only
+//     tolerated, they are deliberately CREATED rather than reissue an id.
 //   - A QUARANTINE, when the file cannot be interpreted at all and nothing can
 //     be salvaged from it: it is RENAMED aside and startup continues with a
 //     fresh log. Renamed, never deleted.
@@ -314,13 +342,26 @@ func repairLog(path string, kind Kind, c codec, logger *logging.Logger) (Repair,
 			return res, qerr // renaming failed: a filesystem problem, not damage
 		}
 		res.Quarantined = dest
-		res.NextIndex = 1 // a fresh log starts here, and that is not a guess
+		// 1 is the honest answer to "where does THIS FILE start": the file that
+		// was here has been renamed away and the one that replaces it is empty,
+		// so as a statement about the file it is exact.
+		//
+		// IT IS NOT THE INDEX THE BUS WILL RESUME AT, and reading it as one was
+		// defect db350e39 -- a quarantine reissued the ENTIRE index space, and
+		// with it every message id derived from it. LostUnidentified below is
+		// what stops that: the quarantined bytes could have held any number of
+		// records at any indices, none of which can now be enumerated, so Open
+		// resumes from the durable ceiling in <data-dir>/wal-index-floor. That
+		// number lives outside the log precisely so a quarantine cannot take it.
+		res.NextIndex = 1
+		res.LostUnidentified = true
 		res.DiscardCount = 1
 		res.DiscardedBytes = plan.Size
 		res.Discards = []Discard{{Stage: "framing", Offset: 0, Length: plan.Size,
 			Reason: "the file header does not verify and no intact record could be found anywhere in the file"}}
 		logger.Error("wal quarantined an unreadable log and started a fresh one",
-			"path", path, "moved_to", dest, "bytes", plan.Size)
+			"path", path, "moved_to", dest, "bytes", plan.Size,
+			"index_resumes_from", "the durable index floor at "+filepath.Join(filepath.Dir(path), IndexFloorFileName)+", not from 1: the quarantined bytes may have held records at indices that can no longer be enumerated, and an index this data directory has authorised is never authorised again (invariant 1)")
 		return res, nil
 	}
 
@@ -331,7 +372,11 @@ func repairLog(path string, kind Kind, c codec, logger *logging.Logger) (Repair,
 	res.Discards = plan.Discards
 	res.DiscardCount = plan.Count
 	res.DiscardedBytes = plan.Bytes
-	res.NextIndex = plan.LastIndex + 1
+	// One past the highest index OBSERVED, not the highest that SURVIVED. A
+	// discarded record's index is jumped over, never handed back out
+	// (invariant 1, reaffirmed without narrowing 2026-08-02).
+	res.NextIndex = plan.HighestSeen + 1
+	res.LostUnidentified = plan.LostUnidentified
 
 	// EVERY discard is logged BEFORE the file is changed, so that a crash during
 	// the repair still leaves the operator a record of what was about to go.

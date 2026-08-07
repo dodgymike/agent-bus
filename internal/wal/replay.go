@@ -168,21 +168,42 @@ func replay(path string, c codec, fn func(Committed) error) (Recovered, error) {
 	open := make(map[uint64]Entry)
 	openBytes := int64(0)
 
-	expectIndex := uint64(1)
+	// expectIndex is 0 until the FIRST record is seen, meaning "no expectation
+	// yet". It deliberately does NOT start at 1.
+	//
+	// A WAL no longer necessarily begins at index 1: a fresh log started after a
+	// quarantine begins ABOVE the durable index floor, and recovery may advance
+	// the index past a hole rather than reissue it. Starting the expectation at 1
+	// made a log whose first record is index 757 report "records 1..756 are
+	// missing" on EVERY start, for ever -- records that were never in this file
+	// at all. Claiming them as missing turns the loss channel into noise, and a
+	// loss channel that cries wolf is the mirror image of the silent-discard
+	// defect invariant 6 names as the actual P0. So only INTERIOR holes are
+	// reported; where the file STARTS is reported separately, as FirstIndex.
+	expectIndex := uint64(0)
 
 	end, err := scanFrom(c, f, path, KindWAL, func(rec Record) error {
+		if r.FirstIndex == 0 {
+			r.FirstIndex = rec.Index
+		}
 		// A hole in the index sequence is a record that is not in the file:
-		// discarded by an earlier recovery, or lost from the media. It is not
+		// discarded by an earlier recovery, lost from the media, or an index
+		// recovery deliberately skipped so that nothing was reissued. It is not
 		// an error -- a repaired log has holes by design, because survivors are
-		// never renumbered -- but it IS a loss, and it is reported on every
-		// start for as long as it exists. Silence here is what let a lost
-		// sector look like a clean boot.
-		if rec.Index > expectIndex {
+		// never renumbered -- but it IS a loss (or at worst a burned number), and
+		// it is reported on every start for as long as it exists. Silence here is
+		// what let a lost sector look like a clean boot.
+		//
+		// MissingRecords therefore counts SKIPPED-BUT-NEVER-USED indices too, and
+		// is an UPPER BOUND on loss rather than an exact count. That is the right
+		// direction to be wrong in: over-reporting a hole invites an operator to
+		// look, under-reporting one hides a lost sector.
+		if expectIndex != 0 && rec.Index > expectIndex {
 			r.MissingRecords += rec.Index - expectIndex
 			r.addDiscard(Discard{Stage: "replay", Offset: rec.Offset, Length: 0,
 				Index: expectIndex, TypeKnown: false,
-				Reason: fmt.Sprintf("records %d..%d are missing from the index sequence: lost from the file, or discarded by an earlier recovery which -- correctly -- did not renumber the survivors",
-					expectIndex, rec.Index-1)})
+				Reason: fmt.Sprintf("records %d..%d are missing from the index sequence: lost from the file, discarded by an earlier recovery which -- correctly -- did not renumber the survivors, or skipped by recovery advancing the index past a hole so that no index is reissued (see the durable index floor, <data-dir>/%s)",
+					expectIndex, rec.Index-1, IndexFloorFileName)})
 		}
 		expectIndex = rec.Index + 1
 
@@ -416,11 +437,28 @@ type Recovered struct {
 	// Path is the file that was replayed.
 	Path string
 
-	// NextIndex is the high-water mark: the index the next append will use. It
-	// is strictly greater than EVERY index in the file, including indices
-	// burned by prepares that were discarded, so a discarded transaction can
-	// never have its index handed out again. An empty log reports 1.
+	// NextIndex is the high-water mark: strictly greater than EVERY index in the
+	// file, including indices burned by prepares that were discarded, so a
+	// discarded transaction can never have its index handed out again. An empty
+	// log reports 1.
+	//
+	// FROM Replay it is the FILE's high-water mark. FROM Log.Recovered it is the
+	// index the next append will ACTUALLY use: Open raises it to the maximum of
+	// this, what the repair pass observed, and the durable index floor in
+	// <data-dir>/wal-index-floor. That distinction matters because internal/hub
+	// derives the message-sequence floor from this field, so it must report the
+	// number that will be used, not the number the file's arithmetic suggests.
 	NextIndex uint64
+
+	// FirstIndex is the index of the FIRST record this replay saw, or 0 for an
+	// empty log.
+	//
+	// A WAL does not necessarily begin at index 1 any more. A fresh log started
+	// after a quarantine begins above the durable index floor, so an operator
+	// looking at a log whose first record is index 758 needs to be able to see
+	// that this is where the file starts rather than where the loss ends --
+	// which is also why replay does not report the indices below it as missing.
+	FirstIndex uint64
 
 	// EndOffset is the byte offset just past the last record Replay ACCEPTED.
 	// After a successful replay that is the end of the file and the offset the

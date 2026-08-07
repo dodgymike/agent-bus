@@ -406,7 +406,38 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 			// end of the last record that verified, which is where the damaged
 			// frame starts.
 			wantAt := recs[len(recs)-1].Offset
-			wantNextIndex := recs[len(recs)-1].Index // the index the torn frame carried
+
+			// wantSurvivorNext is one past the highest index that SURVIVES in the
+			// file. It is what a bare Replay of the repaired file reports, because
+			// the file itself keeps no trace of the frame that was discarded.
+			wantSurvivorNext := recs[len(recs)-2].Index + 1
+
+			// wantNextIndex is what the REPAIR PASS reports, and it is a different
+			// quantity: one past the highest index the file was OBSERVED to carry,
+			// discarded frames included.
+			//
+			// THE INDEX THE TORN FRAME CARRIED IS BURNED, NOT REISSUED. Until
+			// 2026-08-07 this test expected that index straight back out, which was
+			// defect e120153b: recovery cannot tell "a write that was interrupted"
+			// from "a write that completed, was acknowledged, and then had a bit
+			// flipped", so the number it handed back may be one a client had already
+			// seen. Invariant 1 was reaffirmed WITHOUT narrowing on 2026-08-02 --
+			// when recovery discards a record the sequence advances PAST the hole,
+			// it never rewinds onto it -- so the counter now steps over it.
+			//
+			// Whether the burn is visible AT THIS LAYER depends on whether enough of
+			// the frame HEADER survived to read an index out of it, which is exactly
+			// the condition wantRecordIndex already records. Where it did not, the
+			// index the lost frame carried is genuinely unknowable to the repair
+			// pass, so it honestly reports only one past the highest SURVIVOR and
+			// sets LostUnidentified to say the file's arithmetic is a LOWER BOUND.
+			// Open then resumes from the durable index floor, which lives outside
+			// the log precisely because this layer cannot answer.
+			indexReadable := tc.wantRecordIndex != "unknown"
+			wantNextIndex := wantSurvivorNext
+			if indexReadable {
+				wantNextIndex = recs[len(recs)-1].Index + 1
+			}
 
 			tc.damage(t, path, recs, cleanEnd)
 			damagedSize := fileSize(t, path)
@@ -440,8 +471,16 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 					res.Removed, want, damagedSize, wantAt)
 			}
 			if res.NextIndex != wantNextIndex {
-				t.Errorf("TailRepair.NextIndex = %d, want %d: the next append reissues the index the discarded frame carried",
+				t.Errorf("TailRepair.NextIndex = %d, want %d: the index the discarded frame carried is BURNED -- the counter advances past the hole and never rewinds onto it (invariant 1, reaffirmed WITHOUT narrowing on 2026-08-02). Reissuing it was defect e120153b, not the contract.",
 					res.NextIndex, wantNextIndex)
+			}
+			// A framing-stage discard throws away a BYTE RANGE, not a record, so
+			// what that range held cannot be fully enumerated from the file: a range
+			// this wide may have carried a second frame whose header was never
+			// readable. Saying so is what sends Open to the durable index floor
+			// instead of trusting the file's own arithmetic.
+			if !res.LostUnidentified {
+				t.Errorf("TailRepair.LostUnidentified = false, want true: the discard is a byte range whose contents cannot be enumerated, so TailRepair.NextIndex is a LOWER BOUND and Open must consult <data-dir>/%s for the rest", IndexFloorFileName)
 			}
 			if !strings.Contains(res.Reason, "no intact record follows it anywhere in the file") {
 				t.Errorf("TailRepair.Reason = %q, want it to say the search for a record behind the damage found nothing: "+
@@ -485,8 +524,14 @@ func TestWALRepairTailTruncatesTornTail(t *testing.T) {
 			if len(r.Dangling) != 1 || r.Dangling[0] != 3 {
 				t.Errorf("Dangling = %v, want [3]: the prepare whose commit was torn away is unresolved", r.Dangling)
 			}
-			if r.NextIndex != wantNextIndex {
-				t.Errorf("NextIndex after the repair = %d, want %d", r.NextIndex, wantNextIndex)
+			// A bare Replay reports the FILE's high-water mark, which is one past
+			// the highest SURVIVOR -- the discarded frame is no longer in the file
+			// for it to see. That is not a disagreement with the repair's higher
+			// answer: it is the reason the burn has to be recorded somewhere the
+			// file cannot describe, which is what the durable index floor is for.
+			if r.NextIndex != wantSurvivorNext {
+				t.Errorf("Replay of the repaired file reports NextIndex = %d, want %d (one past the highest SURVIVOR): the file alone cannot know an index was burned, which is why Open takes the maximum of this, the repair's answer (%d) and the durable index floor",
+					r.NextIndex, wantSurvivorNext, wantNextIndex)
 			}
 		})
 	}
@@ -1172,8 +1217,17 @@ func TestWALRepairTailDiscardsDamageToACompleteFinalRecord(t *testing.T) {
 					if res.DiscardCount != 1 {
 						t.Errorf("Repair.DiscardCount = %d, want exactly 1: only the damaged final record may go", res.DiscardCount)
 					}
-					if res.NextIndex != 6 {
-						t.Errorf("Repair.NextIndex = %d, want 6: the highest surviving index is 5", res.NextIndex)
+					// ONE PAST THE INDEX THE DISCARDED RECORD CARRIED (6), not one
+					// past the highest SURVIVOR (5). Record 6's frame header is
+					// intact in every one of these cells -- the damage is in its
+					// payload, its checksum or its length field -- so recovery can
+					// read the index it burned and steps over it. This expected 6
+					// until 2026-08-07, which was defect e120153b: the discarded
+					// record here is a COMMIT, so its index may well have been
+					// acknowledged to a client, and handing it back to a different
+					// record is exactly what invariant 1 forbids.
+					if res.NextIndex != 7 {
+						t.Errorf("Repair.NextIndex = %d, want 7: index 6 was OBSERVED in this file and is now burned; the counter advances past the hole rather than reissuing it (invariant 1, reaffirmed without narrowing 2026-08-02). 6 would be the old, rejected behaviour -- the discarded record's own index handed back out.", res.NextIndex)
 					}
 					// AT ERROR, NAMING THE COMMIT. A discarded commit record is an
 					// acknowledged write that is now lost, and the only thing that
@@ -1437,20 +1491,37 @@ func TestWALRepairTailKinds(t *testing.T) {
 		if !res.Truncated || res.At != last.Offset {
 			t.Fatalf("TailRepair = %+v, want Truncated true at %d", res, last.Offset)
 		}
-		if res.NextIndex != last.Index {
-			t.Errorf("TailRepair.NextIndex = %d, want %d", res.NextIndex, last.Index)
+		// One past the index the TORN frame carried, not the index itself: an
+		// observed index is burned, never handed back out (invariant 1). This
+		// expected last.Index until 2026-08-07 -- the reissue that was defect
+		// e120153b, in the audit file rather than the WAL.
+		if want := last.Index + 1; res.NextIndex != want {
+			t.Errorf("TailRepair.NextIndex = %d, want %d: the torn frame's index %d was observed in this file and is burned, so the repair reports the index PAST it rather than the index itself",
+				res.NextIndex, want, last.Index)
 		}
 		repairAssertPrefix(t, path, KindAudit, recs[:len(recs)-1])
 
-		// The repaired audit log is appendable again, and the next record takes
-		// the index the torn one would have had.
+		// The repaired audit log is appendable again -- and here the writer's own
+		// answer is DELIBERATELY LOWER than the repair's, which is not a bug and is
+		// stated rather than hidden.
+		//
+		// OpenWriter attaches NO durable index floor: only wal.Open does, because
+		// only Open knows the data directory, and the WAL's index is the one
+		// internal/hub derives the message-sequence floor from. So an audit file
+		// opened this way still derives its next index from the file alone and
+		// resumes one past the highest SURVIVOR -- reissuing the torn frame's index
+		// 2. That is a KNOWN, scoped gap: audit record indices are an ordering
+		// cursor inside the audit trail, not ids handed to a client, peer or relay.
+		// If audit records ever become addressable by index, the floor has to be
+		// extended to cover them, and this assertion is where that shows up.
 		w, err := OpenWriter(path, KindAudit)
 		if err != nil {
 			t.Fatalf("OpenWriter on the repaired audit file: %v", err)
 		}
 		defer w.Close()
-		if got := w.NextIndex(); got != res.NextIndex {
-			t.Errorf("the writer resumes at index %d, want %d", got, res.NextIndex)
+		if got, want := w.NextIndex(), last.Index; got != want {
+			t.Errorf("the writer resumes at index %d, want %d (one past the highest SURVIVOR): OpenWriter attaches no durable index floor, so it can only read the file, and the repair's higher answer %d is not available to it",
+				got, want, res.NextIndex)
 		}
 	})
 
@@ -1548,8 +1619,12 @@ func TestWALRepairTailToHeaderOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepairTail: %v", err)
 	}
-	if !res.Truncated || res.At != FileHeaderSize || res.NextIndex != 1 {
-		t.Fatalf("TailRepair = %+v, want Truncated true, At %d, NextIndex 1", res, FileHeaderSize)
+	// NextIndex 2, not 1: the torn frame's header survived, so recovery could read
+	// the index it carried and that index is BURNED. This expected 1 until
+	// 2026-08-07, which was defect e120153b -- the discarded frame's own index
+	// handed straight back out.
+	if !res.Truncated || res.At != FileHeaderSize || res.NextIndex != 2 {
+		t.Fatalf("TailRepair = %+v, want Truncated true, At %d, NextIndex 2 (one PAST the index the discarded frame carried -- an observed index is never reissued, invariant 1)", res, FileHeaderSize)
 	}
 	if got := fileSize(t, path); got != FileHeaderSize {
 		t.Fatalf("the repaired file is %d bytes, want exactly the %d-byte header", got, FileHeaderSize)
@@ -1569,8 +1644,23 @@ func TestWALRepairTailToHeaderOnly(t *testing.T) {
 		t.Errorf("the header-only file delivered %s, want nothing", showCommitted(c.got))
 	}
 
-	// And a server starts on it and writes record 1 -- the index the torn frame
-	// carried, reissued because that frame never completed an fsync.
+	// And a server starts on it and writes record 1 -- WHICH IS THE INDEX THE TORN
+	// FRAME CARRIED, and is a reissue.
+	//
+	// It happens here because this fixture's data directory has NO durable index
+	// floor: it was laid down with OpenWriter and repaired with RepairTail, and
+	// neither of those maintains one -- only wal.Open does. So this Open is the
+	// MIGRATION WINDOW, and it falls back to the log's own high-water mark, which
+	// is precisely the pre-2026-08-07 behaviour and is documented as such
+	// (openIndexFloor: a missing floor is benign, because making it fatal would
+	// brick every deployed bus on upgrade).
+	//
+	// It is asserted rather than glossed because it is the one remaining shape in
+	// which an index can come back, and it is bounded to the first start after an
+	// upgrade. Once this Open returns, the floor file exists and the window is
+	// shut; TestWALIndexFloorMigratesAnExistingDataDirectory covers that, and the
+	// crash tests cover the case where the floor is present and the reissue is
+	// therefore impossible.
 	l, err := Open(LogOptions{Dir: dir})
 	if err != nil {
 		t.Fatalf("Open on the repaired header-only log: %v", err)
@@ -1584,7 +1674,14 @@ func TestWALRepairTailToHeaderOnly(t *testing.T) {
 		t.Fatalf("Write after the repair: %v", err)
 	}
 	if c1.PrepareIndex != 1 || c1.CommitIndex != 2 {
-		t.Fatalf("the first write got {prepare:%d commit:%d}, want {1 2}", c1.PrepareIndex, c1.CommitIndex)
+		t.Fatalf("the first write got {prepare:%d commit:%d}, want {1 2}: with no floor file to consult, Open can only use the log's own arithmetic", c1.PrepareIndex, c1.CommitIndex)
+	}
+	// The window is shut behind it: the floor file now exists, so the NEXT start
+	// cannot fall back this way however the log is damaged.
+	if l.IndexFloorPath() == "" {
+		t.Error("Log.IndexFloorPath() is empty: Open must attach a durable index floor even when it started from a migrated data directory")
+	} else if _, err := os.Stat(l.IndexFloorPath()); err != nil {
+		t.Errorf("the durable index floor was not created at %s: %v", l.IndexFloorPath(), err)
 	}
 }
 
@@ -1714,8 +1811,11 @@ func TestWALRepairTailThroughOpen(t *testing.T) {
 	if rep.Removed != int64(partial) {
 		t.Errorf("Repaired.Removed = %d, want %d (the half-frame that was appended)", rep.Removed, partial)
 	}
-	if rep.NextIndex != 5 {
-		t.Errorf("Repaired.NextIndex = %d, want 5", rep.NextIndex)
+	// 6, not 5. The torn frame declared index 5 and its header survived, so
+	// recovery OBSERVED that index and burns it: the counter advances past the
+	// hole. Expecting 5 here was defect e120153b.
+	if rep.NextIndex != 6 {
+		t.Errorf("Repaired.NextIndex = %d, want 6: index 5 was observed in this file and is burned, so the next index is one PAST it -- an index this data directory authorised is never authorised again (invariant 1)", rep.NextIndex)
 	}
 	if rep.Reason == "" {
 		t.Error("Repaired.Reason is empty: the repair must say why the tail went")
@@ -1723,8 +1823,12 @@ func TestWALRepairTailThroughOpen(t *testing.T) {
 	if got := fileSize(t, path); got != rep.At {
 		t.Errorf("the file is %d bytes, want %d", got, rep.At)
 	}
-	if rec.NextIndex != 5 || rec.EndOffset != cleanEnd {
-		t.Errorf("Recovered() = {NextIndex:%d EndOffset:%d}, want {5 %d}", rec.NextIndex, rec.EndOffset, cleanEnd)
+	// Recovered().NextIndex is the index the next append will ACTUALLY use --
+	// internal/hub derives the message-sequence floor from it -- so it carries the
+	// repair's jump, not the file's own arithmetic. The EndOffset is unaffected:
+	// burning an index costs no bytes.
+	if rec.NextIndex != 6 || rec.EndOffset != cleanEnd {
+		t.Errorf("Recovered() = {NextIndex:%d EndOffset:%d}, want {6 %d}: the reported index must be the one that will be used, or hub reissues message ids even though the WAL jumped", rec.NextIndex, rec.EndOffset, cleanEnd)
 	}
 	if len(rec.Dangling) != 0 {
 		t.Errorf("Dangling = %v, want none: the good prefix ends on a commit", rec.Dangling)
@@ -1745,15 +1849,22 @@ func TestWALRepairTailThroughOpen(t *testing.T) {
 		t.Fatalf("Open applied %s, want %s", showCommitted(got), showCommitted(want))
 	}
 
-	// And it keeps writing. Index 5 is REISSUED on purpose: the frame that
-	// carried it never completed its fsync, so nothing it held was ever
-	// acknowledged and no client, peer or relay can have observed that id.
+	// And it keeps writing, starting at 6. INDEX 5 IS BURNED, NOT REISSUED.
+	//
+	// This block used to assert {5 6} on the argument that the torn frame never
+	// completed its fsync, so no client can have observed the id. That argument
+	// does not survive contact with the failure it has to cover: recovery cannot
+	// tell a frame that was never finished from one that was finished, fsynced,
+	// acknowledged, and then had a bit flipped -- the two are byte-indistinguishable
+	// -- so "nothing observed it" is a hope, not a fact. Invariant 1 was reaffirmed
+	// WITHOUT narrowing on 2026-08-02: the sequence advances past the hole and never
+	// rewinds. The cost is a permanent hole at index 5, which is legal and correct.
 	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"n":10}`)})
 	if err != nil {
 		t.Fatalf("Write after the repair: %v", err)
 	}
-	if c.PrepareIndex != 5 || c.CommitIndex != 6 {
-		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {5 6}", c.PrepareIndex, c.CommitIndex)
+	if c.PrepareIndex != 6 || c.CommitIndex != 7 {
+		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {6 7}: index 5 was observed in the discarded frame and is burned for good. {5 6} would be the old, rejected reissue.", c.PrepareIndex, c.CommitIndex)
 	}
 	if _, _, err := ScanAll(path, KindWAL); err != nil {
 		t.Fatalf("the file does not scan clean after the repair and a write: %v", err)

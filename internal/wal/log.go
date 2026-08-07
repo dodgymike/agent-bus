@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -224,6 +225,19 @@ var (
 // indices are never reissued. See Replay, and Log.Recovered for what the
 // replay found.
 //
+// THE RECORD INDEX IS NOT DERIVED FROM THE LOG ALONE. Open also reads the
+// DURABLE INDEX FLOOR in <data-dir>/wal-index-floor (see indexfloor.go) and
+// resumes above the maximum of the replayed high-water mark, what the repair
+// pass observed, and that floor. This is what makes invariant 1 hold through
+// recovery policy that is allowed to throw bytes away: a discarded tail record's
+// index is jumped over rather than reissued, and a QUARANTINE -- which starts a
+// completely fresh log, so the file's own answer is "index 1" -- still resumes
+// above every index this data directory ever authorised. The floor lives outside
+// the log precisely so that no repair, truncation or quarantine can lower it. A
+// MISSING floor file is benign (a data directory that predates it) and logged; a
+// CORRUPT one is fatal and never regenerated -- see ErrIndexFloorCorrupt, which
+// also explains why that is not a violation of "recovery always restarts".
+//
 // IF OPEN RETURNS AN ERROR, THE APPLIER MAY HAVE BEEN PARTIALLY REBUILT: replay
 // applies entries as it walks the file, so a failure part-way leaves the caller
 // holding a fragment of the durable state. That fragment is not a prefix of
@@ -242,6 +256,19 @@ func Open(opts LogOptions) (*Log, error) {
 		now = time.Now
 	}
 	path := filepath.Join(opts.Dir, WALFileName)
+
+	// THE DURABLE INDEX FLOOR IS OPENED FIRST, before a byte of the log is
+	// examined, and a failure here is FATAL and returned as-is. It is read-only
+	// at this point -- nothing is written until begin below -- but it must exist
+	// as a value before recovery runs, because recovery's answer is only half of
+	// the start index. A CORRUPT floor refuses the start (see
+	// ErrIndexFloorCorrupt for why that does not contradict invariant 6); a
+	// MISSING one is benign and yields a zero floor, which is exactly the
+	// pre-2026-08-07 behaviour.
+	floor, err := openIndexFloor(opts.Dir)
+	if err != nil {
+		return nil, err // openIndexFloor already names the path and the remedy
+	}
 
 	// ---------------------------------------------------------------------
 	// RECOVERY (invariant 5: disk is the truth, memory is the serving copy).
@@ -352,12 +379,129 @@ func Open(opts LogOptions) (*Log, error) {
 			path, rec.NextIndex, rec.EndOffset, w.NextIndex(), w.Size(), wErr)
 	}
 
+	// ---------------------------------------------------------------------
+	// DERIVING THE START INDEX (invariant 1: ids are never reused, INCLUDING
+	// across restarts -- reaffirmed WITHOUT narrowing on 2026-08-02).
+	//
+	// The index the next append uses is the MAXIMUM of three sources, and each
+	// one covers a hole the others leave:
+	//
+	//	rec.NextIndex      one past the highest index still IN the file
+	//	repair.NextIndex   one past the highest index the repair pass OBSERVED,
+	//	                   discarded records included
+	//	floor.burned()+1   one past everything durably BURNED -- written, or
+	//	                   permanently skipped by an earlier recovery
+	//
+	// plus, when recovery lost bytes it could not enumerate, floor.ceiling()+1:
+	// one past everything this data directory has EVER AUTHORISED.
+	//
+	// Three points make this correct, and they are the ones easiest to get
+	// wrong:
+	//
+	//  1. THE FLOOR'S `written` IS RAISED TO start-1 AT EVERY Open (see
+	//     floor.begin below). So a run that SKIPPED indices -- because a
+	//     quarantine or an unidentifiable discard forced it to -- and then wrote
+	//     nothing at all and crashed cannot have that skip forgotten: the skip is
+	//     durable even though no record carries it. That is exactly what lets the
+	//     ceiling branch be CONDITIONAL rather than unconditional. Without it,
+	//     "only jump when this recovery found damage" has an induction hole: the
+	//     NEXT start sees an intact (or empty) file, no damage, and happily
+	//     resumes below the indices the damaged run already authorised.
+	//
+	//  2. RESERVING AN INDEX IS NOT ISSUING IT. The floor's ceiling runs up to
+	//     indexReserveBlock-1 indices ahead of anything used; nothing was ever
+	//     told those numbers and no record carries them. So a clean log's own
+	//     high-water mark is a SOUND start, and the common case burns no gap at
+	//     all. Taking the ceiling unconditionally would burn up to a block on
+	//     every single restart, for nothing.
+	//
+	//  3. THE CEILING IS CONSULTED ONLY WHEN RECOVERY LOST SOMETHING IT COULD
+	//     NOT IDENTIFY. A discarded byte range may have held records whose
+	//     indices were never readable, so the file's arithmetic is a lower bound
+	//     there and only the floor can bound it from above. A normal restart --
+	//     clean shutdown or crash -- never takes this branch and never leaves a
+	//     hole.
+	// ---------------------------------------------------------------------
+	fileNext := rec.NextIndex
+	if repair.NextIndex > fileNext {
+		fileNext = repair.NextIndex
+	}
+	start := fileNext
+	quarantined := repair.Quarantined != ""
+	if floor.burned() == math.MaxUint64 || floor.ceiling() == math.MaxUint64 {
+		// Nothing can be appended without reusing an index, and reusing one is
+		// the thing this may never do. Refusing is the only honest answer.
+		wErr := w.Close()
+		return nil, fmt.Errorf("wal: open log %s: the durable index floor %s has reached the end of the 64-bit record index space (burned %d, reserved %d), so no index can be issued without reusing one, which invariant 1 forbids (close: %v)",
+			path, floor.Path(), floor.burned(), floor.ceiling(), wErr)
+	}
+	if b := floor.burned() + 1; b > start {
+		start = b
+	}
+	if repair.LostUnidentified {
+		if c := floor.ceiling() + 1; c > start {
+			start = c
+		}
+	}
+
+	w.advanceIndexTo(start)
+	// Report the index the next append will ACTUALLY use. internal/hub derives
+	// the message-sequence floor from this field (Recovered.NextIndex - 1), so
+	// leaving it at the file's own arithmetic would reissue message ids even
+	// though the WAL itself had jumped -- which is half of what defects e120153b
+	// and db350e39 actually were.
+	rec.NextIndex = start
+
+	// Read BEFORE begin, and that ordering is not incidental: begin CREATES the
+	// file, so existedAtOpen() answers "yes" from the moment it returns. Asking
+	// afterwards makes the migration warning below dead code that no test can
+	// ever see -- which is exactly what happened on the first cut of this
+	// function, and it was caught by a test that was written to expect the
+	// warning rather than to expect the silence.
+	migrating := !floor.existedAtOpen()
+
+	// The floor is written and FSYNCED BEFORE the Log is returned, and therefore
+	// before anything can append. Until this succeeds, the jump above exists only
+	// in memory and a crash would forget it.
+	if err := floor.begin(start); err != nil {
+		wErr := w.Close()
+		return nil, fmt.Errorf("wal: open log %s: recording the start index %d in the durable index floor: %w (close: %v)", path, start, err, wErr)
+	}
+	w.setIndexFloor(floor)
+
+	// SKIPPING INDEX SPACE SILENTLY IS THE SAME FAILURE AS DISCARDING SILENTLY,
+	// applied to the id space instead of the message space -- and silent discard
+	// is the defect invariant 6 actually names. So it is logged loudly and
+	// specifically whenever the start is above what the file alone would have
+	// given, at ERROR when a quarantine caused it and WARN otherwise.
+	if start > fileNext {
+		kv := []interface{}{
+			"path", path, "from", fileNext, "to", start, "indices_skipped", start - fileNext,
+			"index_floor", floor.Path(),
+			"why", "an index this data directory has already authorised is never authorised again (invariant 1, reaffirmed without narrowing 2026-08-02); the skipped indices are permanently burned and will appear as a hole in the log's index sequence",
+		}
+		if quarantined {
+			opts.Logger.Error("wal resumed the record index above the durable floor after a quarantine", kv...)
+		} else {
+			opts.Logger.Warn("wal resumed the record index above what the log file alone would have given", kv...)
+		}
+	}
+	// THE MIGRATION WINDOW, stated honestly rather than left to be discovered: a
+	// data directory that already holds WAL records but has no floor file was
+	// written by a binary that predates it. Until the file exists -- which it
+	// will, from the begin above -- a quarantine could still have reissued ids.
+	if migrating && (rec.Records > 0 || repair.DiscardCount > 0 || quarantined) {
+		opts.Logger.Warn("wal created the durable record index floor for an existing data directory",
+			"path", floor.Path(), "start_index", start,
+			"note", "this data directory predates the durable index floor; until this file existed, a quarantine or an unidentifiable discard could still have reissued record indices and the message ids derived from them")
+	}
+
 	if rec.Records > 0 {
 		opts.Logger.Info("wal replayed",
 			"path", path, "records", rec.Records, "applied", rec.Applied,
 			"aborted", rec.Aborted, "dangling", len(rec.Dangling),
 			"discarded", rec.DiscardCount, "missing_records", rec.MissingRecords,
-			"next_index", rec.NextIndex)
+			"first_index", rec.FirstIndex, "next_index", rec.NextIndex)
 	}
 	// EVERY replay-stage discard reaches the operator log. Replay has no logger
 	// of its own -- that is what keeps it usable as a read-only fsck -- so this
@@ -398,6 +542,19 @@ func (l *Log) Recovered() Recovered {
 
 // Path returns the WAL file the Log appends to.
 func (l *Log) Path() string { return l.w.Path() }
+
+// IndexFloorPath returns the durable record-index floor file backing this Log
+// (<data-dir>/wal-index-floor), or "" if there is none.
+//
+// It is for operator messages and tests. It is NOT a hook for writing to that
+// file: lowering it by hand reissues indices this data directory has already
+// authorised, which is exactly what the file exists to prevent.
+func (l *Log) IndexFloorPath() string {
+	if l.w == nil || l.w.floor == nil {
+		return ""
+	}
+	return l.w.floor.Path()
+}
 
 // Close closes the underlying WAL.
 //

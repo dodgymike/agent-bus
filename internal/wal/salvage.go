@@ -138,9 +138,37 @@ type repairPlan struct {
 	// records behind it prove is ours; it is rewritten, not obeyed.
 	HeaderDamaged bool
 
-	// LastIndex is the highest record index that SURVIVED, so LastIndex+1 is
-	// the index the next append uses.
+	// LastIndex is the highest record index that SURVIVED. It is the walk's
+	// ordering cursor -- a record whose index does not exceed it is out of order
+	// and goes -- and it is NOT the answer to "where does the next append
+	// start". See HighestSeen for that.
 	LastIndex uint64
+
+	// HighestSeen is the highest record index the walk OBSERVED ANYWHERE in the
+	// file: survivors AND discarded records alike.
+	//
+	// This is the field recovery resumes from, and the distinction from
+	// LastIndex is the whole of defect e120153b. One past the highest SURVIVOR
+	// hands a discarded tail record's index straight back out, and recovery
+	// cannot tell a torn write from a bit flipped in a record that was fsynced
+	// and acknowledged -- so that index may be one a client has already seen.
+	// Invariant 1 was reaffirmed WITHOUT narrowing on 2026-08-02: when recovery
+	// discards a record the index advances past the hole, it never rewinds.
+	HighestSeen uint64
+
+	// LostUnidentified reports that the walk threw away bytes it could not
+	// attribute to a known set of record indices, so HighestSeen is a LOWER
+	// BOUND on what this file once carried rather than the answer.
+	//
+	// The reasoning, because it is not obvious: a discarded FRAMING-stage region
+	// is a BYTE RANGE, and a range wide enough for two frames may have held a
+	// second record whose index was never readable. A known index inside a
+	// discard therefore proves a lower bound on what was lost, NEVER an upper
+	// one. So an identified discard is necessary but not sufficient, and the
+	// durable index floor (see indexfloor.go) is what covers the rest: when this
+	// is set, Open resumes from the floor's CEILING -- the highest index this
+	// data directory ever authorised -- instead of from the file's arithmetic.
+	LostUnidentified bool
 
 	// Kept is how many records survived; Rebuilt is how many of those had a
 	// corrupt LENGTH field that the record's own checksum proved recoverable.
@@ -183,6 +211,16 @@ func (p *repairPlan) add(d Discard) {
 	p.Bytes += d.Length
 	if len(p.Discards) < maxDiscardsRetained {
 		p.Discards = append(p.Discards, d)
+	}
+}
+
+// seeIndex records that this index was OBSERVED in the file, whether the record
+// carrying it survived or not. It only ever raises HighestSeen: an index that
+// was once authorised stays authorised however the walk later feels about the
+// bytes around it.
+func (p *repairPlan) seeIndex(idx uint64) {
+	if idx > p.HighestSeen {
+		p.HighestSeen = idx
 	}
 }
 
@@ -244,6 +282,9 @@ func salvage(path string, kind Kind, c codec, keep func(Record) error) (repairPl
 		plan.add(Discard{Stage: "framing", Offset: 0, Length: size,
 			Reason: fmt.Sprintf("the file is %d bytes, too short to hold even a %d-byte file header", size, headerSize)})
 		plan.TailAt = 0
+		// Nothing in these bytes was readable, so nothing about the indices this
+		// file once carried can be asserted from them.
+		plan.LostUnidentified = true
 		return plan, nil
 	}
 
@@ -284,10 +325,19 @@ func salvage(path string, kind Kind, c codec, keep func(Record) error) (repairPl
 				Index: rec.Index, Type: rec.Type, TypeKnown: true,
 				Reason: fmt.Sprintf("record index %d does not follow the previous surviving record (index %d): the record is intact but out of order, so it is an old record resurrected in place or a duplicate",
 					rec.Index, plan.LastIndex)})
+			// This discard does NOT set LostUnidentified. Its tag verified, so
+			// its index is known EXACTLY -- there is no byte range here whose
+			// contents could not be read, which is the condition that flag
+			// describes. seeIndex is called anyway, and is a no-op today because
+			// this branch only runs when the index is not above LastIndex; it is
+			// here so a future change to the ordering rule cannot silently drop
+			// an observed index.
+			plan.seeIndex(rec.Index)
 			off += rec.frameSize()
 			continue
 		}
 		plan.LastIndex = rec.Index
+		plan.seeIndex(rec.Index)
 		plan.Kept++
 		plan.Salvageable = true
 		if keep != nil {
@@ -322,6 +372,10 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, c codec, off, size int64, ke
 	}
 	if exhausted {
 		p.Exhausted = true
+		// The search gave up, so everything from here to the end of the file went
+		// without proof that any of it was unreadable -- and without any way to
+		// name the indices that went with it.
+		p.LostUnidentified = true
 	}
 
 	end := size
@@ -338,6 +392,7 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, c codec, off, size int64, ke
 	if hdrOK {
 		if rec, ok := rebuildFrame(f, c, off, end, hdr); ok && rec.Index > p.LastIndex {
 			p.LastIndex = rec.Index
+			p.seeIndex(rec.Index)
 			p.Kept++
 			p.Rebuilt++
 			p.Salvageable = true
@@ -350,11 +405,50 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, c codec, off, size int64, ke
 		}
 	}
 
+	// This region is going, and its contents can no longer be enumerated: it is a
+	// BYTE RANGE, not a record, and a range this wide may have held more records
+	// than the one header at its start describes. Say so, so that Open consults
+	// the durable ceiling rather than trusting this file's own arithmetic.
+	p.LostUnidentified = true
+
 	d := Discard{Stage: "framing", Offset: off, Length: end - off}
+	// indexRejected records that the discarded frame's DECLARED index was not
+	// plausible for this file and was therefore not believed. It is appended to
+	// the reason below so the decision is visible to an operator rather than
+	// silent.
+	indexRejected := ""
 	if hdrOK {
-		d.Index = binary.BigEndian.Uint64(hdr[4:12])
+		idx := binary.BigEndian.Uint64(hdr[4:12])
+		d.Index = idx
 		d.Type = Type(binary.BigEndian.Uint16(hdr[12:14]))
 		d.TypeKnown = true
+
+		// SECURITY: this index comes from a frame header whose MAC DID NOT
+		// VERIFY. On a WAL the payload is client-supplied, so these bytes are
+		// ATTACKER-INFLUENCED: one flipped or forged length-and-index field
+		// could otherwise set the durable floor to near MaxUint64 and
+		// permanently exhaust this bus's id space -- a denial of service that
+		// survives every restart, because the floor is deliberately never
+		// lowered.
+		//
+		// So the declared index is believed only when it is PLAUSIBLE FOR THIS
+		// FILE: it must advance on the last survivor, and by no more than the
+		// number of records the remaining bytes could physically have held (a
+		// region of B bytes cannot have held more than B/frameHeaderSize
+		// records, and the +1 admits the frame at off itself).
+		//
+		// The bound only ever makes recovery LESS aggressive, and that is safe
+		// because it is not the last line of defence: the DURABLE FLOOR is the
+		// trusted backstop for whatever this declines to believe. Rejecting a
+		// real index costs at most a smaller jump here, and LostUnidentified
+		// above already sends Open to the ceiling.
+		maxAdvance := (size-off)/c.frameHeaderSize() + 1
+		if idx > p.LastIndex && idx-p.LastIndex <= uint64(maxAdvance) {
+			p.seeIndex(idx)
+		} else {
+			indexRejected = fmt.Sprintf(" the damaged frame declares record index %d, which is not plausible for this file (the last surviving index is %d and the %d bytes from here to the end of the file could hold at most %d records), so the declared index was NOT used to advance the index sequence -- it comes from a header whose MAC did not verify and is therefore untrusted input; recovery resumes from the durable index floor instead.",
+				idx, p.LastIndex, size-off, maxAdvance)
+		}
 	}
 	switch {
 	case exhausted:
@@ -370,6 +464,7 @@ func (p *repairPlan) recoverAfterDamage(f *os.File, c codec, off, size int64, ke
 		d.Reason = fmt.Sprintf("the frame at offset %d is damaged and no intact record follows it anywhere in the file, so it and the %d bytes after it were discarded as a torn tail",
 			off, end-off-1)
 	}
+	d.Reason += indexRejected
 	p.add(d)
 	if end >= size {
 		p.TailAt = off

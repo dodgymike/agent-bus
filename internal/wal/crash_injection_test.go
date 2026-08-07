@@ -701,10 +701,23 @@ func TestCrashInjectionMidCommitWriteKill(t *testing.T) {
 		t.Errorf("Recovered = %+v, want 2 applied and 0 aborted", rec)
 	}
 
-	// (4) The prepared entry's index is BURNED. The prepare frame completed its
-	// fsync, so that index is on stable storage and must never be handed to a
-	// different entry (invariant 1). The torn commit frame's index 6 may be
-	// reissued -- its fsync never returned, so nothing can have observed it.
+	// (4) EVERY INDEX THE DEAD PROCESS AUTHORISED IS BURNED -- index 5, which was
+	// fsynced as a PREPARE, and index 6, which the torn commit frame carried.
+	//
+	// This asserted 6 until 2026-08-07, on the argument that the torn frame's fsync
+	// never returned so nothing could have observed index 6. That argument was
+	// rejected: recovery cannot tell an interrupted write from a completed,
+	// acknowledged one that was later corrupted, so it has no basis for the claim.
+	// Invariant 1 was reaffirmed WITHOUT narrowing on 2026-08-02, and the fix is
+	// the durable index floor.
+	//
+	// The number is indexReserveBlock+1 and it is derived, not magic: the child ran
+	// wal.Open, which fsynced a reservation for a block of indexReserveBlock
+	// indices BEFORE the first append, and was then SIGKILLed without ever sealing
+	// it. The torn tail sets Repair.LostUnidentified, so Open stops trusting the
+	// file's arithmetic and resumes one past the durable CEILING. Indices 6..256
+	// are burned unused -- the deliberate price of amortising the floor write, and
+	// cheaper than any chance of reissuing an id.
 	l, err := Open(LogOptions{Dir: dir})
 	if err != nil {
 		t.Fatalf("Open to resume: %v", err)
@@ -714,9 +727,13 @@ func TestCrashInjectionMidCommitWriteKill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write after the crash: %v", err)
 	}
-	if c.PrepareIndex != 6 {
-		t.Fatalf("the first write after the crash got prepare index %d, want 6: index 5 was fsynced as a PREPARE and must never be reissued",
-			c.PrepareIndex)
+	if want := uint64(indexReserveBlock) + 1; c.PrepareIndex != want {
+		t.Fatalf("the first write after the crash got prepare index %d, want %d: index 5 was fsynced as a PREPARE and index 6 was authorised for the torn commit, so recovery must resume above EVERY index this data directory ever authorised, not at the first one the surviving bytes leave free",
+			c.PrepareIndex, want)
+	}
+	// The floor is what supplied that answer, so it must actually be on disk.
+	if l.IndexFloorPath() == "" {
+		t.Error("Log.IndexFloorPath() is empty after recovering a crashed data directory: without the floor there is nothing that could have bounded the burned indices")
 	}
 	assertIndicesUnique(t, path)
 }
@@ -838,13 +855,16 @@ func TestCrashInjectionDiscardPathsRecoverAndLog(t *testing.T) {
 			},
 			wantSurvivors: []uint64{1, 2, 3, 4, 5},
 			wantApplied:   []Committed{txn1, txn2},
-			wantNextIndex: 6,
+			// 7, not 6: the torn frame's header survived, so index 6 was OBSERVED
+			// and is burned. The counter steps over it (invariant 1). Expecting 6
+			// was defect e120153b -- the discarded frame's index handed back out.
+			wantNextIndex: 7,
 			wantFraming:   1,
 			wantLog: []logExpect{
 				{"ERROR", "wal discarded a damaged record", []string{"stage=framing", "record_index=6", "record_type=commit", "discarded as a torn tail"}},
 				{"WARN", "wal truncated damage at the end of the log", []string{"at=", "removed="}},
 			},
-			wantNote: "the prepare whose commit was torn away is unresolved and invisible; the two acknowledged entries survive",
+			wantNote: "the prepare whose commit was torn away is unresolved and invisible; the two acknowledged entries survive, and the torn commit's index is burned rather than reissued",
 		},
 		{
 			// PATH 2: a COMPLETE final record whose checksum fails. Not a torn
@@ -865,13 +885,17 @@ func TestCrashInjectionDiscardPathsRecoverAndLog(t *testing.T) {
 			},
 			wantSurvivors: []uint64{1, 2, 3, 4, 5},
 			wantApplied:   []Committed{txn1, txn2},
-			wantNextIndex: 6,
+			// 7, not 6. This row is the sharpest case for the rule: the file is
+			// FULL LENGTH, so record 6 may well have been fsynced and acknowledged
+			// to a client before a bit rotted. Handing its index to the next write
+			// would give two different records the same id.
+			wantNextIndex: 7,
 			wantFraming:   1,
 			wantLog: []logExpect{
 				{"ERROR", "wal discarded a damaged record", []string{"stage=framing", "record_index=6", "record_type=commit", "checksum"}},
 				{"WARN", "wal truncated damage at the end of the log", nil},
 			},
-			wantNote: "an acknowledged commit lost to bit rot must be discarded LOUDLY, and its index must not be reissued to a survivor",
+			wantNote: "an acknowledged commit lost to bit rot must be discarded LOUDLY, and its index must be burned rather than reissued to any later record",
 		},
 		{
 			// PATH 3: THE CASCADE CASE. Damage in the middle with intact,
@@ -1110,7 +1134,9 @@ func TestCrashInjectionDiscardPathsRecoverAndLog(t *testing.T) {
 			}
 			if fresh.PrepareIndex != tc.wantNextIndex {
 				t.Errorf("the write after recovery got prepare index %d, want %d: the next append starts one past the "+
-					"highest index that SURVIVED, and never reuses a survivor's", fresh.PrepareIndex, tc.wantNextIndex)
+					"highest index the log was OBSERVED to carry -- survivors AND discarded records -- and never below the "+
+					"durable index floor. A discarded record's index is BURNED, not handed back out (invariant 1, reaffirmed "+
+					"without narrowing 2026-08-02).", fresh.PrepareIndex, tc.wantNextIndex)
 			}
 			if err := l.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
@@ -1120,8 +1146,9 @@ func TestCrashInjectionDiscardPathsRecoverAndLog(t *testing.T) {
 			// own account of itself.
 			wantIdx := append(append([]uint64{}, tc.wantSurvivors...), tc.wantNextIndex, tc.wantNextIndex+1)
 			if gotIdx := scanIndices(t, path, KindWAL); !sameIndices(gotIdx, wantIdx) {
-				t.Fatalf("the recovered log holds records %v, want %v (survivors keep their ORIGINAL indices, so a repaired "+
-					"log has HOLES, and the two new records follow them): %s", gotIdx, wantIdx, tc.wantNote)
+				t.Fatalf("the recovered log holds records %v, want %v (survivors keep their ORIGINAL indices and a discarded "+
+					"record's index is burned, so a repaired log has HOLES, and the two new records follow them): %s",
+					gotIdx, wantIdx, tc.wantNote)
 			}
 			assertIndicesUnique(t, path)
 
@@ -1326,10 +1353,36 @@ func TestCrashInjectionEvictsTooManyUnresolvedPrepares(t *testing.T) {
 //     can rescue that record, so EXACTLY ONE record is discarded -- and the
 //     seven behind it still survive.
 func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
-	const txns = 20          // 40 records: 20 prepare/commit pairs
-	const damagedIndex = 33  // a mid-file record with 8 records behind it
-	const finalIndex = 40    // the highest index the fixture writes
-	const wantNextIndex = 41 // one past it: the reviewer's probe saw 33 here
+	const txns = 20            // 40 records: 20 prepare/commit pairs
+	const damagedIndex = 33    // a mid-file record with 8 records behind it
+	const finalIndex = 40      // the highest index the fixture writes
+	const firstFreeInFile = 41 // one past it: the reviewer's probe saw 33 here
+
+	// wantNextIndex is where the index resumes, and it is ABOVE what the file
+	// alone would give. The reason is the ONE JUNK BYTE these cases append, and it
+	// is deliberate rather than incidental:
+	//
+	// A scrap smaller than a frame header is discarded as a FRAMING-STAGE REGION,
+	// not as a record -- there is nothing in one byte to read an index out of. That
+	// sets Repair.LostUnidentified, which is recovery saying "the bytes I threw
+	// away belonged to a record whose index I cannot name". Open then stops
+	// trusting the file's arithmetic and resumes one past the durable CEILING: the
+	// highest index this data directory ever AUTHORISED, which the fixture's own
+	// wal.Open reserved in a block of indexReserveBlock before its first append.
+	// Indices 41..256 are burned unused.
+	//
+	// That is the correct trade and not a regression. The scrap plausibly belongs
+	// to record 41, whose index was reserved and fsynced before any byte of it was
+	// written; reissuing 41 would give two records one id, and a burned block costs
+	// nothing but a hole. Holes are legal and permanent (invariant 1 beats
+	// gap-freeness).
+	//
+	// IT IS NOT WHAT THIS TEST IS ABOUT, and the two assertions are kept separate
+	// below precisely so that the original point cannot be lost in it: ONE damaged
+	// record must cost ONE record, never the eight committed records behind it.
+	// That is security's DUR-11 finding, and it is proved by the SURVIVOR and
+	// APPLIED-ENTRY sweeps, which are unchanged and must stay exactly as strong.
+	const wantNextIndex = indexReserveBlock + 1
 
 	buildFixture := func(t *testing.T) (dir, path string, recs []Record, acked []Committed) {
 		t.Helper()
@@ -1394,11 +1447,21 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 			t.Fatalf("Open: %v: damage is never fatal", err)
 		}
 
-		// THE ASSERTION THE PROBE FAILED. NextIndex must still be 41; the probe
-		// saw 33 because eight committed records had been deleted.
+		// THE ASSERTION THE PROBE FAILED, kept in its original form: the index must
+		// never go BACKWARDS. The probe saw 33 because eight committed records had
+		// been deleted, so anything below 41 here means the cascade is back.
+		if rec.NextIndex < firstFreeInFile {
+			t.Fatalf("NextIndex = %d, want at least %d: %d committed records were deleted by ONE flipped bit in a length field",
+				rec.NextIndex, firstFreeInFile, (int64(firstFreeInFile)-int64(rec.NextIndex))/2)
+		}
+		// And where exactly it resumes: above the durable CEILING, because the junk
+		// byte is a region discard whose index cannot be read. See the long note on
+		// wantNextIndex -- this is a deliberate burn of the reserved block, not a
+		// second cascade, and the survivor sweeps below are what prove the
+		// difference.
 		if rec.NextIndex != wantNextIndex {
-			t.Fatalf("NextIndex = %d, want %d: %d committed records were deleted by ONE flipped bit in a length field",
-				rec.NextIndex, wantNextIndex, (int64(wantNextIndex)-int64(rec.NextIndex))/2)
+			t.Fatalf("NextIndex = %d, want %d (one past the durable ceiling): the trailing junk byte cannot be attributed to a readable index, so recovery resumes above every index this data directory ever authorised rather than guessing from the file",
+				rec.NextIndex, wantNextIndex)
 		}
 		// Only the length was wrong, so the record's own checksum proves it
 		// complete and it is RECOVERED: the whole accepted history comes back.
@@ -1446,11 +1509,18 @@ func TestCrashInjectionMidFileDamageDoesNotCascade(t *testing.T) {
 			t.Fatalf("Open: %v: damage is never fatal", err)
 		}
 
-		// Still 41. The record that was really damaged is gone; the SEVEN intact
-		// records behind it are not, and neither is the high-water mark.
+		// The record that was really damaged is gone; the SEVEN intact records
+		// behind it are not, and the high-water mark never moves BACKWARDS.
+		if rec.NextIndex < firstFreeInFile {
+			t.Fatalf("NextIndex = %d, want at least %d: discarding the damaged record must not move the high-water mark backwards, "+
+				"because the records behind it survive", rec.NextIndex, firstFreeInFile)
+		}
+		// It moves FORWARDS, to one past the durable ceiling, for the junk byte --
+		// see the note on wantNextIndex. Forwards is always safe; backwards is the
+		// defect.
 		if rec.NextIndex != wantNextIndex {
-			t.Fatalf("NextIndex = %d, want %d: discarding the damaged record must not move the high-water mark backwards, "+
-				"because the records behind it survive", rec.NextIndex, wantNextIndex)
+			t.Fatalf("NextIndex = %d, want %d (one past the durable ceiling): the trailing junk byte is a region discard with no readable index, so recovery resumes above every index this data directory ever authorised",
+				rec.NextIndex, wantNextIndex)
 		}
 		want := make([]uint64, 0, 2*txns)
 		for i := uint64(1); i <= finalIndex; i++ {

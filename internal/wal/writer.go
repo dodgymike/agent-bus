@@ -34,6 +34,15 @@ type Writer struct {
 	size     int64  // offset the next Append will write at
 	closed   bool
 	poisoned error // non-nil once a write or fsync has failed
+
+	// floor is the DURABLE index floor for the data directory, or nil.
+	//
+	// It is nil for the AUDIT log, for a Writer built by the exported
+	// OpenWriter, and in tests; nil means no reservation is made and the
+	// behaviour is exactly what it was before the floor existed. Only wal.Open
+	// attaches one, because only Open knows the data directory and only the WAL
+	// feeds internal/hub's message-sequence floor.
+	floor *indexFloor
 }
 
 // OpenWriter opens path for appending records of the given kind.
@@ -190,6 +199,28 @@ func (w *Writer) Append(t Type, payload []byte) (Record, error) {
 		return Record{}, fmt.Errorf("wal: append to %s: %w", w.path, ErrClosed)
 	}
 
+	// THE INDEX IS MADE DURABLE BEFORE IT IS USED, never after. That ordering is
+	// the whole of the guarantee: a number that reached a frame was authorised on
+	// stable storage first, so no crash, no tail repair and no quarantine can
+	// leave the next start believing it is free. It is invariant 4's ordering
+	// ("nothing is acknowledged before it is durable") applied one layer down, to
+	// the id rather than the record.
+	//
+	// A failure to reserve POISONS the Writer. A writer that cannot durably
+	// reserve must not write: appending anyway would stamp an index nothing has
+	// authorised into the log, which is precisely the state the floor exists to
+	// make impossible. Fail-closed, in the same voice as the existing poison
+	// discipline -- the first failure latches and every later Append reports it.
+	//
+	// The cost is amortised: reserve only touches the disk when the index passes
+	// the durable ceiling, which is once per indexReserveBlock appends.
+	if w.floor != nil {
+		if err := w.floor.reserve(w.next); err != nil {
+			return Record{}, w.poison(fmt.Errorf("wal: append to %s: reserving record index %d in the durable index floor %s: %w",
+				w.path, w.next, w.floor.Path(), err))
+		}
+	}
+
 	off, index := w.size, w.next
 	frame := w.c.encodeFrame(index, t, payload)
 
@@ -235,6 +266,30 @@ func (e *poisonError) Is(target error) bool { return target == ErrPoisoned }
 
 func (e *poisonError) Unwrap() error { return e.cause }
 
+// advanceIndexTo raises the index the next Append will use to n. It NEVER
+// lowers it: an n at or below the current value is a no-op.
+//
+// Lowering would reissue an index, which invariant 1 forbids, so a caller
+// passing a lower n is a PROGRAMMING ERROR rather than a request -- it is
+// ignored here rather than honoured, because the one thing this must not do is
+// obey. Open is the only caller: it raises the writer to the maximum of the
+// file's arithmetic and the durable floor.
+func (w *Writer) advanceIndexTo(n uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if n > w.next {
+		w.next = n
+	}
+}
+
+// setIndexFloor attaches the durable index floor. It is called by Open, once,
+// before the Writer is reachable by anything that could append.
+func (w *Writer) setIndexFloor(f *indexFloor) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.floor = f
+}
+
 // NextIndex reports the index the next Append will use.
 func (w *Writer) NextIndex() uint64 {
 	w.mu.Lock()
@@ -276,6 +331,18 @@ func (w *Writer) Sync() error {
 // Close syncs and closes the file. It is idempotent. If the Writer is
 // poisoned, Close still closes the descriptor but reports the poison error, so
 // a caller that only checks Close still learns the file is suspect.
+//
+// On a CLEAN close it also SEALS the durable index floor, recording that every
+// index up to the last one written is burned. The seal happens AFTER the file's
+// own fsync and only if that fsync succeeded: the floor's claim is "these
+// indices are in the log", so it must not be made until the log's bytes are
+// durable. If the writer is POISONED the floor is deliberately NOT sealed -- we
+// do not know what reached the file, and leaving the reservation standing is the
+// conservative side (the next start resumes higher, burning at most a block,
+// which is free; resuming lower is the defect).
+//
+// A seal failure is folded into the returned error exactly as a failed sync is,
+// so a caller that only checks Close still learns the floor is suspect.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -288,6 +355,13 @@ func (w *Writer) Close() error {
 	if first == nil {
 		if err := w.f.Sync(); err != nil {
 			first = w.poison(fmt.Errorf("wal: fsync %s on close: %w", w.path, err))
+		}
+	}
+	if first == nil && w.floor != nil {
+		// w.next-1 is the highest index actually written; w.next is 1 and this is
+		// 0 when nothing was appended, which seal treats as "raise nothing".
+		if err := w.floor.seal(w.next - 1); err != nil {
+			first = fmt.Errorf("wal: close %s: sealing the durable index floor %s: %w", w.path, w.floor.Path(), err)
 		}
 	}
 	if err := w.f.Close(); err != nil && first == nil {

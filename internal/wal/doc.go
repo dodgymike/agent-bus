@@ -74,6 +74,53 @@
 // access -- the key file is in that directory. Accepted, recorded, and stated in
 // PROTOCOL.md rather than discovered later.
 //
+// # The durable record-index floor
+//
+// One file per data directory: IndexFloorFileName ("wal-index-floor"), mode
+// 0600, on-disk format version 4 (RESERVED in the Spec Server
+// `ondisk-format-version` namespace, not chosen by eye -- 1 and 2 are the WAL
+// frame format above, 3 is ids/agent-suffixes). A header line carrying a
+// SHA-256 of the body, then two lines:
+//
+//	agent-bus-wal-index-floor v4 sha256=<64 hex>
+//	reserved <decimal uint64>
+//	written  <decimal uint64>
+//
+// `reserved` is the highest index this data directory has EVER AUTHORISED;
+// `written` is the highest index that is BURNED -- written to the log or
+// permanently skipped by recovery. Both are strictly non-decreasing, always
+// written <= reserved, and NEITHER IS EVER LOWERED. There is deliberately no
+// clean-shutdown flag and no field that can rewind.
+//
+// It exists because deriving the next index from the log ALONE reissues ids, in
+// two ways that were both reported as defects and both reversed by the user:
+// one past the highest SURVIVOR hands a discarded tail record's index straight
+// back out, and a QUARANTINE resets the whole index space to 1. internal/hub
+// derives the message-sequence floor from the recovered high-water mark, so both
+// reissued MESSAGE IDS too. Keeping the floor OUTSIDE the log makes invariant 1
+// structural rather than something every repair path must remember: no
+// truncation, rewrite or quarantine can lower a number that was never in the
+// file. Open resumes above the maximum of the replayed high-water mark, what the
+// repair pass observed, and this floor.
+//
+// The floor is written AHEAD of the index it authorises, in blocks of
+// indexReserveBlock, so the amortised cost is about one extra fsync per 256
+// appends. The price of the block is that a crash may burn up to 255 unused
+// indices, which appear as a HOLE in the log's index sequence. Holes are legal,
+// permanent and correct -- invariant 1 beats gap-freeness.
+//
+// A MISSING floor file is benign (a data directory written by a binary that
+// predates it) and yields a zero floor with a WARN; making it fatal would brick
+// every deployed bus on upgrade, which is the bricking upgradeV1 exists to
+// avoid. A file that EXISTS but does not verify is FATAL, wraps
+// ErrIndexFloorCorrupt, and is NEVER regenerated -- regenerating resumes the
+// index below numbers already handed out, silently, and nothing downstream can
+// detect that. That is the same narrow exception already granted for the MAC key
+// and the persisted bus id: damage to the directory's IDENTITY, not to the log,
+// and the error names a one-step remedy so a bus is never permanently bricked.
+// A crash cannot produce it -- the write is temp file, fsync, rename, directory
+// fsync -- so corruption means media damage or tampering.
+//
 // # Format version 1, and the upgrade
 //
 // Version 1 was the same shape with UNKEYED CRC32C tags: a 16-byte file header

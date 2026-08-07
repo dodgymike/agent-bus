@@ -471,10 +471,17 @@ func TestWALCrashTornFrameTailIsRepaired(t *testing.T) {
 		t.Errorf("Repaired.Removed = %d bytes, want more than the %d-byte frame header: "+
 			"the child is meant to have torn the frame inside its PAYLOAD", rep.Removed, FrameHeaderSize)
 	}
-	// Records 1-4 are the two committed transactions; the torn frame would have
-	// been record 5.
-	if rep.NextIndex != 5 {
-		t.Errorf("Repaired.NextIndex = %d, want 5", rep.NextIndex)
+	// Records 1-4 are the two committed transactions; the torn frame carried
+	// record index 5, its header survived, so that index was OBSERVED and is
+	// burned. The repair therefore reports 6 -- one PAST it. This expected 5 until
+	// 2026-08-07, which was defect e120153b.
+	if rep.NextIndex != 6 {
+		t.Errorf("Repaired.NextIndex = %d, want 6: the discarded frame's index 5 is burned, and the repair reports the index past it rather than handing it back", rep.NextIndex)
+	}
+	// The discard is a byte RANGE whose contents cannot be enumerated, so the
+	// repair's own answer is a lower bound and Open must go to the durable floor.
+	if !rep.LostUnidentified {
+		t.Errorf("Repaired.LostUnidentified = false, want true: recovery threw away bytes it could not attribute to a known set of indices, and only the durable floor can bound what they held")
 	}
 	if rep.Path != path || rep.Reason == "" {
 		t.Errorf("Repaired = %+v, want it to name the path and the reason", rep)
@@ -509,18 +516,34 @@ func TestWALCrashTornFrameTailIsRepaired(t *testing.T) {
 		t.Errorf("Recovered() = %+v, want 2 applied, 0 aborted, no dangling", rec)
 	}
 
-	// (5) The first write after recovery takes index 5 -- the index the torn
-	// frame carried. That REISSUE is deliberate and documented on
-	// TailRepair.NextIndex: the frame never completed its fsync, Append returns
-	// only after fsync, and nothing is acknowledged before Append returns, so no
-	// id inside that frame can ever have been observed by a client, peer or
-	// relay. Invariant 1 protects OBSERVED ids, and none of these were.
+	// (5) The first write after recovery resumes ABOVE EVERYTHING THE DEAD PROCESS
+	// EVER AUTHORISED, at indexReserveBlock+1.
+	//
+	// This block used to assert {5 6}, and called the reissue "deliberate and
+	// documented": the frame never completed its fsync, so no id inside it can have
+	// been observed. That reasoning was reversed on 2026-08-02 when the user
+	// reaffirmed invariant 1 WITHOUT narrowing, and it is unsound on its own terms
+	// -- recovery cannot distinguish a frame that was never finished from one that
+	// was finished, fsynced, acknowledged and then corrupted, so "nothing observed
+	// it" is not a fact recovery has access to.
+	//
+	// Where the number comes from, so it is not mistaken for a magic constant: the
+	// child ran wal.Open, which reserved a block of indexReserveBlock indices
+	// AHEAD of the first append and fsynced that reservation before writing a
+	// byte. The child was then SIGKILLed, so it never sealed the reservation back
+	// down. The torn tail sets LostUnidentified, which tells Open the file's own
+	// arithmetic is a lower bound, so Open resumes one past the durable CEILING --
+	// every index this data directory has ever authorised. Indices 5..256 are
+	// burned unused. That gap is the deliberate price of the block reservation:
+	// holes are legal and permanent, and invariant 1 beats gap-freeness.
+	wantPrepare := uint64(indexReserveBlock) + 1
 	c, err := l.Write(Entry{Kind: "message", Body: json.RawMessage(`{"seq":9}`)})
 	if err != nil {
 		t.Fatalf("Write after the repair: %v", err)
 	}
-	if c.PrepareIndex != 5 || c.CommitIndex != 6 {
-		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {5 6}", c.PrepareIndex, c.CommitIndex)
+	if c.PrepareIndex != wantPrepare || c.CommitIndex != wantPrepare+1 {
+		t.Fatalf("the write after the repair got {prepare:%d commit:%d}, want {%d %d}: recovery must resume above every index the killed process authorised, not at the one the torn frame carried ({5 6} is the old, rejected reissue)",
+			c.PrepareIndex, c.CommitIndex, wantPrepare, wantPrepare+1)
 	}
 	assertIndicesUnique(t, path)
 }
