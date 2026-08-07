@@ -3010,3 +3010,431 @@ recorded proof command, not edited directly (task state is server-owned, never h
 noted, not fixed: `.gitignore`'s `/busctl` entry and a descriptive comment in
 `internal/httpapi/composition_test.go` that names `busctl` — both outside this task's file-ownership
 boundary.
+
+---
+
+## 2026-08-07 — DISCOVERY-DOC: a separate `/v1/discovery` document, not a bigger `/v1/info`
+
+**Context.** An agent that holds nothing but a bus URL has no way to learn how to enrol short of
+reading source or being told out of band. The candidate fix was obvious and cheap-looking: fold a
+protocol guide into `/v1/info`, which is already unauthenticated and already the first thing an agent
+fetches.
+
+**The case FOR extending `/v1/info`, stated honestly because it has real merit.** `/v1/info` is
+already on the allow-list and already the first call a fresh agent makes; adding fields to it costs
+no new unauthenticated route, no new entry on the allow-list, and no second thing for a client to
+remember to fetch. Fewer routes is, all else equal, a smaller surface.
+
+**Why it lost.** `/v1/info`'s exact field set is pinned by a security test *precisely because* that
+endpoint's growth was already judged a risk (`healthz_info_test.go`, see the original 2026-08-02
+entry this addends: "do not add data-dir, listen address, peer list, or agent roster here without
+updating that test and recording the decision"). Folding a multi-kilobyte protocol guide into it
+would force that pin to do one of two things, both bad: cover a large nested structure (steps,
+endpoints, enrolment, session, client, limitations — ten fields including four objects and three
+arrays), which buries the security-relevant assertion ("this unauthenticated endpoint leaks nothing
+about bus state") under wording churn that has nothing to do with security; or go slack and stop
+being exhaustive, which is the exact failure mode the pin exists to prevent. Every future wording
+change to the protocol description — a clearer sentence in `steps`, a new `limitations` entry — would
+then be an edit to a security-sensitive test, which is the wrong incentive: it either discourages
+improving the wording or trains reviewers to rubber-stamp diffs to that test.
+
+It also conflates two different response profiles that have nothing to do with each other.
+`/v1/info` changes on every call (`uptime_seconds`) and is meant to be polled cheaply and often — a
+liveness/version probe. The discovery document is static for the life of the process and cacheable
+indefinitely by a well-behaved client. Bolting the second job onto the first would make a probe
+response large and repetitive, or force a cache-control story that only one field of the response
+actually wants.
+
+**Decision.** Two endpoints, two jobs, two independent exact-field-set pins:
+
+- `GET /v1/info` keeps its three original fields (`bus_id`, `version`, `uptime_seconds`) and gains
+  exactly ONE new field, `discovery`, whose value is the compile-time constant
+  `httpapi.RouteDiscovery` (`"/v1/discovery"`). It costs the field-set pin one entry, not a nested
+  structure, and the entry is safe to pin forever because its value cannot change: it is a string
+  literal, not a read of anything.
+- `GET /v1/discovery` is a new, separate, unauthenticated, bounded (test ceiling 16 KiB, observed
+  ~6.1 KB), STATIC document. It gets its own exhaustive field-set pin
+  (`TestDiscoveryFieldSetIsPinned`, `discovery_test.go`), its own DoS/leak-bound test
+  (`TestDiscoveryDocumentIsStatic`, byte-identity across differently-configured servers), and its own
+  leak guard (`TestDiscoveryDocumentLeaksNoBusState`) — independent of `/v1/info`'s tests, so a wording
+  change to one document's prose never touches the other's security assertions.
+
+`/v1/info` is still reachable from every caller that only knows it: the new `discovery` pointer field
+is proven to resolve (`TestDiscoveryPointerOnInfo` follows it end to end), so nothing that used to be
+learnable from `/v1/info` alone becomes unreachable.
+
+**Two supporting decisions, made in the same change:**
+
+1. **The `endpoints` list inside the discovery document is STATIC, not derived from the mux.**
+   `discovery.go`'s `discoveryEndpoints` is a package-level `[]DiscoveryEndpoint` literal, never a
+   projection of `(*Server).Routes()` / `s.routes`. Deriving it from the mux would leak whether
+   `Options.Hub` and `Options.Auth` are wired — exactly the configuration enumeration that
+   `authMiddleware`'s 401-not-404 behaviour on unregistered paths already exists to withhold (see the
+   AUTH-2 entry). A static list describes the protocol the software speaks, in every build, and
+   reveals nothing about how this particular instance is configured. `TestDiscoveryDocumentIsStatic`
+   proves this by byte-identity across five differently-wired servers — including one with the full
+   messaging surface registered and one without — rather than by field-by-field inspection, because
+   byte-identity is the only check that catches a field nobody thought to look for.
+2. **The document returns relative paths and deliberately does not echo a self-URL.** The `Host`
+   header on an inbound request is client-supplied, not server-verified; a document that reflected it
+   back as "here is my base URL" would let an attacker on the network path point a reader at a bus of
+   the attacker's choosing while still naming this bus's real protocol shape. `paths_are_relative_to`
+   states this explicitly rather than leaving a reader to assume a self-URL exists.
+
+**Consequences.**
+
+- Two exact-field-set tests exist where one might have sufficed, and both must be maintained. That is
+  accepted as the cost of keeping a security-sensitive pin narrow and a protocol document freely
+  editable.
+- The discovery document's `enrolment.invite_required` is `false` as of this build — enrolment is
+  genuinely open, not invite-gated, and the document says so plainly rather than pre-announcing a
+  control that does not exist yet (`TestDiscoveryEnrolmentIsHonest` pins this and records that the
+  flip to `true` must land in the SAME task as the invite gate itself, never before it).
+- The endpoint list omits `POST /v1/broadcast` (it answers 501) and states that honestly in
+  `limitations` rather than advertising a route that refuses everything.
+- `auth.SessionSigningContext` is never served in the document, by design (see invariant 3 and the
+  "Enrolment and sessions" section of `CONTRACTS-HTTP.md`): a client must pin the domain-separation
+  prefix at compile time, not learn it from the server.
+
+---
+
+## 2026-08-07 — MTLS-PIN: the client pins the bus's certificate, and `InsecureSkipVerify` gets exactly one home
+
+**Task:** `MTLS-PIN` (`8c46dc93-16d0-4eea-8ad3-ac51136551e2`).
+
+**STATUS OF EVERYTHING BELOW — read before quoting it.** This records the DECISIONS taken by that
+task and describes what its change DOES; it is not a claim that any of it is running. The change is
+**CODE-ONLY**: the bus does not serve TLS at all yet (`MTLS-LISTENER`), so no agent-bus deployment
+anywhere exercises a single line of it, and none can until the listener ships. Read "the client
+refuses X" throughout as "the client, as written in `client/`, refuses X" — a statement about the
+source, never about an observed production behaviour.
+
+### 1. Pinning lands BEFORE the TLS listener, on purpose
+
+This inverts the obvious order and the reason is a finding, not a preference. The security gate
+showed that overwriting all three key files in an established data directory makes the bus start
+**cleanly, with a different fingerprint, and no warning at all**. Key **loss** is loud — the bus
+refuses to regenerate over a partial set. Key **substitution** is silent.
+
+The fingerprint the bus mints (`MTLS-BUSCERT`, commit `16f54c9`) is therefore worth nothing as a
+defence until something checks it. Shipping the listener first would mean a window in which the bus
+serves TLS, publishes a fingerprint, and no client compares it against anything — which reads as
+"we have mTLS" while providing the confidentiality of TLS and none of the identity. The checker
+lands first; the listener may then land into a client population that already refuses an
+unrecognised certificate.
+
+### 2. `InsecureSkipVerify: true` is now permitted in EXACTLY ONE FILE — `client/pin.go`
+
+This reverses the absolute form of the 2026-08-02 rule ("E7: no plaintext escape hatch"), which
+banned the literal from `client/` and `cmd/agent-busctl/` outright, and it needs stating plainly
+rather than being buried in a test.
+
+**Why the absolute ban could not survive contact with the requirement.** Invariant 11 specifies
+self-signed certificates, **no CA**, and **no trust-on-first-use**. Go's default chain verification
+therefore cannot succeed and cannot be configured to: there is no root to chain to, and the client
+holds a 32-byte fingerprint rather than the certificate, so it cannot construct an `x509.CertPool`
+either. `crypto/tls` offers exactly one supported way to substitute a verification policy — disable
+the default chain check and supply `VerifyPeerCertificate` — and the field's own documentation
+describes that pairing. A ban with no exception would not have prevented the exception; it would
+have pushed it into a package the guard does not scan, which is strictly worse than one loud,
+reviewed occurrence.
+
+**What replaces the ban is stricter, not looser**, and it is mechanical (`client/guard_test.go`):
+
+- `TestNoInsecureSkipVerifyAnywhere` — the literal appears in **exactly one file and exactly once**.
+  Not "rarely": once, counted. Naming it in prose in that file is a failure too, so the count stays
+  a count.
+- `TestPinnedSkipIsAlwaysPairedWithAPinCheck` — an **AST** walk, not a grep, so it can see structure:
+  any composite literal setting it `true` must set `VerifyPeerCertificate` non-nil **in the same
+  literal**; setting it by **assignment** is banned outright (an assignment can be conditional and
+  far from the literal); and **at least one such paired literal must exist**, so the guard cannot
+  pass on a tree where pinning was deleted.
+- `TestClientHasNoInsecureVerificationFlag` — no flag, env var, `Config` field or constant may be
+  NAMED for weakening verification. Invariant 11 forbids a flag that does it *silently*; we read
+  that as forbidding the flag at all. A documented hole is not better than a hidden one, it is a
+  hole with a manual.
+
+The thing being guarded is one line wide and completely silent: a `tls.Config` with the callback
+**deleted** still compiles, still completes handshakes, still returns working connections, and
+verifies nothing. Every positive test passes either way. Only a negative test and an AST guard tell
+them apart — hence `TestClientRefusesChangedBusFingerprint`, which swaps the certificate under a
+fixed address and asserts the bus receives **zero** requests afterwards.
+
+**What is given up** by disabling the default check, stated exactly: CA chain building (there is
+none by design) and **hostname verification** — for which the pin substitutes and is strictly
+stronger, since a name check asks "does this certificate claim this address" and the pin asks "is
+this the exact certificate the invite named". **Certificate expiry and validity are NOT checked**,
+and that is a real gap owned by `MTLS-VERIFY`, recorded here rather than left implicit.
+
+### 3. No TOFU — an `https` bus with no pin is REFUSED, and `http` with a pin is refused too
+
+Both directions fail closed. The first is the invariant. The second is less obvious and matters as
+much: a caller who passed `--bus-fingerprint` believes it is being checked, and a plaintext
+connection has no certificate to check it against, so honouring the flag silently would manufacture
+exactly the false confidence this task exists to remove.
+
+The pin is **never derived from the certificate the bus presented**. `enrol` records only the
+fingerprint that was already in force for the connection that succeeded. Deriving it would be
+trust-on-first-use wearing the costume of a stored pin.
+
+### 4. A flag/store disagreement is a REFUSAL, not a precedence question
+
+Everywhere else in this client the order is flag → env → stored identity → default. For the
+fingerprint it is not: when an explicit `--bus-fingerprint` and the stored identity name **different**
+certificates for the **same** bus, the command fails and prints both.
+
+Applying precedence here would be the documented rule and the wrong answer. "It stopped working, so
+I passed the fingerprint the other end gave me" is the exact sequence by which a substituted
+certificate gets accepted, and precedence would convert a **detected** substitution into a
+successful one. Recovery from a genuine rotation is deliberately manual and out of band: confirm
+`bus_cert_fingerprint=…` on the bus host, then `logout` and re-enrol. Rolling two certificates during
+rotation (invariant 11) is a separate, unwritten task.
+
+### 5. `client.BusFingerprint` mirrors `internal/buscert.Fingerprint` rather than importing it
+
+Invariant 7 forbids `client/` from importing `internal/` — an embeddable client that drags an
+`internal/` path behind it is not embeddable. The construction (`sha256` over the **leaf's DER**,
+lowercase hex, one spelling) is duplicated with a comment naming the server-side definition, under
+the same rule as `SessionSigningContext` and `client/canonical.go`. Divergence fails **closed**: if
+the two ever disagreed about how a certificate is hashed, no pin would match and every connection
+would be refused. Nothing is accepted by accident.
+
+### 6. The transport is now built lazily, per (bus, pin)
+
+`CONTRACTS-CLI.md` previously carried this as a known defect: "the transport is built before the
+identity is resolved… the seam is in the right place, at the wrong time". It had to be fixed here,
+because the pin may come from the selected identity and so is not a function of `Config` alone.
+`Client.endpoint()` resolves the URL and the pin **together** — an address without its pin is the
+input to a TOFU connection, and separating them is how a caller ends up with one and not the other —
+and `Client.doer()` builds and caches an `http.Client` keyed on the pin. `enrol`, `use` and `logout`
+drop it, so no pooled connection verified under one identity's pin is ever reused under another's.
+
+### 7. Earlier entries in THIS file that are now superseded
+
+`DECISIONS.md` is append-only, so the following remain on the page and are no longer accurate as
+written. Nothing above them has been edited; this is the pointer a future reader greping for
+`InsecureSkipVerify` needs:
+
+- **"`InsecureSkipVerify` must appear nowhere in the tree, including tests. Worth a grep in CI"**
+  (2026-08-02, "E7") — superseded by §2 above. The correct rule is now: **exactly one occurrence, in
+  `client/pin.go`, paired with `VerifyPeerCertificate` in the same literal**, enforced by AST rather
+  than by grep. A grep-based CI check would now be the wrong check: it cannot see the pairing, which
+  is the part that carries the security property.
+- **"`InsecureSkipVerify` is not set, is not reachable through `Config`"** (2026-08-02, the transport
+  seam note) — the second half still holds and is now guarded by name
+  (`TestClientHasNoInsecureVerificationFlag`); the first half does not.
+
+Unchanged and NOT weakened: there is still no flag, environment variable or `Config` field that
+disables verification, and never disabling verification "to make something work" (CLAUDE.md
+invariant 11) is exactly what §2 is: the default check is not removed to get past an error, it is
+replaced by a stricter one because the default check is inapplicable by design.
+
+**Note for `MTLS-CLIENTAUTH`:** its stored `proof_cmd` also names a `TestNoInsecureSkipVerifyAnywhere`,
+in `./internal/httpapi ./cmd/agent-bus`. That is a **different test in a different package** from the
+one amended here, and the server side has a different answer available to it — `tls.RequireAnyClientCert`
+performs no chain verification without needing the field at all. Do not copy this exemption across.
+
+### 8. Corrections and gaps the security gate found (same task, recorded here rather than quietly fixed)
+
+The gate returned **PASS** (0 critical, 0 high). Three things it raised change what §2 above may honestly
+claim, so they are recorded beside it rather than only in a backlog:
+
+- **"The pin is STRICTLY STRONGER than hostname verification" is true only under an assumption.**
+  The assumption is **one certificate per bus**. If a single certificate were ever served by two
+  buses, a hostname check would distinguish them and a fingerprint would not. Nothing in this design
+  does that, and rotation is the opposite case (two certificates, one bus) and is safe — but the
+  claim is conditional and is now stated as conditional in `pinnedTLSConfig`'s doc comment.
+- **Certificate EXPIRY is not checked, and that is a live gap in a recorded control, not merely
+  future work.** This file already chose a 365-day certificate lifetime explicitly as *"a
+  leak-containment bound"*. Only the client can enforce that bound on the BUS's certificate, and this
+  change does not: the gate demonstrated that a certificate whose `NotAfter` is a day in the past is
+  pinned, accepted, and enrolled against. It is not exploitable until `MTLS-LISTENER` — but that is a
+  **sequencing requirement, not an excuse**: `MTLS-VERIFY` must land with or before the listener, or
+  the 365-day lifetime is decoration. The gap is noted at the callback that would do the check, not
+  only here.
+- **The single-pin store contradicts E3's two-certificate rollover.** E3 says the bus serves two
+  certificates during rotation *"so no client is ever forced to re-enrol on routine rotation"* — and
+  the recovery path this task ships is exactly logout-and-re-enrol, because an identity stores one
+  pin. That is acceptable while no bus serves TLS and while rotation has no implementation, and it is
+  **not** acceptable at the point `MTLS-LISTENER` ships: the first real rotation would wedge a fleet,
+  and a wedged fleet is how "just let the flag win" gets argued for. The fix is a SET of accepted
+  pins, added only by a deliberate explicit action — never learned from a handshake. Filed as a
+  tracked task gating `MTLS-LISTENER`, not left as a sentence.
+
+One gate finding was **incorrect and is recorded as such** so it is not actioned later on faith: the
+gate reported an `InsecureSkipVerify` in `internal/relay` that the guard does not scan. There is no
+occurrence anywhere under `internal/` or `cmd/` — after this change the string exists in exactly two
+files, `client/pin.go` (once, the field) and `client/guard_test.go` (the guard that counts it).
+Widening the guard's roots to `internal/` is still worth doing, but as belt-and-braces, not as a fix
+for something that is there.
+
+## 2026-08-07 — The durable WAL index floor is authenticated with a KEYED MAC, and version 4 stays backward-compatible (db350e39, security P1-1 + P1-2)
+
+The security gate on the uncommitted `internal/wal` index-floor work returned **CHANGES-REQUESTED**
+with two P1 blockers. Both were proved executably rather than argued, and both are fixed here. Three
+decisions came out of the fix that are not obvious from the diff, so they are recorded.
+
+### 1. The floor file is HMAC-SHA256 under the data directory's own `wal-mac.key`
+
+The floor carried an UNKEYED SHA-256, justified in a comment as "an attacker with directory write
+access can read `wal-mac.key` anyway". **That justification defends forging log RECORDS and does not
+defend this.** The gate demonstrated the attack with NO KEY AT ALL: flip `sealed 0` to `sealed 1`,
+recompute the digest by hand, touch `bus.wal` not at all. Measured on our own re-run: **2268 of 2289
+truncation offsets reissued an already-issued index; 0 refused to open.** Every frame the bus then
+wrote carried a VALID MAC, because the server itself computes it — so the corruption is invisible to
+everything downstream, which is the property that makes it worse than data loss.
+
+CLAUDE.md invariant 6 is not ambiguous about this: integrity here is `crypto/hmac` + `crypto/sha256`,
+**never a CRC or any other unkeyed or linear checksum**. A CRC was removed from this codebase once
+already, after a remote client was shown able to forge one. The same argument applies verbatim, and
+the seal made it load-bearing: `sealed` is now a first-class TRUST DECISION read from a file on disk.
+
+**Construction (invariant 9 — never write our own crypto).** Nothing was invented. The tag is
+`hmac.New(sha256.New, key)` with the covered bytes written to it — the SAME pattern
+`internal/wal/format.go`'s `codec.mac` already uses for every frame — verified with `hmac.Equal`,
+never `==` and never `bytes.Equal`, because a tag comparison that leaks timing is a forgery oracle.
+**No domain-separation scheme was designed.** The tag covers `agent-bus-wal-index-floor v4\n` plus
+the body — the whole file except the tag field — which binds it to the format version (a future v5
+body cannot be replayed as v4) and gives structural separation for free: this input begins with ASCII
+magic, while a frame MAC's input begins with a 4-byte big-endian payload length bounded by
+`MaxPayloadSize` (1 MiB), so no frame the server will ever MAC can share the prefix.
+
+### 2. Version 4 accepts the two shapes that already exist, and reads them CONSERVATIVELY
+
+The `sealed` line was added to v4 without a version bump, on the stated premise that "v4 never
+shipped and no data directory in the world legitimately carries a two-line body". **The premise was
+false.** `f56c723` is in `main` and its `encodeIndexFloor` writes exactly a two-line v4 body. A
+routine upgrade therefore hit `ErrIndexFloorCorrupt`, the bus refused to start, and the operator was
+pointed at a remedy that reissues ids. That is a live-deployment break, not a theoretical one.
+
+So v4 reads three shapes and writes one:
+
+| shape | written by | read as |
+| --- | --- | --- |
+| `hmac-sha256=` + 3-line body | current | authenticated; `sealed` TRUSTED |
+| `sha256=` + 3-line body | the same-day pre-HMAC revision | digest verified; `sealed` FORCED FALSE; WARN |
+| `sha256=` + 2-line body | `f56c723`, in `main` | same (no `sealed` line exists to read) |
+
+**The version number is deliberately NOT bumped**, and not only because these numbers are reserved
+through the Spec Server (5 is already taken by `internal/hub/seqfloorfile.go`). The version field
+defends exactly one thing — an older binary reading a newer layout into a LOWER floor — and neither
+older shape can do that.
+
+**Why a legacy file's `sealed` bit is DISCARDED rather than believed.** The bit's entire meaning is
+"a run reached `Writer.Close`, so `written` is EXACT". An unkeyed digest is recomputable by anyone who
+can write the file, so it cannot support that claim. The cost of discarding it is at most ONE burned
+reservation block (63 indices) on the first start after upgrade, appearing as a legal, permanent hole.
+The cost of believing it is invariant 1. `reserved` and `written` from such a file ARE still used,
+and that asymmetry is deliberate: both are consumed only as a RAISE, so a forged value costs
+availability — loudly — and never a reissued index.
+
+### 3. An UNVERIFIABLE floor is read unauthenticated and logged at ERROR; it is not fatal
+
+Keying the file creates a state that did not exist before: the key is gone, recovery mints a new one
+(`macKeyFor` permits that only where the log provably holds no readable record), and **nothing the
+previous identity wrote can verify — floor included**. That is a re-founded data directory, not a
+damaged floor.
+
+Refusing there would brick a bus over a lost key in a directory recovery has already decided may be
+re-founded, which is what invariant 6 forbids. So the file is read WITHOUT authentication: the
+numbers are kept (raise-only, so they can only make the start MORE conservative), `sealed` is
+discarded, and it is logged at **ERROR**, naming the key path and saying to stop and restore the key.
+
+**Is this a way in? The obvious attack is "delete `wal-mac.key` to force the unauthenticated path,
+then supply a LOWERED `reserved`".** It does not widen anything, and the reason is worth writing
+down rather than re-deriving: that path is only reachable when `macKeyFor` was willing to mint a key,
+and `macKeyFor` refuses exactly when the log POSITIVELY IDENTIFIES ITSELF as format version 2 and is
+longer than its own file header. So an attacker who deletes the key must ALSO destroy the log to
+reach the unauthenticated read — and an attacker who can do that could simply delete the floor file
+instead and get the same result with less work. The floor is never the weakest link in that scenario.
+
+The honest limit, stated rather than buried: an attacker who can forge that file can equally DELETE
+it, and no MAC can prevent deletion. **What the MAC buys is that neither is SILENT any more** — the
+forgery that used to succeed quietly now either fails loudly under the directory's own key, or is
+read unauthenticated with an ERROR line naming the key. That is the whole of the improvement and it
+is not claimed to be more.
+
+### 4. The floor is read AFTER the MAC key is settled, not before
+
+`wal.Open` used to read the floor first, "before a byte of the log is examined". Once the file is
+keyed that ordering is wrong and actively dangerous: a merely WRONG key made the floor fail its tag,
+so the operator was told the FLOOR was corrupt and pointed at deleting it — when nothing was wrong
+with the floor and the fix was to restore the key. Two failures with opposite remedies must not
+collapse into the more destructive one.
+
+The floor is now opened immediately after `repairLog`, by which point `macKeyFor` has ruled on a
+missing key and `repairLog` has raised `ErrMACKeyMismatch` for a wrong one.
+
+**The move NARROWS the misdiagnosis; it does not eliminate it, and both gates measured that.**
+`ErrMACKeyMismatch` is raised only for a log that identifies as version 2 AND is longer than its own
+file header. A wrong key over a log with no readable record — a bare 48-byte header, which is what a
+fresh clean run *and a post-quarantine directory* both leave — still reaches the floor first. The
+remaining gap is closed by the error TEXT rather than by ordering: `indexFloorCorrupt` now names
+`wal-mac.key` as the FIRST thing to check, ahead of the remedy.
+
+**The cost of the move, corrected after review:** a corrupt floor is now refused after `repairLog`
+has run, and **`repairLog` DESTROYS BYTES** — `truncateAt` truncates permanently and the mid-file
+rewrite renames a temp over the original; only a QUARANTINE preserves the file by renaming it aside.
+An earlier draft of this entry claimed it "never deletes bytes without moving them aside", and a
+reviewer measured that false (839 bytes before a refused `Open`, 789 after, nothing moved aside).
+The decision stands on a narrower argument: the bytes `repairLog` removes are damage it has already
+LOGGED before touching the file, and are bytes any successful start would have discarded anyway,
+whereas the misdiagnosis cost an id space. The floor is also still opened BEFORE `replay`, so a
+refusal can never leave the caller holding a partially rebuilt Applier.
+
+### 5. The corrupt-floor error states the COST of its remedy
+
+CLAUDE.md requires an error to name the remedy rather than the stack. The old text ended: *"delete
+`<path>` and restart: the bus will then resume from the log's own high-water mark, which is correct
+unless the log has ALSO been damaged or quarantined."*
+
+**That caveat is unsound, not merely narrow** — and unsound for exactly the reason the `sealed` bit
+exists. A truncation at a clean frame boundary is byte-for-byte identical to a legitimately shorter
+log, so neither recovery nor an operator has any signal that would reveal it. The remedy asked the
+operator to certify something nobody can know. Measured: floor deleted per that instruction, crash,
+cut at a clean boundary — **2268 of 2289 truncation offsets reissued an index.**
+
+A remedy that silently breaks the repository's most load-bearing invariant is worse than no remedy.
+The text now names the remedy AND its cost: restore from a backup if you can; deleting the file
+**FORFEITS INVARIANT 1 for that data directory** unless the previous run shut down CLEANLY, and if
+you delete it, treat every WAL record index and message id the bus has issued as potentially
+reissued. There is no "unless the log was damaged" escape clause.
+
+### Also fixed here (P2s the gate raised, cheap and self-contained)
+
+- **The temp-file reaper is no longer a glob.** `dir` came from `-data` and was interpolated
+  UNESCAPED into a `filepath.Glob` PATTERN, so `-data /srv/bus[1]` reaped a SIBLING directory while
+  missing its own, and `-data /srv/bus[` returned `ErrBadPattern` and disabled the reaper
+  permanently. It is `os.ReadDir` + a prefix/suffix match derived from the same `os.CreateTemp`
+  pattern `atomicReplaceFile` creates with, so the two cannot drift. A path is a path, not a pattern.
+- **Severe discards are logged FIRST, within the same cap.** `logDiscards` capped at 16 in FILE
+  ORDER, so sixteen trivial discards at the head of a file crowded out a dangling COMMIT further in —
+  an acknowledged write that is now lost — and the whole recovery emitted no ERROR line at all.
+  Invariant 6 permits discarding damage only because every discard is logged "loudly and
+  specifically"; a cap that evicts the loudest message is the silent-discard defect (rated P0) in
+  another hat. The cap itself stays, and the exact total is still reported.
+
+### Deliberately NOT done, and filed instead
+
+- `Recovered.addDiscard` still RETAINS only the first 64 discards, in file order, so a severe discard
+  beyond the 64th is never even available to log. Fixing it needs an eviction policy, not a reorder.
+- `persistLocked` checks monotonicity against IN-MEMORY state, not the bytes on disk. Two
+  `*indexFloor` on one directory could lower a persisted `written`; guarded today by
+  `internal/dirlock`.
+- `reapStaleFloorTemps`' safety argument cites the data-directory flock, which `wal.Open` does not
+  itself take (`cmd/agent-bus` takes it first).
+- `parseIndexFloorLine` applies no plausibility bound to `reserved`, while `salvage.go` explicitly
+  refuses an implausible index from an unverified frame header — an asymmetry worth closing.
+  **The security gate sharpened this into the one place the "no worse than deletion" argument
+  actually fails, so it is recorded precisely rather than as a tidiness item:** an *unauthenticated*
+  legacy floor claiming `reserved = 2^64-2` needs no key; `log.go`'s end-of-index-space guard fires
+  only at EXACTLY `MaxUint64`, so `Open` accepts it, and `begin` then **re-persists
+  `reserved = MaxUint64` under a VALID HMAC**. Every later `Open` refuses for ever, and the file is
+  now indistinguishable from a legitimate one, so the only remedy left is the one that forfeits
+  invariant 1. Deletion cannot produce that state. The fix is a plausibility bound applied BEFORE
+  an unverified value is re-signed.
+- A wrong MAC key over a log with no readable record still surfaces as "corrupt floor" rather than
+  as a key problem. Mitigated by the error text (which now names `wal-mac.key` first) but not
+  structurally fixed.
+- `readIndexFloorFile` reads the whole file with `os.ReadFile`, unbounded — a startup memory DoS on
+  a hostile data directory. Pre-existing, and `clipFragment` already bounds what reaches the log.

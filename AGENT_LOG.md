@@ -2065,3 +2065,310 @@ is left in place and marked historical).
 `PROTOCOL.md` (new §8.4.1 recording where the shipped mint DIVERGES from §8.4's specification — the
 reservation is bound to the idempotency key only in memory, not on disk), `AGENT_PROTOCOL.md`,
 `DECISIONS.md`, `AGENT_LOG.md` (this entry), `README.md`.
+
+---
+
+## 2026-08-07 — DISCOVERY-DOC: `GET /v1/discovery`, an unauthenticated protocol-discovery document
+
+**Task.** Add a new, unauthenticated, bounded, STATIC protocol-discovery document at
+`GET /v1/discovery` so an agent holding nothing but a bus URL can learn how to enrol, plus one
+compile-time-constant pointer field (`"discovery":"/v1/discovery"`) on the already-unauthenticated
+`GET /v1/info` so a caller that only knows that endpoint can still find it.
+
+**Chain that ran.** spec-keeper → implementer → test-engineer → reviewer → security → documentation
+(this entry) — all six ran, nothing skipped.
+
+**Files changed (code, by implementer/test-engineer, prior to this documentation pass):**
+`internal/httpapi/discovery.go` (new), `internal/httpapi/discovery_test.go` (new),
+`internal/httpapi/server.go` (`Server.discovery` field, built once in `New`; `InfoResponse.Discovery`;
+route registration), `internal/httpapi/authmw.go` (allow-list gains `RouteDiscovery`),
+`internal/httpapi/authmw_test.go`, `internal/httpapi/durable_test.go`,
+`internal/httpapi/healthz_info_test.go`.
+
+**Docs changed by this pass:** `CONTRACTS-HTTP.md` (Routes table: new `GET /v1/discovery` row and its
+405 row; `/v1/info`'s 200 row now shows the `discovery` field; a new `### Discovery document`
+subsection documenting all ten top-level fields and the four governing invariants — protocol-not-
+roster, static endpoint list, built-once, signing context withheld; every "five-entry allow-list"
+passage — the routes-table row, the `Authorization` header row, the `## Authentication` section
+heading sentence and its bulleted enumeration, and the prose sentence just above it — updated to six,
+with a new bullet for `/v1/discovery`; the `Allow` header row gains `/v1/discovery`; a new
+`RouteDiscovery` row in the Exported Go Surface table), `DECISIONS.md` (new dated entry: why a
+separate `/v1/discovery` rather than a bigger `/v1/info`, including the genuine merit of the rejected
+alternative and the two supporting decisions — the endpoint list is static, not mux-derived, and no
+self-URL is echoed), `AGENT_LOG.md` (this entry). **Not touched, per this task's explicit file
+ownership:** `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`, `CONTRACTS-AGENT.md`, `CONTRACTS-ONDISK.md`,
+`CONTRACTS.md`, `README.md`, `PROTOCOL.md` — the agent-facing CLI half (invariant 7: a Go CLI
+subcommand for this endpoint) is deliberately deferred to the filed follow-up
+`DISCOVERY-DOC-FU-CLI`; until it lands there is no `agent-busctl` subcommand for `/v1/discovery`.
+
+**Existing pinned-field-set tests deliberately updated, and none weakened — each remains an
+exhaustive/exact assertion, verified by reading the diff, not assumed:**
+- `healthz_info_test.go` — `/v1/info`'s `wantKeys` grew from 3 entries (`bus_id`, `version`,
+  `uptime_seconds`) to 4 (`+discovery`), still an exact `len(firstGeneric) != len(wantKeys)` check,
+  not a subset check.
+- `durable_test.go` — the `/v1/info` leak guard's field allow-list grew from 3 names to 4
+  (`+discovery`), still a `k != "bus_id" && k != "version" && k != "uptime_seconds" && k != "discovery"`
+  exhaustive negative check across every differently-configured server in the table, not loosened to
+  a prefix or substring test.
+- `authmw_test.go` — `TestEveryRouteRequiresAuth`'s golden allow-list grew from 5 entries to 6
+  (`+/v1/discovery`), still asserted as an exact sorted-slice equality against
+  `httpapi.UnauthenticatedRoutes()`, not a "contains" check.
+
+`discovery_test.go` itself (new) adds its own independent exhaustive pins on top:
+`TestDiscoveryFieldSetIsPinned` (top-level and every nested object, by exact key-set equality against
+a generically-decoded body — a typed struct would silently tolerate an added field, which is why the
+decode is untyped `map[string]interface{}`), `TestDiscoveryDocumentIsStatic` (byte-identity of the
+response across five differently-configured servers, including one with the full messaging surface
+registered), `TestDiscoveryDocumentLeaksNoBusState` (no enrolled agent id/name/key, no on-disk path,
+and — the one that matters most — `auth.SessionSigningContext` itself never appears in the body),
+`TestDiscoveryPathsMatchRouteConstants` (every endpoint's `path`/`auth` checked against the real
+`Route*` constants, plus a check that `/v1/broadcast` is absent from `endpoints`), and
+`TestDiscoverySessionConstantsMatchAuth` (the mirrored `3600`/`2700` literals checked against
+`auth.SessionLifetime`/`auth.RefreshAfter()` directly, not against a comment).
+
+**Proof-check verdict, quoted verbatim:**
+
+```
+proof-check: verdict=PASS class=test exit=0 tests_run=83 top_level=14 skipped=0 failed=0 empty_pkgs=0
+```
+
+**Verified against a RUNNING bus** (throwaway data dir, plaintext loopback — not TLS, not deployed):
+`GET /v1/info` returned the new `discovery` field; `GET /v1/discovery` returned 6169 bytes with no
+credential presented; `POST /v1/discovery` returned 405 with `Allow: GET`.
+
+**Independently reverified during this documentation pass** (narrower, package-scoped, this box's
+go1.19.4 toolchain): `go build ./...` clean; `go test -run TestDiscovery ./internal/httpapi/...`
+— all 12 `TestDiscovery*` top-level tests PASS, including every subtest above. A throwaway,
+not-committed test binary confirmed the byte count is `bus_id`-length-dependent (6167 bytes observed
+against a differently-named test bus id, 6169 against the bus id the implementer/test-engineer used)
+— consistent with, not contradicting, the shape rule that `bus_id` is the only variable input; the
+scratch test file was deleted before this report, not committed.
+
+**Deliberate scope limit.** This is the SERVER half only. Invariant 7's CLI half — a compiled
+`agent-busctl` subcommand and its `AGENT_PROTOCOL.md` entry, both required by invariant 7 in the SAME
+task as any capability, and both deliberately NOT done here — is filed separately as
+`DISCOVERY-DOC-FU-CLI`. Until that lands, an agent cannot reach `/v1/discovery` through the compiled
+CLI; only a caller that hand-constructs the HTTP request can, which is itself the exception invariant
+7 exists to close.
+
+**Not verified by this pass** (outside this task's remit, flagged rather than asserted): whether
+`DISCOVERY-DOC-FU-CLI` has been claimed or started; whether this code has been merged past whatever
+branch state produced the numbers above — `git status --porcelain` at the start of this pass showed
+this code staged but not committed, and this documentation pass does not commit.
+
+### 2026-08-07 — DISCOVERY-DOC addendum: gate findings applied (supersedes the byte counts above)
+
+The reviewer and security gates returned AFTER the documentation pass above was written, and both
+asked for changes. This addendum records what changed; where it disagrees with the entry above, this
+addendum is correct.
+
+**reviewer — CHANGES-REQUESTED, but explicitly requesting no code edit.** Its two P1 blockers were
+the `CONTRACTS-HTTP.md` and `DECISIONS.md` deliverables, both since written. It verified all seven
+factual claims in the document as TRUE at HEAD, confirmed no pin was loosened, and confirmed the
+byte-identity test genuinely proves the static claim. Three P2s were applied:
+
+- The mirrored session constants are no longer hand-copied literals. `discovery.go` now DERIVES them
+  (`int(auth.SessionLifetime/time.Second)`, `int(auth.RefreshAfter()/time.Second)`); `internal/httpapi`
+  already imports `internal/auth`, so the file comment claiming a new dependency edge was avoided was
+  simply false. Desync is now structurally impossible rather than test-pinned.
+- The hand-rolled `itoa` in `discovery_test.go` was replaced with `strconv.Itoa` (invariant 8).
+- The "broadcast is not advertised" subtest now also asserts `POST /v1/broadcast` really returns 501,
+  so limitation 4 fails the day SIGN-3 un-refuses the route instead of quietly going stale.
+
+**security — PASS-WITH-NITS.** It verified live (not from the tests) that the static-list claim holds
+in code, that no Host-header or request-derived value reaches the response, that the fail-closed
+allow-list matching is preserved (`/v1/discovery/`, `//v1/discovery`, `/v1/Discovery`, `%2f` and
+`/v1/../v1/discovery` all 401), and that neither `auth.SessionSigningContext` nor
+`client.MessageSigningContext` appears in the body. Four findings were applied:
+
+- **MEDIUM — the enrolment recipe conflated two keypairs.** The document implied one Ed25519 key.
+  There are two: the AUTH key the bus records at enrolment, and a separate MESSAGING key the
+  reference client mints and never sends. A client built from the old text would have signed sends
+  with a key no recipient can obtain. Steps 3 and 8 now name both keys and state that nothing
+  distributes the messaging public key.
+- **LOW — limitation 2 was misframed as temporary.** The bus does not merely "not yet" verify
+  signatures; `internal/httpapi/messages.go` is explicit that it never will, because verifying would
+  move the trust boundary onto the bus. Reworded to "the bus enforces shape, the recipient enforces
+  authenticity", while still saying the recipient cannot verify today either.
+- **LOW — limitation 3 understated exposure.** Bodies are not only served in the clear, they are
+  PERSISTED UNENCRYPTED; only the audit log omits them. Said so.
+- **LOW — per-request marshal on an unauthenticated route.** The document is now marshalled ONCE in
+  `New` into `Server.discoveryJSON` and served through a new `writePreformattedJSON` helper that sets
+  exactly the headers `writeJSON` sets. An anonymous request now costs a write, not a ~7 KiB marshal.
+
+**Corrected measurements** (the entry above records 6169/6167 bytes, taken before these edits): the
+document is now **7107 bytes**, re-verified against a RUNNING bus on a throwaway data dir — `/v1/info`
+carried the `discovery` field, `GET /v1/discovery` returned 7107 bytes with no credential, and
+`POST /v1/discovery` returned 405 with `Allow: GET`. Still far under the 16 KiB ceiling pinned by
+`discoveryMaxBytes`. The size remains a function of `bus_id` length only.
+
+**Chain:** spec-keeper → implementer → test-engineer → reviewer → security → documentation. All six
+ran; none skipped. Still CODE-ONLY and NOT deployed.
+
+**Flagged, NOT fixed (outside this task's file ownership):** `README.md` line ~100 still shows the old
+three-field `/v1/info` body; and a stale 7.6 MB `busctl` ELF sits untracked at the repo root and is
+NOT covered by `.gitignore` (which lists `/agent-bus` and `/agent-busctl`, not `/busctl`) — it must be
+deleted or ignored, never committed.
+
+---
+
+## 2026-08-07 — MTLS-PIN: the client pins the bus's certificate fingerprint
+
+**Task:** `MTLS-PIN` (`8c46dc93-16d0-4eea-8ad3-ac51136551e2`, P0, epic MTLS). Run end to end by
+`feature-runner` (opus) under the mandated chain. **CODE-ONLY — not deployed, and the bus does not
+serve TLS yet (`MTLS-LISTENER`), so nothing about this is observable in production today.**
+
+**One sentence:** the client refuses to speak TLS to a bus whose certificate is not the one it was
+told to expect, and there is no way to ask it not to.
+
+**Sequenced ahead of `MTLS-LISTENER` deliberately.** Substituting all three key files in an
+established data dir makes the bus restart cleanly with a different fingerprint and zero warnings —
+key loss is loud, key substitution is silent — so the fingerprint defends nothing until a client
+checks it. Rationale recorded in `DECISIONS.md` (2026-08-07).
+
+**Files changed (all owned by this task):**
+`client/pin.go` (new), `client/pin_test.go` (new), `client/guard_test.go` (rewritten),
+`client/transport.go`, `client/client.go`, `client/config.go`, `client/store.go`, `client/enrol.go`,
+`cmd/agent-busctl/root.go`, `cmd/agent-busctl/enrol.go`, `cmd/agent-busctl/whoami.go`,
+`CONTRACTS-CLI.md`, `AGENT_PROTOCOL.md`, `DECISIONS.md`, `AGENT_LOG.md`.
+
+**Surface added:** `--bus-fingerprint <hex>` (global) / `AGENT_BUS_FINGERPRINT`;
+`client.Config.BusFingerprint`; `client.Identity.BusFingerprint` → `bus_fingerprint` in
+`identities.json` and in `enrol`/`whoami` `--json` (both `omitempty`, store format version
+deliberately **not** bumped — additive, and an older credential is still valid); exported
+`BusFingerprint`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`,
+`ErrBusPresentedNoCertificate`.
+
+**The one thing a reviewer should look at first:** `client/pin.go` sets `InsecureSkipVerify: true`
+paired with `VerifyPeerCertificate`, which the previous guard banned outright. It cannot be avoided
+— self-signed with no CA means the default chain check cannot succeed, and the client holds a
+fingerprint rather than a certificate so it cannot build a `CertPool` either. The guard was narrowed
+to one file AND made structural (AST: the pairing is enforced, the assignment form is banned, and at
+least one paired literal must exist). Full reasoning in `DECISIONS.md`.
+
+**Chain:** spec-keeper → implementer → test-engineer → reviewer → security → documentation. The
+implementer, test-engineer and documentation steps were carried out by `feature-runner` itself
+rather than delegated — the change is one package and its docs, and splitting it would have put the
+`InsecureSkipVerify` judgement in a different context from the guard that constrains it. Reviewer
+and security ran as separate gates and are recorded in the task's Spec Server notes.
+
+**Gate outcome — both COMPLETED against the FINAL code, not an earlier snapshot.** This is recorded
+explicitly because it is the thing this repo has got wrong three times. Reviewer first returned
+CHANGES-REQUIRED (its P1 was reproduced, not theorised: the certificate-mismatch remedy named a
+command that the flag-vs-store conflict rule then refused — a dead end). Security returned PASS with
+findings. Both were then re-run against a FROZEN tree, identified by
+`md5sum client/*.go cmd/agent-busctl/{enrol,root,whoami}.go | md5sum` =
+`4df6e4c572995867adfb087392a4a806`, and both verified that hash before reading. **Reviewer: PASS.
+Security: PASS.** Only markdown changed afterwards — the two doc corrections the gates themselves
+asked for — and the hash above was re-checked and is unchanged, so both verdicts cover exactly the
+code that would be committed.
+
+Each gate also independently mutation-tested rather than trusting the tests: replacing
+`verifyPinnedBusCertificate`'s body with `return nil` fails the behavioural and table tests while the
+AST guards still pass, and deleting `VerifyPeerCertificate` from the `tls.Config` literal fails the
+AST guard. That shape-versus-semantics split is why both kinds of test exist and why neither may be
+deleted in favour of the other. Each gate also RETRACTED one wrong finding of its own (security: an
+`InsecureSkipVerify` in `internal/relay` that does not exist; reviewer: that the unknown-scheme
+`default:` arm was missing when it was already present) — both retractions were the result of being
+asked to re-run the check rather than restate it.
+
+**Verification:** `go build ./...` green; `go vet ./client/... ./cmd/agent-busctl/...` green;
+`"$(go env GOROOT)/bin/gofmt" -l client cmd/agent-busctl` produced **empty output**;
+`go test -race ./client/... ./cmd/agent-busctl/...` both `ok`. Test runs were deliberately scoped
+away from `internal/httpapi` and `internal/wal`, which have other agents' uncommitted work in them.
+The `proof_cmd` was replaced (the original grepped `CONTRACTS-AGENT.md`, which is outside this
+task's file ownership and documents the retired shell wrappers) with one whose doc greps pin the
+literal `--bus-fingerprint` and were confirmed **RED at HEAD before the docs were written**.
+
+**Not done here, on purpose:** the invite blob (`ENROL-SHAPE`) — the pin arrives by flag/env/store
+until the blob exists; the client certificate half of mutual TLS (`MTLS-CLIENTCERT`); serving TLS
+(`MTLS-LISTENER`); certificate **expiry/validity** checking (`MTLS-VERIFY`); rotation with two
+concurrent certificates.
+
+## 2026-08-07 — feature-runner: closed the two P1 security blockers on the WAL index floor (db350e39)
+
+**Task:** fix the two P1s the security gate raised against the staged `internal/wal` index-floor
+work, without regressing the proven index-reuse fix. Scope: `internal/wal/**`, plus appends to the
+shared append-only docs and `CONTRACTS-ONDISK.md`.
+
+**P1-1 (a) — the upgrade path from `main` was broken.** A two-line v4 body was declared CORRUPT on
+the premise that v4 never shipped. `f56c723` is in `main` and writes exactly that. v4 now reads the
+two pre-HMAC shapes with `sealed` forced FALSE and rewrites them keyed at the next `begin`.
+**(b) — the remedy text** told the operator that deleting the floor "is correct unless the log has
+ALSO been damaged", which nobody can determine. Rewritten to name the remedy AND state that deleting
+FORFEITS INVARIANT 1 unless the previous run closed cleanly.
+
+**P1-2 — the seal was forgeable.** The floor is now authenticated with HMAC-SHA256 under the data
+directory's own `wal-mac.key`, using the SAME `hmac.New(sha256.New, key)` pattern `format.go`'s frame
+MAC uses (no invented construction, invariant 9), compared with `hmac.Equal`. The tag covers the
+version line plus the body. Two consequential ordering/behaviour decisions came with it — the floor
+is now read AFTER the MAC key is settled, and an UNVERIFIABLE floor (key lost, new one minted) is
+read unauthenticated with an ERROR rather than bricking the bus. Both are argued in `DECISIONS.md`.
+
+**Also fixed (P2s, cheap and self-contained):** the temp reaper no longer interpolates `-data` into a
+`filepath.Glob` pattern (`os.ReadDir` + prefix match); severe discards are logged first within the
+same cap so a dangling COMMIT can no longer be crowded out of the operator log.
+
+**RED BEFORE / GREEN AFTER, all three P1 arms, with an independent probe driver that measures the
+resumed index by performing a REAL `Write` rather than trusting `Recovered().NextIndex`:**
+
+| arm | before | after |
+| --- | --- | --- |
+| P1-1a upgrade from `main` | `ErrIndexFloorCorrupt`, bus refuses to start | starts, no reuse, file rewritten keyed |
+| P1-1b remedy text | contains the unsound caveat, never says "forfeit" | caveat gone, cost stated |
+| P1-2 forged `sealed 1` + truncation sweep | **2268 of 2289 offsets REISSUED**, 0 refused | **0 of 2289** |
+| P1-1b cost measurement (floor deleted per the old remedy) | 2268 of 2289 REISSUED — the evidence for the text change | unchanged by design; it is why the text changed |
+
+**The four mandated regression sweeps, all measured by a real `Write`, all ZERO violations:**
+
+| sweep | offsets | reuse violations |
+| --- | --- | --- |
+| (b) crash + every truncation offset | 2288 | 0 |
+| (c) `bus.wal` deleted / zero bytes | 2 | 0 (first index 65 vs highest handed 24) |
+| (d) clean `Close` then truncate, every offset | 2288 | 0 |
+| (e) 4 chained crash cycles crossing the 64-block + every offset | 31147 | 0 (320 distinct indices, none repeated) |
+
+**Verification:** `go build ./...` green; `go vet ./internal/wal` green;
+`"$(go env GOROOT)/bin/gofmt" -l internal/wal` produced **empty output** (judged by output, never by
+exit status); `go test -race -count=1 ./internal/wal/` **ok**. Test runs were scoped to
+`./internal/wal/...` — `internal/httpapi`, `client/` and `cmd/agent-busctl` have other agents' live
+work in them, and `TestBusFingerprintEnvIsRead` in `client/pin_test.go` is red from that work, not
+from this.
+
+**Non-vacuity was checked for every new test, not assumed.** The three P1 probes were run against a
+`cp -a` copy of the pre-fix tree and reproduced RED with the numbers above. The new P2-2 test was run
+against a copy with the file-order cap restored and failed there. Nothing in the repo was modified by
+any probe; every one ran in `/tmp`.
+
+**The chain:** implementer (this agent) → test-engineer (this agent) → reviewer → security →
+documentation (this agent, for `CONTRACTS-ONDISK.md` + `internal/wal/doc.go`). Both gates were re-run
+against THESE changes specifically, not against the earlier work.
+
+**Gate verdicts.** SECURITY: **PASS** — both P1s independently re-verified closed with its own driver
+(forged seal + full truncation sweep **0 of 2289** reissued, was 2268/2289; header-spelling downgrade
+2287/2287 refused; all 137 single-bit flips of a keyed floor rejected; `f56c723`'s two-line body opens
+and is rewritten keyed). It also measured that the unauthenticated-read path is strictly LOUDER than
+the deletion baseline it is compared against, and that reaching it requires destroying the log first.
+REVIEWER: **CHANGES-REQUESTED (minor — two comment claims, no code change)**, reverting one source
+line per fix to confirm each test was RED before. Both were **measurably false statements in
+comments**, which is the same failure mode as the "v4 never shipped" premise that caused P1-1, so
+they were fixed rather than argued:
+
+1. `log.go` claimed `repairLog` "never deletes bytes without moving them aside". It does — `truncateAt`
+   truncates permanently and the mid-file rewrite renames a temp over the original; only a quarantine
+   preserves bytes. Measured: 839 bytes before a refused `Open`, 789 after. The decision survives on a
+   narrower argument (those bytes are already-logged damage any successful start would discard); the
+   comment and the `DECISIONS.md` entry now say so.
+2. `log.go` claimed the reorder makes a wrong key always surface as `ErrMACKeyMismatch`. It only does
+   for a v2 log longer than its own header; a wrong key over a log with no readable record — including
+   a POST-QUARANTINE directory — still reports a corrupt floor. Narrowed, not eliminated, and now said
+   so. The residual is mitigated in the error text, which names `wal-mac.key` as the FIRST thing to
+   check, ahead of the remedy.
+
+Also taken from the security gate's non-blocking notes: the corrupt-floor error now says the operator
+cannot read "did it close cleanly" FROM the file, because the flag lives in the body that will not
+verify. Follow-ups are recorded at the end of the `DECISIONS.md` section — most importantly that an
+unauthenticated floor claiming `reserved = 2^64-2` gets RE-SIGNED under a valid HMAC at `begin`,
+which is the one state deletion cannot produce and the only place "no worse than deletion" fails.
+
+**No commit was made** — an integrator owns that.
