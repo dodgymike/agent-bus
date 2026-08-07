@@ -77,9 +77,14 @@ type SuffixAllocator interface {
 //
 // 1. This allocator holds NO durable state, and NextSuffix is NOT the
 // durability point. NameSuffixes is memory only: it writes nothing, reads
-// nothing, fsyncs nothing. A suffix becomes durable because the CALLER writes
-// it into a WAL PREPARE frame and fsyncs that frame before enrolment is
-// acknowledged. The order the caller owns is:
+// nothing, fsyncs nothing. (DurableNameSuffixes in suffixstore.go is the
+// wrapper that does — it persists floor[name] = n and fsyncs it BEFORE it lets
+// n out, so with it the durability point moves in front of the allocation. The
+// caller's obligations below are unchanged either way: the floors file records
+// that a suffix was BURNED, never that an enrolment was accepted.) A suffix
+// becomes durable because the CALLER writes it into a WAL PREPARE frame and
+// fsyncs that frame before enrolment is acknowledged. The order the caller owns
+// is:
 //
 //	n, err := alloc.NextSuffix(name)   // allocate
 //	id, err := AgentID(busID, name, n) // format the fully-qualified id
@@ -226,28 +231,34 @@ type SuffixAllocator interface {
 // nothing in this package can check either. That is why the derivation must
 // return an ERROR when it cannot complete, never a partial map.
 //
-// The zero value is not usable; construct with NewNameSuffixes or
-// ResumeNameSuffixes. The seal gate does NOT make the zero value usable, and
-// does not pretend to. What it buys is exactly one thing: while UNSEALED, a
-// zero value refuses NextSuffix — (0, an error satisfying errors.Is(err,
-// ErrFloorUnproven)) — BEFORE touching a map, where it previously panicked on
-// its nil maps immediately. That is a real improvement, and it is the whole of
-// the improvement.
+// # Where the durable floors actually come from
 //
-// What remains, stated exactly, because the counterexample is one call away:
-// a zero value is unsealed, so Seal() on one SUCCEEDS, and the very next
-// NextSuffix then panics with "assignment to entry in nil map". Equally,
-// RaiseFloor on an unsealed zero value is legal and, for any atLeast >= 1,
-// reaches the same nil-map write and PANICS. The one exception is atLeast == 0:
-// the guard `atLeast > s.floor[name]` is then false — reading a nil map is fine,
-// it yields 0 — so nothing is written and it returns nil. So "the zero value
-// fails closed" is true only of an
-// UNSEALED zero value on NextSuffix; it is not a general property, and a reader
-// must not take the gate as covering the zero value at large.
+// Points 3 and 7 state the obligation and leave it with the caller. It now has
+// an implementation: DurableNameSuffixes (suffixstore.go) persists each name's
+// floor to its own atomically-replaced, fsynced file in the data dir, WRITTEN
+// AHEAD of the suffix it authorises, and composes this type for the arithmetic
+// and the seal gate. That is the SuffixAllocator production should be built on;
+// this type on its own is the memory half of it. Read that type's doc for what
+// it does and does not guarantee on a data dir that predates it.
 //
-// Fixing those nil-map panics — nil guards, or lazy map initialisation — is
-// DELIBERATELY OUT OF SCOPE for the gate: it changes behaviour beyond it.
-// Construct properly.
+// # The zero value
+//
+// The zero value is not usable; construct with NewNameSuffixes,
+// ResumeNameSuffixes, or — in production — OpenNameSuffixes. The seal gate does
+// NOT make the zero value usable and does not pretend to: it is UNSEALED, so
+// NextSuffix refuses with (0, an error satisfying errors.Is(err,
+// ErrFloorUnproven)) before touching a map, and that is all the gate buys.
+//
+// It no longer PANICS, which it previously did in two places this doc used to
+// list as known traps: a zero value that was sealed panicked on the next
+// NextSuffix with "assignment to entry in nil map", and RaiseFloor on an
+// unsealed zero value panicked for any atLeast >= 1. Both maps are now created
+// lazily at the point of first write, so a misconstructed allocator behaves as
+// an empty one rather than crashing the process — which matters because
+// RaiseFloor's panic landed during STARTUP FLOOR ASSEMBLY, the one window where
+// the floors are being proven. That is a robustness fix, not a licence: an
+// allocator built as a struct literal has floors nobody derived, so construct
+// properly.
 type NameSuffixes struct {
 	// mu guards both maps. A mutex, not a sync.Map or a per-name lock:
 	// NextSuffix sits behind an fsync on the real enrolment path, so lock cost
@@ -286,13 +297,24 @@ type NameSuffixes struct {
 // unlike Sequence, has a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds
 // ids.NewNameSuffixes() on every start and every enrolment mints through it.
 // Making this constructor unsealed would refuse EVERY enrolment on a running
-// bus, and that caller is owned by a different task (MSG-FU-SUFFIXFLOOR, gated
-// on the WAL replay-observer work) which cannot be landed in the same change.
+// bus, and that caller sits outside this package.
 //
 // So NewNameSuffixes IS the fresh-bus constructor, and calling it IS the
 // empty-disk claim — the claim is carried by the constructor's NAME instead of
 // by a separate Seal call. If you are deriving floors from anything on disk,
-// this is the wrong constructor: use ResumeNameSuffixes, which is born unsealed.
+// this is the wrong constructor: use ResumeNameSuffixes, which is born unsealed,
+// or better OpenNameSuffixes, which derives them from the data dir itself.
+//
+// # This constructor is now the WRONG one for production, and is on its way out
+//
+// DurableNameSuffixes (suffixstore.go) supersedes it: it persists each name's
+// floor ahead of the suffix it authorises, so a restart resumes above every
+// suffix ever issued without any derivation at all. Once cmd/agent-bus/main.go
+// constructs through OpenNameSuffixes, this constructor should be made
+// born-unsealed for parity with NewSequence, or deleted. That wiring is the
+// remaining half of the P0 and is tracked separately; until it lands, a
+// restarting bus still builds a FRESH counter here and still re-mints agent ids,
+// which is the whole reason the fix is only half-shipped.
 //
 // The residual weakness, stated rather than papered over: a caller whose
 // per-name derivation FAILED and which then falls back to NewNameSuffixes()
@@ -436,7 +458,34 @@ func (s *NameSuffixes) Seal() error {
 func (s *NameSuffixes) NextSuffix(name string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.nextLocked(name, true)
+}
 
+// peekNext reports the suffix NextSuffix would issue for name WITHOUT issuing
+// it: it runs the same seal and exhaustion gates, in the same order, and mutates
+// nothing on any path.
+//
+// It exists for DurableNameSuffixes, which must know the number BEFORE it can
+// persist the floor that authorises it — the write-ahead ordering that type's
+// doc describes. It is unexported on purpose: a peeked number is only meaningful
+// while the caller holds a lock that keeps anyone else from taking it, and
+// DurableNameSuffixes owns its NameSuffixes exclusively and holds its own mutex
+// across the peek, the fsync and the commit. Exporting it would invite a
+// peek-then-issue race whose symptom is two agents on one id.
+func (s *NameSuffixes) peekNext(name string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextLocked(name, false)
+}
+
+// nextLocked is the one implementation of "what comes next for this name". With
+// commit true it issues the number; with commit false it only reports it. The
+// caller must hold s.mu.
+//
+// The gates run in this order for the reason NextSuffix's doc gives: an
+// allocator with no proven floor cannot honestly claim a name is exhausted
+// either. Neither refusal mutates anything.
+func (s *NameSuffixes) nextLocked(name string, commit bool) (uint64, error) {
 	if !s.sealed {
 		return 0, errSuffixFloorUnproven
 	}
@@ -445,9 +494,50 @@ func (s *NameSuffixes) NextSuffix(name string) (uint64, error) {
 		return 0, fmt.Errorf("%w: name %q", ErrSuffixExhausted, name)
 	}
 	f++
+	if !commit {
+		return f, nil
+	}
+	// Lazily create the maps. Reading a nil map is fine — it yields 0, the
+	// correct floor for an unknown name — but WRITING to one panics, and a
+	// NameSuffixes reached as a zero value is sealed only if someone sealed it,
+	// which is legal today. Panicking on the live enrolment path because a
+	// counter was constructed with a struct literal instead of a constructor is
+	// a denial of service dressed up as a programming error; failing safe here
+	// costs one nil check per allocation.
+	if s.floor == nil {
+		s.floor = make(map[string]uint64)
+	}
+	if s.last == nil {
+		s.last = make(map[string]uint64)
+	}
 	s.floor[name] = f
 	s.last[name] = f
 	return f, nil
+}
+
+// isSealed reports whether floor assembly has ended. Unexported: the seal is not
+// a thing callers branch on — they call Seal once and check the error — and an
+// exported predicate would invite exactly the check-then-act race the one-way
+// state machine exists to remove. DurableNameSuffixes uses it to decide whether
+// a Seal needs a disk write before it delegates.
+func (s *NameSuffixes) isSealed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sealed
+}
+
+// floorSnapshot returns a copy of the per-name floors. Unexported for the same
+// reason as peekNext: it is a durable-store implementation detail, and a floor
+// map handed out mid-life would tempt a caller into recomputing floors while the
+// allocator is serving.
+func (s *NameSuffixes) floorSnapshot() map[string]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]uint64, len(s.floor))
+	for name, n := range s.floor {
+		out[name] = n
+	}
+	return out
 }
 
 // LastSuffix reports the highest suffix this allocator has ISSUED for name, or
@@ -592,6 +682,15 @@ func (s *NameSuffixes) RaiseFloor(name string, atLeast uint64) error {
 			ErrFloorBelowIssued, name, atLeast, last)
 	}
 	if atLeast > s.floor[name] {
+		// Lazily create the map — see nextLocked for why. This is the call that
+		// used to PANIC on a zero-value NameSuffixes for any atLeast >= 1, which
+		// the type doc named as a known trap; a floor-assembly path that dies
+		// with "assignment to entry in nil map" is the worst possible way to
+		// learn a counter was built with a struct literal, because it happens at
+		// startup, in the one window where the floors are being proven.
+		if s.floor == nil {
+			s.floor = make(map[string]uint64)
+		}
 		s.floor[name] = atLeast
 	}
 	return nil
