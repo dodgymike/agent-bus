@@ -192,9 +192,21 @@ func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string)
 	return peer, nil
 }
 
-// peerEnrollURL turns a peer base URL into the handshake endpoint, rejecting
-// anything that is not a plain https origin.
-func peerEnrollURL(base string) (string, error) {
+// peerEnrollURL turns a peer base URL into the handshake endpoint. It is a thin
+// wrapper over peerURL, kept so the handshake's call sites and tests name the
+// endpoint they mean.
+func peerEnrollURL(base string) (string, error) { return peerURL(base, PeerEnrollPath) }
+
+// peerURL turns a peer base URL plus one of this package's path constants into
+// an endpoint, rejecting anything that is not a plain https origin.
+//
+// EVERY bus-to-bus request in this package goes through here, which is the
+// point: the https requirement (invariant 11 — there is no plaintext listener,
+// and a roster, a sender id and a message body are exactly the material an
+// on-path observer would want) is enforced once, and a new surface cannot
+// accidentally ship without it. path is always a constant from this package,
+// never caller input, so the endpoint's path can never be a caller's typo.
+func peerURL(base, path string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("relay: peer base URL %q is unparseable: %v", base, err)
@@ -208,7 +220,7 @@ func peerEnrollURL(base string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return "", fmt.Errorf("relay: peer base URL %q must be a bare origin: no query, no fragment, no userinfo", base)
 	}
-	return strings.TrimRight(u.String(), "/") + PeerEnrollPath, nil
+	return strings.TrimRight(u.String(), "/") + path, nil
 }
 
 // peerErrorCode extracts the peer's stable error code from an error body, for
@@ -223,7 +235,15 @@ func peerErrorCode(buf []byte) string {
 	case CodeMethodNotAllowed, CodeUnsupportedMediaType, CodePayloadTooLarge,
 		CodeInvalidRequest, CodeInvalidBusID, CodeBusIDCollision,
 		CodeInvalidRoster, CodeRosterTooLarge, CodeInvalidIdempotencyKey,
-		CodePeerRejected, CodeUnavailable, CodeInternal:
+		CodePeerRejected, CodeUnavailable, CodeInternal,
+		// The relay and roster-sync codes are recognised here too: this
+		// allow-list is what keeps an unrecognised string OUT of our log, so a
+		// code we genuinely emit but do not list would be reported as
+		// "unrecognised" and would send an operator looking for a bug that is
+		// not there.
+		CodeRelayLoop, CodeInvalidBusPath, CodeInvalidRelay,
+		CodeIdempotencyViolation, CodeUnknownPeer, CodeStaleRoster,
+		CodeInvalidRosterUpdate:
 		return body.Error
 	default:
 		return "unrecognised error code"

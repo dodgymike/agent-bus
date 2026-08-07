@@ -340,13 +340,52 @@ func ValidatePeerEnrollResponse(localBusID string, resp PeerEnrollResponse) (Pee
 // bytes, and while those are bounded and validated, there is no reason to hand
 // a stranger a description of our parser. The code is enough for a peer
 // operator to act on and enough for us to grep for.
+//
+// The arms are ordered MOST SPECIFIC FIRST and must stay that way: a sentinel
+// that another one wraps has to be tested before its wrapper, or the more
+// useful code is shadowed by the vaguer one. TestErrorCodeIsStable pins every
+// mapping, so a reordering that changes an answer fails there rather than in a
+// peer operator's logs.
 func ErrorCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, ErrPayloadTooLarge):
 		return CodePayloadTooLarge
-	case errors.Is(err, ErrBusIDCollision):
+
+	// Relay ingress (RELAY-2/RELAY-3). ErrRelayLoop is FIRST among these
+	// because it is the one outcome that is not a fault at all: the relay
+	// handler answers it with 200 and never reaches this function, and any
+	// other caller that does reach it must get the loop-specific code rather
+	// than a generic "invalid" that would invite a retry.
+	case errors.Is(err, ErrRelayLoop):
+		return CodeRelayLoop
+	case errors.Is(err, ErrBusPathTooLong), errors.Is(err, ErrInvalidBusPath):
+		return CodeInvalidBusPath
+	case errors.Is(err, ErrRelayKeyMismatch):
+		// The offending item IS the idempotency key, so a peer operator is
+		// pointed at the header rather than at the envelope.
+		return CodeInvalidIdempotencyKey
+	case errors.Is(err, ErrIdempotencyViolation):
+		return CodeIdempotencyViolation
+	case errors.Is(err, ErrInvalidRelay):
+		return CodeInvalidRelay
+
+	// Roster sync (RELAY-2). ErrPeerBusIDCollision is folded into the existing
+	// bus-id-collision code below, since a peer reading it needs the same
+	// remedy — pick a bus id that is not confusable with one we already know.
+	case errors.Is(err, ErrUnknownPeer):
+		return CodeUnknownPeer
+	case errors.Is(err, ErrStaleRosterUpdate):
+		return CodeStaleRoster
+	case errors.Is(err, ErrInvalidRosterUpdate):
+		return CodeInvalidRosterUpdate
+	case errors.Is(err, ErrTooManyPeers):
+		// Capacity, not the peer's fault and not permanent: it is answered as
+		// "not now" (503/CodeUnavailable), never as "never".
+		return CodeUnavailable
+
+	case errors.Is(err, ErrPeerBusIDCollision), errors.Is(err, ErrBusIDCollision):
 		return CodeBusIDCollision
 	case errors.Is(err, ErrInvalidBusID):
 		return CodeInvalidBusID

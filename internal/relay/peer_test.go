@@ -176,6 +176,22 @@ func TestErrorCodeIsStable(t *testing.T) {
 		{fmt.Errorf("wrapped: %w", idem.ErrInvalidKey), CodeInvalidIdempotencyKey},
 		{fmt.Errorf("wrapped: %w", ErrInvalidRequest), CodeInvalidRequest},
 		{errors.New("something else"), CodeInternal},
+
+		// RELAY-2/RELAY-3 extend the same vocabulary. ErrRelayLoop is checked
+		// FIRST among these because it is the one outcome that is not a fault
+		// at all, and a generic "invalid" code would invite a retry of a
+		// message that can never be accepted.
+		{fmt.Errorf("wrapped: %w", ErrRelayLoop), CodeRelayLoop},
+		{fmt.Errorf("wrapped: %w", ErrInvalidBusPath), CodeInvalidBusPath},
+		{fmt.Errorf("wrapped: %w", ErrBusPathTooLong), CodeInvalidBusPath},
+		{fmt.Errorf("wrapped: %w", ErrRelayKeyMismatch), CodeInvalidIdempotencyKey},
+		{fmt.Errorf("wrapped: %w", ErrIdempotencyViolation), CodeIdempotencyViolation},
+		{fmt.Errorf("wrapped: %w", ErrInvalidRelay), CodeInvalidRelay},
+		{fmt.Errorf("wrapped: %w", ErrUnknownPeer), CodeUnknownPeer},
+		{fmt.Errorf("wrapped: %w", ErrStaleRosterUpdate), CodeStaleRoster},
+		{fmt.Errorf("wrapped: %w", ErrInvalidRosterUpdate), CodeInvalidRosterUpdate},
+		{fmt.Errorf("wrapped: %w", ErrTooManyPeers), CodeUnavailable},
+		{fmt.Errorf("wrapped: %w", ErrPeerBusIDCollision), CodeBusIDCollision},
 	}
 	for _, tc := range cases {
 		if got := ErrorCode(tc.err); got != tc.want {

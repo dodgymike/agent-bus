@@ -31,6 +31,18 @@ const (
 	CodePeerRejected          = "peer_rejected"
 	CodeUnavailable           = "unavailable"
 	CodeInternal              = "internal_error"
+
+	// The relay and roster-sync surfaces (RELAY-2, RELAY-3) extend the same
+	// stable-code vocabulary rather than starting a second one: a peer operator
+	// reads one list, and ErrorCode stays the single mapping from a sentinel to
+	// the string on the wire.
+	CodeRelayLoop            = "relay_loop"
+	CodeInvalidBusPath       = "invalid_bus_path"
+	CodeInvalidRelay         = "invalid_relay"
+	CodeIdempotencyViolation = "idempotency_violation"
+	CodeUnknownPeer          = "unknown_peer"
+	CodeStaleRoster          = "stale_roster"
+	CodeInvalidRosterUpdate  = "invalid_roster_update"
 )
 
 // ErrPeerRejected is what an AcceptPeer callback returns to DECLINE a peer that
@@ -253,28 +265,18 @@ func (h *Handler) localResponse() (PeerEnrollResponse, error) {
 	return PeerEnrollResponse{BusID: h.busID, Agents: out, Count: len(out)}, nil
 }
 
+// fail and writeJSON delegate to the free functions in httputil.go, which the
+// relay-ingress and roster-sync handlers share. The behaviour is unchanged; the
+// surface is one place instead of three, so the "code on the wire, detail in the
+// log" posture cannot drift between the three bus-to-bus handlers. The logger is
+// decorated with the handshake's own context so the log line still names the
+// surface and the local bus.
 func (h *Handler) fail(w http.ResponseWriter, status int, code string, err error) {
-	h.log.Warn("peer handshake rejected",
-		"local_bus", h.busID,
-		"status", status,
-		"code", code,
-		"err", err.Error(),
-	)
-	h.writeJSON(w, status, ErrorBody{Error: code})
+	failJSON(w, h.log.With("surface", "peer-enroll", "local_bus", h.busID), status, code, err)
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, body interface{}) {
-	buf, err := json.Marshal(body)
-	if err != nil {
-		// Both body types are plain structs of strings and ints, so this cannot
-		// fire; if it ever does, do not emit a half-written body.
-		h.log.Error("peer handshake response could not be encoded", "err", err.Error())
-		http.Error(w, `{"error":"`+CodeInternal+`"}`, http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(buf)
+	writeJSONBody(w, h.log.With("surface", "peer-enroll", "local_bus", h.busID), status, body)
 }
 
 // checkJSONContentType requires a JSON media type. A handshake body is always
