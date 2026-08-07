@@ -93,7 +93,7 @@ func TestEnrollRecordsThePresentedPublicKeyInTheRoster(t *testing.T) {
 	if entry.Name != "alpha" {
 		t.Errorf("roster entry name = %q, want %q; the stored name must be the name half of the id, byte for byte", entry.Name, "alpha")
 	}
-	if !entry.PublicKey.Equal(pub) {
+	if !entry.AuthPublicKey.Equal(pub) {
 		t.Error("the roster's public key is not the one presented at enrolment")
 	}
 	if !entry.EnrolledAt.Equal(epoch) {
@@ -104,12 +104,12 @@ func TestEnrollRecordsThePresentedPublicKeyInTheRoster(t *testing.T) {
 	}
 
 	t.Run("the returned key is a copy the caller cannot use to rewrite the credential", func(t *testing.T) {
-		entry.PublicKey[0] ^= 0xff
+		entry.AuthPublicKey[0] ^= 0xff
 		again, ok := roster.Get(res.AgentID)
 		if !ok {
 			t.Fatal("roster entry vanished")
 		}
-		if !again.PublicKey.Equal(pub) {
+		if !again.AuthPublicKey.Equal(pub) {
 			t.Fatal("mutating the returned slice changed the STORED credential; a caller must not be able to reach into the roster through the key it was handed")
 		}
 	})
@@ -165,7 +165,7 @@ func TestEnrollRejectsWrongSizePublicKeysWithoutPanicking(t *testing.T) {
 
 	t.Run("MemoryRoster refuses a wrong-size key even when handed one directly", func(t *testing.T) {
 		roster := auth.NewMemoryRoster()
-		err := roster.Put(auth.RosterEntry{AgentID: testBusID + ".alpha-1", Name: "alpha", PublicKey: make([]byte, 8)})
+		err := roster.Put(auth.RosterEntry{AgentID: testBusID + ".alpha-1", Name: "alpha", AuthPublicKey: make([]byte, 8)})
 		if !errors.Is(err, auth.ErrInvalidPublicKey) {
 			t.Fatalf("Put err = %v, want one wrapping ErrInvalidPublicKey; this is the boundary that hands keys to ed25519.Verify", err)
 		}
@@ -179,7 +179,7 @@ func TestEnrollRejectsWrongSizePublicKeysWithoutPanicking(t *testing.T) {
 		svc, _ := newService(t, auth.Options{Roster: roster})
 
 		agentID := testBusID + ".alpha-1"
-		if err := roster.Put(auth.RosterEntry{AgentID: agentID, Name: "alpha", PublicKey: make([]byte, ed25519.PublicKeySize-1)}); err != nil {
+		if err := roster.Put(auth.RosterEntry{AgentID: agentID, Name: "alpha", AuthPublicKey: make([]byte, ed25519.PublicKeySize-1)}); err != nil {
 			t.Fatalf("seeding the stub roster: %v", err)
 		}
 

@@ -17,6 +17,7 @@ package auth_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -190,4 +191,18 @@ func (r *stubRoster) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.byID)
+}
+
+// List implements auth.Roster. Like Put, it hands back exactly what it was
+// given — no copying and no validation — so a test can still observe the
+// corrupt state this double exists to produce.
+func (r *stubRoster) List() []auth.RosterEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]auth.RosterEntry, 0, len(r.byID))
+	for _, e := range r.byID {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AgentID < out[j].AgentID })
+	return out
 }

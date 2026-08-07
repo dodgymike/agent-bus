@@ -257,14 +257,23 @@ type EnrolResult struct {
 // the ORIGINAL result and applies nothing; the same key with a DIFFERENT
 // payload is a protocol violation and returns ErrIdempotencyKeyReused.
 //
-// # Nothing here is durable
+// # What here is durable, and what is not
 //
-// This records the agent in memory and returns. It does NOT write a WAL prepare
-// or commit, so an acknowledged enrolment does NOT survive a crash. That is a
-// known, deliberately-scoped gap that AUTH-3 closes by making this method write
-// through the two-phase path before it returns — see point 1 of the
-// ids.NameSuffixes doc for the ordering that will be required. Until then no
-// caller may present enrolment as durable.
+// The ROSTER WRITE is durable WHEN — and only when — a WALRoster was injected
+// through Options.Roster: Roster.Put then writes a WAL prepare, fsyncs it,
+// writes and fsyncs the commit, and applies to memory, all before this method
+// returns, which is the ordering point 1 of the ids.NameSuffixes doc requires.
+// With the default MemoryRoster it writes nothing.
+//
+// Nothing else here is durable. The idempotency table (s.idem) and the session
+// table are still MEMORY ONLY, so a retry that straddles a restart re-applies
+// and mints a second agent id for one agent — invariant 10's durability half is
+// not yet met on this route (IDEM-11 owns it).
+//
+// And be precise about what is actually running: cmd/agent-bus/main.go still
+// injects the MEMORY roster. Until the wiring task lands, the durable path
+// exists and is tested but is not the one a deployed bus takes, so no caller
+// may present enrolment on the shipped binary as durable.
 //
 // # The suffix is BURNED by Mint, and that is correct
 //
@@ -291,6 +300,13 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		return EnrolResult{}, fmt.Errorf("%w: got %d bytes, want exactly %d", ErrInvalidPublicKey, len(req.PublicKey), ed25519.PublicKeySize)
 	}
 
+	// NOTE: with a WALRoster injected, enrolMu is now GENUINELY held across an
+	// fsync — two of them — for the duration of Roster.Put below. That is the
+	// cost the lock split above anticipated in so many words ("once AUTH-3 makes
+	// that roster write durable, the lock is held across an fsync, for
+	// milliseconds"), and it is why Authenticate takes sessMu and not this one.
+	// Nothing about the locking changes here; the comment records that the
+	// anticipated condition has arrived.
 	s.enrolMu.Lock()
 	defer s.enrolMu.Unlock()
 
@@ -331,10 +347,19 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 
 	now := s.now()
 	entry := RosterEntry{
-		AgentID:    agentID,
-		Name:       req.Name,
-		PublicKey:  req.PublicKey,
+		AgentID:       agentID,
+		Name:          req.Name,
+		AuthPublicKey: req.PublicKey,
+		// Epoch equals EnrolledAt today: this IS the enrolment, so the
+		// credential's epoch begins here. It is set explicitly rather than left
+		// zero because the durable record carries it (Decode refuses a zero
+		// epoch), and it is a separate field so a future re-key can bump it
+		// without rewriting EnrolledAt. See RosterEntry.Epoch.
+		Epoch:      now,
 		EnrolledAt: now,
+		// MessagingPublicKey, InviteID and CertBindings are left ZERO. They are
+		// reserved (see RosterEntry): the SIGN, INVITE and MTLS-BIND epics
+		// populate them, and nothing on this path may invent a value for them.
 	}
 	if err := s.roster.Put(entry); err != nil {
 		// The suffix inside agentID is spent. See the doc comment: it is not

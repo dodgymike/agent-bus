@@ -67,5 +67,44 @@ var (
 	// agent id that is already present. Agent ids are never reused (invariant
 	// 1), so this is an internal invariant breach — a minter handing out a
 	// suffix twice — not a client error: 500.
+	//
+	// # On a DURABLE roster this is a safety net, not just an assertion
+	//
+	// The realistic way to reach it is a restart: the roster is recovered from
+	// disk while the suffix counter is not, so the counter resumes from 1 and
+	// re-mints an id the recovered roster already holds. WALRoster.Put checks
+	// the RECOVERED map before writing and refuses, which is why the outcome is
+	// a refused enrolment rather than a live identity rebound to a different
+	// keypair. It FAILS CLOSED on purpose: a refused enrolment is recoverable,
+	// a rebound identity is not.
+	//
+	// An operator seeing this repeatedly after a restart should not read it as
+	// a roster bug. It is the signal that the suffix allocator is not durable —
+	// build the minter on ids.OpenNameSuffixes, never ids.NewNameSuffixes.
+	//
+	// The residual gap, stated so it is known: an agent whose record was
+	// DISCARDED at replay (undecodable, or removed by log repair) is not in the
+	// recovered map, so its id is not protected by this check.
 	ErrDuplicateAgentID = errors.New("auth: agent id already enrolled")
+
+	// ErrInvalidRecord reports a durable enrolment record that is malformed:
+	// unparseable JSON, a schema version this build does not understand, an
+	// agent id that does not parse, a name that disagrees with the id, a
+	// wrong-size key, or a certificate history past MaxCertBindings.
+	//
+	// It is raised in BOTH directions and means different things either way. On
+	// the way OUT (Encode, before the durable write) it is a server-side bug and
+	// the operation fails with nothing written: 500. On the way IN (Decode,
+	// during recovery) it is CORRUPTION, and the record is discarded loudly and
+	// the bus starts anyway — invariant 6 — so it never reaches a client at all.
+	ErrInvalidRecord = errors.New("auth: invalid enrolment record")
+
+	// ErrNotAttached reports a durable roster asked to record an enrolment
+	// before it was bound to a WAL (WALRoster.Attach). It is a startup-SEQUENCING
+	// defect, never a client error: 500.
+	//
+	// It exists rather than a silent in-memory success because succeeding here
+	// would acknowledge an enrolment that never reached disk — the exact false
+	// durability claim WALRoster exists to remove (invariant 4).
+	ErrNotAttached = errors.New("auth: durable roster is not attached to a write-ahead log")
 )

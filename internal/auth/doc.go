@@ -44,27 +44,51 @@
 // are not the same primitive, and a future change must not delete one on the
 // strength of the other's rationale.
 //
-// # What is NOT durable yet
+// # What is durable, what is not, and what is actually WIRED
 //
-// State in this package is IN MEMORY ONLY. Enrolment is therefore NOT
-// crash-safe: the roster, the idempotency table and the session table all live
-// in the process and are lost on restart, and nothing here writes to the WAL or
-// participates in the two-phase write path. Read no durability claim into any of
-// it — AUTH-3 makes enrolment durable and restores the roster and the per-name
-// suffix floors on start.
+// Three different questions, and conflating them is how a backlog ends up
+// claiming a thing is shipped:
 //
-// Sessions are a deliberate exception that stays memory-only even after AUTH-3:
-// a session is a short-lived credential with a one-hour ceiling, and losing it
-// on restart costs an agent one cheap challenge/response round trip. Persisting
+//   - THE ROSTER CAN BE DURABLE. WALRoster records every enrolment through
+//     internal/wal's two-phase path — prepare fsync, commit fsync, then apply —
+//     and rebuilds itself by replay at start. Which roster is in force is
+//     decided by whoever calls NewService: pass Options.Roster.
+//   - AGENT ID SUFFIX FLOORS ARE NOT THIS PACKAGE'S JOB. Stopping a restart from
+//     re-minting a live agent id belongs to ids.OpenNameSuffixes, which writes
+//     each name's floor AHEAD of issuing it. This package's
+//     EnrolmentSuffixesInWAL is NOT that mechanism and must never be sealed into
+//     an allocator — it reports only what the ENROLMENT records contain, which
+//     is a strict subset of the agent ids on disk. Read its doc before using it;
+//     an earlier version of this paragraph claimed it made a restart safe, and
+//     that claim was false.
+//   - THE IDEMPOTENCY TABLE IS NOT DURABLE. Service.idem is a plain map, lost
+//     on restart, so a retry that straddles a restart re-applies and mints a
+//     second agent id for one agent. Invariant 10's durability half is not met
+//     on this route; IDEM-11 owns closing it.
+//   - NOTHING IS WIRED YET. cmd/agent-bus/main.go still injects the default
+//     MemoryRoster, which writes nothing and fsyncs nothing. The durable path
+//     above exists and is exercised by this package's tests; it is NOT the path
+//     a deployed bus takes until the startup-wiring task lands. Read no
+//     durability claim about the SHIPPED BINARY into any of it.
+//
+// Sessions are a deliberate exception and stay memory-only permanently: a
+// session is a short-lived credential with a one-hour ceiling, and losing it on
+// restart costs an agent one cheap challenge/response round trip. Persisting
 // live credentials across restarts would buy nothing and would put replayable
-// material on disk.
+// material on disk. WALRoster writes exactly one record kind and no session
+// ever reaches disk.
 //
 // # Seams for the rest of the AUTH epic
 //
 //   - Authenticate is the entry point AUTH-2's middleware will call. This
 //     package deliberately does not enforce a token on any route.
-//   - Roster is an injected interface so AUTH-3 can supply a WAL-backed
-//     implementation without reshaping any caller.
+//   - Roster is an injected interface, which is what let the WAL-backed
+//     implementation land without reshaping any caller.
+//   - RosterEntry already carries the FULL enrolment field set decided by
+//     DECISIONS.md 2026-08-07 (ENROL-SHAPE), including MessagingPublicKey,
+//     InviteID and CertBindings, which nothing populates yet. They are on disk
+//     from the first record so the SIGN, INVITE and MTLS-BIND epics do not each
+//     force a migration — and a migration here means re-enrolling every agent.
 //   - Revocation (AUTH-4) is a scan over the session table; see the note on
 //     Service.sessions for why no per-agent index exists.
 package auth

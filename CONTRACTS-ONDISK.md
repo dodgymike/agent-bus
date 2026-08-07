@@ -365,8 +365,9 @@ Invariants 1 and 5 require that a server-minted agent id survive a restart, not 
 process: state is held in memory for speed and REBUILT by replaying the durable store. AUTH-3 is
 that store for enrolment — `internal/auth`'s `record.go` (the on-disk shape, `Encode`/`Decode`),
 `roster.go` (`RosterEntry`, `CertBinding`, `MaxCertBindings`), `walroster.go` (`WALRoster`, the
-`wal.Applier` that rebuilds the roster by replay) and `floors.go` (`SuffixFloors`, the companion scan
-that recovers the per-name agent-id suffix high-water mark). Read `internal/auth/doc.go`'s package doc
+`wal.Applier` that rebuilds the roster by replay) and `floors.go` (`EnrolmentSuffixesInWAL`, an audit
+scan of the suffixes in enrolment records — NOT a suffix floor and never to be sealed into an
+allocator; see the correction below). Read `internal/auth/doc.go`'s package doc
 for the honest statement of what is and is not durable today; this section documents only the on-disk
 shape.
 
@@ -469,12 +470,34 @@ their field and its decoder together, in one build.
   running server, damaged records are discarded, and the absolute requirement is that every discard is
   logged — availability over retention, not silence over damage.
 
-**`SuffixFloors` (`internal/auth/floors.go`) is a SECOND scan of the WAL, over raw PREPARE records —
-not derived from the committed roster.** Per points 3 and 7 of `ids.NameSuffixes`' doc, deriving the
+> **CORRECTION (2026-08-07, same day, after the security gate).** The two paragraphs below described
+> `SuffixFloors` as the source of the startup suffix floors. **That was wrong and the function has
+> been renamed `EnrolmentSuffixesInWAL` to make the mistake unrepeatable.** It reports the highest
+> suffix in an **enrolment record only** — a strict SUBSET of the agent ids on disk, because a
+> `store` message record names its sender and recipients and those suffixes are burned too. On any
+> data directory written by a build where enrolment is still memory-only, the enrolment subset is
+> EMPTY and the function returns an empty map with a **nil** error, indistinguishable from a fresh
+> bus. Sealing that into an allocator re-mints every live agent id.
+>
+> **The production floor source is `ids.OpenNameSuffixes`** (`internal/ids/suffixstore.go`, commit
+> `61b7c9a`), which PERSISTS AND FSYNCS each name's floor BEFORE issuing the suffix and derives
+> nothing from history — so no tail repair and no log quarantine can rewind it, which makes the
+> "known residual hole" below structural to derivation and absent from write-ahead. It is wired in
+> `cmd/agent-bus/suffixfloors.go`. `AUTH-7` must NOT derive floors from `EnrolmentSuffixesInWAL`.
+>
+> `EnrolmentSuffixesInWAL` is kept, not deleted, for one reason: the production derivation in
+> `cmd/agent-bus/suffixfloors.go` folds only `store.RecordKind`, so the two cover COMPLEMENTARY
+> halves. Unioning them is a filed follow-up; using either alone is not a floor.
+>
+> Read the rest of this subsection as a description of what the function scans, not as a
+> recommendation to seal its output.
+
+**`EnrolmentSuffixesInWAL` (`internal/auth/floors.go`) is a SECOND scan of the WAL, over raw PREPARE
+records — not derived from the committed roster.** Per points 3 and 7 of `ids.NameSuffixes`' doc, deriving the
 per-name suffix floor from the replayed (committed) roster is wrong twice over: it misses a suffix
 burned by a dangling prepare (allocated, prepare fsynced, crash before commit — on disk and in the
 audit log, but no committed roster entry mentions it), and it misses every agent that has since left.
-`SuffixFloors` instead walks every `wal.TypePrepare` record via `wal.ScanAll` and a deliberately
+`EnrolmentSuffixesInWAL` instead walks every `wal.TypePrepare` record via `wal.ScanAll` and a deliberately
 LENIENT, non-`DisallowUnknownFields` decoder that reads only `agent_id` — a record too damaged for the
 strict `Decode` to accept still burned a suffix, and validation protects the roster while the floor is
 a claim about bytes that reached disk. An ABORTED prepare counts too. This is currently a genuinely
@@ -495,11 +518,13 @@ AUTH-3-or-later build already carries the full field set above.
 `cmd/agent-bus/main.go` still constructs `auth.NewService(auth.Options{Minter: minter})` with no
 roster injected, which means `auth.Service` falls back to its default, `MemoryRoster` — the
 in-memory implementation that writes nothing, fsyncs nothing, and is lost entirely on restart.
-`WALRoster`, `Encode`/`Decode` and `SuffixFloors` exist, are unit- and crash-tested, and are correct;
-none of it is on the path a deployed bus takes. Nothing in this section describes SHIPPED runtime
-behaviour until the follow-up wiring task (`AUTH-7`) lands and `main.go` constructs a `WALRoster`,
-attaches it to the process's `*wal.Log`, and derives startup suffix floors from `SuffixFloors`. A
-reader must not come away believing a running bus persists enrolments today.
+`WALRoster`, `Encode`/`Decode` and `EnrolmentSuffixesInWAL` exist, are unit- and crash-tested, and are
+correct; none of it is on the path a deployed bus takes. Nothing in this section describes SHIPPED
+runtime behaviour until the follow-up wiring task (`AUTH-7`) lands and `main.go` constructs a
+`WALRoster` and attaches it to the process's `*wal.Log`. **`AUTH-7` must NOT derive startup suffix
+floors from `EnrolmentSuffixesInWAL`** — see the correction above; the allocator is built by
+`ids.OpenNameSuffixes` in `cmd/agent-bus/suffixfloors.go`, which is already wired. A reader must not
+come away believing a running bus persists enrolments today.
 introduced by this task.
 
 ## The durable invite record (INVITE-STORE, added 2026-08-07)

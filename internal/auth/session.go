@@ -355,11 +355,11 @@ func (s *Service) CompleteSession(token string, signature []byte) (Session, erro
 	// a public key that is not exactly ed25519.PublicKeySize, while it merely
 	// returns false for a bad signature. Enrol already rejects a wrong-size key
 	// at the door, so this is defence in depth — and it stops being merely
-	// defensive the moment AUTH-3 reloads this roster FROM DISK, where a
+	// defensive now that WALRoster reloads this roster FROM DISK, where a
 	// truncated or corrupt record could otherwise turn into a panic on an
 	// unauthenticated route.
-	if len(entry.PublicKey) != ed25519.PublicKeySize {
-		return Session{}, fmt.Errorf("%w: the roster holds a %d-byte public key for %q, want exactly %d", ErrInvalidPublicKey, len(entry.PublicKey), sess.AgentID, ed25519.PublicKeySize)
+	if len(entry.AuthPublicKey) != ed25519.PublicKeySize {
+		return Session{}, fmt.Errorf("%w: the roster holds a %d-byte public key for %q, want exactly %d", ErrInvalidPublicKey, len(entry.AuthPublicKey), sess.AgentID, ed25519.PublicKeySize)
 	}
 	// Checked explicitly rather than left to Verify: Verify would return false,
 	// which is the right outcome, but naming the reason keeps the server log
@@ -371,7 +371,7 @@ func (s *Service) CompleteSession(token string, signature []byte) (Session, erro
 		return Session{}, fmt.Errorf("%w: got a %d-byte signature, want exactly %d", ErrBadSignature, len(signature), ed25519.SignatureSize)
 	}
 
-	if !ed25519.Verify(entry.PublicKey, []byte(SessionSigningContext+token), signature) {
+	if !ed25519.Verify(entry.AuthPublicKey, []byte(SessionSigningContext+token), signature) {
 		if sess.State == SessionPending {
 			delete(s.sessions, hash)
 		}
