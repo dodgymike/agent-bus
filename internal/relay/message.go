@@ -1,13 +1,15 @@
 package relay
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
-	"time"
 
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 )
 
@@ -38,6 +40,24 @@ const PeerRelayPath = "/v1/peer/relay"
 // loop prevention exists to stop.
 const DropLoop = "loop"
 
+// THERE IS DELIBERATELY NO DropUnsigned OR DropBadSignature.
+//
+// A drop reason rides on HTTP 200 and means "settled, and NOT YOUR FAULT" — a
+// loop is the expected steady state of a cyclic topology and the sender cannot
+// know our federation graph. A missing, unsignable or invalid signature is the
+// opposite on both counts: it IS the sender's fault and it IS diagnosable by the
+// sender, so it is answered as CodeUnsigned (400) or CodeBadSignature (403) like
+// every other malformed envelope. Both are final; a peer must not retry either.
+// CodeUnpeeredBus (403) is final for the same reason and is not a drop either:
+// it IS diagnosable by the sender's operator — nobody peered these two buses —
+// and answering 200/dropped would file a missing federation under "working".
+//
+// Minting the constants anyway would be worse than useless: an exported
+// Drop* name is an invitation to a wiring site to answer 200/accepted:false for
+// an unsigned message, and a 200 is what this package uses to say "we took a
+// look and there is nothing wrong here". That is the unauthenticated downgrade
+// dressed as a normal outcome.
+
 // MaxRelayBytes bounds the encoded relay payload read from the network, before
 // it is decoded.
 //
@@ -47,9 +67,10 @@ const DropLoop = "loop"
 //	recipients  store.MaxRecipients (64) x (ids.MaxAgentIDLen 150 + 3 for two
 //	            quotes and a comma)                                  =  9,792
 //	bus_path    MaxBusPath (64) x (64-byte bus id + 3)               =  4,288
+//	signature   64 raw bytes base64-expanded by 4/3, padded          =    88
 //	fixed       origin_bus (64) + message_id (85) + sender (150) +
-//	            content_sha256 (64) + sent_at (20) + size (10) +
-//	            the flags and every field name                       = ~1,024
+//	            content_sha256 (64) + timestamp_unix_ms (20) +
+//	            size (10) + the flags and every field name           = ~1,024
 //	                                                         total  ~ 102,488
 //
 // 256 KiB leaves ~2.5x headroom, so a legal maximum-size relayed message can
@@ -110,9 +131,45 @@ type RelayRequest struct {
 	// signature — see path.go and PROTOCOL.md §8.5.
 	BusPath []string `json:"bus_path"`
 
-	// SentAtUnixNs is the ORIGIN bus's clock reading for the message. It is
-	// PROVENANCE, not authorization input — see RelayedMessage.OriginSentAt.
-	SentAtUnixNs int64 `json:"sent_at_unix_ns"`
+	// TimestampUnixMilli is the SENDING AGENT's wall clock in Unix
+	// milliseconds — signing.Message.TimestampUnixMilli, the exact integer the
+	// origin agent SIGNED. It is PROVENANCE, not authorization input; see
+	// RelayedMessage.TimestampUnixMilli for the boundary it must never cross.
+	//
+	// IT REPLACED A FIELD CALLED sent_at_unix_ns, AND THE REPLACEMENT IS THE
+	// POINT OF SIGN-7. That field was the ORIGIN BUS's clock in NANOSECONDS: a
+	// different quantity, from a different source, in a different unit from the
+	// one the signature covers. An envelope carrying it could not re-derive the
+	// signed bytes at all, so no relayed signature could ever be verified. There
+	// is now exactly ONE timestamp on this envelope, it is the signed one, and
+	// nothing on the path converts it — signing/canonical.go warns that every
+	// conversion between the wire form and the signed form is a place the two
+	// sides drift, so there is none.
+	//
+	// This is not a compatibility break: relay registers no route and is
+	// imported by nothing (see doc.go and guards_test.go), so the envelope is
+	// not yet on any wire and there is nothing to stay compatible with.
+	TimestampUnixMilli int64 `json:"timestamp_unix_ms"`
+
+	// Signature is the origin AGENT's detached Ed25519 signature over
+	// signing.Canonicalize of the fields above — ed25519.SignatureSize (64)
+	// bytes, produced over the canonical bytes UNHASHED (signing.Context is
+	// bound exclusively to Ed25519).
+	//
+	// The signature is over field VALUES that the receiver RE-DERIVES the
+	// canonical bytes from; the pre-serialised canonical byte string is never
+	// transported. That is what makes the JSON transport safe: a hop that
+	// unmarshals and remarshals this envelope changes key order, number
+	// formatting and base64 padding, none of which the signature sees.
+	//
+	// There is deliberately NO key-id or key-epoch field here yet. Today a
+	// verifier obtains the signing key through CrossBusTrust (signed.go): the
+	// ORIGIN bus's attestation for this Sender, checked against a signing key
+	// pinned when we peered with that bus. CRYPTO-4 owns the attested bundle's
+	// format and `key_epoch`, neither number is reserved, and nobody picks a
+	// numbered wire field by eyeballing the list — so CRYPTO-4 is the task that
+	// must add it to THIS envelope, at the same time it adds it everywhere else.
+	Signature []byte `json:"signature"`
 
 	// Size is the declared body length. It is cross-checked against the actual
 	// body, so a lying Size is a rejection rather than an allocation.
@@ -188,8 +245,10 @@ type RelayedMessage struct {
 	// ingress record disagree with the egress envelope built from it.
 	BusPath []string
 
-	// OriginSentAt is the ORIGIN BUS's clock reading, and the field is named
-	// OriginSentAt rather than SentAt DELIBERATELY.
+	// TimestampUnixMilli is the SENDING AGENT's signed wall clock, Unix
+	// milliseconds — the exact integer inside the canonical bytes, kept as an
+	// integer and NOT as a time.Time so that nothing can round-trip it through a
+	// formatted timestamp and hand a different number back to Canonicalize.
 	//
 	// IT IS UNTRUSTED PEER INPUT AND MUST NEVER BECOME THE LOCAL
 	// store.Message.SentAt. store.Message.VisibleTo compares SentAt against an
@@ -200,10 +259,26 @@ type RelayedMessage struct {
 	// it out of every local agent's view, or forward-date it so it is delivered
 	// to agents that enrol later.
 	//
+	// A VALID SIGNATURE OVER IT CHANGES NOTHING ABOUT THAT. The signature proves
+	// the sending agent chose this number; it does not make the number true, and
+	// an agent is free to sign any clock reading it likes. Verification moves the
+	// value from "some peer asserted it" to "this agent asserted it" — which is
+	// exactly what provenance needs and exactly what an authorization decision
+	// must not rest on.
+	//
 	// The local bus MUST stamp its own acceptance time. This value is
 	// PROVENANCE — worth recording in the audit trail, worth showing an
 	// operator, never an input to a visibility or ordering decision.
-	OriginSentAt time.Time
+	TimestampUnixMilli int64
+
+	// Signature is the origin agent's detached Ed25519 signature over the
+	// canonical bytes CanonicalBytes re-derives. Freshly allocated; never
+	// aliases the decoded payload.
+	//
+	// A RelayedMessage only ever exists with this signature ALREADY VERIFIED:
+	// ValidateRelayRequest takes the CrossBusTrust as a required parameter and
+	// runs VerifyRelayed before it returns a value. See signed.go.
+	Signature []byte
 
 	// Body is the opaque payload, freshly allocated.
 	Body []byte
@@ -243,10 +318,37 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // fingerprint can never equal a send's or a peer-enrol's), the origin bus, the
 // origin message id, the sender, the broadcast flag as "1"/"0", the size in
 // decimal, the content hash, the origin timestamp in decimal, then each
-// recipient in order. Recipient ORDER is part of the payload for the same
-// reason roster order is in peerFingerprint: two envelopes differing only in
-// order are different envelopes, and treating them as equal would let a retry
-// quietly re-address a message.
+// recipient in SORTED order.
+//
+// # RECIPIENTS ARE SORTED HERE BECAUSE THE SIGNATURE SORTS THEM
+//
+// This function used to fold the recipients in WIRE order, on the reasoning
+// that roster order is significant in peerFingerprint and that two differently
+// ordered envelopes are two different envelopes. SIGN-7 makes that reasoning
+// wrong, and dangerously so.
+//
+// signing.Canonicalize sorts a COPY of the recipient set bytewise before
+// encoding it (canonical.go, "two independent implementations that disagree
+// about ordering still produce identical bytes"). So recipient order is NOT
+// part of the signed payload: one signature covers every permutation of one
+// recipient set. An order-sensitive fingerprint therefore DISAGREES WITH THE
+// SIGNATURE about what "the same message" means, and invariant 10 punishes the
+// disagreement — a peer that reorders the recipient array while forwarding, or
+// simply a JSON encoder that iterates a set, produces the same key with a
+// different fingerprint, which is idem.OutcomeViolation, which mandates
+// DISCONNECTING THE PEER. A hostile peer could reorder a legitimately signed
+// message's recipients precisely to get an honest peer disconnected, and the
+// honest peer's copy would still carry a perfectly valid signature.
+//
+// That is the same self-inflicted-partition shape as covering bus_path, and it
+// is fixed the same way: the fingerprint must define "same payload" exactly as
+// the signature does. Sorted here, sorted there, one meaning.
+//
+// The property the old comment wanted is not lost. Re-ADDRESSING a message
+// changes the recipient SET, which changes the sorted list, which changes both
+// the fingerprint AND the canonical bytes — so a retry still cannot quietly
+// re-address anything. Only a pure permutation collapses, and it collapses
+// because the sender signed a set, not a sequence.
 //
 // # BusPath MUST NOT BE IN THE FINGERPRINT. THIS IS NOT AN OVERSIGHT.
 //
@@ -265,7 +367,33 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // IDENTITY-DEFINING CONTENT — who sent it, to whom, when, and what — while the
 // bus path is PER-COPY ROUTING METADATA that says how this particular copy got
 // here. Changing the content is a violation; arriving by another route is not.
-func relayFingerprint(originBus, messageID, sender string, broadcast bool, recipients []string, sentAtUnixNs int64, size int, contentSHA256 string) idem.Fingerprint {
+//
+// # THE SIGNED TIMESTAMP IS COVERED, AND IT MUST BE
+//
+// timestampUnixMilli is SIGNED CONTENT (signing.Message.TimestampUnixMilli), so
+// two envelopes bearing one message id and two different timestamps are two
+// different payloads — invariant 10's "same key + DIFFERENT payload = protocol
+// violation". Leave it out and the second one is a matching fingerprint, hence
+// idem.OutcomeRetry, hence silently dropped in favour of whichever arrived
+// first: an origin could equivocate about when it sent a message and the bus
+// would suppress the evidence. The signature was supposed to make exactly that
+// impossible.
+//
+// # THE SIGNATURE ITSELF IS NOT COVERED, AND THAT IS NOT AN OVERSIGHT EITHER
+//
+// Same shape of argument as bus_path above. Ed25519 is DETERMINISTIC: identical
+// content signed by the same key yields byte-identical signatures, so covering
+// it would add nothing in the ordinary case. In the one case where it would
+// differ — a key rotation, where two validly-signed copies of ONE message carry
+// two different signatures — covering it would turn the rotation window into
+// idem.OutcomeViolation between honest peers, and invariant 10 mandates a
+// DISCONNECT on a violation. That is the self-inflicted partition again.
+//
+// Signer substitution does not get in this way: VERIFICATION runs first, in
+// ValidateRelayRequest, and no RelayedMessage — hence no fingerprint — exists
+// for a message whose signature did not verify against the key this bus
+// attributes to the sender.
+func relayFingerprint(originBus, messageID, sender string, broadcast bool, recipients []string, timestampUnixMilli int64, size int, contentSHA256 string) idem.Fingerprint {
 	broadcastField := "0"
 	if broadcast {
 		broadcastField = "1"
@@ -279,9 +407,16 @@ func relayFingerprint(originBus, messageID, sender string, broadcast bool, recip
 		[]byte(broadcastField),
 		[]byte(strconv.Itoa(size)),
 		[]byte(contentSHA256),
-		[]byte(strconv.FormatInt(sentAtUnixNs, 10)),
+		[]byte(strconv.FormatInt(timestampUnixMilli, 10)),
 	)
-	for _, r := range recipients {
+	// Sorted, on a COPY — the caller's slice (and, via ValidateRelayRequest, the
+	// RelayedMessage the caller is about to act on) must never be reordered as a
+	// side effect of fingerprinting it. signing.Canonicalize takes the same
+	// precaution for the same reason.
+	sorted := make([]string, len(recipients))
+	copy(sorted, recipients)
+	sort.Strings(sorted)
+	for _, r := range sorted {
 		fields = append(fields, []byte(r))
 	}
 	return idem.ComputeFingerprint(fields...)
@@ -333,7 +468,34 @@ func relayFingerprint(originBus, messageID, sender string, broadcast bool, recip
 //     the content hash. The body is NEVER echoed in an error: it may be 64 KiB
 //     and, once the CRYPTO epic lands, it is ciphertext nobody here can read.
 //
-//  10. SentAtUnixNs must be positive; 0 is an unset field, not the epoch.
+//  10. TimestampUnixMilli must be positive; 0 is an unset field, not the epoch.
+//     This is the SIGNED timestamp, and signing.Canonicalize applies the same
+//     rule, so an envelope that failed here could never have been signed either.
+//
+//  11. THE SIGNATURE MUST BE PRESENT AND MUST BE THE RIGHT LENGTH, and a
+//     BROADCAST is refused outright — see "Why the trust is a parameter"
+//     and the fail-closed comment on the broadcast check itself.
+//
+//  12. The record is built (step 12 in the code) and THEN VerifyRelayed runs
+//     against trust (step 13). Verification is last,
+//     because verification needs the validated, COPIED fields — it must re-derive
+//     the canonical bytes from the exact values this bus will route, deliver,
+//     attribute and log (PROTOCOL.md §8.5), not from the raw decoded payload
+//     that a later copy could still diverge from. A verification failure returns
+//     the ZERO RelayedMessage, so no caller ever sees a partially-trusted value.
+//
+// # Why the trust is a REQUIRED PARAMETER and not a later step
+//
+// trust is not optional and there is no sibling "validate now, verify later"
+// entry point. That is deliberate: making the CrossBusTrust a parameter of the
+// ONLY constructor of a RelayedMessage means there is no code path in the
+// package, and none reachable from outside it, that produces a RelayedMessage
+// whose signature was not checked. A two-call API would put an unverified,
+// fully-populated, perfectly usable value in a caller's hand, and every future
+// wiring site would be one forgotten call away from an unauthenticated relay
+// ingress — the exact downgrade a hostile peer is looking for. A nil trust is
+// ErrNoSignerKey (VerifyRelayed), never a skip, and an origin bus we hold no
+// peering-time pin for is ErrUnpeeredBus — also a refusal, never a "not yet".
 //
 // # Why check 6 is a PROTOCOL RULE and not a convention
 //
@@ -352,7 +514,7 @@ func relayFingerprint(originBus, messageID, sender string, broadcast bool, recip
 // of idem.KeyCharset ([A-Za-z0-9._-]). A future widening of a bus id could
 // break that relationship, which is why TestRelayIdempotencyKeyIsTheOriginMessageID
 // pins it.
-func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest) (RelayedMessage, error) {
+func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, trust CrossBusTrust) (RelayedMessage, error) {
 	// 1. The key's shape.
 	if err := idem.ValidateKey(idempotencyKey); err != nil {
 		return RelayedMessage{}, err
@@ -444,41 +606,108 @@ func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest) (
 		return RelayedMessage{}, fmt.Errorf("%w: content hash mismatch: the envelope asserts %q, the body hashes to %q", ErrInvalidRelay, req.ContentSHA256, got)
 	}
 
-	// 10. A timestamp of 0 is an unset field, not the epoch.
-	if req.SentAtUnixNs <= 0 {
-		return RelayedMessage{}, fmt.Errorf("%w: sent_at_unix_ns is %d; a message always carries the origin's clock reading, and 0 means the field was never set", ErrInvalidRelay, req.SentAtUnixNs)
+	// 10. A timestamp of 0 is an unset field, not the epoch. This is the SIGNED
+	// timestamp, so the same rule signing.Canonicalize applies is applied here
+	// before we spend anything on cryptography.
+	if req.TimestampUnixMilli <= 0 {
+		return RelayedMessage{}, fmt.Errorf("%w: timestamp_unix_ms is %d; a message always carries the sending agent's signed clock reading, and 0 means the field was never set", ErrInvalidRelay, req.TimestampUnixMilli)
 	}
 
-	// 11. Build the record. EVERY SLICE IS COPIED: nothing may alias the
+	// 11. The signature is present and is the right length.
+	//
+	// A MALFORMED SIGNATURE IS AN ABSENT ONE. Both cases return
+	// ErrMissingSignature, because there is no useful distinction between "you
+	// sent no signature" and "you sent something that cannot be a signature":
+	// neither can be verified, both are final, and the length difference is the
+	// whole diagnosis. The signature bytes themselves are NEVER echoed, for the
+	// same "bound before you quote it" reason the body is not.
+	if len(req.Signature) != ed25519.SignatureSize {
+		return RelayedMessage{}, fmt.Errorf("%w: the envelope carries %d signature bytes, and an Ed25519 signature is exactly %d", ErrMissingSignature, len(req.Signature), ed25519.SignatureSize)
+	}
+
+	// 11a. A RELAYED BROADCAST IS REFUSED. FAIL-CLOSED, ON PURPOSE.
+	//
+	// signing.Canonicalize REFUSES an empty recipient set — "an empty recipient
+	// set would sign an audience of nobody" — and a relay broadcast carries no
+	// recipient list by construction (check 8 above enforces that). So under
+	// canonical format v1 THERE ARE NO CANONICAL BYTES FOR A RELAYED BROADCAST,
+	// and therefore no signature over one can exist. Not "is not implemented":
+	// cannot exist.
+	//
+	// The tempting alternative is to exempt broadcasts from the
+	// mandatory-signature rule. That is precisely the unauthenticated downgrade
+	// a hostile peer reaches by setting "broadcast":true — one flag and the
+	// entire ingest signature requirement is gone, on the surface with the
+	// LARGEST blast radius, since a broadcast is addressed to every agent on
+	// this bus. An exemption you can select from the wire is not a policy.
+	//
+	// SIGN-3 ("Broadcast signature covers the recipient set") is the task that
+	// must resolve this — by defining what a broadcast's signed audience IS —
+	// before relayed broadcasts can work at all. Until then the honest answer to
+	// a peer is a refusal, not a silently unverified delivery.
+	if req.Broadcast {
+		return RelayedMessage{}, fmt.Errorf("%w: this is a relayed broadcast, and the canonical signing format (version %d) refuses an empty recipient set, so no signature over it can exist; SIGN-3 must define a broadcast's signed audience before relayed broadcasts can be accepted, and exempting them from the signature requirement would be an unauthenticated downgrade selectable from the wire", ErrUnsignable, signing.FormatVersion)
+	}
+
+	// 12. Build the record. EVERY SLICE IS COPIED: nothing may alias the
 	// decoded payload, because the decoder's buffers are the sending peer's
 	// bytes and a consumer that outlives the request must not be reading
-	// memory somebody else may still hold.
-	return RelayedMessage{
-		OriginBus:       req.OriginBus,
-		OriginMessageID: req.MessageID,
-		OriginSeq:       seq,
-		Sender:          req.Sender,
-		Broadcast:       req.Broadcast,
-		Recipients:      append([]string(nil), req.Recipients...),
-		BusPath:         append([]string(nil), req.BusPath...),
-		OriginSentAt:    time.Unix(0, req.SentAtUnixNs).UTC(),
-		Body:            append([]byte(nil), req.Body...),
-		ContentSHA256:   req.ContentSHA256,
-		IdempotencyKey:  idempotencyKey,
+	// memory somebody else may still hold. The signature is copied for the same
+	// reason, and it matters more here than elsewhere: it is the input to a
+	// verification, and verifying bytes somebody else can still mutate is a
+	// time-of-check/time-of-use hole in the one check that carries the trust.
+	m := RelayedMessage{
+		OriginBus:          req.OriginBus,
+		OriginMessageID:    req.MessageID,
+		OriginSeq:          seq,
+		Sender:             req.Sender,
+		Broadcast:          req.Broadcast,
+		Recipients:         append([]string(nil), req.Recipients...),
+		BusPath:            append([]string(nil), req.BusPath...),
+		TimestampUnixMilli: req.TimestampUnixMilli,
+		Signature:          append([]byte(nil), req.Signature...),
+		Body:               append([]byte(nil), req.Body...),
+		ContentSHA256:      req.ContentSHA256,
+		IdempotencyKey:     idempotencyKey,
 		Fingerprint: relayFingerprint(req.OriginBus, req.MessageID, req.Sender, req.Broadcast,
-			req.Recipients, req.SentAtUnixNs, req.Size, req.ContentSHA256),
-	}, nil
+			req.Recipients, req.TimestampUnixMilli, req.Size, req.ContentSHA256),
+	}
+
+	// 13. VERIFY. The record above is the value a caller would act on, so it is
+	// the value whose bytes are checked — re-derived from these exact fields,
+	// never from a blob that arrived beside them (PROTOCOL.md §8.5). A failure
+	// returns the ZERO RelayedMessage: there is no partially-trusted result.
+	if err := VerifyRelayed(m, trust); err != nil {
+		return RelayedMessage{}, err
+	}
+	return m, nil
 }
 
 // Forward re-encodes the message for onward relay, with THIS bus's hop appended
 // to the path.
 //
-// Every other field is carried VERBATIM. PROTOCOL.md §8.5: "a relay must
-// forward the signed bytes verbatim — any normalisation on the path breaks
-// verification at the far end". Nothing here re-derives, re-orders, re-hashes
-// or otherwise touches a field that a signature covers or will cover; the ONLY
-// thing that changes on a hop is the bus path, which is the one field that is
-// outside the signature and can never be inside it.
+// Every other field is carried VERBATIM, INCLUDING THE SIGNATURE AND THE SIGNED
+// TIMESTAMP. PROTOCOL.md §8.5: "a relay must forward the signed bytes verbatim
+// — any normalisation on the path breaks verification at the far end". Nothing
+// here re-derives, re-orders, re-hashes, re-encodes or re-signs; the ONLY thing
+// that changes on a hop is the bus path, which is the one field that is outside
+// the signature and can never be inside it, because it GROWS on every hop.
+//
+// # "Verbatim" means the FIELD VALUES, and that is what makes it safe
+//
+// Forward re-emits values, never a cached byte string: there is no stored copy
+// of the canonical encoding anywhere on this path, and this envelope does not
+// carry one. It is safe precisely BECAUSE the far end re-derives the canonical
+// bytes from these values with signing.Canonicalize (see CanonicalBytes) rather
+// than trusting a blob we hand it. A transported blob would have to be trusted
+// to correspond to the fields beside it — and a relay that shipped one could
+// present one set of bytes to the verifier and a different set to the router,
+// which is the whole class of bug PROTOCOL.md §8.5 forbids.
+//
+// The corollary is that the JSON layer is free to differ hop by hop: key order,
+// number formatting, base64 padding and whitespace are all outside the signed
+// bytes, so a hop that unmarshals and remarshals this envelope breaks nothing.
+// Only a hop that changes a VALUE does, and that is a detected forgery.
 //
 // An EMPTY m.BusPath means this bus is the ORIGIN — the message has traversed
 // nothing yet — and the result carries exactly our own hop. See AppendHop.
@@ -488,16 +717,17 @@ func (m RelayedMessage) Forward(localBusID string) (RelayRequest, error) {
 		return RelayRequest{}, err
 	}
 	return RelayRequest{
-		OriginBus:     m.OriginBus,
-		MessageID:     m.OriginMessageID,
-		Sender:        m.Sender,
-		Broadcast:     m.Broadcast,
-		Recipients:    append([]string(nil), m.Recipients...),
-		BusPath:       path,
-		SentAtUnixNs:  m.OriginSentAt.UTC().UnixNano(),
-		Size:          len(m.Body),
-		ContentSHA256: m.ContentSHA256,
-		Body:          append([]byte(nil), m.Body...),
+		OriginBus:          m.OriginBus,
+		MessageID:          m.OriginMessageID,
+		Sender:             m.Sender,
+		Broadcast:          m.Broadcast,
+		Recipients:         append([]string(nil), m.Recipients...),
+		BusPath:            path,
+		TimestampUnixMilli: m.TimestampUnixMilli,
+		Signature:          append([]byte(nil), m.Signature...),
+		Size:               len(m.Body),
+		ContentSHA256:      m.ContentSHA256,
+		Body:               append([]byte(nil), m.Body...),
 	}, nil
 }
 
@@ -524,6 +754,33 @@ func relayKeyFitsIdemKey() error {
 		if err := idem.ValidateKey(b); err != nil {
 			return fmt.Errorf("byte %q may appear in a message id but is not a legal idempotency key byte (%s): %v", b, idem.KeyCharset, err)
 		}
+	}
+	return nil
+}
+
+// relayFitsCanonicalFormat reports whether relay's own size caps are STRICTLY
+// INSIDE the canonical signing format's, which SIGN-7's mandatory verification
+// depends on.
+//
+// It exists for the same reason relayKeyFitsIdemKey does: the dependency is
+// EXECUTABLE rather than a claim in a comment. If relay ever accepted an
+// envelope that signing.Canonicalize would refuse ON SIZE, ValidateRelayRequest
+// would pass every shape check and then fail verification with ErrUnsignable —
+// so a legitimate, correctly-signed maximum-size message would be rejected as
+// unsigned, and the operator would be told the peer sent no signature when in
+// fact this bus's own limits had drifted past the format's. The failure would be
+// attributed to the wrong party, which is the worst kind.
+//
+// The relationship also runs the other way round for safety: because relay's
+// caps are the SMALLER pair, an envelope this package accepts can always be
+// canonicalized, so verification never has to make an allocation decision of its
+// own on peer-supplied sizes.
+func relayFitsCanonicalFormat() error {
+	if store.MaxRecipients > signing.MaxRecipients {
+		return fmt.Errorf("relay accepts up to %d recipients but the canonical signing format carries at most %d, so a message this package accepts could not be canonicalized and its signature could never be checked", store.MaxRecipients, signing.MaxRecipients)
+	}
+	if store.MaxBodyBytes > signing.MaxBodyLen {
+		return fmt.Errorf("relay accepts a body of up to %d bytes but the canonical signing format carries at most %d, so a message this package accepts could not be canonicalized and its signature could never be checked", store.MaxBodyBytes, signing.MaxBodyLen)
 	}
 	return nil
 }

@@ -1307,3 +1307,644 @@ documented here — left for spec-keeper/triage to decide, not resolved as part 
 Proof-check verdict quoted above is the completion evidence; `commit_sha` for this task is `518e71b`
 (the fix itself), since this session added no new tracked-file changes to `docker-compose.yml` — only
 ran and documented the verification the task was waiting on.
+
+---
+
+## 2026-08-07 — MSG-FU-SUFFIXFLOOR: durable per-name agent-id suffix floors, shipped inside
+`internal/ids` only — main.go wiring NOT done
+
+**Chain run: spec-keeper → implementer (inline, by feature-runner) → test-engineer → reviewer →
+security → documentation.** Task `94159d93-fe87-4c3e-b938-86fe7068c787`.
+
+**What shipped.** New file `internal/ids/suffixstore.go` (`DurableNameSuffixes`,
+`OpenNameSuffixes`, `ErrSuffixFileCorrupt`) plus `internal/ids/suffixstore_test.go`, and a change to
+`internal/ids/agentmint.go`. The type persists a per-name agent-id suffix floor to a dedicated,
+atomically-replaced, fsynced file (`<data-dir>/agent-suffixes`, on-disk format version **3**,
+reserved through the Spec Server `ondisk-format-version` namespace 2026-08-07 by feature-runner —
+values 1 and 2 are the WAL's), writing `floor[name] = n` **before** `NextSuffix` returns `n`. See
+`DECISIONS.md` (2026-08-07, same title) for the full design rationale and `PROTOCOL.md` §9 for the
+byte layout, both added in this same documentation pass.
+
+**Review outcome.** Reviewer returned **CHANGES-REQUESTED** (no P0; three P1s):
+
+1. **Task/scope mismatch** — the task's acceptance criteria and FIX paragraph both prescribe wiring
+   `cmd/agent-bus/main.go` and deriving the floor from replay inside `internal/hub`; this diff instead
+   builds a different (and, per the reviewer, better) mechanism entirely inside `internal/ids` and
+   wires nothing outside it. The reviewer noted the task itself was never formally claimed
+   (`claim-next`) before the diff landed.
+2. **Missing name validation at the durable write boundary** — `DurableNameSuffixes.RaiseFloor` /
+   `NextSuffix` and `encodeSuffixFile` did not validate the name being persisted, so an unvalidated
+   byte string could reach the durable counter key or the on-disk file.
+3. **Missing write-failure test** — no test exercised what happens when the atomic write to
+   `agent-suffixes` itself fails.
+
+Security returned **PASS-WITH-NOTES** (no P0/P1 confined to the package; its one P1 restated the same
+unwired-`main.go` gap as reviewer's P1-1).
+
+**All in-boundary findings were closed in this change:**
+
+- Name validation added at `DurableNameSuffixes.RaiseFloor` and `NextSuffix` (both now call
+  `ValidateAgentName` before touching the allocator or the disk) **and** at `encodeSuffixFile` (belt
+  and braces at the last point before an irreversible write — see that function's doc for why a name
+  that could not be read back would permanently strand the data dir).
+- A write-failure test added to `suffixstore_test.go`
+  (`TestDurableNameSuffixesWriteFailureIssuesNothing`, per test-engineer's note on the task): forces
+  the atomic-write temp-file creation to fail via `os.Chmod(dir, 0o500)`, asserts `NextSuffix` returns
+  `(0, err)` and issues nothing, no stray temp file is left, and a retry after the permission is
+  restored lands on the same suffix rather than skipping one.
+- Error messages that would otherwise echo corrupt-file bytes verbatim are now clipped to 128 bytes
+  (`clip` helper in `suffixstore.go`) — the same defensive posture `ParseAgentID` already takes on
+  oversized ids, applied here so a damaged or hostile `agent-suffixes` file cannot put an unbounded
+  amount of arbitrary bytes into an operator's startup log.
+- Three factually-wrong doc comments corrected (in-package; see `suffixstore.go` history for the
+  specific corrections).
+
+**What is NOT done — read this before treating the restart-reuse bug as fixed.**
+`cmd/agent-bus/main.go:327` still calls `ids.NewNameSuffixes()`, and a repo-wide grep confirms **zero
+production callers of `OpenNameSuffixes`** anywhere outside `internal/ids` itself:
+
+```
+$ grep -rn "OpenNameSuffixes(" --include='*.go' . | grep -v _test.go | grep -vE ':\s*//'
+internal/ids/suffixstore.go:225:func OpenNameSuffixes(dir string) (*DurableNameSuffixes, error) {
+```
+
+(the plain `grep -rn "OpenNameSuffixes"` also matches several doc-comment mentions in
+`internal/ids/agentmint.go`, `internal/ids/suffixstore.go` and `internal/ids/doc.go` pointing at it as
+the type callers *should* use — the filtered form above isolates the one place it is actually
+DEFINED/CALLED, which is its own definition; there is no call site anywhere)
+
+A restarting bus therefore still re-mints agent ids on every start — the exact P0 this task was filed
+to close is **not closed in production**. This is stated explicitly in `internal/ids/doc.go`,
+`CONTRACTS.md` (2026-08-07 entry) and `DECISIONS.md` (2026-08-07 entry), all updated in this same
+documentation pass, precisely so no later reader mistakes "the mechanism exists" for "the bug is
+fixed". Wiring `main.go` — deriving legacy-directory backfill floors, `RaiseFloor`-ing them, and
+calling `Seal()` exactly once before the listener binds, the same shape `internal/hub` already
+follows for `Sequence` — is a separate follow-up, not yet filed as its own task at the time of this
+entry.
+
+**Verify commands run for this documentation pass** (narrowest relevant, per `CLAUDE.md`):
+
+```
+$ go build ./internal/ids/
+$ go vet ./internal/ids
+```
+
+Both clean. `go build ./...` / `go vet ./...` were **not** run for the whole tree: `internal/auth` is
+mid-edit by another agent concurrently (confirmed via `git status --porcelain` showing
+`internal/auth/*` modified/untracked at the time of this pass), so a whole-tree build is expected to
+fail for reasons outside this task's scope.
+
+**Docs touched by this pass:** `internal/ids/doc.go` (rewritten to describe `suffixstore.go` and
+restate the unwired-`main.go` gap honestly), `CONTRACTS.md` (new dated section — the on-disk file and
+Go API belong in `CONTRACTS-ONDISK.md` per the post-split plane structure, but that file was outside
+this pass's file boundary; noted inline so a future pass folds it in), `PROTOCOL.md` (new §9, WAL
+sections untouched), `DECISIONS.md` (new dated section), this entry. No route, flag, env var or
+`scripts/bus-*.sh` wrapper changed, so `AGENT_PROTOCOL.md` needed no change — confirmed by re-reading
+this task's shipped surface against `AGENT_PROTOCOL.md`'s scope before deciding not to touch it.
+
+---
+
+## 2026-08-07 — AUTH-3: durable roster persistence and recovery (`d53e3b21`) — code-complete, NOT wired
+
+**Chain run (COMPLETE): spec-keeper → implementer → test-engineer → reviewer → security →
+documentation, with reviewer and security each run TWICE.** This paragraph was rewritten at the end of
+the pass; when documentation first wrote it the two gates had not yet posted, and it said so rather
+than assuming. They have now, and both rounds are on the task journal — check it rather than trusting
+this entry.
+
+**Both gates BLOCKED on the first round, and both blocks were real.**
+
+- **security round 1: BLOCK** on the CONTRACT of `floors.go`. `SuffixFloors` promised "the highest
+  suffix EVER WRITTEN TO DISK by this bus", which is FALSE: it scans only `Kind == "agent"` records,
+  while a `store` message record names its sender and recipients and burns those suffixes too. On any
+  data dir a shipped binary wrote, the enrolment subset is EMPTY, so it returned an empty map with a
+  NIL error — indistinguishable from a fresh bus, and exactly the claim `ids.Seal` accepts. Sealing it
+  re-mints every live agent id. Reproduced by the gate, not argued.
+- **reviewer round 1: CHANGES REQUIRED** — a VACUOUS recorded `proof_cmd`; the missing `List` seam
+  that `MSG-FU-ROSTERSOURCE` requires in the SAME change as durable enrolment; `Put` never confirming
+  the entry reached memory; and four test gaps including the task's own acceptance claim ("still
+  authenticated after a restart") being unproven.
+
+**How the security block was resolved, which is NOT what was proposed.** The proposal was to fold
+message records in and gate the seal. Instead the mechanism was recognised as SUPERSEDED:
+`ids.OpenNameSuffixes` (`internal/ids/suffixstore.go`, commit `61b7c9a`, landed by a sibling agent
+mid-pass) writes each name's floor AHEAD of issuing it and derives nothing from history, so no tail
+repair and no quarantine can rewind it. `SuffixFloors` was therefore RENAMED
+`EnrolmentSuffixesInWAL` — a name that no longer claims to be a floor — and its contract rewritten to
+state what it actually reports, that it is a strict subset, and that it must never be sealed. Round 2
+cleared it: *"on `floors.go`: yes, cleared … Behaviour is unchanged; only the name and the prose
+moved, and the prose is now true."*
+
+**Round 2 then found the retracted claim SURVIVING in four other places** — `doc.go`,
+`walroster.go`, two `floors_test.go` helpers, and this file's own `CONTRACTS-ONDISK.md` section, which
+was instructing `AUTH-7` to do precisely the wiring `floors.go` calls "a REGRESSION dressed as a fix".
+All corrected. The lesson worth keeping: deleting a false claim from the file that states it is not
+the same as retracting it, and the copies are where it gets re-implemented.
+
+**Two of the reviewer's own premises were refuted by measurement**, by the test-engineer and then
+confirmed by the reviewer against `go test -overlay`: an applier error on a foreign `Entry.Kind` does
+NOT abort recovery (`internal/wal/replay.go` discards and continues — it is silent and total at
+replay, fatal only on a live commit), and deleting `validateRosterEntry` from `Put` alone is NOT
+observable because `Encode` validates too. Both are recorded because the corrected facts changed what
+the tests had to assert.
+
+**Also delivered here, from the reviewer's findings:** `Roster.List()` (deep copies, sorted by
+`AgentID`) on all three implementations — the `auth` half of `MSG-FU-ROSTERSOURCE`, which must land
+with durable enrolment or a restarted bus authenticates everyone and serves nobody; and a post-write
+confirmation in `WALRoster.Put` that turns a mis-wired applier from a silent, total no-op into a loud
+first-enrolment failure.
+
+**What was built.** `internal/auth/record.go` (the on-disk enrolment shape, `RecordKind = "agent"`,
+`RecordVersion = 1`, `Encode`/`Decode`), `internal/auth/walroster.go` (`WALRoster`, the durable
+`Roster` implementation and `wal.Applier` that rebuilds the roster by replay), `internal/auth/floors.go`
+(`EnrolmentSuffixesInWAL` — an AUDIT scan of the suffixes in enrolment records; NOT a suffix floor and
+never to be sealed into an allocator, see the gate history above), plus their tests
+(`record_test.go`, `walroster_test.go`, `floors_test.go`) and `internal/auth/crash_test.go`. `roster.go`
+gained `RosterEntry`'s reserved fields (`MessagingPublicKey`, `InviteID`, `CertBindings`,
+`MaxCertBindings = 16`) and the `AuthPublicKey` rename, per `DECISIONS.md`'s 2026-08-07 "ENROL-SHAPE"
+entry, which this task implements.
+
+**Crash-injection evidence (`crash_test.go`), three points on the real two-phase write path, each
+exercised by a re-exec'd child that is genuinely SIGKILLed and PROVEN to have died on that signal
+before the parent trusts any assertion about the resulting log:**
+
+- **Point A — kill after the PREPARE fsync, before COMMIT.** The enrolment is absent from the roster
+  (never acknowledged) but its suffix IS in `EnrolmentSuffixesInWAL`'s output — the pairing that makes the whole
+  design correct, and the case a committed-state-only derivation cannot see: the next enrolment for
+  that name must not re-mint the burned id.
+- **Point B — kill after the COMMIT fsync, with no `Close`, no `Sync`, no defer, no graceful shutdown
+  anywhere.** The enrolment is present with every field intact, including the reserved ones
+  (`InviteID`, a retired and a live `CertBinding`) that travelled the real write path — invariant 4's
+  actual claim, that acknowledged means durable independent of a clean shutdown.
+- **Point C — a TORN COMMIT frame.** A commit record for a second enrolment is deliberately cut mid-
+  payload and appended with no `Close`/`Sync`, then the process is killed. Recovery repairs the torn
+  tail (proved via `wal.Replay` returning `ErrCorrupt` on the raw, unrepaired file first, so the test
+  is not vacuous), the torn enrolment stays invisible, and — as at point A — its suffix is still
+  burned.
+
+**Proof-check verdict, re-run and confirmed at the time this entry was written** (test-engineer's own
+note quotes the same command with the same result):
+
+```
+bash scripts/proof-check.sh 'go test -race -count=1 ./internal/auth/...'
+-> proof-check: verdict=PASS class=test exit=0 tests_run=215 top_level=60 skipped=1 failed=0 empty_pkgs=0
+```
+
+The single skip is `crash_test.go`'s `AUTH_CRASH_POINT`-gated child, which the three
+`TestAuthCrashInjection*` parents drive as a re-exec'd subprocess — confirmed benign by the reviewer.
+This command REPLACES the `proof_cmd` originally recorded on the task
+(`go test -race -run TestRosterRecovery ./internal/auth`), which the reviewer caught as VACUOUS: it
+names a test that exists nowhere, so it reported `tests_run=0` and still exited 0.
+
+**Why no `scripts/bus-*.sh` wrapper or `AGENT_PROTOCOL.md` entry.** AUTH-3 adds NO agent-facing
+surface: no new route, no new flag, no new request/response field, no change to `POST /v1/enroll`'s
+wire shape. An agent enrolling today cannot tell the difference between this build and the one before
+it — the only observable change, once `AUTH-7` wires it in, is that an enrolment survives a restart.
+Invariant 7 ("every capability ships with a wrapper and an `AGENT_PROTOCOL.md` entry in the same
+task") does not apply because there is no new capability at the wire level; this is confirmed, not
+assumed, by re-reading the diff against the enrolment route handler and finding it untouched.
+
+**CODE-COMPLETE, NOT LIVE.** `cmd/agent-bus/main.go` still constructs `auth.NewService(auth.Options{
+Minter: minter})` with no roster, so `auth.Service` falls back to its default `MemoryRoster` — nothing
+persisted here is on the path a deployed bus takes yet. `WALRoster`, `Encode`/`Decode` and
+`EnrolmentSuffixesInWAL` are correct and tested in isolation; wiring `main.go` to construct a `WALRoster`, attach
+it to the process's `*wal.Log` is deferred to `AUTH-7`, filed separately. **`AUTH-7` must NOT derive
+startup suffix floors from `EnrolmentSuffixesInWAL`** — the allocator is built by
+`ids.OpenNameSuffixes` in `cmd/agent-bus/suffixfloors.go`, which a sibling agent has already wired.
+Per `MSG-FU-ROSTERSOURCE`'s warning that the hub's own roster view must move in the same
+change or a durable-but-unwired roster becomes a landmine (sessions authenticate, `hub.publish` fails
+closed for everyone).
+
+**Docs touched by this pass:** `CONTRACTS-ONDISK.md` (new dated section, "The durable enrolment
+record (AUTH-3, added 2026-08-07)"), this entry. No route, flag, header, env var, WAL record type or
+`ondisk-format-version` changed, so `CONTRACTS.md`, `CONTRACTS-HTTP.md`, `PROTOCOL.md` and
+`AGENT_PROTOCOL.md` needed no change — confirmed by re-reading this task's shipped surface against
+each file's scope before deciding not to touch them.
+
+## 2026-08-07 — INVITE-STORE: the durable, bounded, single-use invite record
+
+**Chain run: implementer → test-engineer → reviewer → security → documentation, ALL of them — nothing
+was skipped.** New package `internal/invite`: `doc.go` (the model, the idempotency-scope decision, the
+fail-closed rule and its one honest exception, the two-phase-participant design), `record.go`
+(`RecordKind`, `State`, `Record`, `recordJSON`, `Encode`/`DecodeRecord`), `retention.go` (the derived
+bounds — `MaxRecordBytes`, `MaxRetainedBytes`, `MaxInvites`, `SpentRetention`, `DefaultTTL`, `MaxTTL`,
+`ReservationTTL`), `secret.go` (`GenerateSecret`, `HashSecret`, `VerifySecret`, session-token
+discipline for the bearer secret), `id.go` (`GenerateInviteID`, `ValidateInviteID`,
+`InviteIDPattern`), `errors.go` (the sentinels, and the note that `INVITE-HARDEN`/the HTTP layer must
+collapse them on the wire), `store.go` (`Store`: `Mint`/`Lookup`/`Revoke`/`Begin`/`Redeem`/`Apply`,
+the two-phase `Redemption` participant), plus `record_test.go`, `store_test.go` and `crash_test.go`.
+This is the STORE only — no HTTP route (`INVITE-GATE`), no operator wrapper
+(`INVITE-MINT`/`INVITE-REVOKE`), nothing reachable by an agent yet.
+
+**Security verdict: PASS, no blocking items.** Four P2 hardening items were identified and applied
+afterwards by the feature-runner, all present in the code this entry documents:
+
+1. **The `wal.ErrDiverged` abort rule** (`Store.Redeem`) — a commit that returns `ErrDiverged` has
+   already been fsynced, so the reservation must be ABANDONED, not aborted, or the next `Begin` could
+   admit a second redemption of an already-spent invite. See `DECISIONS.md`'s 2026-08-07
+   "INVITE-STORE" entry for the full reasoning; `INVITE-GATE` must inherit the same rule when it
+   composes its own entry.
+2. **Secret redaction in `String`/`GoString`, plus dropping the secret from the retained request** —
+   `Minted.String`/`GoString` redact the plaintext secret so a stray `%+v` or `%#v` cannot leak it, and
+   `Store.Begin` drops `RedeemRequest.Secret` (`withoutSecret`) the instant it has been verified, so an
+   in-flight `Redemption` holds no live credential for the duration of the caller's durable write.
+3. **Constant-time key/fingerprint comparison** — `Store.Begin`'s replay-vs-key-reuse triage compares
+   `RedeemKey` and `RedeemFingerprint` with `crypto/subtle.ConstantTimeCompare`, not a plain `==`,
+   because both decisions gate whether a caller is handed the ORIGINAL result (an agent identity for
+   enrolment), and a byte-at-a-time compare would let a holder of the secret recover the original key
+   and fingerprint by timing.
+4. **Rejecting an all-zero redeem fingerprint** — `Record.validate` refuses a redeemed record whose
+   `RedeemFingerprint` is the zero value, because a stored zero would match a request that carries no
+   fingerprint at all and replay an agent identity to it, where the correct answer is `ErrKeyReuse`.
+
+**Test result, re-run and confirmed at the time this entry was written:**
+
+```
+bash scripts/proof-check.sh "go test -race -run 'TestInviteStoreRecovery|TestInviteSingleUseSurvivesCrash|TestInviteExpiredIsNotRedeemable' ./internal/invite && grep -qi 'invite record' CONTRACTS-ONDISK.md"
+-> proof-check: verdict=PASS class=test,file-assertion exit=0 tests_run=5 top_level=3 skipped=0 failed=0 empty_pkgs=0
+```
+
+`TestInviteMintNeverStoresTheSecret` (`store_test.go`) is separate concrete evidence, not part of the
+stored proof command: it mints an invite through a real `*wal.Log` and asserts the plaintext secret
+appears nowhere in the resulting `bus.wal` bytes.
+
+**Docs touched by this pass:** `CONTRACTS-ONDISK.md` (new dated section, "The durable invite record
+(INVITE-STORE, added 2026-08-07)"), `DECISIONS.md` (new dated section, "INVITE-STORE: the idempotency
+scope for enrolment is THE INVITE"), this entry. **No route, flag, header, env var, WAL record type or
+`ondisk-format-version` changed** — `wal.Entry.Kind = "invite"` is a free-form application
+discriminator, not a numbered frame type, so `internal/wal/format.go` was not touched and nothing was
+reserved from either Spec Server namespace. `CONTRACTS.md`, `CONTRACTS-HTTP.md`, `PROTOCOL.md` and
+`AGENT_PROTOCOL.md` needed no change, confirmed by re-reading this task's shipped surface (a Go
+package with no HTTP route, CLI flag or agent-facing wire change) against each file's scope before
+deciding not to touch them.
+
+## 2026-08-07 — RELAY-2 + RELAY-3: the relay plane, still deliberately unwired (`feature-runner`)
+
+**Tasks:** RELAY-2 "Message relay + ongoing roster sync across peers" (`654140d7`), RELAY-3 "Loop
+prevention via traversed-bus path" (`e944edda`). Code-only. **Everything is inside `internal/relay`;
+nothing was registered on any mux and nothing outside the package imports it** —
+`TestHandshakeHandlerIsNotWiredIntoAnyMux` still passes, which is the point of it existing.
+
+**Chain run (all steps completed, none skipped):** spec-keeper → implementer → test-engineer →
+reviewer → security → documentation.
+
+**New files:** `path.go` (RELAY-3), `message.go` (relay envelope + fingerprint), `relayhttp.go`
+(ingress handler + `Client.Relay`), `registry.go` (routing table + incremental roster sync),
+`rosterhttp.go` (roster ingress + `Client.PushRoster`), `forward.go` (background per-peer forwarder),
+`httputil.go` (shared response plumbing). Tests: `path_test.go`, `relay_test.go`, `cycle_test.go`,
+`registry_test.go`, `rosterhttp_test.go`, `forward_test.go`. Modified: `doc.go`, `handshake.go`,
+`client.go`, `peer.go`, `peer_test.go` — all minimally (`peerEnrollURL` became a wrapper over a
+generalised `peerURL`; `Handler.fail`/`writeJSON` delegate to `httputil.go`; `ErrorCode` and the
+inbound code allow-list gained the new stable codes).
+
+**Three defects found and fixed DURING the chain, each worth recording because none was caught by the
+suite as first written:**
+
+1. **A send-on-closed-channel PANIC in `Forwarder`** (found by me on review of the implementer's
+   output). `Enqueue` looked up the peer's queue under `f.mu`, released the lock, then sent — so a
+   concurrent `Close`, which closes every queue under that same lock, could close the channel in the
+   window. Fixed by performing the non-blocking send *under* the lock, which is safe only because the
+   send has a `default` arm; the comment says so, because removing the arm would turn it into a
+   deadlock. The test-engineer reproduced the pre-fix shape standalone and got
+   `round 5: PANIC: send on closed channel`, then added
+   `TestForwarderEnqueueIsSafeAgainstAConcurrentClose`.
+2. **An unbounded peer string reaching a log line** (reviewer). `ValidateRelayRequest` `%q`-echoed
+   `origin_bus` in the path-agreement check *before* `ValidatePeerBusID` bounded it. Checks 3 and 4
+   were swapped. Separately, the loop-drop log line — the highest-volume line in the package, since a
+   loop drop is a cycle's expected steady state — logged unvalidated `origin_bus`/`message_id`; it now
+   logs only `BusPath[0]`, which `CheckIncomingPath` has already validated.
+3. **The roster surface broke invariant 10** (reviewer, then a test I added found a second half). The
+   handler validated the idempotency key, logged it, and threw it away — so a peer whose ack was lost
+   retried, fell through to the version-monotonicity check and was answered **409 STALE**. That
+   punishes precisely the peers retrying correctly. `RosterConfig.Apply` now receives the key and a
+   `RosterUpdateFingerprint`, so the wiring site adjudicates through `internal/idem`. Writing the
+   regression test then exposed that `RosterHandler` had no `ErrIdempotencyViolation` arm at all, so a
+   genuine violation became a 503 — telling a peer to retry the thing being refused. Both fixed.
+
+**Proofs, run through `scripts/proof-check.sh` and CONFIRMED RED FIRST** (I sabotaged the production
+code, watched the proof fail on the right assertions, then restored):
+
+```
+proof-check: verdict=PASS class=test exit=0 tests_run=37 top_level=1 skipped=0 failed=0 empty_pkgs=0   # -run TestMessageRelay
+proof-check: verdict=PASS class=test exit=0 tests_run=24 top_level=5 skipped=0 failed=0 empty_pkgs=0   # -run TestRelayLoopPrevention
+proof-check: verdict=PASS class=test exit=0 tests_run=17 top_level=1 skipped=0 failed=0 empty_pkgs=0   # -run TestPeerRosterSync
+```
+
+Neither proof is VACUOUS. The RED runs: stubbing `PathContains` to return `false` failed
+`TestRelayLoopPrevention/this_bus_is_on_the_path`, the case-folded variant, the split-horizon test and
+all three cycle subtests; disabling the relay-key rule failed
+`TestMessageRelay/refuses_an_incoherent_envelope/the_key_is_not_the_origin_message_id`.
+`go test -race -count=1 ./internal/relay` → `ok … 13.7s`, three consecutive runs. `go build ./...`,
+`go vet ./internal/relay` and `"$(go env GOROOT)/bin/gofmt" -l internal/relay` all clean (the bare
+`gofmt` false-pass trap was avoided by using the GOROOT path).
+
+**Security gate: CHANGES-REQUESTED, and the requested change was documentation.** No finding is
+reachable today because nothing serves these handlers — but `doc.go`'s "What the gating tasks must not
+forget" list *is* the handoff artefact, and it was missing seven properties. They are now in it. The
+sharpest: `RelayRequest` carries no signature field, so **SIGN-6 is a prerequisite to serving
+`RelayHandler`, not a follow-up** — message ids are `<bus>-<seq>` and sequential, so a peer can
+pre-poison a range of a victim bus's ids, and when the genuine copy arrives it reads as
+`OutcomeViolation` and invariant 10's mandated disconnect fires **at the honest peer**. Three
+overclaiming comments were corrected rather than deleted, with the correction left visible: the
+"every bound before the allocation" paragraph (the real decode-time bound is the pre-decode byte cap —
+`encoding/json` materialises the slice before any count check of ours), and the `rosterhttp.go` claim
+that 403-not-404 avoids a peer-enumeration oracle (the 403-vs-409 *split* is the oracle; only
+authenticating the caller closes it).
+
+**Deliberately NOT done, so nobody reads it as an omission:** no `scripts/bus-*.sh` wrapper and no
+`AGENT_PROTOCOL.md` entry. Invariant 7's wrapper requirement is about the AGENT-FACING surface; this is
+bus-to-bus, and it is not served. No `CONTRACTS-HTTP.md` route-table entry either — RELAY-1 set that
+precedent for `/v1/peer/enroll` deliberately, and copying it is the correct call for an unserved path.
+The shapes are recorded in a dated `CONTRACTS.md` section and in `PROTOCOL.md` instead, both marked
+NOT REGISTERED.
+
+**Open, honestly:** the test-engineer observed ONE failure of
+`TestMessageRelay/a_loop_is_200_with_a_dropped_reason,_never_an_error_status` on the tree as it found
+it, before any edit, and could not capture the assertion. It has not recurred in ~3,500 subsequent
+executions (~2,900 by the test-engineer including 8-way parallel load and cold-cache runs, ~600 by
+me). The only non-deterministic path in that subtest is `doRelay`'s `t.Fatalf("request: %v", err)` on a
+transient `httptest` connection error, which would be harness fragility rather than a product defect —
+but that is a hypothesis, not a diagnosis, so it is filed as a follow-up rather than closed.
+
+---
+
+## 2026-08-07 — MSG-FU-SUFFIXFLOOR (wiring half): the durable suffix allocator is now CONSTRUCTED at
+startup (feature-runner)
+
+**Task.** `94159d93-fe87-4c3e-b938-86fe7068c787`. `cmd/agent-bus/main.go:327` still built
+`ids.NewNameSuffixes()` — a FRESH counter, every name restarting at suffix 1 on every start — while
+fully-qualified agent ids are already durable inside WAL store-message records (`sender`,
+`recipients`) and the WAL never compacts. `ids.OpenNameSuffixes` had ZERO production callers. That is
+invariant 1 broken in a running bus, and it was about to become exploitable: `internal/auth` is
+concurrently making the roster durable (AUTH-3), at which point a restart mints an id that ALREADY
+EXISTS in persisted state.
+
+**What landed.**
+
+- `cmd/agent-bus/suffixfloors.go` (new): `openSuffixAllocator` — `ids.OpenNameSuffixes(dataDir)` →
+  fold derived floors through `RaiseFloor` → `Seal()` ONCE, error CHECKED. Plus `walAgentIDFloors`,
+  the legacy-dir backfill derivation, and `suffixBackfillExposure`.
+- `cmd/agent-bus/main.go`: constructs through it; every failure is FATAL. The false justification
+  comment at the old lines 312–326 (which told the next reader a fresh counter was safe and that
+  AUTH-3 owned the fix — both wrong) is REPLACED, not deleted, with the reason the fresh counter must
+  never come back. The startup WARN was NARROWED: its clause "and agent id suffixes restart from 1
+  for every name" is now false, and the rest (roster/sessions in memory only) is kept.
+- `cmd/agent-bus/suffixfloors_test.go`, `cmd/agent-bus/suffixrestart_test.go` (new).
+
+**Three judgement calls, all recorded in `DECISIONS.md` (2026-08-07, this task's section plus its
+ADDENDUM):** no fallback on any path including a fresh dir; scan AFTER `wal.Open` and
+BOOT-with-an-ERROR when recovery had already removed records, but REFUSE when the derivation cannot
+complete on a dir with no floors file; and the scan is GATED on `!Existed()` — at most once per data
+directory.
+
+**Both gates COMPLETED with CHANGES REQUESTED, and both changes were made.** They converged
+independently on the same finding: the first draft ran the WAL scan on EVERY start so a rewound
+floors file could be cross-checked, and `wal.ScanAll` retains every record INCLUDING FULL PAYLOADS on
+a log that never compacts — `internal/wal` already carries a measured incident where a per-record
+INDEX LIST cost 1.76 MB on a 23.7 MB log and was called "the boot-time OOM the eviction was written
+to avoid" at 10 GiB. Retaining payloads is strictly worse. Gated, with the streaming cross-check
+filed. Security additionally REPRODUCED a case the first draft got wrong: delete only
+`agent-suffixes` from a live dir and the bus re-mints ids it has issued, silently at INFO, while the
+standing WARN asserted the opposite. The seal line is now graded INFO/WARN/ERROR by case and the
+suffix claim was DELETED from the WARN rather than negated — no unconditional sentence is true in
+both cases. Both gates endorsed raise-over-refuse on the integrity branch: refuse-to-boot would hand
+anyone with data-dir write access a permanent boot-denial primitive.
+
+**Proof — behavioural, not a unit test.** The defect was never in the allocator (that was landed and
+unit-tested at `61b7c9a`); it was that nothing CONSTRUCTED it, so every `internal/ids` test stayed
+green while a restarted bus re-minted live ids. `TestRestartMintsStrictlyGreaterAgentIDSuffix` starts
+a real server subprocess against a throwaway dir, enrols through POST `/v1/enroll` with a FRESH
+keypair each time, restarts on SIGTERM, and restarts again after **kill -9** — the kill is the one
+that matters, because it proves the floor was durable BEFORE the suffix was issued rather than
+flushed on the way out. `TestLegacyDataDirDoesNotReMintAgentIDs` builds a dir with agent ids in WAL
+message records and no `agent-suffixes` file and proves the ids are not re-minted (sender AND
+recipient). `TestOpenSuffixAllocatorFailsClosed` proves a corrupt floors file, an unwritable seal and
+an underivable log each STOP startup — a happy-path test cannot detect the regression this task
+guards. `TestNoFreshSuffixCounterInCmd` parses the package AST (not a grep, so the comment that names
+the forbidden constructor does not trip it) and fails if `ids.NewNameSuffixes` is ever called from
+`cmd/` again.
+
+`bash scripts/proof-check.sh` verdict: **PASS — 24 test(s) ran (8 top-level), 8 passed, 0 skipped**.
+`go build ./...`, `go vet ./...` and `"$(go env GOROOT)/bin/gofmt" -l cmd/` all clean (the GOROOT path,
+never bare `gofmt`). Also verified by hand against a real binary on a throwaway `/tmp` data dir:
+`alpha-1` → SIGTERM → `alpha-2` → kill -9 → `alpha-3`, with `<data-dir>/agent-suffixes` reading
+`alpha 3` at rest.
+
+**Out of this task's file ownership, FILED (the reviewer checked the backlog and caught an earlier
+draft claiming these were filed when they were not — they are now, with public ids):**
+
+- `6f4c17ef-220c-465f-b8d8-a0f04aac1905` — export a streaming raw WAL scan and reinstate the
+  every-start floors cross-check.
+- `e5fa08ba-fe9a-40ae-bf35-dc69198bfdff` — `PROTOCOL.md:592-597` still says the wiring is NOT done
+  (every clause now false), `internal/ids/doc.go:56-75` still names `main.go:327`,
+  `internal/ids/agentmint.go:296-337` still justifies born-sealed by a caller that no longer exists,
+  and `CONTRACTS-HTTP.md:330` quotes the old WARN verbatim.
+- `d5ed5ccc-7178-4dd3-a61e-42ec976750b3` — acceptance criteria (c) and (d): flip
+  `ids.NewNameSuffixes` to born-unsealed or delete it, and generalise the no-production-caller guard
+  beyond package `main`. Verified there are ZERO production callers anywhere in the tree today; the
+  task that previously carried (c)/(d) is superseded, so nothing else held them.
+- `cca64afd-f75d-46e4-91ca-ebc502151253` — RELAY must roster-check LOCAL recipients before the
+  durable write. `recipients` is server-derived only because `hub.publish` requires enrolment;
+  `internal/relay` validates shape only, so once relay is served a peer could relay
+  `<local-bus>.alpha-18446744073709551615` and permanently exhaust that name via this backfill.
+
+**Release ordering:** the backfill folds message records only, so MSG-FU-SUFFIXFLOOR must ship before
+or with AUTH-3 — a build with durable enrolment meeting a dir with no floors file would leave those
+enrolment suffixes invisible.
+
+---
+
+## 2026-08-07 — SIGN-2/SIGN-6: the signing core (not the full feature)
+
+**Task:** SIGN-2 / SIGN-6 wave. **Shipped:** `internal/signing/sign.go` (new) and
+`internal/signing/sign_test.go` (new) — pure delegation to `crypto/ed25519` (invariant 9) over
+`internal/signing.Canonicalize`'s bytes, passed UNHASHED. Exported: `const SignatureSize=64,
+PublicKeySize=32, PrivateKeySize=64`; sentinels `ErrNoSignature`, `ErrSignatureLength`,
+`ErrPublicKeyLength`, `ErrPrivateKeyLength`, `ErrVerify`; funcs `ValidateSignature(sig)`,
+`ValidatePublicKey(pub)`, `Sign(priv, Message) ([]byte, error)`, `Verify(pub, Message, sig) error`.
+
+**The full SIGN-2/SIGN-6 feature is NOT done** and remains todo in the Spec Server for three blockers
+recorded in `DECISIONS.md` (2026-08-07, this task's section): no messaging keypair exists (CRYPTO-3,
+SIGN-8 both todo); the durable id/sequence mint SIGN-1 requires does not exist, and minting without a
+durable record would break `internal/hub`'s restart-floor counting argument; and the signature cannot
+reach the durable record without `internal/hub`, which was outside this agent's file-ownership
+boundary.
+
+**Chain run:** implementer (this agent) → test-engineer → reviewer → security → documentation.
+Reviewer's verdict was **CHANGES-REQUESTED**: one mutation-proven test blind spot — nothing pinned
+`Sign`'s output to `Canonicalize`'s output, so an implementation agreeing with itself but not with
+PROTOCOL.md §8 shipped green. Fixed by anchoring `TestSignVerifyRoundTrip` to raw `ed25519.Sign` over
+`Canonicalize(m)`. Security's verdict was **PASS**.
+
+**Evidence, quoted:**
+```
+RED  (panic guard removed):         verdict=FAIL class=test exit=1 tests_run=7 top_level=1 failed=1
+RED  (verifier accepts all):        verdict=FAIL class=test exit=1 tests_run=11 top_level=6 failed=5
+RED  (Sign/Verify drift, post-fix): verdict=FAIL class=test exit=1 tests_run=97 top_level=25 failed=1
+GREEN:                               verdict=PASS class=test exit=0 tests_run=97 top_level=25 failed=0
+```
+
+**Noted honestly, not caused by this change:** `go vet ./...` currently FAILS in `internal/relay`
+(`internal/relay/cycle_test.go:246:3: unknown field OriginSentAt in struct literal`). That is another
+agent's in-flight relay work (staged `internal/relay/signed.go` + modified `message.go`).
+`internal/signing` builds, vets and tests clean on its own.
+
+---
+
+## 2026-08-07 — DUR: the WAL record-index high-water mark is a dedicated write-ahead file (e120153b, db350e39)
+
+**Task:** close two P0 Spec Server defects sharing one root cause — `e120153b` (a discarded tail
+record's WAL index reissued on recovery) and `db350e39` (a whole-log quarantine resetting the index
+space to 1, and with it, via `internal/hub`'s `Recovered.NextIndex - 1` derivation, every message id
+the bus had ever minted). See `DECISIONS.md`, same date, "The WAL record-index high-water mark is a
+dedicated write-ahead file, not derived from the log" for the full design record, the two
+reconciled invariants, and the rejected alternatives.
+
+**Chain run:** spec-keeper → implementer → test-engineer → reviewer → security → documentation
+(this entry).
+
+**Files changed:** new `internal/wal/indexfloor.go` (the `indexFloor` type: `openIndexFloor`,
+`begin`, `reserve`, `seal`, atomic persist, `ErrIndexFloorCorrupt`); new
+`internal/wal/indexfloor_test.go` and `internal/wal/indexfloor_crash_test.go` (unit and
+crash-injection coverage); `internal/wal/log.go` (`Open` now opens the floor before touching the
+log, computes the start index as the max of the replayed high-water mark / `Repair.NextIndex` /
+`floor.burned()+1` / — when `Repair.LostUnidentified` — `floor.ceiling()+1`, and exposes
+`(*Log).IndexFloorPath()`); `internal/wal/writer.go` (`Writer.Append` reserves durably before
+stamping an index, block size `indexReserveBlock = 256`; a clean `Close` seals the floor);
+`internal/wal/recover.go` (`Repair.NextIndex` now reports one past the highest index OBSERVED,
+survivors and identified discards alike, not one past the highest SURVIVOR; new
+`Repair.LostUnidentified`; the quarantine path sets it and no longer claims `NextIndex = 1` is
+where the bus resumes); `internal/wal/replay.go` (`Recovered.FirstIndex`; `MissingRecords` now
+counts skipped-but-never-used indices, an upper bound rather than an exact count; a log no longer
+reports the range below its own first record as missing); `internal/wal/salvage.go` (framing-stage
+discards set `LostUnidentified`; an implausible forged index is rejected rather than trusted — see
+the security-bound test below); `internal/wal/doc.go` (new "The durable record-index floor"
+section). Test-only edits to `internal/wal/crash_injection_test.go`,
+`internal/wal/recover_test.go`, and `internal/wal/replay_crash_test.go` — see below.
+
+**Nine existing tests whose assertions were INVERTED — that inversion was the task, not a
+workaround, because each one previously asserted the rejected reissue behaviour as correct:**
+
+1. `TestCrashInjectionMidCommitWriteKill` — wanted the resumed prepare index to be exactly 6 (the
+   torn commit frame's own index, reissued); now wants `indexReserveBlock+1`, i.e. above every index
+   the killed process ever authorised.
+2. `TestCrashInjectionDiscardPathsRecoverAndLog` — its torn-tail and bit-rot table rows wanted
+   `wantNextIndex: 6`; now `7`, because the discarded record's own index (6) is burned rather than
+   handed back to the next write.
+3. `TestCrashInjectionMidFileDamageDoesNotCascade` — wanted `wantNextIndex = 41` (one past the last
+   record the file held); now `indexReserveBlock+1`, because the trailing junk byte is a
+   framing-stage region discard (`LostUnidentified`) and recovery no longer guesses an index from an
+   unreadable scrap.
+4. `TestWALRepairTailTruncatesTornTail` — wanted the reissued index of a torn frame; now wants one
+   PAST it, and additionally asserts `LostUnidentified`.
+5. `TestWALRepairTailDiscardsDamageToACompleteFinalRecord` — same shape as (4), for a
+   checksum-failure discard rather than a torn frame.
+6. `TestWALRepairTailKinds` — table rows asserting `NextIndex` equal to the discarded record's own
+   index; now one past it.
+7. `TestWALRepairTailToHeaderOnly` — wanted `NextIndex 1` after truncation to the bare file header;
+   now wants `NextIndex 2`, because the discarded frame's index (1) is observed and burned rather
+   than reused by the header-only fallback.
+8. `TestWALRepairTailThroughOpen` — wanted the first post-repair write to land at the discarded
+   record's own index ({5 6}); now wants {6 7}.
+9. `TestWALCrashTornFrameTailIsRepaired` (`replay_crash_test.go`) — wanted the post-crash write to
+   land at {5 6} (the torn frame's own index, called "deliberate" at the time); now wants
+   `{indexReserveBlock+1, indexReserveBlock+2}`, with the old reasoning ("nothing can have observed
+   an unfsynced index") explicitly retracted in the comment: recovery cannot distinguish an
+   interrupted write from an acknowledged one that later corrupted, so that argument was never sound.
+
+**Crash-injection evidence** (`internal/wal/indexfloor_crash_test.go`,
+`TestWALIndexFloorCrashNeverReissuesAnIndex` and neighbours): a same-process simulation was rejected
+as evidence of nothing, because it still runs every `defer` and buffer flush a real crash is defined
+by skipping — including the floor's own seal. Instead the test binary re-execs itself as a child
+(`WAL_INDEXFLOOR_CHILD`), which opens a real `*wal.Log` against a `t.TempDir()`, writes several
+transactions, fsyncs a REPORT FILE listing every index it was handed (so a no-op child, which would
+also exit 0, cannot pass), and is then killed with a real `SIGKILL` — uncatchable, unblockable — by
+the parent. The parent asserts on the wait status (`Signaled()` and `Signal() == SIGKILL`, not the
+exit code), then damages/quarantines the data directory, restarts through `wal.Open`, and asserts
+the next issued index is strictly greater than every index the report file says the child was
+handed. A companion test, `TestWALIndexFloorRejectsAnImplausibleForgedIndex`, forges a frame index
+of `1<<62` behind a MAC that does not verify and asserts recovery refuses to trust it — the durable
+ceiling after recovery stays within one reservation block of the file's honest size, not anywhere
+near the forged value, which is the security bound recorded in `DECISIONS.md`.
+
+**Proof verdicts, quoted verbatim via `bash scripts/proof-check.sh`:**
+
+RED (defects re-introduced in a throwaway worktree — reverting the nine inverted assertions back to
+the old, reissuing behaviour, to prove they are load-bearing rather than decorative):
+```
+proof-check: verdict=FAIL class=test exit=1 tests_run=21 top_level=5 skipped=0 failed=5 empty_pkgs=0
+```
+
+GREEN (as shipped):
+```
+proof-check: verdict=PASS class=test exit=0 tests_run=21 top_level=5 skipped=0 failed=0 empty_pkgs=0
+proof-check: verdict=PASS class=test exit=0 tests_run=305 top_level=96 skipped=3 failed=0 empty_pkgs=0
+```
+(the second line is `go test -race ./internal/wal`, the full package, not just the tests touched by
+this task.)
+
+**Honest limit: this is CODE-ONLY.** Nothing in this task was exercised against a running
+`agent-bus` server — no wrapper script, no `POST /v1/enroll` through a live process, no restart of a
+real binary. The crash-injection evidence above is real process-kill evidence at the `internal/wal`
+package boundary, which is what CLAUDE.md requires for durability code, but it is not a claim about
+live server behaviour, and no such claim is made here.
+
+## 2026-08-07 — SIGN-7: cross-bus relay preserves the signed envelope byte-exact
+
+**Task** `aeb90793-c0ac-43d8-b1d3-caa2e6f6a8c1`. Chain run: spec-keeper → implementer (×2) →
+test-engineer (×2) → reviewer → security → documentation. All gates COMPLETED; none skipped.
+
+**The two design questions SIGN-7 existed to answer.**
+
+1. *Origin id vs local sequence — HOLDS against what SIGN-1 built.* `signing.Message` covers exactly
+   `{MessageID, Sequence, Sender, Recipients, TimestampUnixMilli, Body}`. No local delivery sequence
+   and no `bus_path` are in it, and `signing.validate` already enforces the origin binding (the bus
+   half of the message id must equal the bus qualifying the sender). The receiving bus mints its own
+   local sequence outside the signed bytes. No change was needed to make this true.
+2. *Cross-bus key trust — was the open hole; the user ruled on it mid-task* (`c27ef78`, `1ec3196`).
+   The origin bus's attestation is relayed intact under the origin's BUS SIGNING key, pinned at
+   PEERING time; no TOFU anywhere, not even a hook; and the bus TLS key and bus SIGNING key are
+   separate keys with separate rotations. Encoded as `relay.CrossBusTrust`, whose two-method shape
+   (`PinnedBusSigningKeys` then `AttestedSignerKey(id, pins)`) forces an attestation to be checked
+   against the ORIGIN's peering-time pins and nothing else. No implementation ships; there is no
+   default and no "verification disabled" mode.
+
+**The hole that made byte-exactness impossible, not merely unimplemented.** The relay envelope
+carried `sent_at_unix_ns` — the origin BUS's nanosecond clock — while the signature covers
+`TimestampUnixMilli`, the sending AGENT's millisecond clock. Different quantity, different source:
+the envelope did not carry the signed timestamp at all, so canonical bytes could not be
+reconstructed. Replaced with `timestamp_unix_ms`: one timestamp, the signed one, no conversion.
+
+**Mechanism guaranteeing byte-exactness: RE-DERIVATION, never an opaque blob.** The envelope carries
+covered field VALUES; the verifier rebuilds the bytes with `signing.Canonicalize` from the values it
+will act on, per PROTOCOL.md §8.5. JSON transports values only, so no hop can re-encode the signed
+bytes.
+
+**Fail-closed decisions.** A relayed BROADCAST is rejected: `signing.Canonicalize` refuses an empty
+recipient set, so no signature over a relayed broadcast can exist under format v1, and exempting it
+would be the downgrade a peer reaches by setting `broadcast:true`. SIGN-3 owns the resolution.
+
+**P1 found by the reviewer and fixed.** `relayFingerprint` folded recipients in WIRE order while
+`signing.Canonicalize` SORTS them — so one signature covered every permutation, but the fingerprint
+called a permutation a different payload. Under invariant 10 that is `idem.OutcomeViolation`, which
+mandates DISCONNECTING the peer: a hostile peer could reorder a legitimately signed recipient array
+and get an HONEST peer disconnected. `relayFingerprint` now sorts a copy. Rule recorded in
+PROTOCOL.md: the fingerprint's notion of "same payload" must match the signature's, exactly.
+
+**Gate verdicts.** Reviewer: 1×P1 (above, fixed), 5×P2. Security: PASS-WITH-CONDITIONS, **no P0**,
+verified by a 16-attack adversarial probe compiled against a scratchpad COPY of the tree (the repo
+was never written to); a hostile intermediate re-signing with its own key over byte-identical
+canonical bytes gets `ErrBadSignature`. Security's P1 was that the fingerprint fix was unstaged —
+now staged. Its P2 on the duplicated `ed25519.Verify` panic guard was fixed by delegating to
+`signing.ValidatePublicKey`.
+
+**NOT LIVE, and that is by design.** `internal/relay` registers no route and is imported by nothing;
+`guards_test.go` still passes. It cannot be served until INVITE-PEERGUARD (`f5d91dbe`) and
+MTLS-RELAYGUARD (`8192c3c7`) land — and now also cannot function until peering carries a bus signing
+key, since `PeerEnrollRequest`/`PeerEnrollResponse` carry only `bus_id` and `agents`, so every
+relayed message is `ErrUnpeeredBus` by construction. Recorded as `doc.go` handoff item 8.
+
+**Proof.** `proof-check: verdict=PASS class=test exit=0 tests_run=281 top_level=66 skipped=0
+failed=0` for `go test -race ./internal/relay/`. Verified in ISOLATION: the tree is red in
+`internal/hub` from a concurrent agent's in-flight `store.NewMessage` arity change, unrelated to
+this task.

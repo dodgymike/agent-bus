@@ -43,6 +43,29 @@ const (
 	CodeUnknownPeer          = "unknown_peer"
 	CodeStaleRoster          = "stale_roster"
 	CodeInvalidRosterUpdate  = "invalid_roster_update"
+
+	// Signed relay ingest (SIGN-7). THREE codes, not one, because they blame
+	// three different things and carry two different statuses:
+	//
+	//   - CodeUnsigned (400) says the ENVELOPE could never be verified by anyone
+	//     — no signature, a malformed one, or a shape the canonical format cannot
+	//     encode.
+	//   - CodeBadSignature (403) says the envelope is well-formed but is NOT
+	//     ATTRIBUTABLE to the agent it names, either because the origin bus
+	//     attests no key for that agent or because the signature does not verify
+	//     against the key it does attest.
+	//   - CodeUnpeeredBus (403) says we hold NO PEERING-TIME PIN for the origin
+	//     bus's SIGNING key, so nothing that bus's agents sign can be verified
+	//     here at all. It is separate from CodeBadSignature because it is a
+	//     different OPERATOR problem with a different remedy: peer the two buses,
+	//     as against investigate a forgery. There is deliberately no
+	//     trust-on-first-use path that would make this code unreachable.
+	//
+	// ALL THREE ARE FINAL. None invites a retry: resending identical bytes cannot
+	// change any of the verdicts, and a peer that reads these codes must stop.
+	CodeUnsigned     = "unsigned"
+	CodeBadSignature = "bad_signature"
+	CodeUnpeeredBus  = "unpeered_bus"
 )
 
 // ErrPeerRejected is what an AcceptPeer callback returns to DECLINE a peer that

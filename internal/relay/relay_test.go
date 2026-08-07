@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,25 +25,40 @@ import (
 // testBody is the body every fixture relays unless it overrides it.
 var testBody = []byte("hello from another bus")
 
-// relayFixture builds a VALID relay envelope originating on peerBus and
-// addressed to an agent on localBus, then applies each mod. Every rejection
-// case in the table below is exactly one deviation from this baseline, so a
-// failure names the deviation rather than the whole payload.
+// relayFixture builds a VALID, GENUINELY SIGNED relay envelope originating on
+// peerBus and addressed to an agent on localBus, then applies each mod. Every
+// rejection case in the table below is exactly one deviation from this baseline,
+// so a failure names the deviation rather than the whole payload.
+//
+// THE SIGNATURE IS APPLIED AFTER THE MODS, over whatever the mods produced, so
+// the baseline is a message a real origin agent could have sent (SIGN-7). A mod
+// that makes the envelope UNCANONICALIZABLE — a malformed id, a duplicate
+// recipient, an unset timestamp — gets a placeholder of the right LENGTH
+// instead. That is not a bypass: every such deviation is refused by checks 1-10
+// of ValidateRelayRequest, all of which run BEFORE the signature is looked at,
+// so the case under test still fails for the reason it names. When the
+// signature ITSELF is the subject, sign explicitly — see signed_test.go.
 func relayFixture(mods ...func(*RelayRequest)) RelayRequest {
 	req := RelayRequest{
-		OriginBus:     peerBus,
-		MessageID:     peerBus + "-1",
-		Sender:        peerBus + ".beta-1",
-		Broadcast:     false,
-		Recipients:    []string{localBus + ".alpha-1"},
-		BusPath:       []string{peerBus},
-		SentAtUnixNs:  time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC).UnixNano(),
-		Size:          len(testBody),
-		ContentSHA256: store.ContentHash(testBody),
-		Body:          append([]byte(nil), testBody...),
+		OriginBus:          peerBus,
+		MessageID:          peerBus + "-1",
+		Sender:             peerBus + ".beta-1",
+		Broadcast:          false,
+		Recipients:         []string{localBus + ".alpha-1"},
+		BusPath:            []string{peerBus},
+		TimestampUnixMilli: time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		Size:               len(testBody),
+		ContentSHA256:      store.ContentHash(testBody),
+		Body:               append([]byte(nil), testBody...),
 	}
 	for _, mod := range mods {
 		mod(&req)
+	}
+	if err := signRelay(&req); err != nil {
+		// Not canonicalizable, so no signature over it can exist for anyone.
+		// A right-length placeholder keeps the deviation under test — not the
+		// missing signature — the thing that decides the outcome.
+		req.Signature = make([]byte, ed25519.SignatureSize)
 	}
 	return req
 }
@@ -64,6 +80,9 @@ func newRelayResponder(t *testing.T, busID string, cfg func(*RelayConfig)) *rela
 	r := &relayResponder{result: RelayAcceptance{LocalMessageID: busID + "-1"}}
 	c := RelayConfig{
 		BusID: busID,
+		// The whole test federation is peered by default, so a test that is not
+		// ABOUT trust gets the ordinary case. Override c.Trust to narrow it.
+		Trust: fakeCrossBusTrustForTest,
 		AcceptRelay: func(_ context.Context, m RelayedMessage) (RelayAcceptance, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -318,7 +337,7 @@ func TestMessageRelay(t *testing.T) {
 			},
 			{
 				name:    "unset timestamp",
-				mod:     func(r *RelayRequest) { r.SentAtUnixNs = 0 },
+				mod:     func(r *RelayRequest) { r.TimestampUnixMilli = 0 },
 				want:    ErrInvalidRelay,
 				because: "0 means the field was never set, not the epoch",
 			},
@@ -356,7 +375,7 @@ func TestMessageRelay(t *testing.T) {
 				case "-":
 					key = ""
 				}
-				_, err := ValidateRelayRequest(localBus, key, req)
+				_, err := ValidateRelayRequest(localBus, key, req, fakeCrossBusTrustForTest)
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("ValidateRelayRequest error = %v, want one wrapping %v (%s)", err, tc.want, tc.because)
 				}
@@ -514,14 +533,20 @@ func TestMessageRelay(t *testing.T) {
 		accept := func(context.Context, RelayedMessage) (RelayAcceptance, error) {
 			return RelayAcceptance{}, nil
 		}
+		trust := fakeCrossBusTrustForTest
 		cases := []struct {
 			name string
 			cfg  RelayConfig
 		}{
-			{"no bus id", RelayConfig{AcceptRelay: accept}},
-			{"bus id with a dot", RelayConfig{BusID: "bus.x", AcceptRelay: accept}},
-			{"no accept callback", RelayConfig{BusID: localBus}},
-			{"negative byte cap", RelayConfig{BusID: localBus, AcceptRelay: accept, MaxRequestBytes: -1}},
+			{"no bus id", RelayConfig{AcceptRelay: accept, Trust: trust}},
+			{"bus id with a dot", RelayConfig{BusID: "bus.x", AcceptRelay: accept, Trust: trust}},
+			{"no accept callback", RelayConfig{BusID: localBus, Trust: trust}},
+			// SIGN-7: a handler without a CrossBusTrust would answer 403 to every
+			// well-formed message a correct peer sent — an outage that looks
+			// exactly like a peer with the wrong keys. Failing at CONSTRUCTION is
+			// what says which side is broken.
+			{"no cross-bus trust", RelayConfig{BusID: localBus, AcceptRelay: accept}},
+			{"negative byte cap", RelayConfig{BusID: localBus, AcceptRelay: accept, Trust: trust, MaxRequestBytes: -1}},
 		}
 		for _, tc := range cases {
 			tc := tc
@@ -612,7 +637,7 @@ func TestRelayEnvelopeBoundsAreLimitsNotOffByOnes(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			req := relayFixture(tc.mod)
-			m, err := ValidateRelayRequest(localBus, req.MessageID, req)
+			m, err := ValidateRelayRequest(localBus, req.MessageID, req, fakeCrossBusTrustForTest)
 			if tc.want != nil {
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("ValidateRelayRequest error = %v, want one wrapping %v", err, tc.want)
@@ -724,11 +749,11 @@ func TestRelayFingerprintExcludesBusPath(t *testing.T) {
 	viaB := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-b"} })
 	viaC := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-c", "bus-d"} })
 
-	one, err := ValidateRelayRequest(localBus, viaB.MessageID, viaB)
+	one, err := ValidateRelayRequest(localBus, viaB.MessageID, viaB, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest(viaB): %v", err)
 	}
-	two, err := ValidateRelayRequest(localBus, viaC.MessageID, viaC)
+	two, err := ValidateRelayRequest(localBus, viaC.MessageID, viaC, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest(viaC): %v", err)
 	}
@@ -761,7 +786,15 @@ func TestRelayFingerprintExcludesBusPath(t *testing.T) {
 			[]string{localBus + ".gamma-1"}, 100, len(testBody), store.ContentHash(testBody)),
 		"extra recipient": relayFingerprint(peerBus, peerBus+"-1", peerBus+".beta-1", false,
 			[]string{localBus + ".alpha-1", localBus + ".gamma-1"}, 100, len(testBody), store.ContentHash(testBody)),
-		"recipient order": relayFingerprint(peerBus, peerBus+"-1", peerBus+".beta-1", false,
+		// NOT "recipient order" — that case used to live here and it asserted the
+		// OPPOSITE of what the fingerprint now guarantees. It passed only by
+		// accident (it compared a TWO-recipient list against a ONE-recipient
+		// base, so the SET differed too). Recipient ORDER is deliberately
+		// invisible to the fingerprint, because signing.Canonicalize sorts a copy
+		// and the fingerprint must define "same payload" exactly as the signature
+		// does; see TestSign7RecipientPermutationCannotGetAnHonestPeerDisconnected.
+		// What must still differ is a different recipient SET:
+		"extra recipient, listed first": relayFingerprint(peerBus, peerBus+"-1", peerBus+".beta-1", false,
 			[]string{localBus + ".gamma-1", localBus + ".alpha-1"}, 100, len(testBody), store.ContentHash(testBody)),
 		"different sender": relayFingerprint(peerBus, peerBus+"-1", peerBus+".gamma-1", false,
 			[]string{localBus + ".alpha-1"}, 100, len(testBody), store.ContentHash(testBody)),
@@ -792,10 +825,10 @@ func TestRelayFingerprintExcludesBusPath(t *testing.T) {
 func TestRelayIdempotencyKeyIsTheOriginMessageID(t *testing.T) {
 	t.Run("a mismatched key is refused", func(t *testing.T) {
 		req := relayFixture()
-		if _, err := ValidateRelayRequest(localBus, "a-different-key", req); !errors.Is(err, ErrRelayKeyMismatch) {
+		if _, err := ValidateRelayRequest(localBus, "a-different-key", req, fakeCrossBusTrustForTest); !errors.Is(err, ErrRelayKeyMismatch) {
 			t.Fatalf("error = %v, want one wrapping ErrRelayKeyMismatch", err)
 		}
-		if _, err := ValidateRelayRequest(localBus, req.MessageID, req); err != nil {
+		if _, err := ValidateRelayRequest(localBus, req.MessageID, req, fakeCrossBusTrustForTest); err != nil {
 			t.Fatalf("the matching key was refused: %v", err)
 		}
 	})
@@ -875,15 +908,16 @@ func TestMaxRelayBytesFitsAMaximumMessage(t *testing.T) {
 	}
 
 	buf, err := json.Marshal(RelayRequest{
-		OriginBus:     strings.Repeat("o", 64),
-		MessageID:     strings.Repeat("o", 64) + "-18446744073709551615",
-		Sender:        strings.Repeat("o", 64) + ".b" + longName + "-18446744073709551615",
-		Recipients:    recipients,
-		BusPath:       path,
-		SentAtUnixNs:  1 << 62,
-		Size:          len(body),
-		ContentSHA256: store.ContentHash(body),
-		Body:          body,
+		OriginBus:          strings.Repeat("o", 64),
+		MessageID:          strings.Repeat("o", 64) + "-18446744073709551615",
+		Sender:             strings.Repeat("o", 64) + ".b" + longName + "-18446744073709551615",
+		Recipients:         recipients,
+		BusPath:            path,
+		TimestampUnixMilli: 1 << 42,
+		Signature:          make([]byte, ed25519.SignatureSize),
+		Size:               len(body),
+		ContentSHA256:      store.ContentHash(body),
+		Body:               body,
 	})
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
@@ -898,7 +932,7 @@ func TestMaxRelayBytesFitsAMaximumMessage(t *testing.T) {
 // memory the sending peer's decoder still owns.
 func TestRelayedMessageCopiesEverything(t *testing.T) {
 	req := relayFixture()
-	m, err := ValidateRelayRequest(localBus, req.MessageID, req)
+	m, err := ValidateRelayRequest(localBus, req.MessageID, req, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest: %v", err)
 	}
@@ -922,7 +956,7 @@ func TestRelayedMessageCopiesEverything(t *testing.T) {
 // is the bus path, which is the one field a signature can never cover.
 func TestForwardCarriesEveryFieldVerbatim(t *testing.T) {
 	req := relayFixture()
-	m, err := ValidateRelayRequest(localBus, req.MessageID, req)
+	m, err := ValidateRelayRequest(localBus, req.MessageID, req, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest: %v", err)
 	}
@@ -938,7 +972,7 @@ func TestForwardCarriesEveryFieldVerbatim(t *testing.T) {
 	want.BusPath = out.BusPath
 	if out.OriginBus != want.OriginBus || out.MessageID != want.MessageID ||
 		out.Sender != want.Sender || out.Broadcast != want.Broadcast ||
-		out.SentAtUnixNs != want.SentAtUnixNs || out.Size != want.Size ||
+		out.TimestampUnixMilli != want.TimestampUnixMilli || out.Size != want.Size ||
 		out.ContentSHA256 != want.ContentSHA256 {
 		t.Fatalf("Forward changed a covered field:\n got %+v\nwant %+v", out, want)
 	}
@@ -950,11 +984,11 @@ func TestForwardCarriesEveryFieldVerbatim(t *testing.T) {
 	}
 
 	// The forwarded envelope must be acceptable to the NEXT bus.
-	if _, err := ValidateRelayRequest(thirdBus, out.MessageID, out); err != nil {
+	if _, err := ValidateRelayRequest(thirdBus, out.MessageID, out, fakeCrossBusTrustForTest); err != nil {
 		t.Fatalf("the forwarded envelope was refused by the next bus: %v", err)
 	}
 	// And it must be refused by a bus already on the path.
-	if _, err := ValidateRelayRequest(localBus, out.MessageID, out); !errors.Is(err, ErrRelayLoop) {
+	if _, err := ValidateRelayRequest(localBus, out.MessageID, out, fakeCrossBusTrustForTest); !errors.Is(err, ErrRelayLoop) {
 		t.Fatalf("error = %v, want one wrapping ErrRelayLoop", err)
 	}
 }

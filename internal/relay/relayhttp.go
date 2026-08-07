@@ -70,6 +70,26 @@ type RelayConfig struct {
 	// silently discard it, which looks exactly like a working relay.
 	AcceptRelay func(ctx context.Context, m RelayedMessage) (RelayAcceptance, error)
 
+	// Trust yields the ORIGIN bus's peering-time signing-key pins and the
+	// messaging key that bus attests for a relayed message's sender (SIGN-7).
+	// Every ingested envelope is verified through it before AcceptRelay ever sees
+	// the message.
+	//
+	// Required, and required AT CONSTRUCTION rather than defaulted to nil-means-
+	// reject, even though VerifyRelayed already treats a nil trust as
+	// ErrNoSignerKey. A handler built without one would answer 403 to every
+	// well-formed message a correct peer sent — an outage that looks exactly
+	// like a peer with the wrong keys, and one that no test supplying a
+	// CrossBusTrust would ever reveal. Failing at construction says which side is
+	// broken.
+	//
+	// READ CrossBusTrust'S DOC BEFORE IMPLEMENTING ONE. In particular: the pins
+	// come from PEERING (never from the TLS certificate, which is a different key
+	// pinned at a different moment by a different party), the origin's attestation
+	// is relayed intact and never re-attested by an intermediate, and there is no
+	// trust-on-first-use fallback to add.
+	Trust CrossBusTrust
+
 	// Logger receives the detailed, peer-supplied-byte-quoting failures that
 	// the wire response deliberately omits. Optional; nil discards.
 	Logger *logging.Logger
@@ -99,6 +119,7 @@ type RelayStats struct {
 type RelayHandler struct {
 	busID       string
 	acceptRelay func(context.Context, RelayedMessage) (RelayAcceptance, error)
+	trust       CrossBusTrust
 	log         *logging.Logger
 	maxBytes    int64
 
@@ -116,6 +137,9 @@ func NewRelayHandler(cfg RelayConfig) (*RelayHandler, error) {
 	if cfg.AcceptRelay == nil {
 		return nil, errors.New("relay: RelayConfig.AcceptRelay is required; without it the handler would validate a relayed message and silently discard it, which is indistinguishable from delivering it")
 	}
+	if cfg.Trust == nil {
+		return nil, errors.New("relay: RelayConfig.Trust is required; every relayed message is verified through it before it is accepted (SIGN-7), and a handler without one would refuse every well-formed message a correct peer sent")
+	}
 	if cfg.MaxRequestBytes < 0 {
 		return nil, fmt.Errorf("relay: RelayConfig.MaxRequestBytes is %d; it must be zero (meaning %d) or positive", cfg.MaxRequestBytes, MaxRelayBytes)
 	}
@@ -127,7 +151,7 @@ func NewRelayHandler(cfg RelayConfig) (*RelayHandler, error) {
 	if log == nil {
 		log = logging.New(io.Discard, logging.LevelError)
 	}
-	return &RelayHandler{busID: cfg.BusID, acceptRelay: cfg.AcceptRelay, log: log, maxBytes: max}, nil
+	return &RelayHandler{busID: cfg.BusID, acceptRelay: cfg.AcceptRelay, trust: cfg.Trust, log: log, maxBytes: max}, nil
 }
 
 // Stats reports this handler's counters.
@@ -176,6 +200,25 @@ func (h *RelayHandler) Stats() RelayStats {
 //     shape of their topology, would never be recorded at all. The 200 is what
 //     keeps a settled outcome legible as settled.
 //
+//   - AN UNSIGNED OR UNSIGNABLE ENVELOPE IS 400 CodeUnsigned; A SIGNATURE WE
+//     CANNOT ATTRIBUTE TO THE NAMED SENDER IS 403 CodeBadSignature; AND AN
+//     ORIGIN BUS WE HOLD NO PEERING-TIME PIN FOR IS 403 CodeUnpeeredBus
+//     (SIGN-7). All are FINAL and none is the loop's 200: a loop is a
+//     settled non-fault the sender could not have avoided, whereas these are the
+//     sender's own envelope being refused, and telling a peer "200, dropped"
+//     for a forged message would file an attack under normal operation. They are
+//     also not 503: a retry cannot change any of the three verdicts, and a peer
+//     that keeps resending an unverifiable message is a peer we want to stop, not
+//     schedule. The 400/403 split is "nobody could verify this" versus "we will
+//     not attribute this to that agent" — the second is an authorization answer.
+//
+//     CodeUnpeeredBus is split out from CodeBadSignature because the two are
+//     different OPERATOR problems: "we have never peered with your bus, so we can
+//     verify nothing you send" is fixed by completing a peering, while "your
+//     signature is wrong" starts a forgery investigation. One code for both would
+//     send an operator hunting an attack on what is the ordinary day-one state of
+//     an unfinished federation.
+//
 //   - An idempotency VIOLATION is 409, and the log line says the caller should
 //     be disconnected (invariant 10). We cannot disconnect from here; see
 //     ErrIdempotencyViolation.
@@ -217,7 +260,10 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m, err := ValidateRelayRequest(h.busID, idempotencyKey, req)
+	// Validation and signature verification are ONE call, on purpose: there is no
+	// point in this function where a validated-but-unverified message exists (see
+	// ValidateRelayRequest, "Why the resolver is a REQUIRED PARAMETER").
+	m, err := ValidateRelayRequest(h.busID, idempotencyKey, req, h.trust)
 	if err != nil {
 		if errors.Is(err, ErrRelayLoop) {
 			// SETTLED, NOT FAILED. See the doc comment above.
@@ -249,8 +295,19 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// stop retrying a fault it did not cause and cannot fix.
 		status := http.StatusBadRequest
 		code := ErrorCode(err)
-		if code == CodeInternal {
+		switch code {
+		case CodeInternal:
 			status = http.StatusInternalServerError
+		case CodeBadSignature, CodeUnpeeredBus:
+			// Authorization answers, not malformed-request ones: the envelope
+			// parsed, and we are refusing to attribute it to the agent it names
+			// (SIGN-7) — either because the signature does not verify, or because
+			// we hold no peering-time pin for its origin bus and therefore cannot
+			// verify anything it sends. Both are FINAL; do not invite a retry, and
+			// note that ErrUnpeeredBus in particular is NOT a 503: no amount of
+			// retrying establishes a peering, which is an operator action on both
+			// ends.
+			status = http.StatusForbidden
 		}
 		h.fail(w, status, code, err)
 		return

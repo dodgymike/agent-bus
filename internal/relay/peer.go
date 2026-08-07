@@ -368,6 +368,23 @@ func ErrorCode(err error) string {
 		return CodeInvalidIdempotencyKey
 	case errors.Is(err, ErrIdempotencyViolation):
 		return CodeIdempotencyViolation
+
+	// Signed relay ingest (SIGN-7). These sit ABOVE ErrInvalidRelay because a
+	// signature failure is the more specific and the more serious diagnosis: a
+	// peer told "invalid_relay" would go looking for a malformed field, when the
+	// actual answer is that we will not attribute this message to the agent it
+	// names. They are also never retryable, and the generic code invites a retry.
+	case errors.Is(err, ErrMissingSignature), errors.Is(err, ErrUnsignable):
+		return CodeUnsigned
+	case errors.Is(err, ErrUnpeeredBus):
+		// FIRST among the attribution failures, because it is the most specific
+		// diagnosis and the only one with an operator remedy: we hold no
+		// peering-time pin for the origin bus's signing key, so nothing it sends
+		// is verifiable. A peer told "bad_signature" here would go looking for a
+		// forgery when the actual answer is that the two buses were never peered.
+		return CodeUnpeeredBus
+	case errors.Is(err, ErrNoSignerKey), errors.Is(err, ErrBadSignature):
+		return CodeBadSignature
 	case errors.Is(err, ErrInvalidRelay):
 		return CodeInvalidRelay
 

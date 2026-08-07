@@ -78,22 +78,61 @@
 //     true of the relay and roster surfaces, where it costs MORE: every
 //     acceptance there is a durable fsync.
 //
-// RELAY-2 and RELAY-3 add seven more, and they are listed in full because THIS
-// LIST IS THE HANDOFF. A gate task reads it and nothing else; a property that is
+// RELAY-2, RELAY-3 and SIGN-7 add eight more, and they are listed in full
+// because THIS LIST IS THE HANDOFF. A gate task reads it and nothing else; a property that is
 // only in a field comment somewhere is a property the gate will not implement.
 // Each was raised by the security gate on 2026-08-07 and each is P1 now, P0 the
 // moment a handler is served:
 //
-//  1. SIGN-6 IS A PREREQUISITE OF SERVING RelayHandler, NOT A FOLLOW-UP.
-//     RelayRequest carries no signature field, so nothing binds an envelope to
-//     the agent that supposedly sent it: a peer can forge OriginBus, Sender and
-//     MessageID for a bus it does not own, and it is accepted. Message ids are
-//     "<bus>-<seq>" and sequential, so a peer can PRE-POISON A RANGE of a
-//     victim bus's ids. When the genuine copy arrives it is the same key with a
-//     different fingerprint — idem.OutcomeViolation — so invariant 10's
-//     mandated disconnect fires AT THE HONEST PEER. The disconnect becomes the
-//     attacker's weapon. PROTOCOL.md §8.5 already requires signed relay ingest;
-//     this is where that requirement bites.
+//  1. THE SIGNATURE EXISTS AND THE TRUST MODEL IS NOW DECIDED; WHAT IS MISSING
+//     IS THE PEERING MATERIAL THAT WOULD MAKE IT IMPLEMENTABLE (see item 8).
+//
+//     SIGN-7 landed the mechanism: RelayRequest carries a detached Ed25519
+//     Signature over the signed field values, RelayedMessage.CanonicalBytes
+//     RE-DERIVES the signed bytes with signing.Canonicalize from the exact
+//     fields this bus will route, deliver, attribute and log (PROTOCOL.md
+//     §8.5 — never a blob that arrived beside them), and verification is
+//     MANDATORY at ingest: ValidateRelayRequest takes a CrossBusTrust as a
+//     required parameter and runs VerifyRelayed before it returns, so no
+//     unverified RelayedMessage can exist. A nil trust is a refusal, not a
+//     skip. A relayed BROADCAST is refused outright, because canonical format
+//     v1 will not sign an empty recipient set and an exemption would be an
+//     unauthenticated downgrade selectable from the wire (SIGN-3 owns that).
+//
+//     THE TRUST QUESTION IS NO LONGER OPEN. DECISIONS.md (2026-08-07, "Cross-bus
+//     key trust: pin the origin bus key at peering, no TOFU"): the ORIGIN bus's
+//     attestation of its own agent's messaging key travels INTACT, signed by the
+//     ORIGIN BUS'S SIGNING KEY, and is NEVER re-attested by an intermediate; that
+//     signing key is PINNED AT PEERING TIME; and there is NO trust-on-first-use
+//     anywhere, not even as a fallback. TOFU's exposure window is FIRST CONTACT,
+//     which is exactly when a hostile intermediate is best placed to act, and a
+//     fallback would reintroduce the entire hole for every peer not yet seen —
+//     which is every peer, once.
+//
+//     CrossBusTrust is that ruling made STRUCTURAL. It replaced a one-method
+//     SignerKeyResolver, which was a per-agent key oracle: nothing in that
+//     signature distinguished an implementation that checked the origin's
+//     attestation from one that believed the nearest bus's re-attestation.
+//     PinnedBusSigningKeys yields the peering-time pins, and those pins are
+//     PASSED INTO AttestedSignerKey — so an implementation has nothing else to
+//     verify an attestation against. VerifyRelayed fetches the pin FIRST and
+//     UNCONDITIONALLY, which is what makes "an unpeered bus's messages cannot be
+//     verified" a property of the code (ErrUnpeeredBus, 403 CodeUnpeeredBus)
+//     rather than a claim in prose.
+//
+//     WHAT REMAINS is (a) the peering field that would give PinnedBusSigningKeys
+//     a source of truth — item 8, owned by INVITE-PEERGUARD — and (b) CRYPTO-4's
+//     attested-bundle format, its transport and `key_epoch`. This package ships
+//     NO implementation of CrossBusTrust and no default, deliberately.
+//
+//     WHY THE RESOLVER IS LOAD-BEARING RATHER THAN A REFINEMENT — this is the
+//     attack a wrong one re-opens, unchanged from before SIGN-7: if a peer can
+//     get a signature accepted for a bus it does not own, it can forge
+//     OriginBus, Sender and MessageID. Message ids are "<bus>-<seq>" and
+//     sequential, so it can PRE-POISON A RANGE of a victim bus's ids. When the
+//     genuine copy arrives it is the same key with a different fingerprint —
+//     idem.OutcomeViolation — so invariant 10's mandated disconnect fires AT
+//     THE HONEST PEER. The disconnect becomes the attacker's weapon.
 //
 //  2. THE APPLIED-KEY TABLE MUST BE METERED BY THE AUTHENTICATED PEER, NOT BY
 //     THE ASSERTED ORIGIN SENDER. RelayedMessage.Scope() keys internal/idem on
@@ -131,6 +170,38 @@
 //     tells the peer to retry the very thing that is refusing it. The gate
 //     should map idem.ErrAgentQuota / idem.ErrCapacity to a back-off-shaped
 //     answer instead.
+//
+//  8. THE PEERING HANDSHAKE CARRIES NO BUS SIGNING KEY, SO NO PIN CAN EVER BE
+//     ESTABLISHED — AND RELAY INGEST THEREFORE CANNOT BE SERVED.
+//
+//     PeerEnrollRequest and PeerEnrollResponse (peer.go) carry ONLY bus_id and
+//     agents. They carry NO BUS SIGNING KEY AND NO TLS CERTIFICATE FINGERPRINT,
+//     so there is today NO MOMENT AT WHICH A PIN IS ESTABLISHED: the peering
+//     material that the cross-bus trust ruling requires does not exist on the
+//     wire. Until it does, CrossBusTrust.PinnedBusSigningKeys has NO SOURCE OF
+//     TRUTH, every relayed message is ErrUnpeeredBus by construction, and the
+//     relay ingest cannot be served at all.
+//
+//     THE PEERING MATERIAL MUST CARRY THE PEER'S BUS SIGNING KEY. That is a
+//     DIFFERENT KEY from the TLS certificate whose fingerprint travels in the
+//     invite blob, and the invite's fingerprint DOES NOT SUBSTITUTE for it
+//     (DECISIONS.md 2026-08-07, "Bus TLS key and bus signing key are separate").
+//     The TLS key authenticates the CONNECTION and is pinned by CLIENTS from the
+//     invite; the SIGNING key attests AGENT KEY BUNDLES and is pinned by PEERS at
+//     peering time. A peer pins TWO THINGS, OBTAINED AT DIFFERENT MOMENTS, and
+//     they must never be conflated in code, in a field name or in a doc phrase —
+//     which is why nothing here is called "busKey". Their rotations differ in
+//     blast radius (a TLS rotation is one bus's clients and rolls over on two
+//     certificates; a SIGNING-key rotation invalidates the pins held by every
+//     peer bus) and so do their compromises (a TLS key impersonates the bus to
+//     CLIENTS; a signing key forges attestations for ANY AGENT ON THE BUS).
+//
+//     INVITE-PEERGUARD (f5d91dbe) OWNS THE PEERING HANDSHAKE AND THEREFORE OWNS
+//     ADDING IT. It is not relay's to add unilaterally: the field is peering
+//     material, it must be delivered over the same operator-mediated channel the
+//     invite uses, and adding a key field to this envelope without that channel
+//     would be trust-on-first-use wearing a field name — precisely what the
+//     ruling forbids.
 //
 // # No wire protocol version field, on purpose
 //
@@ -205,14 +276,16 @@
 //     idem.Scope; a peer free to mint a fresh key per hop would defeat
 //     invariant 10 silently, because every copy would look new.
 //
-// # OriginSentAt must never become the local SentAt
+// # The relayed timestamp must never become the local SentAt
 //
-// RelayedMessage.OriginSentAt is the ORIGIN bus's clock and is untrusted peer
-// input. store.Message.VisibleTo compares SentAt against an agent's enrolment
-// instant to enforce the enrolment epoch, which is an AUTHORIZATION boundary —
-// so a wiring task that copied OriginSentAt into the local record would let a
-// peer choose a message's visibility. The local bus stamps its own acceptance
-// time; the origin's is provenance only.
+// RelayedMessage.TimestampUnixMilli is the SENDING AGENT's signed wall clock and
+// is untrusted peer input. store.Message.VisibleTo compares SentAt against an
+// agent's enrolment instant to enforce the enrolment epoch, which is an
+// AUTHORIZATION boundary — so a wiring task that copied this value into the
+// local record would let a peer choose a message's visibility. The local bus
+// stamps its own acceptance time; the relayed one is provenance only, and a
+// VALID SIGNATURE OVER IT CHANGES NOTHING: the signature proves the agent chose
+// that number, not that the number is true.
 //
 // # The Forwarder is IN-MEMORY and therefore LOSSY
 //

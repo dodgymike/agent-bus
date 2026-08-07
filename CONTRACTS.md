@@ -34,3 +34,245 @@ explicitly out of scope for the split itself and is tracked by other tasks, not 
 
 Do not "fix while you're in there" on either passage from this file; that is scope creep on whichever
 task lands the correction, and both are already filed.
+
+## 2026-08-07 — MSG-FU-SUFFIXFLOOR: new on-disk file + new `internal/ids` Go surface
+
+**No new HTTP route, no new env var, no new CLI flag, no `scripts/bus-*.sh` change.** Say that
+explicitly so a reader does not go looking for one: this task's surface is a data-directory file and
+a package-internal Go API, nothing an agent or an operator invokes directly.
+
+**New on-disk file, belongs in `CONTRACTS-ONDISK.md` (out of this task's file boundary, so recorded
+here instead — fold it into that file's tables the next time it is touched):**
+
+| | |
+|---|---|
+| Path | `<data-dir>/agent-suffixes` |
+| Mode | `0600`, inside the `0700` data directory |
+| Format version | **3**, reserved 2026-08-07 by feature-runner in the Spec Server `ondisk-format-version` namespace (values 1 and 2 are the WAL's — see `CONTRACTS-ONDISK.md` / `PROTOCOL.md` §1) |
+| Header | `agent-bus-agent-suffixes v3 sha256=<64 hex chars over the body>` |
+| Body | one `<agent-name> <highest-suffix-burned>` line per name, sorted by name; floor 0 is spelled by ABSENCE, never by an explicit `0` |
+| Write discipline | temp file in the same directory, fsynced, renamed over the target, directory fsynced — never torn |
+| Failure posture | ANY verification failure (bad header, unknown version, digest mismatch, malformed or duplicate entry) is FATAL and the file is NEVER regenerated — regenerating would resume every name from 1 and re-mint agent ids already on disk (invariant 1) |
+
+Full byte-layout prose lives in `PROTOCOL.md` §9 (new section, this task) rather than duplicated here.
+
+**New Go API, package `ids` (`internal/ids/suffixstore.go`):**
+
+| Symbol | Kind | Contract |
+|---|---|---|
+| `OpenNameSuffixes(dir string) (*DurableNameSuffixes, error)` | func | Loads the persisted floors. Missing file → empty floors, `existed=false`. Corrupt file → fatal, wraps `ErrSuffixFileCorrupt`, never regenerated. Returned allocator is born **unsealed**. |
+| `(*DurableNameSuffixes) RaiseFloor(name string, atLeast uint64) error` | method | Legal only before `Seal`; merges an externally-derived floor. Validates `name` via `ValidateAgentName` (new — see below). |
+| `(*DurableNameSuffixes) Seal() error` | method | Persists the merged floors to disk FIRST, then seals in memory. A failed write leaves the allocator unsealed and refusing — never partially sealed. |
+| `(*DurableNameSuffixes) NextSuffix(name string) (uint64, error)` | method | Implements `ids.SuffixAllocator`. Persists + fsyncs `floor[name] = n` BEFORE returning `n`. Validates `name`. |
+| `(*DurableNameSuffixes) LastSuffix(name string) uint64` | method | Highest suffix issued by THIS process for `name`, not what disk holds — see `Floors` for that. |
+| `(*DurableNameSuffixes) Floors() map[string]uint64` | method | Snapshot copy of the floors currently on disk; mutating the returned map does not affect the allocator. |
+| `(*DurableNameSuffixes) Existed() bool` | method | Whether `agent-suffixes` was present at open — tracks FILE presence, not floor count (an empty-but-present file also reports `true`). |
+| `(*DurableNameSuffixes) Path() string` | method | The file path, for operator messages and tests. |
+| `ErrSuffixFileCorrupt` | var (error) | Sentinel for any on-disk verification failure. Fatal, non-recoverable by regeneration. |
+
+**Scope of this task, stated so the gap is not mistaken for closed:** this ships the mechanism inside
+`internal/ids` only. `cmd/agent-bus/main.go:327` still calls `ids.NewNameSuffixes()` and there are
+**zero production callers of `OpenNameSuffixes`** anywhere in the tree. A restarting bus therefore
+still re-mints agent ids today — see `DECISIONS.md` (2026-08-07) and `AGENT_LOG.md` (2026-08-07) for
+the full picture, and `internal/ids/doc.go` for the in-package statement of the same gap. Wiring
+`main.go` to this allocator is a separate, not-yet-filed follow-up.
+
+## 2026-08-07 — RELAY-2 / RELAY-3: bus-to-bus relay + roster sync (NOT REGISTERED)
+
+**No new HTTP route is served, no new env var, no new CLI flag.** `internal/relay` registers NO
+handler on any mux, authenticates NO peer, and is imported by NOTHING outside itself — enforced by
+`internal/relay/guards_test.go`, which fails the build if any other package in the repository imports
+it. This mirrors RELAY-1's precedent exactly: `/v1/peer/enroll` was never added to
+`CONTRACTS-HTTP.md`'s route tables for the same reason, and that omission was deliberate, not an
+oversight. **Do not add `/v1/peer/relay` or `/v1/peer/roster` to `CONTRACTS-HTTP.md` either** — there
+is nothing there yet to add. **No `scripts/bus-*.sh` wrapper is owed by this task.** CLAUDE.md
+invariant 7 requires a wrapper for every agent-facing capability shipped "in the same task"; this is a
+bus-to-bus (server-to-server) surface, not agent-facing, so the wrapper requirement does not apply
+here — stated explicitly so this is not mistaken for a skipped step.
+
+**Nothing below is reachable today.** It documents the PLANNED shapes `internal/relay` now carries in
+Go, so that the eventual gate tasks — `INVITE-PEERGUARD` (`f5d91dbe`) and `MTLS-RELAYGUARD`
+(`8192c3c7`), neither of which has landed — have one place to read the contract from. Until BOTH land
+and a wiring task registers these handlers on a listener, nothing here is served, nothing here is
+reachable from the network, and nothing here should be wired into `internal/httpapi` or any other mux.
+
+**Path constants (reserved spellings, not registrations):**
+
+| Constant | Value | Surface |
+|---|---|---|
+| `PeerEnrollPath` | `/v1/peer/enroll` | RELAY-1's handshake (already unregistered; listed here for completeness) |
+| `PeerRelayPath` | `/v1/peer/relay` | RELAY-2's message relay ingress |
+| `PeerRosterPath` | `/v1/peer/roster` | RELAY-2's ongoing roster sync ingress |
+
+**`RelayRequest`** — the body one bus POSTs to another at `PeerRelayPath`. Every field is untrusted
+peer input; nothing here proves the sending bus is entitled to speak for `origin_bus`.
+
+| Field | JSON key | Notes |
+|---|---|---|
+| OriginBus | `origin_bus` | the bus that accepted the message from its own agent; authority for `message_id` and `sender`'s namespace |
+| MessageID | `message_id` | the ORIGIN's `"<bus-id>-<seq>"` id — never this bus's own id for the message |
+| Sender | `sender` | fully-qualified `<bus-id>.<agent-id>`, inside `origin_bus`'s namespace |
+| Broadcast | `broadcast` | exactly one of `broadcast` and a non-empty `recipients` is set |
+| Recipients | `recipients` | fully-qualified ids; empty for a broadcast |
+| BusPath | `bus_path` | ordered traversed-bus list; loop-prevention/provenance metadata, NOT covered by any signature |
+| SentAtUnixNs | `sent_at_unix_ns` | the ORIGIN bus's clock — provenance only, never authorization input |
+| Size | `size` | declared body length, cross-checked against the actual body |
+| ContentSHA256 | `content_sha256` | hex SHA-256 of `body` |
+| Body | `body` | opaque payload, carried verbatim |
+
+**`RelayResponse`** — the answer to a relay POST, always HTTP 200 once past transport-level checks
+(see the status mapping below):
+
+| Field | JSON key | Notes |
+|---|---|---|
+| Accepted | `accepted` | this bus took responsibility for the message, now or previously |
+| Duplicate | `duplicate` | `idem.OutcomeRetry` — same key, same payload; the ORIGINAL result is being replayed, nothing re-applied, nobody disconnected |
+| DroppedReason | `dropped_reason` | omitted unless `accepted` is false and the outcome is final; today the only value is `"loop"` (`DropLoop`) |
+| MessageID | `message_id` | the id THIS bus minted for its own copy — never the origin's; empty when nothing was accepted |
+
+**`RosterUpdate`** — one incremental change to a peer's roster, pushed as that peer's own agents come
+and go, at `PeerRosterPath`:
+
+| Field | JSON key | Notes |
+|---|---|---|
+| BusID | `bus_id` | the peer whose roster this describes — a peer describes only its own roster |
+| Version | `version` | the peer's own monotonic ROSTER EPOCH — see the naming hazard below, this is NOT a wire-protocol version |
+| Added | `added` | fully-qualified ids inside `bus_id`'s namespace |
+| Removed | `removed` | fully-qualified ids inside `bus_id`'s namespace; disjoint from `added` |
+
+**`RosterUpdateResponse`**:
+
+| Field | JSON key | Notes |
+|---|---|---|
+| Applied | `applied` | whether the update was applied (including as a replayed duplicate) |
+| Version | `version` | the version now in force for that peer, so the pusher can detect divergence without a second round trip |
+
+**Caps:**
+
+| Constant | Value | Notes |
+|---|---|---|
+| `MaxRelayBytes` | 256 KiB | encoded relay payload, checked before decode; derived, not guessed — see `message.go` |
+| `MaxBusPath` | 64 | hard-linked to `store.MaxBusPath` (`MaxBusPath = store.MaxBusPath`) — the relay ingress cap must never exceed the on-disk cap, or an accepted-but-unpersistable path becomes an acknowledged-but-lost message (invariant 5) |
+| `MaxRosterUpdateEntries` | 256 | `added` plus `removed`, together — not each |
+| `MaxRosterUpdateBytes` | 64 KiB | encoded roster update, checked before decode |
+| `MaxPeers` | 64 | peer buses one `Registry` holds |
+| `MaxRosterAgents` | 1024 | agents in one peer's roster; the product `MaxPeers * MaxRosterAgents` (65,536 ids) is the real routing-table ceiling |
+
+**Status mapping** (both surfaces use one vocabulary; codes are `CodeXXX` string constants, never the
+raw Go error):
+
+| Condition | HTTP | Body | Notes |
+|---|---|---|---|
+| Non-POST | 405 | `CodeMethodNotAllowed` | |
+| Non-JSON content type | 415 | `CodeUnsupportedMediaType` | |
+| Over the byte cap | 413 | `CodePayloadTooLarge` | |
+| Malformed envelope | 400 | `CodeInvalidRequest` / other `ErrorCode(err)` | |
+| **Loop drop (relay only)** | **200** | `{"accepted":false,"dropped_reason":"loop"}` | **NOT an error status.** A loop is the expected steady state of a cyclic topology and is nobody's fault; a 5xx would make RELAY-4's future retry/backoff re-deliver forever the one thing that can never be accepted, and a 4xx would blame a sender that cannot know our federation graph. See `relayhttp.go`'s `ServeHTTP` doc for the full three-part argument. |
+| **Duplicate (relay only)** | 200 | `{"accepted":true,"duplicate":true,"message_id":"<original>"}` | invariant 10: return the original result, re-apply nothing, disconnect nobody |
+| **Idempotency VIOLATION (relay and roster)** | **409** | `CodeIdempotencyViolation` | same key, different payload. The handler logs that the peer SHOULD be disconnected per invariant 10 but cannot do so itself — it does not own the connection. `MTLS-RELAYGUARD` (`8192c3c7`) must wire the disconnect when it gates this handler onto a listener. |
+| Stale roster update (roster only) | 409 | `CodeStaleRoster` | version not strictly greater than the one already applied — the update is well-formed, it just lost a race or the peer regressed its counter; recovery is a re-handshake |
+| Unknown peer (roster only) | 403 | `CodeUnknownPeer` | a roster update may never CREATE a peer — accepted as a residual, this 403-vs-409 split is itself a peer-enumeration oracle until the gate authenticates the caller (see `doc.go`) |
+| Callback failure, otherwise | 503 | `CodeUnavailable` | "not now", so a peer knows retrying is correct |
+
+**The `Idempotency-Key` header rule — unusual and load-bearing.** Every mutating surface carries the
+key in `idem.HeaderName` (invariant 10), but **on the relay surface the key MUST equal the origin's
+`message_id`** — `ValidateRelayRequest` refuses the envelope otherwise (`ErrRelayKeyMismatch`). A
+per-hop key would make every copy of one message, however it was routed, look new to
+`internal/idem` and would defeat duplicate suppression silently: the same message arriving via two
+disjoint peers must resolve to ONE `idem.Scope`, and only the origin's own message id is common to
+every copy. On the roster surface there is no such natural id to reuse — the pusher mints its own key
+and reuses it across retries of one update; the per-peer `version` field is the independent mechanism
+that makes a late or reordered update harmless, and neither field replaces the other (both are needed
+because updates cross an unordered, at-least-once channel).
+
+**Two naming hazards a future task will otherwise trip over:**
+
+1. **`RosterUpdate.Version` is a peer ROSTER EPOCH, not a wire-protocol version**, and it already
+   occupies the JSON key `"version"`. It is the peer's own monotonic counter for its own namespace
+   (minted by the peer, which does not breach invariant 1 — that invariant governs ids WE mint, and a
+   peer's roster epoch is a fact only the peer can know about its own state). The task that eventually
+   adds a reserved wire-protocol version field to these envelopes **must not reuse `"version"`** for
+   it — use `"protocol_version"` or rename the epoch, but do it deliberately. Conflating the two is how
+   a peer ends up applying a roster epoch as a format number.
+2. **No relay wire-protocol version has been RESERVED.** Neither `RelayRequest` nor `RosterUpdate`
+   carries a version field today, for the same reason `PeerEnroll`'s payload does not (see `doc.go`,
+   "No wire protocol version field, on purpose"): versions are allocated through the Spec Server
+   reservations API (`POST /api/v1/projects/agent-bus/reservations`), never hand-picked by the agent
+   writing the code, and because nothing serves these handlers the format is not yet on any wire, so
+   there is nothing to stay compatible with yet. **The task that first REGISTERS these handlers must
+   reserve a version and add the field to both surfaces at once** — that reservation is not done by
+   this documentation pass.
+
+Full design rationale — the seven properties raised for the gate tasks, the residuals, why loop
+prevention is availability-only, why the fingerprint excludes `bus_path` — lives in
+`internal/relay/doc.go`'s package comment and in `PROTOCOL.md`'s new loop-prevention section rather
+than duplicated here; this entry is the contract shape, not the argument for it.
+
+## 2026-08-07 — SIGN-7: the relay envelope is SIGNED (still NOT REGISTERED, still NOT SERVED)
+
+**No new HTTP route, no new env var, no new CLI flag, and no `scripts/bus-*.sh` wrapper or
+`AGENT_PROTOCOL.md` entry is owed by this task.** `internal/relay` still registers NO handler on any
+mux and is still imported by NOTHING outside itself (a guard test in `internal/relay/guards_test.go`
+walks the repository and fails otherwise), and it remains gated behind `INVITE-PEERGUARD` (`f5d91dbe`) and `MTLS-RELAYGUARD`
+(`8192c3c7`), neither of which has landed. This is a bus-to-bus surface, not an agent-facing one, so
+CLAUDE.md invariant 7's wrapper requirement does not apply — stated explicitly, as the RELAY-2/RELAY-3
+entry above does, so it is not mistaken for a skipped step. **Nothing below is reachable from the
+network; no relayed signature is verified in production and no cross-bus message flows.**
+
+**`RelayRequest` field changes — these SUPERSEDE the `RelayRequest` table in the RELAY-2 / RELAY-3
+entry above.** Not a compatibility break: the envelope is not yet on any wire, so there is nothing to
+stay compatible with.
+
+| Field | JSON key | Change | Notes |
+|---|---|---|---|
+| ~~SentAtUnixNs~~ | ~~`sent_at_unix_ns`~~ | **REMOVED** | it was the ORIGIN BUS's nanosecond clock, not the sender's signed clock, so the canonical bytes could not be reconstructed from the envelope at all |
+| TimestampUnixMilli | `timestamp_unix_ms` | **ADDED** (`int64`) | the SENDING AGENT's signed wall clock in Unix ms — the exact integer `signing.Message.TimestampUnixMilli` covers, carried verbatim with no conversion anywhere. Must be > 0 (0 is an unset field, not the epoch). **PROVENANCE ONLY — never the local `store.Message.SentAt`**, which is an authorization input (`VisibleTo` compares it against the enrolment instant) |
+| Signature | `signature` | **ADDED** (64 bytes, base64 in JSON) | the origin agent's detached Ed25519 signature over `signing.Canonicalize`'s output, unhashed, carried verbatim on every hop. Exactly `ed25519.SignatureSize`; any other length is treated as no signature |
+
+Every other `RelayRequest` field is unchanged. The relay **fingerprint** (`relayFingerprint`) now
+folds the recipient list **sorted** rather than in wire order, because `signing.Canonicalize` sorts —
+so the fingerprint's notion of "the same payload" matches the signature's; an order-sensitive
+fingerprint made a mere re-ordering of a validly signed recipient array an `idem.OutcomeViolation`,
+which invariant 10 answers by disconnecting the sender. It still excludes `bus_path` and still
+excludes the signature itself. See `PROTOCOL.md` §8.5 and §10.
+
+**New Go-level construction requirement (not a wire surface):** `relay.RelayConfig.Trust` — a
+`relay.CrossBusTrust` — is **required**, and `NewRelayHandler` returns an error without one.
+`ValidateRelayRequest` takes it as a required parameter and runs `VerifyRelayed` before returning, so
+no validated-but-unverified `RelayedMessage` can exist. A nil trust is a refusal, never a skipped
+check; there is no "verification disabled" mode and no default implementation ships.
+
+**New error codes, appended to the status mapping in the entry above.** All three are FINAL — a retry
+cannot change any of the verdicts — so none is a 503 and none is a `dropped_reason` (which rides on
+HTTP 200 and means "settled, and not your fault"):
+
+| Condition | HTTP | Body | Notes |
+|---|---|---|---|
+| Missing, wrong-length or uncanonicalizable signature — **including a relayed broadcast** | **400** | `CodeUnsigned` = `"unsigned"` | "nobody could verify this envelope". A relayed broadcast has no recipient list, canonical format v1 refuses an empty recipient set, so no signature over one can exist; exempting broadcasts would be an unauthenticated downgrade selectable from the wire. **Relayed broadcasts do not work today, deliberately — SIGN-3 owns the fix.** |
+| Signature does not verify, or no attested signer key for the sender | **403** | `CodeBadSignature` = `"bad_signature"` | an authorization answer: "we will not attribute this to that agent" |
+| No peering-time pin held for the origin bus's signing key | **403** | `CodeUnpeeredBus` = `"unpeered_bus"` | a distinct **operator** problem from `bad_signature`: the remedy is to complete a peering, not to hunt a forgery. NOT a "not yet" — nothing a retry does establishes a pin, and there is deliberately no trust-on-first-use fallback |
+
+**Cross-bus key trust is now DECIDED** (`DECISIONS.md` 2026-08-07, "Cross-bus key trust: pin the origin
+bus key at peering, NO TOFU" and "The bus TLS key and the bus SIGNING key are SEPARATE"). The origin
+bus's attestation of its own agent's messaging key travels **intact**, signed by the **origin bus's
+signing key**, never re-attested by an intermediate; that signing key is pinned **at peering time**;
+and there is no trust-on-first-use anywhere. A bus that has not been peered with cannot have its
+agents' signatures verified — **intended behaviour, not a gap**. The bus **TLS** key (pinned by
+clients from the invite blob's certificate fingerprint) and the bus **SIGNING** key (pinned by peers
+at peering time) are different keys with different rotation blast radii and different compromises, and
+pinning one does not give you the other. Normative text and the reasoning: `PROTOCOL.md` §8.5.
+
+**KNOWN GAP — the peering handshake carries no key, so no pin can be established and relay ingest
+cannot be served at all.** `PeerEnrollRequest` / `PeerEnrollResponse` still carry only `bus_id` and
+`agents`: no bus signing key, no certificate fingerprint. `CrossBusTrust.PinnedBusSigningKeys`
+therefore has no source of truth and every relayed message is `unpeered_bus` by construction. Adding
+that field belongs to `INVITE-PEERGUARD` (`f5d91dbe`), which owns the peering handshake — it is
+peering material and must arrive over the same operator-mediated channel the invite uses.
+`internal/relay/doc.go` handoff item 8 is the full text. Separately, `internal/buscert`
+(`MTLS-BUSCERT`) does mint and load both key files (`bus-tls.key`, `bus-signing.key`), but as of this
+writing nothing on the startup path imports it, so a running bus produces neither.
+
+**Still no reserved relay wire-protocol version.** SIGN-7 added fields to `RelayRequest` without one,
+for the same reason the entry above gives: nothing serves these handlers, so the format is not yet on
+any wire. The task that first REGISTERS these handlers must reserve a version and add the field to
+both surfaces at once.

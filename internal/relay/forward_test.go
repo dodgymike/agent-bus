@@ -110,13 +110,16 @@ func newForwarderFixture(t *testing.T, depth int, peers map[string]*peerServer) 
 // localMessage is a message this bus originated, ready to be forwarded. Its
 // path is empty, which Forward turns into exactly our own hop.
 func localMessage(seq uint64, recipients []string, broadcast bool) RelayedMessage {
-	m := originMessage(localBus, localBus+".alpha-1", seq, []byte("forward me"))
-	m.Recipients = recipients
-	m.Broadcast = broadcast
-	if broadcast {
-		m.Recipients = nil
-	}
-	return m
+	// The recipient set and the broadcast flag are set BEFORE the fixture signs,
+	// so what the forwarder carries is a genuinely signed envelope rather than
+	// one whose signature stopped covering its own recipients.
+	return originMessage(localBus, localBus+".alpha-1", seq, []byte("forward me"), func(m *RelayedMessage) {
+		m.Recipients = recipients
+		m.Broadcast = broadcast
+		if broadcast {
+			m.Recipients = nil
+		}
+	})
 }
 
 // TestForwarderNeverBlocksOnASlowPeer is the structural half of "a slow or dead

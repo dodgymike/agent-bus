@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,7 +119,7 @@ type node struct {
 func newNode(t *testing.T, fab *fabric, busID string) *node {
 	t.Helper()
 	n := &node{fab: fab, busID: busID, keys: idem.NewStore(idem.StoreOptions{})}
-	h, err := NewRelayHandler(RelayConfig{BusID: busID, AcceptRelay: n.accept})
+	h, err := NewRelayHandler(RelayConfig{BusID: busID, AcceptRelay: n.accept, Trust: fakeCrossBusTrustForTest})
 	if err != nil {
 		t.Fatalf("NewRelayHandler(%s): %v", busID, err)
 	}
@@ -231,23 +232,36 @@ func (n *node) counters() (duplicates, violations int) {
 // originMessage builds the RelayedMessage a bus holds for a message its OWN
 // agent just sent. Its BusPath is EMPTY — the message has traversed nothing yet
 // — which Forward turns into exactly [originBus]. See AppendHop.
-func originMessage(originBus, sender string, seq uint64, body []byte) RelayedMessage {
+// mods are applied BEFORE the message is signed, so the result is always a
+// message the origin agent could genuinely have produced (SIGN-7).
+func originMessage(originBus, sender string, seq uint64, body []byte, mods ...func(*RelayedMessage)) RelayedMessage {
 	id, err := ids.MessageID(originBus, seq)
 	if err != nil {
 		panic(err)
 	}
-	return RelayedMessage{
-		OriginBus:       originBus,
-		OriginMessageID: id,
-		OriginSeq:       seq,
-		Sender:          sender,
-		Recipients:      []string{"bus-elsewhere.target-1"},
-		BusPath:         nil,
-		OriginSentAt:    time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC),
-		Body:            body,
-		ContentSHA256:   store.ContentHash(body),
-		IdempotencyKey:  id,
+	m := RelayedMessage{
+		OriginBus:          originBus,
+		OriginMessageID:    id,
+		OriginSeq:          seq,
+		Sender:             sender,
+		Recipients:         []string{"bus-elsewhere.target-1"},
+		BusPath:            nil,
+		TimestampUnixMilli: time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC).UnixMilli(),
+		Body:               body,
+		ContentSHA256:      store.ContentHash(body),
+		IdempotencyKey:     id,
 	}
+	for _, mod := range mods {
+		mod(&m)
+	}
+	if err := signRelayedMessage(&m); err != nil {
+		// A broadcast (and nothing else the tests build) cannot be canonicalized
+		// under format v1, so no signature over it can exist — see SIGN-3 and
+		// ValidateRelayRequest check 11a. A right-length placeholder keeps such a
+		// fixture usable by the FORWARDING tests, which never verify.
+		m.Signature = make([]byte, ed25519.SignatureSize)
+	}
+	return m
 }
 
 // TestRelayLoopPreventionCycle is the headline test for RELAY-3.
@@ -408,11 +422,11 @@ func TestRelayLoopPreventionCycle(t *testing.T) {
 		viaB := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-b"} })
 		viaC := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-c"} })
 
-		one, err := ValidateRelayRequest(localBus, viaB.MessageID, viaB)
+		one, err := ValidateRelayRequest(localBus, viaB.MessageID, viaB, fakeCrossBusTrustForTest)
 		if err != nil {
 			t.Fatalf("ValidateRelayRequest: %v", err)
 		}
-		two, err := ValidateRelayRequest(localBus, viaC.MessageID, viaC)
+		two, err := ValidateRelayRequest(localBus, viaC.MessageID, viaC, fakeCrossBusTrustForTest)
 		if err != nil {
 			t.Fatalf("ValidateRelayRequest: %v", err)
 		}
@@ -457,7 +471,7 @@ func TestRelayCycleTerminatesEvenWhenAPeerLiesAboutThePath(t *testing.T) {
 		r.OriginBus = peerBus
 		r.BusPath = []string{peerBus, "bus-a"}
 	})
-	if _, err := ValidateRelayRequest("bus-a", honest.MessageID, honest); !errors.Is(err, ErrRelayLoop) {
+	if _, err := ValidateRelayRequest("bus-a", honest.MessageID, honest, fakeCrossBusTrustForTest); !errors.Is(err, ErrRelayLoop) {
 		t.Fatalf("the ingress backstop did not fire on an honest path: %v", err)
 	}
 
@@ -467,14 +481,14 @@ func TestRelayCycleTerminatesEvenWhenAPeerLiesAboutThePath(t *testing.T) {
 		r.BusPath = []string{peerBus}
 	})
 	ctx := context.Background()
-	first, err := ValidateRelayRequest("bus-a", lying.MessageID, lying)
+	first, err := ValidateRelayRequest("bus-a", lying.MessageID, lying, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest: %v", err)
 	}
 	if _, err := a.accept(ctx, first); err != nil {
 		t.Fatalf("first accept: %v", err)
 	}
-	second, err := ValidateRelayRequest("bus-a", lying.MessageID, lying)
+	second, err := ValidateRelayRequest("bus-a", lying.MessageID, lying, fakeCrossBusTrustForTest)
 	if err != nil {
 		t.Fatalf("ValidateRelayRequest: %v", err)
 	}
