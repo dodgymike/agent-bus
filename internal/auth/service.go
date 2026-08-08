@@ -167,7 +167,18 @@ type Service struct {
 type idempotentEnrol struct {
 	name      string
 	publicKey []byte
-	result    EnrolResult
+	// messagingKey is part of the REMEMBERED PAYLOAD, not decoration. Invariant
+	// 10 defines a legitimate retry as "same key + same payload", and the
+	// messaging key is now part of what an enrolment asserts — so a second call
+	// under one key carrying a DIFFERENT messaging key is a key reused for
+	// different content and is refused. Leaving it out of the comparison would
+	// be worse than a missing check: the replay would return the ORIGINAL result
+	// and apply nothing, so the roster would keep the FIRST messaging key while
+	// the client walked away believing the second one was registered — every
+	// message it signs then fails to verify, everywhere, with nothing pointing
+	// at the cause.
+	messagingKey []byte
+	result       EnrolResult
 }
 
 // NewService builds a Service from opts.
@@ -217,6 +228,33 @@ type EnrolRequest struct {
 	// be nil, empty or the wrong length — that is a clean validation error, and
 	// never a panic (see ErrInvalidPublicKey).
 	PublicKey ed25519.PublicKey
+
+	// MessagingPublicKey is the PUBLIC half of the client's Ed25519 MESSAGING
+	// keypair — a DIFFERENT key from PublicKey, and the reason RosterEntry keeps
+	// the two apart (see RosterEntry.MessagingPublicKey). It is client-supplied
+	// MATERIAL, never an identity: nothing here derives, checks or influences the
+	// minted agent id from it (invariant 1). The server only records the public
+	// half, exactly as it does for the auth key.
+	//
+	// It is what a peer bus is later handed to verify this agent's signed
+	// messages, and it is what RELAY-17's per-agent attestation signs over — a
+	// bus cannot attest a key it never received, which is why the field is
+	// carried on the enrolment rather than registered by a later call.
+	//
+	// # OPTIONAL TODAY, and this is a STAGING state, not the end state
+	//
+	// Empty is accepted and stored as the reserved/unpopulated state, for exactly
+	// the reason RosterEntry documents: every agent enrolled before this field
+	// existed has none, and a roster that refused them would brick every current
+	// identity on the bus. New enrolments are INTENDED to be refused without one
+	// (an agent that cannot be attested cannot participate in relay), and that
+	// flip is deliberately NOT made here — see the RELAY-13 follow-up note in
+	// Enrol.
+	//
+	// When present it must be exactly ed25519.PublicKeySize bytes — a
+	// wrong-length key reaching ed25519.Verify is a PANIC, not a false — and it
+	// must NOT equal PublicKey. Both checks are in Enrol.
+	MessagingPublicKey ed25519.PublicKey
 
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10). It is
 	// REQUIRED: without one, a retry after a lost acknowledgement mints a
@@ -275,6 +313,23 @@ type EnrolResult struct {
 // exists and is tested but is not the one a deployed bus takes, so no caller
 // may present enrolment on the shipped binary as durable.
 //
+// # The messaging key rides the SAME durable record (RELAY-13)
+//
+// req.MessagingPublicKey is written into the roster entry, so with a WALRoster
+// it is encoded into the one enrolment record (auth.Encode's "msg_pub") that is
+// fsynced before this method returns, and is rebuilt by replay at the next
+// start. There is no second write, no second file and no in-memory-only half:
+// a field that were written but not replayed would be WORSE than an absent one,
+// because it would look present until a restart.
+//
+// It is still OPTIONAL on the way in. Refusing an enrolment that carries no
+// messaging key is the intended end state — an agent that cannot be attested
+// cannot participate in relay — but making that flip RED-LINES every existing
+// caller and test that enrols with an auth key alone, in files this task does
+// not own. It is therefore reported as a follow-up rather than half-made here;
+// NO TASK HAS BEEN FILED for it yet, so name one here when one exists. Read this
+// method as "records it when offered", never as "requires it".
+//
 // # The suffix is BURNED by Mint, and that is correct
 //
 // If the roster write fails after the id is minted, the suffix the minter
@@ -299,6 +354,44 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 	if len(req.PublicKey) != ed25519.PublicKeySize {
 		return EnrolResult{}, fmt.Errorf("%w: got %d bytes, want exactly %d", ErrInvalidPublicKey, len(req.PublicKey), ed25519.PublicKeySize)
 	}
+	// The messaging key is OPTIONAL today and validated only when present — see
+	// EnrolRequest.MessagingPublicKey for why empty must stay acceptable, and
+	// why a present-but-wrong-length key must not.
+	//
+	// The length rule is ALSO enforced by validateRosterEntryKeys, which every
+	// Roster.Put runs, so this is not the only guard against handing a wrong-size
+	// key to ed25519.Verify. WHAT THIS ONE ADDS IS ORDERING: it runs before
+	// minter.Mint below, so a malformed key is refused without BURNING AN AGENT
+	// ID SUFFIX. A number spent on a rejected enrolment is never handed back
+	// (invariant 1 — ids are never reused, and gaps are correct), so validating
+	// after the mint would let an anonymous caller burn one suffix per malformed
+	// request.
+	if len(req.MessagingPublicKey) != 0 && len(req.MessagingPublicKey) != ed25519.PublicKeySize {
+		return EnrolResult{}, fmt.Errorf("%w: messaging public key is %d bytes, want exactly %d", ErrInvalidPublicKey, len(req.MessagingPublicKey), ed25519.PublicKeySize)
+	}
+	// ONE KEY MAY NOT SERVE BOTH ROLES. Documented as impossible is not the same
+	// as enforced, and this is the only point at which both keys are in hand.
+	//
+	// The hazard: the session handshake has the SERVER choose the bytes the auth
+	// key signs (invariant 3), so an agent reusing its auth key for messaging
+	// would be putting a server-chosen input under the key its PEERS verify.
+	//
+	// BE ACCURATE ABOUT WHAT THIS CHECK IS AND IS NOT. It is NOT what stops a
+	// session signature being replayed as a message signature — DOMAIN
+	// SEPARATION does that, and already does: a session challenge starts with the
+	// 'a' of SessionSigningContext, a canonical message with the 0x00 of a uint32
+	// length, so the two byte languages cannot be confused (internal/signing's
+	// canonical.go makes this argument for exactly this key pair). This check
+	// makes the separation STRUCTURAL instead of contingent on every future
+	// signing domain staying disjoint, and it bounds one compromised key to one
+	// role. It is also per-request: it cannot stop an enroller registering some
+	// OTHER agent's public key as its messaging key, because NO PROOF OF
+	// POSSESSION of the messaging private key is taken at enrolment. That gap is
+	// real and is NOT covered by AUTH-1-FU-POPKEY, which is about the AUTH key —
+	// no task covers this one yet, so do not read it as scheduled.
+	if len(req.MessagingPublicKey) != 0 && bytes.Equal(req.MessagingPublicKey, req.PublicKey) {
+		return EnrolResult{}, fmt.Errorf("%w: the messaging public key is the same key as the auth public key; they are separate keys with separate jobs and one key may not serve both", ErrInvalidPublicKey)
+	}
 
 	// NOTE: with a WALRoster injected, enrolMu is now GENUINELY held across an
 	// fsync — two of them — for the duration of Roster.Put below. That is the
@@ -315,7 +408,9 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 	// roster is full: the agent is already in that roster, so replaying its
 	// result admits nobody new.
 	if prev, ok := s.idem[req.IdempotencyKey]; ok {
-		if prev.name != req.Name || !bytes.Equal(prev.publicKey, req.PublicKey) {
+		if prev.name != req.Name ||
+			!bytes.Equal(prev.publicKey, req.PublicKey) ||
+			!bytes.Equal(prev.messagingKey, req.MessagingPublicKey) {
 			// Same key, different content. Not a retry — a protocol violation.
 			// The payload is NOT echoed into the error: the caller already
 			// knows what it sent, and the two public keys have no business in a
@@ -347,9 +442,17 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 
 	now := s.now()
 	entry := RosterEntry{
-		AgentID:       agentID,
-		Name:          req.Name,
+		AgentID: agentID,
+		Name:    req.Name,
+		// Both keys are recorded as the CLIENT presented them. Neither is
+		// consulted by the mint above, which has already happened: the id is the
+		// server's (invariant 1) and no part of it is derived from key material.
 		AuthPublicKey: req.PublicKey,
+		// Empty when the client sent none, which is the reserved state Decode and
+		// validateRosterEntryKeys already accept — see
+		// EnrolRequest.MessagingPublicKey. Roster.Put DEEP-COPIES it, so the
+		// caller's slice is not the stored credential.
+		MessagingPublicKey: req.MessagingPublicKey,
 		// Epoch equals EnrolledAt today: this IS the enrolment, so the
 		// credential's epoch begins here. It is set explicitly rather than left
 		// zero because the durable record carries it (Decode refuses a zero
@@ -357,9 +460,10 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		// without rewriting EnrolledAt. See RosterEntry.Epoch.
 		Epoch:      now,
 		EnrolledAt: now,
-		// MessagingPublicKey, InviteID and CertBindings are left ZERO. They are
-		// reserved (see RosterEntry): the SIGN, INVITE and MTLS-BIND epics
-		// populate them, and nothing on this path may invent a value for them.
+		// InviteID and CertBindings are left ZERO. They remain reserved (see
+		// RosterEntry): the INVITE and MTLS-BIND epics populate them, and nothing
+		// on this path may invent a value for them. MessagingPublicKey is no
+		// longer among them — RELAY-13 populates it above, from the request.
 	}
 	if err := s.roster.Put(entry); err != nil {
 		// The suffix inside agentID is spent. See the doc comment: it is not
@@ -407,7 +511,12 @@ func (s *Service) recordIdempotent(req EnrolRequest, result EnrolResult) {
 		// still hold this slice, and a mutated copy here would make a genuine
 		// retry look like a key reused with different content, or worse.
 		publicKey: append([]byte(nil), req.PublicKey...),
-		result:    result,
+		// Copied for the same reason, and note append(nil, empty...) yields nil:
+		// an absent messaging key is remembered as nil, and bytes.Equal treats
+		// nil and empty alike, so a client that sends "" and a client that omits
+		// the field are the same payload rather than a false conflict.
+		messagingKey: append([]byte(nil), req.MessagingPublicKey...),
+		result:       result,
 	}
 }
 

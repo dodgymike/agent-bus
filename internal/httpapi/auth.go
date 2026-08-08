@@ -31,11 +31,13 @@ const (
 
 // MaxAuthRequestBytes bounds the body of an auth route.
 //
-// The largest legitimate request here is an enrolment: a 64-byte name, a
-// 44-byte base64 Ed25519 public key and a 128-byte idempotency key — under a
-// third of a kilobyte with JSON overhead. 8 KiB is generous by an order of
-// magnitude and still finite, which is the point: an unauthenticated caller
-// must not be able to stream unbounded bytes into json.Decode.
+// The largest legitimate request here is an enrolment: a 64-byte name, TWO
+// 44-byte base64 Ed25519 public keys (auth and messaging) and a 128-byte
+// idempotency key — under a third of a kilobyte with JSON overhead. 8 KiB is
+// generous by an order of magnitude and still finite, which is the point: an
+// unauthenticated caller must not be able to stream unbounded bytes into
+// json.Decode. The second key moved the legitimate maximum by 44 bytes, which
+// is why this bound did not need revisiting when it landed.
 const MaxAuthRequestBytes = 8 << 10
 
 // IdempotencyReplayedHeader marks a response that was replayed from the
@@ -61,6 +63,46 @@ type EnrolRequestBody struct {
 	// key. The server stores only this half and can therefore VERIFY the
 	// agent's calls but never FORGE them.
 	PublicKey string `json:"public_key"`
+
+	// MessagingPublicKey is the base64 (standard encoding, padded) Ed25519
+	// MESSAGING public key — the key PEERS verify this agent's signed messages
+	// with, and the key this bus attests to a peer bus. It is a DIFFERENT key
+	// from PublicKey, it must NOT be the same value, and an enrolment presenting
+	// one key for both roles is refused in internal/auth.
+	//
+	// WHY THEY MUST DIFFER, stated with the right control named. It is NOT that
+	// the bus holds anything it could forge with — the bus holds only the PUBLIC
+	// half of both keys and can forge with neither.
+	//
+	// The hazard is that the bus CHOOSES THE BYTES THE AUTH KEY SIGNS: the
+	// session handshake has the server issue a token and the client sign it
+	// (invariant 3). One key serving both roles would put a server-chosen input
+	// under the key peers verify with.
+	//
+	// What actually closes that today is DOMAIN SEPARATION, not this rule: a
+	// session challenge always begins with the 'a' of auth.SessionSigningContext
+	// and a canonical message always begins with the 0x00 of a uint32 length, so
+	// no session signature can be read as a message signature (see the first-byte
+	// argument in internal/signing/canonical.go). Do not overstate this check —
+	// it is not the thing standing between an agent and a forged message.
+	//
+	// Key separation is what makes the property STRUCTURAL: it stops the
+	// guarantee depending on every future signing domain staying disjoint, it
+	// bounds the blast radius of one compromised key to one role, and it lets the
+	// two rotate on independent schedules.
+	//
+	// It is client-supplied MATERIAL, not identity. It is validated as input —
+	// standard base64, decoding to exactly an Ed25519 public key — and it has no
+	// influence whatsoever on the agent id the server mints (invariant 1).
+	//
+	// OPTIONAL TODAY, and an empty/absent value is accepted: agents enrolled
+	// before the field existed have none, and their durable records must keep
+	// loading. Making it REQUIRED for new enrolments is the intended end state,
+	// and AT THE TIME OF WRITING NO FOLLOW-UP TASK HAS BEEN FILED for it — do not
+	// read "intended" as "scheduled", and name the task here once one exists. See
+	// CONTRACTS-HTTP.md, which is the contract of record for which of the two
+	// this build enforces.
+	MessagingPublicKey string `json:"messaging_public_key"`
 
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10).
 	IdempotencyKey string `json:"idempotency_key"`
@@ -133,10 +175,36 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The messaging key is decoded ONLY when the client sent one. An absent
+	// field decodes to "" and must stay a valid enrolment (see
+	// EnrolRequestBody.MessagingPublicKey).
+	//
+	// BE PRECISE ABOUT WHAT THIS GUARD DOES AND DOES NOT BUY. It is NOT
+	// correctness: "" is valid base64 for zero bytes, so routing it through
+	// decodeBase64Field would yield an empty slice, and internal/auth compares
+	// with bytes.Equal, which does not distinguish nil from empty — an earlier
+	// draft of this comment claimed the idempotency comparison would change, and
+	// it would not. What the guard buys is that a client which simply omitted an
+	// optional field does not generate a decode attempt, and cannot appear in a
+	// debug log line as a field that was parsed.
+	//
+	// A PRESENT one is validated to the letter: standard base64 here, exact
+	// Ed25519 length in internal/auth, both before it is stored and long before
+	// any verifier is handed it.
+	var msgPub []byte
+	if body.MessagingPublicKey != "" {
+		var okMsg bool
+		msgPub, okMsg = s.decodeBase64Field(w, r, "messaging_public_key", body.MessagingPublicKey)
+		if !okMsg {
+			return
+		}
+	}
+
 	res, err := s.auth.Enrol(auth.EnrolRequest{
-		Name:           body.Name,
-		PublicKey:      pub,
-		IdempotencyKey: body.IdempotencyKey,
+		Name:               body.Name,
+		PublicKey:          pub,
+		MessagingPublicKey: msgPub,
+		IdempotencyKey:     body.IdempotencyKey,
 	})
 	if err != nil {
 		// The NAME is logged, the public key is not: a name is what an operator

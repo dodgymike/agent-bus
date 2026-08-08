@@ -29,8 +29,8 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `HEAD` | `/healthz`, `/v1/info`, `/v1/discovery` | none | 200 | **CHANGED 2026-08-08 (CORE-7): HEAD is now ACCEPTED on every GET route** and was a 405 before. Same status as the corresponding `GET`, and the same `Content-Type` / `X-Content-Type-Options`, with **no body** — `writeJSON`/`writePreformattedJSON` suppress it. **`Content-Length` is absent** (measured: `GET /healthz` sends `Content-Length: 16`, `HEAD /healthz` sends none), because net/http computes it from bytes written and the handler writes none. Legal under RFC 9110 §8.6, which permits omitting it; do not read "same headers" more strongly than this row states. Probes (load balancers, container healthchecks, uptime monitors) commonly issue `HEAD /healthz`; that used to be a false alarm from the one route whose job is to report liveness honestly. |
 | other | `/healthz`, `/v1/info`, `/v1/discovery` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET, HEAD` — the `Allow` value changed with CORE-7 and now names every method the route serves |
 | `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
-| `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
-| `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key` than its first use — a protocol violation, not a retry (invariant 10). Rejected and logged; **the connection is KEPT** — narrowed 2026-08-08, this row carried `Connection: close` until then (see `## Headers`) |
+| `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `messaging_public_key` **when present** (three checks: standard base64, exactly 32 bytes, and not equal to `public_key` — see the request-body section below); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
+| `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key`/`messaging_public_key` than its first use — a protocol violation, not a retry (invariant 10). Rejected and logged; **the connection is KEPT** — narrowed 2026-08-08, this row carried `Connection: close` until then (see `## Headers`) |
 | `POST` | `/v1/enroll` | none | 503 | the roster (default 4096 entries) or the idempotency table (default 16384 entries) is at capacity; `Retry-After: 5` |
 | `POST` | `/v1/session/begin` | none (issues the challenge; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","token":"...","challenge_expires_at":"<RFC3339Nano UTC>"}` |
 | `POST` | `/v1/session/begin` | none | 404 | `agent_id` is malformed **or** well-formed but not on this bus's roster — the two cases are deliberately indistinguishable to the caller |
@@ -399,6 +399,64 @@ built without an auth service does not have it. `cmd/agent-bus`'s `run()` always
 routes; a `nil` `Options.Auth` is reachable only by a caller of the `httpapi` package directly (tests,
 or a future build that intentionally omits the auth surface).
 
+### `POST /v1/enroll` request body (RELAY-13, 2026-08-08)
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | The short name being requested. The server mints the id; this is only the human-chosen half. |
+| `public_key` | base64 std, padded | yes | The agent's Ed25519 **AUTH** public key, exactly 32 bytes. Proves the agent to **this bus**. |
+| `messaging_public_key` | base64 std, padded | **no — see below** | **NEW 2026-08-08 (RELAY-13).** The agent's Ed25519 **MESSAGING** public key, exactly 32 bytes, and it may **not** be the same value as `public_key` (400 if it is). Stored on the roster entry as `MessagingPublicKey` and written to the durable enrolment record as `msg_pub` (`CONTRACTS-ONDISK.md`), so it survives a restart by WAL replay. It is client-supplied **material, not identity**: it is validated as input and has **no influence on the minted agent id** (invariant 1). |
+| `idempotency_key` | string | yes | 1–128 bytes of `[A-Za-z0-9._-]`. Makes the enrolment safe to retry (invariant 10). |
+
+**Why two keys, with the right control named.** It is *not* that the bus could forge with the auth
+key — the bus holds only the **public** half of both keys and can forge with neither. The hazard is
+that **the bus chooses the bytes the auth key signs**: the session handshake has the server issue a
+token and the client sign it (invariant 3), so one key serving both roles would put a server-chosen
+input under the key peers verify with.
+
+What actually prevents a session signature being read as a message signature is **domain
+separation**, and it already does: a session challenge always begins with the `a` of
+`auth.SessionSigningContext`, a canonical message always begins with the `0x00` of a uint32 length
+(see `internal/signing/canonical.go`, which makes this argument for exactly this key pair). **Do not
+read the same-key refusal as the control that closes a signing oracle** — it is not. It makes the
+separation *structural* rather than contingent on every future signing domain staying disjoint, it
+bounds a compromised key to one role, and it lets the two keys rotate independently. It is also
+**per-request**: it does not stop an enroller registering some *other* agent's public key as its
+messaging key, because no proof of possession of the messaging private key is taken at enrolment —
+that is a separate, reported gap.
+
+A client built before `messaging_public_key` existed keeps working because the field is **optional**,
+not because of the decoder. Separately, unknown fields are rejected (400), so a client that
+**misspells** the field is told so rather than silently enrolling without a key.
+
+**`messaging_public_key` is OPTIONAL today, and that is a STAGING state.** Omitting it (or sending
+`""`) is accepted and the roster entry carries no messaging key — the same reserved/empty state every
+agent enrolled before the field existed already has on disk, which is why `auth.Decode` and
+`auth.validateRosterEntryKeys` treat an absent key as valid and a **present-but-wrong-length** key as
+a hard error. Requiring it on **new** enrolments is the intended end state (an agent whose key the bus
+never received cannot be attested to a peer bus, so it cannot participate in relay); **read this row,
+not the code comments, for which of the two this build enforces.** When the flip lands, a body with
+no `messaging_public_key` becomes a 400 and this paragraph changes with it. The flip is reported as a
+follow-up in RELAY-13's completion report — at the time of writing **no follow-up task has been filed
+for it**, and this sentence must be updated with the task key when one is, rather than left implying
+work is scheduled that is not.
+
+**The 400 bodies are of two different granularities, and a client sending both keys cannot always
+tell which one it got wrong.** A bad *encoding* is field-specific — `{"error":"messaging_public_key
+must be standard base64"}` — because the encoding check happens per field in the HTTP layer. A bad
+*length*, and the same-key-twice refusal, both come back as `{"error":"invalid public key"}`,
+byte-identical to the message for a bad `public_key`, because `internal/auth` maps them to the one
+`ErrInvalidPublicKey` sentinel. The server log distinguishes them; the unauthenticated response
+deliberately says little. Reported as a follow-up in RELAY-13's completion report and **not yet filed
+as a task**; documented here so it is not mistaken for a bug in the client.
+
+**It is part of the idempotency payload.** Invariant 10's "same key + same payload = a retry" now
+includes this field: presenting one idempotency key with two different messaging keys is a 409
+(rejected and logged, connection KEPT). It has to be counted — if it were not, the second call would
+be answered as a replay, the roster would keep the **first** key, and the client would leave believing
+the second was registered. Every message it signed would then fail to verify for every peer, with
+nothing pointing at the cause.
+
 **The signing contract — load-bearing for any future client.** `POST /v1/session/complete`'s
 `signature` field is an Ed25519 signature over the exact byte string:
 
@@ -412,8 +470,9 @@ constant in `internal/auth/session.go`, concatenated directly onto `token` with 
 implementation **must pin `SessionSigningContext` as a compile-time constant** and must **not** learn
 it from the wire: the `/v1/session/begin` response deliberately does not echo this prefix anywhere in
 its body, precisely so a man-in-the-middle who could choose what gets signed cannot turn the agent's
-key into a signing oracle for arbitrary bytes. `public_key` (on `/v1/enroll`) and `signature` (on
-`/v1/session/complete`) are both `base64.StdEncoding` — the **standard, padded** alphabet, decoded
+key into a signing oracle for arbitrary bytes. `public_key` and `messaging_public_key` (on
+`/v1/enroll`) and `signature` (on
+`/v1/session/complete`) are all `base64.StdEncoding` — the **standard, padded** alphabet, decoded
 `Strict()` server-side so a value has exactly one valid spelling. (The `token` value itself uses a
 different encoding, `base64.RawURLEncoding` — unpadded, URL-safe — since it is minted server-side and
 only ever needs to round-trip, never to be independently re-encoded by a client.)
