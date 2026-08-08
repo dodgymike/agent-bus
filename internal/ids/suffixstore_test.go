@@ -198,8 +198,25 @@ func TestAgentIDSuffixesResumeAcrossRestart(t *testing.T) {
 		// alpha's counter must not have been advanced by beta's traffic: the
 		// per-name counters are independent, and a shared one would leak the
 		// enrolment rate of one name into another's ids.
-		if alpha1 != 1 || alpha2 != 2 {
-			t.Errorf("alpha suffixes were %d then %d, want 1 then 2: the per-name counters are not independent", alpha1, alpha2)
+		//
+		// The expected values are 1 then suffixBlockSize+1, not 1 then 2,
+		// because alpha's first mint reserves a whole block and the restart
+		// resumes above the WHOLE reserved block rather than above the last
+		// suffix issued. The skipped numbers are correct (point 4 of the
+		// NameSuffixes doc). What independence means here is that beta's three
+		// mints move alpha's numbers not at all — which is why these are exact
+		// values and not a "strictly greater" check.
+		if alpha1 != 1 || alpha2 != suffixBlockSize+1 {
+			t.Errorf("alpha suffixes were %d then %d, want 1 then %d: the per-name counters are not independent (beta's traffic moved alpha)", alpha1, alpha2, suffixBlockSize+1)
+		}
+
+		// The control that makes the claim above airtight: the same run with NO
+		// beta traffic at all must give alpha exactly the same two numbers.
+		ctrl := t.TempDir()
+		_, ctrlAlpha1 := mintSuffix(t, restart(t, ctrl), "alpha")
+		_, ctrlAlpha2 := mintSuffix(t, restart(t, ctrl), "alpha")
+		if ctrlAlpha1 != alpha1 || ctrlAlpha2 != alpha2 {
+			t.Errorf("alpha got %d then %d alongside beta, but %d then %d alone: beta's traffic perturbed alpha's counter", alpha1, alpha2, ctrlAlpha1, ctrlAlpha2)
 		}
 	})
 
@@ -324,6 +341,15 @@ func TestDurableNameSuffixesMergesDerivedFloors(t *testing.T) {
 	if !store.Existed() {
 		t.Errorf("Existed() = false after the file was written, want true")
 	}
+	// What the file holds is the RESERVED high-water from run 1's block, not
+	// run 1's issued suffix 101. Read it rather than hard-coding it, so the
+	// assertion below states the actual property — "strictly above whatever
+	// floor is persisted" — instead of a number that only holds for one
+	// suffixBlockSize.
+	persisted := store.Floors()["alpha"]
+	if persisted < n {
+		t.Fatalf("persisted floor for alpha = %d, want at least the issued suffix %d", persisted, n)
+	}
 	if err := store.RaiseFloor("alpha", 5); err != nil {
 		t.Fatalf("RaiseFloor with a stale value: %v", err)
 	}
@@ -334,8 +360,8 @@ func TestDurableNameSuffixesMergesDerivedFloors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextSuffix: %v", err)
 	}
-	if n != 102 {
-		t.Fatalf("after a stale RaiseFloor(alpha, 5) the next suffix was %d, want 102: a stale derivation lowered a persisted floor", n)
+	if n != persisted+1 {
+		t.Fatalf("after a stale RaiseFloor(alpha, 5) the next suffix was %d, want %d: a stale derivation lowered a persisted floor", n, persisted+1)
 	}
 }
 
@@ -810,12 +836,15 @@ func TestDurableNameSuffixesWriteFailureIssuesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenNameSuffixes after restart: %v", err)
 	}
+	// Each name that issued reserved a block, so disk holds suffixBlockSize for
+	// both — a floor ABOVE the suffix 1 each of them actually handed out. Higher
+	// is the safe direction: it can only skip numbers, never reissue one.
 	floors := store2.Floors()
-	if floors["alpha"] != 1 {
-		t.Errorf("persisted floor[alpha] after restart = %d, want 1", floors["alpha"])
+	if floors["alpha"] != suffixBlockSize {
+		t.Errorf("persisted floor[alpha] after restart = %d, want %d (the reserved block high-water)", floors["alpha"], suffixBlockSize)
 	}
-	if floors["beta"] != 1 {
-		t.Errorf("persisted floor[beta] after restart = %d, want 1", floors["beta"])
+	if floors["beta"] != suffixBlockSize {
+		t.Errorf("persisted floor[beta] after restart = %d, want %d (the reserved block high-water)", floors["beta"], suffixBlockSize)
 	}
 	if err := store2.Seal(); err != nil {
 		t.Fatalf("Seal after restart: %v", err)
@@ -824,15 +853,24 @@ func TestDurableNameSuffixesWriteFailureIssuesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextSuffix after restart: %v", err)
 	}
-	if n3 != 2 {
-		t.Fatalf("beta after restart = %d, want 2: the retry's suffix 1 must never be reissued across the whole history", n3)
+	if n3 != suffixBlockSize+1 {
+		t.Fatalf("beta after restart = %d, want %d: the retry's suffix 1 must never be reissued across the whole history", n3, suffixBlockSize+1)
 	}
 	n4, err := store2.NextSuffix("alpha")
 	if err != nil {
 		t.Fatalf("NextSuffix after restart: %v", err)
 	}
-	if n4 != 2 {
-		t.Fatalf("alpha after restart = %d, want 2: alpha's suffix 1 must never be reissued across the whole history", n4)
+	if n4 != suffixBlockSize+1 {
+		t.Fatalf("alpha after restart = %d, want %d: alpha's suffix 1 must never be reissued across the whole history", n4, suffixBlockSize+1)
+	}
+	// The claim that actually matters, stated independently of any block
+	// arithmetic: nothing issued after the restart may collide with anything
+	// issued before it.
+	for name, before := range map[string]uint64{"alpha": n1, "beta": n2} {
+		after := map[string]uint64{"alpha": n4, "beta": n3}[name]
+		if after <= before {
+			t.Fatalf("%s issued %d before the restart and %d after: a suffix was reissued", name, before, after)
+		}
 	}
 }
 
@@ -856,8 +894,8 @@ func TestDurableNameSuffixesFloorsIsACopy(t *testing.T) {
 	got["intruder"] = 1
 
 	real := store.Floors()
-	if real["alpha"] != 1 {
-		t.Errorf("mutating the map returned by Floors() affected the allocator: floor[alpha] = %d, want 1", real["alpha"])
+	if real["alpha"] != suffixBlockSize {
+		t.Errorf("mutating the map returned by Floors() affected the allocator: floor[alpha] = %d, want %d (the reserved block high-water)", real["alpha"], suffixBlockSize)
 	}
 	if _, present := real["intruder"]; present {
 		t.Errorf("mutating the map returned by Floors() injected a new name into the allocator")
@@ -940,8 +978,15 @@ func TestDurableNameSuffixesLastSuffixIsPerProcessNotPerDisk(t *testing.T) {
 	if got := store2.LastSuffix("alpha"); got != 0 {
 		t.Errorf("LastSuffix on a freshly-opened, unsealed store = %d, want 0", got)
 	}
-	if got := store2.Floors()["alpha"]; got != n1 {
-		t.Fatalf("Floors()[alpha] after restart = %d, want %d", got, n1)
+	// Floors() reports what DISK says, which since the block reservation is the
+	// reserved high-water and therefore strictly above the single suffix that
+	// was actually issued. The write-ahead property is the >= ; the exact value
+	// pins the block.
+	if got := store2.Floors()["alpha"]; got < n1 {
+		t.Fatalf("Floors()[alpha] after restart = %d, want at least the issued suffix %d: the floor authorising a suffix must be durable before it is handed out", got, n1)
+	}
+	if got := store2.Floors()["alpha"]; got != suffixBlockSize {
+		t.Fatalf("Floors()[alpha] after restart = %d, want %d (the reserved block high-water, not the issued suffix %d)", got, suffixBlockSize, n1)
 	}
 	if err := store2.Seal(); err != nil {
 		t.Fatalf("Seal: %v", err)
