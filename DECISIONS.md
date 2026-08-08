@@ -3438,3 +3438,901 @@ reissued. There is no "unless the log was damaged" escape clause.
   structurally fixed.
 - `readIndexFloorFile` reads the whole file with `os.ReadFile`, unbounded — a startup memory DoS on
   a hostile data directory. Pre-existing, and `clipFragment` already bounds what reaches the log.
+
+---
+
+## 2026-08-07 — The listener is TLS, and the guard that proved it wasn't is REPLACED, not deleted (MTLS-LISTENER + MTLS-VERIFY)
+
+Two backlog tasks landed as ONE commit, at the user's explicit direction, so `main` is never left
+with a bus that nothing can health-check. That pairing is the decision worth recording first: the
+server-side switch (`MTLS-LISTENER`) and the probe rework (`MTLS-VERIFY`) are a single atomic change
+in practice, because `scripts/bus-serve.sh`'s `http://` health probe is what every other task's
+server-startup proof runs through. Landing the listener alone would have reported every healthy bus
+as failed.
+
+### 1. `tls.NewListener`, not `srv.ServeTLS`
+
+`internal/buscert` has already loaded, parsed and validated the certificate and key by the time the
+listener is built. `ServeTLS(ln, certFile, keyFile)` would re-read the same two files from disk — a
+SECOND load of the same material, and a second chance for the two loads to disagree (over an
+operator's mid-start `cp`, say). Wrapping the already-loaded `tls.Certificate` keeps exactly one
+load, one fingerprint, and one thing that can fail, and it fails at startup rather than per
+connection.
+
+The TLS config is built BEFORE `net.Listen`. Unusable material must refuse the start without having
+taken the port, so an operator restarting over a broken certificate does not also find the address
+held by the corpse of the attempt.
+
+### 2. TLS 1.2 floor, and it is deliberately the SAME number as the client's
+
+`client/pin.go`'s `pinnedTLSConfig` sets `MinVersion: tls.VersionTLS12`. The server now sets the same
+value. A server floor ABOVE the client's is a handshake failure with no useful message at either end,
+and this repo's own client is not the only consumer — an operator's `curl --cacert` against
+`/healthz` has to work too. 1.3 is negotiated whenever both ends offer it, which for every Go client
+here is always.
+
+ALPN is pinned to `http/1.1` because `tls.NewListener` + `Serve` does not configure HTTP/2 the way
+`ServeTLS` does. Advertising only what is actually served is the honest option; the alternative
+leaves a client offering `h2` to infer the answer from an empty ALPN result.
+
+### 3. `ClientAuth: tls.NoClientCert` — server-side enforcement does NOT precede client-side capability
+
+The bus does not request or require a client certificate. Mutual TLS is still the design (invariant
+11), and `MTLS-CLIENTAUTH` is the task that gets there — but it may not land before
+`MTLS-CLIENTCERT`, which is what teaches the client to generate and present one. `MTLS-CLIENTCERT` is
+`todo` today, so a bus demanding a client certificate now would refuse every agent in the fleet AT
+THE HANDSHAKE, before any route, log line or error an agent could act on.
+
+This ordering is not a preference and not caution for its own sake: this repo has already shipped
+server-side enforcement ahead of client-side capability once — signature checking landed before the
+client could sign, and every send failed with `curl` exit 7 until it was reverted. The field is
+written explicitly rather than left as the zero value so that the day it legitimately changes, it
+changes in a diff someone reviews.
+
+### 4. `TestCmdDoesNotServeTLS` is REPLACED by `TestCmdHasNoPlaintextListener`
+
+The old guard failed the build if `ServeTLS|ListenAndServeTLS|tls.NewListener|TLSConfig` appeared
+anywhere under `cmd/`. It was added on purpose during `MTLS-BUSCERT` to prove that commit did not
+start serving TLS, and its own doc comment said to delete it in the task that legitimately made the
+listener TLS. That task is this one.
+
+It was NOT simply deleted. A deleted guard leaves the tree with strictly less protection than it had;
+the temporary scaffold is instead converted into the invariant that is now permanently true. The
+replacement asserts, by AST walk over the package's non-test sources, that:
+
+- `InsecureSkipVerify` appears nowhere in `cmd/agent-bus` (it is permitted in exactly one file in
+  this repo, `client/pin.go`, paired with `VerifyPeerCertificate` — narrowed 2026-08-07);
+- TLS IS served, so deleting the `tls.NewListener` wrap fails the build rather than silently
+  reverting the invariant; and
+- **no registered flag could make TLS optional** — the guard collects every flag NAME registered on a
+  `flag.FlagSet` in the package and rejects `tls`, `no-tls`, `insecure`, `plaintext`,
+  `allow-plaintext`, `disable-tls`, `http` and friends. Invariant 11 says the server refuses to start
+  rather than fall back; the fallback that would actually get written is a flag, so that is what the
+  guard watches.
+
+### 5. The container healthcheck moved INTO the server binary (`agent-bus healthcheck`)
+
+The runtime image is Alpine with busybox `wget` and no curl — chosen in `DEPLOY-1` precisely so a
+healthcheck would not need a second binary. busybox `wget` cannot be told to trust ONE self-signed
+certificate. Its only relevant knob is `--no-check-certificate`, which does not verify differently,
+it verifies not at all, and invariant 11 is explicit that certificate verification is never disabled
+to make something work.
+
+The three options were: add curl to the image (a dependency, and invariant 8 wants a justification
+for one); drop the certificate check (forbidden); or put the probe in the binary that is already
+there. The third costs nothing at runtime and gains something real — because it is a genuine x509
+verification against the data directory's certificate as the sole root, it also enforces the
+HOSTNAME and the VALIDITY PERIOD. `DECISIONS.md` chose a 365-day certificate lifetime as a
+leak-containment bound; a probe that ignored expiry would let a bus no client can dial keep reporting
+itself healthy for ever.
+
+It is a subcommand on the SERVER binary rather than on `agent-busctl`, following the precedent set by
+`invite mint` (E4): its input is FILESYSTEM ACCESS to the data directory, not a network privilege,
+and no agent ever runs it. It differs from `invite mint` in one respect that matters — it takes no
+lock and writes nothing, so it is safe and intended to run against a RUNNING bus.
+
+`scripts/bus-serve.sh` keeps using `curl --cacert` rather than the subcommand, because it runs on a
+workstation where curl is already a dependency of the script and the binary may not be built yet at
+`status` time. Two consumers, two tools, each already present where it runs.
+
+### 6. What this breaks, stated plainly
+
+Every existing deployment is now reached at a DIFFERENT SCHEME. A plaintext request to the port is
+not routed at all: crypto/tls fails the handshake and net/http writes a bare `400 Bad Request` +
+"Client sent an HTTP request to an HTTPS server." onto the socket and closes it — no route, no
+handler, no auth middleware. `AGENT_PROTOCOL.md`, `README.md` and `PROTOCOL.md` still show `http://127.0.0.1:8080`
+examples — and `AGENT_PROTOCOL.md:252` states as FACT that "today every real bus is
+`http://127.0.0.1:…` and no fingerprint is involved", which this change makes false. All three are
+outside this change's file-ownership boundary and are NOT edited here. They are filed as
+**`MTLS-VERIFY-FU-DOCSCHEME`**, rated **P0** by the security gate, whose reasoning is worth quoting
+because it is the reason this is not a tidiness item: *"A documented command that fails with a
+transport error is the single most reliable generator of 'just add an insecure flag' in the field,
+and invariant 11 forbids exactly that flag."* It must land before this change is announced to agents.
+
+**The reviewer gate caught this paragraph asserting that filing had already happened when it had
+not**, which is the same defect class as the two comment corrections above: a written claim about
+the world that nobody checked. The task now exists; this sentence names it.
+
+Nothing on disk changed format. No existing WAL, enrolment, invite or agent id is invalidated: the
+certificate has been minted into the data directory since `MTLS-BUSCERT` (`16f54c9`), and this change
+only starts serving with it. `docker compose down -v` is newly more destructive though — it now
+destroys the certificate every enrolled agent has pinned, and there is no trust-on-first-use to
+re-learn it.
+
+## 2026-08-07 — IDEM-17: crash-injection evidence is indexed by the RETRY WINDOW, not by durable state
+
+**Decision.** `internal/idem/crashinjection_test.go` deliberately duplicates neither the harness nor
+the coverage of `internal/hub/idem_crash_test.go` (IDEM-11's evidence). The two index the SAME write
+path along two different axes, and both are needed:
+
+- `internal/hub/idem_crash_test.go` indexes by **the durable state recovery finds**: a committed
+  entry, a dangling prepare, and a pre-IDEM-11 entry carrying no applied-key record. That is the
+  right axis for asking "does recovery read what is on disk correctly".
+- `internal/idem/crashinjection_test.go` indexes by **where the SIGKILL falls relative to the
+  client's retry**: between the prepare and commit fsyncs, after the commit but before the ack,
+  after the ack with an in-process retry already answered, and while a post-restart retry was itself
+  being answered. That is the right axis for invariant 10, because a duplicate is something a
+  CLIENT does, not something a disk does.
+
+**Why the second axis earns its keep, concretely.** Two of its crash points have IDENTICAL durable
+state (post-commit-pre-ack and post-ack differ only in what the client knows), so the state axis
+cannot distinguish them — yet they are the two cases invariant 10's legitimate-retry carve-out is
+written for. Indexing by durable state alone would have left the honest-client property untested,
+and it was untested: the existing suite issued every post-restart retry through a helper that
+RE-MINTED first, which silently masks the property. A real client holds a signed assignment and
+replays it verbatim; the reservation table is in memory and does NOT survive a restart. If the mint
+lookup ever moved ahead of the applied-key lookup in `hub.publish`, every honest retry across a
+restart would be refused with `ErrUnknownMint` for a message sitting durable on disk. That defect
+was reproduced by mutation and is now caught by
+`TestIdemCrashInjectionRestartHonestRetryIsNeverPunished`.
+
+**The corollary that shaped the suite.** Under SIGN-1's reserve-then-send, losing the applied-key
+table does NOT present as a duplicate — it presents as a refusal, because the in-memory mint table
+died with it. The duplicate appears one step later, when the client does exactly what
+`ErrUnknownMint` documents: re-mint under the same key and re-send. A suite that only ever replayed
+verbatim would have reported the wrong failure and never observed the second message.
+`TestIdemCrashInjectionRestartRemintingClientStillGetsOneEffect` exists solely to model that client,
+and it is the test that fails with "the operation has now been APPLIED TWICE" when the applied-key
+table stops being recovered. Recorded because it is genuinely counter-intuitive: the obvious test for
+a double-apply does not catch the double-apply.
+
+**Placement, recorded as a boundary consequence rather than a preference.** A suite that drives
+`internal/hub` lives under `internal/idem` because the authoring agent's file-ownership boundary was
+`internal/idem/**` while `internal/hub/**` was another live agent's. It is legal — `package idem_test`
+is an external test package, so it may import `internal/hub` even though `internal/hub` imports
+`internal/idem` — but it has a real cost: the file contains no reference to package `idem`, so
+`go test ./internal/hub/` does not run it and coverage is attributed to the wrong package. Filed as
+`IDEM-17-FU-PLACEMENT` to be settled deliberately rather than left as an accident of scheduling.
+
+---
+
+## 2026-08-07 — CORRECTION: the WAL record-index floor does NOT subsume the message-sequence floor. The subsumption claim is DISPROVED, 247 of 248 truncation offsets (MSG-FU-SEQHIGHWATER, `6ebe51be`)
+
+**This entry CORRECTS, by name, the paragraph "This SUBSUMES most of the open task
+`MSG-FU-SEQHIGHWATER` (`6ebe51be`)" in the earlier 2026-08-07 section "The WAL record-index high-water
+mark is a dedicated write-ahead file, not derived from the log (e120153b, db350e39)" (section heading
+at line 2577; the paragraph itself around line 2656, added by `aad611c`).** `DECISIONS.md` is
+append-only, so that paragraph is not edited — it must be read as SUPERSEDED. Nothing else in that
+section is disturbed: the dedicated index file, the rejected alternatives (a)-(d), the
+implausible-index bound and the reservation-block trade all stand. What is withdrawn is one inference
+drawn at the end of it.
+
+*(An earlier draft of this entry named the wrong section — "The durable WAL index floor is
+authenticated with a KEYED MAC…", which is a different section 615 lines further down, added by
+`cc6f63a`. The reviewer gate caught it. In an append-only file "by name" is the whole mechanism by
+which a correction finds its target, so naming the wrong one silently orphans the correction.)*
+
+**The claim, quoted.** *"`internal/hub` derives its sequence floor from `wal.Recovered.NextIndex - 1`,
+so raising the value `Recovered.NextIndex` reports closes the measured message-id regression … without
+`internal/hub` needing a floor file of its own"*, and the instruction that followed it — that whoever
+re-scoped the task should read it as *"confirm the residual is acceptable and close" or "account for
+the migration window explicitly"*, **not** *"build a second floor"*.
+
+**It is false, and it was measured false rather than argued false.** Sweeping EVERY truncation offset
+of a data directory's `bus.wal` — a pristine copy per offset, `wal-mac.key` and `wal-index-floor`
+carried through intact, the resumed sequence read by performing a real `hub.Hub.Mint` (the in-process
+call the `/v1/mint` route makes) rather than by consulting an accessor. An offset counts as a reissue
+when the resumed sequence lands at or below the **durably burned floor** (256 after five mints), not
+merely at or below the highest number actually handed out (5) — the burned range is what
+`seqfloorfile.go` promises never to reissue, and measuring against the issued numbers alone would
+accept any rewind inside the 252-number gap between them:
+
+| data directory | offsets swept | offsets that REISSUED a durably burned sequence |
+|---|---|---|
+| `message-seq-floor` present | 248 | **0** |
+| `message-seq-floor` removed | 248 | **247** |
+
+The single survivor in the second row is the undamaged file, where the in-log `seqfloor` record still
+replays. Every other cut — including cuts that leave the WAL's own durable index floor fully intact —
+resumes the message sequence at or below a number a client already holds an Ed25519 signature over.
+
+**The provenance of that table was itself a finding, and this entry is what closes it.** When the
+numbers first appeared — in `CONTRACTS-ONDISK.md`, quoted from a throwaway sweep under `/tmp` — the
+**security** gate filed them as a LOW *evidence-provenance* finding in its 20:29 note: *"the
+Measured-evidence 248/247 table appears ONLY in `CONTRACTS-ONDISK.md`; grep across all `.go` and `.md`
+finds no committed test producing those counts"*. It was right to. The **reviewer** gate reproduced
+the table experimentally, and said so in its 20:21:29 verdict (*"including the 248/0/247 table which I
+reproduced experimentally"*), so the numbers were never in doubt — but a measurement that lives only in a
+decision record is a claim, not evidence, and it decays the moment the code moves. The table above is
+now produced by a committed test on every run, which is the difference between the two.
+
+**WHY the ratio inverts, which is the whole of the error.** The subsumption rests on a COUNTING
+argument: every sequence issued is `<=` the WAL index of the prepare carrying it, because a message
+consumes one sequence and at least two indices, so the indices outrun the sequences for ever. That
+argument was true, and `SIGN-2`/`SIGN-6` retired it. `/v1/mint` now hands a client a sequence **before
+any record carries it**, and burns `MintBatchSize = 256` numbers per floor record — so **five mints
+consume five sequences against two WAL indices**. The counting does not merely weaken at the edge, it
+runs backwards: sequences outpace indices by up to 128:1. Raising `Recovered.NextIndex` therefore
+raises a counter that is no longer an upper bound on the one that matters.
+
+The codebase already said so, in capitals, in two places the paragraph did not consult:
+`internal/hub/hub.go` ("That argument is RETIRED") and `internal/hub/seqfloorfile.go` ("THAT IS THE
+ARGUMENT THE BATCH BROKE … Do not reinstate any reasoning that ties a sequence to a WAL index").
+
+**The right artefact ALREADY EXISTS, and nothing new was built.** `internal/hub/seqfloorfile.go`,
+`<data-dir>/message-seq-floor`, on-disk format version 5 (RESERVED, not chosen), landed under
+`aad611c`. It is the authoritative source; the in-log `seqfloor` record and the three log-derived
+sources `hub.Open` maximises over are defence in depth. This correction adds a TEST and this text —
+no second floor, no third. The earlier instruction "not build a second floor" was right for the wrong
+reason: there must not be a second floor because there is already a correct first one, not because
+the WAL's index floor covers it.
+
+**Chronology, because it is the transferable lesson — and it is SHARPER than two earlier drafts of
+this paragraph said.** Both of them claimed the mechanism landed at 16:23 in `aad611c` and the
+rationale denying it was needed landed nearly three hours later in `cc6f63a` at 19:20. That is FALSE,
+and the reviewer gate disproved it with one command after two gates had waved it through by checking
+only the two commit *timestamps* and never which commit carried the paragraph:
+
+```
+$ git log --oneline -S "This SUBSUMES most of the open task" -- DECISIONS.md
+aad611c Durable roster + signed sends: two agents survive a restart
+$ git show cc6f63a -- DECISIONS.md | grep -c "SUBSUMES most of the open task"
+0
+```
+
+**`aad611c` added BOTH.** One commit, at one moment, shipped `internal/hub/seqfloorfile.go` — a
+dedicated durable message-sequence floor — AND a decision paragraph arguing that `internal/hub` needed
+no floor file of its own. The contradiction was not a drift that opened over three hours; it was
+INTERNAL TO A SINGLE DIFF.
+
+That makes the lesson a different and more uncomfortable one. "Re-read the tree before you write the
+rationale" would NOT have caught this, because the refuting code was in the author's own working tree
+as they wrote it. What catches it is narrower: **when one commit contains both a mechanism and an
+argument that the mechanism is unnecessary, one of the two is wrong — read your own diff as a whole
+before writing its rationale.** And the operational guard stands either way: a claim of the form "X
+subsumes Y" is a claim about behaviour, so it gets a measurement before it gets a paragraph. This
+entry is the third attempt at this one paragraph, which is itself the evidence for that rule.
+
+**The evidence, and how it stays evidence.** `TestSequenceHighWaterSurvivesDeepDamage`
+(`internal/hub/seqhighwater_test.go`) is the sweep above, run on every invocation in ~8s. Its second
+arm is a NEGATIVE CONTROL that removes `message-seq-floor` and then checks three things, not one: that
+the sweep finds reissues at all, that it finds them at a LARGE MAJORITY of offsets, and that the
+UNDAMAGED offset is NOT among them (with the whole log intact the in-log `seqfloor` record still
+bounds the sequence). A bare "at least one reissue" would let a sweep degraded to a single offset pass
+while the table above quietly stopped being true, and a test has to check what it is quoted for.
+
+Both assertions were observed RED before being accepted GREEN — a proof never seen failing is not
+evidence that it can fail. Disabling source (0) in `hub.Open` (a one-line `if false &&`, in a
+throwaway copy of `HEAD`, never in the tree) turns the primary arm's 0/248 into 247/248 and fails it;
+collapsing the offset range to the undamaged file alone fails the control. Verdict on the task's
+registered proof: `verdict=PASS class=test exit=0 tests_run=3 top_level=1 skipped=0 failed=0
+empty_pkgs=0`, independently re-run by both gates.
+
+**READ THE TWO INTEGERS AS A MEASUREMENT, NOT AS A CONSTANT.** 248 and 247 are a function of the WAL
+frame layout: the pristine log is 247 bytes, so the sweep has 248 offsets. Any change to the frame
+format moves both — with `internal/wal`'s in-flight audit-record work in the tree the same test prints
+**245 swept / 244 reissued**, and it is just as correct. What must not move is the SHAPE: zero
+reissues with the floor file, a large majority without it, and the undamaged offset never among them.
+The test asserts the shape and prints the integers; this entry quotes the integers as of `bus.wal` at
+247 bytes. Do not "fix" a future 245 to match this paragraph.
+
+**Adjacent, and NOT part of this correction.** The same superseded section states
+`indexReserveBlock = 256`; `internal/wal/indexfloor.go:114` says `64`. That is a wal-layer doc drift
+with no bearing on the subsumption question, and it is outside this change's file boundary. **It is
+NOT yet filed** — it is handed to spec-keeper as a recommended follow-up, and this sentence says so
+rather than claiming a task exists, because asserting that filing has already happened when it has
+not is a defect this very file has now recorded twice.
+
+**Chain, and what the gates changed.** spec-keeper (task state) → feature-runner (this test and this
+entry) → reviewer → security. Neither gate rubber-stamped it:
+
+- **Reviewer: CHANGES-REQUESTED, TWICE, and both rounds were about THIS TEXT rather than the test.**
+  Round one: two unverified claims-about-the-world — a follow-up asserted as already filed when no such
+  task existed, and the 248/247 reproduction attributed to the wrong gate. Round two, after those were
+  fixed: the section named the WRONG earlier section as its target, and the whole chronology paragraph
+  was false (see above). It also caught a false comment in the test — a "read-only" probe that in fact
+  rewrites `wal-index-floor` through `indexFloor.begin`, harmless only because the fixture closes
+  cleanly — and the weak negative control. **Three of those five findings are the same defect: an
+  assertion about git, the backlog or another agent's notes, written from memory and never executed.**
+  In a file whose whole purpose is to be believed later, that is the defect class to watch for, and it
+  is why every factual claim in this section now has a command behind it.
+- **Security: PASS**, with one MEDIUM that is now fixed: the original assertion measured against the
+  highest sequence ISSUED (5) rather than the durably BURNED floor (256), leaving a 252-number blind
+  band in which a rewind would have passed silently. That is why the bar above is the burned floor.
+  Security also confirmed the primary arm's safety is STRUCTURAL, not merely tested — `hub.Open` reads
+  source (0) first and every later source can only raise it — and recorded one pre-existing follow-up
+  that this entry must not be read as blessing: `message-seq-floor` is integrity-protected by a bare
+  SHA-256 while its sibling `wal-index-floor` is authenticated with HMAC under `wal-mac.key`. Endorsing
+  `seqfloorfile.go` as "the right artefact" above is an endorsement of its PLACEMENT (outside the log),
+  not a ruling on that asymmetry, which belongs in its own task. That task is **NOT yet filed either**
+  — it is recommended to spec-keeper alongside the `indexReserveBlock` one, and the security gate's
+  framing is to adopt: *reconcile the two positions deliberately*, not *fix a hole*, since the same
+  gate has already ruled the unkeyed digest DEFENSIBLE. The substance to settle is that
+  `seqfloorfile.go` justifies it on "an attacker with write access can read `wal-mac.key` anyway",
+  which assumes read AND write — a write-only primitive breaks that equivalence, and
+  `internal/wal/indexfloor.go:393` states the opposite position outright.
+
+Code-only: this is a test and a decision record, so no live behaviour is claimed by either.
+
+## 2026-08-07 — MTLS-EXPIRY: the client ENFORCES the pinned certificate's validity window, and `crypto/x509` makes the verdict
+
+Supersedes the two places this file recorded the gap as open: the MTLS-PIN entry §2 ("**Certificate
+expiry and validity are NOT checked**, and that is a real gap owned by `MTLS-VERIFY`") and §8's
+second bullet ("**Certificate EXPIRY is not checked, and that is a live gap in a recorded control**").
+Both are now CLOSED on the client side. Neither line is edited — this file is append-only — so read
+them as history.
+
+### 1. Why this was split out of `MTLS-VERIFY`
+
+`MTLS-VERIFY` depended on `MTLS-LISTENER` and `MTLS-LISTENER` was gated on `MTLS-VERIFY`: a genuine
+cycle, and the TLS chain had no runnable head. The expiry check is the part of `MTLS-VERIFY` that
+needs no running TLS bus — it is a property of `client/pin.go` alone, provable against an in-memory
+certificate — so splitting it out breaks the cycle without weakening either task.
+
+### 2. `crypto/x509` decides; this package only reports
+
+The tempting implementation is two lines: `at.Before(leaf.NotBefore) || at.After(leaf.NotAfter)`.
+It was rejected. Invariant 9 says never write your own crypto and prefer the API that wraps as much
+of the problem as possible, and certificate validity is exactly the kind of detail a library exists
+to get right — interval endpoints, the zero time, a `NotAfter` earlier than `NotBefore`. A second
+implementation of a question that must have one answer is how the two answers eventually disagree.
+
+`checkBusCertificateValidity` therefore calls `leaf.Verify`, with **the leaf itself as its own root**:
+
+```go
+selfSigned := x509.NewCertPool()
+selfSigned.AddCert(leaf)
+leaf.Verify(x509.VerifyOptions{Roots: selfSigned, CurrentTime: at,
+    KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+```
+
+That is the stdlib's own supported way to say *"trust is already established, apply the remaining
+checks"*. Traced through go1.19's `verify.go`: `isValid(leafCertificate, …)` performs the
+`NotBefore`/`NotAfter` comparison, `Roots.contains(c)` then short-circuits chain building, and
+`ExtKeyUsageAny` returns before any EKU filtering. An **ordinary** `Verify` could not be used: it
+fails with `UnknownAuthorityError` for the no-CA reason long before it reaches the dates, which is
+precisely why disabling the default chain check took the validity check away with it.
+
+Each option is load-bearing. `Roots` is a fresh pool per call holding one certificate.
+`CurrentTime` is the caller's, which is what makes the boundary instants testable without waiting.
+`KeyUsages: ExtKeyUsageAny` **skips** EKU filtering deliberately — the default (`ServerAuth`) would
+make this function reject a valid pinned certificate over an EKU bit and report it as a validity
+problem it is not. `DNSName` is left empty: there is no hostname verification in this design, the
+pin substitutes for it, and setting it here would resurrect the name check the invite blob replaced.
+
+### 3. Identity BEFORE validity, and the two failures are never conflated
+
+A matching fingerprint is now necessary but not sufficient. The order is fingerprint first, window
+second, because the two demand opposite responses: a mismatch means *"you may be talking to the
+wrong bus"* and warrants an investigation; an expiry means *"you are talking to the right bus and
+its certificate is stale"* and warrants a rotation or a clock check. A certificate that is **both**
+unpinned and expired is reported as UNPINNED — the expiry of a stranger's certificate is a detail,
+and leading with it would bury the substitution. `ErrBusCertificateExpired` is a separate sentinel
+from `ErrBusFingerprintMismatch` for the same reason, and a test asserts an expired certificate does
+NOT match the mismatch sentinel.
+
+### 4. There is NO client-side clock-skew allowance, on purpose
+
+`internal/buscert` backdates `NotBefore` by five minutes when it MINTS a certificate. That is the
+right place for an allowance: applied once, by the party that knows the certificate is fresh, and
+**visible in the certificate itself**. A second, invisible allowance in the client would extend
+every certificate's usable life beyond the `NotAfter` it states — silently weakening the
+leak-containment bound this task exists to enforce, in a way no operator reading the certificate
+could detect. A client with a wrong clock instead gets a refusal whose remedy names THE CLOCK FIRST,
+before any re-pinning advice, because re-pinning cannot fix a clock and trying it wastes the one
+diagnosis that would.
+
+### 5. The unrecognised case FAILS CLOSED
+
+`ErrBusCertificateUnusable` is a catch-all for any x509 verdict that is not "valid" and not the
+validity window — today only an unhandled critical extension, plus unparseable DER, which a live
+handshake cannot produce because `crypto/tls` parses the peer chain before the callback runs. It
+exists so "expired" stays a precise claim rather than becoming the label on every refusal. The
+important property is the direction: a default arm that returned `nil` would accept everything it
+did not think of, which is the silent-accept hole the whole pinning design exists to prevent.
+
+`isPinError` lists all four sentinels, which is what routes them through `pinError` (so the operator
+gets the certificate remedy rather than "cannot reach the bus") and makes them non-retryable. A
+sentinel added to `pin.go` and forgotten there would be reported as a transient network fault AND
+retried — a certificate problem dressed as a flaky connection, which is the most effective way to
+stop anyone noticing it.
+
+### 6. The evidence, because "the code looks right" is not evidence for this class of bug
+
+A `tls.Config` whose verification callback returns `nil` still compiles, still completes handshakes,
+and still returns working connections. Every positive test in `client/` passes either way. So the
+proof is negative and it was **mutation-tested**:
+
+- Neutering `checkBusCertificateValidity` to `return nil` → BOTH new tests go red.
+- Replacing it with a one-sided `at.After(leaf.NotAfter)` check → **only**
+  `TestNotYetValidBusCertificateIsRejected` goes red, proving the two tests are not redundant and
+  that both ends of the window are independently guarded.
+- Both tests were confirmed RED before the fix: an expired certificate and a not-yet-valid one were
+  each pinned, accepted and enrolled against.
+
+### 7. What the gates found, and the one place they CONVERGED
+
+Both gates returned **PASS** (security: no P0, no P1; reviewer: PASS, its two P1s being process/docs rather
+than code). The security gate re-derived the correctness argument by brute force in an isolated copy
+rather than by reading: 5 pin-sets × 8 chain shapes, zero `CurrentTime`, an inverted window
+(`NotAfter` < `NotBefore`), zero-valued dates, unhandled critical extensions, and malformed DER at 1
+byte, truncated, junk-suffixed and 4 MiB. It could not construct an input that is accepted when it
+should be refused.
+
+**The convergence is the finding worth recording.** Both gates independently arrived at
+`ClientSessionCache` as the NEXT occurrence of this exact bug class, and neither was prompted to look
+for it. `crypto/tls` **does not call `VerifyPeerCertificate` on a RESUMED handshake** — its own source
+says "Resumptions currently don't reverify certificates". So adding a session cache for latency would
+disable the pin check *and* this new expiry check on every resumed connection, silently, with every
+positive test still green. It is absent today, which is the only reason the callback runs at all.
+That is the same one-line, silent, every-positive-test-still-passes shape as deleting the callback —
+arrived at from a performance argument instead of a correctness one, which is what makes it likely.
+
+Treated as a control rather than a comment: `pinnedTLSConfig` carries a "DO NOT ADD A
+ClientSessionCache HERE" section naming `VerifyConnection` as the only correct home if resumption is
+ever wanted, **and** `TestPinnedSkipIsAlwaysPairedWithAPinCheck` now fails if the field appears in
+that literal at all.
+
+**The guard was then widened, because the first version of it was not enough.** On re-verification the
+security gate REPRODUCED the bypass over live TLS 1.2 — with a cache attached, the second connection
+resumed and was **accepted while the server served a completely unpinned certificate**, the callback
+never running — and pointed out that a literal-only guard misses `tlsConfig.ClientSessionCache = …`
+by ASSIGNMENT, in `transport.go` or two lines under the DO-NOT-ADD comment itself. The existing
+`*ast.AssignStmt` arm (which already banned setting `InsecureSkipVerify` by assignment, for the same
+reason: an assignment can be conditional and far from the literal) now bans the cache too.
+Mutation-confirmed both ways: in the literal, and by assignment at `transport.go:105`.
+
+**And then the guard itself had to be narrowed, which is the more interesting half.** The reviewer
+gate — re-verifying, and explicitly WITHDRAWING its own earlier "non-brittle" assessment — found the
+first version guilty of three things a guard must never do, all confirmed by injection:
+
+- it **rejected the remedy it prescribes**. The message says "run the checks from `VerifyConnection`",
+  and the check never looked for `VerifyConnection`, so taking the advice still failed. A guard that
+  refuses its own fix gets deleted by the next person who follows it.
+- it **false-positived on an explicit `ClientSessionCache: nil`**, which disables resumption exactly
+  as omitting the field does and is if anything the clearer spelling.
+- it fired **a second, false message** — "pinning was removed, or it moved somewhere this guard does
+  not look" — about a file pairing them on the very next line, because it returned before the
+  paired-literal counter incremented.
+
+All three are now fixed and each is verified by injection rather than by reading: explicit `nil`
+passes, cache-plus-`VerifyConnection` passes, cache alone fails with exactly ONE message, and the
+assignment form fails.
+
+**And the fix for the third of those introduced a fourth defect, which the gate then caught** — worth
+recording because it is the most instructive step in the sequence. Accepting any literal that
+mentioned `VerifyConnection` meant `ClientSessionCache: …` **plus `VerifyConnection: nil`** passed the
+guard, and that configuration resumes with NO verification whatsoever: `crypto/tls` skips a nil
+callback and never calls `VerifyPeerCertificate` on a resumption. It was the exact bypass the branch
+exists to close, **wearing the remedy's name** — and the same function already spends a dedicated
+branch rejecting `VerifyPeerCertificate: nil`, so the new arm was asymmetric with the file's own
+standard. A nil `VerifyConnection` now resolves to "absent" and does not satisfy the remedy.
+
+**The guard is SHAPE-ONLY, and its limit is deliberate rather than overlooked.** It resolves a literal
+`nil` and nothing more, so `VerifyConnection: connHook` where `connHook` is a nil variable, or a
+constructor returning a nil callback, both PASS. The reviewer gate probed exactly those and then
+argued AGAINST tightening — and it is right: the only stricter rule available is "demand a function
+literal", which would reject `VerifyConnection: c.verifyConn`, the likeliest spelling of a genuine
+remedy, and a guard that rejects its own prescribed fix is the defect this branch already had once.
+`InsecureSkipVerify` can be required to be a literal `true` because a bool is a constant; a callback
+is not. The residual is recorded rather than closed, and the honest consequence is that **no
+behavioural test asserts a resumed handshake re-verifies** — the guard alone holds it, exposure is
+zero while no cache exists in-tree, and a live-TLS resumption test is filed as a follow-up.
+
+Two general lessons, both earned here rather than asserted:
+
+- **A guard is only as good as its false-positive behaviour.** One that fails correct work is one the
+  next agent deletes, and then the property is unguarded and nobody notices.
+- **Widening a guard to admit a remedy is itself a change that needs adversarial review.** Three of
+  the four defects above were introduced by making the guard *more* permissive, each time for a good
+  reason.
+
+Also applied, each mutation-confirmed:
+
+- **The fail-closed catch-all is now tested.** Both gates independently noted that the
+  `ErrBusCertificateUnusable` arm — the one whose entire purpose is refusing what nobody thought of —
+  was asserted in prose and nowhere else, and was the single line that could be mutated to `return
+  nil` and redden nothing. It is live-reachable, not dead code: `crypto/tls` parses the peer chain but
+  never calls `Verify` itself, so a certificate with a critical extension Go does not understand
+  arrives intact, in date, with a matching fingerprint.
+- **A zero clock is now REFUSED, not repaired.** x509 substitutes `time.Now()` for a zero
+  `CurrentTime`, so the verdict was already right — but `Error()` compared the zero `At` for its
+  wording, and the gate observed an EXPIRED certificate described as *"NOT VALID UNTIL … it is now
+  0001-01-01"*. Removing the divergence beats documenting it: a caller with no clock has not judged
+  anything.
+- **The per-handshake clock is now guarded.** It had a seven-line rationale and no test; capturing it
+  once at construction reddened nothing. It does now.
+- **Three doc claims were narrowed to what the code actually does.** `checkBusCertificateValidity`
+  AUTHENTICATES NOTHING on its own (an attacker-minted in-date self-signed certificate passes it
+  cleanly — identity comes solely from the fingerprint comparison that runs first, and the
+  self-signature is never verified on this path). "Per handshake" is NOT "per request" — the real
+  bound on an expired certificate's usable life is the POOLED CONNECTION's lifetime, and an agent
+  continuously long-polling `/v1/wait` holds one open across the expiry. And `x509.NewCertPool()`
+  specifically — not nil, not the system pool — is what keeps the darwin/windows/ios PLATFORM
+  verifier branch out of this path, which matters because this package is meant to be EMBEDDED.
+
+## 2026-08-07 — `bus_fingerprint` → `bus_fingerprints` is a CLEAN BREAK: no deprecation alias (user ruling)
+
+`MTLS-ROTATE` changed the stored/JSON field from a scalar `bus_fingerprint` to a set
+`bus_fingerprints`. The question raised was whether to keep the old scalar as a read alias.
+
+**Ruled: no alias.** Two reasons, and the first is the one that matters:
+
+1. **A scalar alias for a set re-teaches the exact assumption `MTLS-ROTATE` removed.** The whole
+   point of that work is that a bus mid-rollover legitimately has TWO certificates, so any code path
+   that can still ask "what is *the* bus fingerprint" will eventually be written against, and it will
+   be wrong precisely during the event the set exists to survive. A compatibility shim that preserves
+   a broken mental model is not compatibility.
+2. **Nothing consumes the field yet.** No bus serves TLS (`MTLS-LISTENER` is unlanded), so there are
+   no enrolled identities in the wild carrying the old spelling. The break is free NOW and gets
+   permanently more expensive after the first consumer — an alias is the kind of thing that is
+   cheap to add and never removed.
+
+Reversible if a real consumer appears before the listener ships; the point is to not pay for a
+migration nobody needs.
+
+<!-- ===== BEGIN 2026-08-07 feature-runner: data-directory permissions + seq-floor bounds (task be447589-6583-4d5c-a9d4-ec9d9fef0f1c) ===== -->
+
+## 2026-08-07 — The data directory's PERMISSIONS are enforced at startup, and the message-seq floor is bounded at both ends
+
+Three decisions, all forced by exploits that were reproduced against `9f2878a` before anything was
+changed. They are recorded together because they are one argument: **the integrity of the data
+directory is a property of the DIRECTORY, not of the files in it.**
+
+### 1. Other-writable data directory: REFUSE. Group-writable: TIGHTEN and WARN.
+
+`os.MkdirAll(dir, 0o700)` does nothing at all to a directory that already exists — no chmod, no
+check, no warning — so a pre-created `0777` data dir survived a completely clean start. The live
+data dir in this repo is `0775` today, a umask artefact nobody chose. Meanwhile `client/store.go`
+and `client/clientcert.go` have stat-tighten-warned their credential directory since MTLS. **The
+client protected its credentials and the server did not protect its own. That asymmetry was the
+defect.**
+
+Why this is a directory problem and not a per-file one: every identity file is written `0600`, and
+that mode governs who may OPEN the file. It does not govern who may REPLACE it. Unlinking a file and
+creating another in its place, or renaming over it, are permissions on the CONTAINING DIRECTORY. So
+`0600` on `message-seq-floor` protects nothing when the directory is world-writable. Closing it at
+the directory covers `bus-id`, `agent-suffixes`, `wal-mac.key`, `wal-index-floor` and
+`message-seq-floor` in one place.
+
+**Why the two outcomes differ**, which was the question actually asked:
+
+- **Other-writable => refuse.** The trusted set is unbounded — every account on the box, and anything
+  that gets code execution as any of them. There is no benign cause: a umask can only CLEAR bits, so
+  a directory *we* created can never be other-writable, which means the bit was always set by
+  something else. And a directory that has been world-writable may ALREADY have had a file
+  substituted; adopting a forged one is silent and undetectable. Tightening would convert an attack
+  into a warning line that scrolls past. The mode is deliberately left UNCHANGED so the operator can
+  see it, and nothing is written into the directory before the check.
+- **Group-writable => tighten to `0700` and WARN.** The trusted set is bounded and was chosen by an
+  administrator, the dominant cause is an accident (`mkdir` under umask 002, or a deployment group)
+  that the chmod fully removes, and refusing would brick working buses on upgrade over a condition we
+  can simply fix. The WARN is not decoration: once the chmod has run it is the ONLY surviving
+  evidence that the directory was ever exposed.
+
+The sticky bit is deliberately NOT treated as mitigating. It stops another user unlinking files they
+do not own, but it does not stop them CREATING a file the bus has not written yet — and every
+identity file is absent on a first start.
+
+**There is no flag to bypass either branch.** A flag that disables a security check ends up in
+somebody's unit file; invariant 11 already states the posture.
+
+### 2. An implausibly high `message-seq-floor` is refused, not adopted — REVERSING a prior decision
+
+`internal/hub/mint_test.go` used to assert that a floor of `math.MaxUint64` must OPEN, on the stated
+grounds that *"an exhausted id space is a legitimate state to recover, not corruption. Refusing to
+start here would be indistinguishable from a damaged file and would send an operator after the wrong
+problem."* **That is reversed.** New bound: `maxPlausibleSeqFloor = 1<<56`; above it the file is
+refused as corrupt-or-tampered.
+
+The old reasoning treated a physically unreachable state as legitimate — the test's own comment
+conceded the fixture was "the only way to reach this state without issuing 1.8e19 sequences" — and in
+doing so left the file's most damaging forgery indistinguishable from a normal start. The digest is
+UNKEYED, so `floor = 2^64-1` with a valid SHA-256 is one line of Python for anyone with directory
+write. The measured consequence: the bus boots **completely healthy** (`/healthz` ok, roster intact,
+log replayed, zero warnings) and every `/v1/mint` returns 500 for ever, across every restart.
+
+The comparison is not "refuse" versus "keep working". It is:
+
+- **adopt** => a bus that serves, enrols and issues sessions, cannot deliver a single message, ever,
+  and says nothing about why;
+- **refuse** => a bus that stops and names the file, the value and a one-step remedy.
+
+A genuinely exhausted bus is equally unable to mint either way, so refusing costs it nothing it still
+had. **Refusing strictly dominates on the availability axis as well as the security one**, which is
+what makes reversing the earlier call correct rather than merely different.
+
+`1<<56` is deliberately generous: ~2,285 years at a sustained million minted sequences per second,
+four orders of magnitude beyond a single-node bus. It also leaves >1.8e19 numbers before exhaustion,
+so an attacker gains nothing by choosing the largest value that still passes. Only the READ is
+bounded; `ensureSeqFloorLocked` still saturates to `MaxUint64` on true arithmetic overflow, and the
+honest caveat is recorded at `maxPlausibleSeqFloor`.
+
+### 3. Floor file ABSENT **and** the log lost records => REFUSE (invariant 1 over invariant 6)
+
+A missing floor file is a SUPPORTED UPGRADE PATH — a data directory written by a binary that predates
+it — and rebuilding the floor from the log is right when the log is INTACT. Combined with a damaged
+log it is a fabrication. Measured: 300 sequences minted, handed out and signable; delete the floor
+file, truncate the log; the bus starts happily and mints **25**, walking back up through 275 numbers a
+client may hold a signature over. The harm is invisible and is WORST FOR THE MOST CORRECT CLIENTS:
+our own docs require consumers to deduplicate on `message_id`, so a correctly implemented consumer
+sees the repeat, concludes it is the duplicate it was told to expect, and silently DROPS the new
+message.
+
+The knowledge was already in the tree; only the guard was missing. `openSeqFloorFile`'s comment
+already named "missing-file plus quarantine on the SAME start" as the one uncovered case, and
+`seqFloorCorrupt`'s remedy already said the log fallback is *"correct ONLY if that log has not also
+been damaged or quarantined"*. **The CORRUPT path refused and explained itself; the MISSING path
+performed the identical unsafe fallback silently and then logged that it had "closed the window"** —
+with a floor below numbers already issued. That warning is now qualified to say what actually makes
+it true.
+
+**On invariant 6.** This is a refuse-to-start path, and invariant 6 says recovery must always reach a
+running server. It falls under the NARROW IDENTITY-FILE exception already granted for the MAC key,
+the persisted bus id, the agent-suffix floors and the WAL index floor — not the log. The log still
+always starts: a damaged log on a directory that HAS its floor file is still repaired or quarantined,
+still logged loudly, and still serves. What refuses is the case where NOTHING on disk can prove the
+id authority, and invariant 1 was reaffirmed WITHOUT narrowing on 2026-08-02 precisely for this.
+
+**Two supporting decisions this required:**
+
+- **`seqFloorFile.ensureExists()` writes the file at floor 0 on every start.** Before this, "the file
+  is absent" meant two different things — a legacy directory, and a fresh directory that has simply
+  never minted — and the guard has to tell them apart. Measured: a brand-new bus opened and then
+  `kill -9`'d leaves `records=0, NextIndex=65`, because indices are reserved in blocks; that is
+  indistinguishable from a log whose records were destroyed. Writing the file at Open collapses the
+  ambiguity at the source and closes the migration window one step earlier, at the first START rather
+  than the first MINT. This reverses a smaller assertion in `mint_test.go` whose stated worry ("every
+  start would rewrite a file it has nothing new to say about") does not occur — the write happens
+  only when the file is absent.
+- **The predicate is "records were REMOVED FROM THE FILE", not "recovery had something to say".** It
+  counts quarantine, truncation, mid-file rewrite, unidentified loss, and — the arm that matters
+  most — **indices the file cannot account for**. It deliberately EXCLUDES `MissingRecords`, dangling
+  prepares, `HeaderRepaired` and `Rebuilt`: those remove nothing from the file and are the ordinary
+  signature of a clean crash, so counting them would refuse every legacy directory that had ever
+  crashed.
+
+**The unaccounted-for-indices arm was forced by measurement, and it is the reason a sampled sweep is
+not acceptable evidence here.** Sweeping every byte offset of a 4491-byte log: 23 offsets — exactly
+the RECORD BOUNDARIES — produce a file recovery calls perfectly clean (no truncation, no
+unidentified loss, no quarantine, records present), because a log cut precisely on a boundary is
+indistinguishable from a log that ended there. At one of them the bus started and minted 257 against
+a pristine high-water mark of 300. What makes it detectable is the durable index floor, which lives
+OUTSIDE the log and therefore survives: when the surviving records cannot account for the indices
+this directory has authorised, records are gone whatever the file looks like.
+
+**The accepted false positive, stated plainly:** indices are authorised in blocks, so an unclean
+shutdown legitimately leaves authorised-but-unused indices and this arm fires on them. That cost can
+only ever be paid by a directory with NO floor file — i.e. one written by a binary older than
+`ensureExists` — once, with a documented remedy. The alternative is silently reissuing signed message
+ids, and there is no third option: nothing on disk distinguishes "burned and unused" from "used and
+then lost".
+
+### What was deliberately NOT done
+
+**`message-seq-floor` was NOT keyed with the WAL MAC, and keying it must not be recorded as the
+answer to this finding.** Keying does not help against the attacker who can read `wal-mac.key`
+sitting in the same directory, and it would leave every other file there creatable, deletable and
+renameable by a directory-writer. The permission is the defect. Keying remains worth doing for
+consistency with `wal-index-floor`, as a separate and honestly-labelled change.
+
+The false justification has been corrected in place at `encodeSeqFloor`: it claimed the digest need
+not be keyed because "an attacker with write access to the data directory can read the WAL MAC key
+sitting next to it anyway". **Directory-write and file-read are independent permissions.** A local
+user on a `0777` data directory has the first and not the second, so there really is an attacker who
+can forge the unkeyed seq floor and cannot forge the keyed index floor.
+
+<!-- ===== END 2026-08-07 feature-runner: data-directory permissions + seq-floor bounds ===== -->
+
+## 2026-08-08 — Invariant 10's disconnect is NARROWED to the replay path (user decision)
+
+**The change.** Same key + different payload no longer disconnects; it rejects and logs. Replay of
+an already-accepted signed message by a third party now DOES disconnect, and did not before.
+Implemented in `1c6c540`, contract text in `0dbb025`.
+
+**Why this entry exists.** CLAUDE.md requires an explicit decision record for any change that
+weakens a load-bearing invariant. `0dbb025` shipped the weakening without one — the integrator
+flagged the gap in both commit messages rather than letting it pass silently. This closes it.
+
+**What was measured, at the raw socket rather than from status codes.** An independent security
+agent in another repo first reported that neither path disconnected. That was wrong, and the way it
+was wrong is the useful part: `Connection: close` fires AFTER the response, and any pooled HTTP
+client transparently redials, so a 200 on the next request is consistent with either outcome. Re-run
+against a pinned connection:
+
+- same-agent key reuse → `409`, `Connection: close` present, socket **closed by the server**
+- third-party replay   → `403`, header **absent**, socket **still open**
+
+So the control existed and fired — on the party most likely to be honest — while the actual
+adversary kept its connection. Worse, the disconnect was **unreachable** by a third party at all:
+both routes in (claim `sender=victim`, or present the victim's mint) are caught by an authorization
+check that runs BEFORE the idempotency layer and exits through a non-disconnecting door.
+
+**Why not simply implement the invariant as written.** A disconnect on same-agent key reuse lands on
+a client that lost track of its own keys — keys are scoped per agent, so the key is always the
+caller's own — and drops every other request pipelined on that socket, including its parked
+long-poll. This project has now aimed an abuse defence at the wrong party four times; this is the
+one place it was specified.
+
+**The implementation reproduced the very bug it was fixing.** The first draft disconnected on ANY
+sender mismatch, so an empty `sender`, a dropped bus prefix (`alpha-1`) and a trailing space each
+dropped an honest client's socket. Caught by the reviewer, reproduced at the socket, then fixed by
+gating on `ids.ParseAgentID(body.Sender)` succeeding: the 403 still fires for every mismatch, but
+only a claim that NAMES an agent drops the connection. That is why invariant 10 now carries a
+two-question test before anyone adds a disconnect.
+
+**One ambiguity deliberately left un-disconnected.** `409 no-matching-reservation` is byte-identical
+for a third party spending someone else's mint and for an agent re-presenting its OWN spent
+reservation. The minting agent lives only in the `mints` map KEY, never the value, so a miss carries
+no ownership information. Rather than guess, the case rejects without disconnecting, and
+`TestCrossMintIsIndistinguishableFromAnHonestSpentReservation` asserts the indistinguishability so
+it goes RED the day it becomes resolvable. Follow-up `10212db3`.
+
+**Not yet reconciled, and it is the forward hazard.** `internal/relay/doc.go` still specifies
+"OFFENDING PEER DISCONNECTED". Relay ingest inheriting the pre-narrowing rule would drop every agent
+behind a peer bus at once — the same defect one scale up. Six agent-facing files also still assert
+the removed disconnect; no code branches on them, which is exactly why the suite stays green over
+stale security prose.
+
+<!-- ===== BEGIN 2026-08-08 feature-runner: CORRECTION to the 2026-08-07 seq-floor entry (task be447589-6583-4d5c-a9d4-ec9d9fef0f1c) ===== -->
+
+## 2026-08-08 — CORRECTION: both "durable" arms of the seq-floor guard were WRONG and were removed
+
+The 2026-08-07 entry above describes an "unaccounted-for indices" arm as *"the arm that matters
+most"*. **That arm, and a second one built to replace it, were both removed on 2026-08-08 because
+each turned an ordinary unclean shutdown into a PERMANENT refusal of a perfectly healthy data
+directory.** The entry above is left intact per the append-only rule; this section supersedes it.
+
+**Attempt 1 — compare the file's reach against `rec.NextIndex`.** `NextIndex` from `Log.Recovered`
+is the FLOOR-RAISED value, not the file's own high-water mark. Indices are authorised in BLOCKS, so
+any unclean shutdown leaves authorised-but-unused indices, which the arm read as data loss.
+Reproduced: five mints, `SIGKILL`, remove the floor file — exit 1 on starts #1, #2 and #3 with a
+byte-identical, undamaged log.
+
+**Attempt 2 — count `MissingRecords`.** It looked like the one signal that outlives a repair. But a
+burned reservation starts at the END of the file and becomes an INTERIOR hole the moment the bus
+writes past it, and then never clears. Measured on an undamaged log: crash once, run and stop
+CLEANLY twice, and `MissingRecords` sits at 58 for ever.
+
+**Both were reachable by following our own documentation.** `seqFloorCorrupt` and
+`CONTRACTS-ONDISK.md` tell an operator to move a damaged floor file aside and restart; on a
+directory whose last stop was unclean — i.e. the crash that plausibly damaged the file — that
+lands in the refusal, permanently, with no automated way out.
+
+**The lesson, recorded because it was learned twice in one session:** a refusal that "fails safe"
+is only safe if its false-positive population has been MEASURED. Both arms were argued from first
+principles, both arguments were wrong about how the durable index floor behaves, and the cost was a
+brick on healthy directories — worse than the reissue each was closing.
+
+**What remains** is the four transient `Repaired.*` signals plus a narrow emptied-log arm
+(`Records == 0 && NextIndex > 1`), which cannot reproduce the false positive because any bus that
+minted anything has records, and because `ensureExists` means any directory this binary has opened
+carries a floor file and never reaches the predicate.
+
+**Accepted consequence: the guard is now UNIFORMLY ONE-SHOT.** Truncation, quarantine and interior
+loss all refuse on start #1 and come up on start #2 — and `docker-compose.yml` ships
+`restart: unless-stopped`, so that second start is automatic and unattended. This is a KNOWN,
+DOCUMENTED gap, pinned by `TestSeqFloorGuardSurvivesARestart`, which is written to FAIL the day it
+is closed. It is still strictly better than what shipped before, which was silent adoption with no
+refusal at all.
+
+**Closing it honestly requires `internal/wal` to expose the highest index a record actually
+CONSUMED** (its index floor already tracks `reserved`/`written` durably and logs the difference as
+`indices_skipped`, but neither value is on `wal.Recovered`). That is outside this task's boundary
+and is reported as a blocker rather than approximated a third time.
+
+<!-- ===== END 2026-08-08 feature-runner: CORRECTION ===== -->
+
+<!-- ===== BEGIN 2026-08-08b feature-runner: precision fix to the same-day CORRECTION (task be447589) ===== -->
+
+## 2026-08-08 (b) — "UNIFORMLY one-shot" was imprecise: QUARANTINE is covered on every start
+
+The CORRECTION above says the guard is "UNIFORMLY ONE-SHOT … truncation, quarantine and interior
+loss all refuse on start #1 and come up on start #2". **The quarantine half is wrong**, found by the
+reviewer gate and since measured and pinned. Corrected, per shape:
+
+| damage shape   | start #1 | start #2 onwards | why |
+| -------------- | -------- | ---------------- | --- |
+| QUARANTINE     | refuses  | **refuses**      | leaves an EMPTY log; the emptied-log arm is a property of the FILE, not of this start |
+| TRUNCATED tail | refuses  | starts           | only transient `Repaired.*` flags survive the repair |
+| INTERIOR loss  | refuses  | starts           | same |
+
+So the known gap is the two ONE-SHOT shapes, not all three. The distinction is worth stating
+because it is the one structural hint about what a correct durable signal looks like: the arm that
+works reads the state of the FILE, and both arms that had to be removed read what THIS START did to
+it. `TestSeqFloorGuardSurvivesARestart` now carries a quarantine case pinning the covered shape
+alongside the two gaps.
+
+Also added, on the reviewer's point that nothing pinned the FALSE POSITIVE itself:
+`TestUncleanShutdownWithNoFloorFileStillStarts` kills the bus, runs cleanly twice so the burned
+index reservation becomes an interior hole, removes the floor file exactly as our own documentation
+instructs, and requires the bus to COME UP — twice, because the defect it guards was permanent.
+Every other test in that file uses SIGTERM, so without it a third rebuild of either removed arm
+would pass the whole suite green.
+
+<!-- ===== END 2026-08-08b feature-runner ===== -->
+
+<!-- ===== BEGIN 2026-08-08c feature-runner: AMENDMENT to Decision 4 (broadcast 501) — DUR-5 audit wiring ===== -->
+
+## 2026-08-08 (c) — AMENDMENT to Decision 4: the broadcast write path is no longer "INTACT and tested". Half of it is (operator ruling)
+
+Decision 4 (`POST /v1/broadcast` answers 501) closed with this promise, and it is the sentence this
+amendment corrects — the original stays exactly as written, above:
+
+> `hub.Broadcast`, `client.Broadcast` and the whole broadcast write path are **deliberately left
+> INTACT and tested**, so SIGN-3 re-opens the route by settling ONE question rather than by
+> re-plumbing the write path.
+
+**Which half is still true, and which is not.** The load-bearing half holds: SIGN-3 still re-opens
+the route by settling ONE question, and no re-plumbing is waiting for it. The *plumbing* is intact —
+`hub.Broadcast`, `hub.publish`, the mint, the idempotency scope, the fan-out and the wake-up are
+unchanged and are the same single code path a directed send takes. What is **no longer true** is
+"and tested": `hub.Broadcast` now **fails closed** before its durable write, and the ~31 tests that
+exercised it are **skipped**, not passing.
+
+**Why it fails closed.** DUR-5 landed the append-only message audit log (invariant 6), and
+`PROTOCOL.md` §8.6 binds the record's `content_sha256` to `signing.CanonicalDigest` — SHA-256 over
+the canonical *signing* bytes, the same bytes Ed25519 signs. `signing.Canonicalize` **rejects an
+empty recipient set**, and `store.Message` stores a broadcast as a **FLAG** rather than an expanded
+roster snapshot, so a broadcast has no canonical bytes and therefore no content hash. That is the
+*same* unanswered question Decision 4 already identified as SIGN-3's: what the canonical audience of
+a broadcast IS.
+
+So `internal/hub/audit.go` refuses rather than substituting a value. **Any value chosen there would
+settle SIGN-3 by accident** — in a file nobody would think to read when they came to settle it
+properly — and would then be written into an **append-only trail that cannot be edited afterwards**.
+That permanence is what makes this different from an ordinary interim shortcut: a wrong digest in a
+durable audit log is not a thing a later commit can take back. The rejected alternative, auditing a
+broadcast under a hash we invented, produces a trail that looks authoritative and proves nothing —
+which is worse than refusing.
+
+**The tests are SKIPPED, not REWRITTEN, and the distinction is the point.** Rewriting them to assert
+"a broadcast is refused" would have been less code and a green suite. It was rejected because a
+suite asserting the refusal reads as the **settled design**: the next person would find tests
+documenting the interim posture as if it were the decision, and SIGN-3 would look answered. A skip
+says the opposite — this is unresolved, and it names the question that resolves it. The skip is a
+**single** check in `mintedBroadcast` keyed on `signing.ErrInvalid`, not ~31 hand-placed calls, for
+two reasons: it is exact (a broadcast test failing for any *other* reason still fails, loudly,
+rather than hiding behind a convenient explanation), and it is **self-healing** (the day SIGN-3
+lands, every one of those tests comes back on its own — nobody has to find and delete thirty-one
+skips, and none can be left behind).
+
+**Production impact is ZERO, and that is why this was acceptable as an interim posture rather than a
+release blocker.** No broadcast can reach `hub.Broadcast` on a running bus:
+
+- `POST /v1/broadcast` answers **501** before the body is decoded (`internal/httpapi/messages.go`,
+  `handleBroadcast`) — unchanged by this amendment.
+- The route is **deliberately absent from the discovery document** (`internal/httpapi/discovery.go`),
+  so it is not advertised to agents.
+- **Relayed broadcasts are refused on INGEST**, so a peer cannot introduce one either. The
+  enforcement is `ValidateRelayRequest` in `internal/relay/message.go`, which rejects a relayed
+  broadcast outright with `ErrUnsignable` — naming SIGN-3 for the same reason this amendment does,
+  and noting that exempting broadcasts from the signature requirement would be an unauthenticated
+  downgrade selectable from the wire. Pinned by `internal/relay/signed_test.go`. (`internal/relay/doc.go`
+  describes the rule; `message.go` is where it is enforced.) The egress fan-out code exists but has
+  nothing to fan out.
+
+The refusal is therefore reachable only from tests, which is precisely the population that is
+skipped.
+
+**What resolves this.** SIGN-3, and nothing else. When it defines the canonical audience of a
+broadcast, `auditContentHash` gets its digest, `hub.Broadcast` stops failing, the 31 skips stop
+firing without being touched, and `/v1/broadcast` can return from 501 in the same change. Until
+then, treat "broadcast works at hub level" as **false** and do not cite Decision 4's closing
+sentence as evidence that it does.
+
+**Recorded because the backlog would otherwise mislead:** DUR-5 is code-complete and its behaviour
+IS live for directed sends — every `POST /v1/send` now writes a real audit record — but it is
+**not** live for broadcasts, and no amount of test-suite green should be read as saying it is.
+
+<!-- ===== END 2026-08-08c feature-runner ===== -->
