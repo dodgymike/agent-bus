@@ -195,6 +195,82 @@ func TestCLISendSurfaces409AsIdempotencyViolation(t *testing.T) {
 	}
 }
 
+// TestIdempotencyViolation_NoDisconnect pins IDEM-14-FU-CLIENTTEXT: the
+// idempotency-conflict Remedy used to assert, as fact, that "the bus
+// disconnects the client" on a same-key-different-payload 409. Field evidence
+// (2026-08-07) measured that it does not — same pid, zero new stderr, and a
+// subsequent authenticated call succeeds immediately after. A client that
+// over-claims a disconnect risks an agent taking destructive recovery action
+// (re-enrol, rebuild identity, restart supervisors) it does not need.
+//
+// Removing the false claim is not sufficient on its own — a reader told only
+// "not disconnected" still has to guess what DID happen, and the wrong guess
+// (nothing happened, so retry as-is) is exactly the mistake the ORIGINAL 409
+// already refuses. So this test checks the POSITIVE claim too: the remedy
+// must say the request was rejected and logged, and that the connection was
+// kept usable — not merely omit the word "disconnect". And it checks the
+// claim is actually true, not just printed: the SAME Client makes another
+// authenticated call right after the violation and it must succeed.
+//
+// It deliberately does not assert anything about IDEM-14 itself (b0facce9,
+// still open) — whether the bus one day DOES disconnect on this path is that
+// task's decision to make and ship, together with its own doc update. This
+// test only holds the client to not claiming a consequence that, as of
+// today, does not happen — and to stating accurately what does.
+func TestIdempotencyViolation_NoDisconnect(t *testing.T) {
+	const key = "reused-key-nodc"
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case routeSend:
+			// The stub sets Connection: close to mirror what a real bus might do
+			// on this path today — the point under test is what the CLIENT
+			// claims, not what this fixture's socket does.
+			w.Header().Set("Connection", "close")
+			stubWriteJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key reused with different content"})
+		case routeAgents:
+			stubWriteJSON(w, http.StatusOK, AgentList{Agents: []AgentSummary{}})
+		default:
+			t.Errorf("stub bus: unexpected route %s", r.URL.Path)
+		}
+	})
+	c := bus.client(t, nil)
+
+	_, err := c.Send(context.Background(), SendOptions{
+		To:             "bus-x.other-1",
+		Body:           []byte("new content under an old key"),
+		IdempotencyKey: key,
+	})
+	if err == nil {
+		t.Fatalf("Send under a reused key with different content = nil error, want a 409")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	if strings.Contains(e.Remedy, "disconnect") {
+		t.Fatalf("Remedy = %q still claims a disconnect — measured field evidence shows the connection survives this 409 today (IDEM-14 is still open)", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, "FRESH") {
+		t.Fatalf("Remedy = %q, want it to still say a FRESH key is the fix for new content", e.Remedy)
+	}
+	// The POSITIVE claims: rejected, logged, connection kept. Absence of
+	// "disconnect" alone would also pass if the sentence just went silent
+	// about the consequence — these pin that it says something true instead.
+	for _, want := range []string{"rejects", "logs", "does NOT drop the connection"} {
+		if !strings.Contains(e.Remedy, want) {
+			t.Fatalf("Remedy = %q, want it to say %q — a reader must be told what DOES happen, not just that the old claim was wrong", e.Remedy, want)
+		}
+	}
+
+	// The same Client — same process, same underlying transport — makes another
+	// authenticated call right after the violation. This is the behaviour the
+	// field evidence actually measured: not a broken TCP connection, a
+	// perfectly usable one.
+	if _, err := c.Agents(context.Background()); err != nil {
+		t.Fatalf("Agents() immediately after the idempotency violation failed: %v — the client must not have treated the 409 as a dropped connection", err)
+	}
+}
+
 // TestCLISendSurfaces409MintLostAsRoutineNotAViolation checks the OTHER 409 is
 // told apart from invariant 10's key-reused-with-different-payload.
 //
@@ -560,13 +636,15 @@ func TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry(t *testing.T) {
 	const key = "write-key-42"
 
 	// fromStatus builds the error the transport would build for this response.
+	// path is fixed at routeSend: none of this table's cases exercise the 404
+	// branch, which is the only one that reads it.
 	fromStatus := func(op string, status int, retryAfter, detail string) error {
 		h := http.Header{}
 		if retryAfter != "" {
 			h.Set("Retry-After", retryAfter)
 		}
 		resp := &http.Response{StatusCode: status, Header: h}
-		return statusError(op, resp, []byte(`{"error":`+strconvQuote(detail)+`}`))
+		return statusError(op, routeSend, resp, []byte(`{"error":`+strconvQuote(detail)+`}`))
 	}
 
 	cases := []struct {
@@ -804,6 +882,56 @@ func TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry(t *testing.T) {
 			t.Fatalf("IdempotencyKeyOf = %q, want \"\" — there is nowhere to stamp a key on a non-*Error", k)
 		}
 	})
+}
+
+// TestWriteFailedEmptyRemedyBranch exercises the branch
+// TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry's table cannot
+// reach: its fixture guard Fatalf's on an EMPTY original remedy (by design,
+// so "the original remedy survives" is never asserted vacuously there), which
+// means no case in that table can cover writeFailed's own `else` branch —
+// the one that runs when there is no existing remedy to compose onto.
+//
+// That branch IS reachable: networkError returns an *Error with Remedy: ""
+// for a cancelled context (see networkError, the context.Canceled case) —
+// deliberately empty, because "cancelled while talking to the bus" has
+// nothing more useful to add and a network remedy like "check --bus" would
+// be actively wrong advice for the caller's OWN cancellation. 76ec4aa1: this
+// test is the case that was missing, not evidence the branch should be
+// deleted — the branch is live code on a real, if uncommon, path (a caller's
+// context is cancelled mid-send).
+func TestWriteFailedEmptyRemedyBranch(t *testing.T) {
+	const key = "cancel-key-1"
+	err := networkError("send", "https://bus.example", context.Canceled)
+
+	var before *Error
+	if !errors.As(err, &before) {
+		t.Fatalf("the fixture is not a *client.Error: %v", err)
+	}
+	if before.Remedy != "" {
+		t.Fatalf("fixture remedy = %q, want empty — this test exists specifically to cover the empty-remedy case", before.Remedy)
+	}
+
+	got := writeFailed("send", key, err)
+
+	var e *Error
+	if !errors.As(got, &e) {
+		t.Fatalf("writeFailed returned a non-*Error: %v", got)
+	}
+	if e.Kind != KindNetwork {
+		t.Fatalf("Kind = %q, want %q", e.Kind, KindNetwork)
+	}
+	if e.IdempotencyKey != key {
+		t.Fatalf("IdempotencyKey = %q, want %q", e.IdempotencyKey, key)
+	}
+	// The empty-remedy branch sets e.Remedy = clause with NOTHING prepended —
+	// no "; " separator, since TrimRight("", "; ") is "" and the else arm
+	// stands the clause alone. Asserting equality (not just Contains) is what
+	// actually pins that branch rather than the composing one.
+	wantRemedy := "this send may or may not have been applied; retry with --idempotency-key " + key +
+		" so the retry is the SAME message rather than a second one (invariant 10)"
+	if e.Remedy != wantRemedy {
+		t.Fatalf("Remedy = %q, want exactly %q — the empty-remedy branch must stand the clause alone with no leading separator", e.Remedy, wantRemedy)
+	}
 }
 
 // strconvQuote JSON-quotes a detail string for the stub error bodies above. It

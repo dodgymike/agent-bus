@@ -122,10 +122,11 @@ type WatchStats struct {
 //     turns a visible fault into a silent one, and in the second case into an
 //     actively misleading one — the watch would report "no messages arrived"
 //     while messages were arriving damaged.
-//   - KindUsage, KindConfig, KindRejected, or a KindAuth that survived the
-//     transparent re-handshake authorizedRequest already performs. None of
-//     those improve by being retried, and looping on an auth failure looks like
-//     credential guessing.
+//   - KindUsage, KindConfig, KindRejected, KindVersionSkew, or a KindAuth that
+//     survived the transparent re-handshake authorizedRequest already
+//     performs. None of those improve by being retried — a missing route
+//     (KindVersionSkew, 52930611) needs a bus upgrade, not another poll, and
+//     looping on an auth failure looks like credential guessing.
 //   - the cursor could not be persisted (see below)
 //
 // Does NOT stop it:
@@ -373,8 +374,9 @@ func watchShouldRetry(err error) bool {
 	case KindNetwork, KindServer:
 		return true
 	default:
-		// KindUsage, KindConfig, KindRejected, KindAuth (which already survived
-		// authorizedRequest's one re-handshake), KindInternal.
+		// KindUsage, KindConfig, KindRejected, KindVersionSkew, KindAuth
+		// (which already survived authorizedRequest's one re-handshake),
+		// KindInternal.
 		return false
 	}
 }

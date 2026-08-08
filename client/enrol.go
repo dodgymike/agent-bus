@@ -373,37 +373,81 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 // answer — a timeout, a connection failure — may well have been APPLIED, so
 // the key material is kept and the caller is told the exact flag that resumes
 // it.
+//
+// This now matches writeFailed's (messages.go) shape byte-for-byte, which was
+// the model it was always meant to converge on (45b2e17a / 799aea40 —
+// near-duplicate reports of the same three defects): the retry clause is
+// COMPOSED onto e.Remedy rather than replacing it (so an unreachable-bus
+// enrol keeps "check --bus / AGENT_BUS_URL and that the bus is running"
+// instead of losing it, and — per the MTLS-EXPIRY cross-reference on
+// 45b2e17a — the certificate-pin remedy on the enrol path, which the old
+// overwrite also destroyed), e.fatal is checked so a 503 the bus cannot
+// durably accept is told NOT to retry rather than being handed the ordinary
+// retry wording, and e.IdempotencyKey is ALWAYS stamped — including when
+// opts.Save is false and when the error is not ambiguous — because errors.go
+// documents an empty key as meaning no key ever existed, which was false for
+// every failed enrol before this fix (`enrol --json`'s idempotency_key field
+// was silently empty where `send`'s was not).
 func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err error) error {
-	if !opts.Save {
+	// errors.As, not a type assertion — see annotateSessionError. Stamped
+	// before the opts.Save branch below: the key was sent to the bus either
+	// way, and IdempotencyKeyOf(err) must answer it regardless of whether the
+	// caller asked this attempt to be persisted locally.
+	var e *Error
+	if !errors.As(err, &e) {
+		// Nothing to stamp or compose onto — pass through unchanged, same as
+		// writeFailed does for a non-*Error. KindOf(err) would report
+		// KindInternal here too, so the switch below could never have matched
+		// KindNetwork/KindServer for this err anyway.
+		if opts.Save {
+			_ = c.store.DropPending(idemKey, busURL)
+		}
 		return err
 	}
-	switch KindOf(err) {
+	e.IdempotencyKey = idemKey
+
+	if !opts.Save {
+		return e
+	}
+
+	switch e.Kind {
 	case KindNetwork, KindServer:
-		// errors.As, not a type assertion — see annotateSessionError.
-		var e *Error
-		if !errors.As(err, &e) {
-			return err
+		clause := "this " + op + " may or may not have been applied; retry with --idempotency-key " + idemKey +
+			" so the retry is the SAME enrolment rather than a second one (invariant 10)"
+		if e.fatal {
+			// A 503 with no Retry-After: the bus cannot durably accept right
+			// now (invariant 4), and that will not clear by asking again
+			// immediately — see the identical reasoning in writeFailed.
+			clause = "this " + op + " may or may not have been applied; do NOT retry until the bus can durably accept again, then use --idempotency-key " + idemKey +
+				" so the retry is the SAME enrolment rather than a second one (invariant 10)"
 		}
-		e.Remedy = "retry with --idempotency-key " + idemKey +
-			" — the bus may already have enrolled this agent, and that key resumes the SAME enrolment instead of creating a second one"
+		// TrimRight so a remedy that already ends in a separator does not
+		// produce ";; " — the join must add exactly one.
+		if base := strings.TrimRight(e.Remedy, "; "); base != "" {
+			e.Remedy = base + "; " + clause
+		} else {
+			e.Remedy = clause
+		}
 		return e
 	default:
 		_ = c.store.DropPending(idemKey, busURL)
-		return err
+		return e
 	}
 }
 
 // idempotencyConflict is the LOCAL refusal of a key reused for different
 // content on the same bus.
 //
-// Catching it here rather than letting the bus catch it is not politeness: the
-// bus's answer to this is a 409 AND a disconnection (invariant 10), so the
-// round trip costs a connection and teaches the caller nothing this message
-// does not.
+// Catching it here rather than letting the bus catch it is not politeness:
+// the bus's answer to this is a 409 that it rejects and logs (invariant 10),
+// so the round trip costs a connection attempt and teaches the caller
+// nothing this message does not — and, per the field evidence in
+// IDEM-14-FU-CLIENTTEXT (see annotateIdempotencyConflict in messages.go), it
+// does NOT disconnect, so this text must not claim more than that either.
 func idempotencyConflict(op, key, previousName, busURL string) *Error {
 	return newError(KindUsage, op,
 		fmt.Sprintf("idempotency key %q was already used to enrol %q at %s", key, previousName, busURL),
-		"use a fresh idempotency key for different content — reusing one with a different payload is a protocol violation that disconnects the client (invariant 10)")
+		"use a fresh idempotency key for different content — reusing one with a different payload is a protocol violation that the bus rejects and logs (invariant 10)")
 }
 
 // validateAgentName checks a requested name against the server's rule, with a

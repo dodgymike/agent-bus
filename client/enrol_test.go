@@ -271,6 +271,20 @@ func TestEnrolIdempotencyKeyReusedWithDifferentNameFails(t *testing.T) {
 	if got := atomic.LoadInt32(&count); got != 1 {
 		t.Fatalf("server saw %d requests after the conflicting retry, want still 1 — it must be refused locally", got)
 	}
+	// IDEM-14-FU-CLIENTTEXT applies here too (idempotencyConflict, the LOCAL
+	// refusal, not just annotateIdempotencyConflict's bus-side 409 wording):
+	// no false "disconnects the client" claim, on a call that in fact never
+	// even reached the bus.
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	if strings.Contains(e.Remedy, "disconnect") {
+		t.Fatalf("Remedy = %q claims a disconnect on a request that was refused LOCALLY and never reached the bus", e.Remedy)
+	}
+	if !strings.Contains(e.Remedy, "rejects and logs") {
+		t.Fatalf("Remedy = %q, want it to say the bus rejects and logs this rather than merely omitting the old disconnect claim", e.Remedy)
+	}
 }
 
 // TestEnrolSameKeyDifferentBusIsFresh checks the idempotency scope is (key,
@@ -639,5 +653,198 @@ func TestEnrolUppercaseNameNamesLowercaseRemedy(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&doer.calls); got != 0 {
 		t.Fatalf("HTTP calls = %d, want 0 (name validation must fail before any request)", got)
+	}
+}
+
+// TestEnrolFailedComposesRemedyAndStampsKey mirrors
+// TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry (messages_test.go)
+// for enrolFailed, which was the whole point of 45b2e17a / 799aea40: the two
+// near-duplicate reports of the same three defects (enrolFailed REPLACED the
+// remedy instead of composing it, ignored e.fatal, and never stamped
+// Error.IdempotencyKey) are fixed together here, on the same shape writeFailed
+// already used.
+//
+// It calls enrolFailed directly and builds every *Error through statusError /
+// networkError, for the same reason the messages.go table does: what is under
+// test is the REAL classification, not a fixture that agrees with the test by
+// construction.
+func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
+	const idemKey = "enrol-fail-key-1"
+	const busURL = "https://bus.example"
+
+	fromStatus := func(op string, status int, retryAfter, detail string) error {
+		h := http.Header{}
+		if retryAfter != "" {
+			h.Set("Retry-After", retryAfter)
+		}
+		resp := &http.Response{StatusCode: status, Header: h}
+		return statusError(op, routeEnroll, resp, []byte(`{"error":`+strconvQuote(detail)+`}`))
+	}
+
+	cases := []struct {
+		name  string
+		save  bool
+		build func() error
+		// wantKind is the Kind after enrolFailed. Closed vocabulary, same
+		// reasoning as the writeFailed table.
+		wantKind  Kind
+		wantFatal bool
+		// wantRemedyKeeps are substrings of the ORIGINAL remedy that must
+		// survive composition.
+		wantRemedyKeeps []string
+		// wantRemedyAdds are substrings the appended clause must contribute.
+		wantRemedyAdds []string
+		// wantRemedyLacks are substrings that must NOT appear.
+		wantRemedyLacks []string
+		// wantRemedyUnchanged asserts the remedy is byte-for-byte unchanged —
+		// no clause at all (the default/KindRejected branch).
+		wantRemedyUnchanged bool
+		// wantPendingDropped asserts DropPending ran: no pending record
+		// survives for this (key, busURL) after enrolFailed returns.
+		wantPendingDropped bool
+	}{
+		{
+			name: "fatal 503 keeps its diagnosis and is told NOT to retry",
+			save: true,
+			build: func() error {
+				return fromStatus("enrol", http.StatusServiceUnavailable, "", "the write path is poisoned")
+			},
+			wantKind:  KindServer,
+			wantFatal: true,
+			wantRemedyKeeps: []string{
+				fatalRemedyFragment,
+				"invariant 4",
+			},
+			wantRemedyAdds: []string{
+				"this enrol may or may not have been applied",
+				"do NOT retry until the bus can durably accept again",
+				"--idempotency-key " + idemKey,
+				"invariant 10",
+			},
+		},
+		{
+			name: "network failure keeps `check --bus` and gains the retry clause",
+			save: true,
+			build: func() error {
+				return networkError("enrol", busURL, errors.New("dial tcp: connection refused"))
+			},
+			wantKind:  KindNetwork,
+			wantFatal: false,
+			wantRemedyKeeps: []string{
+				networkRemedyFragment,
+			},
+			wantRemedyAdds: []string{
+				"this enrol may or may not have been applied",
+				"--idempotency-key " + idemKey,
+				"the SAME enrolment rather than a second one",
+				"invariant 10",
+			},
+			wantRemedyLacks: []string{"do NOT retry"},
+		},
+		{
+			name: "network failure with Save=false still stamps the key but composes nothing",
+			save: false,
+			build: func() error {
+				return networkError("enrol", busURL, errors.New("dial tcp: connection refused"))
+			},
+			wantKind:            KindNetwork,
+			wantFatal:           false,
+			wantRemedyUnchanged: true,
+		},
+		{
+			name: "404 (unknown route / version skew) is refused for good and drops the pending record",
+			save: true,
+			build: func() error {
+				return fromStatus("enrol", http.StatusNotFound, "", "no such route")
+			},
+			wantKind:            KindVersionSkew,
+			wantFatal:           false,
+			wantRemedyUnchanged: true,
+			wantPendingDropped:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c, err := New(Config{IdentityDir: dir})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := c.Store().ClaimEnrolment(pendingEnrolment{
+				IdempotencyKey: idemKey,
+				Name:           "a",
+				BusURL:         busURL,
+				PublicKey:      "cHViLWtleQ==",
+				PrivateKeySeed: "c2VlZC1ieXRlcy1oZXJlLWZvci10ZXN0aW5nLW9ubHk=",
+				CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+			}, time.Now()); err != nil {
+				t.Fatalf("seeding a pending record: %v", err)
+			}
+
+			built := tc.build()
+			var before *Error
+			if !errors.As(built, &before) {
+				t.Fatalf("the fixture is not a *client.Error, so this case proves nothing: %v", built)
+			}
+			beforeRemedy := before.Remedy
+
+			got := c.enrolFailed("enrol", idemKey, busURL, EnrolOptions{Save: tc.save}, built)
+
+			var e *Error
+			if !errors.As(got, &e) {
+				t.Fatalf("enrolFailed returned a non-*Error: %v", got)
+			}
+			if e.Kind != tc.wantKind {
+				t.Fatalf("Kind = %q, want %q — annotating a failure must not move it between categories", e.Kind, tc.wantKind)
+			}
+			if got := IsFatalUnavailable(got); got != tc.wantFatal {
+				t.Fatalf("IsFatalUnavailable = %v, want %v", got, tc.wantFatal)
+			}
+			if e.IdempotencyKey != idemKey {
+				t.Fatalf("IdempotencyKey = %q, want %q — this was previously NEVER stamped on a failed enrol (799aea40)", e.IdempotencyKey, idemKey)
+			}
+			if got := IdempotencyKeyOf(got); got != idemKey {
+				t.Fatalf("IdempotencyKeyOf = %q, want %q", got, idemKey)
+			}
+
+			if tc.wantRemedyUnchanged {
+				if e.Remedy != beforeRemedy {
+					t.Fatalf("the remedy was modified:\n  before: %q\n   after: %q", beforeRemedy, e.Remedy)
+				}
+			} else {
+				if !strings.HasPrefix(e.Remedy, beforeRemedy) {
+					t.Fatalf("the composed remedy does not START with the original diagnosis:\n  before: %q\n   after: %q\n"+
+						"this was exactly the REPLACES-not-composes bug (45b2e17a): `check --bus` and similar must survive", beforeRemedy, e.Remedy)
+				}
+			}
+			for _, want := range tc.wantRemedyKeeps {
+				if !strings.Contains(e.Remedy, want) {
+					t.Fatalf("the ORIGINAL diagnosis was destroyed: remedy no longer contains %q.\nremedy: %q", want, e.Remedy)
+				}
+			}
+			for _, want := range tc.wantRemedyAdds {
+				if !strings.Contains(e.Remedy, want) {
+					t.Fatalf("remedy = %q, want it to contain the appended clause %q", e.Remedy, want)
+				}
+			}
+			for _, unwanted := range tc.wantRemedyLacks {
+				if strings.Contains(e.Remedy, unwanted) {
+					t.Fatalf("remedy = %q, want it NOT to contain %q", e.Remedy, unwanted)
+				}
+			}
+
+			_, found, ferr := c.Store().FindPending(idemKey, busURL)
+			if ferr != nil {
+				t.Fatalf("FindPending: %v", ferr)
+			}
+			if tc.wantPendingDropped && found {
+				t.Fatalf("a pending record survives for a failure that will be refused identically forever — it is dead weight and should have been dropped")
+			}
+			if !tc.wantPendingDropped && !found {
+				t.Fatalf("the pending record was dropped for an AMBIGUOUS failure — it may still have been applied, so the key material must be kept for a retry")
+			}
+		})
 	}
 }

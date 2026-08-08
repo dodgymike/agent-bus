@@ -1227,13 +1227,15 @@ func resolveIdempotencyKey(op, key string) (string, error) {
 // reports the failure as not-retryable. For those the key is a handle for LATER,
 // once the bus can durably accept again; it is not an invitation to retry now.
 //
-// enrolFailed solves the same problem for enrolment, but it does NOT yet draw
-// either of these distinctions: it REPLACES the remedy rather than composing
-// with it (so `enrol` against an unreachable bus loses "check --bus /
-// AGENT_BUS_URL and that the bus is running"), it ignores e.fatal, and it never
-// sets Error.IdempotencyKey — so `enrol --json` reports no idempotency_key where
-// `send` does. Do not read the two as already consistent. Tracked as a
-// follow-up; when it is fixed the two should converge on this shape.
+// enrolFailed (enrol.go) solves the same problem for enrolment and now draws
+// both distinctions the same way (45b2e17a / 799aea40, fixed): it COMPOSES
+// the remedy rather than replacing it, checks e.fatal, and always stamps
+// Error.IdempotencyKey. The two are not literally shared code — enrolment's
+// clause names "this enrol" and "the SAME enrolment" where a send names the
+// message — but the composition logic (the TrimRight/"; " join, the
+// wantRemedyUnchanged-shaped default branch) is now byte-for-byte the same
+// pattern, and a future edit to one of these should check the other still
+// agrees.
 func writeFailed(op, key string, err error) error {
 	// errors.As, not a type assertion — a wrapped *Error would otherwise slip
 	// through and lose both the key and the remedy.
@@ -1277,9 +1279,10 @@ const mintLostMarker = "POST " + routeMint
 //
 //   - invariant 10's one unforgivable case: the SAME idempotency key presented
 //     with a DIFFERENT payload. The bus treats that as a protocol violation —
-//     it answers 409 with `Connection: close` and DISCONNECTS — so the caller
-//     must be told plainly that retrying will not help and a FRESH key is the
-//     fix.
+//     it answers 409, REJECTS it and LOGS it (narrowed 2026-08-08,
+//     IDEM-14-FU-CLIENTTEXT — it does NOT disconnect; an earlier version of
+//     this comment claimed it did) — so the caller must be told plainly that
+//     retrying will not help and a FRESH key is the fix.
 //   - hub.ErrUnknownMint / hub.ErrMintMismatch: the reservation this key named
 //     is not one the bus is holding. ErrUnknownMint is ROUTINE — the mint
 //     table is in-memory only and does not survive a restart — so this is the
@@ -1311,7 +1314,20 @@ func annotateIdempotencyConflict(op, key string, err error) error {
 	e.Kind = KindRejected
 	e.Message = "the bus refused this " + op + ": idempotency key " + key +
 		" was already used with a DIFFERENT payload"
-	e.Remedy = "use a FRESH idempotency key for new content — reusing one with different content is a protocol violation and the bus disconnects the client (invariant 10); to RETRY the original message, resend it byte for byte under the same key"
+	// NOT "the bus disconnects the client": measured field evidence (2026-08-07,
+	// IDEM-14-FU-CLIENTTEXT) is that it does not — the connection survives this
+	// 409 today, and asserting otherwise risks an agent taking destructive
+	// recovery (re-enrol, rebuild identity, restart supervisors) it does not
+	// need. IDEM-14 (b0facce9), still open, is what decides and implements the
+	// actual disconnect mechanics; this text must not get ahead of it again.
+	//
+	// Removing a false claim is not enough on its own — a reader must be told
+	// what DOES happen, not just that the old sentence was wrong, or "not
+	// disconnected" reads as "nothing happened" and invites its own bad guess
+	// (retry under the same key, say). So this says explicitly: rejected,
+	// logged, connection kept open. That is the positive half of invariant
+	// 10's narrowing, not just the negative one.
+	e.Remedy = "use a FRESH idempotency key for new content — reusing one with different content is a protocol violation: the bus rejects it with this 409 and logs it, but does NOT drop the connection (invariant 10), so this session and any other request pipelined on it remain usable; to RETRY the original message, resend it byte for byte under the same key"
 	return e
 }
 

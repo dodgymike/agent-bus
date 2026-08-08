@@ -49,9 +49,33 @@ const (
 	KindServer Kind = "server"
 
 	// KindRejected is a request the bus understood and refused on its merits:
-	// an invalid name, an unknown route, an idempotency-key conflict. Retrying
-	// the same request unchanged will fail the same way.
+	// an invalid name, an idempotency-key conflict, a size or format the bus
+	// declines. Retrying the same request unchanged will fail the same way.
 	KindRejected Kind = "rejected"
+
+	// KindVersionSkew is a 404 on a route THIS client depends on for the
+	// operation it attempted (added 2026-08-08, 52930611). It is deliberately
+	// NOT KindRejected: a 404 here means the bus never understood the
+	// request at all — it does not know the route exists — which is a
+	// different fact from "the bus understood and refused it", and it invites
+	// a different reaction. Telling a caller its MESSAGE was rejected when
+	// its BUS is simply too old to have the route invites retrying,
+	// abandoning the message, or reporting a delivery failure — all wrong
+	// when the actual remedy is "upgrade the bus".
+	//
+	// This does NOT hold for every route. /v1/send answers a genuine
+	// PER-RESOURCE 404 (hub.ErrUnknownRecipient, "unknown recipient") for a
+	// message addressed to an agent the bus does not know — an earlier
+	// version of this comment claimed no route on this surface had a dynamic
+	// per-resource lookup, which security gate finding F1 (52930611) showed
+	// was false and actively harmful for exactly this case: the remedy told
+	// the caller to point --bus at a DIFFERENT bus, which is wrong advice and
+	// a nudge toward pinned-fingerprint churn under invariant 11. statusError
+	// (transport.go) carves that one route out and keeps it KindRejected.
+	// Every OTHER route this client calls IS a fixed, statically-known path
+	// with no dynamic lookup behind it, checked against every 404 site in
+	// internal/httpapi at the time of the fix.
+	KindVersionSkew Kind = "version_skew"
 
 	// KindEmpty is "nothing to report" — a successful operation whose result
 	// set is empty. It exists so an agent can branch on an empty long-poll
@@ -77,6 +101,12 @@ const (
 	ExitServer   = 6 // the bus reported a failure of its own
 	ExitRejected = 7 // the bus understood the request and refused it
 	ExitEmpty    = 8 // succeeded with nothing to report
+
+	// ExitVersionSkew is a 404 on a route this client depends on: the bus
+	// never understood the request, because it does not know the route
+	// exists. Deliberately distinct from ExitRejected — see KindVersionSkew.
+	// Added 2026-08-08, 52930611.
+	ExitVersionSkew = 9
 )
 
 // Error is the one error type this package returns. Every failure path
@@ -260,6 +290,8 @@ func ExitCode(err error) int {
 		return ExitServer
 	case KindRejected:
 		return ExitRejected
+	case KindVersionSkew:
+		return ExitVersionSkew
 	case KindEmpty:
 		return ExitEmpty
 	default:

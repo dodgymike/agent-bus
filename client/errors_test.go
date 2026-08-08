@@ -119,7 +119,11 @@ func TestHTTPStatusMapsToKindAndExitCode(t *testing.T) {
 	}{
 		{http.StatusUnauthorized, KindAuth, ExitAuth},
 		{http.StatusForbidden, KindAuth, ExitAuth},
-		{http.StatusNotFound, KindRejected, ExitRejected},
+		// A 404 on /v1/enroll — the route this table's Enrol call actually
+		// hits — is a missing route (an old bus predating enrolment), not a
+		// refusal on the merits: KindVersionSkew, not KindRejected. See
+		// 52930611 / KindVersionSkew's doc comment.
+		{http.StatusNotFound, KindVersionSkew, ExitVersionSkew},
 		{http.StatusConflict, KindRejected, ExitRejected},
 		{http.StatusRequestEntityTooLarge, KindRejected, ExitRejected},
 		{http.StatusTooManyRequests, KindServer, ExitServer},

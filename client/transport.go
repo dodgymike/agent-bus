@@ -352,10 +352,16 @@ func (c *Client) attempt(ctx context.Context, doer HTTPDoer, urlStr string, payl
 		}
 		return res, nil
 	}
-	return nil, statusError(req.op, httpResp, body)
+	return nil, statusError(req.op, req.path, httpResp, body)
 }
 
 // statusError maps a non-2xx response to a classified *Error.
+//
+// path is the request path this response answered — req.path, not anything
+// parsed back off resp, because a test double's *http.Response has no
+// populated Request field and a caller must not have to fake one just to get
+// the right classification. It is used ONLY for the 404 case, to name the
+// missing route (see the KindVersionSkew case below and 52930611).
 //
 // The mapping is by STATUS, and the bus's own `{"error":"..."}` message is
 // carried through verbatim as the detail: the server deliberately writes a
@@ -393,7 +399,7 @@ func (c *Client) attempt(ctx context.Context, doer HTTPDoer, urlStr string, payl
 // The second case is marked fatal, which takes it out of the retry loop
 // (isRetryable) and is reported to callers by IsFatalUnavailable so a long-lived
 // watcher can stop and say so instead of looping forever on a dead bus.
-func statusError(op string, resp *http.Response, body []byte) *Error {
+func statusError(op, path string, resp *http.Response, body []byte) *Error {
 	detail := decodeServerError(body)
 	e := &Error{Op: op, Status: resp.StatusCode, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 	switch {
@@ -401,10 +407,39 @@ func statusError(op string, resp *http.Response, body []byte) *Error {
 		e.Kind = KindAuth
 		e.Message = "the bus rejected this credential: " + detail
 		e.Remedy = "the session may have expired or the bus may have restarted; retry, and if it persists re-enrol with `agent-busctl enrol`"
+	case resp.StatusCode == http.StatusNotFound && path != routeSend:
+		// KindVersionSkew, not KindRejected, for every route EXCEPT
+		// routeSend: /v1/send answers a genuine PER-RESOURCE 404 —
+		// hub.ErrUnknownRecipient, "unknown recipient" — for a message
+		// addressed to an agent the bus does not know, which is exactly the
+		// dynamic per-resource lookup this branch assumes does not exist on
+		// this surface. That was a real defect (security gate finding F1,
+		// 52930611): an unknown-recipient send was surfacing as an
+		// infrastructure/version fault, with a remedy that told the caller to
+		// point --bus at a DIFFERENT bus — actively wrong advice, and a nudge
+		// toward trust-anchor churn under invariant 11's pinning. Every OTHER
+		// route this client calls is a fixed path with no dynamic lookup
+		// behind it (checked against every 404 site in internal/httpapi:
+		// the session routes below, this recipient case, and the server's
+		// generic route-not-registered catch-all are the only three), so a
+		// 404 on any of THOSE still means the bus does not know the route.
+		//
+		// session.go's annotateSessionError OVERRIDES this for the two
+		// session routes regardless of what is set here: a 404 on
+		// /v1/session/begin or /v1/session/complete means the bus does not
+		// know THIS AGENT (a stale local credential against a rebuilt bus),
+		// which is an auth condition, not a missing route.
+		e.Kind = KindVersionSkew
+		e.Message = "the bus has no route for " + op + " (" + path + "): " + detail
+		e.Remedy = "this bus build predates that route; upgrade the bus, or point --bus at one built at/after the commit that added it — this is not a rejection of your request, the bus does not know the route exists"
 	case resp.StatusCode == http.StatusNotFound:
+		// routeSend's 404: a genuine per-resource refusal (unknown
+		// recipient), not a missing route. Falls through to the ordinary
+		// KindRejected wording below, same as any other 4xx the bus
+		// understood and refused on its merits.
 		e.Kind = KindRejected
-		e.Message = "the bus answered 404: " + detail
-		e.Remedy = "this bus build may not serve that route yet; check `agent-busctl --help` and the bus version"
+		e.Message = "the bus refused the request: " + detail
+		e.Remedy = "correct the request and try again"
 	case resp.StatusCode == http.StatusConflict:
 		e.Kind = KindRejected
 		e.Message = "the bus refused the request: " + detail
