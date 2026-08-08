@@ -305,7 +305,17 @@ func peerErrorCode(buf []byte) string {
 		// not there.
 		CodeRelayLoop, CodeInvalidBusPath, CodeInvalidRelay,
 		CodeIdempotencyViolation, CodeUnknownPeer, CodeStaleRoster,
-		CodeInvalidRosterUpdate:
+		CodeInvalidRosterUpdate,
+		// Signed relay ingest (SIGN-7, handshake.go) is a THIRD such surface.
+		// RelayHandler emits all three of these on the responder side
+		// (relayhttp.go) whenever it cannot attribute an envelope to the agent
+		// it names or holds no peering-time pin for the origin bus — they are
+		// FINAL, operator-actionable verdicts, not internal failures, and
+		// belong in this log-legibility allow-list for the same reason as
+		// every code above: without them here a peer's signature refusal is
+		// reported as "unrecognised error code" instead of the real reason
+		// (RELAY-9).
+		CodeUnsigned, CodeBadSignature, CodeUnpeeredBus:
 		return body.Error
 	default:
 		return "unrecognised error code"
