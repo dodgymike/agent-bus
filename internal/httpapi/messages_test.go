@@ -599,13 +599,20 @@ func TestSendRoute(t *testing.T) {
 		}
 	})
 
-	t.Run("the same key with a DIFFERENT payload is a protocol violation", func(t *testing.T) {
+	// NARROWED 2026-08-07: this was asserted to disconnect. It no longer does.
+	// The key is the caller's OWN — keys are scoped per agent — so this is a
+	// client that lost track of its keys, and dropping its socket would kill the
+	// long poll and every other request it had pipelined there. The disconnect
+	// moved to checkSignedMint's sender-mismatch 403, which is where a THIRD
+	// PARTY's signed message presents. disconnect_socket_test.go proves both at
+	// the socket; this case only pins the status and the absent header.
+	t.Run("the same key with a DIFFERENT payload is a protocol violation, rejected without disconnecting", func(t *testing.T) {
 		rec := sendDM(t, srv, alpha, beta.id, b64("something else"), "dm-1")
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
 		}
-		if got := rec.Header().Get("Connection"); !strings.EqualFold(got, "close") {
-			t.Errorf("Connection = %q, want \"close\": invariant 10 disconnects a client that reuses a key for different content", got)
+		if got := rec.Header().Get("Connection"); strings.EqualFold(got, "close") {
+			t.Errorf("Connection = %q, want it absent: a client reusing its OWN key is confused, not hostile, and is not disconnected", got)
 		}
 	})
 

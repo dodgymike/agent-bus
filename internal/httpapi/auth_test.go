@@ -184,7 +184,13 @@ func TestEnrollRoute(t *testing.T) {
 		}
 	})
 
-	t.Run("the same key with a different payload is 409 and disconnects", func(t *testing.T) {
+	// NARROWED 2026-08-07: this was "409 and disconnects". It is now 409 and the
+	// connection is KEPT — reusing one's own key with different content is a
+	// client bug, and /v1/enroll is unauthenticated, so the socket is not even a
+	// proxy for an identity. The disconnect moved to the paths where a THIRD
+	// PARTY's signed material is presented; see disconnect_socket_test.go, which
+	// proves both halves at the socket rather than from this header.
+	t.Run("the same key with a different payload is 409 and keeps the connection", func(t *testing.T) {
 		srv, _ := newAuthServer(t)
 		_, _, pubB64 := newAuthKeypair(t)
 		_, _, otherB64 := newAuthKeypair(t)
@@ -205,8 +211,8 @@ func TestEnrollRoute(t *testing.T) {
 				if rec.Code != http.StatusConflict {
 					t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
 				}
-				if got := rec.Result().Header.Get("Connection"); !strings.EqualFold(got, "close") {
-					t.Errorf("Connection = %q, want %q: reusing a key for new content is a protocol violation and the client is disconnected", got, "close")
+				if got := rec.Result().Header.Get("Connection"); strings.EqualFold(got, "close") {
+					t.Errorf("Connection = %q, want it absent: reusing a key for new content is rejected and logged, but the caller is confused rather than hostile and its connection is kept", got)
 				}
 				body := decodeBody(t, rec)
 				wantKeys(t, body, "error")

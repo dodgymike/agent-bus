@@ -279,13 +279,32 @@ func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, op strin
 
 	case errors.Is(err, auth.ErrIdempotencyKeyReused):
 		// Invariant 10: same key + DIFFERENT payload is a protocol violation,
-		// not a retry. Reject it, LOG it, and DISCONNECT the offending client —
-		// net/http closes the connection after this response because of the
-		// Connection header. Note the contrast with a legitimate retry (same
-		// key, same payload), which never reaches here: it returns the original
-		// 201 and is not punished in any way.
-		w.Header().Set("Connection", "close")
-		s.log.Warn("idempotency key reused with a different payload; disconnecting the client", kv...)
+		// not a retry. Reject it and LOG it. Note the contrast with a legitimate
+		// retry (same key, same payload), which never reaches here: it returns
+		// the original 201 and is not punished in any way.
+		//
+		// # THE CONNECTION IS KEPT (narrowed 2026-08-07)
+		//
+		// This path carried "Connection: close" until 2026-08-07 and no longer
+		// does, for the reason set out in full at httpapi.disconnect: reusing
+		// one's own key with different content is a client BUG, and dropping the
+		// socket punishes every other request on it rather than the offending
+		// one.
+		//
+		// The argument is if anything STRONGER on this route than on /v1/send,
+		// because /v1/enroll is UNAUTHENTICATED. There is no principal here to
+		// hold responsible, so the connection is not a proxy for an identity —
+		// the party disconnected is simply whoever owns that socket, which on a
+		// shared address is not necessarily the party that sent the request. And
+		// the honest client it hits is one part-way through obtaining a
+		// credential, with no session yet to fall back on.
+		// The log line deliberately does NOT borrow /v1/send's "the key is the
+		// caller's own" wording: enrolment keys are a GLOBAL namespace
+		// (idem.NewEnrolScope, no agent component), precisely because there is no
+		// authenticated agent yet, so two different clients CAN collide here. The
+		// reason the connection is kept is the one in the block comment above —
+		// there is no principal to hold responsible — not key ownership.
+		s.log.Warn("enrolment idempotency key reused with different key material; rejected, and the connection is KEPT because this route is unauthenticated and the socket identifies no principal to punish", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "idempotency key already used with a different payload"})
 
 	case errors.Is(err, auth.ErrUnknownAgent), errors.Is(err, auth.ErrUnknownSession):

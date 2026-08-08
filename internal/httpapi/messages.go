@@ -63,6 +63,49 @@ const MaxMessageRequestBytes = 128 << 10
 // transient burst and harmless otherwise.
 const pollRetryAfterSeconds = "5"
 
+// disconnect marks the connection for closure after the response is written:
+// net/http honours a handler-set "Connection: close" by closing the socket once
+// the reply is flushed.
+//
+// # WHO this is for, and who it is NOT for (narrowed 2026-08-07)
+//
+// Invariant 10 pairs a rejection with a disconnect, and the whole value of the
+// disconnect depends on aiming it at the right party. It is for the caller that
+// presented ANOTHER AGENT'S signed message — the replay clause. That caller is
+// not a confused client: it is holding material it was never issued, and there
+// is no benign way to arrive at it.
+//
+// It is deliberately NOT used for a caller's conflict with ITSELF. Reusing your
+// own idempotency key with a different payload is a protocol violation and is
+// refused, but it is overwhelmingly a BUG IN AN HONEST CLIENT, and dropping the
+// socket destroys every unrelated in-flight request that client had pipelined on
+// it — including the long poll it was parked on. That is an abuse defence
+// landing on the party most likely to be honest, so those paths reject and log
+// and keep the connection. See writeHubError's ErrIdempotencyKeyReused case and
+// writeAuthError's, which both carried this header until 2026-08-07.
+//
+// Before adding a call site, answer TWO questions:
+//
+//  1. Can a merely BUGGY client reach this line? If it can, it is the wrong
+//     line — see the sender-mismatch check in checkSignedMint, whose first
+//     draft fired on an omitted or unqualified `sender` field and had to be
+//     gated on the claim actually parsing as an agent id.
+//  2. Does this connection carry only ONE principal's traffic? Today it does.
+//     When the relay ingest path lands it will NOT: a peer bus legitimately
+//     presents a `sender` that is not the connection's principal, on a
+//     connection multiplexing many agents, so dropping it would punish every
+//     agent behind that peer. internal/relay/doc.go already specifies
+//     "OFFENDING PEER DISCONNECTED" and will need reconciling with this
+//     narrowing rather than inheriting it.
+//
+// The 409 from hub.ErrUnknownMint is the case that proves question 1 — it is
+// reached both by a caller presenting a stranger's reservation and by a caller
+// re-presenting its own spent one. For an OUTSTANDING reservation nothing
+// available here tells the two apart, so it does not disconnect either.
+func disconnect(w http.ResponseWriter) {
+	w.Header().Set("Connection", "close")
+}
+
 // AgentInfo is one entry of GET /v1/agents.
 type AgentInfo struct {
 	AgentID    string `json:"agent_id"`
@@ -495,13 +538,15 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 // violation. Dressing a permanent refusal as transient is how a client ends up
 // in a retry loop that can never succeed.
 func (s *Server) checkSignedMint(w http.ResponseWriter, r *http.Request, sender string, body SendRequestBody) (hub.SignedMint, bool) {
-	reject := func(status int, clientMsg, logMsg string, kv ...interface{}) (hub.SignedMint, bool) {
-		kv = append([]interface{}{
+	logKV := func(kv []interface{}) []interface{} {
+		return append([]interface{}{
 			"request_id", RequestIDFromContext(r.Context()),
 			"agent_id", sender,
 			"path", r.URL.Path,
 		}, kv...)
-		s.log.Debug(logMsg, kv...)
+	}
+	reject := func(status int, clientMsg, logMsg string, kv ...interface{}) (hub.SignedMint, bool) {
+		s.log.Debug(logMsg, logKV(kv)...)
 		s.writeJSON(w, r, status, ErrorResponse{Error: clientMsg})
 		return hub.SignedMint{}, false
 	}
@@ -550,13 +595,69 @@ func (s *Server) checkSignedMint(w http.ResponseWriter, r *http.Request, sender 
 	// would resolve a verification key for the NAMED sender, and either fail
 	// confusingly or, worse, succeed against a key the real sender never used.
 	// The bus refuses to store that contradiction rather than pass it on.
+	//
+	// # AND THE CONNECTION IS CLOSED (2026-08-07)
+	//
+	// This is invariant 10's REPLAY clause, and it is the door a third party
+	// actually comes through. A signature does not stop replay: an accepted,
+	// signed message can be resent verbatim by anyone who has seen it, and the
+	// bytes still verify. What identifies the replayer is that the `sender`
+	// inside those bytes is not the agent on the session — exactly this check.
+	//
+	// The disconnect is aimed HERE, and only at paths like this one, because a
+	// caller cannot reach it by being merely buggy about its OWN messages: the
+	// sender name is inside the bytes it signed, so a single-identity client
+	// signs its own name or it signs nothing. Reaching this line means the
+	// caller is presenting a name it did not authenticate as.
+	//
+	// The residual innocent case, and it is worth naming rather than denying: a
+	// process holding TWO enrolments — an agent embedding client/ under two
+	// identities — could pair identity A's signed request with identity B's
+	// session token and land here without malice. It costs that client one
+	// connection and one clear 403 naming the remedy, which is a far smaller
+	// price than leaving the replay path open, and it is a client bug that
+	// SHOULD be loud.
+	//
+	// This check runs BEFORE hub.Send, so a disconnected caller has consumed no
+	// idempotency key, written no WAL record and delivered nothing.
+	//
+	// # THE DISCONNECT IS GATED ON THE CLAIM BEING A REAL AGENT ID
+	//
+	// The status is 403 for every mismatch. The DISCONNECT is not: it fires only
+	// when the claim PARSES as a well-formed, fully-qualified "<bus>.<agent>"
+	// id (invariant 2). That gate exists because the first draft of this change
+	// failed its own rule — "can a merely BUGGY client reach this line?" — on
+	// three shapes a single-identity client reaches by accident and not by
+	// malice:
+	//
+	//   - the `sender` field omitted entirely (empty string);
+	//   - an UNQUALIFIED id, the bus prefix dropped ("alpha-1");
+	//   - a trailing space or other stray whitespace.
+	//
+	// None of those names another agent; each is a client that failed to fill
+	// the field correctly, and dropping its socket costs it every other request
+	// on that connection and buys a reconnect storm as it retries. A REPLAYER,
+	// by contrast, is carrying somebody's real id inside bytes that somebody
+	// really signed, so it always parses.
 	if body.Sender != sender {
 		// The claimed value is not echoed to the client (it chose it) and IS
 		// logged, because an operator hunting an impersonation attempt needs to
 		// know which name was being worn.
-		return reject(http.StatusForbidden, "sender does not match the authenticated caller",
-			"send rejected: the sender named in the request is not the authenticated principal",
-			"claimed_sender", body.Sender)
+		if _, _, _, err := ids.ParseAgentID(body.Sender); err != nil {
+			// Malformed: a confused client, not a replayer. Debug, and the
+			// connection is kept.
+			return reject(http.StatusForbidden, "sender does not match the authenticated caller",
+				"send rejected: the sender named in the request is malformed and is not the authenticated principal; the connection is KEPT because a claim that is not a well-formed agent id names nobody and is a client bug rather than impersonation",
+				"claimed_sender", body.Sender, "err", err)
+		}
+		// WARN, not Debug: unlike the shape failures above, this is the signature
+		// of an impersonation or replay attempt and an operator should see it
+		// without turning debug logging on.
+		disconnect(w)
+		s.log.Warn("send refused and the client disconnected: the sender named in the request is a well-formed id for a DIFFERENT agent than the authenticated principal, which is how a replayed third-party message presents",
+			logKV([]interface{}{"claimed_sender", body.Sender})...)
+		s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "sender does not match the authenticated caller"})
+		return hub.SignedMint{}, false
 	}
 
 	// (e) The message id must be well formed, must be THIS bus's, and must agree
@@ -912,12 +1013,31 @@ func (s *Server) writeHubError(w http.ResponseWriter, r *http.Request, op string
 
 	case errors.Is(err, hub.ErrIdempotencyKeyReused):
 		// Invariant 10: same key + DIFFERENT payload is a protocol violation,
-		// not a retry. Reject it, LOG it, and DISCONNECT the offending client —
-		// net/http closes the connection after this response because of the
-		// Connection header. A legitimate retry (same key, same payload) never
-		// reaches here: it returns the original 201 and is not punished.
-		w.Header().Set("Connection", "close")
-		s.log.Warn("idempotency key reused with a different payload; disconnecting the client", kv...)
+		// not a retry. Reject it and LOG it. A legitimate retry (same key, same
+		// payload) never reaches here: it returns the original 201 and is not
+		// punished.
+		//
+		// # THE CONNECTION IS KEPT (narrowed 2026-08-07)
+		//
+		// This path carried "Connection: close" until 2026-08-07 and no longer
+		// does. The reasoning that removed it:
+		//
+		// The caller is AUTHENTICATED, the key is ITS OWN — keys are scoped per
+		// agent (idem.Scope), so one agent cannot collide with another's — and
+		// no other agent's material is involved. What that describes is a
+		// client that lost track of its own keys, which is a BUG, not an
+		// attack; a real attacker gains nothing by conflicting with itself.
+		//
+		// And the punishment lands on everything BUT the offending request:
+		// dropping the socket kills every other request that client had
+		// pipelined on it, including a long poll it was parked on, so one
+		// mis-keyed retry costs it messages it was legitimately waiting for.
+		// That is an abuse defence aimed at the party most likely to be honest.
+		//
+		// The disconnect now lives where a third party is demonstrably involved
+		// — checkSignedMint's sender-mismatch 403, invariant 10's replay clause.
+		// See disconnect() for the test to apply before adding another site.
+		s.log.Warn("idempotency key reused with a different payload; rejected, and the connection is KEPT because the key is the caller's own", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "idempotency key already used with a different payload"})
 
 	case errors.Is(err, hub.ErrUnknownRecipient):
