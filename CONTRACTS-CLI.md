@@ -410,24 +410,73 @@ outright rather than accept it alongside the new one for a window. (Enrolling st
 existing identity without the `logout` is refused — the stored identity still pins the old
 certificate.)
 
-- **Certificate expiry on the CLIENT side is NOT checked yet** — `MTLS-EXPIRY` owns it and is in
-  flight, not in `main`. `client/pin.go`'s `verifyPinnedBusCertificate` compares the fingerprint and
-  nothing else, so a bus certificate whose `NotAfter` is in the past is still accepted if the pin
-  matches. Disabling the default chain check (which the absence of a CA forces — see
-  `pinnedTLSConfig`) disables the validity-period check along with it, and nothing has yet been put
-  back in its place.
+- **Certificate expiry on the CLIENT side IS checked, since `MTLS-EXPIRY` (2026-08-07, commit
+  `9f2878a`).** A matching fingerprint is now NECESSARY BUT NOT SUFFICIENT:
+  `client/pin.go`'s `verifyPinnedBusCertificate` runs the **identity** check first (the leaf's
+  `sha256(DER)` must be a member of the accept-set) and then `checkBusCertificateValidity`, so a bus
+  certificate outside its validity window is REFUSED even when the pin matches. The order is
+  deliberate — a certificate that is both unpinned *and* expired is reported as UNPINNED, because the
+  substitution is what an operator must see first.
 
-  **This bullet was briefly WRONG in the other direction and the correction is recorded rather than
-  quietly reverted**, because it is the failure mode this repo keeps repeating: a 2026-08-07 revision
-  claimed the check "has been in place since `MTLS-PIN` … commit `61e6067`". It has not. `61e6067`
-  does not contain it, and never will; the code that revision was reading was `MTLS-EXPIRY`'s
-  *uncommitted* work sitting in the same worktree. Verified: `git show HEAD:client/pin.go` matches no
-  `NotAfter`, `NotBefore`, `ErrBusCertificateExpired` or `ParseCertificate`.
+  The mechanism, since it is contract:
+  - The verdict comes from `x509.Certificate.Verify` and nowhere else (invariant 9: no hand-rolled
+    date arithmetic). The leaf is added to a **fresh `x509.NewCertPool()` as its own root** — the
+    stdlib's supported way to say "trust is already established, apply the remaining checks", and
+    specifically a fresh pool rather than nil/system, which on darwin and windows would hand off to
+    the platform verifier and change the code path per OS.
+  - No chain is built and **the self-signature is not verified here**. It does not need to be: the pin
+    covers the whole DER, and the handshake separately proves the peer holds the matching private
+    key. `checkBusCertificateValidity` authenticates nothing on its own — an attacker's in-date
+    self-signed certificate passes it cleanly — which is why it is only ever reached after the
+    fingerprint comparison.
+  - `KeyUsages` is `ExtKeyUsageAny` (no EKU filtering) and `DNSName` is empty (there is no hostname
+    verification in this design; the pin replaces it).
+  - Failure surfaces as `*BusCertificateExpiredError`, carrying `Fingerprint`, `NotBefore`, `NotAfter`
+    and the time judged against, and unwrapping to the sentinel `ErrBusCertificateExpired`. Every
+    other x509 verdict fails closed as `ErrBusCertificateUnusable`, as does being handed the zero time
+    instead of a clock.
+  - **There is no client-side clock-skew allowance, on purpose.** `internal/buscert` backdates
+    `NotBefore` by five minutes when it MINTS a certificate; a second, invisible allowance here would
+    extend every certificate's usable life beyond the `NotAfter` it states.
+  - **The clock is read per HANDSHAKE, not per request.** `pinVerifier` takes `now func() time.Time`
+    and calls it on each handshake, so a long-lived transport cannot go on approving a certificate
+    that expired hours ago — but an established connection is reused *without* a new handshake, so the
+    real bound is how long the pooled connection survives, which for an agent continuously
+    long-polling `/v1/wait` can be a long time. TLS session resumption is disabled (no
+    `ClientSessionCache`), which is what keeps `VerifyPeerCertificate` running on every new
+    connection; adding a cache without also moving these checks into `VerifyConnection` would
+    silently disable both of them, with every positive test still passing.
 
-  What `MTLS-VERIFY` (2026-08-07) DID add is the **server-side operator** check, which is a different
-  surface and does not substitute for the client one: `agent-bus healthcheck` performs a real x509
-  verification against the bus's own certificate, so it enforces the validity period *for the
-  operator's probe*. That makes an expired certificate show up as an unhealthy container. It does
+  **This bullet has now been wrong in BOTH directions, and both corrections are recorded rather than
+  quietly reverted** — the pattern is the point:
+  1. A 2026-08-07 revision claimed the check "has been in place since `MTLS-PIN` … commit `61e6067`".
+     It was not: that revision was reading `MTLS-EXPIRY`'s *uncommitted* work in the same worktree and
+     documenting it as shipped. `61e6067` genuinely does not contain it — the proof below is RED
+     against that commit, which is what makes the proof worth anything.
+  2. The bullet that replaced it said expiry is "NOT checked yet" and that `MTLS-EXPIRY` is "in
+     flight, not in `main`", citing a proof that `git show HEAD:client/pin.go` matched no `NotAfter`,
+     `ErrBusCertificateExpired` or `ParseCertificate`. That was true when written and became FALSE the
+     same day, when `9f2878a` landed — at which point the paragraph's own stored proof matched all
+     three and disproved the paragraph. **A claim anchored on a moving `HEAD` rots silently**; cite a
+     commit.
+
+  Proof — RED at `61e6067`, GREEN at `9f2878a`. Read with `git show`, never from the worktree, which
+  is exactly how correction 1 happened:
+
+  ```
+  for s in 'var ErrBusCertificateExpired = errors.New(' \
+           'return checkBusCertificateValidity(rawCerts[0], at)' \
+           'leaf, err := x509.ParseCertificate(der)' \
+           'CurrentTime: at,' \
+           'invalid.Reason == x509.Expired'; do
+    git show 9f2878a:client/pin.go | grep -qF -- "$s" || echo "MISSING: $s"
+  done
+  ```
+
+  What `MTLS-VERIFY` (2026-08-07) separately added is the **server-side operator** check, which is a
+  different surface and does not substitute for the client one: `agent-bus healthcheck` performs a
+  real x509 verification against the bus's own certificate, so it enforces the validity period *for
+  the operator's probe*. That makes an expired certificate show up as an unhealthy container. It does
   nothing for an agent connecting from elsewhere.
 - **`client.Config.HTTPClient` bypasses all of this — both halves.** An embedder that supplies its
   own transport bypasses the fingerprint check *and* the refusal to speak `https` to a bus with no
@@ -531,6 +580,26 @@ No code changes meaning; some commands give one a more specific sense:
   (2026-08-07): `agent-busctl broadcast`, because the bus's deliberate `501` falls into the generic
   `>= 500` branch.** Not retried, but not distinguishable from a real server fault by exit code alone
   — read the message text, which carries the bus's own explanation.
+- `6` — **and, since `CLI-3-FU-HASHVERIFY` (2026-08-08), `watch` on a BODY-INTEGRITY failure: a
+  message whose body disagrees with the `size` or `content_sha256` the bus sent beside it.** The
+  whole batch fails, nothing reaches the caller, and the watch **STOPS — it does not retry.** Read
+  the distinction precisely, because the two halves are separately load-bearing: the **cursor is left
+  exactly where it was**, so nothing is skipped and a later run re-reads that position; but this run
+  does not re-read it, because the bus is deterministic about what lives at a position and no number
+  of attempts turns a body that disagrees with its digest into one that agrees.
+
+  **This exit code REPLACES a previous exit `8`, and that is the point of the task.** Before the fix
+  the error was an ordinary `KindServer`, which both the transport retry loop and `watchShouldRetry`
+  treat as transient, so `watch` re-read the same cursor, got the same damaged message, looped until
+  `--for` expired and exited **8** — "a bounded watch delivered nothing" — while messages were in
+  fact arriving damaged. A caller branching on `8` was being told the opposite of the truth.
+
+  What the check proves and does not: it proves the bytes and the metadata beside them AGREE, which
+  catches corruption in transit, a proxy that mangled a body, and a bus internally inconsistent with
+  itself. It is **not authenticity** — the BUS computes that hash, so a bus that wants to lie hashes
+  the body it invented. Sender authenticity is the signature and nothing else. An **absent** field is
+  not verified: `size` `0` or an omitted `content_sha256` is an older bus, and refusing to read from
+  it would turn version skew into an outage for a check that is not an authenticity control anyway.
 
 ### JSON shapes — CONTRACT
 
@@ -667,7 +736,7 @@ This is the load-bearing part of `watch`, and it applies whether the output is h
 | `<identity-dir>/identities.json` | `0600` | Format version `1` (**not bumped by `MTLS-ROTATE`** — see below). Enrolled identities **including TWO Ed25519 private-key seeds each** (`private_key_seed` and, since 2026-08-07, `messaging_key_seed`), the pinned `bus_fingerprints` **array** (up to `MaxBusPins` = 2, `omitempty`; a single-pin `MTLS-PIN` store is migrated on load — see below), the current selection, and in-flight (`pending`) enrolments. |
 | `<identity-dir>/identities.lock` | `0600` | Exclusive lock for read-modify-write; treated as abandoned after 30s. |
 | `<identity-dir>/trusted-keys/` | `0700` | (added 2026-08-07) The local trust store — `client.TrustedKeysDirName`. One `0600` file per peer, **named `<fully-qualified-agent-id>.pub`**, holding the standard base64 of that peer's 32-byte Ed25519 **messaging** public key. Deliberately the dullest format that works: one key, one file, no index, so an operator can inspect/add/remove with `cat`/`cp`/`rm` during an incident and a damaged file costs trust in one peer rather than all. A file over `4 KiB` is refused unread. The `0600`/`0700` modes protect **INTEGRITY, not secrecy** — these are public keys; whoever can write this directory decides whose signatures this agent accepts. |
-| `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_url`) pair — no key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
+| `<identity-dir>/cursors.json` | `0600` | Format version `1`. One `watch` read position per (`agent_id`, `bus_id`) pair — **`bus_id`, the server-minted one, NOT the bus URL, since `CLI-3-FU-URLKEY` (2026-08-08)**; see below. No key material. Capped at 256 records, and 512 bytes per stored cursor, so a bus cannot grow the file without bound. |
 | `<identity-dir>/cursors.lock` | `0600` | A **separate** exclusive lock from `identities.lock` — a cursor advances far more often than a credential changes, and sharing one lock would put `watch` in needless contention with `enrol`/`use`/`logout`. |
 
 **The `identities.json` accept-set field is migrated, one-way, on load (`MTLS-ROTATE`, 2026-08-07).**
@@ -717,6 +786,103 @@ compromised, and silently fixing the mode destroys the only evidence.
 **Session tokens are never written to disk.** They are bearer credentials with at most an hour of
 life that do not survive a bus restart, so persisting them would trade a stealable token at rest for
 two saved round trips. Each `agent-busctl` process performs its own handshake.
+
+### The cursor key is the BUS ID, not the bus URL (`CLI-3-FU-URLKEY`, 2026-08-08)
+
+A `cursors.json` record is keyed on (`agent_id`, `bus_id`) — the **server-minted** bus id (invariants
+1 and 2), read from the `<bus-id>.` prefix of the agent's own fully-qualified id. It was keyed on
+`bus_url`, **scheme included**, until this change.
+
+**This is a fix, not a preference.** A real agent migrated across a plaintext → TLS switch and ended
+up with two records for one agent id:
+
+```
+{agent_id: …mic-array-1, bus_url: http://127.0.0.1:18080,  cursor: …|266}
+{agent_id: …mic-array-1, bus_url: https://127.0.0.1:18080, cursor: …|266}
+```
+
+The `https` record started empty, so the first `watch` after the flip re-received the agent's entire
+history. At-least-once delivery permits that and `message_id` dedup absorbs it; the SCOPE is what
+made it worth fixing. It fires for **every agent on the bus at once**, the moment TLS is required,
+and any handler that acts per-message rather than deduplicating re-acts on its whole history
+simultaneously. A URL is not an identity for a bus — one bus is reachable at `http` and `https`
+during a migration, and also across a port move, a DNS change or a reverse proxy appearing.
+
+`bus_url` is deliberately **not** retained as a second field. A non-key field that looks like a key
+is how this happened once.
+
+#### BREAKING FOR EMBEDDERS — same Go signature, different meaning
+
+`Store.Cursor`, `Store.SetCursor` and `Store.ClearCursor` all keep the signature they had. Their
+**second parameter changed meaning**, from the bus URL to the bus id:
+
+```go
+// before CLI-3-FU-URLKEY
+c, err := st.Cursor(agentID, "https://127.0.0.1:8080")  // bus URL
+// after
+c, err := st.Cursor(agentID, "bus-abc")                 // server-minted bus id
+```
+
+Both are `string`, so **an embedder that keeps passing a URL recompiles cleanly and silently
+mis-keys every cursor**: the lookup matches nothing, `Cursor` returns `""` (it does not error on a
+miss — see below), and the caller replays from the start of the retained window while `SetCursor`
+writes records under a key nothing will ever read back. That is the worst shape a breaking change
+takes, so it is called out here rather than left to a release note. The fix is to derive the id the
+same way the client does — the prefix of `Credential.AgentID` up to the first `.` (invariant 2) — and
+**not** from `Credential.BusURL`. The empty string is refused: all three return a `KindInternal`
+error when either key is empty, so a caller that has no bus id gets an error rather than a wrong
+answer.
+
+`Credential.BusID` is used as a **cross-check**, not as the source. The client derives the bus id
+from the agent id (checked against the bus-id grammar) and refuses when `Credential.BusID` is present
+and disagrees, rather than picking a winner: the two disagreeing means the stored identity is
+self-contradictory about whose sequence space the cursor belongs to.
+
+#### Migration — REQUIRED READING even now the key is fixed
+
+Existing installs already have the split records; the fix stops new ones appearing, it does not
+retroactively unsplit what a flip already wrote. Three properties, all contract:
+
+- **The format version stays `1`, deliberately.** No bump. The bus id is recoverable from the record
+  itself (the `agent_id` prefix), so nothing is lost and nothing needs guessing — and `loadCursors`
+  **refuses an unknown version outright**, so bumping would make an older binary discard the whole
+  file and *guarantee* the full replay this change exists to prevent.
+- **Migration happens on READ, in memory** (`migrateCursorRecords`), so a read never takes the write
+  lock. The migrated shape reaches disk the next time anything calls `SetCursor`/`ClearCursor`, which
+  on an active watch is every batch.
+- **Mixing builds is safe in both directions.** An older build reading a new file finds no `bus_url`,
+  matches nothing and replays. An older build *writing* strips `bus_id` from every record — but
+  `agent_id`, which the id was derived FROM, is untouched, so the next new-build load re-derives them
+  all and collapses whatever duplicates the old build appended. The file degrades to the old shape
+  and is losslessly re-migrated; it never loses a position.
+
+What the one-time migration does to the split pair, and both are ANNOUNCED on stderr rather than
+done silently:
+
+| Case | Outcome |
+| --- | --- |
+| Two records collapse onto one key (the `http`/`https` pair) | The **most recently updated** wins — a cursor is opaque, so the timestamp is the only ordering available, and choosing the newest replays at most the gap between the two rather than the whole history. A warning names the count and says it may replay the messages in between. |
+| A record whose `agent_id` carries no bus prefix | **Dropped** — it can never be keyed or matched, and would otherwise hold one of the 256 slots for ever. A warning names the count. |
+
+#### `enrol` now writes `cursors.json`
+
+`Store.PromotePending` — the last step of a successful `enrol` — calls `ClearCursor` for the new
+credential's (agent id, bus id), **unconditionally**, whether or not it replaced an existing
+identity. Two consequences worth stating:
+
+- `enrol` now touches a **second** file and takes a **second** lock (`cursors.lock`, after the
+  identities lock is released — never nested).
+- The direction of the risk is the opposite of the obvious guess. Re-keying removed the accidental
+  separation the URL key gave, so an id enrolled by a *new* holder could inherit the *previous*
+  holder's read position — and the bus's cursor is not bus-scoped, so a position from elsewhere is
+  accepted and only later messages are returned. That is a **SKIP** — silent loss — where every other
+  failure mode in this client is a replay. It is unconditional because `logout` removes a credential
+  without touching `cursors.json`, so a logout-then-enrol lands on the append path with the old
+  position still sitting under the identical key. A genuinely fresh identity has no record, so the
+  clear is a no-op.
+- A **failed** clear is a warning, not a failure: the credential is already durable, so failing the
+  enrolment would report a success as a failure. The warning names `--replay` as the remedy, which is
+  the one thing that reliably steps around a position that is too far ahead.
 
 ### The MESSAGING keypair — a second key, distinct from the AUTH key (added 2026-08-07)
 
@@ -863,10 +1029,48 @@ Exported surface as of 2026-08-02:
 | `KeyRing`, `DirKeyRing` (`NewDirKeyRing`, `MessagingKey`, `Trust`, `List`), `TrustedKey`, `TrustedKeysDirName`, `ErrNoTrustedKey`, `Config.KeyRing` | (2026-08-07) The local trust store. A `nil` `Config.KeyRing` means a `DirKeyRing` under `<identity-dir>/trusted-keys`; it is **not** a way to turn verification off — a `KeyRing` holding nothing means "this agent trusts nobody" and every message is unverifiable. Fail closed. |
 | `RejectionReason` (+ `RejectedNoTrustedKey`, `RejectedMalformedKey`, `RejectedNoSignature`, `RejectedSignatureEncoded`, `RejectedSignatureLength`, `RejectedNotCanonical`, `RejectedSignatureInvalid`), `RejectedMessage`, `Batch.Rejected` | (2026-08-07) The verification-failure vocabulary. **Declared, json-tagged and stable — but NOT YET PRODUCED**: `Client.Read` does not verify, so `Batch.Rejected` is always empty today. The settled policy these encode, for when the wiring lands: on failure the **cursor ADVANCES**, the **body is DISCARDED** and never handed to the caller, and the event is **recorded loudly** (message id, sender, which check failed). Fail-closed applies to the BODY, not the CURSOR — blocking the cursor would hand anyone who can inject one bad message a permanent DoS against that agent. |
 | `MaxBodyBytes`, `MaxBatchLimit`, `DefaultBatchLimit`, `MaxPollTimeout`, `DefaultPollTimeout` | Protocol limits, pinned literals mirroring the server's own (see `client/messages.go`) |
+| `TerminalSafe(s string, keepNewlines bool) string`, `IsBidiOrInvisible(r rune) bool` | (2026-08-08, `CLI-3-FU-SAFETEXT`) The terminal-output neutralisers, **newly exported** — see below |
 
 `Identity` is the redacted public half and `Credential` is `Identity` plus the secret seed; the split
 is structural, so no rendering path can marshal a private key by forgetting a redaction step.
 `Credential.String()` redacts. `SessionInfo` has **no token field at all**, not even a `json:"-"` one.
+
+**`TerminalSafe` and `IsBidiOrInvisible` — two functions, two jobs** (`CLI-3-FU-SAFETEXT`,
+2026-08-08). Both are in `client/sanitize.go`, both are now part of the compatibility surface.
+
+```go
+func TerminalSafe(s string, keepNewlines bool) string
+func IsBidiOrInvisible(r rune) bool
+```
+
+`TerminalSafe` **REWRITES**, which is right when something must be printed: every C0 control and
+`DEL`, every **C1** control (`0x80`–`0x9f` — a lone `0x9b` is `CSI` on some terminals, so these are
+as dangerous as `ESC [` and are not merely "high bytes"), and every bidi/zero-width codepoint becomes
+a **space**; invalid UTF-8 becomes `U+FFFD`. It does **not** truncate — a bound belongs to the
+caller, since a message body is legitimately long. Replacement rather than deletion is contract, not
+taste: dropping a codepoint splices the text either side into one convincing token, turning
+`adm\x1bin` into `admin`.
+
+`IsBidiOrInvisible` is the **predicate**, so a caller can **DISQUALIFY** instead of rewrite. That is
+the right move when a value is being handed to a consumer that will print it *later* — `watch`'s
+NDJSON `text` field is omitted rather than rewritten on this test, because `jq -r .text` strips the
+JSON escaping and pipes the result straight at a terminal, and a lossily-rewritten body would be
+worse than no field at all. Its set: `U+200B`–`U+200F`, `U+202A`–`U+202E`, `U+2066`–`U+2069`,
+`U+FEFF`. **None of these is a control character**, so every ordinary control check misses all of
+them.
+
+`keepNewlines` is for a message **BODY**, where a newline is content. It must **never** be set for an
+id, a timestamp or an error detail, where a line break is an attempt to forge a second line of
+output — and a caller that keeps newlines takes on the job of making a continuation line
+unmistakable (`cmd/agent-busctl` indents them, so a multi-line body cannot read as several messages).
+
+They are exported because invariant 7's third audience — an agent EMBEDDING this package — needs
+exactly this when rendering another agent's message body, and its only alternatives were reaching
+into the package (impossible) or writing a second copy. `cmd/agent-busctl` had written that second
+copy; this change **deleted it**. A security-relevant neutraliser that exists twice decays silently:
+the two agreed the day they were written, and nothing would have failed on the day they stopped.
+None of this applies to `--json` output, where `encoding/json` already escapes every byte below
+`0x20`.
 
 **The 503 split.** A `503` with a `Retry-After` header is a transient capacity refusal and is retried
 with jittered backoff (`Watch`, and the transport's own retry loop, both honour it). A `503` with
@@ -874,6 +1078,22 @@ with jittered backoff (`Watch`, and the transport's own retry loop, both honour 
 transient — and is **not** retried: it stops a `Watch` outright and is reported through
 `client.IsFatalUnavailable`, which every long-running caller (a supervisor, a `watch`) must check and
 stop on rather than back off forever, or an operator-visible fault becomes a silent one.
+
+**`IsFatalUnavailable` now reports TWO conditions, not one** (`CLI-3-FU-HASHVERIFY`, 2026-08-08).
+Read it as "fatal, bus-side"; the NAME is narrower than the condition and is kept unchanged for
+compatibility. Both conditions are `KindServer`, so both are exit `6`, and both must stop a loop:
+
+| Condition | Why retrying cannot help |
+| --- | --- |
+| A `503` with **no** `Retry-After` (`hub.ErrNotDurable` / `hub.ErrPoisoned`) | Every capacity refusal on every route carries the header, so its absence is the bus stating this is not transient — invariant 4, refusing rather than acknowledging what it cannot make durable. |
+| A message whose body disagrees with the `size` or `content_sha256` beside it (`verifyMessageBody`) | A retry re-reads the same cursor and gets the same damaged message. |
+
+The bit is unexported and read only through this function, deliberately: `Kind` is a **closed**
+vocabulary a caller branches on and the CLI maps to an exit code, so this stays `KindServer` to
+everything that switches on `Kind`, with one extra bit for the two places that must not loop on it —
+the transport's retry loop and a long-running watch. `watchShouldRetry` therefore checks
+`IsFatalUnavailable` **first and separately**, before its `KindNetwork, KindServer` retry branch,
+which would otherwise sweep both conditions straight back into retrying.
 
 ---
 
@@ -886,6 +1106,27 @@ stop on rather than back off forever, or an operator-visible fault becomes a sil
 | `AGENT_BUS_AGENT_ID` | `agent-busctl` | Act as this stored identity (`--as`) |
 | `AGENT_BUS_TIMEOUT` | `agent-busctl` | Per-operation timeout (`--timeout`) |
 | `AGENT_BUS_FINGERPRINT` | `agent-busctl` | The bus certificate to accept, 64 lowercase hex (`--bus-fingerprint`). Surrounding whitespace is trimmed, as for `AGENT_BUS_TIMEOUT`; nothing else about the value is repaired. **Not a secret** — a certificate fingerprint is published in the bus's startup log and derivable from any handshake — so an env var is a fit carrier for it, unlike a key. |
+| `COLUMNS` | `agent-busctl agents` | (2026-08-08) Terminal width budget for the human-readable roster table. **The only env var here that is not `AGENT_BUS_`-prefixed**, because it is not ours — it is the conventional one, read rather than defined. See below. |
+
+**`COLUMNS` — `agent-busctl agents` only, and `--json` is unaffected.** When the table would not fit
+the budget, `agents` drops a **COLUMN** (`ENROLLED` first, then `BUS`, which is only the id's own
+prefix restated) rather than cutting an id — a truncated fully-qualified id is not a thing a reader
+can act on.
+
+The contract, which is deliberately dull:
+
+- The budget is `$COLUMNS`, falling back to **100** (`maxAgentTableWidth`) when it is unset.
+- **The fallback is the common case, not a consolation prize.** `COLUMNS` is usually unset in a
+  non-interactive shell — which is exactly when the output is piped into something that does not care
+  about width, and exactly when an agent is reading it. "Unset" therefore behaves precisely as it did
+  before this existed.
+- **A value that is not a positive integer is NOT BELIEVED** and falls back to 100. `COLUMNS` is
+  ordinary environment, so `0`, `-1`, `""` and `wide` are all reachable, and each would otherwise
+  collapse the table to its narrowest form for a reason invisible to the reader. There is
+  deliberately **no upper clamp**: an implausibly large value only ever means "never drop a column".
+- It is read from the environment, not probed. An `ioctl(TIOCGWINSZ)` would give a sharper answer
+  than a table that only ever drops two columns needs, at the cost of a dependency or per-platform
+  `unsafe`/`syscall` plumbing (invariant 8, stdlib first).
 
 `cmd/agent-bus` still reads no environment variables; every server knob is a flag.
 (`scripts/bus-serve.sh` has its own `AGENT_BUS_RUN_DIR` / `AGENT_BUS_DATA_DIR` / `AGENT_BUS_LISTEN`

@@ -49,6 +49,44 @@
 id_rsa*
 id_ed25519*
 *.token
+#
+# The agent-busctl CREDENTIAL STORE (CLI-2-FU-GITIGNORE). Checked, not assumed:
+# none of the patterns above matches `identities.json` — it is not a `.pem`, not
+# a `.key`, and the substring rules want "credentials"/"creds", not "identities".
+# It nevertheless holds TWO Ed25519 private-key SEEDS per enrolled agent
+# (`private_key_seed` and `messaging_key_seed`), which makes it the single
+# highest-value file this repo can accidentally acquire.
+#
+# It normally lives outside the tree — `DefaultIdentityDir` is
+# `os.UserConfigDir()/agent-bus` — so this is for the case that puts it here:
+# `--identity ./somewhere` or `AGENT_BUS_IDENTITY=$PWD/...`, which is exactly
+# what a throwaway run or a copy-pasted example does.
+#
+# The `.tmp-*` companion is NOT belt-and-braces. `(*Store).saveJSON` writes to
+# `<name>.tmp-<random hex>` and renames, and `sweepTempFiles` only clears
+# leftovers on the NEXT write — so a process killed mid-save leaves a COMPLETE
+# COPY OF EVERY PRIVATE KEY under a name the bare pattern does not match.
+identities.json
+identities.json.tmp-*
+#
+# cursors.json is ignored TOO, and it is deliberately not credential material —
+# so the reasoning is stated rather than waved through. Three parts:
+#   - It is not innocuous. It is a map of (agent id -> bus id -> read position):
+#     precisely the routing metadata invariant 6 keeps in the audit trail, and
+#     committing it publishes which agents talk to which buses.
+#   - The two files are written by the SAME code into the SAME 0700 directory
+#     and arrive together, so catching one and not the other shrinks no blast
+#     radius — the seeds are already covered — while guaranteeing a permanently
+#     dirty tree in the one situation where a clean `git status --porcelain` is
+#     the signal work is finished (CLAUDE.md step 10).
+#   - Its temp file leaks nothing, but it is listed for the same reason: a rule
+#     that covers a file but not its rename source is a rule with a hole in it.
+# Cost, stated honestly and it is the same cost `*.pem` already accepts: a
+# credential store dropped into the tree now contains only ignored files, so the
+# directory stops showing up in `git status` and nothing shouts about it. `git
+# add -f` remains the deliberate, review-visible escape hatch.
+cursors.json
+cursors.json.tmp-*
 
 # ...but NEVER a source or script file, and never a directory. The three name
 # patterns above are unanchored substring matches, so without these negations a

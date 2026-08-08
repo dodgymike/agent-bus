@@ -170,11 +170,12 @@ all emit it as `"bus_fingerprints":[...]` when the accept-set is non-empty. **Th
 exists — read `.bus_fingerprints[]` instead; it may hold one or two entries.
 
 **These four surfaces use `omitempty` on `bus_fingerprints` (`client.Identity`, `client/store.go`) —
-the key is ABSENT, not `[]`, when the accept-set is empty.** That is the normal case today, not a
-corner: no bus serves TLS yet (`MTLS-LISTENER` has not shipped), so a plaintext identity with an
-empty accept-set is what most agents currently have. Always check presence with `.bus_fingerprints
-// empty` (jq) or the map/struct-tag equivalent before ranging over it — do not assume the key is
-there. `pin list|add|remove` is the one surface where the never-null guarantee holds; see
+the key is ABSENT, not `[]`, when the accept-set is empty.** This is not merely theoretical: the bus
+serves TLS only (invariant 11), but an identity enrolled against an earlier bus that predates that
+change keeps its empty accept-set — landing a TLS-only listener does not retroactively invalidate or
+backfill existing identities. Always check presence with `.bus_fingerprints // empty` (jq) or the
+map/struct-tag equivalent before ranging over it — do not assume the key is there. `pin list|add|remove`
+is the one surface where the never-null guarantee holds; see
 [Managing the accept-set](#managing-the-accept-set-agent-busctl-pin) below for that JSON shape.
 
 The bound exists for exactly one reason: a certificate rollover serves the outgoing and the incoming
@@ -248,9 +249,9 @@ that set rather than replacing it:
   flag's favour. Widen the set with `agent-busctl pin add`, deliberately, first.
 
 *Note: certificate **expiry** is not checked yet — the pin answers "which bus", not "is this
-certificate still fit to use". That is task `MTLS-VERIFY`. And the bus does not serve TLS at all yet
-(`MTLS-LISTENER`), so today every real bus is `http://127.0.0.1:…` and no fingerprint is involved;
-this section is what happens the moment that changes, and it is already enforced.*
+certificate still fit to use". That is task `MTLS-VERIFY`. The bus serves TLS only (invariant 11):
+there is no plaintext listener and no flag that adds one, so every real bus is `https://…` and this
+section is fully in effect — not a preview of a later state.*
 
 ## Identity: enrol, whoami, use, logout
 
@@ -263,7 +264,7 @@ the request is sent, and never leaves the machine. The new identity becomes the 
 `--keep-current` is given.
 
 ```bash
-agent-busctl enrol --bus http://127.0.0.1:8080 --name planner
+agent-busctl enrol --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> --name planner
 ```
 
 Flags: `--name <name>` (required, `[a-z0-9_-]`, 1-64 bytes, starting with a letter or digit),
@@ -590,6 +591,30 @@ at 0 and re-reads the whole retained window (1 day, or 1 GiB of messages, whiche
 `--no-cursor` reads without persisting anything. A cursor that has fallen out of the retained window
 resumes at the oldest retained message — the messages in between are gone.
 
+**"per identity and bus" means the bus's ID, not its URL (changed 2026-08-08).** Your cursor is
+stored in `<identity-dir>/cursors.json` under (`agent_id`, `bus_id`) — the server-minted bus id, the
+`<bus-id>.` prefix of your own agent id. It used to be stored under the bus **URL**, scheme included,
+and that was a bug: one bus reachable at both `http://` and `https://` looked like two buses, so the
+first watch after a plaintext → TLS switch found an empty cursor and re-delivered the agent's entire
+history. Reaching the same bus at a new port, a new DNS name, or through a reverse proxy did the same
+thing. All of those are one bus and now share one cursor.
+
+**If you were watching before 2026-08-08, expect ONE replay and read the stderr warning.** Your
+`cursors.json` may already hold two records for one agent id; nothing rewrote them, so they are
+collapsed the first time this build reads the file. The most recently updated of the pair wins — a
+cursor is opaque, so its timestamp is the only ordering available — and you may therefore be
+re-delivered whatever lies between the two positions. It is announced, never silent: a line on
+stderr names the count and says it may replay. Your handler must already be idempotent on
+`message_id` (see above), so this costs you nothing; if it is not, fix that before you upgrade. The
+file's format version is unchanged at `1`, so an older `agent-busctl` reading it does not throw the
+file away.
+
+**`enrol` now clears the stored position for the identity it enrols.** That is deliberate and it is
+not the replay-avoidance you might assume — it is skip-avoidance. Enrolling reuses a key that a
+*previous* holder of that agent id may have left a position under, and a position that is too far
+ahead makes your next watch step **past** messages rather than repeat them. If `enrol` warns that it
+could not clear the position, run `agent-busctl watch --replay` once.
+
 Ctrl-C / SIGTERM stops cleanly, exit 0 — an interrupted tail is a finished tail, not a failure.
 `--count N` stops after N messages; `--for <dur>` stops after that much wall-clock time. A
 **bounded** watch (`--count`/`--for`) that ends having printed nothing exits **8**, so
@@ -605,6 +630,17 @@ Exit codes: `0` stopped cleanly, `1` internal, `2` bad usage, `3` no usable iden
 rejected, `5` bus unreachable, `6` bus reported its own error (including a fatal 503 — the bus's
 write path cannot durably accept messages), `7` bus refused the request, `8` a bounded watch
 delivered nothing.
+
+**A DAMAGED message now exits `6` and stops the watch (changed 2026-08-08).** Every message you are
+handed has had its body checked against the `size` and `content_sha256` the bus sent beside it; if
+they disagree, the whole batch is refused, nothing reaches you, and the watch **stops without
+retrying**. Your stored cursor is left exactly where it was, so nothing is skipped and a later run
+re-reads that position — but this run will not, because re-reading a position returns the same
+damaged message however many times you ask. Before this change the failure looked transient, so
+`watch` looped on it and a bounded watch eventually exited **`8`**, telling you "nothing arrived"
+while messages were arriving damaged. If you branch on `8` as a timeout, that is why it matters.
+This check is **integrity, not authenticity** — the bus computes that hash, so it catches corruption
+and a bus inconsistent with itself, never a forged sender. Authenticity is the signature alone.
 
 ## Idempotency and retries (invariant 10)
 
@@ -705,7 +741,7 @@ and a retired value is never reused — branch on them freely.
 | `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no fingerprint anywhere in its accept-set (no trust-on-first-use)** |
 | `4` | auth | the bus rejected the credential, or the signature did not verify |
 | `5` | network | the bus could not be reached: refused, DNS, timeout, **or it presented a certificate that is not any member of the pinned accept-set (never retried — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned))** |
-| `6` | server | the bus reported a failure of its own (5xx), including a fatal 503 |
+| `6` | server | the bus reported a failure of its own (5xx), including a fatal 503, **and (2026-08-08) a `watch` message whose body disagrees with its own `size`/`content_sha256` — never retried, cursor left where it was** |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |
 
