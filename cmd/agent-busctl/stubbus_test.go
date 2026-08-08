@@ -296,8 +296,17 @@ func (b *stubBus) run(t *testing.T, stdin string, stdoutIsTTY, stdinIsTTY bool, 
 
 func (b *stubBus) runCtx(t *testing.T, ctx context.Context, stdin string, stdoutIsTTY, stdinIsTTY bool, rest ...string) cliResult {
 	t.Helper()
+	return b.runEnv(t, ctx, emptyEnv, stdin, stdoutIsTTY, stdinIsTTY, rest...)
+}
+
+// runEnv is runCtx with the environment lookup supplied, for the handful of
+// behaviours that read one (COLUMNS, AGENT_BUS_*). The process environment is
+// never touched: lookupEnv is injected all the way down from run(), so tests
+// stay parallel-safe.
+func (b *stubBus) runEnv(t *testing.T, ctx context.Context, lookupEnv func(string) (string, bool), stdin string, stdoutIsTTY, stdinIsTTY bool, rest ...string) cliResult {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := runWithTTY(ctx, b.args(rest...), strings.NewReader(stdin), &stdout, &stderr, emptyEnv, stdoutIsTTY, stdinIsTTY)
+	code := runWithTTY(ctx, b.args(rest...), strings.NewReader(stdin), &stdout, &stderr, lookupEnv, stdoutIsTTY, stdinIsTTY)
 	return cliResult{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
 }
 

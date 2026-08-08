@@ -209,10 +209,83 @@ func TestSafeTextNeutralisesBidiAndZeroWidth(t *testing.T) {
 					tc.in, got, tc.want)
 			}
 			for _, r := range got {
-				if isBidiOrInvisibleRune(r) {
+				if IsBidiOrInvisible(r) {
 					t.Fatalf("safeText(%q) still contains U+%04X — it must be replaced, not passed through", tc.in, r)
 				}
 			}
 		})
 	}
+}
+
+// TestSafeTextIsTerminalSafe pins the EXPORTED renderer that CLI-3-FU-SAFETEXT
+// exists to create, and pins it as ONE implementation rather than two that
+// happen to agree.
+//
+// Two things are asserted, and the second is the reason this task was filed:
+//
+//  1. TerminalSafe neutralises everything safeText does — controls, DEL, C1,
+//     the bidi/zero-width set, invalid UTF-8 — plus the keepNewlines behaviour
+//     the CLI needs for a message BODY and safeText must never have for an id.
+//  2. safeText AGREES with it by construction. The table below is driven through
+//     BOTH, so a future edit to one that is not made to the other fails here
+//     rather than silently diverging in a security-relevant neutraliser.
+func TestSafeTextIsTerminalSafe(t *testing.T) {
+	cases := []struct {
+		name           string
+		in             string
+		wantNoNewlines string
+		wantNewlines   string
+	}{
+		{"escape sequence", "boom\x1b[2K\rall clear", "boom [2K all clear", "boom [2K all clear"},
+		{"DEL and BEL", "a\x7fb\x07c", "a b c", "a b c"},
+		{"C1 CSI byte", "ab", "a b", "a b"},
+		{"tab", "a\tb", "a b", "a b"},
+		{"right-to-left override", "a‮b", "a b", "a b"},
+		{"zero-width space", "adm​in", "adm in", "adm in"},
+		{"invalid UTF-8", "a\xffb", "a�b", "a�b"},
+		{"plain text", "the write path fell over", "the write path fell over", "the write path fell over"},
+		{"real bidirectional text survives", "שלום", "שלום", "שלום"},
+		// The one deliberate difference. A newline in a message BODY is content;
+		// a newline in an id or a timestamp is an attempt to forge a second line
+		// of output.
+		{"newline", "line one\nline two", "line one line two", "line one\nline two"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TerminalSafe(tc.in, false); got != tc.wantNoNewlines {
+				t.Fatalf("TerminalSafe(%q, false) = %q, want %q", tc.in, got, tc.wantNoNewlines)
+			}
+			if got := TerminalSafe(tc.in, true); got != tc.wantNewlines {
+				t.Fatalf("TerminalSafe(%q, true) = %q, want %q", tc.in, got, tc.wantNewlines)
+			}
+			// safeText is TerminalSafe(_, false) plus a trim and a rune-boundary
+			// truncation, and nothing else. Asserting the relationship — rather
+			// than a second expected-value table — is what stops the two drifting.
+			if got, want := safeText(tc.in, 0), strings.TrimSpace(tc.wantNoNewlines); got != want {
+				t.Fatalf("safeText(%q, 0) = %q but TerminalSafe says %q; the two neutralisers have diverged", tc.in, got, want)
+			}
+		})
+	}
+
+	t.Run("TerminalSafe does not truncate", func(t *testing.T) {
+		long := strings.Repeat("x", 4096)
+		if got := TerminalSafe(long, false); got != long {
+			t.Fatalf("TerminalSafe truncated a %d-byte string to %d bytes; bounding the length is the CALLER's decision (safeText's max), not the renderer's",
+				len(long), len(got))
+		}
+	})
+
+	t.Run("IsBidiOrInvisible names the set", func(t *testing.T) {
+		for _, r := range []rune{0x200b, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069, 0xfeff} {
+			if !IsBidiOrInvisible(r) {
+				t.Fatalf("IsBidiOrInvisible(U+%04X) = false, want true", r)
+			}
+		}
+		for _, r := range []rune{'a', ' ', '\n', 0x05d0 /* Hebrew alef */, 0x0627 /* Arabic alef */} {
+			if IsBidiOrInvisible(r) {
+				t.Fatalf("IsBidiOrInvisible(U+%04X) = true; real bidirectional text renders from its own character properties and must not be flagged", r)
+			}
+		}
+	})
 }

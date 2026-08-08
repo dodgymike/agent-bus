@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -154,9 +156,21 @@ type Message struct {
 	Signature string `json:"signature"`
 
 	// Size is the body length in bytes, as the bus recorded it.
+	//
+	// It is VERIFIED against len(Body) on the read path, so a Message a caller
+	// holds is one whose two answers agreed. See verifyMessageBody.
 	Size int `json:"size"`
 
 	// ContentSHA256 is the hex SHA-256 of the DECODED body.
+	//
+	// It is VERIFIED against sha256(Body) on the read path: a message whose hash
+	// disagrees with its bytes fails the whole batch and never reaches a caller
+	// (verifyMessageBody). So a Message in hand has an intact body, and a body
+	// that looks short afterwards was shortened downstream of this package.
+	//
+	// It is NOT authenticity. The BUS computes this hash, so it detects
+	// corruption and a bus whose own answer is inconsistent — not a forged
+	// sender. Sender authenticity is Signature and nothing else.
 	ContentSHA256 string `json:"content_sha256"`
 
 	// Body is the DECODED message body.
@@ -214,6 +228,10 @@ type SendResult struct {
 
 	// ContentSHA256 is the hex SHA-256 of the decoded body, as the bus computed
 	// it. A caller that wants end-to-end assurance can compare it with its own.
+	//
+	// UNLIKE Message.ContentSHA256, this one is NOT compared here — the caller
+	// holds the body it sent and is the only party that can do so. (It is the
+	// send path; there is no decoded body in the response to compare against.)
 	ContentSHA256 string `json:"content_sha256"`
 
 	// Replayed reports that the bus answered from its applied-key table rather
@@ -943,9 +961,130 @@ func validateBatch(op string, b *Batch) error {
 		if err := validateServerContentHash(op, "content hash", m.ContentSHA256); err != nil {
 			return err
 		}
+		if err := verifyMessageBody(op, m); err != nil {
+			return err
+		}
 	}
 	return nil
 }
+
+// verifyMessageBody compares size and content_sha256 against the DECODED body.
+//
+// # What this proves, and what it emphatically does not
+//
+// It proves the bytes and the metadata beside them AGREE. It detects corruption
+// in transit, a proxy that mangled a body, and a bus whose own answer is
+// internally inconsistent. It is NOT authenticity: the BUS computes the hash, so
+// a bus that wants to lie signs nothing and simply hashes the body it invented.
+// Sender authenticity is the signature (canonical.go, the SIGN epic) and nothing
+// here weakens or substitutes for it. Do not let a passing hash be read as "this
+// message really came from that agent".
+//
+// # Why it is a HARD failure for the whole batch
+//
+// Invariant 7 names "verification of inbound messages" as the client's job, and
+// this is the cheap half of it. The alternative — a per-message flag — puts the
+// decision in every caller and will be ignored by most of them, which is the
+// failure mode a verification step exists to prevent. Failing the batch also
+// matches what Agents already does with a malformed roster entry, and it leaves
+// the WATCH CURSOR EXACTLY WHERE IT WAS: Read returns an error and Watch never
+// advances, so NOTHING IS SKIPPED.
+//
+// Note what that does NOT mean. The failure is marked fatal (see
+// bodyIntegrityError), so the watch STOPS rather than re-reading the batch — the
+// position is preserved for a later run, not retried in this one. Preserving the
+// position and retrying it are different things, and only the first is promised
+// here: a retry would fetch the same damaged message for ever.
+//
+// # Why both fields, and in this order
+//
+// Size is checked first because it gives the far more useful diagnosis. A
+// truncated body fails both checks, but "size says 4096, body is 3 bytes" names
+// the fault; "hash mismatch" only says something is wrong. The hash then catches
+// everything a length check cannot: a body of the right length with the wrong
+// bytes.
+//
+// An ABSENT field is not verified. A bus that sends no content_sha256 (Size 0,
+// or the field omitted) is an older bus, and refusing to read from it would turn
+// a version skew into an outage for a check that — see above — is not an
+// authenticity control anyway. An empty body is refused on the send path, so
+// Size 0 unambiguously means "not sent" rather than "a zero-length message".
+//
+// Note the test is `!= 0`, NOT `> 0`. `size` is a plain JSON integer, so a bus
+// can send a NEGATIVE one; `> 0` would have let it skip the length check
+// entirely while the field's doc comment promised the two had been compared. A
+// negative size can never equal len(Body), so it now fails, which is right.
+//
+// Cost: one SHA-256 over each body, bounded by the response reader rather than
+// by the nominal per-message limit: maxBatchResponseBytes caps a batch at 4 MiB,
+// so that is the real worst case per poll — a few milliseconds, against a call
+// that has just done a network round trip.
+func verifyMessageBody(op string, m *Message) error {
+	if m.Size != 0 && m.Size != len(m.Body) {
+		return bodyIntegrityError(op,
+			fmt.Sprintf("the bus sent message %s with size %d but a body of %d bytes",
+				safeText(m.MessageID, 60), m.Size, len(m.Body)))
+	}
+	if m.ContentSHA256 != "" {
+		sum := sha256.Sum256(m.Body)
+		if got := hex.EncodeToString(sum[:]); got != m.ContentSHA256 {
+			return bodyIntegrityError(op,
+				fmt.Sprintf("the bus sent message %s with a body that hashes to %s but a content_sha256 of %s",
+					safeText(m.MessageID, 60), got, m.ContentSHA256))
+		}
+	}
+	return nil
+}
+
+// bodyIntegrityError builds the failure, and marks it FATAL.
+//
+// The fatal bit is not decoration, it is what makes this a hard error rather
+// than a hang. Without it the error is an ordinary KindServer, which both the
+// transport retry loop and watchShouldRetry treat as transient — so `agent-busctl
+// watch` re-read the SAME cursor, got the SAME damaged message, and looped until
+// --for expired, exiting 8 ("no messages arrived") with the remedy never once
+// reaching the agent. That is the exact mis-attribution this task exists to
+// remove, in a new costume: the reader is told nothing arrived when in fact
+// something arrived damaged.
+//
+// It is also simply true. Retrying re-reads a position, the bus is deterministic
+// about what lives there, and no number of attempts turns a body that disagrees
+// with its digest into one that agrees.
+func bodyIntegrityError(op, message string) *Error {
+	e := newError(KindServer, op, message, bodyIntegrityRemedy)
+	e.fatal = true
+	return e
+}
+
+// bodyIntegrityRemedy names WHICH SIDE is at fault, because getting that wrong
+// is what this check exists to prevent.
+//
+// The failure it came out of: an agent saw short message bodies and nearly filed
+// a bus defect. The bus was innocent — an over-limit body is REJECTED on send,
+// never cut — and the truncation was in the agent's own consumer. Establishing
+// that took hours of detective work that this one sentence replaces, in both
+// directions: if the check FAILS the damage is on the bus side of this client,
+// and if it PASSES the body was intact when it was handed over, so anything
+// short after that was shortened by the consumer.
+//
+// # Two things it must NOT say, and the second is easy to get wrong
+//
+// It must not say "retry": this failure is marked fatal precisely because a
+// retry re-reads the same position and gets the same damaged message, so the
+// advice would send the reader round the loop the fatal bit exists to break.
+//
+// It must not offer `--replay` either, which is the subtler mistake — an earlier
+// draft of this string did. `--replay` restarts at position 0 and therefore
+// walks straight back into the same damaged message. So does resuming from the
+// stored cursor, which sits BEFORE it. The only position that gets past a
+// damaged message is one AFTER it, so `--cursor` is the sole escape and the
+// remedy says exactly that rather than listing every flag that sounds relevant.
+// CLAUDE.md's rule is that a remedy names the remedy; a flag that will not work
+// costs the reader a second failure on top of the first.
+//
+// The message id is named in the Message half of the error, which is what makes
+// "the one after this" a thing the reader can actually identify.
+const bodyIntegrityRemedy = "the body and its metadata arrived already disagreeing, so the fault is on the BUS side of this client (the bus, or something between you and it) and not in your handler. Retrying will not clear it and neither will --replay: both re-read a position at or before the damaged message and get it again. Check the bus's logs for the message id above; to step over it, resume with `agent-busctl watch --cursor <a position AFTER that message>`. Note the converse, which is usually the question being asked: this check runs BEFORE a body reaches a caller, so a body that looks truncated after a SUCCESSFUL read was truncated by the consumer, not by the bus"
 
 // cursorPattern is the shape a cursor the bus issued must have.
 //

@@ -131,9 +131,14 @@ type Error struct {
 	// backoff, not a fact a caller should branch on — the Kind is.
 	retryAfter time.Duration
 
-	// fatal marks a failure that LOOKS retryable by status but is not. Today
-	// that is exactly one thing: a 503 with no Retry-After, which the bus emits
-	// only when its hub cannot durably accept messages (see statusError).
+	// fatal marks a failure that LOOKS retryable by Kind but is not. Two
+	// conditions set it:
+	//
+	//   - a 503 with no Retry-After, which the bus emits only when its hub
+	//     cannot durably accept messages (see statusError);
+	//   - a message whose body disagrees with the size or content_sha256 beside
+	//     it (see verifyMessageBody). Retrying re-reads the same cursor and gets
+	//     the same damaged message, for ever.
 	//
 	// It is unexported and read through IsFatalUnavailable rather than being a
 	// Kind of its own, because the Kind set is a CLOSED vocabulary a caller
@@ -187,19 +192,28 @@ func KindOf(err error) Kind {
 	return KindInternal
 }
 
-// IsFatalUnavailable reports whether err is a bus unavailability that RETRYING
+// IsFatalUnavailable reports whether err is a BUS-SIDE failure that RETRYING
 // WILL NOT FIX, following the Unwrap chain like KindOf.
 //
-// It is true for exactly one condition today: the bus answered 503 with NO
-// Retry-After header, which it does only when the hub cannot durably accept
-// messages (hub.ErrNotDurable / hub.ErrPoisoned). Every capacity refusal on
-// every route carries the header, so the header's absence is the bus saying
-// "this is not transient" — and, per invariant 4, refusing rather than
-// acknowledging something it cannot make durable.
+// Two conditions set it:
 //
-// A caller that loops — a long poll, a watch, a supervisor — must check this and
-// STOP. Backing off forever on a poisoned write path converts an operator-
-// visible fault into a silent one.
+//   - The bus answered 503 with NO Retry-After header, which it does only when
+//     the hub cannot durably accept messages (hub.ErrNotDurable /
+//     hub.ErrPoisoned). Every capacity refusal on every route carries the
+//     header, so the header's absence is the bus saying "this is not transient"
+//     — and, per invariant 4, refusing rather than acknowledging something it
+//     cannot make durable.
+//   - A message arrived whose body disagrees with the size or content_sha256
+//     beside it (CLI-3-FU-HASHVERIFY, verifyMessageBody). A retry re-reads the
+//     same cursor and gets the same damaged message.
+//
+// The NAME is narrower than the condition and is kept for compatibility; read it
+// as "fatal, bus-side". Both conditions share the property the name exists to
+// convey and that every caller acts on, which is the one that matters: a caller
+// that loops — a long poll, a watch, a supervisor — must check this and STOP.
+// Backing off forever converts an operator-visible fault into a silent one, and
+// in the second case into an actively misleading one: the watch would report
+// "no messages arrived" while messages were arriving damaged.
 func IsFatalUnavailable(err error) bool {
 	var e *Error
 	if errors.As(err, &e) {

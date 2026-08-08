@@ -115,9 +115,13 @@ type WatchStats struct {
 //
 // Stops with an ERROR:
 //   - handle returned one (returned verbatim, cursor not advanced)
-//   - the bus is fatally unavailable — IsFatalUnavailable, i.e. a 503 with no
-//     Retry-After, the non-durable or poisoned hub. An operator must see that;
-//     backing off forever on it turns a visible fault into a silent one.
+//   - a bus-side failure that retrying will not fix — IsFatalUnavailable. Two
+//     conditions: a 503 with no Retry-After (the non-durable or poisoned hub),
+//     and a message whose body disagrees with the size or content_sha256 beside
+//     it (verifyMessageBody). An operator must see either; backing off forever
+//     turns a visible fault into a silent one, and in the second case into an
+//     actively misleading one — the watch would report "no messages arrived"
+//     while messages were arriving damaged.
 //   - KindUsage, KindConfig, KindRejected, or a KindAuth that survived the
 //     transparent re-handshake authorizedRequest already performs. None of
 //     those improve by being retried, and looping on an auth failure looks like
@@ -187,27 +191,28 @@ func (c *Client) Watch(ctx context.Context, opts WatchOptions, handle func(Messa
 		defer cancel()
 	}
 
-	// The persisted cursor is scoped to (agent id, resolved bus URL) — see
-	// cursorRecord for why both halves are needed. Resolve them only when they
-	// are actually wanted, so a caller that supplied an explicit cursor and does
-	// not persist never touches the store.
-	var agentID, busURL string
+	// The persisted cursor is scoped to (agent id, SERVER-MINTED BUS ID) — see
+	// cursorRecord for why both halves are needed, and why the bus half is the
+	// bus id rather than the URL this client happened to dial. Resolve them only
+	// when they are actually wanted, so a caller that supplied an explicit cursor
+	// and does not persist never touches the store.
+	var agentID, busID string
 	needsStore := opts.Persist || (opts.Cursor == "" && !opts.Replay)
 	if needsStore {
 		cred, err := c.credential()
 		if err != nil {
 			return stats, err
 		}
-		base, err := c.resolveBusURL()
+		agentID = cred.AgentID
+		busID, err = cursorBusID(cred)
 		if err != nil {
 			return stats, err
 		}
-		agentID, busURL = cred.AgentID, base.String()
 	}
 
 	cursor := opts.Cursor
 	if cursor == "" && !opts.Replay && needsStore {
-		stored, err := c.store.Cursor(agentID, busURL)
+		stored, err := c.store.Cursor(agentID, busID)
 		if err != nil {
 			return stats, err
 		}
@@ -280,7 +285,7 @@ func (c *Client) Watch(ctx context.Context, opts WatchOptions, handle func(Messa
 			cursor = batch.Cursor
 			stats.Cursor = cursor
 			if opts.Persist {
-				if perr := c.store.SetCursor(agentID, busURL, cursor); perr != nil {
+				if perr := c.store.SetCursor(agentID, busID, cursor); perr != nil {
 					return stats, perr
 				}
 			}
@@ -354,9 +359,12 @@ func batchLimit(limit, max, delivered int) int {
 // 503 that carried Retry-After). Everything else is either the caller's mistake
 // or a condition that will not change by being asked again.
 //
-// IsFatalUnavailable is checked FIRST and separately, because it is KindServer
-// too: a 503 with no Retry-After is the bus saying its write path is not durable,
-// which is precisely the KindServer that must not be retried.
+// IsFatalUnavailable is checked FIRST and separately, because both of its
+// conditions are KindServer too and would otherwise be swept into the retry
+// branch below: a 503 with no Retry-After is the bus saying its write path is
+// not durable, and a body that disagrees with its own size or content_sha256 is
+// a message no number of re-reads will repair. Those are precisely the
+// KindServers that must not be retried.
 func watchShouldRetry(err error) bool {
 	if IsFatalUnavailable(err) {
 		return false

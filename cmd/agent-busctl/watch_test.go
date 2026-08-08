@@ -539,3 +539,61 @@ func TestCLIWatchDiagnosticsNeverReachStdout(t *testing.T) {
 		t.Fatalf("a diagnostic reached stdout: %q", res.Stdout)
 	}
 }
+
+// TestCLIWatchSurfacesBodyHashMismatch exercises CLI-3-FU-HASHVERIFY THE WAY AN
+// AGENT WOULD: through `agent-busctl watch`, not through the client package.
+//
+// The client-level test (client.TestCLIWatchRejectsBodyHashMismatch) proves the
+// check fires. This one proves the agent on the other end can act on it: a
+// documented exit code, and a message on stderr that names which side is at
+// fault. That second half is the entire point of the task — an agent saw short
+// bodies, blamed the bus, and the bus was innocent.
+func TestCLIWatchSurfacesBodyHashMismatch(t *testing.T) {
+	damaged := stubMessage(1, "bus-x.other-1", "bus-x.agent-1", "the original body")
+	damaged.Body = damaged.Body[:3] // truncated after the bus sized and hashed it
+
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != stubRouteWait {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusOK, map[string]interface{}{
+			"messages": []client.Message{damaged},
+			"cursor":   "cursor-1",
+		})
+	})
+
+	res := bus.run(t, "", true, false, "watch", "--for", "2s")
+
+	// KindServer -> exit 6. NOT exit 7: the bus did not understand and refuse
+	// this request, it answered with a body inconsistent with its own metadata.
+	if res.Code != client.ExitServer {
+		t.Fatalf("watch over a damaged message exit = %d, want %d; stdout=%q stderr=%q",
+			res.Code, client.ExitServer, res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "the original body"[:3]) && strings.Contains(res.Stdout, "bus-x.other-1") {
+		t.Fatalf("the damaged body was rendered to stdout; it must never reach the consumer:\n%s", res.Stdout)
+	}
+	// NOTE the phrases below are deliberately SPECIFIC. An earlier version of
+	// this test asserted the bare substring "bus", which CANNOT FAIL: every
+	// diagnostic line is prefixed "agent-busctl: " and "bus" sits inside
+	// "busctl". It passed against a remedy naming no side at all — a vacuous
+	// assertion guarding the one thing the task exists to prove.
+	for _, want := range []string{
+		"size 17 but a body of 3 bytes",  // which field disagreed, and by how much
+		"on the BUS side of this client", // WHICH SIDE is at fault
+		"not in your handler",            // and which side is not
+	} {
+		if !strings.Contains(res.Stderr, want) {
+			t.Fatalf("stderr does not contain %q — an agent must be able to tell WHICH SIDE is wrong:\n%s", want, res.Stderr)
+		}
+	}
+	if !strings.Contains(res.Stderr, "truncated by the consumer, not by the bus") {
+		t.Fatalf("stderr does not say what a PASSING check would have meant (that a short body is the consumer's doing); that is the diagnosis this check exists to make self-evident:\n%s", res.Stderr)
+	}
+	// The remedy must not advise a retry: the failure is fatal precisely because
+	// re-reading the same position returns the same message.
+	if strings.Contains(res.Stderr, "retry the read") {
+		t.Fatalf("stderr advises retrying a failure that is marked fatal and will never clear:\n%s", res.Stderr)
+	}
+}

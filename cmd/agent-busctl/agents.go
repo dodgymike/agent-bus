@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dodgymike/agent-bus/client"
@@ -26,6 +27,11 @@ WHAT IT DOES
   so it is never shortened, elided or truncated here. If a row would be too
   wide, this command drops a COLUMN (ENROLLED first, then BUS, which is only
   the id's own prefix restated) rather than cutting the id.
+
+  "Too wide" is measured against $COLUMNS, falling back to 100 when COLUMNS is
+  unset or is not a positive integer — which is the usual case in a
+  non-interactive shell, and also exactly when the output is being piped and
+  width does not matter. --json is unaffected.
 
   The roster carries no key material.
 
@@ -90,15 +96,52 @@ func runAgents(ctx context.Context, env *cliEnv, args []string) error {
 		}
 	}
 
-	return env.out.Emit(list, func(w io.Writer) { writeAgentTable(w, list.Agents) })
+	budget := agentTableWidth(env.lookupEnv)
+	return env.out.Emit(list, func(w io.Writer) { writeAgentTable(w, list.Agents, budget) })
 }
 
-// maxAgentTableWidth is the width at which columns start being dropped.
+// maxAgentTableWidth is the width at which columns start being dropped when the
+// reader's real terminal width is unknown.
 //
 // 100 rather than 80: a terminal is usually at least 80 wide and an id is
 // commonly 20-30 characters, so this only bites on genuinely long ids — which
 // is precisely the case where the id must survive and something else must go.
 const maxAgentTableWidth = 100
+
+// agentTableWidth resolves the column budget from the reader's environment.
+//
+// COLUMNS, with maxAgentTableWidth as the fallback. That is the whole mechanism,
+// and the cheapness is the point: an ioctl(TIOCGWINSZ) probe would give a
+// sharper answer than a table that only ever drops two columns needs, and it
+// would cost either a dependency or unsafe/syscall plumbing per platform
+// (invariant 8, stdlib first).
+//
+// The FALLBACK is not a consolation prize, it is the common case. COLUMNS is
+// frequently unset in a non-interactive shell — which is precisely when the
+// output is being piped into something that does not care about width, and when
+// an agent is reading it. So "unset" must keep behaving exactly as it did
+// before this function existed.
+//
+// A value that is not a positive integer is NOT BELIEVED. COLUMNS is ordinary
+// environment, so "0", "-1", "" and "wide" are all reachable — from a shell that
+// exports it unset, from a supervisor, or from a caller being awkward — and each
+// of them would otherwise collapse the table to its narrowest form for no reason
+// the reader can see. There is deliberately no upper clamp: an implausibly large
+// COLUMNS only ever means "never drop a column", which is harmless.
+func agentTableWidth(lookupEnv func(string) (string, bool)) int {
+	if lookupEnv == nil {
+		return maxAgentTableWidth
+	}
+	v, ok := lookupEnv("COLUMNS")
+	if !ok {
+		return maxAgentTableWidth
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return maxAgentTableWidth
+	}
+	return n
+}
 
 // writeAgentTable renders the roster as an aligned table.
 //
@@ -110,17 +153,22 @@ const maxAgentTableWidth = 100
 // fixed width, would therefore destroy the one property the id exists to carry —
 // and the bus prefix is the LEADING part, so any "…" truncation cuts the wrong
 // end first. So the id column is sized to the longest id present, and when that
-// makes a row wider than maxAgentTableWidth the columns that carry the least
-// information are dropped instead:
+// makes a row wider than the budget the columns that carry the least information
+// are dropped instead:
 //
 //	ENROLLED first — it is a timestamp nobody routes on;
 //	then BUS — it is literally the id's own prefix, already on the row.
+//
+// budget is the READER'S column count (agentTableWidth). Dropping columns is the
+// only lever this function has, so a budget narrower than the id column simply
+// drops both and then overruns — which is right: an id that does not fit is
+// printed in full and allowed to wrap, never cut.
 //
 // Nothing here sanitises the strings: client.Agents has already REJECTED the
 // whole response if any id, name or timestamp contained anything a terminal
 // could act on (client/sanitize.go). Do not add a second, weaker check here;
 // add it there if it is ever missing.
-func writeAgentTable(w io.Writer, agents []client.AgentSummary) {
+func writeAgentTable(w io.Writer, agents []client.AgentSummary, budget int) {
 	const (
 		idHead       = "AGENT ID"
 		nameHead     = "NAME"
@@ -150,10 +198,13 @@ func writeAgentTable(w io.Writer, agents []client.AgentSummary) {
 		}
 		return n
 	}
-	if width() > maxAgentTableWidth {
+	if budget <= 0 {
+		budget = maxAgentTableWidth
+	}
+	if width() > budget {
 		showEnrolled = false
 	}
-	if width() > maxAgentTableWidth {
+	if width() > budget {
 		showBus = false
 	}
 

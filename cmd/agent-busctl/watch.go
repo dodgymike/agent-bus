@@ -388,52 +388,16 @@ func plainText(body []byte) (string, bool) {
 		case r == '\t' || r == '\n' || r == '\r':
 		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 			return "", false
-		case isBidiOrInvisible(r):
+		case client.IsBidiOrInvisible(r):
 			// Disqualifying rather than rewriting, for the same reason as any
 			// other control: `jq -r .text` strips the JSON escaping and pipes
 			// the result straight at a terminal, where a bidi override reorders
-			// the line. See isBidiOrInvisible.
+			// the line. See client.IsBidiOrInvisible for the codepoints and why
+			// none of them is caught by the control checks above.
 			return "", false
 		}
 	}
 	return string(body), true
-}
-
-// isBidiOrInvisible reports whether r is a Unicode character that changes how
-// text is DISPLAYED without being visible itself.
-//
-// None of these is a C0, DEL or C1 control, so the ordinary control checks miss
-// every one of them — and each is chosen by another agent when it appears in a
-// message body:
-//
-//	U+200B  zero-width space         invisible; splits a word that reads whole
-//	U+200C  zero-width non-joiner    invisible
-//	U+200D  zero-width joiner        invisible
-//	U+200E  left-to-right mark       changes the direction of what follows
-//	U+200F  right-to-left mark       changes the direction of what follows
-//	U+202A..U+202E  the legacy bidi embedding/override controls — U+202E
-//	                (RIGHT-TO-LEFT OVERRIDE) visually REVERSES the rest of the
-//	                line, which is how a body or an id can be made to read as
-//	                though it came from a different agent
-//	U+2066..U+2069  the isolate forms of the same thing
-//	U+FEFF  zero-width no-break space (BOM) — invisible mid-string
-//
-// A message body has no legitimate use for any of them. Real bidirectional text
-// (Arabic, Hebrew) renders correctly from its own character properties; these
-// codepoints exist to OVERRIDE that, which in a one-line feed is only ever a
-// forgery primitive.
-func isBidiOrInvisible(r rune) bool {
-	switch {
-	case r >= 0x200b && r <= 0x200f: // ZWSP, ZWNJ, ZWJ, LRM, RLM
-		return true
-	case r >= 0x202a && r <= 0x202e: // LRE, RLE, PDF, LRO, RLO
-		return true
-	case r >= 0x2066 && r <= 0x2069: // LRI, RLI, FSI, PDI
-		return true
-	case r == 0xfeff: // BOM / zero-width no-break space
-		return true
-	}
-	return false
 }
 
 // writeHumanMessage renders one message for a terminal.
@@ -447,35 +411,36 @@ func isBidiOrInvisible(r rune) bool {
 // message from someone else, or of a agent-busctl status line. client/sanitize.go
 // documents exactly this attack for server-supplied text.
 //
-// This duplicates client.safeText because that function is UNEXPORTED and this
-// package must not reach into client/'s internals; exporting it would widen the
-// client package's API for a purely presentational need. The duplication is
-// confined to the HUMAN path — NDJSON needs none of it, since encoding/json
-// escapes every byte below 0x20 already.
+// The neutraliser is client.TerminalSafe — ONE implementation, exported from the
+// package that owns the threat model. This command carried its own copy until
+// CLI-3-FU-SAFETEXT; the two agreed on the day they were written, which is
+// exactly the guarantee that decays silently in a security-relevant function.
 //
-// It differs from safeText in one deliberate way: NEWLINES SURVIVE. A body
-// legitimately contains them, and turning them into spaces would mangle every
-// multi-line message. They are rendered as real line breaks with the
-// continuation lines INDENTED, so a multi-line body can never be mistaken for
-// several messages.
+// keepNewlines is set for the BODY and only the body. A body legitimately
+// contains newlines and turning them into spaces would mangle every multi-line
+// message, so they are rendered as real line breaks with the continuation lines
+// INDENTED — that indent is what stops a multi-line body being mistaken for
+// several messages, and it is the reason keeping newlines is safe here. The
+// sender id and the timestamp get keepNewlines=false: a line break in either is
+// an attempt to forge a second line of output.
 func writeHumanMessage(w io.Writer, m client.Message) {
 	scope := "broadcast"
 	if !m.Broadcast {
 		scope = "→you"
 	}
-	header := fmt.Sprintf("%s %s %s", humanTime(m.SentAt), terminalSafe(m.From, false), scope)
+	header := fmt.Sprintf("%s %s %s", humanTime(m.SentAt), client.TerminalSafe(m.From, false), scope)
 
 	if !utf8.Valid(m.Body) {
 		// Not text at all. A screenful of replacement characters helps nobody,
 		// and the lossless form is one flag away. Note the test is UTF-8
 		// VALIDITY, not the stricter plainText: a body that is real text with a
-		// stray control byte in it is still worth reading, and terminalSafe
+		// stray control byte in it is still worth reading, and TerminalSafe
 		// below is what makes reading it safe.
 		fmt.Fprintf(w, "%s  <%d bytes, not text — re-run with --json and use `jq -r .body | base64 -d`>\n", header, len(m.Body))
 		return
 	}
 
-	safe := terminalSafe(string(m.Body), true)
+	safe := client.TerminalSafe(string(m.Body), true)
 	lines := strings.Split(safe, "\n")
 	if len(lines) == 1 {
 		fmt.Fprintf(w, "%s  %s\n", header, lines[0])
@@ -487,57 +452,17 @@ func writeHumanMessage(w io.Writer, m client.Message) {
 	}
 }
 
-// terminalSafe replaces everything a terminal can act on with a space.
-//
-// C0 controls, DEL and C1 controls all go — C1 because a lone 0x9b is CSI on
-// some terminals, which is as dangerous as ESC-[. So do the Unicode bidi and
-// zero-width characters (isBidiOrInvisible), which are not controls at all and
-// would otherwise pass through verbatim. Invalid UTF-8 becomes U+FFFD.
-// Everything is REPLACED rather than dropped so a run of them cannot splice two
-// words into one convincing token (a dropped ESC would turn "adm\x1bin" into
-// "admin").
-//
-// keepNewlines is set only for a message BODY, where a newline is content. It
-// never applies to an id or a timestamp: a line break in one of those is an
-// attempt to forge a second line of output.
-func terminalSafe(s string, keepNewlines bool) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' && keepNewlines:
-			b.WriteByte('\n')
-		case r == utf8.RuneError:
-			b.WriteRune('�')
-		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
-			// Tabs included: a tab in a body would break the indentation this
-			// renderer uses to show that a continuation line is not a new
-			// message.
-			b.WriteByte(' ')
-		case isBidiOrInvisible(r):
-			// Not a control by any of the tests above, but it reorders or hides
-			// what a human reads — the same forgery this function exists to
-			// stop, spelled in Unicode instead of ANSI. Replaced with a space
-			// for the same reason the controls are: dropping it would splice the
-			// text either side of it into one convincing token.
-			b.WriteByte(' ')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
 // humanTime renders the bus's timestamp as a local wall-clock time.
 //
 // A live feed is read by someone watching it now, so the second matters and the
 // date does not. A timestamp the bus formatted some other way is passed through
 // neutralised rather than dropped — it is information, and it is already known
 // to be free of control characters (client.validateServerTimestamp).
+// keepNewlines is false: a line break in a timestamp is a forged second line.
 func humanTime(sentAt string) string {
 	t, err := time.Parse(time.RFC3339, sentAt)
 	if err != nil {
-		return terminalSafe(sentAt, false)
+		return client.TerminalSafe(sentAt, false)
 	}
 	return t.Local().Format("15:04:05")
 }

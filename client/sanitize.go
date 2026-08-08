@@ -30,17 +30,49 @@ import (
 // message, short enough that a hostile bus cannot fill a scrollback.
 const maxDetailBytes = 200
 
-// safeText renders untrusted text for a terminal: every control character
-// becomes a space, invalid UTF-8 is replaced, and the result is truncated on a
-// RUNE boundary.
+// TerminalSafe renders untrusted text for a terminal: every control character
+// becomes a space, every bidi/zero-width codepoint becomes a space, and invalid
+// UTF-8 becomes U+FFFD. It does NOT truncate — see safeText for that.
 //
-// Control characters are replaced rather than dropped so that a run of them
-// cannot silently splice two words into one convincing token.
-func safeText(s string, max int) string {
+// # Why this is EXPORTED
+//
+// Invariant 7's third audience is an agent that EMBEDS this package, and an
+// embedder rendering another agent's message body to a terminal needs exactly
+// this function. Without it, the only options are to reach into this package's
+// internals (impossible) or to write a second copy (which is what
+// cmd/agent-busctl did, and what CLI-3-FU-SAFETEXT deleted). A security-relevant
+// neutraliser that exists twice is one that decays silently: the two agreed on
+// the day they were written and nothing would have failed when they stopped.
+//
+// # What it neutralises, and why REPLACE rather than DROP
+//
+//	C0 (< 0x20) and DEL   ESC, CR, LF, BEL, backspace, tab — the lot
+//	C1 (0x80..0x9f)       a lone 0x9b is CSI on some terminals, so these are as
+//	                      dangerous as ESC-[ and are not merely "high bytes"
+//	bidi/zero-width       see IsBidiOrInvisible; none of these is a control, so
+//	                      every ordinary control check misses all of them
+//	invalid UTF-8         becomes U+FFFD
+//
+// Everything is REPLACED with a space rather than dropped, because dropping
+// would splice the text either side into one convincing token: a dropped ESC
+// turns "adm\x1bin" into "admin".
+//
+// keepNewlines is for a message BODY, where a newline is content and turning it
+// into a space would mangle every multi-line message. It must NEVER be set for
+// an id, a timestamp or an error detail: a line break in one of those is an
+// attempt to forge a second line of output. Note that a caller keeping newlines
+// takes on the job of making a continuation line unmistakable — cmd/agent-busctl
+// indents them, so a multi-line body cannot read as several messages.
+//
+// This is about what a HUMAN sees. JSON output needs none of it: encoding/json
+// escapes every byte below 0x20 already.
+func TerminalSafe(s string, keepNewlines bool) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
+		case r == '\n' && keepNewlines:
+			b.WriteByte('\n')
 		case r == utf8.RuneError:
 			b.WriteRune('�')
 		case r < 0x20, r == 0x7f:
@@ -50,9 +82,9 @@ func safeText(s string, max int) string {
 			// C1 controls. A single 0x9b is CSI on some terminals, so these
 			// are as dangerous as ESC-[ and are not merely "high bytes".
 			b.WriteByte(' ')
-		case isBidiOrInvisibleRune(r):
+		case IsBidiOrInvisible(r):
 			// The same forgery this function exists to stop, spelled in Unicode
-			// rather than ANSI — and NOT caught by any test above, because none
+			// rather than ANSI — and NOT caught by any control test, because none
 			// of these is a control character. U+202E reverses the rest of the
 			// line, so a bus that answers 500 with a bidi run can reorder the
 			// text printed beside it. That matters more than it used to: the
@@ -68,7 +100,18 @@ func safeText(s string, max int) string {
 			b.WriteRune(r)
 		}
 	}
-	out := strings.TrimSpace(b.String())
+	return b.String()
+}
+
+// safeText is TerminalSafe for a SERVER-SUPPLIED FIELD: newlines never survive,
+// the result is trimmed, and it is bounded to max bytes on a RUNE boundary.
+//
+// The split from TerminalSafe is deliberate. The bound belongs to the caller,
+// not to the renderer: a message body is legitimately long and must not be
+// silently shortened, whereas an error detail from a hostile bus must not be
+// able to fill a scrollback (maxDetailBytes). max <= 0 means no bound.
+func safeText(s string, max int) string {
+	out := strings.TrimSpace(TerminalSafe(s, false))
 	if max <= 0 || len(out) <= max {
 		return out
 	}
@@ -80,7 +123,7 @@ func safeText(s string, max int) string {
 	return strings.TrimSpace(out[:cut]) + "…"
 }
 
-// isBidiOrInvisibleRune reports whether r changes how text is DISPLAYED without
+// IsBidiOrInvisible reports whether r changes how text is DISPLAYED without
 // being visible itself.
 //
 // None of these is a C0, DEL or C1 control, so every ordinary control test
@@ -94,15 +137,18 @@ func safeText(s string, max int) string {
 //	U+2066..U+2069  the isolate forms of the same thing
 //	U+FEFF          zero-width no-break space (BOM) — invisible mid-string
 //
-// Server-supplied text has no legitimate use for any of them. Real
-// bidirectional text (Arabic, Hebrew) renders correctly from its own character
-// properties; these codepoints exist to OVERRIDE that.
+// Neither server-supplied text nor a message body has a legitimate use for any
+// of them. Real bidirectional text (Arabic, Hebrew) renders correctly from its
+// own character properties; these codepoints exist to OVERRIDE that.
 //
-// NOTE: cmd/agent-busctl/watch.go carries a near-identical predicate for message
-// BODIES. The duplication is tracked by CLI-3-FU-SAFETEXT, which exports one
-// renderer from this package and deletes the CLI's copy; until then the two must
-// be kept in step.
-func isBidiOrInvisibleRune(r rune) bool {
+// It is exported alongside TerminalSafe because the two answer different
+// questions and both have callers. TerminalSafe REWRITES, which is right when
+// something must be printed; this predicate lets a caller DISQUALIFY instead,
+// which is right when the value is about to be handed to a consumer that will
+// print it later — cmd/agent-busctl uses it that way for the `text` field of its
+// NDJSON stream, where `jq -r .text` strips the JSON escaping and pipes the
+// result straight at a terminal.
+func IsBidiOrInvisible(r rune) bool {
 	switch {
 	case r >= 0x200b && r <= 0x200f:
 		return true
@@ -189,9 +235,10 @@ func validateServerTimestamp(op, field, value string) error {
 // and a caller comparing it against its own digest is entitled to assume it is
 // at least the right KIND of thing.
 //
-// NOTE: the value is still not compared against the body. This checks the shape
-// only; end-to-end verification of the hash against the bytes we sent or
-// received is a deliberate behaviour change and is not made here.
+// This checks the SHAPE only. The VALUE is compared against the decoded body on
+// the read path by verifyMessageBody (messages.go), which runs after this and
+// relies on it: a shape check first means a mismatch is reported as "these two
+// hashes differ" rather than "this is not a hash at all".
 var contentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // validateServerContentHash checks a content_sha256 field. An empty value is

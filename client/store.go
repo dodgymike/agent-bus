@@ -731,48 +731,107 @@ func locateForPin(d storeData, ref string) (int, Credential, error) {
 	return i, d.Credentials[i], nil
 }
 
-// save writes the store atomically: a fresh 0600 temp file in the same
+// storeFile names one JSON document in the store directory, together with the
+// lock that serialises writes to it and the exact words its failures are
+// reported in.
+//
+// It exists so saveJSON, lockFile and sweepTempFiles are ONE implementation
+// shared by identities.json and cursors.json (CLI-3-FU-STOREDEDUP). They were
+// two copies until then — written apart only because store.go was outside the
+// implementing agent's file-ownership boundary during a parallel wave — and they
+// agreed on the day they were written, which is precisely the guarantee that
+// decays without anything failing. What the original protects is a file of
+// Ed25519 private-key seeds; a divergence between the copies is a lost-update
+// bug on private keys, and the reasoning that makes the lock correct (below) is
+// subtle enough that a second copy would eventually lose it.
+//
+// The nouns are carried rather than derived because the two documents' messages
+// are not variations on one template: "the credential store lock" and "the
+// cursor lock" do not share a stem, and inventing one would change strings a
+// user reads for no benefit.
+type storeFile struct {
+	// op is the Error.Op these failures carry.
+	op string
+
+	// name is the document's file name inside s.dir, and the stem of its
+	// ".tmp-*" temp files. Two descriptors must never share one.
+	name string
+
+	// lockName is the document's own lock file. Two descriptors must never
+	// share one either: a shared lock would put the cursor hot loop in
+	// contention with enrolment, which is exactly what the split avoids.
+	lockName string
+
+	// what names the document in a save failure — "the credential store".
+	what string
+
+	// lockWhat names it in a lock failure — "the credential store lock".
+	lockWhat string
+
+	// busyWhat names it in the lock-timeout REMEDY, which is phrased from the
+	// reader's point of view: "another agent-busctl process is updating <this>".
+	busyWhat string
+}
+
+// identitiesFile is the credential document: every enrolled identity, including
+// PRIVATE KEYS.
+var identitiesFile = storeFile{
+	op:       "store",
+	name:     storeFileName,
+	lockName: lockFileName,
+	what:     "the credential store",
+	lockWhat: "the credential store lock",
+	busyWhat: "the store",
+}
+
+// save writes the credential store atomically. See saveJSON.
+func (s *Store) save(d storeData) error {
+	d.Version = storeFormatVersion
+	return s.saveJSON(identitiesFile, d)
+}
+
+// saveJSON writes one document atomically: a fresh 0600 temp file in the same
 // directory, fsynced, then renamed over the target, then the directory itself
 // fsynced so the rename survives a crash.
 //
 // The temp file is created 0600 with O_EXCL rather than written and chmodded,
 // so there is no instant at which the private keys exist under a looser mode.
-func (s *Store) save(d storeData) error {
-	d.Version = storeFormatVersion
-	body, err := json.MarshalIndent(d, "", "  ")
+func (s *Store) saveJSON(f storeFile, v interface{}) error {
+	body, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return wrapError(KindInternal, "store", "cannot encode the credential store", "", err)
+		return wrapError(KindInternal, f.op, "cannot encode "+f.what, "", err)
 	}
 	body = append(body, '\n')
 
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		return wrapError(KindInternal, "store", "cannot generate a temporary file name", "", err)
+		return wrapError(KindInternal, f.op, "cannot generate a temporary file name", "", err)
 	}
-	tmp := filepath.Join(s.dir, storeFileName+".tmp-"+hex.EncodeToString(suffix[:]))
+	target := filepath.Join(s.dir, f.name)
+	tmp := filepath.Join(s.dir, f.name+".tmp-"+hex.EncodeToString(suffix[:]))
 
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
+	fh, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
 	if err != nil {
-		return wrapError(KindConfig, "store", "cannot create a temporary file in "+s.dir, "check the directory is writable", err)
+		return wrapError(KindConfig, f.op, "cannot create a temporary file in "+s.dir, "check the directory is writable", err)
 	}
 	// From here on the temp file must not be left behind on any error path.
-	cleanup := func() { _ = f.Close(); _ = os.Remove(tmp) }
+	cleanup := func() { _ = fh.Close(); _ = os.Remove(tmp) }
 
-	if _, err := f.Write(body); err != nil {
+	if _, err := fh.Write(body); err != nil {
 		cleanup()
-		return wrapError(KindConfig, "store", "cannot write the credential store", "check for a full or read-only filesystem", err)
+		return wrapError(KindConfig, f.op, "cannot write "+f.what, "check for a full or read-only filesystem", err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := fh.Sync(); err != nil {
 		cleanup()
-		return wrapError(KindConfig, "store", "cannot flush the credential store to disk", "check for a full or read-only filesystem", err)
+		return wrapError(KindConfig, f.op, "cannot flush "+f.what+" to disk", "check for a full or read-only filesystem", err)
 	}
-	if err := f.Close(); err != nil {
+	if err := fh.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return wrapError(KindConfig, "store", "cannot close the credential store", "check for a full or read-only filesystem", err)
+		return wrapError(KindConfig, f.op, "cannot close "+f.what, "check for a full or read-only filesystem", err)
 	}
-	if err := os.Rename(tmp, s.Path()); err != nil {
+	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
-		return wrapError(KindConfig, "store", "cannot replace the credential store "+s.Path(), "check the directory is writable", err)
+		return wrapError(KindConfig, f.op, "cannot replace "+f.what+" "+target, "check the directory is writable", err)
 	}
 	// Fsync the DIRECTORY so the rename itself is durable. Without it the
 	// file's contents are on disk but the name may not be, and a crash can
@@ -785,7 +844,10 @@ func (s *Store) save(d storeData) error {
 	return nil
 }
 
-// lock takes the store's exclusive lock and returns a release function.
+// lock takes the credential store's exclusive lock. See lockFile.
+func (s *Store) lock() (func(), error) { return s.lockFile(identitiesFile) }
+
+// lockFile takes one document's exclusive lock and returns a release function.
 //
 // The lock is an O_EXCL file rather than flock(2) so this package stays
 // portable stdlib-only (invariant 8). Its one weakness is that a holder which
@@ -798,22 +860,26 @@ func (s *Store) save(d storeData) error {
 // stale, removes it and wins the O_EXCL create; B — which stat'd the OLD file
 // a moment earlier — then removes A's LIVE lock and wins its own create. Both
 // believe they hold the lock, both read-modify-write, and one whole-file
-// update is lost. Since the file holds private keys, "lost update" means "lost
-// identity". Comparing the token before unlinking closes both halves: a break
-// only removes the exact file that was observed stale, and a release only
-// removes a lock that is still ours.
-func (s *Store) lock() (func(), error) {
-	path := filepath.Join(s.dir, lockFileName)
+// update is lost. Since the credential file holds private keys, "lost update"
+// means "lost identity". Comparing the token before unlinking closes both
+// halves: a break only removes the exact file that was observed stale, and a
+// release only removes a lock that is still ours.
+//
+// This reasoning is the reason the function is shared rather than copied. It
+// lived in one copy and was REFERENCED by the other, which is a comment
+// promising a property the code beside it no longer had to keep.
+func (s *Store) lockFile(f storeFile) (func(), error) {
+	path := filepath.Join(s.dir, f.lockName)
 	deadline := time.Now().Add(lockAcquireTimeout)
 	for {
 		token, err := newLockToken()
 		if err != nil {
 			return nil, err
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
+		fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
 		if err == nil {
-			_, werr := f.WriteString(token)
-			cerr := f.Close()
+			_, werr := fh.WriteString(token)
+			cerr := fh.Close()
 			if werr != nil || cerr != nil {
 				// A lock we cannot prove we own is worse than no lock: the
 				// release below would refuse to remove it and it would go
@@ -823,16 +889,16 @@ func (s *Store) lock() (func(), error) {
 				if cause == nil {
 					cause = cerr
 				}
-				return nil, wrapError(KindConfig, "store",
-					"cannot write the credential store lock "+path,
+				return nil, wrapError(KindConfig, f.op,
+					"cannot write "+f.lockWhat+" "+path,
 					"check for a full or read-only filesystem",
 					cause)
 			}
 			return func() { removeIfToken(path, token) }, nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
-			return nil, wrapError(KindConfig, "store",
-				"cannot create the credential store lock "+path,
+			return nil, wrapError(KindConfig, f.op,
+				"cannot create "+f.lockWhat+" "+path,
 				"check the directory is writable",
 				err)
 		}
@@ -850,9 +916,9 @@ func (s *Store) lock() (func(), error) {
 		}
 
 		if time.Now().After(deadline) {
-			return nil, newError(KindConfig, "store",
-				"timed out waiting for the credential store lock "+path,
-				"another agent-busctl process is updating the store; retry, or remove the lock file if no other process is running")
+			return nil, newError(KindConfig, f.op,
+				"timed out waiting for "+f.lockWhat+" "+path,
+				"another agent-busctl process is updating "+f.busyWhat+"; retry, or remove the lock file if no other process is running")
 		}
 		time.Sleep(lockPollInterval)
 	}
@@ -902,7 +968,7 @@ func (s *Store) update(mutate func(d *storeData) error) error {
 	}
 	defer release()
 
-	s.sweepTempFiles()
+	s.sweepTempFiles(identitiesFile)
 
 	d, err := s.load()
 	if err != nil {
@@ -915,10 +981,15 @@ func (s *Store) update(mutate func(d *storeData) error) error {
 	return s.save(d)
 }
 
-// sweepTempFiles removes leftovers from a save that was killed between
-// creating the temp file and renaming it. Called only with the lock held.
-func (s *Store) sweepTempFiles() {
-	matches, err := filepath.Glob(filepath.Join(s.dir, storeFileName+".tmp-*"))
+// sweepTempFiles removes leftovers from a save of f that was killed between
+// creating the temp file and renaming it. Called only with f's lock held.
+//
+// The glob is scoped to f.name, and that scoping is load-bearing rather than
+// incidental: the descriptors' globs are DISJOINT, so a cursor write can never
+// delete an in-flight copy of the credential document (or the reverse) while the
+// other writer holds a different lock.
+func (s *Store) sweepTempFiles(f storeFile) {
+	matches, err := filepath.Glob(filepath.Join(s.dir, f.name+".tmp-*"))
 	if err != nil {
 		return
 	}
@@ -1259,11 +1330,58 @@ func (s *Store) DropPending(key, busURL string) error {
 // Doing both in one cycle is what makes the outcome atomic from a reader's
 // point of view: there is no instant at which the store holds a usable
 // credential AND a pending record for the same enrolment.
+// # A REPLACED credential does not inherit the old one's read position
+//
+// findCredential matches on AgentID ALONE, so enrolling again under an agent id
+// already in the store OVERWRITES it. Since CLI-3-FU-URLKEY the watch cursor is
+// keyed by (agent id, bus id) — both derivable from that same agent id — so the
+// incoming credential would silently adopt the position the previous holder of
+// that id had reached.
+//
+// That direction is the dangerous one. A cursor is a "everything up to here has
+// been seen" watermark, and the bus's cursor is deliberately unsigned and NOT
+// bus-scoped (internal/hub's DecodeCursor binds only the agent half), so a
+// position minted elsewhere is accepted and only messages AFTER it are returned.
+// The result is a SKIP — silent message loss — where every other failure mode in
+// this client is a replay. Under the old bus_url key the two records could not
+// collide because they sat under different URLs; re-keying removed that
+// accidental separation, so the separation now has to be deliberate.
+//
+// Clearing costs a replay of the retained window for that identity, which
+// at-least-once delivery already permits and any correct handler already
+// tolerates. It is the cheap side of the trade by a wide margin.
+//
+// # It is UNCONDITIONAL, and that is the second half of the fix
+//
+// An earlier version cleared only when findCredential had matched, i.e. only on
+// the overwrite path. That left the hole open one step further out: `logout`
+// REMOVES the credential but does not touch cursors.json, so a logout followed
+// by an enrolment lands on the APPEND path with the previous holder's position
+// still sitting in the file, waiting under a key the new credential derives
+// identically. Clearing whether or not anything was replaced closes both routes
+// with less code than distinguishing them. A genuinely fresh identity has no
+// record under its key, so the clear is a no-op — it cannot disturb another
+// agent's position, which is what the "unrelated cursor" subtest pins.
+//
+// # Ordering and failure mode
+//
+// It runs AFTER the update rather than inside the mutate callback: the callback
+// holds the identities lock, ClearCursor takes the cursors lock, and nesting the
+// second inside the first would buy nothing. s.update's deferred release runs
+// when update returns, so the identities lock is already released here.
+//
+// A FAILED clear is reported, not fatal. Failing the enrolment would be wrong —
+// the credential is already durable at that point, so the caller would be told
+// its enrolment failed when it had succeeded. But be precise about what is left
+// behind, because the obvious guess is backwards: a surviving record is the
+// PREVIOUS holder's position, so the risk is a SKIP, not a replay. That is why
+// the remedy names --replay, which is the one thing that reliably steps around
+// a position that is too far ahead.
 func (s *Store) PromotePending(key string, cred Credential, makeCurrent bool) error {
 	if cred.AgentID == "" || cred.PrivateKeySeed == "" {
 		return newError(KindInternal, "store", "refusing to store an incomplete credential", "")
 	}
-	return s.update(func(d *storeData) error {
+	if err := s.update(func(d *storeData) error {
 		if i := findCredential(d.Credentials, cred.AgentID); i >= 0 {
 			d.Credentials[i] = cred
 		} else {
@@ -1274,7 +1392,21 @@ func (s *Store) PromotePending(key string, cred Credential, makeCurrent bool) er
 		}
 		d.Pending = removePending(d.Pending, key, cred.BusURL)
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	busID, err := cursorBusID(cred)
+	if err != nil {
+		// The credential is self-contradictory about its bus. Nothing can be
+		// keyed, so there is nothing to clear and nothing that could be read
+		// back later either.
+		return nil
+	}
+	if cerr := s.ClearCursor(cred.AgentID, busID); cerr != nil {
+		s.warnf("enrolled %s but could not clear the stored read position left under its key (%v); a position left there belongs to a PREVIOUS holder of this id and would make the next watch SKIP past messages — run `agent-busctl watch --replay` once, or delete %s",
+			cred.AgentID, cerr, s.CursorPath())
+	}
+	return nil
 }
 
 func removePending(pending []pendingEnrolment, key, busURL string) []pendingEnrolment {
