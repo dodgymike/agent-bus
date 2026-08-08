@@ -157,7 +157,8 @@ type PeerRoster struct {
 	// It exists because invariant 10's central distinction cannot be made
 	// without it: same key + same payload is a legitimate retry that must
 	// return the original result, while same key + DIFFERENT payload is a
-	// protocol violation that must be rejected and disconnect the caller. A
+	// protocol violation that must be rejected and logged — and NOT
+	// disconnected (narrowed 2026-08-08). A
 	// registration site handed only the key could not tell those apart, and
 	// would have to re-derive the fingerprint from a payload it no longer has.
 	// Zero on a roster derived from a RESPONSE.

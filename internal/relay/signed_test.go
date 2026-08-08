@@ -947,14 +947,16 @@ var (
 // DIFFERENT payload.
 //
 // Invariant 10 turns that disagreement into a weapon. Same idempotency key with
-// a different fingerprint is idem.OutcomeViolation, and a violation is not
-// merely refused — it is rejected, logged, AND THE OFFENDING PEER IS
-// DISCONNECTED. So a hostile peer could take an honest peer's legitimately
-// signed message, reorder nothing but the recipient array, forward it, and have
-// this bus classify the pair as a protocol violation and DISCONNECT THE HONEST
-// PEER — whose own copy still carried a perfectly valid signature over the very
-// same audience. The victim has done nothing wrong and cannot tell why it was
-// dropped; the attacker spends one forwarded copy.
+// a different fingerprint is idem.OutcomeViolation, which is a 409 refusal plus
+// a protocol-violation log line. So a hostile peer could take an honest peer's
+// legitimately signed message, reorder nothing but the recipient array, forward
+// it, and have this bus REFUSE the honest peer's own copy as a protocol
+// violation — a copy that still carried a perfectly valid signature over the
+// very same audience. The victim has done nothing wrong, its message does not
+// arrive, and it is logged as the offender; the attacker spends one forwarded
+// copy. (Before invariant 10 was narrowed on 2026-08-08 the same refusal also
+// closed the honest peer's connection. The narrowing shrank the blast radius; it
+// did not make the misattribution acceptable, which is why this test stands.)
 //
 // The fix is that the fingerprint defines "same payload" exactly as the
 // signature does: sorted here, sorted there, one meaning. This test asserts the
@@ -1018,7 +1020,7 @@ func TestSign7RecipientPermutationCannotGetAnHonestPeerDisconnected(t *testing.T
 		if one.Fingerprint != two.Fingerprint {
 			t.Fatalf("two permutations of ONE recipient set have DIFFERENT fingerprints (%x vs %x).\n"+
 				"The signature says these are the same message — both copies carry the SAME signature bytes and both verify — so the fingerprint must too.\n"+
-				"With them disagreeing, invariant 10 classifies the pair as idem.OutcomeViolation and mandates DISCONNECTING the peer, so a hostile peer that reorders a recipient array gets an HONEST peer disconnected.",
+				"With them disagreeing, invariant 10 classifies the pair as idem.OutcomeViolation, so a hostile peer that reorders a recipient array gets an HONEST peer's own signed message refused with a 409 and logged as a protocol violation.",
 				one.Fingerprint, two.Fingerprint)
 		}
 		// The scopes must agree too, or the second copy would never be looked up
@@ -1066,7 +1068,7 @@ func TestSign7RecipientPermutationCannotGetAnHonestPeerDisconnected(t *testing.T
 
 		status, code, resp = remote.postRelay(t, reordered)
 		if status == http.StatusConflict || code == CodeIdempotencyViolation {
-			t.Fatalf("a REORDERED recipient array gave %d/%q: the bus has classified an honest peer's own signed message as an idempotency VIOLATION, which invariant 10 answers by DISCONNECTING that peer. Reordering is free for an attacker and the victim's copy is perfectly valid.", status, code)
+			t.Fatalf("a REORDERED recipient array gave %d/%q: the bus has classified an honest peer's own signed message as an idempotency VIOLATION, so the honest copy is refused and the honest peer is the one logged as the offender. Reordering is free for an attacker and the victim's copy is perfectly valid.", status, code)
 		}
 		if status != http.StatusOK {
 			t.Fatalf("the reordered copy gave %d/%q, want 200", status, code)

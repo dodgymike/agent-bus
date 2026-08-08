@@ -179,7 +179,7 @@ func (h *RosterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// this case it fell through to the 503 default, which tells a peer
 			// that reused a key with new content to RETRY — the one response
 			// that guarantees it keeps doing the thing being refused.
-			h.log.Warn("roster update REJECTED: idempotency key reused with a different payload — THE SENDING PEER SHOULD BE DISCONNECTED (invariant 10); this handler cannot close the connection, so the gate task MTLS-RELAYGUARD (8192c3c7) must wire that",
+			h.log.Warn("roster update REJECTED: idempotency key reused with a different payload (invariant 10). Rejected and logged, and that is the WHOLE remedy — the peer is deliberately NOT disconnected (narrowed 2026-08-08; see relay's package doc, \"Key reuse is REJECT-AND-LOG\")",
 				"local_bus", h.busID,
 				"peer_bus", u.BusID,
 				"version", u.Version,
@@ -317,7 +317,7 @@ func (c *Client) PushRoster(ctx context.Context, peerBaseURL string, u RosterUpd
 		return fmt.Errorf("%w: response from %s exceeds %d bytes", ErrPayloadTooLarge, endpoint, MaxRosterUpdateBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: %s returned %d (%s)", ErrPeerRefused, endpoint, resp.StatusCode, peerErrorCode(buf))
+		return &PeerRefusedError{Endpoint: endpoint, StatusCode: resp.StatusCode, Code: peerErrorCode(buf)}
 	}
 	var decoded RosterUpdateResponse
 	if err := decodeStrict(buf, &decoded); err != nil {

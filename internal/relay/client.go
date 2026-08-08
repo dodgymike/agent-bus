@@ -21,6 +21,68 @@ import (
 // malformed reply, and carries the peer's stable error code when it sent one.
 var ErrPeerRefused = errors.New("relay: peer refused the handshake")
 
+// PeerRefusedError is a refusal that KEPT THE STATUS CODE, and it exists for
+// exactly one reason: RELAY-4's retry loop cannot be correct without it.
+//
+// Every non-200 used to collapse into one opaque wrapped ErrPeerRefused, which
+// leaves a retry policy two equally wrong choices. Retry everything, and a 400
+// malformed envelope or a 409 idempotency violation is re-sent until the horizon
+// runs out — the traffic amplification relayhttp.go's status argument exists to
+// prevent, with the control acting as the amplifier. Retry nothing, and a 503
+// from a peer that is merely restarting is discarded, which is the entire case
+// RELAY-4 was written for.
+//
+// It wraps ErrPeerRefused, so every existing errors.Is(err, ErrPeerRefused)
+// check keeps working unchanged.
+type PeerRefusedError struct {
+	// Endpoint is the URL that refused, for the log line.
+	Endpoint string
+	// StatusCode is the peer's HTTP status.
+	StatusCode int
+	// Code is the peer's stable error code when it sent one; "" otherwise. It
+	// is UNTRUSTED peer input and is only ever logged, never branched on —
+	// retriability is decided from the status alone, which is the one field the
+	// HTTP layer itself defines.
+	Code string
+}
+
+func (e *PeerRefusedError) Error() string {
+	return fmt.Sprintf("%s: %s returned %d (%s)", ErrPeerRefused.Error(), e.Endpoint, e.StatusCode, e.Code)
+}
+
+// Unwrap is what keeps errors.Is(err, ErrPeerRefused) true.
+func (e *PeerRefusedError) Unwrap() error { return ErrPeerRefused }
+
+// Retriable reports whether re-sending the identical request could ever produce
+// a different answer.
+//
+// The split is "not now" versus "never", and it is decided from the STATUS, not
+// from the peer's error code string:
+//
+//   - 5xx is NOT NOW. The peer is broken, restarting, or shedding load; the same
+//     bytes may well be accepted in a minute. relayhttp.go maps every unclassified
+//     AcceptRelay failure to 503 precisely so a peer can tell this apart.
+//   - 429 and 408 are NOT NOW for the same reason: both name a condition of the
+//     moment rather than of the message.
+//   - EVERY OTHER 4xx IS NEVER. 400 (malformed envelope), 403 (bad signature or
+//     unpeered bus), 409 (idempotency violation) and 413 (too large) are verdicts
+//     on THIS message's content, and no amount of resending changes its content.
+//   - 3xx IS NEVER, emphatically. Client.NewClient installs
+//     http.ErrUseLastResponse so a redirect is surfaced as a refusal rather than
+//     followed; retrying one would just re-present the SSRF the redirect policy
+//     was added to close.
+//
+// Note what is NOT here: a 200 carrying accepted:false, dropped_reason=loop. That
+// is a SETTLED answer with a nil error and never reaches this method — which is
+// the whole reason relayhttp.go insists a loop is a 200.
+func (e *PeerRefusedError) Retriable() bool {
+	switch e.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return e.StatusCode >= 500 && e.StatusCode <= 599
+}
+
 // ClientConfig configures the initiator side of the handshake.
 type ClientConfig struct {
 	// BusID is THIS bus's server-minted id (invariant 1): what we claim to the
@@ -162,7 +224,7 @@ func (c *Client) Enroll(ctx context.Context, peerBaseURL, idempotencyKey string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return PeerRoster{}, fmt.Errorf("%w: %s returned %d (%s)", ErrPeerRefused, endpoint, resp.StatusCode, peerErrorCode(buf))
+		return PeerRoster{}, &PeerRefusedError{Endpoint: endpoint, StatusCode: resp.StatusCode, Code: peerErrorCode(buf)}
 	}
 
 	var decoded PeerEnrollResponse

@@ -1268,3 +1268,28 @@ afterwards and a missing one stays missing.
 **No new HTTP route, CLI flag, env var, record type or `ondisk-format-version` is introduced**, and
 there is still no agent-facing surface — no `scripts/bus-*.sh` wrapper and no `AGENT_PROTOCOL.md`
 entry, because agents never see a bus's TLS or signing key material directly.
+
+## `RetentionWindow`'s `PeerOutageBudget` term is now an ENFORCED constraint, not a stated one (RELAY-4, added 2026-08-08)
+
+The `PeerOutageBudget` (24h) term cited above (line 572 area, `internal/idem/retention.go`) was
+documented as a constraint RELAY-4 had not yet been built to satisfy. **That is no longer true.**
+RELAY-4 (peer-down retry/backoff, `internal/relay/forward.go`) now enforces the bound structurally:
+`NewForwarder` REFUSES TO CONSTRUCT unless `RetryHorizon + Timeout <= idem.PeerOutageBudget`
+(`RetryHorizonCeiling`, cited by reference so the two constants cannot drift apart). The default is
+`DefaultRetryHorizon` (`23h59m30s`) plus `DefaultForwardTimeout` (`30s`) = exactly `24h`.
+
+The retry deadline is anchored on a job's **enqueue instant** (`enqueuedAt`), never on its first
+attempt — this is what keeps a per-peer queue that drains serially from stacking two horizons back
+to back behind one dead peer.
+
+**Why an operator should care:** a retry that lands after its horizon has elapsed is applied as a
+NEW operation and the message is DELIVERED TWICE, by the same "duplicates are suppressed only
+within the retention window" rule stated above — so `PeerOutageBudget` and the forwarder's retry
+horizon are one bound, not two, and anyone raising either MUST move both together.
+
+Asserted by `go test -race -run TestPeerRetryBackoffHorizonStaysInsideTheOutageBudget ./internal/relay`.
+
+**Not yet reachable.** `internal/relay` is NOT registered on any mux (`TestHandshakeHandlerIsNotWiredIntoAnyMux`)
+— it is gated behind INVITE-PEERGUARD and MTLS-RELAYGUARD, so none of this is live/observable from a
+running bus yet. The outbound queue this retry logic drains is still IN-MEMORY with no durable
+outbox, so cross-bus delivery remains BEST EFFORT, not reliable, even once wired.

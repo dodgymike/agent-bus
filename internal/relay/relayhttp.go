@@ -36,15 +36,23 @@ type RelayAcceptance struct {
 // idem.OutcomeViolation: the same idempotency key presented with a DIFFERENT
 // payload.
 //
-// # THE HANDLER CANNOT DO THE FULL REMEDY, AND SAYS SO
+// # THE 409 PLUS THE LOG LINE IS THE COMPLETE REMEDY. NO GATE TASK OWES MORE.
 //
-// CLAUDE.md invariant 10 requires that a violation is rejected, logged AND THE
-// OFFENDING CLIENT DISCONNECTED. This handler does the first two. It cannot do
-// the third: the connection belongs to the serving layer, and this package is
-// not served by anything (see the package doc). THE GATE TASK — MTLS-RELAYGUARD
-// (8192c3c7) — MUST WIRE THE DISCONNECT when it puts this handler on a
-// listener. The 409 and the log line are deliberately shaped to make that
-// wiring obvious rather than optional.
+// CLAUDE.md invariant 10 as NARROWED on 2026-08-08 (code: 1c6c540; contract:
+// 0dbb025) requires that key reuse with a different payload is REJECTED AND
+// LOGGED — and nothing else. It does NOT disconnect. An earlier version of this
+// comment told MTLS-RELAYGUARD (8192c3c7) to close the connection here; THAT
+// INSTRUCTION IS WITHDRAWN and must not be reinstated.
+//
+// Two reasons, and the second is specific to this package. First, an
+// idempotency key is scoped to the CALLER'S OWN agent, so reusing one for new
+// content is overwhelmingly a client that lost track of its keys — the party
+// most likely to be honest. Second, a relay link MULTIPLEXES AN ENTIRE PEER
+// BUS'S ROSTER: closing this connection would drop every agent behind that peer
+// over one agent's traffic. See the package doc, "Key reuse is REJECT-AND-LOG",
+// for the two questions invariant 10 now requires before any disconnect is added
+// to a relay surface, and for the open design question that would have to be
+// answered first.
 var ErrIdempotencyViolation = errors.New("relay: idempotency key reused with a different payload")
 
 // RelayConfig configures the relay ingress.
@@ -219,9 +227,11 @@ func (h *RelayHandler) Stats() RelayStats {
 //     send an operator hunting an attack on what is the ordinary day-one state of
 //     an unfinished federation.
 //
-//   - An idempotency VIOLATION is 409, and the log line says the caller should
-//     be disconnected (invariant 10). We cannot disconnect from here; see
-//     ErrIdempotencyViolation.
+//   - An idempotency VIOLATION is 409 and a Warn line, AND THAT IS THE WHOLE
+//     RESPONSE (invariant 10 as narrowed 2026-08-08). The peer is NOT
+//     disconnected: the key is its own, so this is far more likely a confused
+//     peer than a hostile one, and this link carries a whole roster's traffic.
+//     See ErrIdempotencyViolation.
 //
 //   - A DUPLICATE is 200 with accepted:true, duplicate:true and the ORIGINAL
 //     local message id. Invariant 10: return the original result, re-apply
@@ -319,7 +329,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Neither payload is echoed — invariant 10's violation case is
 			// exactly the situation where two payloads exist and neither may be
 			// shown to the other party.
-			h.log.Warn("relayed message REJECTED: idempotency key reused with a different payload — THE SENDING PEER SHOULD BE DISCONNECTED (invariant 10); this handler cannot close the connection, so the gate task MTLS-RELAYGUARD (8192c3c7) must wire that",
+			h.log.Warn("relayed message REJECTED: idempotency key reused with a different payload (invariant 10). Rejected and logged, and that is the WHOLE remedy — the peer is deliberately NOT disconnected, because the key is its own and this link carries its entire roster's traffic",
 				"local_bus", h.busID,
 				"origin_bus", m.OriginBus,
 				"origin_message_id", m.OriginMessageID,
@@ -447,7 +457,7 @@ func (c *Client) Relay(ctx context.Context, peerBaseURL string, req RelayRequest
 		return RelayResponse{}, fmt.Errorf("%w: response from %s exceeds %d bytes", ErrPayloadTooLarge, endpoint, MaxRelayBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return RelayResponse{}, fmt.Errorf("%w: %s returned %d (%s)", ErrPeerRefused, endpoint, resp.StatusCode, peerErrorCode(buf))
+		return RelayResponse{}, &PeerRefusedError{Endpoint: endpoint, StatusCode: resp.StatusCode, Code: peerErrorCode(buf)}
 	}
 
 	var decoded RelayResponse

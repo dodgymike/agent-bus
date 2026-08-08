@@ -76,13 +76,25 @@ func (f *fabric) record(resp RelayResponse) {
 // IS the assertion that the mesh settles.
 func (f *fabric) run(ctx context.Context, maxSteps int) {
 	f.t.Helper()
+	steps, terminated := f.runBounded(ctx, maxSteps)
+	if !terminated {
+		f.t.Fatalf("the federation did not terminate within %d relay steps: the message is still circulating, which is exactly what RELAY-3 exists to prevent", maxSteps)
+	}
+	_ = steps
+}
+
+// runBounded is run without the fatal, for the tests that need to OBSERVE
+// non-termination rather than be killed by it. It returns how many relay steps
+// it performed and whether the queue emptied inside the bound.
+func (f *fabric) runBounded(ctx context.Context, maxSteps int) (steps int, terminated bool) {
+	f.t.Helper()
 	for step := 0; ; step++ {
 		if step > maxSteps {
-			f.t.Fatalf("the federation did not terminate within %d relay steps: the message is still circulating, which is exactly what RELAY-3 exists to prevent", maxSteps)
+			return step, false
 		}
 		j, ok := f.pop()
 		if !ok {
-			return
+			return step, true
 		}
 		resp, err := j.from.cli.Relay(ctx, j.to.srv.URL, j.req)
 		if err != nil {
@@ -108,6 +120,27 @@ type node struct {
 	// exercised: with the split horizon on, a correct mesh never puts a looping
 	// copy on the wire at all.
 	naive bool
+
+	// lying makes this node REWRITE the traversed path down to the origin hop
+	// alone before forwarding. It models the limit PROTOCOL.md §8.5 states
+	// outright: a peer that strips hops out defeats the egress split horizon AND
+	// the receiver's ingress check, because the path is metadata outside the
+	// signature. It is how RELAY-5 switches RELAY-3 OFF ENTIRELY in order to
+	// prove idempotency is independently necessary. The origin hop is kept
+	// because ValidateBusPath requires BusPath[0] == OriginBus, so a message
+	// claiming otherwise is refused before any loop check runs.
+	lying bool
+
+	// noIdem makes accept skip the applied-key table completely — no lookup, no
+	// Remember — modelling a bus built with RELAY-3 but WITHOUT IDEM-15. It is
+	// the other half of RELAY-5's independent-necessity proof.
+	noIdem bool
+
+	// persist, when set, durably records every applied key before accept
+	// returns. It stands in for IDEM-11's durable applied-key table, which is
+	// what makes the crash half of RELAY-5 mean anything: a table held only in
+	// memory tells you nothing about what a SIGKILL leaves behind.
+	persist func(idem.Record) error
 
 	mu         sync.Mutex
 	seq        uint64
@@ -153,22 +186,24 @@ func (n *node) accept(_ context.Context, m RelayedMessage) (RelayAcceptance, err
 	}
 
 	n.mu.Lock()
-	rec, outcome := n.keys.Lookup(sc, m.Fingerprint)
-	switch outcome {
-	case idem.OutcomeViolation:
-		n.violations++
-		n.mu.Unlock()
-		return RelayAcceptance{}, fmt.Errorf("%w: %s", ErrIdempotencyViolation, m.OriginMessageID)
-	case idem.OutcomeRetry:
-		n.duplicates++
-		n.mu.Unlock()
-		var original string
-		if err := json.Unmarshal(rec.Result, &original); err != nil {
-			return RelayAcceptance{}, fmt.Errorf("stored result is not a message id: %w", err)
+	if !n.noIdem {
+		rec, outcome := n.keys.Lookup(sc, m.Fingerprint)
+		switch outcome {
+		case idem.OutcomeViolation:
+			n.violations++
+			n.mu.Unlock()
+			return RelayAcceptance{}, fmt.Errorf("%w: %s", ErrIdempotencyViolation, m.OriginMessageID)
+		case idem.OutcomeRetry:
+			n.duplicates++
+			n.mu.Unlock()
+			var original string
+			if err := json.Unmarshal(rec.Result, &original); err != nil {
+				return RelayAcceptance{}, fmt.Errorf("stored result is not a message id: %w", err)
+			}
+			// The ORIGINAL result, replayed verbatim. Nothing re-applied and
+			// nothing refused (invariant 10).
+			return RelayAcceptance{LocalMessageID: original, Duplicate: true}, nil
 		}
-		// The ORIGINAL result, replayed verbatim. Nothing re-applied, nobody
-		// disconnected (invariant 10).
-		return RelayAcceptance{LocalMessageID: original, Duplicate: true}, nil
 	}
 
 	n.seq++
@@ -182,7 +217,7 @@ func (n *node) accept(_ context.Context, m RelayedMessage) (RelayAcceptance, err
 		n.mu.Unlock()
 		return RelayAcceptance{}, err
 	}
-	if err := n.keys.Remember(idem.Record{
+	record := idem.Record{
 		Agent:       m.Sender,
 		Op:          idem.OpRelay,
 		Key:         m.IdempotencyKey,
@@ -190,9 +225,23 @@ func (n *node) accept(_ context.Context, m RelayedMessage) (RelayAcceptance, err
 		Result:      result,
 		Seq:         n.seq,
 		CommittedAt: time.Now().UTC(),
-	}); err != nil {
-		n.mu.Unlock()
-		return RelayAcceptance{}, err
+	}
+	if !n.noIdem {
+		if err := n.keys.Remember(record); err != nil {
+			n.mu.Unlock()
+			return RelayAcceptance{}, err
+		}
+		// DURABLE BEFORE DELIVERED, in that order (invariant 4): a record that
+		// reached stable storage before the local delivery is what makes a
+		// SIGKILL here recoverable. The reverse order would leave a delivery
+		// nothing remembers, which is the double-delivery this whole epic exists
+		// to prevent.
+		if n.persist != nil {
+			if err := n.persist(record); err != nil {
+				n.mu.Unlock()
+				return RelayAcceptance{}, err
+			}
+		}
 	}
 	n.delivered = append(n.delivered, m.OriginMessageID)
 	n.mu.Unlock()
@@ -209,8 +258,17 @@ func (n *node) schedule(m RelayedMessage) {
 		// Already on the path, or the path is at its cap. Nothing to do.
 		return
 	}
+	if n.lying {
+		// RELAY-3 SWITCHED OFF AT BOTH ENDS AT ONCE. Stripping the path back to
+		// the origin hop defeats the receiver's CheckIncomingPath as well as our
+		// own split horizon — the documented limit of a path that travels
+		// outside the signature. BusPath[0] must remain the origin, or
+		// ValidateBusPath refuses the envelope before any loop check runs and
+		// the test would prove nothing about loop prevention at all.
+		req.BusPath = []string{m.OriginBus}
+	}
 	for _, p := range n.peers {
-		if !n.naive && !NextHopAllowed(m.BusPath, p.busID) {
+		if !n.naive && !n.lying && !NextHopAllowed(m.BusPath, p.busID) {
 			continue
 		}
 		n.fab.push(job{from: n, to: p, req: req})
@@ -273,8 +331,8 @@ func originMessage(originBus, sender string, seq uint64, body []byte, mods ...fu
 //  2. the origin never delivers its own message back to itself;
 //  3. the traffic TERMINATES — the pump empties inside a bounded step count,
 //     whereas an unstopped cycle produces work forever;
-//  4. nothing is reported as idem.OutcomeViolation, i.e. no correct peer is
-//     ever asked to disconnect another correct peer;
+//  4. nothing is reported as idem.OutcomeViolation, i.e. no correct peer ever
+//     refuses another correct peer's ordinary traffic as a protocol violation;
 //  5. a peer with NO split horizon is still stopped, by the ingress backstop,
 //     with a 200 and dropped_reason=loop rather than an error status.
 func TestRelayLoopPreventionCycle(t *testing.T) {
@@ -312,7 +370,7 @@ func TestRelayLoopPreventionCycle(t *testing.T) {
 		}
 		for _, n := range []*node{a, b, c} {
 			if _, violations := n.counters(); violations != 0 {
-				t.Errorf("%s reported %d idempotency violations; a correct peer must never be asked to disconnect another correct peer", n.busID, violations)
+				t.Errorf("%s reported %d idempotency violations; a correct peer's ordinary traffic must never be refused as a protocol violation", n.busID, violations)
 			}
 		}
 	})
@@ -363,8 +421,8 @@ func TestRelayLoopPreventionCycle(t *testing.T) {
 	// THE HARDER TOPOLOGY, and the one that proves the fingerprint excludes
 	// bus_path. Every node relays to BOTH others, so each node genuinely
 	// receives the message TWICE by two DISJOINT paths — and the second arrival
-	// must be suppressed as duplicate:true with HTTP 200, NOT as a violation
-	// and NOT as a disconnect.
+	// must be suppressed as duplicate:true with HTTP 200, NOT refused as a
+	// violation.
 	t.Run("a fully meshed three cycle suppresses the second arrival as a duplicate", func(t *testing.T) {
 		fab := &fabric{t: t}
 		a := newNode(t, fab, "bus-a")
@@ -389,13 +447,13 @@ func TestRelayLoopPreventionCycle(t *testing.T) {
 				t.Errorf("%s suppressed %d duplicates, want 1: in a full mesh it receives the message by two disjoint paths", n.busID, duplicates)
 			}
 			if violations != 0 {
-				t.Errorf("%s reported %d violations; the fingerprint must EXCLUDE bus_path, or every legitimate duplicate in a mesh is a violation and invariant 10 has correct peers disconnect each other as the steady state", n.busID, violations)
+				t.Errorf("%s reported %d violations; the fingerprint must EXCLUDE bus_path, or every legitimate duplicate in a mesh is a violation and correct peers 409-refuse each other as the steady state", n.busID, violations)
 			}
 			if got := n.h.Stats().Duplicates; got != 1 {
 				t.Errorf("%s handler Duplicates = %d, want 1", n.busID, got)
 			}
 			if got := n.h.Stats().Rejected; got != 0 {
-				t.Errorf("%s handler Rejected = %d, want 0: a duplicate is never a refusal, and its sender is never disconnected", n.busID, got)
+				t.Errorf("%s handler Rejected = %d, want 0: a duplicate is never a refusal", n.busID, got)
 			}
 		}
 		if got := a.deliveredIDs(); len(got) != 0 {

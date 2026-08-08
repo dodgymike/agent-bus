@@ -131,8 +131,16 @@
 //     OriginBus, Sender and MessageID. Message ids are "<bus>-<seq>" and
 //     sequential, so it can PRE-POISON A RANGE of a victim bus's ids. When the
 //     genuine copy arrives it is the same key with a different fingerprint —
-//     idem.OutcomeViolation — so invariant 10's mandated disconnect fires AT
-//     THE HONEST PEER. The disconnect becomes the attacker's weapon.
+//     idem.OutcomeViolation — so the HONEST peer's real message is the one
+//     refused, and the poisoned copy is what this bus delivers and attributes.
+//     Since the 2026-08-08 narrowing that refusal is a 409 and a log line and
+//     nothing more (see "Key reuse is REJECT-AND-LOG" below), so the attacker no
+//     longer gets the victim's socket closed for it — but do not read that as
+//     the hole being smaller. It is the same hole: an attacker still chooses
+//     which of two copies of a message the bus accepts, and the honest sender
+//     still cannot get its message through. What changed is only that the
+//     collateral damage no longer extends to every other request on the honest
+//     peer's connection.
 //
 //  2. THE APPLIED-KEY TABLE MUST BE METERED BY THE AUTHENTICATED PEER, NOT BY
 //     THE ASSERTED ORIGIN SENDER. RelayedMessage.Scope() keys internal/idem on
@@ -243,11 +251,58 @@
 // is why an update may never CREATE a peer: allowing it would make roster sync
 // a second, ungated enrolment path around both gates.
 //
-// One more handoff MTLS-RELAYGUARD owns: invariant 10 requires that an
-// idempotency key reused with a DIFFERENT payload is rejected, logged AND THE
-// OFFENDING PEER DISCONNECTED. RelayHandler does the first two (409 plus a log
-// line that says so); it cannot close a connection it does not own. The gate
-// task must wire the disconnect.
+// # Key reuse is REJECT-AND-LOG, and relay is the worst place to assume otherwise
+//
+// This section used to hand MTLS-RELAYGUARD an instruction to close the
+// connection on idempotency-key reuse. THAT INSTRUCTION IS WITHDRAWN and must
+// not be reinstated. Invariant 10 was NARROWED on 2026-08-08 by operator
+// decision, after the behaviour was measured at the raw socket (code: 1c6c540;
+// contract: 0dbb025, CLAUDE.md). What RelayHandler already does IS the complete
+// rule, not two thirds of it awaiting a gate:
+//
+//   - SAME KEY + SAME PAYLOAD is a RETRY. Return the original result, apply
+//     nothing, disconnect nobody. RelayHandler answers 200 with duplicate:true.
+//   - SAME KEY + DIFFERENT PAYLOAD is still a protocol violation, and the whole
+//     response to it is REJECT IT AND LOG IT — 409 CodeIdempotencyViolation plus
+//     the Warn line. NOTHING FURTHER IS OWED BY ANY GATE TASK. An idempotency
+//     key is scoped to the CALLER'S OWN agent, so reusing one for new content is
+//     overwhelmingly a client that lost track of its keys; dropping the socket
+//     destroys every other request pipelined on it, including a parked
+//     long-poll, which lands the abuse defence on the party most likely to be
+//     honest.
+//   - THE ONE CASE THAT STILL DISCONNECTS ANYWHERE IN THIS CODEBASE is
+//     THIRD-PARTY REPLAY of an already-accepted signed message, and even then
+//     only when the claimed sender is a well-formed fully-qualified
+//     <bus-id>.<agent-id> — an absent, unqualified or whitespace-padded claim
+//     names nobody, is still refused, and must NOT disconnect. Relay ingest has
+//     built no path to that detection yet.
+//
+// # The two questions to answer BEFORE wiring any disconnect here
+//
+// CLAUDE.md invariant 10 now carries them, and it carries them BECAUSE OF THIS
+// PACKAGE:
+//
+//  1. Can a merely BUGGY peer reach this line?
+//  2. Does this connection carry only ONE principal's traffic?
+//
+// FOR RELAY INGEST THE ANSWER TO (2) IS NO, and that is the fact a future
+// implementer must not have to rediscover. A peer bus relays traffic on behalf
+// of its ENTIRE LOCAL ROSTER over ONE link, so `sender != the connection's
+// principal` is the NORMAL, CORRECT shape of every relayed message, for many
+// agents at once. A per-socket disconnect on this link is therefore the wrong
+// PRIMITIVE even for the one case that legitimately disconnects a single agent
+// on /v1/send: one agent's buggy or hostile traffic would drop every agent
+// behind that peer bus simultaneously. That is this repository's recurring
+// "abuse defence aimed at the wrong party" defect, one scale up.
+//
+// OPEN QUESTION, DELIBERATELY NOT ANSWERED HERE, owned by whoever builds relay
+// ingest for real (MTLS-RELAYGUARD 8192c3c7 / RELAY-2): if relay ever needs to
+// punish a replaying peer, WHAT IS THE MECHANISM ON A MULTI-PRINCIPAL LINK?
+// Per-origin-agent rejection without dropping the transport, per-peer rate
+// limiting, and peer-level de-peering are all plausible and have different blast
+// radii. Choosing one is a design task with its own evidence; inventing it in a
+// package comment is how the wrong primitive gets inherited. Until it is chosen,
+// there is no disconnect on this surface and none is missing.
 //
 // # Loop prevention is AVAILABILITY, never security
 //
@@ -268,9 +323,14 @@
 //   - relayFingerprint covers the message's identity-defining content and NOT
 //     the traversed path. In a mesh, one message arrives by several routes with
 //     a different path each time; a path-covering fingerprint would make every
-//     one of those legitimate duplicates an idem.OutcomeViolation, and
-//     invariant 10 would then have correct peers DISCONNECT each other as the
-//     ordinary steady state of a correct mesh.
+//     one of those legitimate duplicates an idem.OutcomeViolation, so the
+//     ordinary steady state of a CORRECT mesh would be a stream of 409s and
+//     violation log lines between peers that are doing nothing wrong — and every
+//     second arrival, which is exactly the one duplicate suppression exists to
+//     absorb, would be refused instead of absorbed. (Before the 2026-08-08
+//     narrowing this was worse still: it also had correct peers disconnect each
+//     other. The narrowing removed the amputation, not the misdiagnosis, and the
+//     misdiagnosis is what makes the mesh unusable.)
 //   - the relay idempotency key IS the origin's message id. That identity is
 //     what makes two copies arriving by two disjoint paths resolve to ONE
 //     idem.Scope; a peer free to mint a fresh key per hop would defeat

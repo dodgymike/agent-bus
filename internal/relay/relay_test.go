@@ -431,7 +431,7 @@ func TestMessageRelay(t *testing.T) {
 			}
 		})
 
-		t.Run("an idempotency violation is 409 and names the disconnect", func(t *testing.T) {
+		t.Run("an idempotency violation is 409 and nothing more", func(t *testing.T) {
 			remote := newRelayResponder(t, localBus, nil)
 			remote.failWith(fmt.Errorf("the applied-key table disagrees: %w", ErrIdempotencyViolation))
 			if status, code, _ := remote.postRelay(t, relayFixture()); status != http.StatusConflict || code != CodeIdempotencyViolation {
@@ -742,9 +742,10 @@ func TestRelayClientCannotBeMadeToEmitAnInjectedOrUnboundedLogLine(t *testing.T)
 // In a cyclic or meshed topology one message reaches a bus by more than one
 // route, and each copy carries a DIFFERENT bus_path. If the path were covered
 // by the fingerprint, the second copy would be the same key with a different
-// fingerprint — idem.OutcomeViolation — and invariant 10 requires a violation
-// to be rejected AND THE PEER DISCONNECTED. Correct peers would therefore
-// disconnect each other as the steady state of a correct mesh.
+// fingerprint — idem.OutcomeViolation — which invariant 10 answers with a 409
+// refusal and a protocol-violation log line. Correct peers would therefore
+// refuse each other's ordinary traffic, and log each other as offenders, as the
+// steady state of a correct mesh.
 func TestRelayFingerprintExcludesBusPath(t *testing.T) {
 	viaB := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-b"} })
 	viaC := relayFixture(func(r *RelayRequest) { r.BusPath = []string{peerBus, "bus-c", "bus-d"} })
@@ -758,7 +759,7 @@ func TestRelayFingerprintExcludesBusPath(t *testing.T) {
 		t.Fatalf("ValidateRelayRequest(viaC): %v", err)
 	}
 	if one.Fingerprint != two.Fingerprint {
-		t.Fatal("two copies of ONE message arriving by different routes have different fingerprints; in a cyclic topology every legitimate duplicate would be an idem.OutcomeViolation, and invariant 10 would have correct peers disconnect each other as the normal steady state")
+		t.Fatal("two copies of ONE message arriving by different routes have different fingerprints; in a cyclic topology every legitimate duplicate would be an idem.OutcomeViolation, so correct peers would 409-refuse each other's ordinary traffic as the normal steady state")
 	}
 	// The scopes must agree too, or the second copy would never be looked up
 	// against the first.

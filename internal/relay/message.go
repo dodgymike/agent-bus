@@ -335,10 +335,13 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // SIGNATURE about what "the same message" means, and invariant 10 punishes the
 // disagreement — a peer that reorders the recipient array while forwarding, or
 // simply a JSON encoder that iterates a set, produces the same key with a
-// different fingerprint, which is idem.OutcomeViolation, which mandates
-// DISCONNECTING THE PEER. A hostile peer could reorder a legitimately signed
-// message's recipients precisely to get an honest peer disconnected, and the
-// honest peer's copy would still carry a perfectly valid signature.
+// different fingerprint, which is idem.OutcomeViolation, which is a 409 refusal
+// and a violation log line against a peer that did nothing wrong. A hostile peer
+// could reorder a legitimately signed message's recipients precisely to get an
+// honest peer's copy refused, and the honest peer's copy would still carry a
+// perfectly valid signature. (Until the 2026-08-08 narrowing that refusal ALSO
+// dropped the honest peer's connection; the narrowing removed the amputation,
+// not the misdiagnosis.)
 //
 // That is the same self-inflicted-partition shape as covering bus_path, and it
 // is fixed the same way: the fingerprint must define "same payload" exactly as
@@ -356,12 +359,15 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // route, and each copy carries a DIFFERENT bus_path — that is the normal
 // steady state, not an edge case. If the path were covered by the fingerprint,
 // the second copy would be the same idempotency key with a DIFFERENT
-// fingerprint, which is idem.OutcomeViolation. CLAUDE.md invariant 10 mandates
-// that a violation is rejected, logged AND THE OFFENDING CLIENT DISCONNECTED.
-// So covering the path would make correct peers disconnect each other as the
-// ordinary behaviour of a correct mesh — a self-inflicted partition, produced
-// by the very mechanism meant to make retries safe, and one that no test of
-// the two-node case would ever reveal.
+// fingerprint, which is idem.OutcomeViolation — a 409 refusal plus a violation
+// log line (CLAUDE.md invariant 10 as narrowed 2026-08-08: rejected and logged,
+// NOT disconnected). So covering the path would make correct peers refuse each
+// other's ordinary traffic as the normal behaviour of a correct mesh: every
+// second arrival — the exact case duplicate suppression exists to absorb — would
+// be answered with a protocol-violation error instead. That is produced by the
+// very mechanism meant to make retries safe, and no test of the two-node case
+// would ever reveal it. Before the narrowing it was worse still, because the
+// refusal also closed the honest peer's connection.
 //
 // The rule that keeps this coherent: the fingerprint covers the message's
 // IDENTITY-DEFINING CONTENT — who sent it, to whom, when, and what — while the
@@ -386,8 +392,9 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // it would add nothing in the ordinary case. In the one case where it would
 // differ — a key rotation, where two validly-signed copies of ONE message carry
 // two different signatures — covering it would turn the rotation window into
-// idem.OutcomeViolation between honest peers, and invariant 10 mandates a
-// DISCONNECT on a violation. That is the self-inflicted partition again.
+// idem.OutcomeViolation between honest peers, i.e. a 409 and a violation log
+// line for every message in flight across the rotation. That is the same
+// misdiagnosis as bus_path, on the one day a bus can least afford it.
 //
 // Signer substitution does not get in this way: VERIFICATION runs first, in
 // ValidateRelayRequest, and no RelayedMessage — hence no fingerprint — exists
