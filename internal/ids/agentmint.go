@@ -291,36 +291,83 @@ type NameSuffixes struct {
 // AgentID, which rejects it, because a zero suffix is indistinguishable from an
 // unset field.
 //
-// It is returned already SEALED, and this is a DELIBERATE DEVIATION from
-// Sequence, where NewSequence is born unsealed so that even the empty case has
-// to say out loud that it is empty. The deviation exists because NameSuffixes,
-// unlike Sequence, has a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds
-// ids.NewNameSuffixes() on every start and every enrolment mints through it.
-// Making this constructor unsealed would refuse EVERY enrolment on a running
-// bus, and that caller sits outside this package.
+// It is returned already SEALED, and this is a DEVIATION from Sequence, where
+// NewSequence is born unsealed so that even the empty case has to say out loud
+// that it is empty.
 //
-// So NewNameSuffixes IS the fresh-bus constructor, and calling it IS the
+// # The justification this doc used to give is DEAD, and the deviation is now on borrowed time
+//
+// Read this before treating born-sealed as a considered design property, because
+// until MSG-FU-SUFFIXFLOOR-FU-UNSEAL it was justified by a fact that has since
+// become false. The old wording said the deviation existed "because NameSuffixes,
+// unlike Sequence, has a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds
+// ids.NewNameSuffixes() on every start and every enrolment mints through it".
+// THAT CALLER IS GONE. cmd/agent-bus now constructs through OpenNameSuffixes,
+// and there are ZERO production callers of this constructor anywhere in the
+// module — a fact that is no longer a claim in a comment but an assertion two
+// tests make on every run: TestNoProductionCallerOfNewNameSuffixes in this
+// package walks the whole module's AST, and
+// cmd/agent-bus/suffixfloors_test.go:TestNoFreshSuffixCounterInCmd does the same
+// for package main.
+//
+// What holds the deviation in place today is NOT a reason, it is a cost: five
+// TEST files outside this package (internal/httpapi/{auth,authmw,authmw_internal,messages}_test.go
+// and internal/auth/auth_test.go) build ids.NewAgentIDMinter(busID,
+// ids.NewNameSuffixes()) and mint through it, so flipping this constructor to
+// born-unsealed makes those packages RED until each adds a Seal. That flip is
+// the remaining half of MSG-FU-SUFFIXFLOOR-FU-UNSEAL (c) and needs a file
+// ownership boundary spanning three packages; it was deliberately NOT done
+// alongside the guard.
+//
+// So do not read "born sealed" as a property to preserve. It is scheduled to
+// become born-UNSEALED for parity with NewSequence, or to be deleted outright.
+//
+// Meanwhile NewNameSuffixes IS the fresh-bus constructor, and calling it IS the
 // empty-disk claim — the claim is carried by the constructor's NAME instead of
 // by a separate Seal call. If you are deriving floors from anything on disk,
 // this is the wrong constructor: use ResumeNameSuffixes, which is born unsealed,
 // or better OpenNameSuffixes, which derives them from the data dir itself.
 //
-// # This constructor is now the WRONG one for production, and is on its way out
+// # This constructor is the WRONG one for production
 //
 // DurableNameSuffixes (suffixstore.go) supersedes it: it persists each name's
 // floor ahead of the suffix it authorises, so a restart resumes above every
-// suffix ever issued without any derivation at all. Once cmd/agent-bus/main.go
-// constructs through OpenNameSuffixes, this constructor should be made
-// born-unsealed for parity with NewSequence, or deleted. That wiring is the
-// remaining half of the P0 and is tracked separately; until it lands, a
-// restarting bus still builds a FRESH counter here and still re-mints agent ids,
-// which is the whole reason the fix is only half-shipped.
+// suffix ever issued without any derivation at all. A production path that
+// builds this instead starts every name at 1 and re-mints agent ids that are
+// already durable on disk, which is invariant 1 broken — and every other test in
+// the module stays green while it happens. That is exactly why the defence is a
+// guard test rather than a comment.
 //
 // The residual weakness, stated rather than papered over: a caller whose
 // per-name derivation FAILED and which then falls back to NewNameSuffixes()
-// mints every name from 1, silently, exactly as before the seal existed. That
-// is the one hole the seal does not close on this type, and closing it means
-// main.go constructing through the resume path.
+// mints every name from 1, silently, exactly as before the seal existed. That is
+// the one hole the seal does not close on this type.
+//
+// Be precise about how much the guard takes off that, because an earlier draft
+// of this paragraph overclaimed. What TestNoProductionCallerOfNewNameSuffixes
+// rejects is any REFERENCE, in this module's non-test files, to the identifier
+// NewNameSuffixes resolved through this package — a direct call, a call buried
+// in an error branch, the function taken as a value, and a reflect.ValueOf of
+// it. What it does not and cannot reject:
+//
+//   - the same weakness in a DIFFERENT module that imports this package; the
+//     hole is a property of the TYPE, and the guard only walks this tree;
+//
+//   - a FAMILY of exact behavioural equivalents reached without naming the
+//     guarded constructor at all, each yielding floor 0 for every name:
+//     ResumeNameSuffixes(nil) followed by Seal(), and — measured, not theorised
+//     — (&NameSuffixes{}).Seal(), since the empty composite literal is legal
+//     from any package despite the unexported fields. Nothing in production does
+//     either today. They are deliberately out of scope here rather than silently
+//     assumed covered, and they need their own follow-up.
+//
+//     Note what that follow-up is NOT: flipping this constructor to
+//     born-unsealed does not touch either shape, because neither goes through
+//     it. The only place that family can actually be controlled is Seal itself —
+//     refusing, or demanding an explicit fresh-bus assertion, when the floor map
+//     is empty. The hazard is already named at the top of this file ("calling
+//     Seal() merely to silence this error re-mints agent ids"); nothing
+//     currently enforces it.
 //
 // The compensating property is real but NARROW, and covers exactly one of the
 // two shapes: a sealed-at-birth allocator cannot SILENTLY ABSORB a later floor
@@ -329,13 +376,10 @@ type NameSuffixes struct {
 // errors will see — rather than a floor claim that quietly did nothing. Note the
 // limits of that. The loudness is the CALLER's, not this type's: a dropped
 // RaiseFloor error is still go vet-clean (see RaiseFloor's doc), so nothing here
-// forces the caller to look. And the FALLBACK shape above is not covered at all,
-// because a caller that gives up on a failed derivation calls neither RaiseFloor
-// nor Seal — there is no call for the error to fire on. That shape stays
-// UNCOVERED until main.go constructs through the resume path. Nor is it
-// hypothetical: the current production caller performs NO derivation whatsoever
-// — cmd/agent-bus/main.go just calls NewNameSuffixes() — so the uncovered case
-// is the DEFAULT TODAY, not an edge reached only by a derivation that failed.
+// forces the caller to look. And the FALLBACK shape above is not covered by it
+// at all, because a caller that gives up on a failed derivation calls neither
+// RaiseFloor nor Seal — there is no call for the error to fire on. The guard
+// test, not the seal, is what covers that shape.
 func NewNameSuffixes() *NameSuffixes {
 	return &NameSuffixes{
 		floor:  make(map[string]uint64),

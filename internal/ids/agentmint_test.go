@@ -425,14 +425,26 @@ func TestNameSuffixesRefusesToIssueFromAnUnsealedFloor(t *testing.T) {
 		})
 	})
 
-	// NewNameSuffixes is born SEALED. This subtest pins that DELIBERATE
-	// DEVIATION from NewSequence (which is born unsealed) so nobody flips it by
-	// accident: NameSuffixes has a LIVE PRODUCTION CALLER —
-	// cmd/agent-bus/main.go builds ids.NewNameSuffixes() on every start and
-	// every enrolment mints through it — so an unsealed fresh constructor would
-	// refuse EVERY enrolment on a running bus. The constructor's NAME is the
-	// empty-disk claim; switching main.go to the resume path is a separate task
-	// (MSG-FU-SUFFIXFLOOR).
+	// NewNameSuffixes is born SEALED, and this subtest pins that.
+	//
+	// READ THIS BEFORE TREATING IT AS A PROPERTY TO DEFEND. The justification
+	// that used to sit here is DEAD, and leaving it would have made this comment
+	// the last surviving copy of a claim the rest of the package just corrected:
+	// it said "NameSuffixes has a LIVE PRODUCTION CALLER — cmd/agent-bus/main.go
+	// builds ids.NewNameSuffixes() on every start and every enrolment mints
+	// through it". That caller is GONE. cmd/agent-bus constructs through
+	// OpenNameSuffixes, and TestNoProductionCallerOfNewNameSuffixes now asserts
+	// module-wide, by AST walk, that no production file references the fresh
+	// constructor at all.
+	//
+	// So this subtest documents the CURRENT behaviour, not a desired one. It is
+	// scheduled to be INVERTED — born-unsealed, for parity with NewSequence — by
+	// MSG-FU-SUFFIXFLOOR-FU-UNSEAL (c), which could not land here because the
+	// flip also needs internal/httpapi/{auth,authmw,authmw_internal,messages}_test.go
+	// and internal/auth/auth_test.go, which mint through this constructor. When
+	// that task runs, THIS subtest is one of the things it must change: it is
+	// the in-package half of the flip, and a (c) scoped to only the other two
+	// packages will fail here.
 	t.Run("NewNameSuffixesIsBornSealed", func(t *testing.T) {
 		s := NewNameSuffixes()
 

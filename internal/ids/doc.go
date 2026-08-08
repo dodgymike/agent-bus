@@ -29,10 +29,16 @@
 //     unsealed NO name may issue, and sealing asserts something about the names
 //     ABSENT from the floor map too — that they were never written — which is
 //     the proof obligation point 7 of that doc demands. Its two constructors
-//     differ deliberately: ResumeNameSuffixes is born UNSEALED and must Seal,
-//     while NewNameSuffixes is the FRESH-BUS constructor and is born SEALED,
-//     because it has a live caller (cmd/agent-bus/main.go) that must keep
-//     enrolling.
+//     still differ: ResumeNameSuffixes is born UNSEALED and must Seal, while
+//     NewNameSuffixes is the FRESH-BUS constructor and is born SEALED. That
+//     difference used to be justified by a live caller in cmd/agent-bus/main.go
+//     "that must keep enrolling"; THAT CALLER IS GONE, and
+//     TestNoProductionCallerOfNewNameSuffixes now asserts module-wide, by
+//     walking the AST rather than grepping, that no production file calls the
+//     fresh constructor at all. Born-sealed is therefore a leftover, not a
+//     design property — it is scheduled to become born-UNSEALED for parity with
+//     NewSequence, or to be deleted, once the five out-of-package TEST callers
+//     that mint through it are updated (MSG-FU-SUFFIXFLOOR-FU-UNSEAL (c)).
 //   - suffixstore.go — DurableNameSuffixes (MSG-FU-SUFFIXFLOOR), the production
 //     SuffixAllocator: it composes a NameSuffixes with a dedicated, atomically
 //     replaced, fsynced file (<data-dir>/agent-suffixes, format version 3) and
