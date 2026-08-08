@@ -382,14 +382,30 @@ func parseBusURL(raw string) (*url.URL, error) {
 
 // canonicalHost lower-cases the host and drops the port when it is the
 // scheme's default, so equivalent spellings produce one string.
+//
+// It mirrors cmd/agent-bus/invite.go's canonicalInviteHost, which fixed the
+// server-side copy of this exact bug (2cf20abf's sibling report) and
+// documents the divergence in detail: net.SplitHostPort strips the brackets
+// off an IPv6 literal, and the default-port branch used to return the bare
+// host unchanged — turning "[::1]:443" into "::1", which is not a legal URL
+// host. This string is used as an idempotency scope key (see the CANONICALISE
+// comment on parseBusURL above), so a malformed host here does not just fail
+// to dial — it corrupts which retries scope to which record.
 func canonicalHost(scheme, host string) string {
 	h, port, err := net.SplitHostPort(host)
 	if err != nil {
-		// No port present (SplitHostPort's error case for a bare host).
+		// No port present — SplitHostPort's error case for a bare host. An
+		// IPv6 literal from a parsed URL is already bracketed here (url.URL.Host
+		// keeps the brackets when there is no port) and stays that way.
 		return strings.ToLower(host)
 	}
 	h = strings.ToLower(h)
 	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		if strings.Contains(h, ":") {
+			// An IPv6 literal: SplitHostPort removed the brackets that make it
+			// a legal URL host, so put them back.
+			return "[" + h + "]"
+		}
 		return h
 	}
 	return net.JoinHostPort(h, port)

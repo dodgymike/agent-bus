@@ -92,6 +92,46 @@ func TestParseBusURLTable(t *testing.T) {
 	}
 }
 
+// TestCanonicalHostIPv6DefaultPort pins 2cf20abf: canonicalHost's default-port
+// early return used to strip the brackets net.SplitHostPort removes and never
+// put them back, turning "[::1]:443" into the bare "::1" — not a legal URL
+// host, and this string scopes the idempotency store (the CANONICALISE
+// comment on parseBusURL). The non-default-port path (net.JoinHostPort)
+// already re-brackets correctly; this table exercises the branch that did
+// not.
+func TestCanonicalHostIPv6DefaultPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme string
+		host   string
+		want   string
+	}{
+		{name: "https IPv6 default port loses its brackets", scheme: "https", host: "[::1]:443", want: "[::1]"},
+		{name: "http IPv6 default port loses its brackets", scheme: "http", host: "[::1]:80", want: "[::1]"},
+		{name: "https IPv6 global literal default port loses its brackets", scheme: "https", host: "[2001:db8::1]:443", want: "[2001:db8::1]"},
+		// Explicit (non-default) port: net.JoinHostPort already re-brackets
+		// correctly. Included so a future edit that "simplifies" both branches
+		// into one has a red flag on this side too if it regresses.
+		{name: "https IPv6 explicit port stays bracketed", scheme: "https", host: "[::1]:9090", want: "[::1]:9090"},
+		{name: "http IPv6 explicit port stays bracketed", scheme: "http", host: "[2001:db8::1]:8080", want: "[2001:db8::1]:8080"},
+		// No port at all: SplitHostPort's error path returns the input
+		// lower-cased and unchanged — url.URL.Host already carries the
+		// brackets for a bare IPv6 host, so this must stay bracketed too.
+		{name: "https IPv6 no port stays bracketed", scheme: "https", host: "[::1]", want: "[::1]"},
+		// IPv4 and named hosts are unaffected by the bracket fix.
+		{name: "http IPv4 default port drops cleanly", scheme: "http", host: "127.0.0.1:80", want: "127.0.0.1"},
+		{name: "https named host default port drops cleanly", scheme: "https", host: "BUS:443", want: "bus"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canonicalHost(tt.scheme, tt.host); got != tt.want {
+				t.Fatalf("canonicalHost(%q, %q) = %q, want %q", tt.scheme, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBusURLPathPrefixIsKeptAndTrailingSlashTrimmed checks a base URL that
 // carries a path prefix is honoured on every request, and a trailing slash
 // does not turn into a doubled slash when a route path is appended.
