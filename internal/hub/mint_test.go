@@ -488,6 +488,93 @@ func TestADataDirWithNoSeqFloorFileIsBackfilledLoudly(t *testing.T) {
 	}
 }
 
+// TestSeqFloorMigrationWarningDoesNotClaimTheLogIsComplete pins the HONESTY of
+// the migration WARN, which is the only thing an operator gets on this path.
+//
+// The warning used to end "...this start verified that recovery removed no
+// records from that log, so this start closes the window". Literally true —
+// recovery discarded nothing — and substantively false, because a truncation
+// landing EXACTLY ON A RECORD BOUNDARY removes records without leaving anything
+// torn for recovery to discard. Open's guard reads the same discard signal, so
+// the guard and its own reassurance share one blind spot.
+//
+// The size of that blind spot, stated the way it must be stated: on an
+// exhaustively swept real specimen the guard failed at 22 of 22 RECORD
+// BOUNDARIES — 100%, and necessarily so, since it cannot fire where nothing is
+// torn. Thirteen of the 22 reissued a sequence already delivered (one of them
+// reissuing a message id end to end); the other nine were harmless only because
+// that directory's floor had already stepped past its delivered high-water. The
+// harmful fraction is a property of the DIRECTORY'S HISTORY, not of the bug.
+// Every one of those 22 starts printed "closes the window".
+//
+// This test does NOT build a boundary-exact specimen; that belongs to the task
+// that closes the hole (Spec Server 9fd58deb). It pins the wording, because the
+// wording is the fix: the WARN may say recovery discarded nothing, and must not
+// dress that up as proof the log is complete.
+//
+// It also asserts the line is not TRUNCATED. logging caps a msg at 1024 bytes
+// and appends "...(truncated)", and the caveat is at the end — so a message that
+// grows past the cap silently loses exactly the half this test exists to keep.
+func TestSeqFloorMigrationWarningDoesNotClaimTheLogIsComplete(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, false)
+	alpha := agentID(t, testBusID, "alpha")
+	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
+	mustMint(t, h, alpha, "send", "k-1")
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log: %v", err)
+	}
+
+	// The pre-upgrade data directory: intact log, no floor FILE.
+	if err := os.Remove(filepath.Join(dir, hub.SeqFloorFileName)); err != nil {
+		t.Fatalf("removing %s to model a pre-upgrade data directory: %v", hub.SeqFloorFileName, err)
+	}
+	lg2 := openTestLog(t, dir, true)
+	_, buf := openMintHub(t, dir, lg2, nil, "", "alpha")
+
+	var warn string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "level=warn") && strings.Contains(line, "had no durable message sequence floor file") {
+			warn = line
+			break
+		}
+	}
+	if warn == "" {
+		t.Fatalf("backfilling the sequence floor emitted no level=warn line about the missing floor file; an operator is then told nothing at all about a start whose floor is derived rather than recorded.\nlog: %s", buf.String())
+	}
+
+	// The false all-clear, in the two forms it took. Neither may come back
+	// without the consumed-index check that would make it true.
+	for _, banned := range []string{
+		"closes the window",
+		"verified that recovery removed no records",
+	} {
+		if strings.Contains(warn, banned) {
+			t.Fatalf("the migration WARN says %q. That claim is FALSE on a log truncated exactly on a record boundary: recovery discards nothing, so this check passes while records are missing and the derived floor sits below numbers /v1/mint already handed out. Measured on a real specimen the guard fails at 22 of 22 record boundaries, 13 of them reissuing a delivered sequence and one reissuing a message id end to end — systematic, not a corner case. Do not restore it before Spec Server task 9fd58deb lands the consumed-index check.\nWARN: %s", banned, warn)
+		}
+	}
+
+	// What it must say instead: the true claim, and the caveat that bounds it.
+	//
+	// Each of these appears ONLY in the caveat. An earlier draft asserted
+	// "already handed out", which also matches the message's second sentence and
+	// was present in the false-all-clear version too — so it pinned nothing.
+	for _, want := range []string{
+		"discarded no records", // the discard check, which IS what ran
+		"record boundary",      // the damage that check cannot see
+		"sit BELOW numbers",    // the consequence: the floor may be too low
+		"UNPROVEN",             // the standing of the floor it just reported
+	} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("the migration WARN does not contain %q, so it does not tell the operator that a boundary-exact truncation is invisible to the check it just ran and the floor it reports may be below numbers already issued.\nWARN: %s", want, warn)
+		}
+	}
+
+	if strings.Contains(warn, "(truncated)") {
+		t.Fatalf("the migration WARN exceeded logging's 1024-byte msg cap and was truncated, which drops the caveat at its end — the operator keeps the reassuring half and loses the qualifying half.\nWARN: %s", warn)
+	}
+}
+
 // TestOpenRefusesACorruptSeqFloorFile pins the other half of the missing/corrupt
 // judgement: a file that EXISTS and does not verify is FATAL and is NEVER
 // regenerated.

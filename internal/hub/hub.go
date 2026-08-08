@@ -198,6 +198,36 @@ type Options struct {
 	// at all: measured, a bus that had handed out 300 sequences resumed at 25
 	// after this exact damage.
 	//
+	// # What it does NOT cover — it is a PROXY, not the question
+	//
+	// It answers "did recovery physically remove records", which is NOT the same
+	// question as "is the log complete". The two differ when the log was cut
+	// EXACTLY ON A RECORD BOUNDARY: replay reads to EOF, finds nothing torn,
+	// discards nothing, and this field is "" — while the records past the cut
+	// are gone, removed by the cut rather than by recovery.
+	//
+	// That blindness is TOTAL, not statistical: on an exhaustively swept real
+	// specimen this field was "" at 22 of 22 record boundaries — 100%, as it must
+	// be, since nothing is torn there — and 13 of those 22 starts derived a floor
+	// BELOW a sequence already delivered, one reissuing a message id end to end.
+	// The other nine were harmless only because that directory's floor had
+	// already stepped past its delivered high-water, so the harmful fraction is a
+	// property of a DIRECTORY'S HISTORY, not of the defect. Never restate this as
+	// a percentage of byte offsets (it reads as 0.29% and invites dismissal).
+	//
+	// And the floor itself is not the blind half: a paired test on an unguarded
+	// build derived IDENTICAL floors for boundary-exact and mid-record cuts at
+	// the same offset, so derivation is one monotonic step function whose steps
+	// land on record boundaries and the two recovery paths cannot disagree about
+	// the floor. The only thing that differs is whether this field is set — which
+	// is exactly why it is the wrong question. (All 22 were clean tail repairs:
+	// quarantined_to= absent on every one, verified directly.)
+	//
+	// Closing that needs the consumed-index field (Spec Server task 9fd58deb),
+	// not a different reading of this one. Anything relying on this field as
+	// proof of completeness must say so no more strongly than the field can
+	// support; see the migration WARN in Open.
+	//
 	// The CALLER decides what counts as removal, because the caller is the one
 	// holding wal.Recovered. Today cmd/agent-bus sets it for a quarantine, a
 	// truncation, a mid-file rewrite, and bytes discarded at the framing stage.
@@ -719,21 +749,94 @@ func Open(o Options) (*Hub, error) {
 			// The MIGRATION window, named. A data directory with history but no
 			// floor file was written by a binary that predates the file, and until
 			// this write landed a quarantine could have reissued a minted
-			// sequence. It is a WARN and not an ERROR because the window is now
-			// CLOSED — one start, and the derivation it was seeded from is the
-			// best the log can prove.
+			// sequence. It is a WARN and not an ERROR because a floor was
+			// derivable and the bus can serve; it is NOT a WARN because the
+			// window is closed. Read the next paragraph before touching either
+			// this wording or the predicate above.
 			//
-			// "CLOSES THE WINDOW" IS ONLY TRUE BECAUSE OF THE GUARD ABOVE, and
-			// the sentence is qualified accordingly. Before that guard existed
-			// this line was reachable on a start whose log had just been
-			// truncated, where the floor it announces was BELOW numbers already
-			// handed out — an operator was being told the opposite of what had
-			// happened, at WARN, with the wrong number attached. The guard makes
-			// the claim defensible by making this line unreachable on any start
-			// that removed records from the log; the wording now says so, so
-			// that anyone who weakens the predicate can see what it was holding
-			// up.
-			h.log.Warn("this data directory had no durable message sequence floor file: it was written by an agent-bus that predates it. Until now a WAL quarantine could have reissued sequence numbers already handed out by /v1/mint. The file has been created from the floor the log proves, and this start verified that recovery removed no records from that log, so this start closes the window",
+			// # WHAT THE GUARD ABOVE COVERS, AND THE HOLE IT DOES NOT
+			//
+			// The guard's predicate is o.LogRepaired, which answers "did recovery
+			// PHYSICALLY REMOVE records" — a PROXY for "the log is complete", and
+			// the proxy has one hole. A truncation landing exactly on a record
+			// boundary removes nothing during recovery: replay reads to EOF, finds
+			// no torn record, sets LogRepaired to "", and this line is REACHED
+			// with records missing. They were removed by the CUT, not by recovery.
+			//
+			// THE HOLE IS SYSTEMATIC, NOT A CORNER CASE — state it as a fraction
+			// of BOUNDARIES, never of offsets. A real specimen was swept
+			// exhaustively end to end (8900 offsets, both halves): every non-
+			// boundary offset REFUSED, loudly and never silently — that is the
+			// part worth keeping — and the guard failed at 22 of 22 RECORD
+			// BOUNDARIES, i.e. 100% of them. It must: the guard cannot fire where
+			// nothing is torn, so the escape set IS the boundary set. The escapes
+			// are 360, 427, 738, 805, 937, 1004, 2016, 2083, 3095, 3162, 4172,
+			// 4240, 4372, 4440, 5487, 5555, 6602, 6670, 7717, 7785, 8832, 8900 —
+			// spaced alternately ~1047 and ~68, which is message-record plus
+			// small-record framing.
+			//
+			// 13 of the 22 reissued a sequence already delivered (floor 22 at the
+			// first five, floor 256 at the next eight, against a highest-delivered
+			// of 260); the other nine were harmless only because the floor had
+			// already stepped past the delivered high-water by that point. So
+			// 13/22 is a fact about ONE SPECIMEN'S HISTORY — a directory with more
+			// traffic after its last floor step has a higher harmful fraction —
+			// while 22/22 is the fact about this code. Do not re-derive a
+			// percentage over offsets (it reads as 0.29% and invites closing this
+			// as rare).
+			//
+			// Single-byte sharp and reproducible 3/3 (2015 refuses, 2016 starts,
+			// 2017 refuses). End to end at offset 2016 message id
+			// bus-7ubqgqor3zshldk3-257 was issued TWICE with different content
+			// hashes — invariant 1, broken, on a start this line used to call
+			// closed.
+			//
+			// And the floor derivation is NOT the blind half. On an unguarded
+			// build, boundary-exact and mid-record cuts at the SAME offset derived
+			// identical floors (checked at 1004, 2016, 4240, 4440, 5487, 6602,
+			// 7785): derivation is one monotonic step function whose steps land on
+			// record boundaries, so the two recovery paths cannot disagree about
+			// the floor. The ONLY thing that differs is whether LogRepaired is
+			// set — which is exactly why the guard is blind while the floor is not.
+			//
+			// And these are clean TAIL REPAIRS, not quarantine artefacts: the
+			// whole-file quarantine branch was ruled out directly, quarantined_to=
+			// absent on all 22. (An earlier reading had this as confirmed only by
+			// consequence — the step function would have collapsed to the
+			// file-only source under a quarantine — because the sweep's first
+			// discriminator matched prose. It was then checked properly.)
+			//
+			// SO THE MESSAGE BELOW CLAIMS ONLY THE DISCARD CHECK. It previously
+			// said this start "verified that recovery removed no records ... so
+			// this start closes the window", which is literally true (recovery
+			// discarded nothing) and substantively false (records are gone). The
+			// guard and its own reassurance share ONE blind spot, so the operator
+			// was told the window was closed at precisely the offsets where it was
+			// open — a confident false all-clear, which is worse than silence
+			// because it spends the operator's uncertainty in the wrong direction.
+			// Do not restore that claim: TestSeqFloorMigrationWarningDoesNotClaimTheLogIsComplete
+			// pins its absence.
+			//
+			// Closing the hole for real needs a check that does not go through
+			// LogRepaired at all — the consumed-index field, tracked as Spec
+			// Server task 9fd58deb. Until that lands, the predicate above stays as
+			// it is (every non-boundary cut is still refused loudly, which is
+			// worth keeping) and the honesty lives in the wording.
+			//
+			// Keep the message under logging's 1024-byte msg cap (maxValueLen; it
+			// currently sits at 993), or the caveat — which is at the END — is
+			// exactly the half that gets truncated away, leaving the reassuring
+			// half behind. An earlier draft of this very message overran the cap
+			// by 39 bytes and the test below caught it; it asserts no truncation
+			// for that reason, so trim before you add.
+			//
+			// The "UNPROVEN FLOOR:" prefix is there for the same reason and covers
+			// what the cap check cannot: truncation downstream of us — a 1024-octet
+			// RFC 3164 syslog hop, a shipper, an operator's `cut` — also drops the
+			// TAIL, so with the qualifier only at the end every such path keeps the
+			// reassuring half and loses the caveat. Front-loading the verdict means
+			// the first thing surviving any truncation is the word that matters.
+			h.log.Warn("UNPROVEN FLOOR: this data directory had no durable message sequence floor file: it was written by an agent-bus that predates it. Until now a WAL quarantine could have reissued numbers already handed out by /v1/mint. The file has been created from the floor the durable log proves, and recovery discarded no records from that log on this start. That is the ONLY check that ran, and it does NOT establish that the log is complete: ANY truncation landing exactly on a record boundary leaves nothing torn for recovery to discard, so this check is blind at EVERY record boundary, and a floor derived from a log cut that way can sit BELOW numbers /v1/mint has already handed out. Treat the floor as UNPROVEN: if this log may ever have been truncated or partially restored, stop the bus, compare the floor against the highest sequence you know it issued and raise the file by hand before restarting (it is digest-protected; see CONTRACTS-ONDISK.md. Too high only skips numbers, too low reissues them)",
 				"seq_floor_file", h.seqFloorFile.Path(),
 				"floor", floor,
 			)
