@@ -84,6 +84,43 @@ const Levels = "debug|info|warn|error"
 // transport for arbitrary payloads; anything longer is truncated.
 const maxValueLen = 1024
 
+// StackKey is the field key carrying a panic stack trace, and MaxStackValueLen
+// is the larger cap that applies to it (CORE-6).
+//
+// WHY AN EXEMPTION AND NOT A GLOBAL RAISE. maxValueLen exists to stop an
+// attacker-controlled value -- a header, a request id, an error string built
+// from client input -- from turning one log record into a multi-kilobyte
+// payload. That reasoning is untouched for every other field, so the cap stays
+// at 1024 for all of them. A stack trace is different in the one way that
+// matters: it is produced by runtime/debug.Stack, so its content and its
+// length are the SERVER's, not the caller's.
+//
+// WHY IT MATTERED. A stack is the one value whose TAIL is the useful half --
+// the deepest frames are where the panic actually happened -- so truncating at
+// 1024 discarded precisely the frames an operator needs. Measured on a real
+// net/http request path: 1238 bytes, i.e. production lost the tail while the
+// httptest-driven test saw a 962-byte stack, stayed under the cap, and passed.
+// See TestPanicStackNotTruncated, which now forces a stack past the old limit
+// so the blind spot cannot come back the next time this constant is tuned.
+//
+// WHY A CAP AT ALL. 8192 is a bound, not "unlimited": a pathological
+// goroutine stack should still not be able to emit an unbounded line, and a
+// non-panic call site that happens to use the key "stack" gets the larger cap
+// but is still bounded.
+const (
+	StackKey         = "stack"
+	MaxStackValueLen = 8192
+)
+
+// valueLimit returns the truncation cap for a field with the given key. Every
+// key but StackKey gets maxValueLen; see StackKey for why that one differs.
+func valueLimit(key string) int {
+	if key == StackKey {
+		return MaxStackValueLen
+	}
+	return maxValueLen
+}
+
 // Logger writes structured records at or above its level. It is safe for
 // concurrent use: the level is fixed at construction and all writes go through
 // a single *log.Logger, whose Output is mutex-protected.
@@ -165,10 +202,17 @@ func appendPairs(b *strings.Builder, kv []interface{}) {
 			writeValue(b, format(kv[i]))
 			return
 		}
+		key := sanitiseKey(format(kv[i]))
 		b.WriteByte(' ')
-		b.WriteString(sanitiseKey(format(kv[i])))
+		b.WriteString(key)
 		b.WriteByte('=')
-		writeValue(b, format(kv[i+1]))
+		// The cap is chosen from the SANITISED key. What keeps the larger
+		// stack budget unreachable by accident is sanitiseKey's substitution
+		// rule: it replaces a disallowed byte with '_' and never deletes one,
+		// so no key other than a literal "stack" can render as "stack". (The
+		// keys here come from code, not from the wire, so this is a
+		// consistency property rather than a defence against an attacker.)
+		writeValueLimit(b, format(kv[i+1]), valueLimit(key))
 	}
 }
 
@@ -264,8 +308,14 @@ func isKeyByte(c byte) bool {
 // makes the byte-wise truncation below safe: a rune split by the cut is
 // escaped rather than emitted as invalid UTF-8.
 func writeValue(b *strings.Builder, v string) {
-	if len(v) > maxValueLen {
-		v = v[:maxValueLen] + "...(truncated)"
+	writeValueLimit(b, v, maxValueLen)
+}
+
+// writeValueLimit is writeValue with an explicit truncation cap, so a field's
+// key can select it; see valueLimit and StackKey (CORE-6).
+func writeValueLimit(b *strings.Builder, v string, limit int) {
+	if len(v) > limit {
+		v = v[:limit] + "...(truncated)"
 	}
 	if needsQuote(v) {
 		b.WriteString(strconv.Quote(v))
