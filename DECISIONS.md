@@ -4336,3 +4336,96 @@ IS live for directed sends — every `POST /v1/send` now writes a real audit rec
 **not** live for broadcasts, and no amount of test-suite green should be read as saying it is.
 
 <!-- ===== END 2026-08-08c feature-runner ===== -->
+
+## 2026-08-08 — FEDERATION (RELAY-6): deployment assumptions and what they defer
+
+Recorded by feature-runner for the `RELAY` epic (`9b187d47`), phase "FEDERATION". The canonical
+text for (a)/(b)/(d) below was drafted by spec-keeper this session as a task note on the epic and
+is transferred here close to verbatim, carrying the user's own ruling; (c)/(e)/(f) are the
+planner's rulings for the same wave-1 kickoff, recorded here because this task owns `DECISIONS.md`
+exclusively for the wave. Six rulings, each with what is given up and what would mechanically
+reverse it.
+
+**THE ASSUMPTION.** The user is deploying three buses — laptop ↔ an internet-facing machine ↔ this
+machine — with the middle box acting as a relay hop. The premise, stated on one line so it can be
+grepped whole: every bus-to-bus link is an SSH tunnel; no bus process is ever a publicly listening
+service. The user is the sole operator and sole local user of all three machines.
+
+**(a) Topology: SSH tunnels only, operator-controlled end to end.**
+No bus binds anything but loopback; every hop between buses is an SSH tunnel the operator set up.
+- *Given up:* any deployment path where a bus is reachable without an operator-controlled tunnel in
+  front of it.
+- *Reverses when (mechanical):* any bus process binds an interface other than the loopback address
+  its local tunnel terminates on, **or** a fourth machine joins the topology without an SSH tunnel
+  the operator personally holds both ends of.
+
+**(b) INVITE-GATE does not block the FEDERATION epic.** INVITE-GATE (P0, task `05a5216d`) exists
+chiefly because an unauthenticated `POST /v1/enroll` lets anyone who reaches the port mint agents,
+exhaust the session table, or brick the roster at the 4096 cap (finding `1c4d3dea`, roster-brick
+DoS). With no reachable listener, that attacker does not exist — an SSH tunnel terminating on
+loopback means the port is never exposed to anyone who has not already authenticated to the
+underlying machine via SSH. This makes running before INVITE-GATE defensible in a way it is **not**
+on an exposed bus. On the same basis, **all other security work is deferred until end-to-end relay
+is running** — security must not sit on the FEDERATION critical path. Nothing already built is
+weakened by this: invariant 9 (never write our own crypto) is untouched, since relay needs no new
+crypto.
+  - *What it does NOT buy, stated plainly so nobody over-reads it:* the tunnel authenticates the
+    **machine**, not the bus process. Anything with a shell on the internet-facing machine reaches
+    both forwarded ports — and because the bus binds loopback and the tunnel terminates on
+    loopback, the bus cannot distinguish tunnel traffic from local traffic. Peer identity and
+    certificate pinning (invariant 11, the MTLS-* epic) remain necessary regardless of this
+    decision, because invariant 2's routing needs to know unambiguously which bus a message
+    traversed — that is functionality, not hardening, and this decision does not touch it.
+  - *Given up:* single-use/expiring/revocable peer admission, redemption audit.
+  - *Reverses when (mechanical, any ONE of):* any bus is bound to a non-loopback interface, or a
+    tunnel endpoint is shared with a non-operator, or a second local/operator user is added to any
+    of the three machines, or a peer bus is admitted that the operator does not control. Any one of
+    these makes INVITE-GATE a hard blocker again, immediately.
+  - *Time-box:* this deferral is scoped to "until end-to-end relay is running", not indefinite. Once
+    the FEDERATION epic is functioning end-to-end across the three-bus topology, the deferred tasks
+    are due for re-triage against whatever the topology looks like at that point.
+
+**(c) Peer-principal authentication is a REQUIREMENT (b) does not defer, and it is NOT yet built —
+this ruling states what must be true before the relay handler is ever served, not the current
+runtime behaviour.** Security review (2026-08-08) flagged that an earlier draft of this ruling read
+as a present-tense claim; corrected here. Today `internal/relay.Handler` "performs NO
+AUTHENTICATION OF THE PEER, and none is missing by accident" (`internal/relay/doc.go:7-9`), is
+"reachable from nowhere" — it is deliberately never registered on any mux
+(`internal/relay/doc.go:5,7`) — and two more specific gaps are open in the same file: roster
+updates are not yet bound to the authenticated connection (`internal/relay/doc.go:154-158`), and
+the last bus-path hop is not yet checked against the sending peer (`internal/relay/doc.go:172-175`).
+Both close only once `INVITE-PEERGUARD` (task `f5d91dbe`) and `MTLS-RELAYGUARD` (task `8192c3c7`)
+land — per `doc.go:9-19`, BOTH must land before the handler is served on a listener. What (b) defers
+is INVITE-GATE's pre-auth-enrolment concern; it does NOT defer, and was never meant to defer,
+peer-principal authentication on the relay path itself — that remains a hard precondition of
+wiring the handler in at all, tracked by the two tasks above, not by this decision.
+  - *Given up:* nothing — this ruling authorises no shortcut; the handler stays unregistered until
+    both gating tasks land.
+  - *Reverses when:* never by topology change. It resolves (not reverses) once `f5d91dbe` and
+    `8192c3c7` both land and the handler is wired to a listener; only a future decision that
+    explicitly narrows invariant 2 or 6 could touch it otherwise, and none is proposed here.
+
+**(d) Local-attacker scenarios are out of scope, by operator ruling.** No second local user exists
+on any of the three machines.
+  - *Given up:* defence against a co-resident non-operator process on any of the three machines.
+  - *Reverses when (mechanical):* a second local user account (human or service) is added to any of
+    the three machines.
+
+**(e) Peer configuration is an offline `agent-bus peer` subcommand under the dirlock, not a new
+online admin route.** This follows the `invite mint` / D6 precedent: peers are configured by the
+operator running the CLI against the on-disk store while the bus is (or can safely be) restarted,
+never through a new privileged HTTP surface.
+  - *Given up:* online re-peering — a topology change needs a restart.
+  - *Reverses when (mechanical):* an operator requirement for zero-downtime re-peering is stated
+    explicitly; that requires a new design (a new privilege tier and admin route), not a flag flip,
+    and must be recorded as its own decision when it happens.
+
+**(f) Static next-hop routing, not a routing protocol.** Each bus is configured with explicit,
+operator-entered routes to its directly-known peers; there is no discovery or dynamic propagation of
+reachability between non-adjacent buses.
+  - *Given up:* topology discovery — a fourth bus needs an operator-entered route on every bus that
+    must reach it. Right trade for a fixed three-node line.
+  - *Reverses when (mechanical):* the topology grows past what the operator can hand-enter as static
+    routes (in practice: more buses than the operator is willing to edit config for by hand), or two
+    buses that are not directly peered need to route through an intermediary neither operator
+    configured explicitly.
