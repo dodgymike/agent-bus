@@ -17,7 +17,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | namespace | reserved values | meaning |
 | --- | --- | --- |
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
-| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below) |
+| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`), `6` (`peer-withdrawal-floor`, `internal/relay/peerstore.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below). `6` is the durable PEER WITHDRAWAL floor file's format (RELAY-34, reserved 2026-08-08 — see the `peer-withdrawal-floor` subsection below) |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -1486,17 +1486,21 @@ idempotent only if the record is the same generation, **lower is REFUSED and log
   either stays unknown or keeps the generation already in memory. It can cost availability (the
   operator must re-apply).
 
-  **But be precise about the direction, because only half of it is comfortable.** `Apply` never
-  INSTALLS an address or a pinned key this bus did not already hold. **It can, however, fail to
-  REMOVE one.** Every entry carries the complete post-transition state, so if recovery discards a
-  WITHDRAWAL — a torn tail, a bit-rotted frame, a filesystem snapshot rolled back past it, all of
-  which invariant 6 requires us to survive rather than refuse to boot — the previous generation is the
-  surviving truth and is reinstated. For routes that means an un-peered bus is routable again; **for
-  the trust table it means a REVOKED PINNED SIGNING KEY IS PINNED AGAIN. Revocation fails OPEN.**
-  Reproduced by truncating eight bytes from a `bus.wal` tail. Not reachable today (nothing outside
-  `internal/relay` constructs a `PeerStore`), and closing it needs a mechanism this record does not
-  have — a revocation that cannot be un-said by losing one entry — so it is a **P1 follow-up**, stated
-  here so RELAY-17 builds on what is true rather than on the comfortable half of it.
+  **CORRECTED 2026-08-08 by RELAY-34 — the paragraph that used to follow said revocation fails
+  OPEN, and that was TRUE when it was written.** `Apply` never INSTALLS an address or a pinned key
+  this bus did not already hold; that half was always sound. The half that was not: a discard **can
+  fail to REMOVE one**. Every entry carries the complete post-transition state, so discarding a
+  WITHDRAWAL — a torn tail, a bit-rotted frame, a filesystem or VM snapshot rolled back past it, all
+  of which invariant 6 REQUIRES us to survive rather than refuse to boot — left the previous
+  generation as the surviving truth and reinstated it. For routes an un-peered bus became routable
+  again; **for the trust table a REVOKED PINNED SIGNING KEY CAME BACK.** Reproduced by truncating
+  eight bytes from a `bus.wal` tail.
+
+  **That is now CLOSED by the durable withdrawal floor** (`peer-withdrawal-floor`, its own section
+  below): a withdrawal is fsynced OUTSIDE the log before the tombstone is handed to the log at all,
+  so losing the tombstone loses only the tombstone. Both halves are now fail-closed, and **absence of
+  a pin now means "not currently trusted"** rather than "no surviving record says otherwise" — which
+  is the property RELAY-17 builds its cross-bus trust anchor on.
 
 **A note for whoever wires this up:** `PeerStore` must have the log REPLAYED INTO IT before its first
 write. `config_seq` starts at zero and is rebuilt only from the records `Apply` is handed, so a store
@@ -1526,3 +1530,263 @@ existing log is read differently** — an applier that does not exist cannot mis
 (`DECISIONS.md`, FEDERATION (e)), are separate tasks. **No new HTTP route, CLI flag, env var,
 `AGENT_PROTOCOL.md` entry or `scripts/bus-*.sh` wrapper** — an operator cannot observe any of this
 yet.
+
+## On-disk files in the data directory: the durable PEER WITHDRAWAL floor (`RELAY-34`, added 2026-08-08)
+
+**This is the FOURTH floor file, and like the other three it exists because a number that must
+outlive the log cannot be stored inside it.** `wal-index-floor` guards the WAL record index,
+`message-seq-floor` guards the message sequence, `agent-suffixes` guards per-name agent-id suffixes.
+This one guards something that is not a counter at all: **the FACT that an operator withdrew a peer
+configuration.**
+
+### The defect it closes
+
+`internal/relay/peerstore.go`'s two records (`"peer"`, `"bustrust"`) each carry the **complete
+post-transition state**, never a delta. That is what makes replay a plain monotonic upsert — and it
+is also what made a withdrawal **losable**. Recovery is REQUIRED by invariant 6 to discard damage and
+boot anyway, so when it discarded the tombstone the previous generation became the surviving truth
+and was reinstated. For routes an un-peered bus became routable again. **For the trust table a
+REVOKED PINNED BUS SIGNING KEY CAME BACK: revocation failed OPEN.**
+
+Reproduced end to end by the security gate: `PutTrust` then `RemoveTrust`, both acknowledged,
+`PinnedKeys` correctly nil; truncate **eight bytes** off `bus.wal`'s tail; reopen; `PinnedKeys`
+returns the revoked key, active, one key pinned.
+
+**Do not discount this as adversarial.** The triggers are bit-rot, a torn write, and a VM or
+filesystem snapshot rolled back past the revocation — **none of them adversarial**, and a
+single-operator SSH-tunnelled deployment suffers a snapshot rollback exactly as much as a hostile
+one. "Sole operator" reads like the strongest mitigating argument here and is the weakest.
+
+Nothing INSIDE the log could close it. Quoting `internal/wal/indexfloor.go`, which states the
+principle: *"A floor derived from the log drops whenever the log does."* A withdrawal stored only as
+a log entry inherits every repair the log undergoes.
+
+### The file
+
+`<data-dir>/peer-withdrawal-floor` (mode `0600`, on-disk format version **6** — RESERVED via the Spec
+Server `ondisk-format-version` namespace on 2026-08-08, never hand-picked), implemented in
+`internal/relay/peerstore.go`, constant `relay.PeerWithdrawalFloorFileName`. Format: a header line
+carrying an unkeyed SHA-256 digest of the body, then one line per withdrawal:
+
+```
+agent-bus-peer-withdrawal-floor v6 sha256=<64 hex>
+route <folded bus id> <config_seq>
+trust <folded bus id> <config_seq>
+```
+
+| field | rule |
+| --- | --- |
+| table token | exactly `route` or `trust`. **Deliberately NOT `busTable.what`** ("peer route", "bus trust") — that is prose for log lines and may be reworded, and a durable key an edit to a log message can rename is one that silently forgets every revocation recorded under the old spelling |
+| bus id | valid per `ids.ValidateBusID`, at most `MaxPeerBusIDLen` (64), and **already FOLDED to lower case** — so one bus has exactly one floor and a reader cannot take the lower of two spellings |
+| `config_seq` | canonical decimal, no sign, no leading zeros, and **strictly below the plausibility bound 2^32** (`maxPlausiblePeerWithdrawalSeq`) |
+| ordering | sorted by (table, bus id), so the bytes are a function of the withdrawal set alone |
+
+Entries are capped at **4096** across both tables (`maxPeerWithdrawalFloorEntries`, derived as 32
+complete turnovers of the `MaxPeers`=64 live cap) and the read is bounded at **1 MiB**. The cap
+matters because the map is MONOTONIC — an entry may never be dropped, since the record it defends
+against is still in an append-only log that is never compacted.
+
+### The ordering is the mechanism — WRITE THE FLOOR AHEAD OF THE LOG ENTRY
+
+`PeerStore.write` **fsyncs `floor[table][bus] = seq` BEFORE it hands the tombstone to the durable
+log.** This is invariant 4's rule one layer down: nothing is acknowledged as withdrawn before the
+fact of the withdrawal is durable somewhere no log repair can reach. **It must not be reversed for
+any reason, including latency**, because the interesting failure is the crash BETWEEN the two:
+
+| crash point | outcome | direction |
+| --- | --- | --- |
+| floor write fails | log entry never written, withdrawal REFUSED, operator told, old configuration stands | nothing claimed |
+| floor written, log write fails | floor stands alone; the pins are already un-served and stay un-served across every restart | **fail-CLOSED** |
+| floor + log written, tail then discarded | floor survives, tombstone does not; the superseded record is refused at admission and hidden at read | **fail-CLOSED** |
+
+Log-then-floor would leave a tombstone the very next torn tail can discard with nothing outside the
+log remembering — precisely the state this closes.
+
+### Where the floor is enforced
+
+- **`busTable.upsert`** refuses any ACTIVE record at or below the floor (`ErrPeerWithdrawn`). A
+  TOMBSTONE is never blocked: the record that SET the floor is itself a tombstone at exactly that
+  sequence, and an older tombstone reinstates nothing.
+- **`busTable.lookup`** reports such a record ABSENT, so `Lookup`, `LookupTrust` and therefore
+  `PinnedKeys` all see nothing. This covers the floor-written/log-failed window that `upsert` cannot.
+- **`ActivePeers` / `TrustedBuses`** skip it — they read the map directly rather than through
+  `lookup`.
+- **`PeerStore.write`** treats it as absent too. Not symmetry for its own sake: `Put`/`PutTrust`
+  return a NO-OP when the incoming configuration equals the current active one, so an operator
+  re-pinning the SAME key after a lost tombstone would otherwise be told "nothing to do" and left
+  with an un-pinned bus.
+
+**It cannot refuse a legitimate write.** `NewPeerStore` seeds `config_seq` from the floors, and
+`applyLocked` raises it from every applied record, so a live write is always minted strictly above
+every floor. The seeding is not tidiness: a directory whose log was quarantined but whose floor
+survived would otherwise resume minting at 1, below its own floor, and refuse its own re-pin for
+ever.
+
+### `PeerStoreOptions.Dir` — and the hand-off this creates
+
+`Dir` is the data directory and is where the floor lives. **An empty `Dir` does not silently degrade:
+`Remove` and `RemoveTrust` fail with `relay.ErrPeerNoWithdrawalFloor`**, and a durable store built
+without one WARNS at construction. Reads, `Put`, `PutTrust` and `Apply` are unaffected.
+
+**Any caller that constructs a `PeerStore` MUST set `Dir`** — most immediately the offline
+`agent-bus peer` subcommand (RELAY-12), which is where an operator's revocation is actually typed,
+and the composition root (RELAY-24). A store built without `Dir` cannot CONSULT a floor another
+process wrote, so it may serve a pin the operator revoked; that shape is an unwired audit shape only
+and must never back a routing or verification decision.
+
+### A corrupt floor file is FATAL and is NEVER regenerated
+
+`relay.ErrPeerWithdrawalFloorCorrupt` — bad header, unknown version, checksum mismatch, a malformed,
+unfolded, duplicated or out-of-range entry. Same posture as `ids.ErrSuffixFileCorrupt`,
+`wal.ErrIndexFloorCorrupt` and `hub.ErrSeqFloorFileCorrupt`, and the same reconciliation with
+invariant 6: **the LOG still always starts** — a damaged `bus.wal` is still repaired and the bus
+still comes up. What refuses is a damaged IDENTITY file, the narrow exception already granted to
+`bus-id`, `wal-mac.key`, `agent-suffixes`, `wal-index-floor` and `message-seq-floor`. A crash can
+never produce this state: the write is temp file + fsync + rename + directory fsync, so a reader sees
+the whole old file or the whole new one.
+
+The error names a one-step remedy, and deliberately NOT a bare "delete it": deleting it forgets every
+revocation it recorded. The remedy says to move it aside and restart — **the bus then REBUILDS the
+floor from every withdrawal its log still holds**, logging each repair — and to re-apply by hand only
+those withdrawals whose log records are gone.
+
+#### THE FLOOR IS REPAIRED FROM THE LOG WHEN IT FALLS BEHIND (security-gate P1, 2026-08-08)
+
+The first version of this fix had a hole the security gate reproduced: the state *"tombstone in the
+log, no floor beside it"* is the pre-RELAY-34 behaviour, silently restored, and there are three
+non-adversarial ways in — bit-rot on the floor file, an inconsistent snapshot or backup restore that
+brings `bus.wal` forward without it, and **an operator following this very error's instruction to
+move it aside**. The documented remedy then *failed silently*: the tombstone is still in the log, so
+`RemoveTrust` took its already-removed no-op branch, returned success and wrote nothing. Once the
+tombstone had been swept it was worse — `RemoveTrust` reported `ErrUnknownPeer` and the floor could
+not be re-established at all.
+
+Two changes close it, both in code rather than prose:
+
+- **`PeerStore.Apply` reconciles** (`reconcileWithdrawalFloor`): a withdrawal in the log whose floor
+  is missing or lower re-floors at that record's `config_seq`. This is not "deriving the floor from
+  the log" in the sense the file exists to avoid — the floor is still WRITTEN AHEAD of the log entry
+  and is still the ONLY source when the tombstone is gone. It is the reverse direction: while the
+  tombstone IS present it proves a withdrawal happened, so a floor behind it is a floor that lost
+  data. It only ever RAISES. On forgery, at the strength the threat model supports rather than the
+  flattering one: the WAL's keyed HMAC means the NON-ADVERSARIAL triggers this mechanism exists for —
+  bit-rot, torn writes, snapshot rollback — can only DROP records, never invent a tombstone. It is not
+  a claim against a deliberate attacker, since `wal-mac.key` sits in the same data directory; what
+  bounds that actor is direction (an injected tombstone only ever UN-pins a bus, which is fail-closed)
+  plus the sequence bound above.
+- **Re-applying a withdrawal re-asserts its floor**, so the manual remedy does what it says.
+
+Cost on a healthy bus: **zero**. On a live commit the floor already covers the sequence, so
+`recordWithdrawal` returns without touching the disk. Only a start whose floor really lost data pays
+an fsync, and each repair is logged at WARN.
+
+#### The floor is never written with a sequence this binary would refuse to READ (security-gate P2-a, 2026-08-08)
+
+The write side once validated against `maxConfigSeq` while the read side refused at the plausibility
+bound, so an **acknowledged** withdrawal could persist a file the next start refuses — and following
+that refusal's own remedy (move it aside, restart) had the reconciliation re-derive the same
+out-of-range value from the tombstone still in the log and write the **identical unreadable file**. A
+bus that never boots again, with a remedy that **loops**. Both sides now refuse at the same bound:
+`encodePeerWithdrawalFloors` rejects it (the withdrawal fails loudly, fail-closed, and the bus stays
+bootable) and `reconcileWithdrawalFloor` skips and diagnoses a log record carrying one rather than
+copying it into the file. Reconcile is the only path by which a sequence from the LOG reaches the
+file, so it is the path that has to bound it.
+
+#### The floor update is serialised by its own mutex (security-gate P2-b, 2026-08-08)
+
+`recordWithdrawal` releases `PeerStore.mu` across the file write and rebuilds the whole file from the
+in-memory mirror. Its safety was argued from `writeMu` — which covered only one of its two callers.
+`reconcileWithdrawalFloor` holds no `writeMu` and **cannot** (it runs from `Apply`, which `write()`
+reaches while already holding it), so two callers could interleave snapshot-then-write and the second
+could write a snapshot taken before the first's entry existed, **dropping a floor its caller had
+already been told was recorded**. A dedicated `floorMu` is now held across snapshot → encode → rename
+→ adopt. Lock order is `writeMu → floorMu → mu`, acyclic. Latent rather than reachable today, but it
+becomes reachable the moment a second source of applied peer records exists — relay ingest.
+
+#### An out-of-range MINTED sequence has its own error, not the corrupt-file one (security-gate round-3 P2 and P3, 2026-08-08)
+
+When the bound refuses a sequence being **minted** (rather than one being read), the floor file is
+perfectly intact — what is out of range is the counter, because some record in the log carried an
+implausible `config_seq` and raised it (`applyLocked` raises the high-water mark from every record
+including discarded ones, as invariant 1 requires). Wrapping `ErrPeerWithdrawalFloorCorrupt` there
+printed *"the persisted peer withdrawal floor is corrupt"* and sent the operator to **move a healthy
+floor aside**, permanently losing every revocation whose tombstone had been swept — and still not
+letting them withdraw. That case now returns `relay.ErrPeerWithdrawalSeqTooHigh`, which names the log
+as the cause and says in as many words that the floor file is NOT corrupt and must not be moved.
+Reachable only by forging a WAL frame; the keyed HMAC means the non-adversarial triggers can only
+drop records. It is fail-closed for the file and fail-OPEN for the revocation (the withdrawal is
+refused, so the pin is still served), which is exactly why the diagnosis has to be right.
+
+`reconcileWithdrawalFloor` also now **skips any record the table refused on IDENTITY grounds** — one
+naming this bus's own id (a self-peer, which nothing may legitimately produce, and which wrote a
+permanent row for the local bus that no operator action could explain or remove), and one whose bus
+id differs only by ASCII case from a bus the table already holds (flooring the confusable would
+durably un-pin the LEGITIMATE bus — a revocation nobody performed). Reconcile deliberately runs on
+records `applyLocked` refused, because a refused record can still be a withdrawal whose floor must be
+kept; an identity refusal is the exception, and is different in kind.
+
+#### A plausibility bound on the stored sequence (security-gate P2, 2026-08-08)
+
+`config_seq` is seeded into `PeerStore.configSeq` from this file, so a single planted entry near
+`maxConfigSeq` seeded the counter to its ceiling: the bus started perfectly healthy, read fine, and
+then failed **every** `Put`/`PutTrust`/`Remove`/`RemoveTrust`, for every bus in both tables, across
+every restart, with `ErrPeerConfigSeqExhausted` naming a ceiling nobody had reached. Total loss of
+function with the diagnosis pointing elsewhere. A floor at or above **2^32** is now refused at parse
+time as tampered-or-damaged — 2^32 is ~136 years at one configuration change every second, and leaves
+over 9.0e15 numbers between it and the ceiling, so a value that passes cannot bring exhaustion within
+reach either. Same shape as `hub.maxPlausibleSeqFloor`.
+
+A **MISSING** file is legal and means "nothing has ever been withdrawn". There is no migration window
+to be fail-open in: when this landed, nothing outside `internal/relay` had ever constructed a
+`PeerStore`, so no data directory held a `"peer"` or `"bustrust"` record at all.
+
+### The digest is INTEGRITY, not AUTHENTICATION — a KNOWN, UNRESOLVED asymmetry
+
+Unkeyed SHA-256, like `agent-suffixes` and `message-seq-floor`, unlike `wal-index-floor`'s keyed
+HMAC. **RELAY-34 deliberately does not resolve that asymmetry** — it has its own open task, and
+picking a side here would be a crypto decision made as a side effect of a durability fix, which
+invariant 9 forbids. What is claimed is what is true: this defends the data directory's INTEGRITY
+against media damage and accidental editing. Authenticity is defended one layer up, at the directory,
+by `enforceDataDirPermissions` and the dirlock.
+
+Note which direction tampering runs: forging a floor HIGH un-pins a bus (fail-closed, visible,
+repairable by re-pinning); forging it LOW or deleting the file restores exactly the pre-RELAY-34
+behaviour and no worse. Neither is a new capability for anyone who can already rewrite the directory.
+
+### SINGLE WRITER PER DATA DIRECTORY
+
+The whole map is rewritten on every withdrawal, so **two processes sharing a data directory would
+each rewrite it from its own view and the last rename would win — silently LOWERING a floor**, which
+is the one operation this file must never perform. `internal/relay` cannot enforce that; it is
+enforced one layer up by the data-directory lock (`internal/dirlock`) the server takes at startup and
+the offline `agent-bus peer` subcommand takes too (`DECISIONS.md`, FEDERATION (e)). It is the same
+assumption `ids.DurableNameSuffixes` and `hub.seqFloorFile` already rest on — written down here
+because the consequence is worse: theirs skip numbers, this one forgets a revocation.
+
+### Acceptance evidence is a REAL `kill -9` PLUS the eight-byte truncation
+
+`go test -race -run TestPeerStoreTrustSurvivesATornWALTail ./internal/relay` re-execs a child that
+REVOKES a pinned bus signing key and is SIGKILLed the instant the tombstone's commit is fsynced (the
+parent asserts `syscall.WaitStatus.Signaled()`). **The dying child itself asserts the floor is
+already on disk BEFORE the log write** — that is the ordering proof, and it is unobservable from the
+parent afterwards, where both files simply exist. The parent then truncates eight bytes off
+`bus.wal`, confirms recovery reports the damage and that the revocation is GONE from the log, and
+requires that `PinnedKeys`, `LookupTrust` and `TrustedBuses` all still report the bus as un-pinned —
+through both recovery paths (`wal.Open`'s applier and `wal.Replay`) — that the discard was LOGGED,
+and that the unrelated route written before the crash is untouched.
+
+Confirmed RED before the fix, and RED again with the mechanism disabled in an otherwise-identical
+tree. Supporting tests: `TestPeerStoreRePinsAfterADiscardedRevocation` (a revocation that sticks must
+still be reversible), `TestPeerStoreRefusesAWithdrawalItCannotFloor` (the fail-closed refusal, and
+that nothing reaches the log), `TestPeerWithdrawalFloorFileIsStrictlyVerified` (twelve tampering
+cases), `TestPeerStoreSeedsConfigSeqFromTheWithdrawalFloor`, plus the two security-gate regressions
+`TestPeerStoreRepairsALostWithdrawalFloorFromTheLog` and
+`TestPeerWithdrawalFloorRefusesAnImplausibleSequence` — both also confirmed RED with their
+respective fixes disabled.
+
+### Still NOT WIRED
+
+`PeerStore` is still not constructed by a running `cmd/agent-bus` server, and **no new HTTP route,
+CLI flag, env var, `AGENT_PROTOCOL.md` entry or wrapper** comes with this. No existing data directory
+gains a `peer-withdrawal-floor` file until something writes a withdrawal through a `PeerStore` built
+with a `Dir`.

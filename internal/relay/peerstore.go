@@ -62,14 +62,19 @@ package relay
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +172,85 @@ var (
 
 	// ErrPeerConfigSeqExhausted reports the maxConfigSeq ceiling.
 	ErrPeerConfigSeqExhausted = errors.New("relay: peer configuration sequence exhausted")
+
+	// ErrPeerWithdrawn reports a record that a DURABLY RECORDED WITHDRAWAL
+	// supersedes: it is at or below this bus's withdrawal floor for that bus, so
+	// admitting it would reinstate a configuration the operator withdrew.
+	//
+	// It is a SEPARATE sentinel from ErrInvalidPeerRecord because the record is
+	// not invalid and nothing is wrong with it — it is simply superseded, and on
+	// a HEALTHY log it is superseded by a tombstone that is about to be replayed
+	// two entries later. Apply logs it distinctly and at WARN for exactly that
+	// reason; treating it as a corruption-grade ERROR would put an alarming line
+	// in every normal boot's log and teach an operator to ignore the one that
+	// matters. See busTable.withdrawnAt.
+	ErrPeerWithdrawn = errors.New("relay: superseded by a durably recorded peer withdrawal")
+
+	// ErrPeerNoWithdrawalFloor reports a withdrawal attempted on a store built
+	// without a data directory.
+	//
+	// It is a REFUSAL and never a degraded mode, for the reason RELAY-34 exists:
+	// a withdrawal recorded ONLY as a log entry can be un-said by losing that
+	// entry, and for the trust table "un-said" means a revoked pinned bus signing
+	// key comes back. Refusing to withdraw at all is the fail-CLOSED half of that
+	// choice — the operator is told the revocation did not happen, rather than
+	// being told it did and finding out otherwise after a torn write.
+	ErrPeerNoWithdrawalFloor = errors.New("relay: peer store has no data directory, so a withdrawal cannot be made durable outside the log")
+
+	// ErrTooManyPeerWithdrawals reports the maxPeerWithdrawalFloorEntries bound.
+	ErrTooManyPeerWithdrawals = errors.New("relay: too many recorded peer withdrawals")
+
+	// ErrPeerWithdrawalSeqTooHigh reports a withdrawal whose minted config_seq is
+	// at or above maxPlausiblePeerWithdrawalSeq, so it cannot be recorded in the
+	// durable withdrawal floor in a form this binary could read back.
+	//
+	// # It is a SEPARATE sentinel because the remedy is the OPPOSITE one
+	//
+	// A security-gate finding. This case used to wrap
+	// ErrPeerWithdrawalFloorCorrupt, whose message says "the persisted peer
+	// withdrawal floor is corrupt" and whose remedy is "move it aside and
+	// restart". BOTH ARE FALSE HERE. The floor file is perfectly intact; what is
+	// out of range is the sequence being minted, because some record in the LOG
+	// carried an implausibly high config_seq and raised the counter (applyLocked
+	// raises the high-water mark from every record, including ones it discards —
+	// invariant 1 requires that). An operator following the corrupt-file remedy
+	// would DELETE a healthy floor, permanently losing every revocation whose
+	// tombstone had been swept, and STILL not be able to withdraw.
+	//
+	// The state is fail-closed for the FILE and fail-OPEN for the revocation —
+	// the withdrawal is refused, so the pin is still served — which is why the
+	// message has to name the real cause rather than send someone to the wrong
+	// file. Reachable only by forging a WAL frame (the keyed HMAC means the
+	// non-adversarial triggers can only DROP records), and an actor who can mint
+	// frames already owns the trust table, so this is a diagnosis problem rather
+	// than a new exposure.
+	ErrPeerWithdrawalSeqTooHigh = errors.New("relay: this bus's configuration sequence is too high to record a withdrawal")
+
+	// ErrPeerWithdrawalFloorCorrupt reports a peer-withdrawal-floor file that
+	// EXISTS but does not verify: bad header, unknown version, checksum mismatch,
+	// a malformed or duplicated entry, or a floor above maxConfigSeq.
+	//
+	// It is FATAL at construction and the file is NEVER regenerated, the same
+	// posture ids.ErrSuffixFileCorrupt, wal.ErrIndexFloorCorrupt and
+	// hub.ErrSeqFloorFileCorrupt take. Regenerating it means forgetting which
+	// pins an operator revoked, silently — which is precisely the failure this
+	// file exists to make impossible.
+	//
+	// # This does NOT contradict invariant 6
+	//
+	// Invariant 6 is about the LOG: recovery must always reach a running server
+	// rather than refusing to boot over a damaged bus.wal, and it still does —
+	// nothing here changes how a torn, bit-rotted or truncated log is repaired.
+	// What refuses is a damaged IDENTITY file, which is the same narrow exception
+	// already granted to bus-id, wal-mac.key, agent-suffixes, wal-index-floor and
+	// message-seq-floor.
+	//
+	// A CRASH CAN NEVER PRODUCE THIS STATE. The write is temp file + fsync +
+	// rename + directory fsync, so a reader sees the whole old file or the whole
+	// new one, never a torn one. Corruption therefore means media damage or
+	// tampering, and there is no benign cause to be generous to. The message
+	// names a concrete one-step remedy, so a bus is never permanently bricked.
+	ErrPeerWithdrawalFloorCorrupt = errors.New("relay: the persisted peer withdrawal floor is corrupt")
 )
 
 // PeerDurableLog is the two-phase write path, injected.
@@ -799,6 +883,546 @@ func elidePeerText(s string) string {
 }
 
 // ---------------------------------------------------------------------------
+// The durable WITHDRAWAL FLOOR — the mechanism that makes a revocation STICK
+// ---------------------------------------------------------------------------
+
+// PeerWithdrawalFloorFileName is the file within the data directory that holds
+// the durable per-bus WITHDRAWAL FLOOR: for each table and each bus, the
+// config_seq at which this bus last withdrew that configuration.
+//
+// # The defect it closes (RELAY-34), and why nothing inside the log could
+//
+// Every durable peer record carries the COMPLETE post-transition state rather
+// than a delta. That is what makes replay a plain monotonic upsert with no
+// ordering logic — and it is also what made a withdrawal LOSABLE. If recovery
+// discards the tombstone (a torn tail, a bit-rotted frame, a filesystem or VM
+// snapshot rolled back past it — all of which invariant 6 REQUIRES us to survive
+// and boot from rather than refuse), the previous generation is the surviving
+// truth and is reinstated. For routes that means an un-peered bus is routable
+// again. FOR THE TRUST TABLE IT MEANS A REVOKED PINNED BUS SIGNING KEY IS
+// PINNED AGAIN: revocation failed OPEN. The security gate reproduced exactly
+// that by truncating eight bytes off a bus.wal tail, and
+// TestPeerStoreTrustSurvivesATornWALTail is that reproduction, kept as a
+// regression test.
+//
+// No amount of care INSIDE the log fixes it, and that is the whole reason this
+// is a file. Quoting internal/wal/indexfloor.go, which states the principle:
+// "A floor derived from the log drops whenever the log does. wal.RepairLog may
+// truncate a tail, rewrite the middle, or move the whole file aside — and a
+// number stored inside the thing being repaired inherits every repair." A
+// withdrawal stored only as a log entry inherits every repair too.
+//
+// So this is the SAME SHAPE ids.DurableNameSuffixes (agent-suffixes), wal's
+// indexFloor (wal-index-floor) and hub's seqFloorFile (message-seq-floor)
+// already use, and it is chosen for their reason rather than by analogy: WRITE
+// THE FLOOR AHEAD OF THE THING IT AUTHORISES, OUTSIDE THE LOG IT MUST OUTLIVE.
+// PeerStore.write fsyncs floor[table][bus] = seq BEFORE it hands the withdrawal
+// to the durable log, so a withdrawal that was ACKNOWLEDGED was necessarily
+// floored first. It is invariant 4's ordering one layer down.
+//
+// # It cannot make anything fail OPEN, in either failure direction
+//
+//   - floor write fails    -> the log entry is never written, the withdrawal is
+//     REFUSED, the operator is told, the old pins stand. Nothing was claimed.
+//   - floor written, log write fails -> the floor stands alone. The pins are
+//     already un-served (busTable.lookup consults the floor, not just the
+//     table), and they stay un-served across every restart. Fail-CLOSED: fewer
+//     keys trusted than the log alone would suggest, which is the direction
+//     RELAY-34's brief requires when one has to be chosen.
+//
+// # SINGLE WRITER PER DATA DIRECTORY — an assumption, not a guarantee this
+// # package makes
+//
+// The whole map is rewritten on every withdrawal, so TWO processes sharing a
+// data directory would each rewrite it from its own view and the last rename
+// would win — silently LOWERING a floor, which is the one operation this file
+// must never perform. That assumption is not enforced here and cannot be: it is
+// enforced one layer up, by the data-directory lock the server takes at startup
+// (internal/dirlock), which the offline `agent-bus peer` subcommand also takes
+// (DECISIONS.md, FEDERATION (e)). It is exactly the assumption
+// ids.DurableNameSuffixes and hub.seqFloorFile already rest on, written down
+// here because the consequence is worse: theirs skip numbers, this one forgets a
+// revocation. NOTHING in this package may be used against a directory another
+// process holds.
+//
+// It is EXPORTED because operators and CONTRACTS-ONDISK.md need to name it, and
+// because the error a corrupt floor raises tells an operator to move exactly
+// this path aside.
+const PeerWithdrawalFloorFileName = "peer-withdrawal-floor"
+
+// peerWithdrawalFloorMagic is the first token of the header line, spelled out in
+// full so a stray file in a data directory is identifiable by `head -1` alone.
+const peerWithdrawalFloorMagic = "agent-bus-peer-withdrawal-floor"
+
+// peerWithdrawalFloorVersion is the on-disk format version of this file.
+//
+// It is RESERVED, not chosen: value 6 in the Spec Server `ondisk-format-version`
+// namespace, reserved 2026-08-08 for RELAY-34 (1 and 2 are the WAL frame format,
+// 3 is ids/agent-suffixes, 4 is wal/wal-index-floor, 5 is hub/message-seq-floor).
+// Never pick one of these by eyeballing the list — that is the parallel-agent
+// collision class CLAUDE.md names explicitly.
+//
+// Note the contrast with PeerRecordKind/BusTrustRecordKind, which needed NO
+// reservation: those are free-form application discriminators inside a WAL
+// entry's body. This is a FILE FORMAT, so it takes a number.
+//
+// An UNKNOWN version is a HARD ERROR, never a "read what you can". A file
+// written by a newer binary may encode withdrawals this one cannot see, and
+// reading it partially would forget a revocation — which is the one thing this
+// file exists to make impossible.
+const peerWithdrawalFloorVersion = 6
+
+// maxPeerWithdrawalFloorEntries bounds how many (table, bus) withdrawals the
+// file may hold, ACROSS BOTH TABLES.
+//
+// A bound is needed because the map is MONOTONIC: an entry may never be dropped,
+// since the record it defends against is still sitting in an append-only log
+// that is never compacted. So distinct-buses-ever-withdrawn grows without limit
+// under enough operator churn, and an unbounded file read at startup is a
+// memory-exhaustion shape however unlikely the traffic pattern.
+//
+// 4096 is DERIVED as 32x the live cap: a bus routes to at most MaxPeers (64)
+// peers and pins at most MaxPeers, so 4096 is thirty-two complete turnovers of
+// both tables. Every one of those is a MANUAL operator action through an offline
+// subcommand under the dirlock, so the ceiling is unreachable in practice and
+// exists so the unreachable case is a loud refusal rather than a silent
+// unbounded file.
+//
+// Reaching it REFUSES A WITHDRAWAL, which is stated rather than glossed: it is
+// the one place this design can refuse a revocation. It is still fail-closed in
+// the sense that matters — the caller gets an error naming the remedy and the
+// operator knows the revocation did not happen — but it is not "revocation
+// always succeeds", and pretending otherwise would be the comfortable version.
+const maxPeerWithdrawalFloorEntries = 4096
+
+// maxPeerWithdrawalFloorFileSize bounds how much of the file is read into
+// memory.
+//
+// DERIVED: a full file is maxPeerWithdrawalFloorEntries lines of
+// "<token> <bus-id> <seq>", at most 5 + 1 + MaxPeerBusIDLen + 1 + 16 + 1 = 88
+// bytes each, so about 352 KiB plus an 80-byte header. 1 MiB is roughly 3x that
+// and far below anything that matters, while still refusing a multi-gigabyte
+// file planted to exhaust memory at startup — which is before anything has
+// authenticated.
+const maxPeerWithdrawalFloorFileSize int64 = 1 << 20
+
+// maxPlausiblePeerWithdrawalSeq is the highest config_seq a REAL bus could ever
+// have withdrawn at, and anything at or above it is treated as tampered-or-
+// damaged rather than adopted. It is hub.maxPlausibleSeqFloor's idea applied to
+// this counter, and it was added because the security gate demonstrated the
+// failure it prevents.
+//
+// # Why a bound is needed when the file already has a digest
+//
+// The digest is UNKEYED, so it is an integrity check and not an authentication
+// one: anyone who can write the data directory can recompute it. NewPeerStore
+// SEEDS configSeq from these floors, so a single planted entry at maxConfigSeq
+// seeds the counter to its ceiling — and then every Put, PutTrust, Remove and
+// RemoveTrust, for every bus, in BOTH tables, fails with
+// ErrPeerConfigSeqExhausted naming a ceiling nobody reached. The bus starts
+// perfectly healthy, reads fine, and can never be reconfigured again, across
+// every restart, because the file persists. That is the worst failure shape
+// available here: total loss of function with the diagnosis pointing somewhere
+// else entirely.
+//
+// # Why 2^32, and why the bound does not need to be tight
+//
+// The bound's only job is to separate "a value a real bus reached" from "a value
+// only a tamperer or catastrophic corruption produces", and a false positive
+// refuses a start — so it is set generously.
+//
+// config_seq advances at OPERATOR rate: one per configuration change, typed
+// through an offline subcommand under the dirlock. 2^32 is 4.29 billion of them.
+// At one configuration change EVERY SECOND, sustained, without pause, reaching
+// it takes about 136 years. Meanwhile it leaves more than 9.0e15 numbers between
+// it and maxConfigSeq, so a value that passes this bound cannot bring exhaustion
+// within reach either: a tamperer gains nothing by picking the largest value
+// that still passes.
+//
+// The honest caveat: only the READ is bounded. A bus that genuinely wrote a
+// withdrawal above this would refuse its next start with a message saying
+// "tampered", which would be the wrong word — but it is 136 years of continuous
+// operator input away.
+const maxPlausiblePeerWithdrawalSeq = uint64(1) << 32
+
+// The stable on-disk TOKENS for the two tables. They are deliberately NOT
+// busTable.what ("peer route", "bus trust"): what is prose for log lines and may
+// be reworded, and a durable key that can be reworded by an edit to a log
+// message is a durable key that can silently forget every revocation recorded
+// under the old spelling.
+const (
+	routeTableToken = "route"
+	trustTableToken = "trust"
+)
+
+// peerWithdrawalEntry is one line of the file: which table, which bus (in its
+// FOLDED spelling, matching busTable's key), and the config_seq of the
+// withdrawal.
+type peerWithdrawalEntry struct {
+	table string
+	busID string
+	seq   uint64
+}
+
+// encodePeerWithdrawalFloors renders the canonical on-disk form:
+//
+//	agent-bus-peer-withdrawal-floor v6 sha256=<hex of the body>
+//	route <bus-id> <config_seq>
+//	trust <bus-id> <config_seq>
+//	...
+//
+// The digest covers the BODY, and entries are sorted by (table, bus id), so the
+// bytes are a function of the withdrawal set alone — which is what makes the
+// checksum meaningful and the file diffable and readable by eye. Numbers are
+// canonical decimal (no sign, no leading zeros) so a floor has exactly one
+// spelling.
+//
+// Bus ids are VALIDATED HERE, at the last point before an irreversible write,
+// and this is not decoration. A bus id carrying a space would produce a file
+// readPeerWithdrawalFloors rejects, and one carrying a newline would forge an
+// entry for another bus — and because a rejected floor file is NEVER regenerated
+// (ErrPeerWithdrawalFloorCorrupt), either would strand the data directory. They
+// are written FOLDED and required to already be folded, so the file cannot hold
+// two spellings of one bus and a reader cannot take the lower of them.
+//
+// # The digest is INTEGRITY, not AUTHENTICATION — and that is a KNOWN asymmetry
+//
+// It is an unkeyed SHA-256, exactly like agent-suffixes and message-seq-floor,
+// and unlike wal-index-floor's keyed HMAC. Anyone who can write the data
+// directory can recompute it. That asymmetry across the four floor files is a
+// REAL open question with its own task; RELAY-34 deliberately does not resolve
+// it here, because picking a side would be a crypto decision made as a side
+// effect of a durability fix, and invariant 9 is explicit that crypto is never
+// the incidental part of a change. What is claimed is what is true: this defends
+// the data directory's INTEGRITY against media damage and accidental editing.
+// Its authenticity is defended one layer up, at the directory, by
+// enforceDataDirPermissions (cmd/agent-bus/datadirperm.go) and the dirlock.
+//
+// Note also which direction tampering runs here. Forging a floor HIGH un-pins a
+// bus — fail-closed, visible, and repairable by re-pinning. Forging it LOW, or
+// deleting the file, restores exactly the pre-RELAY-34 behaviour and no worse.
+// Neither is a new capability for anyone who can already rewrite the directory.
+func encodePeerWithdrawalFloors(entries []peerWithdrawalEntry) ([]byte, error) {
+	sorted := make([]peerWithdrawalEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].table != sorted[j].table {
+			return sorted[i].table < sorted[j].table
+		}
+		return sorted[i].busID < sorted[j].busID
+	})
+
+	var body bytes.Buffer
+	for i, e := range sorted {
+		if e.table != routeTableToken && e.table != trustTableToken {
+			return nil, fmt.Errorf("%w: refusing to persist a withdrawal for table %q, which is neither %q nor %q", ErrPeerWithdrawalFloorCorrupt, elidePeerText(e.table), routeTableToken, trustTableToken)
+		}
+		if err := ids.ValidateBusID(e.busID); err != nil {
+			return nil, fmt.Errorf("%w: refusing to persist a withdrawal floor: %v; a floor file holding that bus id could never be read back, and a floor file that cannot be read back is never regenerated, so writing it would permanently strand this data directory", ErrPeerWithdrawalFloorCorrupt, err)
+		}
+		if e.busID != strings.ToLower(e.busID) {
+			return nil, fmt.Errorf("%w: refusing to persist a withdrawal floor for %q: the file holds FOLDED bus ids, so that two spellings of one bus cannot become two floors and a reader cannot take the lower", ErrPeerWithdrawalFloorCorrupt, elidePeerText(e.busID))
+		}
+		// THE WRITE SIDE REFUSES EXACTLY WHAT THE READ SIDE REFUSES, and the
+		// bound is maxPlausiblePeerWithdrawalSeq rather than maxConfigSeq.
+		//
+		// A security-gate finding, and the failure it prevents is the worst in
+		// this file. When the two bounds differed, this writer could persist a
+		// file parsePeerWithdrawalEntry refuses — so the next start failed with
+		// ErrPeerWithdrawalFloorCorrupt, and following the remedy it prints
+		// (move it aside, restart) had reconcileWithdrawalFloor re-derive the
+		// same out-of-range value from the tombstone still in the log and write
+		// the identical unreadable file. A bus that never boots again, with a
+		// remedy that LOOPS. That is the same class the bus-id check above
+		// exists for, and it is why the two bounds must move together.
+		//
+		// Refusing here is fail-CLOSED and keeps the bus bootable: the
+		// withdrawal fails loudly, the operator is told, and nothing unreadable
+		// reaches the disk.
+		if e.seq == 0 || e.seq >= maxPlausiblePeerWithdrawalSeq {
+			return nil, fmt.Errorf("%w: refusing to persist a withdrawal floor of %d for %s; a config_seq recorded here is between 1 and %d, and persisting one this reader would refuse would leave a data directory that cannot start and whose printed remedy rebuilds the same unreadable file", ErrPeerWithdrawalFloorCorrupt, e.seq, e.busID, maxPlausiblePeerWithdrawalSeq-1)
+		}
+		if i > 0 && sorted[i-1].table == e.table && sorted[i-1].busID == e.busID {
+			return nil, fmt.Errorf("%w: refusing to persist two withdrawal floors for %s in the %s table; there is exactly one floor per (table, bus) and a reader that took either could take the lower", ErrPeerWithdrawalFloorCorrupt, e.busID, e.table)
+		}
+		body.WriteString(e.table)
+		body.WriteByte(' ')
+		body.WriteString(e.busID)
+		body.WriteByte(' ')
+		body.WriteString(strconv.FormatUint(e.seq, 10))
+		body.WriteByte('\n')
+	}
+
+	sum := sha256.Sum256(body.Bytes())
+
+	var out bytes.Buffer
+	out.WriteString(peerWithdrawalFloorMagic)
+	out.WriteString(" v")
+	out.WriteString(strconv.Itoa(peerWithdrawalFloorVersion))
+	out.WriteString(" sha256=")
+	out.WriteString(hex.EncodeToString(sum[:]))
+	out.WriteByte('\n')
+	out.Write(body.Bytes())
+	return out.Bytes(), nil
+}
+
+// readPeerWithdrawalFloors loads and verifies the file, returning one map per
+// table token.
+//
+// A MISSING file yields empty maps and a NIL error: that is a data directory
+// that has never withdrawn a peer configuration, which is every data directory
+// in existence at the time this landed (nothing outside internal/relay had
+// constructed a PeerStore, so no data directory holds a "peer" or "bustrust"
+// record at all). There is therefore NO migration window in which a real
+// withdrawal predates the file — which is exactly the window that would
+// otherwise be fail-open, and it is closed by arithmetic rather than by hope.
+//
+// Every other failure is FATAL and wraps ErrPeerWithdrawalFloorCorrupt, except
+// an I/O failure — permission denied, a device error — which is returned AS-IS
+// and NOT dressed up as a corruption claim. "I could not read the file" and "the
+// file is not what was written" call for different operator actions.
+//
+// The SHA-256 is checked BEFORE any entry is parsed. A digest that does not
+// match means the bytes are not the bytes that were written, so a floor read out
+// of them could be LOWER than the one persisted — the silent rewind this whole
+// mechanism exists to prevent.
+func readPeerWithdrawalFloors(path string) (map[string]map[string]uint64, error) {
+	out := map[string]map[string]uint64{
+		routeTableToken: {},
+		trustTableToken: {},
+	}
+
+	// BOUNDED READ. This file is written by whoever can write the data
+	// directory, so an unbounded os.ReadFile on a multi-gigabyte
+	// "peer-withdrawal-floor" would be a trivial memory exhaustion at startup.
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("relay: reading the durable peer withdrawal floor from %s: %w", path, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxPeerWithdrawalFloorFileSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("relay: reading the durable peer withdrawal floor from %s: %w", path, err)
+	}
+	if int64(len(data)) > maxPeerWithdrawalFloorFileSize {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("it is larger than %d bytes; a real floor file holds at most %d short lines, so this is damaged or planted and is NOT read into memory", maxPeerWithdrawalFloorFileSize, maxPeerWithdrawalFloorEntries))
+	}
+
+	nl := bytes.IndexByte(data, '\n')
+	if nl < 0 {
+		return nil, peerWithdrawalFloorCorrupt(path, "it has no header line")
+	}
+	header, body := string(data[:nl]), data[nl+1:]
+
+	fields := strings.Split(header, " ")
+	if len(fields) != 3 || fields[0] != peerWithdrawalFloorMagic {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("it does not start with a %q header line (got %q)", peerWithdrawalFloorMagic, elidePeerText(header)))
+	}
+	wantVersion := "v" + strconv.Itoa(peerWithdrawalFloorVersion)
+	if fields[1] != wantVersion {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("it is on-disk format %s, but this binary understands only %s; a file written by a NEWER agent-bus may record withdrawals this binary cannot see, and reading it partially would FORGET a revocation — run the version of agent-bus that wrote it, or migrate the data directory deliberately", elidePeerText(fields[1]), wantVersion))
+	}
+	const sumPrefix = "sha256="
+	if !strings.HasPrefix(fields[2], sumPrefix) {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("its header has no %s digest (got %q)", sumPrefix, elidePeerText(fields[2])))
+	}
+	want, derr := hex.DecodeString(strings.TrimPrefix(fields[2], sumPrefix))
+	if derr != nil || len(want) != sha256.Size {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("its header digest %q is not %d hex bytes", elidePeerText(fields[2]), sha256.Size))
+	}
+	if got := sha256.Sum256(body); !bytes.Equal(got[:], want) {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("it fails its own checksum (header says %x, body hashes to %x), so it is not the bytes that were written and a floor read from it could FORGET a revocation this bus recorded", want, got[:]))
+	}
+
+	if len(body) == 0 {
+		// A legal empty body: the file exists and records no withdrawals.
+		return out, nil
+	}
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) > maxPeerWithdrawalFloorEntries {
+		return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("it holds %d entries, above the %d this binary retains", len(lines), maxPeerWithdrawalFloorEntries))
+	}
+	for i, line := range lines {
+		e, perr := parsePeerWithdrawalEntry(line)
+		if perr != nil {
+			return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("entry %d: %v", i+1, perr))
+		}
+		if _, dup := out[e.table][e.busID]; dup {
+			return nil, peerWithdrawalFloorCorrupt(path, fmt.Sprintf("entry %d lists %s in the %s table twice; there is exactly one floor per (table, bus) and a reader that took either could take the LOWER, forgetting a revocation", i+1, e.busID, e.table))
+		}
+		out[e.table][e.busID] = e.seq
+	}
+	return out, nil
+}
+
+// parsePeerWithdrawalEntry reads one "<table> <bus-id> <config_seq>" line.
+//
+// Every field is validated: the file is UNTRUSTED INPUT even though this bus
+// wrote it, because "this bus wrote it" is exactly the claim corruption
+// disproves. The bus id must be valid AND already folded, so a tampered file
+// cannot introduce a second spelling of a bus whose floor a reader would then
+// miss; the number must be canonical decimal within maxConfigSeq, so a floor has
+// exactly one spelling and cannot be a value no config_seq could ever reach.
+func parsePeerWithdrawalEntry(line string) (peerWithdrawalEntry, error) {
+	parts := strings.Split(line, " ")
+	if len(parts) != 3 {
+		return peerWithdrawalEntry{}, fmt.Errorf("expected %q, got %q", "<table> <bus-id> <config_seq>", elidePeerText(line))
+	}
+	table, busID, num := parts[0], parts[1], parts[2]
+	if table != routeTableToken && table != trustTableToken {
+		return peerWithdrawalEntry{}, fmt.Errorf("table %q is neither %q nor %q", elidePeerText(table), routeTableToken, trustTableToken)
+	}
+	if len(busID) > MaxPeerBusIDLen {
+		return peerWithdrawalEntry{}, fmt.Errorf("its bus id is %d bytes, but a bus id is at most %d; it is not echoed here because it is oversized", len(busID), MaxPeerBusIDLen)
+	}
+	if err := ids.ValidateBusID(busID); err != nil {
+		return peerWithdrawalEntry{}, err
+	}
+	if busID != strings.ToLower(busID) {
+		return peerWithdrawalEntry{}, fmt.Errorf("bus id %q is not folded; the file holds FOLDED bus ids so that one bus has exactly one floor", elidePeerText(busID))
+	}
+	if num == "" {
+		return peerWithdrawalEntry{}, fmt.Errorf("bus id %q has an empty config_seq", busID)
+	}
+	for i := 0; i < len(num); i++ {
+		if c := num[i]; c < '0' || c > '9' {
+			return peerWithdrawalEntry{}, fmt.Errorf("config_seq %q for %s must be decimal digits only", elidePeerText(num), busID)
+		}
+	}
+	if len(num) > 1 && num[0] == '0' {
+		return peerWithdrawalEntry{}, fmt.Errorf("config_seq %q for %s has a leading zero; a floor has exactly one spelling", elidePeerText(num), busID)
+	}
+	seq, err := strconv.ParseUint(num, 10, 64)
+	if err != nil {
+		return peerWithdrawalEntry{}, fmt.Errorf("config_seq %q for %s is not a 64-bit decimal number: %v", elidePeerText(num), busID, err)
+	}
+	if seq == 0 {
+		return peerWithdrawalEntry{}, fmt.Errorf("%s has floor 0, which is the unset value; the first configuration this bus writes is 1, so no withdrawal can be at 0", busID)
+	}
+	// THE PLAUSIBILITY BOUND, checked at the last point before the value becomes
+	// a floor and deliberately a REFUSAL rather than a clamp. See
+	// maxPlausiblePeerWithdrawalSeq: silently ADOPTING an implausible value seeds
+	// configSeq to its ceiling and permanently refuses every write in BOTH tables
+	// on a bus that otherwise looks completely healthy.
+	if seq >= maxPlausiblePeerWithdrawalSeq {
+		return peerWithdrawalEntry{}, fmt.Errorf("config_seq %d for %s is implausibly high: no bus reaches %d in any lifetime (that is roughly 136 years at one configuration change every second), so this file has been TAMPERED WITH or the media is damaged. Adopting it would seed the configuration counter near its ceiling and make EVERY peer and trust write fail with \"configuration sequence exhausted\", permanently and across every restart", seq, busID, maxPlausiblePeerWithdrawalSeq)
+	}
+	return peerWithdrawalEntry{table: table, busID: busID, seq: seq}, nil
+}
+
+// peerWithdrawalFloorCorrupt builds the fatal error, appending the SAME one-step
+// operator remedy every time. The remedy matters as much as the diagnosis:
+// without it this error is a permanently unstartable bus, which is precisely the
+// shape invariant 6 forbids.
+//
+// The remedy is deliberately NOT a bare "delete it": deleting it FORGETS every
+// revocation it recorded, and a forgotten revocation is a pinned bus signing key
+// that quietly comes back. So it says so, in those words, and tells the operator
+// what actually happens next.
+//
+// # CORRECTED by the security gate — the previous remedy silently did nothing
+//
+// It used to say "move it aside, restart, and RE-APPLY every withdrawal by hand".
+// That instruction FAILED SILENTLY, and the gate reproduced it: the tombstone is
+// still in the log, so RemoveTrust takes its already-removed no-op branch,
+// returns success, and writes no floor. The operator was told the revocation was
+// back in place while it was not. Worse, once the tombstone had been swept,
+// RemoveTrust reported ErrUnknownPeer and there was no way to re-establish the
+// floor at all.
+//
+// Both are now fixed in code rather than in prose — reconcileWithdrawalFloor
+// repairs the floor from every withdrawal the log still holds, and re-applying a
+// withdrawal re-asserts its floor — so the remedy below states what the restart
+// really does, and confines the manual work to the withdrawals the log can no
+// longer prove.
+func peerWithdrawalFloorCorrupt(path, why string) error {
+	return fmt.Errorf("%w: %s: %s. It will NOT be regenerated in place, because silently rebuilding it would FORGET which peer configurations this bus withdrew — and for the trust table a forgotten withdrawal is a REVOKED pinned bus signing key that comes back, with nothing downstream able to tell it from a key the operator configured. Move %s aside and restart: the bus REBUILDS the floor from every withdrawal its log still holds, logging each repair. Withdrawals whose log records are gone cannot be rebuilt, so re-apply those by hand (`agent-bus peer remove` / `remove-trust`) before trusting anything this bus pins",
+		ErrPeerWithdrawalFloorCorrupt, path, why, path)
+}
+
+// atomicReplacePeerWithdrawalFloor writes data to path via a temp file in the
+// SAME directory: the temp file is created, chmodded 0600, written, fsynced and
+// closed, renamed into place, and then the directory itself is fsynced so the
+// rename is durable. A reader therefore sees either the complete old file or the
+// complete new one, never a torn one — which is what makes "a crash can never
+// produce a corrupt floor file" a true statement rather than a hope.
+//
+// # It is a COPY, and the honest account of why (corrected by the reviewer gate)
+//
+// There are three other production copies of this sequence:
+// internal/ids/atomicfile.go's atomicWriteFile (shared by ids/busid.go's
+// writeBusIDFile, which is a one-line delegation to it, and by
+// ids/suffixstore.go), internal/wal/indexfloor.go's atomicReplaceFile, and
+// internal/hub/seqfloorfile.go's atomicReplaceSeqFloor. This is the fourth.
+//
+// An earlier version of this comment said "the FIFTH copy", named files that do
+// not contain the code, and justified the duplication with the exact argument
+// that Spec Server task 1aed37a9-3a8e-4940-8b36-ee2dbe28afb5 COMPLETED by
+// removing — internal/ids/atomicfile.go:20-49 records that removal, and
+// ids/atomicfile_test.go enforces single-copy inside package ids with an AST
+// guard. Reinstating "duplication here is deliberate" as a principle would undo
+// a finished task, so it is not claimed.
+//
+// What is true: the copy exists because ids.atomicWriteFile is UNEXPORTED, and
+// this package must not import internal/wal (that would tie the floor to the
+// very thing it exists to be independent of). Unifying them means EXPORTING a
+// shared helper across four packages, which is a refactor with no behavioural
+// content and is out of scope under CLAUDE.md's "do not refactor unless the task
+// explicitly asks". It is reported as a follow-up by RELAY-34 rather than
+// asserted to be already filed. Until then: every step below is load-bearing and
+// each is a silent, undetectable-by-test omission if dropped — fsync the FILE
+// before the rename, fsync the DIRECTORY after it, keep the temp file in dir so
+// the rename is an intra-filesystem swap, and chmod 0600 before any content is
+// written.
+func atomicReplacePeerWithdrawalFloor(dir, path string, data []byte) (err error) {
+	tmp, err := os.CreateTemp(dir, ".peer-withdrawal-floor-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err = tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting mode on %s: %w", tmpName, err)
+	}
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing %s: %w", tmpName, err)
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("syncing %s: %w", tmpName, err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("closing %s: %w", tmpName, err)
+	}
+
+	if err = os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming %s to %s: %w", tmpName, path, err)
+	}
+
+	dirFile, derr := os.Open(dir)
+	if derr != nil {
+		err = fmt.Errorf("opening %s to fsync directory entry: %w", dir, derr)
+		return err
+	}
+	defer dirFile.Close()
+	if serr := dirFile.Sync(); serr != nil {
+		err = fmt.Errorf("syncing directory %s: %w", dir, serr)
+		return err
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // The shared table
 // ---------------------------------------------------------------------------
 
@@ -808,6 +1432,13 @@ func elidePeerText(s string) string {
 type busTable struct {
 	// what names the table in every log line: "peer route" or "bus trust".
 	what string
+
+	// token is this table's STABLE on-disk spelling in the withdrawal floor file
+	// ("route", "trust"). It is separate from what for the reason given at
+	// routeTableToken: what is prose and may be reworded, and a durable key that
+	// an edit to a log message can rename is a durable key that can silently
+	// forget every revocation recorded under the old spelling.
+	token string
 
 	// entries is keyed on the LOWERCASED bus id — the same key Registry uses,
 	// and for the same reason: two bus ids differing only by ASCII case must
@@ -845,12 +1476,56 @@ type busTable struct {
 	// writeMu field.
 	sweptMax uint64
 
+	// withdrawnAt is the DURABLE PER-BUS WITHDRAWAL FLOOR, mirrored from
+	// <data-dir>/peer-withdrawal-floor and keyed on the folded bus id: the
+	// config_seq at which this bus last withdrew this table's configuration for
+	// that bus. It only ever rises.
+	//
+	// # It is NOT a second sweptMax, and collapsing the two would reopen RELAY-34
+	//
+	// sweptMax defends against a record duplicated or reordered WITHIN a log that
+	// still holds the tombstone (or held it until a sweep). It is rebuilt from
+	// the log every start, so it drops whenever the log does. This map is read
+	// from a file OUTSIDE the log at construction, so it survives exactly the
+	// events sweptMax cannot: a discarded tail, a bit-rotted frame, a snapshot
+	// rolled back past the withdrawal. That difference is the whole content of
+	// RELAY-34 — see PeerWithdrawalFloorFileName.
+	//
+	// It is read under PeerStore.mu like every other field here, and written only
+	// by PeerStore.recordWithdrawal, AFTER the file it mirrors is fsynced. Memory
+	// therefore never claims a withdrawal disk does not hold.
+	withdrawnAt map[string]uint64
+
 	max       int
 	retention time.Duration
 }
 
-func newBusTable(what string, max int, retention time.Duration) *busTable {
-	return &busTable{what: what, entries: make(map[string]busScopedRecord), max: max, retention: retention}
+func newBusTable(what, token string, max int, retention time.Duration) *busTable {
+	return &busTable{
+		what:        what,
+		token:       token,
+		entries:     make(map[string]busScopedRecord),
+		withdrawnAt: make(map[string]uint64),
+		max:         max,
+		retention:   retention,
+	}
+}
+
+// withdrawn reports whether rec is superseded by a durably recorded withdrawal:
+// it is ACTIVE and at or below this table's withdrawal floor for its bus.
+//
+// A TOMBSTONE is never withdrawn-by-the-floor, and that is deliberate rather
+// than an omission. The record that SET the floor is itself a tombstone at
+// exactly that sequence, so blocking it would refuse the very write that had
+// just been floored; and admitting an older tombstone reinstates nothing,
+// because a tombstone carries no live configuration at all.
+//
+// The caller must hold PeerStore.mu.
+func (t *busTable) withdrawn(rec busScopedRecord) bool {
+	if rec.recordState() != PeerRecordActive {
+		return false
+	}
+	return rec.recordSeq() <= t.withdrawnAt[strings.ToLower(rec.recordBusID())]
 }
 
 // upsert is the ONE place anything enters or changes a table, and it is
@@ -902,6 +1577,24 @@ func (t *busTable) upsert(rec busScopedRecord, now time.Time, log *logging.Logge
 
 	busID := rec.recordBusID()
 	folded := strings.ToLower(busID)
+
+	// THE DURABLE WITHDRAWAL FLOOR, checked FIRST and on every path. This is
+	// RELAY-34's mechanism and it is the only defence in this file that survives
+	// the loss of the withdrawal record itself: t.withdrawnAt comes from a file
+	// outside the log, so a discarded, bit-rotted or snapshot-rolled-back
+	// tombstone cannot lower it. Without this the previous generation is the
+	// surviving truth and is reinstated — for the trust table, a REVOKED PINNED
+	// BUS SIGNING KEY.
+	//
+	// It cannot refuse a legitimate write: PeerStore.configSeq is seeded from
+	// these floors at construction and raised by every applied record, so a live
+	// write is minted strictly above every floor. What it refuses is a record
+	// this bus already superseded with a withdrawal it made durable.
+	if t.withdrawn(rec) {
+		return fmt.Errorf("%w: refusing to reinstate the %s record for %s at config_seq %d: this bus durably recorded a WITHDRAWAL of it at config_seq %d, in %s, which is outside the log and therefore survives a discarded tail. The record carrying that withdrawal is not what is being replayed here, so either it is simply still to come (the healthy case, on an intact log) or it has been LOST — and reinstating this generation is how a revoked pinned bus signing key comes back (source %s)",
+			ErrPeerWithdrawn, t.what, busID, rec.recordSeq(), t.withdrawnAt[folded], PeerWithdrawalFloorFileName, source)
+	}
+
 	existing, known := t.entries[folded]
 	if !known {
 		// THE ADMISSION FLOOR. See busTable.sweptMax: without this, a record
@@ -1040,9 +1733,22 @@ func (t *busTable) sweep(now time.Time, log *logging.Logger, localBusID string) 
 // lookup returns the record for a bus id in its canonical spelling only,
 // matching Registry.Route: the table is keyed case-insensitively so a confusable
 // can be REFUSED at the door, not so that both spellings resolve.
+//
+// A record the DURABLE WITHDRAWAL FLOOR supersedes is reported ABSENT. That is
+// the belt to upsert's braces and it covers a window upsert cannot: PeerStore's
+// write path fsyncs the floor BEFORE it hands the withdrawal to the log, so if
+// the log write then fails the floor stands alone while the table still holds
+// the generation being withdrawn. Serving that generation would be exactly the
+// fail-open this whole mechanism exists to close, so every reader — Lookup,
+// LookupTrust and therefore PinnedKeys — goes through here and sees nothing.
+//
+// The caller must hold PeerStore.mu.
 func (t *busTable) lookup(busID string) (busScopedRecord, bool) {
 	rec, ok := t.entries[strings.ToLower(busID)]
 	if !ok || rec.recordBusID() != busID {
+		return nil, false
+	}
+	if t.withdrawn(rec) {
 		return nil, false
 	}
 	return rec, true
@@ -1086,8 +1792,20 @@ type PeerStoreOptions struct {
 	// Durable is the two-phase write path. A nil Durable makes every mutating
 	// operation fail with ErrPeerNotDurable — see that error for why this is a
 	// refusal and not a degraded in-memory mode. A store built without one can
-	// still Apply (rebuild by replay) and read, which is what a read-only audit
-	// of a data directory needs.
+	// still Apply (rebuild by replay) and read, which is what an audit of a data
+	// directory needs.
+	//
+	// SUCH A STORE IS NOT READ-ONLY ON DISK, and this doc used to say it was.
+	// When Dir is set, Apply repairs the durable withdrawal floor from any
+	// withdrawal the log holds that the floor has fallen behind
+	// (reconcileWithdrawalFloor), so a replay writes the data directory even with
+	// no Durable. That is deliberate — a floor that lost data must be repaired by
+	// whichever process notices first, and refusing to repair from a read path
+	// would leave the hole open for exactly as long as nobody wrote — but it
+	// means the SINGLE-WRITER rule on PeerWithdrawalFloorFileName binds READERS
+	// too: a store with a Dir may only be built inside the data-directory lock.
+	// cmd/agent-bus's `peer` subcommand holds the dirlock on both its read and
+	// its write path, so this is satisfied today.
 	//
 	// THE CALLER MUST REPLAY THE LOG INTO THIS STORE BEFORE THE FIRST WRITE. The
 	// configSeq high-water mark starts at zero and is rebuilt only from the
@@ -1099,6 +1817,33 @@ type PeerStoreOptions struct {
 	// write. There is no way for this package to check it, which is why it is
 	// stated here rather than assumed.
 	Durable PeerDurableLog
+
+	// Dir is the DATA DIRECTORY, and it is where the durable withdrawal floor
+	// (PeerWithdrawalFloorFileName) lives. It must be the same directory the
+	// durable log lives in, and this package cannot check that — the log arrives
+	// as an interface precisely so it can be built without one.
+	//
+	// # An EMPTY Dir does not silently degrade: it REFUSES WITHDRAWALS
+	//
+	// Remove and RemoveTrust both fail with ErrPeerNoWithdrawalFloor, and reads
+	// and Apply still work. That is deliberate, and it is the fail-closed choice
+	// rather than the convenient one: a withdrawal recorded ONLY in the log can
+	// be un-said by losing one entry (RELAY-34), so a store that cannot write the
+	// floor must not be allowed to tell an operator their revocation succeeded.
+	//
+	// The corresponding honest caveat, stated rather than left to be discovered:
+	// a store built WITHOUT Dir over a data directory that HAS a floor file
+	// cannot consult it, so it may serve a pin the operator revoked. Such a store
+	// is an unwired audit shape only and must never back a routing or
+	// verification decision. Any caller that constructs a PeerStore for a running
+	// bus — or for the offline `agent-bus peer` subcommand, which is where an
+	// operator's revocation is actually typed — MUST set Dir.
+	//
+	// A non-empty Dir must exist and be a directory; NewPeerStore checks, because
+	// a store that cannot write its floor is a bus that would pass construction
+	// and then refuse the first revocation, which is a startup failure wearing a
+	// runtime disguise.
+	Dir string
 
 	// Logger receives every discard and every refused transition. It may be nil.
 	Logger *logging.Logger
@@ -1158,6 +1903,13 @@ type PeerStore struct {
 	log     *logging.Logger
 	now     func() time.Time
 
+	// dir is the data directory, and floorPath is
+	// <dir>/peer-withdrawal-floor within it. Both are empty when the store was
+	// built without a Dir, in which case a withdrawal is REFUSED rather than
+	// recorded only in the log — see PeerStoreOptions.Dir.
+	dir       string
+	floorPath string
+
 	routes *busTable
 	trust  *busTable
 
@@ -1201,10 +1953,46 @@ type PeerStore struct {
 	//     the same answer applies: downgrade is not a supported operation here.
 	//     Written down so it is known rather than discovered.
 	//
-	// A durable floor file (the wal-index-floor pattern) would close both, and is
-	// deliberately not built here: it is the durability layer's mechanism, and
-	// this counter is not an id.
+	// A durable floor file (the wal-index-floor pattern) would close both. Since
+	// RELAY-34 there IS one — <data-dir>/peer-withdrawal-floor — and NewPeerStore
+	// seeds this mark from it, so the two residuals above are narrowed but NOT
+	// eliminated: the file records the sequence of every WITHDRAWAL, not of every
+	// record, so a number carried only by an unreadable ACTIVE record is still
+	// unknown to this binary. Closing them fully would mean flooring every write,
+	// which is a durability-layer mechanism for a counter that is not an id, and
+	// remains deliberately unbuilt.
 	configSeq uint64
+
+	// floorMu serialises the WHOLE update of the durable withdrawal floor:
+	// snapshot the mirror, encode, atomically replace the file, adopt it in
+	// memory. It is a THIRD mutex and it is not redundant with writeMu.
+	//
+	// # Why writeMu cannot do this job — a security-gate finding
+	//
+	// recordWithdrawal releases s.mu across the file write, and its safety used
+	// to be argued from writeMu: "the caller holds it for the whole mint ->
+	// write -> fold, so no second write can interleave". That argument covered
+	// exactly ONE of its two callers. reconcileWithdrawalFloor is the other, and
+	// it holds no writeMu BY NECESSITY — it runs from Apply, which write()
+	// reaches while already holding writeMu, so taking it there self-deadlocks.
+	//
+	// With the precondition unmet, two callers could interleave
+	// snapshot-then-write and the second could write a snapshot taken before the
+	// first's entry existed, DROPPING a floor the caller had already been told
+	// was recorded. The gate reproduced it: a concurrent Remove and Apply left
+	// the route floor missing from disk although Remove returned success. That
+	// is the "silently LOWERING a floor" this file must never do.
+	//
+	// Not reachable through today's wiring, since writeMu serialises peer writes
+	// and wal.Txn holds its lock across Apply — but it becomes reachable the
+	// moment a second source of applied peer records exists, which is exactly
+	// relay ingest. Fixed structurally rather than left as an assumption about
+	// callers.
+	//
+	// LOCK ORDER is floorMu -> mu, and nothing takes floorMu while holding mu, so
+	// there is no cycle. Apply never takes writeMu, so writeMu -> floorMu -> mu
+	// is the only chain and it is acyclic.
+	floorMu sync.Mutex
 
 	// writeMu serialises WHOLE WRITES: mint the sequence, write it durably, fold
 	// it in. It is a SECOND mutex rather than a longer hold of s.mu because s.mu
@@ -1229,7 +2017,15 @@ type PeerStore struct {
 	writeMu sync.Mutex
 }
 
-// NewPeerStore validates opts and returns an empty store.
+// NewPeerStore validates opts and returns a store holding nothing but the
+// DURABLE WITHDRAWAL FLOORS read from o.Dir.
+//
+// Those floors are the one piece of state that is loaded here rather than
+// replayed, and that is the point of them: they are what a replay cannot
+// reconstruct, because the record they came from may be the one recovery threw
+// away. A corrupt floor file is FATAL and is never regenerated — see
+// ErrPeerWithdrawalFloorCorrupt, including why that does not contradict
+// invariant 6.
 func NewPeerStore(o PeerStoreOptions) (*PeerStore, error) {
 	if err := ids.ValidateBusID(o.BusID); err != nil {
 		return nil, fmt.Errorf("relay: peer store bus id: %w", err)
@@ -1253,14 +2049,73 @@ func NewPeerStore(o PeerStoreOptions) (*PeerStore, error) {
 		durable: o.Durable,
 		log:     o.Logger,
 		now:     o.Now,
-		routes:  newBusTable("peer route", max, retention),
-		trust:   newBusTable("bus trust", max, retention),
+		routes:  newBusTable("peer route", routeTableToken, max, retention),
+		trust:   newBusTable("bus trust", trustTableToken, max, retention),
 	}
 	if s.log == nil {
 		s.log = logging.New(io.Discard, logging.LevelError)
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+
+	if o.Dir != "" {
+		// Checked HERE rather than at the first write, so a Dir that is missing or
+		// is not a directory at all fails at construction rather than at the
+		// moment an operator tries to revoke a key.
+		//
+		// It checks EXISTENCE, not WRITABILITY, and the difference is stated
+		// rather than glossed: a directory that exists but cannot be written
+		// still constructs, and the first withdrawal then fails with the
+		// underlying I/O error. That is fail-CLOSED — the revocation is refused
+		// and the operator is told — but it is not the same as proving up front
+		// that a withdrawal will be possible, and a comment claiming otherwise
+		// would be the comfortable version rather than the true one.
+		info, err := os.Stat(o.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("relay: opening the durable peer withdrawal floor in %s: %w", o.Dir, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("relay: opening the durable peer withdrawal floor: %s is not a directory", o.Dir)
+		}
+		s.dir = o.Dir
+		s.floorPath = filepath.Join(o.Dir, PeerWithdrawalFloorFileName)
+		floors, err := readPeerWithdrawalFloors(s.floorPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range []*busTable{s.routes, s.trust} {
+			for folded, seq := range floors[t.token] {
+				t.withdrawnAt[folded] = seq
+				// THE CONFIGURATION SEQUENCE IS SEEDED FROM THE FLOORS, and this
+				// is load-bearing rather than tidy-mindedness.
+				//
+				// configSeq is otherwise rebuilt only from the records Apply is
+				// handed, so a data directory whose LOG was lost or quarantined
+				// but whose floor file survived would resume minting at 1 — below
+				// every floor — and the operator's very next PutTrust for a
+				// previously-revoked bus would be refused by the floor it just
+				// dropped under. Forever, since every retry mints the same low
+				// number.
+				//
+				// Seeding closes that, and it is always SAFE because the floor is
+				// written strictly BEFORE the record carrying the same sequence:
+				// a floor value is therefore always a sequence this bus really
+				// did put on disk, so adopting it as a high-water mark can only
+				// agree with, never overstate, what the log would have proven.
+				if seq > s.configSeq {
+					s.configSeq = seq
+				}
+			}
+		}
+	} else if o.Durable != nil {
+		// A store that can WRITE but cannot record a withdrawal outside the log
+		// is the shape RELAY-34 exists to stop shipping. It is not refused
+		// outright — an in-memory test double is a legitimate use — but it is
+		// said loudly, once, at construction, because the alternative is finding
+		// out at the moment an operator tries to revoke a key.
+		s.log.Warn("this peer store has a durable log but NO data directory, so peer and trust WITHDRAWALS WILL BE REFUSED; a withdrawal recorded only in the log can be un-said by a discarded tail, and for the trust table that means a revoked pinned bus signing key comes back (RELAY-34). Set PeerStoreOptions.Dir",
+			"local_bus", s.busID, "floor_file", PeerWithdrawalFloorFileName)
 	}
 	return s, nil
 }
@@ -1305,8 +2160,12 @@ func (s *PeerStore) Put(cfg PeerConfig) (PeerRecord, error) {
 // Remove durably withdraws a route, leaving a TOMBSTONE rather than deleting the
 // entry (see busTable.upsert for what the tombstone holds on to).
 //
-// Removing an already-removed route is a NO-OP that writes nothing; removing an
-// unknown one is ErrUnknownPeer.
+// Removing an unknown route is ErrUnknownPeer. Removing an ALREADY-REMOVED one
+// writes no log entry, but it is not a no-op on disk: it RE-ASSERTS the durable
+// withdrawal floor, so an operator re-applying a withdrawal after the floor file
+// was lost gets it back (a security-gate finding — see recordWithdrawal). On a
+// store built without PeerStoreOptions.Dir it therefore fails with
+// ErrPeerNoWithdrawalFloor rather than reporting a success it cannot make stick.
 func (s *PeerStore) Remove(busID string) (PeerRecord, error) {
 	rec, err := s.write(s.routes, busID, func(existing busScopedRecord, seq uint64, now time.Time) (busScopedRecord, bool, error) {
 		cur, ok := existing.(PeerRecord)
@@ -1370,6 +2229,15 @@ func (s *PeerStore) PutTrust(t BusTrust) (BusTrustRecord, error) {
 // tombstone because busTable.sweptMax carries its sequence forward. The revoked
 // key does not come back when the tombstone goes away; that was a real hole in
 // the first version of this file and both gates found it.
+//
+// NOR DOES IT COME BACK WHEN THE TOMBSTONE ITSELF IS LOST. That was a second,
+// deeper hole (RELAY-34): both defences above live inside the log, so a
+// discarded tail took them with it. The revocation is now fsynced into
+// <data-dir>/peer-withdrawal-floor BEFORE the tombstone reaches the log, and
+// that file is what a torn tail cannot reach. The consequence a caller must
+// handle: on a store built without PeerStoreOptions.Dir this method REFUSES with
+// ErrPeerNoWithdrawalFloor rather than recording a revocation it cannot make
+// stick.
 func (s *PeerStore) RemoveTrust(busID string) (BusTrustRecord, error) {
 	rec, err := s.write(s.trust, busID, func(existing busScopedRecord, seq uint64, now time.Time) (busScopedRecord, bool, error) {
 		cur, ok := existing.(BusTrustRecord)
@@ -1425,9 +2293,29 @@ func (s *PeerStore) write(t *busTable, busID string, build func(existing busScop
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: this store already holds %s for %q, and %q differs from it only by ASCII case; a confusable in the routing subject is refused at the door", ErrPeerBusIDCollision, t.what, existing.recordBusID(), busID)
 	}
+	// A record the DURABLE WITHDRAWAL FLOOR supersedes is ABSENT to the write
+	// path too, exactly as it is to every reader.
+	//
+	// This is not symmetry for its own sake — dropping it makes re-pinning
+	// impossible. Put/PutTrust return a NO-OP when the incoming configuration
+	// equals the current active one, so an operator re-pinning the SAME key after
+	// a lost tombstone would match the superseded record, be told "nothing to
+	// do", and be left with a bus that is still un-pinned. The withdrawal is also
+	// what Remove/RemoveTrust must not find, so an already-withdrawn bus reports
+	// ErrUnknownPeer rather than writing a second tombstone.
+	// slotHeld is whether this bus ALREADY OCCUPIES a slot in the table, which is
+	// a different question from whether its record is usable. The floor-hidden
+	// case below makes the record invisible but does NOT free its slot, so
+	// gating the capacity check on `known` would refuse an operator
+	// RECONFIGURING A BUS THE TABLE ALREADY HOLDS, at exactly MaxPeers, when no
+	// new slot is needed at all. Caught by the reviewer gate.
+	slotHeld := known
+	if known && t.withdrawn(existing) {
+		known = false
+	}
 	if !known {
 		existing = nil
-		if len(t.entries) >= t.max {
+		if !slotHeld && len(t.entries) >= t.max {
 			// Read UNDER the lock and only then formatted: reading it after the
 			// unlock would be a data race on the field being reported.
 			held := len(t.entries)
@@ -1448,6 +2336,25 @@ func (s *PeerStore) write(t *busTable, busID string, build func(existing busScop
 	}
 	if !mustWrite {
 		s.mu.Unlock()
+		// RE-APPLYING AN ALREADY-APPLIED WITHDRAWAL RE-ASSERTS ITS FLOOR.
+		//
+		// This is a security-gate finding (RELAY-34, P1) and not tidiness. The
+		// remedy for a lost or corrupt floor file tells an operator to re-apply
+		// every withdrawal by hand — but the tombstone is still in the log, so
+		// RemoveTrust took this no-op branch, returned the tombstone and nil, and
+		// wrote NOTHING. The operator was told the revocation was in place while
+		// the floor was still absent, and the next torn tail resurrected the key.
+		// The gate reproduced exactly that.
+		//
+		// Re-flooring here is free in the normal case: recordWithdrawal returns
+		// immediately when the floor already covers the sequence, so this costs
+		// an uncontended lock and no I/O unless the floor is genuinely missing or
+		// behind.
+		if rec.recordState() == PeerRecordRemoved {
+			if err := s.recordWithdrawal(t, folded, rec.recordSeq()); err != nil {
+				return nil, err
+			}
+		}
 		return rec.clone(), nil
 	}
 	// The sequence is CONSUMED here, before the write, and never reused. A write
@@ -1464,6 +2371,24 @@ func (s *PeerStore) write(t *busTable, busID string, build func(existing busScop
 	if err != nil {
 		return nil, err
 	}
+	// THE WITHDRAWAL FLOOR IS FSYNCED BEFORE THE LOG ENTRY IS WRITTEN. This
+	// ordering is the whole of RELAY-34's fix and it must not be reversed for any
+	// reason, including latency: it is invariant 4's rule one layer down —
+	// nothing is ACKNOWLEDGED as withdrawn before the fact of the withdrawal is
+	// durable somewhere no log repair can reach.
+	//
+	// Written AHEAD rather than after, because the interesting failure is the
+	// crash BETWEEN the two. Floor-then-log leaves a bus un-pinned with no
+	// tombstone (fail-CLOSED: fewer keys trusted, and the operator's retry
+	// completes it). Log-then-floor would leave a tombstone the very next torn
+	// tail can discard, with nothing outside the log remembering — which is
+	// precisely the state this task exists to make unreachable.
+	if canonical.recordState() == PeerRecordRemoved {
+		if err := s.recordWithdrawal(t, folded, canonical.recordSeq()); err != nil {
+			return nil, err
+		}
+	}
+
 	kind := PeerRecordKind
 	if t == s.trust {
 		kind = BusTrustRecordKind
@@ -1485,8 +2410,103 @@ func (s *PeerStore) write(t *busTable, busID string, build func(existing busScop
 	return canonical, nil
 }
 
+// recordWithdrawal raises this table's durable withdrawal floor for one bus to
+// seq and returns only once the bytes and the directory entry are FSYNCED.
+//
+// On success, floor[table][bus] >= seq is on stable storage OUTSIDE the log —
+// which is the post-condition PeerStore.write relies on before it lets the
+// withdrawal record anywhere near the durable log.
+//
+// # The lock discipline
+//
+// s.floorMu is held across the WHOLE sequence — snapshot, encode, atomic
+// replace, adopt — so two callers can never interleave and write a snapshot
+// taken before the other's entry existed. s.mu is released across the file write
+// instead, because every reader takes it and a reader blocked on an operator's
+// disk is a bus that stops answering for the duration.
+//
+// CORRECTED by the security gate: this used to argue the safety from writeMu
+// ("the caller holds it for the whole mint -> write -> fold"), which covered
+// only ONE of the two callers. reconcileWithdrawalFloor holds no writeMu and
+// cannot, and the gate reproduced a lost floor entry through that gap. See the
+// floorMu field.
+//
+// # Memory NEVER claims more than disk
+//
+// t.withdrawnAt is updated only AFTER a successful write, mirroring
+// ids.DurableNameSuffixes, wal's indexFloor and hub's seqFloorFile. A caller
+// that saw an error has floored nothing and may safely retry with the same
+// number — and, crucially, has NOT been told a revocation happened.
+//
+// A seq at or below the floor already on disk is a pure no-op that touches
+// nothing, which is what makes a repeated withdrawal free.
+func (s *PeerStore) recordWithdrawal(t *busTable, folded string, seq uint64) error {
+	if s.dir == "" {
+		return fmt.Errorf("%w: refusing to withdraw the %s for %s. A withdrawal that exists only as a log entry can be UN-SAID by losing that entry — a torn tail, a bit-rotted frame, a snapshot rolled back past it — and for the trust table an un-said withdrawal is a REVOKED PINNED BUS SIGNING KEY that comes back (RELAY-34). Build this store with PeerStoreOptions.Dir set to the data directory so the withdrawal can be recorded in %s, outside the log",
+			ErrPeerNoWithdrawalFloor, t.what, folded, PeerWithdrawalFloorFileName)
+	}
+
+	// THE SEQUENCE BOUND, checked here rather than only in the encoder, so the
+	// caller gets ErrPeerWithdrawalSeqTooHigh and its accurate remedy instead of
+	// a corrupt-file error that would send an operator to delete a healthy floor.
+	// See that sentinel.
+	if seq >= maxPlausiblePeerWithdrawalSeq {
+		return fmt.Errorf("%w: refusing to withdraw the %s for %s at config_seq %d, which is at or above %d — the highest this bus can record in %s and read back. THE FLOOR FILE IS NOT CORRUPT: do NOT move it aside, because that would delete every revocation it holds. The cause is in the LOG: a peer-configuration record carrying an implausibly high config_seq has raised this bus's configuration counter (the counter is raised by every record, including discarded ones, so that a sequence is never reissued). Until that record is out of the replayed history this withdrawal cannot be recorded, and the configuration it would withdraw is STILL IN FORCE",
+			ErrPeerWithdrawalSeqTooHigh, t.what, folded, seq, maxPlausiblePeerWithdrawalSeq, PeerWithdrawalFloorFileName)
+	}
+
+	// HELD ACROSS SNAPSHOT -> ENCODE -> RENAME -> ADOPT. See the floorMu field:
+	// s.mu cannot do it (it is released across the file write so readers are not
+	// blocked on an operator's disk) and writeMu cannot either (reconcile runs
+	// from Apply, which write() reaches while already holding it).
+	s.floorMu.Lock()
+	defer s.floorMu.Unlock()
+
+	s.mu.Lock()
+	if seq <= t.withdrawnAt[folded] {
+		s.mu.Unlock()
+		return nil
+	}
+	if _, already := t.withdrawnAt[folded]; !already {
+		if n := len(s.routes.withdrawnAt) + len(s.trust.withdrawnAt); n >= maxPeerWithdrawalFloorEntries {
+			s.mu.Unlock()
+			return fmt.Errorf("%w: %d peer withdrawals are recorded in %s, the limit, and a withdrawal may never be forgotten (the record it defends against is still in an append-only log). This withdrawal is REFUSED rather than recorded only in the log, so it has NOT taken effect — the configuration stands and must be withdrawn again once the limit is raised",
+				ErrTooManyPeerWithdrawals, n, PeerWithdrawalFloorFileName)
+		}
+	}
+	entries := make([]peerWithdrawalEntry, 0, len(s.routes.withdrawnAt)+len(s.trust.withdrawnAt)+1)
+	for _, tab := range []*busTable{s.routes, s.trust} {
+		for bus, at := range tab.withdrawnAt {
+			if tab == t && bus == folded {
+				continue // superseded by the pending raise, appended below.
+			}
+			entries = append(entries, peerWithdrawalEntry{table: tab.token, busID: bus, seq: at})
+		}
+	}
+	entries = append(entries, peerWithdrawalEntry{table: t.token, busID: folded, seq: seq})
+	s.mu.Unlock()
+
+	data, err := encodePeerWithdrawalFloors(entries)
+	if err != nil {
+		return err
+	}
+	if err := atomicReplacePeerWithdrawalFloor(s.dir, s.floorPath, data); err != nil {
+		return fmt.Errorf("relay: recording the withdrawal of the %s for %s in %s: %w", t.what, folded, s.floorPath, err)
+	}
+
+	s.mu.Lock()
+	if seq > t.withdrawnAt[folded] {
+		t.withdrawnAt[folded] = seq
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 // Lookup returns the ROUTE record for a bus id, in whatever state it holds. The
 // caller must check State: a tombstone is a known record and NOT a usable route.
+//
+// A record superseded by a durably recorded WITHDRAWAL is reported ABSENT rather
+// than returned as a tombstone — see busTable.lookup.
 func (s *PeerStore) Lookup(busID string) (PeerRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1537,6 +2557,17 @@ func (s *PeerStore) LookupTrust(busID string) (BusTrustRecord, bool) {
 // This is NOT an implementation of CrossBusTrust — that interface must also
 // VERIFY an attestation, which is RELAY-17's work. This is the storage side of
 // its first method and nothing more.
+//
+// # For RELAY-17: ABSENCE now means what it says (RELAY-34)
+//
+// Until RELAY-34 the PRESENCE of a pin here was sound and its ABSENCE was not:
+// absence meant "no surviving record says otherwise", and a discarded withdrawal
+// could manufacture exactly that. A revoked key came back. Absence now means
+// "not currently trusted", because a withdrawal is durable outside the log
+// before it is acknowledged and this read consults it. Both halves are safe to
+// build a cross-bus trust anchor on — PROVIDED the store was built with
+// PeerStoreOptions.Dir; one built without it cannot see the floor and must not
+// back a verification decision.
 func (s *PeerStore) PinnedKeys(busID string) []ed25519.PublicKey {
 	rec, ok := s.LookupTrust(busID)
 	if !ok || rec.State != PeerRecordActive {
@@ -1556,6 +2587,13 @@ func (s *PeerStore) ActivePeers() []PeerRecord {
 	s.routes.sweep(s.now(), s.log, s.busID)
 	out := make([]PeerRecord, 0, len(s.routes.entries))
 	for _, rec := range s.routes.entries {
+		// The durable withdrawal floor applies to the LIST paths too. They read
+		// the map directly rather than through busTable.lookup, so leaving them
+		// out would be a hole in the one direction that matters: a withdrawn
+		// route reappearing in the set a caller iterates to decide where to send.
+		if s.routes.withdrawn(rec) {
+			continue
+		}
 		r, typed := rec.(PeerRecord)
 		if !typed || r.State != PeerRecordActive {
 			continue
@@ -1574,6 +2612,12 @@ func (s *PeerStore) TrustedBuses() []BusTrustRecord {
 	s.trust.sweep(s.now(), s.log, s.busID)
 	out := make([]BusTrustRecord, 0, len(s.trust.entries))
 	for _, rec := range s.trust.entries {
+		// See ActivePeers: the floor applies here too, and here it is the
+		// difference between listing a bus as trusted and listing one whose pins
+		// the operator revoked.
+		if s.trust.withdrawn(rec) {
+			continue
+		}
 		r, typed := rec.clone().(BusTrustRecord)
 		if !typed || r.State != PeerRecordActive {
 			continue
@@ -1605,32 +2649,41 @@ func (s *PeerStore) TrustedBuses() []BusTrustRecord {
 // DECODED cannot name the bus it was for, because that is exactly what could not
 // be read — it names the entry kind instead.
 //
-// # A DISCARD IS FAIL-CLOSED FOR A ROUTE AND FAIL-OPEN FOR A REVOCATION
+// # A DISCARD IS FAIL-CLOSED IN BOTH DIRECTIONS (corrected by RELAY-34)
 //
-// Be precise about this, because the comfortable half is easy to state and the
-// uncomfortable half is the one that matters for a trust anchor.
+// THIS SECTION USED TO SAY THE OPPOSITE, and the correction is the substance of
+// RELAY-34 rather than a rewording — read it before changing anything below.
 //
 // Apply itself never INSTALLS anything this bus did not already hold: the bus
-// stays unknown, or keeps the generation already in memory. For a ROUTE that is
-// fail-closed all the way — the worst outcome is that a configured peer is not
-// restored and the operator re-applies it.
+// stays unknown, or keeps the generation already in memory. That half was always
+// true, and for a ROUTE it was the whole story — the worst outcome is that a
+// configured peer is not restored and the operator re-applies it.
 //
-// BUT A DISCARD CAN ALSO FAIL TO REMOVE SOMETHING, and that is not a coding slip,
-// it is what the complete-record design costs. Every entry carries the whole
-// post-transition state, so if recovery discards a WITHDRAWAL — a torn tail, a
-// bit-rotted frame, a filesystem snapshot rolled back past it, all of which
-// invariant 6 requires us to survive rather than refuse to boot — the previous
-// generation is the surviving truth and is reinstated. For the routes table that
-// means a peer the operator un-peered is routable again. FOR THE TRUST TABLE IT
-// MEANS A REVOKED PINNED SIGNING KEY IS PINNED AGAIN: revocation fails OPEN.
+// The half that was FALSE: a discard cannot install a configuration, but it CAN
+// FAIL TO REMOVE ONE, and for a revocation that is the only direction that
+// matters. Every entry carries the whole post-transition state, so a discarded
+// WITHDRAWAL — a torn tail, a bit-rotted frame, a snapshot rolled back past it,
+// all of which invariant 6 REQUIRES us to survive and boot from rather than
+// refuse — left the previous generation as the surviving truth, and reinstated
+// it. For routes an un-peered bus became routable again; FOR THE TRUST TABLE A
+// REVOKED PINNED SIGNING KEY CAME BACK. The security gate reproduced it by
+// truncating eight bytes from a bus.wal tail.
 //
-// The security gate reproduced exactly that by truncating eight bytes from a
-// bus.wal tail. It is not reachable today (nothing outside this package
-// constructs a PeerStore), and closing it needs a mechanism this record does not
-// have — a revocation that cannot be un-said by losing one entry, which is a
-// design question rather than a wording one. It is recorded as a P1 follow-up
-// and stated here so that RELAY-17, which will verify against these pins, builds
-// on what is true rather than on the comfortable half of it.
+// WHAT CLOSES IT is the durable withdrawal floor: a withdrawal is fsynced into
+// <data-dir>/peer-withdrawal-floor, OUTSIDE the log, BEFORE the tombstone is
+// handed to the log at all. busTable.upsert refuses any active record at or
+// below that floor and busTable.lookup hides one, so losing the tombstone now
+// loses only the tombstone — the revocation itself is not in the log and cannot
+// be discarded with it. See PeerWithdrawalFloorFileName for the mechanism and
+// TestPeerStoreTrustSurvivesATornWALTail for the reproduction, kept as a
+// regression test.
+//
+// The residual, stated rather than glossed: this holds for a store built with
+// PeerStoreOptions.Dir. A store built WITHOUT one refuses to withdraw at all,
+// so it can never acknowledge a revocation it could not floor — but it also
+// cannot CONSULT a floor another process wrote, so it must not back a routing or
+// verification decision. That is stated on PeerStoreOptions.Dir and warned about
+// at construction.
 func (s *PeerStore) Apply(c wal.Committed) error {
 	var (
 		rec   busScopedRecord
@@ -1654,14 +2707,166 @@ func (s *PeerStore) Apply(c wal.Committed) error {
 			"local_bus", s.busID, "kind", c.Entry.Kind, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex, "err", err)
 		return nil
 	}
+	// s.mu is taken and released EXPLICITLY rather than deferred, because the
+	// floor reconciliation below must run WITHOUT it: recordWithdrawal takes s.mu
+	// itself and fsyncs a file, and neither may happen under a lock every reader
+	// contends on.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.applyLocked(table, rec, "replay"); err != nil {
+		if errors.Is(err, ErrPeerWithdrawn) {
+			// NOT an ERROR, and the level is a deliberate judgement rather than
+			// an oversight. On an INTACT log this fires on every healthy boot —
+			// the active record is replayed, the floor already knows it was
+			// withdrawn, and the tombstone that says so is two entries further on
+			// — so logging it at ERROR would put an alarming line in every normal
+			// startup and train an operator to ignore the ones that matter. It is
+			// still specific and still loud enough to find: invariant 6's rule is
+			// that a discard must not be SILENT, not that it must be an error.
+			s.log.Warn("NOT RESTORING a peer configuration that a durably recorded WITHDRAWAL supersedes; this is the withdrawal floor doing its job, and it is what stops a discarded tombstone from reinstating a revoked pinned bus signing key",
+				"local_bus", s.busID, "table", table.what, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex,
+				"peer_bus", rec.recordBusID(), "config_seq", rec.recordSeq(), "state", rec.recordState().String(), "err", err)
+			s.mu.Unlock()
+			return nil
+		}
 		s.log.Error("DISCARDING a peer-configuration record that could not be applied; that bus keeps the generation already in memory",
 			"local_bus", s.busID, "table", table.what, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex,
 			"peer_bus", rec.recordBusID(), "config_seq", rec.recordSeq(), "state", rec.recordState().String(), "err", err)
 	}
+	s.mu.Unlock()
+
+	// The floor is repaired from a withdrawal the log still holds, if it has
+	// fallen behind. Free on a live commit and on any healthy start; it does I/O
+	// only when the floor file really has lost data. See
+	// reconcileWithdrawalFloor.
+	s.reconcileWithdrawalFloor(table, rec)
 	return nil
+}
+
+// reconcileWithdrawalFloor re-derives the durable withdrawal floor from a
+// WITHDRAWAL the log still holds, whenever the file has fallen behind the log.
+//
+// # Why this exists — the remedy has to actually work
+//
+// A security-gate finding (RELAY-34, P1). The floor file can be lost or
+// corrupted independently of the log: bit-rot on it, an inconsistent
+// snapshot/backup restore that brings bus.wal forward without it, or an operator
+// following ErrPeerWithdrawalFloorCorrupt's instruction to move it aside. The
+// state that leaves — a tombstone in the log with no floor beside it — is
+// exactly the pre-RELAY-34 hole, silently re-opened. And once the tombstone has
+// been SWEPT there is no operator command that can re-establish the floor at
+// all, because RemoveTrust then reports ErrUnknownPeer.
+//
+// So the bus repairs it itself, on the next start, from the one source that
+// still has the answer. This is not deriving the floor from the log in the sense
+// the file exists to avoid — the floor is still WRITTEN AHEAD of the log entry,
+// and is still the ONLY source when the tombstone is gone. It is the reverse
+// direction: while the tombstone IS present, it proves a withdrawal happened, so
+// a floor behind it is a floor that lost data, not a log that gained it.
+//
+// # Why it cannot be abused, and cannot lower anything
+//
+// It only ever RAISES: recordWithdrawal refuses a sequence at or below the
+// floor, so a replayed history can advance a floor and never rewind one.
+//
+// On forgery, stated at the strength the threat model actually supports rather
+// than the flattering one: WAL frames carry a keyed HMAC, so the NON-ADVERSARIAL
+// triggers this whole mechanism exists for — bit-rot, a torn write, a snapshot
+// rollback — can only DROP records, never invent a tombstone. That is the case
+// that matters here. It is NOT a claim against a deliberate attacker: wal-mac.key
+// lives in the same data directory (internal/wal/mackey.go), so whoever can write
+// the directory can generally also read the key and mint frames. What bounds that
+// actor is direction — an injected tombstone only ever UN-pins a bus, which is
+// fail-closed and repairable by re-pinning — plus the sequence bound above, which
+// stops an injected record making the directory unstartable.
+//
+// On a LIVE commit it costs nothing at all: write() floored the withdrawal
+// before the log entry existed, so the floor already covers it and
+// recordWithdrawal returns without touching the disk. The only start that pays
+// an fsync is one where the floor really had fallen behind.
+//
+// It NEVER fails the caller. Apply may not return an error (invariant 6), and a
+// data directory that cannot be written must not stop a bus from booting — so a
+// failure here is logged loudly and specifically and the bus carries on with the
+// floor it has, which is the pre-existing behaviour rather than a new hazard.
+//
+// The caller must NOT hold s.mu.
+func (s *PeerStore) reconcileWithdrawalFloor(t *busTable, rec busScopedRecord) {
+	if s.dir == "" || rec.recordState() != PeerRecordRemoved {
+		return
+	}
+	// A record whose sequence this binary would refuse to READ BACK is never
+	// copied into the floor. Before the repair path existed, a floor entry could
+	// only come from write(), where the sequence is minted; reconcile is the one
+	// place a value from the LOG reaches the file, so it is the one place that
+	// has to bound it. Propagating it would write a file the next start refuses,
+	// and the remedy for that refusal runs this same code again.
+	// A record naming OUR OWN bus is refused on every path (applyLocked), so it
+	// must not be floored either. Without this, a `removed` record carrying the
+	// local bus id — which nothing may legitimately produce — wrote a permanent
+	// floor entry for this bus's own id, a row no operator action can ever
+	// explain or remove. Security-gate finding.
+	if err := ValidatePeerBusID(s.busID, rec.recordBusID()); err != nil {
+		return
+	}
+	// AND a record the table refused as an ASCII-CASE CONFUSABLE of a bus it
+	// already holds. This is the other half of the same finding: reconcile
+	// deliberately runs on records applyLocked REFUSED — a refused record can
+	// still be a withdrawal whose floor must be kept — but an identity refusal is
+	// different in kind. Two bus ids differing only by case are two DIFFERENT
+	// buses downstream.
+	//
+	// # WHAT THIS GUARD DOES NOT COVER, stated rather than implied
+	//
+	// It is ORDER-DEPENDENT: it can only fire once the table HOLDS the legitimate
+	// record to compare against. A confusable `removed` record replaying FIRST,
+	// against an empty table, is still floored — under the FOLDED key, which is
+	// the legitimate bus's key.
+	//
+	// That gap is deliberate, because closing it would break the mechanism. The
+	// only available rule would be "do not floor a withdrawal for a bus the table
+	// does not already hold", and that is exactly the case the floor exists for:
+	// a tombstone whose ACTIVE record was discarded arrives with nothing in the
+	// table, and refusing to floor it is the original defect.
+	//
+	// The residual harm is bounded and is NOT a new un-pinning: the confusable
+	// occupies the slot and the legitimate bus is refused by ErrPeerBusIDCollision
+	// either way, so the served outcome matches the pre-RELAY-34 behaviour. What
+	// is left is a permanent floor row nothing can explain or remove, consuming
+	// one of maxPeerWithdrawalFloorEntries. It is reachable only by forging a WAL
+	// frame, since nothing outside this file emits these record kinds and the
+	// keyed HMAC means the non-adversarial triggers can only DROP records.
+	folded := strings.ToLower(rec.recordBusID())
+	s.mu.Lock()
+	existing, known := t.entries[folded]
+	confusable := known && existing.recordBusID() != rec.recordBusID()
+	s.mu.Unlock()
+	if confusable {
+		s.log.Error("REFUSING to record a withdrawal floor for a bus id that differs only by ASCII case from one this table already holds; flooring it would durably un-pin the legitimate bus, which is a revocation nobody performed",
+			"local_bus", s.busID, "table", t.what, "peer_bus", rec.recordBusID(),
+			"held_as", existing.recordBusID(), "config_seq", rec.recordSeq())
+		return
+	}
+	if rec.recordSeq() >= maxPlausiblePeerWithdrawalSeq {
+		s.log.Error("REFUSING to record a withdrawal floor from a log record whose config_seq is implausibly high; the floor is left as it is, so this withdrawal is NOT protected against the loss of its log record, but the data directory stays startable",
+			"local_bus", s.busID, "table", t.what, "peer_bus", rec.recordBusID(),
+			"config_seq", rec.recordSeq(), "limit", maxPlausiblePeerWithdrawalSeq)
+		return
+	}
+	s.mu.Lock()
+	behind := rec.recordSeq() > t.withdrawnAt[folded]
+	s.mu.Unlock()
+	if !behind {
+		return
+	}
+	if err := s.recordWithdrawal(t, folded, rec.recordSeq()); err != nil {
+		s.log.Error("a WITHDRAWAL in the log is not recorded in the durable withdrawal floor and the floor could NOT be repaired; until it is, losing that log record would reinstate the configuration it withdrew — for a trust record, a REVOKED pinned bus signing key",
+			"local_bus", s.busID, "table", t.what, "peer_bus", rec.recordBusID(),
+			"config_seq", rec.recordSeq(), "floor_file", s.floorPath, "err", err)
+		return
+	}
+	s.log.Warn("REPAIRED the durable withdrawal floor from a withdrawal the log still holds; the floor file had fallen behind the log, which happens when it is lost, restored from an inconsistent snapshot, or moved aside after corruption",
+		"local_bus", s.busID, "table", t.what, "peer_bus", rec.recordBusID(),
+		"config_seq", rec.recordSeq(), "floor_file", s.floorPath)
 }
 
 // applyLocked is the single entry into the tables, shared by replay and by the

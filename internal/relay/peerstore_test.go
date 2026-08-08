@@ -13,12 +13,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +105,16 @@ func (s *psLogSink) String() string {
 
 // psStore builds a store with a captured logger and NO durable log (the
 // replay-only shape). tune may adjust the options.
+//
+// IT DELIBERATELY HAS NO Dir, and that is a coverage decision rather than an
+// omission. RELAY-34's withdrawal floor is a STRONGER defence than the in-log
+// ones that came before it (the tombstone, and busTable.sweptMax), so a fixture
+// that had a Dir would let the floor answer first and SHADOW them — every test
+// here written to prove sweptMax refuses a resurrected record would still pass
+// while no longer exercising sweptMax at all. That is silent coverage loss of a
+// defence both review gates once found missing, so the two are kept separable:
+// this fixture proves the in-log defences, and the tests that need the floor ask
+// for a Dir explicitly (psOpenStore does, since it shares the log's directory).
 func psStore(t *testing.T, tune func(*PeerStoreOptions)) (*PeerStore, *psLogSink) {
 	t.Helper()
 	sink := &psLogSink{}
@@ -134,7 +147,10 @@ func psOpenStore(t *testing.T, dir string, tune func(*PeerStoreOptions), wrap fu
 	if wrap != nil {
 		durable = wrap(d)
 	}
-	o := PeerStoreOptions{BusID: psLocalBus, Durable: durable}
+	// Dir is the SAME directory the log lives in — that is the contract, and it
+	// is what puts peer-withdrawal-floor next to bus.wal where an operator (and
+	// the tail-truncation test) can find it.
+	o := PeerStoreOptions{BusID: psLocalBus, Dir: dir, Durable: durable}
 	if tune != nil {
 		tune(&o)
 	}
@@ -1103,6 +1119,12 @@ const (
 	// fsynced, and the process dies before PutTrust can fold it into memory,
 	// before PutTrust returns, and before any operator is told it worked.
 	peerCrashRotatePostCommit = "rotate-post-commit-pre-ack"
+
+	// peerCrashRevokePostCommit: the child REVOKES the pinned bus signing key
+	// and dies the instant the tombstone's commit is fsynced — before
+	// RemoveTrust folds it in, before it returns, and before any operator is
+	// told the revocation worked. RELAY-34's crash point.
+	peerCrashRevokePostCommit = "revoke-post-commit-pre-ack"
 )
 
 // TestPeerStoreCrashChild is the child half. It does NOTHING in a normal run.
@@ -1115,9 +1137,6 @@ func TestPeerStoreCrashChild(t *testing.T) {
 	if dir == "" {
 		t.Fatalf("child: %s=%q but %s is unset", envPeerCrashPoint, point, envPeerCrashDir)
 	}
-	if point != peerCrashRotatePostCommit {
-		t.Fatalf("child: unknown crash point %q", point)
-	}
 
 	// NO deferred Close and NO t.Cleanup on the log: a Close that ran would be
 	// exactly the graceful shutdown this test exists to rule out.
@@ -1125,7 +1144,18 @@ func TestPeerStoreCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child: wal.Open(%s): %v", dir, err)
 	}
-	st, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Durable: &psKillAfterCommit{l: lg}})
+
+	var durable PeerDurableLog
+	switch point {
+	case peerCrashRotatePostCommit:
+		durable = &psKillAfterCommit{l: lg}
+	case peerCrashRevokePostCommit:
+		durable = &psKillAfterRevokeCommit{l: lg, dir: dir}
+	default:
+		t.Fatalf("child: unknown crash point %q", point)
+	}
+
+	st, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Dir: dir, Durable: durable})
 	if err != nil {
 		t.Fatalf("child: NewPeerStore: %v", err)
 	}
@@ -1134,14 +1164,69 @@ func TestPeerStoreCrashChild(t *testing.T) {
 	}
 	pins := st.PinnedKeys(psOriginBus)
 	if len(pins) != 1 || !bytes.Equal(pins[0], psKey(1)) {
-		t.Fatalf("child: recovered pins %x, want exactly the parent's key; there is nothing to rotate", pins)
+		t.Fatalf("child: recovered pins %x, want exactly the parent's key; there is nothing to rotate or revoke", pins)
 	}
 	if _, ok := st.Lookup(psRemoteBus); !ok {
 		t.Fatalf("child: the parent's route was not recovered")
 	}
 
+	if point == peerCrashRevokePostCommit {
+		// The floor must NOT exist yet: it is written by RemoveTrust, and if it
+		// were already here the wrapper's ordering assertion would prove nothing.
+		if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+			t.Fatalf("child: %s already exists before the revocation (stat err %v); nothing has withdrawn anything yet", PeerWithdrawalFloorFileName, err)
+		}
+		got, err := st.RemoveTrust(psOriginBus)
+		t.Fatalf("child: RemoveTrust returned (%+v, %v) but the durable log kills this process the instant the commit is fsynced; the crash was never injected", got, err)
+	}
+
 	got, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(2)}})
 	t.Fatalf("child: PutTrust returned (%+v, %v) but the durable log kills this process the instant the commit is fsynced; the crash was never injected", got, err)
+}
+
+// psKillAfterRevokeCommit is RELAY-34's post-commit, pre-ack kill — and it also
+// PROVES THE WRITE-AHEAD ORDERING, which is the property the whole fix rests on.
+//
+// It runs BEFORE the real *wal.Log.Write, so the durable withdrawal floor must
+// ALREADY be on disk when it is entered: PeerStore.write fsyncs the floor before
+// it hands the tombstone to the log. Asserting that here rather than in the
+// parent is what makes it an ordering proof — from the parent, after the crash,
+// both files exist and their order is unobservable.
+type psKillAfterRevokeCommit struct {
+	l   *wal.Log
+	dir string
+}
+
+func (k *psKillAfterRevokeCommit) Write(e wal.Entry) (wal.Committed, error) {
+	if e.Kind != BusTrustRecordKind {
+		return wal.Committed{}, fmt.Errorf("child: the peer store handed the durable log an entry of kind %q, want %q", e.Kind, BusTrustRecordKind)
+	}
+	rec, err := DecodeBusTrustRecord(e.Body)
+	if err != nil {
+		return wal.Committed{}, fmt.Errorf("child: the entry the peer store handed the durable log does not decode as a trust record: %v", err)
+	}
+	if rec.State != PeerRecordRemoved || len(rec.SigningKeys) != 0 {
+		return wal.Committed{}, fmt.Errorf("child: the entry is %s with %d pinned keys; this crash point exists to prove a REVOCATION survives, so it must be the tombstone that is written", rec.State, len(rec.SigningKeys))
+	}
+
+	// THE ORDERING ASSERTION. The floor is written AHEAD of the log entry, so it
+	// is on stable storage at this instant — before a single byte of the
+	// tombstone has reached the log, and therefore before anything a later
+	// discard could take away.
+	floors, ferr := readPeerWithdrawalFloors(filepath.Join(k.dir, PeerWithdrawalFloorFileName))
+	if ferr != nil {
+		return wal.Committed{}, fmt.Errorf("child: reading the withdrawal floor before the log write: %v", ferr)
+	}
+	if got := floors[trustTableToken][psOriginBus]; got != rec.ConfigSeq {
+		return wal.Committed{}, fmt.Errorf("child: the durable withdrawal floor for %s is %d before the log write, want the tombstone's config_seq %d; the floor is NOT being written ahead of the log entry, which is the entire mechanism", psOriginBus, got, rec.ConfigSeq)
+	}
+
+	c, err := k.l.Write(e)
+	if err != nil {
+		return wal.Committed{}, err
+	}
+	psKillSelf()
+	return c, nil
 }
 
 // psKillAfterCommit is the honest post-commit, pre-ack kill.
@@ -1335,5 +1420,1433 @@ func TestPeerStoreSurvivesReplay(t *testing.T) {
 	after := st2.PinnedKeys(psOriginBus)
 	if len(after) != 1 || !bytes.Equal(after[0], psKey(2)) {
 		t.Fatalf("after the pre-crash record was replayed a SECOND time the pins are %x, want the ROTATED key: a duplicated older record downgraded a trust anchor, and nothing downstream could tell that from a legitimate rotation", after)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-34: revocation must survive a WAL discard
+// ---------------------------------------------------------------------------
+
+// psWALPath is the log inside a data directory.
+func psWALPath(dir string) string { return filepath.Join(dir, wal.WALFileName) }
+
+// psTruncateTail chops n bytes off the end of the log — the exact damage the
+// security gate used to reproduce RELAY-34, and a shape invariant 6 REQUIRES
+// recovery to survive by discarding and booting anyway.
+func psTruncateTail(t *testing.T, dir string, n int64) {
+	t.Helper()
+	fi, err := os.Stat(psWALPath(dir))
+	if err != nil {
+		t.Fatalf("stat %s: %v", psWALPath(dir), err)
+	}
+	if fi.Size() <= n {
+		t.Fatalf("the log is only %d bytes; there is nothing to truncate", fi.Size())
+	}
+	if err := os.Truncate(psWALPath(dir), fi.Size()-n); err != nil {
+		t.Fatalf("truncating %d bytes off %s: %v", n, psWALPath(dir), err)
+	}
+}
+
+// TestPeerStoreTrustSurvivesATornWALTail is RELAY-34's acceptance evidence, and
+// it is a REGRESSION test: the exact eight-byte tail truncation below made a
+// REVOKED pinned bus signing key come back before the durable withdrawal floor
+// existed. Confirmed RED against f1a787c before the fix.
+//
+// # Why this shape, and why every part of it is load-bearing
+//
+// The defect needed two things that are individually ordinary and jointly fatal:
+//
+//   - a REAL kill -9 at the revocation's commit, so nothing graceful can have
+//     tidied anything up and the floor's write-ahead ordering is observed by the
+//     dying process rather than inferred afterwards (psKillAfterRevokeCommit
+//     asserts the floor is already on disk BEFORE the log write it wraps);
+//   - a DISCARD of that revocation, because invariant 6 forbids refusing to boot
+//     over a damaged log — so the bus must come up having thrown the tombstone
+//     away, and the revocation must survive that anyway.
+//
+// Realistic triggers for the second are bit-rot, a torn write and a VM or
+// filesystem snapshot rolled back past the revocation. None is adversarial, and
+// a single-operator deployment suffers a snapshot rollback exactly as much as a
+// hostile one — so "our deployment is one person over SSH" is not a mitigation
+// and must not be read as one.
+//
+// What it proves, in order:
+//
+//	(a) the revocation is on stable storage AND the floor was written AHEAD of
+//	    it (asserted inside the dying child);
+//	(b) after the 8-byte truncation the log NO LONGER CARRIES the revocation —
+//	    without this the rest passes against an intact log and proves nothing;
+//	(c) recovery still REACHES A RUNNING STORE (invariant 6): it does not refuse;
+//	(d) the revoked key is STILL REVOKED, through every read path;
+//	(e) the discard was LOGGED, not silent;
+//	(f) the route written before the crash is untouched — the floor must not
+//	    fail closed over configuration nobody withdrew.
+func TestPeerStoreTrustSurvivesATornWALTail(t *testing.T) {
+	dir := t.TempDir()
+
+	// --- Phase 1: a route, and a pin the operator will later revoke ---------
+	st, lg := psOpenStore(t, dir, nil, nil)
+	route, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log before handing the directory to the child: %v", err)
+	}
+
+	// --- Phase 2: the child REVOKES and is SIGKILLed at the commit ----------
+	runPeerCrashChild(t, peerCrashRevokePostCommit, dir)
+
+	// --- (a) THE REVOCATION IS DURABLE, AND SO IS ITS FLOOR -----------------
+	committed := psReplayCommitted(t, dir)
+	if len(committed) != 3 {
+		t.Fatalf("the crashed log holds %d committed entries, want exactly 3 (route, pin, revocation): the child died before its revocation was durable, so there is no post-commit crash to recover from", len(committed))
+	}
+	revocation, err := DecodeBusTrustRecord(committed[2].Entry.Body)
+	if err != nil {
+		t.Fatalf("the last committed entry does not decode as a trust record: %v", err)
+	}
+	if revocation.State != PeerRecordRemoved {
+		t.Fatalf("the last committed entry is %s, want a withdrawal tombstone", revocation.State)
+	}
+	floors, err := readPeerWithdrawalFloors(filepath.Join(dir, PeerWithdrawalFloorFileName))
+	if err != nil {
+		t.Fatalf("reading %s after the crash: %v", PeerWithdrawalFloorFileName, err)
+	}
+	if got := floors[trustTableToken][psOriginBus]; got != revocation.ConfigSeq {
+		t.Fatalf("the durable withdrawal floor for %s is %d, want the revocation's config_seq %d; the crash left the floor and the log disagreeing", psOriginBus, got, revocation.ConfigSeq)
+	}
+	if got := len(floors[routeTableToken]); got != 0 {
+		t.Fatalf("the route table has %d withdrawal floors, want 0; nothing withdrew a route", got)
+	}
+
+	// --- (b) DESTROY THE REVOCATION: eight bytes off the tail ---------------
+	psTruncateTail(t, dir, 8)
+
+	// --- (c) RECOVERY STILL REACHES A RUNNING STORE (invariant 6) ----------
+	//
+	// It does not refuse to boot, and it is wal.Open — not this test — that
+	// repairs the tail, so what follows is measured against the bytes a real
+	// recovery leaves behind.
+	st2, lg2 := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg2.Close() }()
+	if rec := lg2.Recovered(); len(rec.Dangling) == 0 && rec.DiscardCount == 0 {
+		t.Fatalf("recovery reported neither a dangling prepare nor a discard (%+v); the truncation did not damage anything, so this test is no longer exercising the hole it exists for", rec)
+	}
+
+	// The revocation really is GONE from the log now. Without this the rest
+	// would pass just as happily against an intact log and prove nothing.
+	survivors := psReplayCommitted(t, dir)
+	if len(survivors) != 2 {
+		t.Fatalf("after recovery the log replays %d committed entries, want 2 (route, pin): the revocation was NOT discarded", len(survivors))
+	}
+	for _, c := range survivors {
+		if c.Entry.Kind != BusTrustRecordKind {
+			continue
+		}
+		rec, derr := DecodeBusTrustRecord(c.Entry.Body)
+		if derr != nil {
+			t.Fatalf("a surviving trust entry does not decode: %v", derr)
+		}
+		if rec.State == PeerRecordRemoved {
+			t.Fatalf("the truncation did not remove the revocation from the log")
+		}
+	}
+
+	sink := &psLogSink{}
+	st3, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Dir: dir, Logger: logging.New(sink, logging.LevelDebug)})
+	if err != nil {
+		t.Fatalf("NewPeerStore over the damaged directory: %v", err)
+	}
+	if _, err := wal.Replay(psWALPath(dir), st3.Apply); err != nil {
+		t.Fatalf("replaying the damaged log: %v", err)
+	}
+
+	// --- (d) THE REVOKED KEY IS STILL REVOKED ------------------------------
+	//
+	// This is the assertion that was RED. Before the floor, the surviving
+	// ACTIVE record was the only truth left and PinnedKeys returned the revoked
+	// key, active, one key pinned.
+	for _, tc := range []struct {
+		name  string
+		store *PeerStore
+	}{
+		{"a store recovered through wal.Open's applier", st2},
+		{"a store recovered through wal.Replay", st3},
+	} {
+		if pins := tc.store.PinnedKeys(psOriginBus); len(pins) != 0 {
+			t.Errorf("%s: PinnedKeys(%s) returned %x after a discarded revocation; A REVOKED PINNED BUS SIGNING KEY CAME BACK", tc.name, psOriginBus, pins)
+		}
+		if rec, ok := tc.store.LookupTrust(psOriginBus); ok {
+			t.Errorf("%s: LookupTrust(%s) reported %+v; a bus whose pins were durably revoked must read as absent", tc.name, psOriginBus, rec)
+		}
+		for _, r := range tc.store.TrustedBuses() {
+			if r.BusID == psOriginBus {
+				t.Errorf("%s: TrustedBuses still lists %s", tc.name, psOriginBus)
+			}
+		}
+	}
+
+	// --- (e) THE DISCARD WAS NOT SILENT ------------------------------------
+	if out := sink.String(); !strings.Contains(out, "NOT RESTORING a peer configuration") {
+		t.Errorf("recovery did not log the superseded record; silent discard is the defect, not discard itself. Log was:\n%s", out)
+	}
+
+	// --- (f) NOTHING ELSE WAS FAILED CLOSED --------------------------------
+	got, ok := st3.Lookup(psRemoteBus)
+	if !ok {
+		t.Fatalf("the route written before the crash was not recovered; the withdrawal floor must not fail closed over a configuration nobody withdrew")
+	}
+	psAssertRoute(t, "the route recovered from the damaged log", got, route)
+}
+
+// TestPeerStoreRePinsAfterADiscardedRevocation is the other half of RELAY-34's
+// contract, and it is the half a floor gets wrong if it is bolted on carelessly:
+// a revocation that STICKS must still be REVERSIBLE by the operator.
+//
+// Two traps are pinned here, both of which a naive floor walks straight into:
+//
+//   - Re-pinning the SAME key must not be swallowed as a no-op. PutTrust returns
+//     early when the incoming pin set equals the current ACTIVE record — and
+//     after a discarded revocation that record is still sitting in the table,
+//     invisible but present. An operator would be told "nothing to do" and left
+//     with an un-pinned bus.
+//   - The new record must be minted ABOVE the floor. config_seq is otherwise
+//     rebuilt only from the log, so a directory whose log lost the revocation
+//     could mint below its own floor and refuse its own write for ever.
+func TestPeerStoreRePinsAfterADiscardedRevocation(t *testing.T) {
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	if _, err := st.RemoveTrust(psOriginBus); err != nil {
+		t.Fatalf("RemoveTrust: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	psTruncateTail(t, dir, 8)
+
+	st2, lg2 := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg2.Close() }()
+
+	// ANTI-VACUITY. Without these this test passed with the truncation removed
+	// entirely, while its name, doc and failure strings all claimed to be testing
+	// the state "after a discarded revocation" — the reviewer gate found it. The
+	// discard has to be shown to have happened before anything is concluded from
+	// it.
+	if rec := lg2.Recovered(); len(rec.Dangling) == 0 && rec.DiscardCount == 0 {
+		t.Fatalf("recovery reported neither a dangling prepare nor a discard (%+v); nothing was damaged, so this is not the state this test claims to exercise", rec)
+	}
+	for _, c := range psReplayCommitted(t, dir) {
+		if c.Entry.Kind != BusTrustRecordKind {
+			continue
+		}
+		r, derr := DecodeBusTrustRecord(c.Entry.Body)
+		if derr != nil {
+			t.Fatalf("decoding a surviving trust entry: %v", derr)
+		}
+		if r.State == PeerRecordRemoved {
+			t.Fatalf("the revocation is still in the log; it was not discarded, so the floor is not what is keeping the key revoked below")
+		}
+	}
+
+	if pins := st2.PinnedKeys(psOriginBus); len(pins) != 0 {
+		t.Fatalf("the revoked key came back: %x", pins)
+	}
+
+	// The operator re-pins THE SAME KEY. This must write a new generation, not
+	// return the invisible superseded one as a no-op.
+	rec, err := st2.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}})
+	if err != nil {
+		t.Fatalf("re-pinning after a discarded revocation: %v", err)
+	}
+	if rec.State != PeerRecordActive {
+		t.Fatalf("the re-pin produced a %s record", rec.State)
+	}
+	floors, err := readPeerWithdrawalFloors(filepath.Join(dir, PeerWithdrawalFloorFileName))
+	if err != nil {
+		t.Fatalf("reading the floor: %v", err)
+	}
+	if floor := floors[trustTableToken][psOriginBus]; rec.ConfigSeq <= floor {
+		t.Fatalf("the re-pin was minted at config_seq %d, at or below the withdrawal floor %d; it would be refused by the floor it was written under, for ever", rec.ConfigSeq, floor)
+	}
+	pins := st2.PinnedKeys(psOriginBus)
+	if len(pins) != 1 || !bytes.Equal(pins[0], psKey(1)) {
+		t.Fatalf("after re-pinning, PinnedKeys = %x, want the operator's key back", pins)
+	}
+
+	// And it survives a restart, floor and all.
+	if err := lg2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	st3, lg3 := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg3.Close() }()
+	pins = st3.PinnedKeys(psOriginBus)
+	if len(pins) != 1 || !bytes.Equal(pins[0], psKey(1)) {
+		t.Fatalf("after a restart the re-pinned key is %x, want it still pinned; the floor is refusing a generation written ABOVE it", pins)
+	}
+}
+
+// TestPeerStoreRefusesAWithdrawalItCannotFloor pins the fail-CLOSED choice: a
+// store that cannot write the durable floor REFUSES to withdraw, rather than
+// recording a revocation only in the log and telling the operator it worked.
+//
+// This is also the hand-off contract for whoever wires a PeerStore up — most
+// immediately the offline `agent-bus peer` subcommand, which is where an
+// operator's revocation is actually typed. Forget PeerStoreOptions.Dir and the
+// revocation path fails loudly at the first attempt instead of silently
+// producing a revocation a torn tail can undo.
+func TestPeerStoreRefusesAWithdrawalItCannotFloor(t *testing.T) {
+	dir := t.TempDir()
+	d := &psLateLog{}
+	sink := &psLogSink{}
+	st, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Durable: d, Logger: logging.New(sink, logging.LevelDebug)})
+	if err != nil {
+		t.Fatalf("NewPeerStore: %v", err)
+	}
+	lg, err := wal.Open(wal.LogOptions{Dir: dir, Applier: st})
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	defer func() { _ = lg.Close() }()
+	d.l = lg
+
+	// A store that can write but cannot floor says so at CONSTRUCTION, once,
+	// rather than only at the moment a revocation is attempted.
+	if out := sink.String(); !strings.Contains(out, "WITHDRAWALS WILL BE REFUSED") {
+		t.Errorf("a durable store with no data directory did not warn at construction. Log was:\n%s", out)
+	}
+
+	if _, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1}); err != nil {
+		t.Fatalf("Put on a store with no data directory: %v; only WITHDRAWALS are refused", err)
+	}
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust on a store with no data directory: %v; only WITHDRAWALS are refused", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"Remove", func() error { _, err := st.Remove(psRemoteBus); return err }},
+		{"RemoveTrust", func() error { _, err := st.RemoveTrust(psOriginBus); return err }},
+	} {
+		err := tc.call()
+		if !errors.Is(err, ErrPeerNoWithdrawalFloor) {
+			t.Errorf("%s returned %v, want ErrPeerNoWithdrawalFloor", tc.name, err)
+		}
+	}
+
+	// AND NOTHING WAS WRITTEN. A refusal that had already appended a tombstone
+	// would be the worst of both: the operator is told it failed and the log
+	// says it happened.
+	for _, c := range psReplayCommitted(t, dir) {
+		var state PeerRecordState
+		switch c.Entry.Kind {
+		case PeerRecordKind:
+			rec, derr := DecodePeerRecord(c.Entry.Body)
+			if derr != nil {
+				t.Fatalf("decoding a committed route: %v", derr)
+			}
+			state = rec.State
+		case BusTrustRecordKind:
+			rec, derr := DecodeBusTrustRecord(c.Entry.Body)
+			if derr != nil {
+				t.Fatalf("decoding a committed trust record: %v", derr)
+			}
+			state = rec.State
+		default:
+			continue
+		}
+		if state == PeerRecordRemoved {
+			t.Errorf("a withdrawal that was REFUSED still reached the durable log")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+		t.Errorf("a store with no data directory wrote %s anyway (stat err %v)", PeerWithdrawalFloorFileName, err)
+	}
+}
+
+// TestPeerWithdrawalFloorFileIsStrictlyVerified pins the file format itself. It
+// is the trust anchor's trust anchor: a floor read out of bytes that are not the
+// bytes that were written could FORGET a revocation, which is the one thing the
+// file exists to make impossible. So every failure is FATAL and the file is
+// never regenerated.
+func TestPeerWithdrawalFloorFileIsStrictlyVerified(t *testing.T) {
+	good, err := encodePeerWithdrawalFloors([]peerWithdrawalEntry{
+		{table: trustTableToken, busID: psOriginBus, seq: 7},
+		{table: routeTableToken, busID: psRemoteBus, seq: 3},
+	})
+	if err != nil {
+		t.Fatalf("encodePeerWithdrawalFloors: %v", err)
+	}
+	// The canonical form is readable by eye and sorted, so the bytes are a
+	// function of the withdrawal set alone.
+	wantBody := "route " + psRemoteBus + " 3\ntrust " + psOriginBus + " 7\n"
+	if !strings.HasSuffix(string(good), wantBody) {
+		t.Errorf("the encoded body is not the canonical sorted form; got:\n%s", good)
+	}
+	if !strings.HasPrefix(string(good), peerWithdrawalFloorMagic+" v6 sha256=") {
+		t.Errorf("the header is not %q v6 with a sha256 digest; got:\n%s", peerWithdrawalFloorMagic, good)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, PeerWithdrawalFloorFileName)
+	if err := os.WriteFile(path, good, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	floors, err := readPeerWithdrawalFloors(path)
+	if err != nil {
+		t.Fatalf("readPeerWithdrawalFloors on a good file: %v", err)
+	}
+	if floors[trustTableToken][psOriginBus] != 7 || floors[routeTableToken][psRemoteBus] != 3 {
+		t.Fatalf("round trip lost a floor: %+v", floors)
+	}
+
+	sum := func(body string) string {
+		h := sha256.Sum256([]byte(body))
+		return peerWithdrawalFloorMagic + " v6 sha256=" + hex.EncodeToString(h[:]) + "\n" + body
+	}
+	for _, tc := range []struct{ name, content string }{
+		{"no header line", peerWithdrawalFloorMagic},
+		{"a foreign magic", sum("trust " + psOriginBus + " 7\n")[len(peerWithdrawalFloorMagic):]},
+		// A VALID digest over the body, so the version check is what refuses it.
+		// This case used to carry "sha256=00", which the digest-LENGTH check
+		// refused first — so deleting the version check entirely left the suite
+		// green, while CONTRACTS-ONDISK.md cited this list as evidence it was
+		// covered. Reviewer-gate finding.
+		{"an unknown on-disk format version", strings.Replace(sum("trust "+psOriginBus+" 7\n"), " v6 ", " v99 ", 1)},
+		{"a body that does not match the digest", peerWithdrawalFloorMagic + " v6 sha256=" + strings.Repeat("00", 32) + "\ntrust " + psOriginBus + " 7\n"},
+		{"an unknown table token", sum("pins " + psOriginBus + " 7\n")},
+		{"an unfolded bus id", sum("trust BUS-PS-ORIGIN 7\n")},
+		{"an invalid bus id", sum("trust bus.with.dots 7\n")},
+		{"a zero floor", sum("trust " + psOriginBus + " 0\n")},
+		{"a leading zero", sum("trust " + psOriginBus + " 07\n")},
+		{"a floor above the plausibility bound", sum("trust " + psOriginBus + " 9007199254740992\n")},
+		{"a duplicated (table, bus)", sum("trust " + psOriginBus + " 7\ntrust " + psOriginBus + " 2\n")},
+		{"a short line", sum("trust " + psOriginBus + "\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), PeerWithdrawalFloorFileName)
+			if err := os.WriteFile(p, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			_, err := readPeerWithdrawalFloors(p)
+			if !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+				t.Fatalf("readPeerWithdrawalFloors returned %v, want ErrPeerWithdrawalFloorCorrupt", err)
+			}
+			// The remedy is part of the contract: without it this error is a
+			// permanently unstartable bus, which invariant 6 forbids. Matched
+			// case-insensitively so a reworded sentence cannot fail the test for
+			// the wrong reason — what must hold is that the PATH and the ACTION
+			// are both named, not the capitalisation.
+			if !strings.Contains(strings.ToLower(err.Error()), "move "+strings.ToLower(p)+" aside") {
+				t.Errorf("the fatal error does not name the one-step remedy: %v", err)
+			}
+		})
+	}
+
+	// A MISSING file is legal and means "nothing has ever been withdrawn". It is
+	// NOT fatal, because there is no data directory in existence whose
+	// withdrawals predate this file — nothing outside internal/relay had ever
+	// constructed a PeerStore when it landed.
+	missing, err := readPeerWithdrawalFloors(filepath.Join(t.TempDir(), PeerWithdrawalFloorFileName))
+	if err != nil {
+		t.Fatalf("a missing floor file is fatal: %v", err)
+	}
+	if len(missing[routeTableToken]) != 0 || len(missing[trustTableToken]) != 0 {
+		t.Errorf("a missing floor file yielded floors: %+v", missing)
+	}
+}
+
+// TestPeerStoreSeedsConfigSeqFromTheWithdrawalFloor pins the recovery direction
+// the floor makes possible ON ITS OWN: a data directory whose LOG is gone but
+// whose floor survived must not resume minting below its own floor.
+//
+// Without the seeding this is not a cosmetic gap. Every PutTrust for a
+// previously-revoked bus would be minted at 1, refused by the floor, and retried
+// at 1 again — a bus that can never be re-pinned, for ever, with an error
+// message blaming a revocation the operator already knows about.
+func TestPeerStoreSeedsConfigSeqFromTheWithdrawalFloor(t *testing.T) {
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	revocation, err := st.RemoveTrust(psOriginBus)
+	if err != nil {
+		t.Fatalf("RemoveTrust: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The whole log is lost — a quarantine, a restore from a backup that predates
+	// it, an operator moving it aside. The floor file is all that is left.
+	if err := os.Remove(psWALPath(dir)); err != nil {
+		t.Fatalf("removing the log: %v", err)
+	}
+
+	st2, lg2 := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg2.Close() }()
+	rec, err := st2.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(2)}})
+	if err != nil {
+		t.Fatalf("re-pinning on a directory whose log is gone: %v; the store is minting below its own withdrawal floor", err)
+	}
+	if rec.ConfigSeq <= revocation.ConfigSeq {
+		t.Fatalf("the new record is at config_seq %d, at or below the surviving withdrawal floor %d", rec.ConfigSeq, revocation.ConfigSeq)
+	}
+	if pins := st2.PinnedKeys(psOriginBus); len(pins) != 1 || !bytes.Equal(pins[0], psKey(2)) {
+		t.Fatalf("PinnedKeys = %x, want the newly pinned key", pins)
+	}
+}
+
+// TestPeerStoreRepairsALostWithdrawalFloorFromTheLog is a REGRESSION test for
+// the security gate's P1 on RELAY-34: the fix's own remedy silently re-opened
+// the hole it closed.
+//
+// The state at issue is "tombstone in the log, no floor beside it", and it has
+// three non-adversarial ways in — bit-rot on the floor file, an inconsistent
+// snapshot or backup restore that brings bus.wal forward without it, and an
+// operator following ErrPeerWithdrawalFloorCorrupt's own instruction to move it
+// aside. In that state the pre-RELAY-34 behaviour was back: an 8-byte tail
+// truncation resurrected the revoked key.
+//
+// Two arms, because the gate found two distinct failures:
+//
+//	(1) THE BUS REPAIRS ITSELF on the next start, from the withdrawal its log
+//	    still holds — so the remedy works without the operator doing anything;
+//	(2) RE-APPLYING the withdrawal by hand — the documented remedy — actually
+//	    writes the floor, where it used to take a no-op branch, return success
+//	    and write nothing.
+func TestPeerStoreRepairsALostWithdrawalFloorFromTheLog(t *testing.T) {
+	floorOf := func(t *testing.T, dir string) uint64 {
+		t.Helper()
+		floors, err := readPeerWithdrawalFloors(filepath.Join(dir, PeerWithdrawalFloorFileName))
+		if err != nil {
+			t.Fatalf("reading the floor: %v", err)
+		}
+		return floors[trustTableToken][psOriginBus]
+	}
+
+	// setup writes a pin and revokes it, then DESTROYS the floor file while
+	// leaving the log — and its tombstone — intact.
+	setup := func(t *testing.T) (string, uint64) {
+		t.Helper()
+		dir := t.TempDir()
+		st, lg := psOpenStore(t, dir, nil, nil)
+		if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+			t.Fatalf("PutTrust: %v", err)
+		}
+		rev, err := st.RemoveTrust(psOriginBus)
+		if err != nil {
+			t.Fatalf("RemoveTrust: %v", err)
+		}
+		if err := lg.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := floorOf(t, dir); got != rev.ConfigSeq {
+			t.Fatalf("the floor is %d before it is destroyed, want %d", got, rev.ConfigSeq)
+		}
+		if err := os.Remove(filepath.Join(dir, PeerWithdrawalFloorFileName)); err != nil {
+			t.Fatalf("removing the floor file: %v", err)
+		}
+		return dir, rev.ConfigSeq
+	}
+
+	t.Run("recovery rebuilds it from the log", func(t *testing.T) {
+		dir, want := setup(t)
+
+		sink := &psLogSink{}
+		st, lg := psOpenStore(t, dir, func(o *PeerStoreOptions) {
+			o.Logger = logging.New(sink, logging.LevelDebug)
+		}, nil)
+		if err := lg.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := floorOf(t, dir); got != want {
+			t.Fatalf("after a restart the withdrawal floor is %d, want it REBUILT to %d from the tombstone the log still holds", got, want)
+		}
+		if pins := st.PinnedKeys(psOriginBus); len(pins) != 0 {
+			t.Fatalf("PinnedKeys = %x after recovery, want none", pins)
+		}
+		if out := sink.String(); !strings.Contains(out, "REPAIRED the durable withdrawal floor") {
+			t.Errorf("the repair was not logged; a floor rebuilt in silence is a floor nobody knows was ever lost. Log was:\n%s", out)
+		}
+
+		// AND THE REBUILT FLOOR HOLDS AGAINST THE ORIGINAL ATTACK. This is the
+		// assertion that was RED: without the repair the 8-byte truncation
+		// brought the revoked key straight back.
+		psTruncateTail(t, dir, 8)
+		st2, lg2 := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg2.Close() }()
+		if pins := st2.PinnedKeys(psOriginBus); len(pins) != 0 {
+			t.Fatalf("after the floor was lost and rebuilt, an 8-byte tail truncation returned the REVOKED key %x", pins)
+		}
+	})
+
+	t.Run("re-applying the withdrawal by hand re-asserts the floor", func(t *testing.T) {
+		dir, want := setup(t)
+
+		// A store that has NOT replayed the log, so the automatic repair cannot
+		// have run: this arm isolates the operator's manual remedy.
+		d := &psLateLog{}
+		st, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Dir: dir, Durable: d})
+		if err != nil {
+			t.Fatalf("NewPeerStore: %v", err)
+		}
+		lg, err := wal.Open(wal.LogOptions{Dir: dir})
+		if err != nil {
+			t.Fatalf("wal.Open: %v", err)
+		}
+		defer func() { _ = lg.Close() }()
+		d.l = lg
+		if _, err := wal.Replay(lg.Path(), func(c wal.Committed) error {
+			// Deliberately folded WITHOUT Apply's reconciliation, so the floor is
+			// still missing when RemoveTrust is called below.
+			s := st
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			switch c.Entry.Kind {
+			case BusTrustRecordKind:
+				rec, derr := DecodeBusTrustRecord(c.Entry.Body)
+				if derr != nil {
+					return nil
+				}
+				_ = s.applyLocked(s.trust, rec, "test")
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("replaying: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+			t.Fatalf("the floor exists before the manual remedy (stat err %v); this arm proves nothing", err)
+		}
+
+		// THE DOCUMENTED REMEDY. It used to return success and write nothing.
+		if _, err := st.RemoveTrust(psOriginBus); err != nil {
+			t.Fatalf("re-applying the withdrawal by hand: %v", err)
+		}
+		if got := floorOf(t, dir); got != want {
+			t.Fatalf("re-applying the withdrawal left the floor at %d, want %d; the remedy reported success and wrote nothing", got, want)
+		}
+	})
+}
+
+// TestPeerWithdrawalFloorRefusesAnImplausibleSequence is a REGRESSION test for
+// the security gate's P2 on RELAY-34.
+//
+// NewPeerStore seeds config_seq from the floors, so a single planted entry near
+// maxConfigSeq seeded the counter to its ceiling: the bus started perfectly
+// healthy, read fine, and then failed EVERY Put, PutTrust, Remove and
+// RemoveTrust — for every bus, in BOTH tables, across every restart — with
+// "configuration sequence exhausted", naming a ceiling nobody had reached.
+// Total loss of function with the diagnosis pointing somewhere else entirely.
+func TestPeerWithdrawalFloorRefusesAnImplausibleSequence(t *testing.T) {
+	plant := func(t *testing.T, seq uint64) string {
+		t.Helper()
+		dir := t.TempDir()
+		body := "trust " + psOriginBus + " " + strconv.FormatUint(seq, 10) + "\n"
+		h := sha256.Sum256([]byte(body))
+		data := peerWithdrawalFloorMagic + " v6 sha256=" + hex.EncodeToString(h[:]) + "\n" + body
+		if err := os.WriteFile(filepath.Join(dir, PeerWithdrawalFloorFileName), []byte(data), 0o600); err != nil {
+			t.Fatalf("planting: %v", err)
+		}
+		return dir
+	}
+
+	for _, seq := range []uint64{maxConfigSeq, maxConfigSeq - 1, maxPlausiblePeerWithdrawalSeq} {
+		dir := plant(t, seq)
+		_, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Dir: dir})
+		if !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+			t.Errorf("a planted floor of %d was ACCEPTED (err %v); it would seed config_seq near its ceiling and permanently refuse every write in both tables", seq, err)
+		}
+	}
+
+	// Just below the bound is still adopted: the bound separates "tampered" from
+	// "high", and must not refuse a value a bus could genuinely reach.
+	dir := plant(t, maxPlausiblePeerWithdrawalSeq-1)
+	st, err := NewPeerStore(PeerStoreOptions{BusID: psLocalBus, Dir: dir})
+	if err != nil {
+		t.Fatalf("a floor just below the plausibility bound was refused: %v", err)
+	}
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 0 {
+		t.Errorf("PinnedKeys = %x, want none", pins)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-34: the mutants the reviewer gate found alive
+// ---------------------------------------------------------------------------
+//
+// Every test below was written because a MUTATION of the shipped mechanism left
+// the whole suite green. A defence nothing can detect the absence of is a
+// defence that will be deleted by a future edit and nobody will know, which for
+// this mechanism means a revoked pinned bus signing key silently comes back. Each
+// names the mutation it kills.
+
+// psFloors reads the floor file, requiring it to exist and verify.
+func psFloors(t *testing.T, dir string) map[string]map[string]uint64 {
+	t.Helper()
+	floors, err := readPeerWithdrawalFloors(filepath.Join(dir, PeerWithdrawalFloorFileName))
+	if err != nil {
+		t.Fatalf("reading %s: %v", PeerWithdrawalFloorFileName, err)
+	}
+	return floors
+}
+
+// TestPeerWithdrawalFloorAccumulatesEveryWithdrawal kills the mutant that
+// deletes `t.withdrawnAt[folded] = seq` in recordWithdrawal.
+//
+// The blind spot it closes: NO other test performs more than ONE withdrawal
+// against a single store. recordWithdrawal rebuilds the WHOLE file from the
+// in-memory mirror on every call, so if the mirror is not updated, withdrawal N
+// ERASES withdrawals 1..N-1 from disk — RELAY-34's own fail-open, reintroduced,
+// with a green suite. The reviewer gate demonstrated exactly that.
+func TestPeerWithdrawalFloorAccumulatesEveryWithdrawal(t *testing.T) {
+	const busA, busB = "bus-ps-alpha", "bus-ps-beta"
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+
+	if _, err := st.PutTrust(BusTrust{BusID: busA, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust(A): %v", err)
+	}
+	if _, err := st.PutTrust(BusTrust{BusID: busB, SigningKeys: []ed25519.PublicKey{psKey(2)}}); err != nil {
+		t.Fatalf("PutTrust(B): %v", err)
+	}
+	if _, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	revA, err := st.RemoveTrust(busA)
+	if err != nil {
+		t.Fatalf("RemoveTrust(A): %v", err)
+	}
+	revB, err := st.RemoveTrust(busB)
+	if err != nil {
+		t.Fatalf("RemoveTrust(B): %v", err)
+	}
+	revRoute, err := st.Remove(psRemoteBus)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// ALL THREE must be on disk simultaneously, at their exact sequences. The
+	// mutant leaves only the last.
+	floors := psFloors(t, dir)
+	for _, want := range []struct {
+		table, bus string
+		seq        uint64
+	}{
+		{trustTableToken, busA, revA.ConfigSeq},
+		{trustTableToken, busB, revB.ConfigSeq},
+		{routeTableToken, psRemoteBus, revRoute.ConfigSeq},
+	} {
+		if got := floors[want.table][want.bus]; got != want.seq {
+			t.Errorf("%s floor for %s is %d, want %d; an earlier withdrawal was ERASED by a later one, which is RELAY-34's fail-open reintroduced (floors: %+v)", want.table, want.bus, got, want.seq, floors)
+		}
+	}
+
+	if err := lg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// And the consequence, end to end: after a discard BOTH revocations hold.
+	psTruncateTail(t, dir, 8)
+	st2, lg2 := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg2.Close() }()
+	for _, bus := range []string{busA, busB} {
+		if pins := st2.PinnedKeys(bus); len(pins) != 0 {
+			t.Errorf("after a tail truncation, PinnedKeys(%s) = %x; a REVOKED key came back", bus, pins)
+		}
+	}
+	for _, r := range st2.ActivePeers() {
+		if r.BusID == psRemoteBus {
+			t.Errorf("ActivePeers still lists the withdrawn route %s", psRemoteBus)
+		}
+	}
+}
+
+// psFailWriteOfKind wraps a durable log and FAILS the write for one entry kind,
+// after the store has already fsynced the withdrawal floor.
+//
+// psOpenStore has always taken a wrap func and NO test used it to fail a write
+// (the reviewer gate's finding). This is the window the read-side and
+// write-side floor checks exist for and which nothing exercised.
+type psFailWriteOfKind struct {
+	inner PeerDurableLog
+	kind  string
+	state PeerRecordState
+	fired int32
+}
+
+func (w *psFailWriteOfKind) Write(e wal.Entry) (wal.Committed, error) {
+	if e.Kind == w.kind {
+		var state PeerRecordState
+		switch e.Kind {
+		case PeerRecordKind:
+			rec, err := DecodePeerRecord(e.Body)
+			if err != nil {
+				return wal.Committed{}, err
+			}
+			state = rec.State
+		case BusTrustRecordKind:
+			rec, err := DecodeBusTrustRecord(e.Body)
+			if err != nil {
+				return wal.Committed{}, err
+			}
+			state = rec.State
+		}
+		if state == w.state {
+			atomic.AddInt32(&w.fired, 1)
+			return wal.Committed{}, errors.New("psFailWriteOfKind: injected durable-log failure")
+		}
+	}
+	return w.inner.Write(e)
+}
+
+// TestPeerStoreHidesAPinWhoseFloorLandedButWhoseTombstoneDidNot kills THREE
+// mutants at once, all of which the reviewer gate found alive:
+//
+//   - removing the floor check from busTable.lookup;
+//   - removing it from ActivePeers and TrustedBuses;
+//   - removing the `if known && t.withdrawn(existing) { known = false }` reset in
+//     PeerStore.write.
+//
+// They were dead code as far as the suite was concerned because upsert refuses
+// the superseded record at ADMISSION, so it never reached the table in any
+// existing test. The window where they are the ONLY defence is precise: the
+// withdrawal floor is fsynced and THEN the durable log write fails. The table
+// still holds the live generation, nothing was refused at admission, and only
+// the read-side and write-side checks stop a revoked key being served.
+//
+// The file documented that window in prose and nothing exercised it.
+func TestPeerStoreHidesAPinWhoseFloorLandedButWhoseTombstoneDidNot(t *testing.T) {
+	dir := t.TempDir()
+	fail := &psFailWriteOfKind{kind: BusTrustRecordKind, state: PeerRecordRemoved}
+	st, lg := psOpenStore(t, dir, nil, func(inner PeerDurableLog) PeerDurableLog {
+		fail.inner = inner
+		return fail
+	})
+	defer func() { _ = lg.Close() }()
+
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	if _, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// The revocation's FLOOR lands; its LOG ENTRY does not.
+	if _, err := st.RemoveTrust(psOriginBus); err == nil {
+		t.Fatalf("RemoveTrust succeeded; the injected failure did not fire")
+	}
+	if atomic.LoadInt32(&fail.fired) != 1 {
+		t.Fatalf("the injected failure fired %d times, want 1", fail.fired)
+	}
+	rev := psFloors(t, dir)[trustTableToken][psOriginBus]
+	if rev == 0 {
+		t.Fatalf("the withdrawal floor was not written before the log write; the whole write-ahead ordering is inverted")
+	}
+	// The tombstone really is NOT in the log — otherwise this proves nothing.
+	for _, c := range psReplayCommitted(t, dir) {
+		if c.Entry.Kind != BusTrustRecordKind {
+			continue
+		}
+		r, err := DecodeBusTrustRecord(c.Entry.Body)
+		if err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if r.State == PeerRecordRemoved {
+			t.Fatalf("the tombstone reached the log; the failure was not injected where this test needs it")
+		}
+	}
+
+	// EVERY read path must report the bus as un-pinned, from the LIVE store —
+	// with the superseded ACTIVE record still sitting in the table.
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 0 {
+		t.Errorf("PinnedKeys = %x; the floor landed, so the key is REVOKED even though its tombstone never reached the log", pins)
+	}
+	if rec, ok := st.LookupTrust(psOriginBus); ok {
+		t.Errorf("LookupTrust reported %+v, want absent", rec)
+	}
+	for _, r := range st.TrustedBuses() {
+		if r.BusID == psOriginBus {
+			t.Errorf("TrustedBuses still lists %s", psOriginBus)
+		}
+	}
+
+	// And the WRITE path must treat it as absent too: re-pinning the SAME key
+	// must write a new generation above the floor rather than being swallowed as
+	// a no-op against the hidden record.
+	rec, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}})
+	if err != nil {
+		t.Fatalf("re-pinning: %v", err)
+	}
+	if rec.ConfigSeq <= rev {
+		t.Fatalf("the re-pin was minted at config_seq %d, at or below the floor %d", rec.ConfigSeq, rev)
+	}
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 1 || !bytes.Equal(pins[0], psKey(1)) {
+		t.Fatalf("after re-pinning, PinnedKeys = %x, want the key back", pins)
+	}
+
+	// The ROUTE table's list path, same window, so ActivePeers is covered too.
+	routeFail := &psFailWriteOfKind{kind: PeerRecordKind, state: PeerRecordRemoved, inner: fail.inner}
+	st.durable = routeFail
+	if _, err := st.Remove(psRemoteBus); err == nil {
+		t.Fatalf("Remove succeeded; the injected route failure did not fire")
+	}
+	if _, ok := st.Lookup(psRemoteBus); ok {
+		t.Errorf("Lookup still reports the withdrawn route %s", psRemoteBus)
+	}
+	for _, r := range st.ActivePeers() {
+		if r.BusID == psRemoteBus {
+			t.Errorf("ActivePeers still lists the withdrawn route %s", psRemoteBus)
+		}
+	}
+}
+
+// TestPeerWithdrawalFloorIsWrittenAtomically kills the mutant that replaces
+// atomicReplacePeerWithdrawalFloor with a bare os.WriteFile.
+//
+// The discriminator is deliberate rather than incidental. A bare os.WriteFile
+// opens the EXISTING file O_TRUNC, which needs write permission on the FILE
+// (0600, ours) and not on the directory — so on a READ-ONLY directory it
+// truncates the floor to nothing and only then fails, DESTROYING every
+// revocation already recorded. The atomic writer creates its temp file in the
+// directory first, so it fails before touching anything.
+//
+// It also asserts the mode the writer produced (a dropped tmp.Chmod is
+// otherwise invisible — every other test writes its own 0600 fixtures) and that
+// no temp file is left behind.
+func TestPeerWithdrawalFloorIsWrittenAtomically(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory does not restrain root, so the discriminator does not hold")
+	}
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	if _, err := st.PutTrust(BusTrust{BusID: psRemoteBus, SigningKeys: []ed25519.PublicKey{psKey(2)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	first, err := st.RemoveTrust(psOriginBus)
+	if err != nil {
+		t.Fatalf("RemoveTrust: %v", err)
+	}
+
+	path := filepath.Join(dir, PeerWithdrawalFloorFileName)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("the floor file the writer produced is mode %o, want 0600; it holds no secret, but a writer that does not chmod before writing is a writer whose bytes were briefly world-readable", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".peer-withdrawal-floor-") {
+			t.Errorf("a temp file %q was left behind by a SUCCESSFUL write", e.Name())
+		}
+	}
+
+	// Now make the DIRECTORY unwritable and withdraw again.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	if _, err := st.RemoveTrust(psRemoteBus); err == nil {
+		t.Fatalf("RemoveTrust succeeded on a read-only data directory; the floor cannot have been written, so the revocation must be REFUSED rather than acknowledged")
+	}
+
+	// THE ALREADY-RECORDED REVOCATION MUST BE UNHARMED. A non-atomic writer
+	// truncates it here.
+	floors, err := readPeerWithdrawalFloors(path)
+	if err != nil {
+		t.Fatalf("the existing floor file no longer verifies after a FAILED write: %v; the writer is not atomic, and a failed write has destroyed revocations it never touched", err)
+	}
+	if got := floors[trustTableToken][psOriginBus]; got != first.ConfigSeq {
+		t.Fatalf("after a failed write the recorded floor for %s is %d, want it untouched at %d", psOriginBus, got, first.ConfigSeq)
+	}
+	_ = lg.Close()
+}
+
+// TestPeerWithdrawalFloorBoundsAreEnforced kills the mutants that remove the
+// read-side size and entry-count bounds and the write-side withdrawal cap.
+// The reviewer gate found ZERO test references to any of the three identifiers.
+func TestPeerWithdrawalFloorBoundsAreEnforced(t *testing.T) {
+	t.Run("an oversized file is refused without being read into memory", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, PeerWithdrawalFloorFileName)
+		big := make([]byte, maxPeerWithdrawalFloorFileSize+1)
+		for i := range big {
+			big[i] = 'a'
+		}
+		if err := os.WriteFile(path, big, 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		_, err := readPeerWithdrawalFloors(path)
+		if !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+			t.Fatalf("a %d-byte floor file returned %v, want ErrPeerWithdrawalFloorCorrupt", len(big), err)
+		}
+		if !strings.Contains(err.Error(), "larger than") {
+			t.Errorf("the refusal does not name the size bound: %v", err)
+		}
+	})
+
+	t.Run("too many entries is refused", func(t *testing.T) {
+		var body strings.Builder
+		for i := 0; i <= maxPeerWithdrawalFloorEntries; i++ {
+			fmt.Fprintf(&body, "trust bus-ps-%d %d\n", i, i+1)
+		}
+		h := sha256.Sum256([]byte(body.String()))
+		data := peerWithdrawalFloorMagic + " v6 sha256=" + hex.EncodeToString(h[:]) + "\n" + body.String()
+		path := filepath.Join(t.TempDir(), PeerWithdrawalFloorFileName)
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		_, err := readPeerWithdrawalFloors(path)
+		if !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+			t.Fatalf("a floor file with %d entries returned %v, want ErrPeerWithdrawalFloorCorrupt", maxPeerWithdrawalFloorEntries+1, err)
+		}
+	})
+
+	t.Run("the withdrawal cap refuses rather than growing the file without bound", func(t *testing.T) {
+		dir := t.TempDir()
+		st, lg := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg.Close() }()
+		if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+			t.Fatalf("PutTrust: %v", err)
+		}
+		// The cap is 4096 withdrawals; reaching it through the API would be 4096
+		// durable writes. The mirror is filled directly instead — this is an
+		// in-package test and the cap is a property of the mirror's size, not of
+		// how it got that big.
+		st.mu.Lock()
+		for i := 0; i < maxPeerWithdrawalFloorEntries; i++ {
+			st.routes.withdrawnAt[fmt.Sprintf("bus-ps-filler-%d", i)] = uint64(i + 1)
+		}
+		st.mu.Unlock()
+
+		_, err := st.RemoveTrust(psOriginBus)
+		if !errors.Is(err, ErrTooManyPeerWithdrawals) {
+			t.Fatalf("RemoveTrust at the withdrawal cap returned %v, want ErrTooManyPeerWithdrawals", err)
+		}
+		// AND THE REVOCATION MUST NOT HAVE HAPPENED: a refusal that had already
+		// written the tombstone would be the worst of both.
+		if pins := st.PinnedKeys(psOriginBus); len(pins) != 1 {
+			t.Errorf("the refused revocation still un-pinned the bus (pins %x); it must be refused, not half-applied", pins)
+		}
+	})
+}
+
+// TestPeerStoreUpsertRefusesAWithdrawnRecordWithErrPeerWithdrawn asserts the
+// PRIMARY recovery-time defence by its SENTINEL rather than by a log substring.
+//
+// The reviewer gate found that removing the floor check from busTable.upsert
+// failed exactly one assertion — a strings.Contains on a log message — so a
+// reword of that message would have turned the mechanism's only direct test into
+// a false pass. errors.Is cannot be defeated by prose.
+func TestPeerStoreUpsertRefusesAWithdrawnRecordWithErrPeerWithdrawn(t *testing.T) {
+	at := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	st, _ := psStore(t, nil)
+	st.trust.withdrawnAt[psOriginBus] = 5
+	st.routes.withdrawnAt[psRemoteBus] = 6
+
+	for _, tc := range []struct {
+		name    string
+		table   *busTable
+		rec     busScopedRecord
+		refused bool
+	}{
+		{"an active trust record below the floor", st.trust, psTrust(psOriginBus, 4, at, psKey(1)), true},
+		{"an active trust record AT the floor", st.trust, psTrust(psOriginBus, 5, at, psKey(1)), true},
+		{"an active trust record above the floor", st.trust, psTrust(psOriginBus, 6, at, psKey(1)), false},
+		{"an active route below the floor", st.routes, psRoute(psRemoteBus, 3, psURLGen1, at), true},
+		{
+			// A TOMBSTONE is never refused by the floor: the record that SET the
+			// floor is itself a tombstone at exactly that sequence.
+			"a tombstone at the floor", st.trust,
+			BusTrustRecord{BusID: psOriginBus, ConfigSeq: 5, State: PeerRecordRemoved, UpdatedAt: at}, false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st.mu.Lock()
+			err := st.applyLocked(tc.table, tc.rec, "test")
+			st.mu.Unlock()
+			if got := errors.Is(err, ErrPeerWithdrawn); got != tc.refused {
+				t.Fatalf("errors.Is(err, ErrPeerWithdrawn) = %v, want %v (err %v)", got, tc.refused, err)
+			}
+		})
+	}
+}
+
+// TestPeerWithdrawalFloorNeverPersistsWhatItCannotReadBack is a REGRESSION test
+// for the security re-verification's P2-a, whose outcome was the worst failure
+// available in this file: a bus that never boots again, with a printed remedy
+// that LOOPS.
+//
+// The write side validated against maxConfigSeq while the read side refused at
+// maxPlausiblePeerWithdrawalSeq, so an acknowledged withdrawal could persist a
+// file the next start refuses. Following that refusal's remedy — move it aside,
+// restart — had reconcileWithdrawalFloor re-derive the same out-of-range value
+// from the tombstone still in the log and write the identical unreadable file.
+//
+// The rule the two arms pin: THIS BINARY NEVER WRITES A FLOOR FILE IT WOULD
+// REFUSE TO READ, whether the sequence comes from a mint or from the log.
+func TestPeerWithdrawalFloorNeverPersistsWhatItCannotReadBack(t *testing.T) {
+	t.Run("the encoder refuses an out-of-range sequence", func(t *testing.T) {
+		for _, seq := range []uint64{maxPlausiblePeerWithdrawalSeq, maxPlausiblePeerWithdrawalSeq + 1, maxConfigSeq} {
+			_, err := encodePeerWithdrawalFloors([]peerWithdrawalEntry{{table: trustTableToken, busID: psOriginBus, seq: seq}})
+			if !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+				t.Errorf("encoding a floor of %d returned %v, want a refusal; the reader would reject this file and the bus would never start again", seq, err)
+			}
+		}
+	})
+
+	t.Run("a withdrawal minted above the bound is refused and the bus still starts", func(t *testing.T) {
+		// Seed config_seq just below the bound, exactly as the gate did: this is
+		// the value TestPeerWithdrawalFloorRefusesAnImplausibleSequence requires
+		// to be ADOPTED, so the two rules meet here.
+		dir := t.TempDir()
+		body := "trust bus-ps-seed " + strconv.FormatUint(maxPlausiblePeerWithdrawalSeq-1, 10) + "\n"
+		h := sha256.Sum256([]byte(body))
+		data := peerWithdrawalFloorMagic + " v6 sha256=" + hex.EncodeToString(h[:]) + "\n" + body
+		if err := os.WriteFile(filepath.Join(dir, PeerWithdrawalFloorFileName), []byte(data), 0o600); err != nil {
+			t.Fatalf("planting: %v", err)
+		}
+
+		st, lg := psOpenStore(t, dir, nil, nil)
+		if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+			t.Fatalf("PutTrust: %v", err)
+		}
+		// The withdrawal would mint at or above the bound. It must be REFUSED,
+		// loudly, rather than acknowledged and persisted unreadably.
+		err := func() error { _, e := st.RemoveTrust(psOriginBus); return e }()
+		if !errors.Is(err, ErrPeerWithdrawalSeqTooHigh) {
+			t.Fatalf("RemoveTrust returned %v, want ErrPeerWithdrawalSeqTooHigh; an acknowledged withdrawal here writes a floor file this binary cannot read back", err)
+		}
+		// THE DIAGNOSIS MUST NOT BLAME THE FILE. This case used to wrap
+		// ErrPeerWithdrawalFloorCorrupt, whose remedy is "move it aside and
+		// restart" — which would DELETE a healthy floor and permanently lose
+		// every revocation whose tombstone had been swept, while still not
+		// letting the operator withdraw. A security-gate finding, and the reason
+		// the sentinel is separate.
+		if errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+			t.Errorf("the refusal claims the floor FILE is corrupt; it is intact, and that error's remedy destroys it: %v", err)
+		}
+		if !strings.Contains(err.Error(), "THE FLOOR FILE IS NOT CORRUPT") {
+			t.Errorf("the refusal does not warn the operator off the wrong remedy: %v", err)
+		}
+		if err := lg.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		// THE BUS STILL STARTS. That is the property the whole finding is about.
+		st2, lg2 := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg2.Close() }()
+		if pins := st2.PinnedKeys(psOriginBus); len(pins) != 1 {
+			t.Errorf("after the refused withdrawal the pin should still stand (refusal is fail-closed on the FLOOR, not on the pin); got %x", pins)
+		}
+	})
+
+	t.Run("reconcile rejects an out-of-range sequence from the log by name", func(t *testing.T) {
+		// This arm asserts the LOG LINE as well as the outcome, deliberately, and
+		// the reason is worth stating because a log-substring assertion is
+		// normally a weak test.
+		//
+		// The reconcile-side bound is DEFENCE IN DEPTH behind the encoder's: with
+		// it removed, reconcile still writes nothing, because encoding the
+		// out-of-range entry fails anyway. The two are distinguishable only by
+		// what the operator is told — "this record's sequence is implausible" (a
+		// diagnosis) versus "the floor could not be repaired" (a symptom, with the
+		// cause left to be guessed). That difference IS the value of the bound, so
+		// it is what the test pins; without it the bound is untestable and a
+		// future edit would delete it with the suite green.
+		dir := t.TempDir()
+		sink := &psLogSink{}
+		st, lg := psOpenStore(t, dir, func(o *PeerStoreOptions) {
+			o.Logger = logging.New(sink, logging.LevelDebug)
+		}, nil)
+		defer func() { _ = lg.Close() }()
+
+		// A tombstone carrying a sequence no mint could produce — a forged frame,
+		// or a record written by a future binary. Before the fix, reconcile copied
+		// it verbatim into the floor and made the directory unstartable, with a
+		// printed remedy that rebuilt the same unreadable file.
+		if err := st.Apply(psCommitted(t, BusTrustRecord{
+			BusID: psOriginBus, ConfigSeq: 1 << 40, State: PeerRecordRemoved,
+			UpdatedAt: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC),
+		}, 10)); err != nil {
+			t.Fatalf("Apply returned %v; it must never return an error", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+			floors := psFloors(t, dir)
+			t.Fatalf("reconcile wrote a floor from an out-of-range log record (%+v); the next start would refuse it and the remedy would rebuild it", floors)
+		}
+		if out := sink.String(); !strings.Contains(out, "REFUSING to record a withdrawal floor from a log record whose config_seq is implausibly high") {
+			t.Errorf("the out-of-range record was not diagnosed by name; the operator gets a symptom instead of a cause. Log was:\n%s", out)
+		}
+	})
+}
+
+// TestPeerWithdrawalFloorSurvivesConcurrentWriters is a REGRESSION test for the
+// security re-verification's P2-b.
+//
+// recordWithdrawal releases s.mu across the file write and rebuilds the WHOLE
+// file from the in-memory mirror. Its safety was argued from writeMu — but
+// reconcileWithdrawalFloor is a second caller that holds no writeMu and CANNOT
+// (it runs from Apply, which write() reaches while already holding it). Two
+// callers could therefore interleave snapshot-then-write, and the second could
+// write a snapshot taken before the first's entry existed, DROPPING a floor its
+// caller had already been told was recorded.
+//
+// The gate reproduced exactly this: a concurrent Remove and Apply left the route
+// floor missing from disk although Remove returned success.
+func TestPeerWithdrawalFloorSurvivesConcurrentWriters(t *testing.T) {
+	at := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg.Close() }()
+
+	if _, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := st.Remove(psRemoteBus); err != nil {
+			t.Errorf("Remove: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// A withdrawal arriving through the APPLY path, which is the caller that
+		// cannot hold writeMu.
+		st.Apply(psCommitted(t, BusTrustRecord{
+			BusID: psOriginBus, ConfigSeq: 500, State: PeerRecordRemoved, UpdatedAt: at,
+		}, 20))
+	}()
+	wg.Wait()
+
+	// BOTH floors must be on disk. The bug dropped whichever lost the race, while
+	// its caller had been told the withdrawal was recorded.
+	floors := psFloors(t, dir)
+	if got := floors[trustTableToken][psOriginBus]; got != 500 {
+		t.Errorf("the trust floor for %s is %d, want 500; a concurrent writer dropped it (floors %+v)", psOriginBus, got, floors)
+	}
+	if got := floors[routeTableToken][psRemoteBus]; got == 0 {
+		t.Errorf("the route floor for %s is missing although Remove returned success; a concurrent writer dropped it (floors %+v)", psRemoteBus, floors)
+	}
+}
+
+// TestPeerStoreNeverFloorsItsOwnBusID is a REGRESSION test for the security
+// gate's round-3 P3.
+//
+// reconcileWithdrawalFloor runs on records applyLocked REFUSED, which is
+// deliberate — a record refused by the in-memory table can still be a
+// withdrawal whose floor must be recorded. But a record naming OUR OWN bus is
+// refused on every path as a self-peer, and nothing may legitimately produce
+// one. Flooring it wrote a permanent row for this bus's own id: an entry no
+// operator action can ever explain, remove, or have caused.
+func TestPeerStoreNeverFloorsItsOwnBusID(t *testing.T) {
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg.Close() }()
+
+	if err := st.Apply(psCommitted(t, BusTrustRecord{
+		BusID: psLocalBus, ConfigSeq: 7, State: PeerRecordRemoved,
+		UpdatedAt: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC),
+	}, 30)); err != nil {
+		t.Fatalf("Apply returned %v; it must never return an error", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+		t.Fatalf("a withdrawal naming our OWN bus id was floored (%+v); a self-peer is refused on every other path and must not become a permanent row nothing can explain", psFloors(t, dir))
+	}
+}
+
+// TestPeerWithdrawalFloorAdoptsOnlyAfterAWriteThatLANDED is a REGRESSION test
+// for the reviewer gate's round-2 P1-A: moving `t.withdrawnAt[folded] = seq`
+// from AFTER atomicReplacePeerWithdrawalFloor to before it left the entire
+// suite green, while the code documents "Memory NEVER claims more than disk".
+//
+// The consequence is RELAY-34's own fail-open, reached by an ordinary operator
+// mistake rather than by damage. If memory adopts a floor the disk does not
+// hold:
+//
+//   - the failed RemoveTrust has nonetheless made the pin invisible in memory,
+//     so every RETRY reports ErrUnknownPeer and the operator can never complete
+//     the revocation without restarting;
+//   - and after the restart the floor is absent, so THE REVOKED PIN COMES BACK.
+//
+// The discriminator is a directory the process cannot write, which is the
+// cheapest honest way to make the floor write fail without stubbing it.
+func TestPeerWithdrawalFloorAdoptsOnlyAfterAWriteThatLANDED(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory does not restrain root, so the floor write cannot be made to fail this way")
+	}
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg.Close() }()
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := st.RemoveTrust(psOriginBus); err == nil {
+		_ = os.Chmod(dir, 0o700)
+		t.Fatalf("RemoveTrust succeeded on a read-only data directory")
+	}
+
+	// NOTHING MAY HAVE BEEN ADOPTED. The pin must still be served, because the
+	// revocation demonstrably did not become durable and the operator was told so.
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 1 {
+		_ = os.Chmod(dir, 0o700)
+		t.Fatalf("after a FAILED floor write the pin reads as %x; memory adopted a withdrawal disk does not hold, so a restart would bring the key back and every retry would report ErrUnknownPeer", pins)
+	}
+
+	// AND THE RETRY MUST WORK once the directory is writable again — the failure
+	// left the store in a state the operator can still act on.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	if _, err := st.RemoveTrust(psOriginBus); err != nil {
+		t.Fatalf("retrying the withdrawal after the directory became writable: %v", err)
+	}
+	if got := psFloors(t, dir)[trustTableToken][psOriginBus]; got == 0 {
+		t.Fatalf("the retried withdrawal recorded no floor")
+	}
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 0 {
+		t.Fatalf("after the successful retry the pin is still served: %x", pins)
+	}
+}
+
+// TestPeerStoreCapCountsASlotTheBusAlreadyHolds pins the reviewer gate's own
+// round-1 P2 fix, which was correct but undefended: reverting `slotHeld` to
+// `known` left the suite green.
+//
+// A floor-hidden record still OCCUPIES its slot, so gating the capacity check on
+// `known` refused an operator RECONFIGURING a bus the table already holds, at
+// exactly MaxPeers, when no new slot was needed at all.
+func TestPeerStoreCapCountsASlotTheBusAlreadyHolds(t *testing.T) {
+	dir := t.TempDir()
+	// THE SLOT MUST BE HELD BY A FLOOR-HIDDEN *ACTIVE* RECORD, and getting that
+	// state right is the whole test. An earlier version held it with a TOMBSTONE
+	// and therefore tested nothing: busTable.withdrawn returns false for any
+	// non-Active record, so `known` was never forced false, the `if !known`
+	// branch was never entered, and the guard under test was never reached —
+	// slotHeld and known are indistinguishable in that state. The reviewer gate
+	// caught it, and caught me claiming the mutant died when it had not.
+	//
+	// The state that does exercise it is the one
+	// TestPeerStoreHidesAPinWhoseFloorLandedButWhoseTombstoneDidNot builds: the
+	// withdrawal's FLOOR lands and its log entry does not, so the table still
+	// holds a live ACTIVE record that every reader must treat as absent.
+	fail := &psFailWriteOfKind{kind: BusTrustRecordKind, state: PeerRecordRemoved}
+	st, lg := psOpenStore(t, dir, func(o *PeerStoreOptions) { o.MaxPeers = 1 }, func(inner PeerDurableLog) PeerDurableLog {
+		fail.inner = inner
+		return fail
+	})
+	defer func() { _ = lg.Close() }()
+
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	if _, err := st.RemoveTrust(psOriginBus); err == nil {
+		t.Fatalf("RemoveTrust succeeded; the injected failure did not fire, so no floor-hidden ACTIVE record exists and this test would prove nothing")
+	}
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 0 {
+		t.Fatalf("the floor did not land: PinnedKeys = %x", pins)
+	}
+	// The table is at MaxPeers=1 and the slot is held by this very bus, whose
+	// record is now floor-hidden. Re-pinning it needs no new slot.
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(2)}}); err != nil {
+		t.Fatalf("re-pinning a bus whose slot this table already holds was refused: %v; the cap counted a slot that did not need allocating", err)
+	}
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 1 || !bytes.Equal(pins[0], psKey(2)) {
+		t.Fatalf("PinnedKeys = %x, want the re-pinned key", pins)
+	}
+	// A DIFFERENT bus must still be refused: the cap is real.
+	if _, err := st.PutTrust(BusTrust{BusID: psRemoteBus, SigningKeys: []ed25519.PublicKey{psKey(3)}}); !errors.Is(err, ErrTooManyPeers) {
+		t.Fatalf("a NEW bus at the cap returned %v, want ErrTooManyPeers; the cap has been disabled rather than corrected", err)
+	}
+}
+
+// TestPeerWithdrawalFloorEncoderRefusesUnpersistableEntries covers the encoder's
+// own validation, which had ZERO test references although its comment argues the
+// checks are what stop a data directory being permanently stranded (a file it
+// writes but cannot read back is never regenerated). All three mutants survived.
+func TestPeerWithdrawalFloorEncoderRefusesUnpersistableEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []peerWithdrawalEntry
+	}{
+		{"an invalid bus id", []peerWithdrawalEntry{{table: trustTableToken, busID: "bus.with.dots", seq: 1}}},
+		{"a bus id carrying a space", []peerWithdrawalEntry{{table: trustTableToken, busID: "bus one", seq: 1}}},
+		{"a bus id carrying a newline", []peerWithdrawalEntry{{table: trustTableToken, busID: "bus\ntrust bus-x 9", seq: 1}}},
+		{"an UNFOLDED bus id", []peerWithdrawalEntry{{table: trustTableToken, busID: "BUS-PS-ORIGIN", seq: 1}}},
+		{"an unknown table token", []peerWithdrawalEntry{{table: "pins", busID: psOriginBus, seq: 1}}},
+		{"a zero sequence", []peerWithdrawalEntry{{table: trustTableToken, busID: psOriginBus, seq: 0}}},
+		{
+			"a duplicated (table, bus)",
+			[]peerWithdrawalEntry{
+				{table: trustTableToken, busID: psOriginBus, seq: 7},
+				{table: trustTableToken, busID: psOriginBus, seq: 2},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := encodePeerWithdrawalFloors(tc.entries); !errors.Is(err, ErrPeerWithdrawalFloorCorrupt) {
+				t.Fatalf("encoding returned %v, want a refusal; a file written with this entry could never be read back, and a floor file that cannot be read back is never regenerated", err)
+			}
+		})
+	}
+}
+
+// TestPeerStoreNeverFloorsACaseConfusable is the other half of the reviewer's
+// reconcile finding, alongside TestPeerStoreNeverFloorsItsOwnBusID.
+//
+// Two bus ids differing only by ASCII case are two DIFFERENT buses downstream,
+// and the table refuses the confusable. Flooring it anyway would durably un-pin
+// the LEGITIMATE bus — a revocation nobody performed.
+func TestPeerStoreNeverFloorsACaseConfusable(t *testing.T) {
+	at := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	st, lg := psOpenStore(t, dir, nil, nil)
+	defer func() { _ = lg.Close() }()
+
+	if _, err := st.PutTrust(BusTrust{BusID: psOriginBus, SigningKeys: []ed25519.PublicKey{psKey(1)}}); err != nil {
+		t.Fatalf("PutTrust: %v", err)
+	}
+	confusable := strings.ToUpper(psOriginBus)
+	if confusable == psOriginBus {
+		t.Fatalf("fixture error: %q has no case variant", psOriginBus)
+	}
+	if err := st.Apply(psCommitted(t, BusTrustRecord{
+		BusID: confusable, ConfigSeq: 900, State: PeerRecordRemoved, UpdatedAt: at,
+	}, 40)); err != nil {
+		t.Fatalf("Apply returned %v; it must never return an error", err)
+	}
+
+	if pins := st.PinnedKeys(psOriginBus); len(pins) != 1 {
+		t.Fatalf("a withdrawal naming an ASCII-case CONFUSABLE of %s un-pinned it (pins %x); that is a revocation nobody performed", psOriginBus, pins)
+	}
+	if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
+		t.Fatalf("a case-confusable withdrawal was floored: %+v", psFloors(t, dir))
 	}
 }
