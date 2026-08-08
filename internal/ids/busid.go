@@ -117,53 +117,19 @@ func readBusIDFile(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// writeBusIDFile atomically persists id to path, mode 0600: a temp file in
-// the SAME directory is written, fsynced and closed, then renamed into place,
-// then the directory itself is fsynced so the rename is durable. The temp
-// file is removed on any error path.
-func writeBusIDFile(dir, path, id string) (err error) {
-	tmp, err := os.CreateTemp(dir, ".bus-id-*")
-	if err != nil {
-		return fmt.Errorf("creating temp bus id file in %s: %w", dir, err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err = tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("setting mode on %s: %w", tmpName, err)
-	}
-	if _, err = tmp.WriteString(id + "\n"); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("syncing %s: %w", tmpName, err)
-	}
-	if err = tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-
-	if err = os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("renaming %s to %s: %w", tmpName, path, err)
-	}
-
-	dirFile, derr := os.Open(dir)
-	if derr != nil {
-		err = fmt.Errorf("opening %s to fsync directory entry: %w", dir, derr)
-		return err
-	}
-	defer dirFile.Close()
-	if serr := dirFile.Sync(); serr != nil {
-		err = fmt.Errorf("syncing directory %s: %w", dir, serr)
-		return err
-	}
-	return nil
+// writeBusIDFile atomically persists id to path, mode 0600, through the shared
+// atomicWriteFile (atomicfile.go): a temp file in the SAME directory is written,
+// fsynced and closed, then renamed into place, then the directory itself is
+// fsynced so the rename is durable. The temp file is removed on any error path.
+//
+// What remains here is the CONTENT contract, which is this file's alone and not
+// the writer's: the id, and a single trailing newline so the file is a well-
+// formed text line and `cat` of it reads sensibly (readBusIDFile trims it back
+// off). The atomic-replace sequence itself used to be duplicated verbatim in
+// suffixstore.go; it is now written once, because each of its steps is a
+// durability property that can rot in one copy while every test stays green.
+func writeBusIDFile(dir, path, id string) error {
+	return atomicWriteFile(dir, path, ".bus-id-*", []byte(id+"\n"))
 }
 
 // BusIdentity satisfies httpapi.Identity with a server-minted bus id.

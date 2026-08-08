@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,29 @@ const suffixFileMagic = "agent-bus-agent-suffixes"
 // it partially would lower a floor — which is the one thing this whole file
 // exists to make impossible.
 const suffixFileVersion = 3
+
+// suffixBlockSize is how many suffixes NextSuffix reserves for a name in one
+// durable write. Numbers within a reserved block are issued from memory with no
+// I/O at all; the next write happens only when the block is used up.
+//
+// It is a TUNING CONSTANT, not a reserved number: it does not appear on disk, it
+// is not part of the file format, and changing it needs no version bump. A file
+// written by a binary with a different block size is read identically, because
+// what is stored is a floor and the reader only ever needs "at least this high".
+//
+// The trade it sets:
+//
+//   - larger — fewer fsyncs per enrolment (one per suffixBlockSize), more
+//     unissued numbers skipped when a process dies mid-block;
+//   - smaller — the reverse.
+//
+// 64 is chosen as the smallest value that makes the write cost plainly
+// non-quadratic in enrol/leave churn while keeping the per-restart skip small
+// enough to stay legible to an operator reading agent ids. Both directions are
+// SAFE for invariant 1 — the durable floor is >= every issued suffix either way
+// — so this is a cost knob, not a correctness one. Setting it to 1 restores the
+// pre-amortisation behaviour exactly.
+const suffixBlockSize = 64
 
 // ErrSuffixFileCorrupt is returned by OpenNameSuffixes when the agent-suffixes
 // file exists but does not verify: bad header, unknown version, checksum
@@ -143,32 +167,59 @@ var ErrSuffixFileCorrupt = errors.New("ids: the persisted agent-id suffix floors
 // so the strong property holds unconditionally. The residual is a MIGRATION
 // window, not a permanent limit.
 //
-// # Cost
+// # Cost, and the block reservation that bounds it
 //
-// One atomic file replacement — two fsyncs, one of the file and one of the
-// directory — per issued suffix, plus one at Seal. Enrolment already pays the
-// WAL's prepare/commit fsyncs and a name is enrolled once per agent lifetime, so
-// the fsync COUNT is not the interesting part.
-//
-// The interesting part is the SHAPE of the write, and it is a genuinely new cost
-// class for this codebase, so it is stated rather than waved at. The whole floor
-// map is rewritten every time, which is O(distinct names EVER seen) per issued
-// suffix — where the WAL, being append-only, is O(record). And the map is
+// The whole floor map is rewritten on every write, which is O(distinct names
+// EVER seen) — where the WAL, being append-only, is O(record). And the map is
 // monotonic by design: a name is never forgotten, INCLUDING after the agent
 // leaves (point 5 of the NameSuffixes doc), because forgetting it is the reset
 // that reissues its ids.
 //
 // It is therefore WRONG to say, as an earlier draft of this comment did, that
 // bounding this is admission control's job "exactly as it is for the in-memory
-// map". The in-memory map costs O(1) per NEW name; this file costs O(N) per
-// EVERY enrolment, re-enrolments included. While the roster cap is a hard
-// lifetime cap on distinct names, N is bounded and the total is small. The day a
-// leave/revocation path frees roster slots, enrol-leave churn grows N without
-// bound while every enrolment rewrites all of it — cumulative I/O quadratic in
-// the churn, from an unauthenticated request. That needs an amortisation (write
-// a BLOCK of suffixes per name and hand them out from memory; the gaps that
-// leaves are already declared correct) and it is filed as a follow-up, not
-// something to discover in production.
+// map". The in-memory map costs O(1) per NEW name; the file used to cost O(N)
+// per EVERY issued suffix, re-enrolments included. While the roster cap is a
+// hard lifetime cap on distinct names, N is bounded and the total is small. The
+// day a leave/revocation path frees roster slots, enrol-leave churn grows N
+// without bound while every enrolment rewrites all of it — cumulative I/O
+// quadratic in the churn, from an unauthenticated request.
+//
+// So NextSuffix no longer writes per issued suffix. It reserves a BLOCK of
+// suffixBlockSize numbers for a name in one write and then issues them from
+// memory, writing again only when the block runs out. The file therefore holds a
+// RESERVED HIGH-WATER, not the highest suffix issued, and one write covers
+// suffixBlockSize enrolments of that name.
+//
+// # This does NOT weaken the write-ahead property — read this before changing it
+//
+// The property is unchanged and it is the whole point of the type: NO SUFFIX IS
+// EVER RETURNED BEFORE A FLOOR AT LEAST THAT HIGH IS DURABLE. Blocking makes the
+// durable floor HIGHER than the issued one, never lower:
+//
+//	reserve:  persist and fsync floor[name] = n + suffixBlockSize - 1
+//	issue:    hand out n, n+1, … up to that floor, from memory, no writes
+//
+// Every number handed out is <= a floor that was fsynced BEFORE the first of
+// them was returned. A crash at any instant therefore leaves disk >= every
+// suffix any client was ever told, so the next start resumes strictly above all
+// of them. A floor that is too HIGH is safe — it only skips numbers, and the
+// gaps that leaves are already declared correct by point 4 of the NameSuffixes
+// doc, which is why the amortisation is available at all. A floor that is too
+// LOW is id reuse. Any future change here must preserve the direction of that
+// inequality, not merely the fact that a write happens.
+//
+// What is given up, precisely: up to suffixBlockSize-1 unissued numbers per name
+// per process lifetime, because a restart resumes above the whole reserved block
+// rather than above the last issued suffix. That is a cosmetic jump in agent-id
+// suffixes across restarts and nothing more; at 64 per restart, exhausting a
+// uint64 name would take ~2.8e17 restarts.
+//
+// The residual, stated honestly: this amortises REPEAT use of a name by a factor
+// of suffixBlockSize. It does not bound the growth of the map itself — a churn
+// pattern that invents an ENDLESS SUPPLY OF NEW NAMES still writes once per new
+// name over a map that never shrinks, so the cumulative cost is still quadratic
+// in the number of DISTINCT names. Bounding that is admission control's job (the
+// roster cap), and this type cannot do it: it may not forget a name.
 //
 // # Single writer per data dir
 //
@@ -259,6 +310,13 @@ func (d *DurableNameSuffixes) Existed() bool { return d.existed }
 
 // Floors returns a copy of the floors currently held on DISK. It is a snapshot
 // for logging and tests; mutating it does not affect the allocator.
+//
+// Since the block reservation landed this is the RESERVED HIGH-WATER, not the
+// highest suffix issued: after one NextSuffix for a fresh name it reads
+// suffixBlockSize, not 1. That is the honest answer to "what does disk say", and
+// disk deliberately says something higher than what has been handed out — see
+// the block-reservation section on the type. For "what did I hand out", use
+// LastSuffix.
 func (d *DurableNameSuffixes) Floors() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -329,19 +387,29 @@ func (d *DurableNameSuffixes) Seal() error {
 	return nil
 }
 
-// NextSuffix allocates the next suffix for name, PERSISTING IT FIRST.
+// NextSuffix allocates the next suffix for name, NEVER RETURNING ONE THAT IS NOT
+// ALREADY COVERED BY A DURABLE FLOOR.
 //
 // The order is the whole contract of this type:
 //
 //	n := <the suffix the in-memory counter would issue next>   (nothing mutated)
-//	persist and fsync floor[name] = n                          (n is now BURNED)
+//	if n > <the floor on disk for name>:
+//	        persist and fsync floor[name] = n + suffixBlockSize - 1
+//	                                                           (a BLOCK is burned)
 //	commit n in memory
 //	return n
 //
+// The write is CONDITIONAL, and that is the only thing that changed when the
+// block reservation landed. The invariant it preserves is unchanged and
+// absolute: at the moment n is returned, a floor >= n has already been fsynced.
+// When n is inside a block reserved by an earlier call, that fsync happened
+// earlier — which is still "before", and is the entire saving.
+//
 // A failure at the persist step returns (0, err) and issues nothing: n has not
 // been handed out, so a later attempt legitimately yields n again. A crash at
-// any point burns n without issuing it, which leaves a gap — and gaps are
-// correct (point 4 of the NameSuffixes doc), never something to compact.
+// any point leaves the unissued remainder of the reserved block burned, which
+// leaves a gap — and gaps are correct (point 4 of the NameSuffixes doc), never
+// something to compact.
 //
 // An UNSEALED allocator issues nothing and writes nothing: it returns an error
 // satisfying errors.Is(err, ErrFloorUnproven) before touching the disk.
@@ -361,34 +429,53 @@ func (d *DurableNameSuffixes) NextSuffix(name string) (uint64, error) {
 		return 0, err
 	}
 
-	prev, had := d.durable[name]
-	d.durable[name] = n
-	if err := d.writeFloors(d.durable); err != nil {
-		// Roll the mirror back to what disk is KNOWN to hold.
-		//
-		// Be precise about why this is safe, because the tempting justification
-		// is false. It is NOT true that "the file never goes backwards": a write
-		// that in fact landed leaves disk at n while the mirror says prev, and
-		// the next write — for ANY name, since the whole map is written — then
-		// rewrites this name's entry back down to prev.
-		//
-		// The property that actually holds, and the one the restart guarantee
-		// rests on, is weaker but sufficient:
-		//
-		//	every map ever persisted is >= every suffix ever ISSUED
-		//
-		// It holds because d.durable[name] is only ever advanced to a value the
-		// in-memory counter has NOT yet issued, and is only left advanced when
-		// the write that carried it succeeded. n was never returned to anyone
-		// here, so no id bears it, and a floor that drops back to prev cannot
-		// collide with an id that does not exist. The number is simply un-burned
-		// and will be handed out later.
-		if had {
-			d.durable[name] = prev
-		} else {
-			delete(d.durable, name)
+	// The reserved block already covers n: it was fsynced by an earlier call, so
+	// n may be issued from memory with no I/O. This is the amortisation, and the
+	// comparison is the ONLY thing standing between it and id reuse — it must
+	// stay ">", so that n == the durable floor still counts as covered and
+	// n == floor+1 does not.
+	if n > d.durable[name] {
+		// Reserve a fresh block. The high-water saturates rather than wrapping:
+		// wrapping would set the floor BELOW the suffix being issued, which is
+		// precisely the reuse this type exists to prevent. Saturating leaves the
+		// floor at the maximum, which is safe — it simply means every remaining
+		// suffix for this name is already covered and needs no further write,
+		// until NameSuffixes' own exhaustion check refuses at MaxUint64.
+		high := n + suffixBlockSize - 1
+		if high < n {
+			high = math.MaxUint64
 		}
-		return 0, fmt.Errorf("allocating agent id suffix for %q: %w", name, err)
+
+		prev, had := d.durable[name]
+		d.durable[name] = high
+		if err := d.writeFloors(d.durable); err != nil {
+			// Roll the mirror back to what disk is KNOWN to hold.
+			//
+			// Be precise about why this is safe, because the tempting
+			// justification is false. It is NOT true that "the file never goes
+			// backwards": a write that in fact landed leaves disk at high while
+			// the mirror says prev, and the next write — for ANY name, since the
+			// whole map is written — then rewrites this name's entry back down
+			// to prev.
+			//
+			// The property that actually holds, and the one the restart
+			// guarantee rests on, is weaker but sufficient:
+			//
+			//	every map ever persisted is >= every suffix ever ISSUED
+			//
+			// It holds because this branch is reached only when prev < n, and n
+			// is the number the counter has NOT yet issued — so prev is exactly
+			// the highest suffix issued for this name, and rolling back to it
+			// still covers every id that exists. Nothing was returned to anyone
+			// here, so no id bears any number in the abandoned block; those
+			// numbers are simply un-burned and will be handed out later.
+			if had {
+				d.durable[name] = prev
+			} else {
+				delete(d.durable, name)
+			}
+			return 0, fmt.Errorf("allocating agent id suffix for %q: %w", name, err)
+		}
 	}
 
 	got, err := d.mem.NextSuffix(name)
@@ -399,6 +486,12 @@ func (d *DurableNameSuffixes) NextSuffix(name string) (uint64, error) {
 	}
 	if got != n {
 		return 0, fmt.Errorf("ids: internal error allocating agent id suffix for %q: persisted floor %d but the counter issued %d; the persisted floor no longer bounds the issued suffix", name, n, got)
+	}
+	if got > d.durable[name] {
+		// Belt to the braces above: the returned suffix must never exceed the
+		// floor on disk. If this ever fires the amortisation has broken invariant
+		// 1, so it refuses rather than returning the number.
+		return 0, fmt.Errorf("ids: internal error allocating agent id suffix for %q: issued %d but the durable floor is only %d; refusing to return a suffix that is not covered by a persisted floor", name, got, d.durable[name])
 	}
 	return n, nil
 }
@@ -599,59 +692,7 @@ func parseSuffixEntry(line string) (string, uint64, error) {
 	return name, n, nil
 }
 
-// atomicWriteFile writes data to path via a temp file in the SAME directory:
-// the temp file is written, chmodded 0600, fsynced and closed, renamed into
-// place, and then the directory itself is fsynced so the rename is durable. A
-// reader therefore sees either the complete old file or the complete new one,
-// never a torn one. The temp file is removed on every error path.
-//
-// This deliberately duplicates the sequence writeBusIDFile performs in busid.go
-// rather than refactoring that function to share it. writeBusIDFile is shipped,
-// tested and on the startup critical path, and unifying the two is a refactor
-// with no behavioural content — out of scope for this task under CLAUDE.md's
-// "do not refactor unless the task explicitly asks". The duplication is filed as
-// a follow-up (see this task's report); if either copy changes, BOTH must.
-func atomicWriteFile(dir, path, tmpPattern string, data []byte) (err error) {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("creating temp file in %s: %w", dir, err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err = tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("setting mode on %s: %w", tmpName, err)
-	}
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("syncing %s: %w", tmpName, err)
-	}
-	if err = tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-
-	if err = os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("renaming %s to %s: %w", tmpName, path, err)
-	}
-
-	dirFile, derr := os.Open(dir)
-	if derr != nil {
-		err = fmt.Errorf("opening %s to fsync directory entry: %w", dir, derr)
-		return err
-	}
-	defer dirFile.Close()
-	if serr := dirFile.Sync(); serr != nil {
-		err = fmt.Errorf("syncing directory %s: %w", dir, serr)
-		return err
-	}
-	return nil
-}
+// The atomic temp-file-plus-rename writer this file's floors are persisted
+// through lives in atomicfile.go, shared with busid.go's writeBusIDFile. It used
+// to be a second, byte-identical copy here; see atomicWriteFile's doc for why
+// exactly one copy is a durability property and not a style preference.
