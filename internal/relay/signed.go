@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
 
@@ -19,6 +20,25 @@ import (
 // a refusal too, but it blames a THIRD party — the operators, on both ends, who
 // have not peered these buses — and it is kept separate for exactly that reason.
 // All are FINAL: a retrying peer must never be told to send the same bytes again.
+//
+// THESE ARE NOT THE ONLY SENTINELS A CALLER MAY TEST FOR (RELAY-27). A failure
+// coming out of CrossBusTrust keeps its OWN sentinel as well — errors.Is finds
+// it THROUGH the relay sentinel, because VerifyRelayed returns an
+// *attributionError carrying both. That holds for any error a trust returns
+// rather than for an enumerated set — attest exports SEVEN sentinels today and
+// the wrapping is uniform, so it covers the two (ErrOriginBusMismatch,
+// ErrNoClock) that the five RELAY-27 was filed about do not name — with ONE
+// exception: an error that already carries a relay wire answer of its own is
+// severed from the chain, so a trust cannot steer the ingress by wrapping one of
+// this package's sentinels. See AttestedSignerKey's doc and the guard in
+// VerifyRelayed.
+//
+// The five it does name are attest.ErrExpired, attest.ErrUnpinned,
+// attest.ErrAgentIDMismatch, attest.ErrInvalid and attest.ErrVerify. Before
+// RELAY-27 all of them collapsed into ErrNoSignerKey and every one answered a
+// peer "bad_signature" — telling an operator to hunt a forgery on the two most
+// common non-forgeries there are, an unfinished peering and a message that
+// queued past its attestation's expiry.
 var (
 	// ErrMissingSignature reports an envelope with no signature, or with
 	// something that cannot be one (a wrong length). The two are one error on
@@ -61,6 +81,146 @@ var (
 	// nothing distinguishes those three from here.
 	ErrBadSignature = errors.New("relay: relayed message signature does not verify")
 )
+
+// attributionError carries TWO answers at once: the RELAY sentinel that decides
+// what the PEER is told, and the CAUSE, whose own sentinels must survive to
+// local callers and to our logs.
+//
+// # WHY A TYPE AND NOT TWO %w VERBS — READ THIS BEFORE "SIMPLIFYING" IT
+//
+// The obvious spelling is fmt.Errorf("%w: …: %w", sentinel, cause), and it is
+// WRONG ON THIS TOOLCHAIN. Multiple %w verbs are a go1.20 feature. go.mod pins
+// go1.19 and the digest-pinned builder at Dockerfile:15 is golang:1.19.4, where
+// fmt wraps NEITHER operand and renders the second literally as
+// "%!w(*errors.errorString=&{…})". errors.Is then answers false for BOTH — so
+// the naive fix would deliver no cause AND silently destroy
+// errors.Is(err, ErrNoSignerKey), which ErrorCode depends on for the wire code.
+//
+// go vet DOES catch that exact spelling — "fmt.Errorf call has more than one
+// error-wrapping directive %w" — and vet is mandated before every commit, so the
+// literal two-%w edit is caught by the toolchain rather than by us. What vet
+// does NOT catch is the same mistake reached any other way: a %v that should
+// have been a %w, a helper that drops the chain, or an Unwrap that returns the
+// wrong operand — and no positive test notices either, because a passing path
+// never inspects an error. TestSignedRelayPreservesAttestSentinels therefore
+// asserts errors.Is in BOTH directions on the SAME error value, and additionally
+// fails on any "%!w(" in the text so the outcome is legible rather than
+// mysterious if one ever slips through. errors.Join is unavailable for the same
+// go1.20 reason.
+//
+// Unwrap exposes the CAUSE and Is answers for the RELAY sentinel: one value, two
+// chains, no fmt verb involved in either.
+type attributionError struct {
+	// sentinel is the relay-level sentinel ErrorCode maps onto the wire. It is
+	// ALWAYS one of this file's package-level sentinels — a leaf error — which
+	// is what lets Is compare directly and terminate.
+	sentinel error
+
+	// cause is the CrossBusTrust implementation's own error, kept INTACT so its
+	// sentinels remain reachable with errors.Is.
+	//
+	// It is NIL when that error already carried a relay wire answer of its own —
+	// see the guard at the construction site, which refuses to let a trust
+	// launder an attribution refusal into some other outcome. The diagnosis is
+	// not lost when that happens; it is in msg.
+	cause error
+
+	// msg is rendered once at construction. It quotes only ids this package has
+	// already validated and bounded, and it never leaves the process: the relay
+	// handler answers a peer with the CODE alone (relayhttp.go, "the detailed
+	// error stays local").
+	msg string
+}
+
+func (e *attributionError) Error() string { return e.msg }
+
+// Unwrap yields the CAUSE, which is what makes attest.ErrExpired,
+// attest.ErrUnpinned, attest.ErrAgentIDMismatch, attest.ErrInvalid and
+// attest.ErrVerify reachable through this error instead of stopping dead at the
+// relay sentinel.
+//
+// It returns NIL when the cause was severed by the guard in VerifyRelayed — see
+// the cause field above. errors.Is then stops after Is, which is the intent: the
+// relay sentinel still answers, and only the hijack is refused.
+func (e *attributionError) Unwrap() error { return e.cause }
+
+// Is answers for the RELAY sentinel. errors.Is consults this method BEFORE it
+// unwraps, so one value matches both its relay sentinel and everything in the
+// cause chain.
+//
+// The comparison is a direct == and not a recursive errors.Is: sentinel is
+// always a leaf from this file, so there is nothing beneath it to search, and a
+// direct compare provably cannot re-enter this method. Comparing two interface
+// values whose dynamic types differ yields false rather than panicking, so a
+// non-comparable target is safe here.
+func (e *attributionError) Is(target error) bool { return e.sentinel == target }
+
+// relaySentinelForTrustError decides which relay sentinel — and therefore which
+// wire code and status — a CrossBusTrust failure is answered with.
+//
+// It maps onto sentinels that ALREADY EXIST. No wire code is invented here:
+// every code these reach is already in ErrorCode (peer.go) and already in the
+// peerErrorCode allow-list RELAY-9 tightened (client.go), so a taxonomy fix does
+// not become a protocol change and neither of those files is touched.
+//
+// The arms are MOST SPECIFIC FIRST and must stay that way, mirroring ErrorCode.
+//
+//   - attest.ErrUnpinned -> ErrUnpeeredBus (403 CodeUnpeeredBus). This is
+//     attest's own documented instruction ("Callers map this onto relay's
+//     ErrUnpeeredBus, whose remedy is an operator action, never a retry") and it
+//     is the single most valuable arm: it is the ONLY diagnosis here with an
+//     operator remedy — complete the peering — and it is the ordinary day-one
+//     state of an unfinished federation. Answered "bad_signature", as it was
+//     before RELAY-27, it sends an operator hunting a forgery that never
+//     happened.
+//
+//   - attest.ErrInvalid -> ErrInvalidRelay (400 CodeInvalidRelay). Also attest's
+//     own instruction: "a caller mapping this package's errors onto the wire
+//     should answer it as a malformed request, not as a refusal to attribute."
+//     The peer sent an attestation that cannot even be canonicalized, so nobody
+//     could check it — a 400, not the 403 it used to get. NOT CodeUnsigned:
+//     that tells a peer it did not sign its message, which is false and
+//     misdirecting — the message may be signed perfectly well; what is malformed
+//     is the ATTESTATION beside it, which is a bad field in the envelope, which
+//     is exactly what ErrInvalidRelay means.
+//
+//   - everything else -> ErrNoSignerKey (403 CodeBadSignature). FAIL-CLOSED, and
+//     it is the default rather than an enumeration on purpose: a CrossBusTrust
+//     is an interface anyone may implement, so an error this function has never
+//     seen — from a store, a future attest sentinel, a wiring bug — must land on
+//     a REFUSAL. An unrecognised failure that fell through to "allow" would be
+//     the unauthenticated relay ingress this whole file exists to prevent.
+//
+// WHAT TAKES THE DEFAULT ARM, AND THE TWO GAPS LEFT IN IT. attest.ErrVerify,
+// attest.ErrAgentIDMismatch, attest.ErrOriginBusMismatch, attest.ErrExpired and
+// attest.ErrNoClock all answer ErrNoSignerKey / 403 bad_signature. For the first
+// three that is the right answer — they are genuine refusals to attribute. The
+// other two are KNOWN GAPS, deliberately left (follow-up RELAY-27-FU-EXPIRED):
+//
+//   - attest.ErrExpired: a peer is told "bad_signature" for an EXPIRED
+//     attestation, which attest itself warns is far more often an honest message
+//     queued across a partition than a forgery.
+//   - attest.ErrNoClock: a LOCAL wiring fault of OURS — attest gives it a
+//     separate sentinel precisely so it "cannot be reported to a peer as its bad
+//     request" — yet it answers a peer 403, i.e. non-retriable, so our bug makes
+//     the peer permanently drop a message that was fine.
+//
+// Both are PRE-EXISTING, not RELAY-27 regressions: before this change everything
+// here was bad_signature. Fixing either on the WIRE needs a stable code that is
+// RESERVED, never chosen (CLAUDE.md), plus arms in handshake.go, peer.go and
+// client.go — three files this task does not own. What RELAY-27 does deliver is
+// that the SENTINEL now survives, so this bus's own logs and callers can tell all
+// five apart even while the peer-facing code is still coarse.
+func relaySentinelForTrustError(err error) error {
+	switch {
+	case errors.Is(err, attest.ErrUnpinned):
+		return ErrUnpeeredBus
+	case errors.Is(err, attest.ErrInvalid):
+		return ErrInvalidRelay
+	default:
+		return ErrNoSignerKey
+	}
+}
 
 // CanonicalBytes re-derives the exact bytes the sender signed, from the fields
 // THIS bus will route, deliver, attribute and log.
@@ -202,8 +362,35 @@ type CrossBusTrust interface {
 	// PEERING-TIME PIN of the origin bus's signing key, because that is the only
 	// input this method is given.
 	//
-	// Returning an error is always safe: VerifyRelayed turns any error, and any
-	// key of the wrong size, into ErrNoSignerKey, which is a refusal.
+	// RETURNING AN ERROR IS ALWAYS SAFE, AND THE ERROR YOU RETURN IS KEPT
+	// (RELAY-27). Every failure is a REFUSAL — there is no error this method can
+	// return that becomes an allow, and a key of the wrong size is a refusal too.
+	// What the error SELECTS is which refusal:
+	//
+	//	attest.ErrUnpinned  -> relay.ErrUnpeeredBus  (403 unpeered_bus)
+	//	attest.ErrInvalid   -> relay.ErrInvalidRelay (400 invalid_relay)
+	//	anything else       -> relay.ErrNoSignerKey  (403 bad_signature)
+	//
+	// and the error you return stays reachable with errors.Is through the one
+	// VerifyRelayed returns. So an implementation that wraps attest's sentinels
+	// gets attest's taxonomy on the wire and in the log for free, and one that
+	// returns anything else still fails closed.
+	//
+	// WITH ONE EXCEPTION, AND IT IS AN INSTRUCTION: DO NOT WRAP AN ERROR THAT
+	// ALREADY HAS A WIRE ANSWER — every relay sentinel, and idem's key errors
+	// too. If your error carries a relay wire answer of its own — anything
+	// ErrorCode recognises — it is SEVERED from the errors.Is chain and kept only
+	// in the message text. Otherwise a trust could steer the ingress by wrapping,
+	// say, ErrRelayLoop, which is answered 200 "settled, dropped" before
+	// ErrorCode is ever consulted, turning your refusal into a routine loop drop.
+	// A relay sentinel is relay's answer to give, not yours; return attest's
+	// sentinels, or your own.
+	//
+	// This REPLACES the previous contract, under which VerifyRelayed flattened
+	// every error here into ErrNoSignerKey. That flattening was deliberate but
+	// wrong in effect: it answered a peer "bad_signature" — forgery — for an
+	// unfinished peering and for an expired attestation alike. See
+	// relaySentinelForTrustError.
 	AttestedSignerKey(fqAgentID string, pinnedOriginBusSigningKeys []ed25519.PublicKey) (ed25519.PublicKey, error)
 }
 
@@ -218,6 +405,12 @@ type CrossBusTrust interface {
 // would be invisible in every test that happens to pass a CrossBusTrust. The
 // same posture covers a trust that errors and one that returns a key of the
 // wrong size — both are "we do not know who this is", which is a refusal.
+//
+// Fail-closed is about the OUTCOME, not the diagnosis. Every trust failure is
+// still a refusal; RELAY-27 only stopped them all being the SAME refusal. An
+// error this file has never seen still lands on ErrNoSignerKey — the default arm
+// of relaySentinelForTrustError is a refusal precisely so an unrecognised
+// failure can never become an allow.
 //
 // # THE ORDER OF THE CHECKS IS THE SECURITY PROPERTY, NOT AN OPTIMISATION
 //
@@ -238,7 +431,12 @@ type CrossBusTrust interface {
 //     means the pinning store is wrong, and proceeding would verify against a
 //     subset of what the operator believes is pinned.
 //  5. The origin bus's attestation for m.Sender, checked against those pins and
-//     nothing else.
+//     nothing else. A failure here is a refusal WHOSE SENTINEL IS PRESERVED
+//     (RELAY-27): relaySentinelForTrustError picks the relay sentinel that fixes
+//     the wire code, and the trust's own error — attest.ErrExpired,
+//     attest.ErrUnpinned, attest.ErrAgentIDMismatch, attest.ErrInvalid,
+//     attest.ErrVerify — stays reachable with errors.Is on the SAME returned
+//     value. It is no longer flattened into ErrNoSignerKey.
 //  6. The canonical bytes, re-derived from the fields THIS bus will act on.
 //  7. ed25519.Verify.
 //
@@ -303,7 +501,60 @@ func VerifyRelayed(m RelayedMessage, trust CrossBusTrust) error {
 	// m.Sender is likewise a validated, bounded, fully-qualified agent id.
 	pub, err := trust.AttestedSignerKey(m.Sender, pins)
 	if err != nil {
-		return fmt.Errorf("%w: sender %q: %v", ErrNoSignerKey, m.Sender, err)
+		// RELAY-27: the trust's error keeps its OWN sentinel. relaySentinelFor-
+		// TrustError picks the relay sentinel that fixes the wire answer, and
+		// attributionError carries BOTH, because go1.19 cannot wrap two errors
+		// with fmt (see attributionError's doc — the two-%w spelling wraps
+		// neither and would break errors.Is for both).
+		sentinel := relaySentinelForTrustError(err)
+
+		// THE CAUSE MAY NOT CARRY A RELAY WIRE ANSWER OF ITS OWN (security gate,
+		// RELAY-27 P2-1). Keeping the cause reachable is the point of this
+		// change, but it makes it reachable by EVERY errors.Is in the ingress,
+		// not only the ones looking for attest — and one of those is not a
+		// refusal at all: relayhttp.go tests ErrRelayLoop and answers 200
+		// "settled, dropped" BEFORE ErrorCode is ever consulted. A trust whose
+		// error wrapped ErrRelayLoop would therefore have an ATTRIBUTION REFUSAL
+		// laundered into a routine loop drop — counted as loopDrops, logged Info
+		// rather than Warn, and the peer told not to retry a message we in fact
+		// refused. That is invariant 6's "every discard is LOGGED, loudly and
+		// specifically" failing silently.
+		//
+		// ErrorCode is the SELF-MAINTAINING test for "this error already means
+		// something to relay": it answers CodeInternal for everything it does not
+		// recognise, so a cause that already has a code is dropped from the
+		// CHAIN while remaining in the TEXT above — where the diagnosis is wanted
+		// and where it decides nothing. A hand-written list of relay sentinels
+		// here would go stale the first time one was added elsewhere.
+		//
+		// internal/attest cannot trip this (it imports only ids and signing, so
+		// it cannot name a relay sentinel), and that is exactly why the guard is
+		// code rather than a sentence in the interface doc: CrossBusTrust is an
+		// INTERFACE, and a future in-tree implementation is under no such
+		// constraint.
+		//
+		// ACCEPTED RESIDUAL (security gate re-verification, LOW): an error whose
+		// Is() method is STATEFUL — false on this one classifying probe, true
+		// when the ingress asks — still slips through. No single classification
+		// can be immune to an Is() that lies, and reaching it requires a hostile
+		// in-tree CrossBusTrust, which is already trusted code inside the trust
+		// boundary. Not worth a second probe or a defensive copy.
+		//
+		// The other half of this rule is stated as an INSTRUCTION to implementors
+		// on AttestedSignerKey ("do not wrap a relay sentinel"), because a cause
+		// wrapping BOTH an attest sentinel and a relay-coded error would lose the
+		// attest one here. That is unreachable through fmt on go1.19 — it needs a
+		// hand-written multi-Is type — so it is documented rather than coded
+		// against.
+		cause := err
+		if ErrorCode(err) != CodeInternal {
+			cause = nil
+		}
+		return &attributionError{
+			sentinel: sentinel,
+			cause:    cause,
+			msg:      fmt.Sprintf("%s: sender %q: %v", sentinel, m.Sender, err),
+		}
 	}
 	// The length check is signing.ValidatePublicKey's and not a second copy of
 	// it. ed25519.Verify PANICS on a wrong-sized public key, so the guard is a
