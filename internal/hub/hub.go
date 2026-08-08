@@ -152,6 +152,21 @@ type Options struct {
 	// It is READ THROUGH on every check, never copied: see RosterSource.
 	Roster RosterSource
 
+	// RemoteRouter admits recipients this bus does NOT hold but that a peer bus
+	// does (RELAY-16). It is OPTIONAL and nil is the correct value for a bus that
+	// is not federated.
+	//
+	// Nil is not a degraded mode and has NO default: with no router every
+	// recipient absent from Roster is refused with ErrUnknownRecipient, which is
+	// precisely what this bus did before the seam existed. Contrast Roster, whose
+	// absence is a startup ERROR — an empty roster is silently catastrophic
+	// because it makes the bus serve nobody, whereas an absent router only
+	// declines to widen admission, which is the safe direction.
+	//
+	// It never overrides the roster: see RemoteRouter and Hub.routeRemote for why
+	// an id in THIS bus's namespace is never offered to it.
+	RemoteRouter RemoteRouter
+
 	// Durable is the two-phase write path. When nil the hub serves reads and
 	// refuses every send with ErrNotDurable — invariant 4 has no "best effort"
 	// setting.
@@ -406,13 +421,23 @@ type Hub struct {
 	// not an optimisation. Set once in Open, never replaced.
 	roster RosterSource
 
+	// router is the OPTIONAL egress-admission seam (RELAY-16). Nil on a
+	// non-federated bus, and nil is behaviourally identical to the bus before the
+	// seam existed. Set once in Open, never replaced; it is consulted only
+	// through routeRemote, which is where the invariants on its answer live.
+	router RemoteRouter
+
 	// recovered holds every agent id named as a sender or a recipient by a
 	// message replayed from disk at startup. It is written only during Open and
 	// read-only afterwards, so it needs no lock.
 	//
-	// It exists to make ONE thing observable: an id that appears here and is
-	// NOT in the roster is an id whose holder is gone and whose name could be
-	// minted again, which invariant 1 forbids. See noteRecoveredIdentities.
+	// It exists to make ONE thing observable: a LOCALLY-QUALIFIED id that appears
+	// here and is NOT in the roster is an id whose holder is gone and whose name
+	// could be minted again, which invariant 1 forbids. Since RELAY-16 a durable
+	// record may also name a FOREIGN recipient, which this bus's roster was never
+	// going to hold and which says nothing about this bus's id space; the
+	// consumer filters those out rather than the harvest, so this map stays the
+	// raw fact about what was written. See noteRecoveredIdentities.
 	recovered map[string]struct{}
 
 	waitMu sync.Mutex
@@ -480,6 +505,7 @@ func Open(o Options) (*Hub, error) {
 		now:            o.Now,
 		pollTimeout:    o.PollTimeout,
 		roster:         o.Roster,
+		router:         o.RemoteRouter,
 		recovered:      make(map[string]struct{}),
 		waiters:        make(map[*waiter]struct{}),
 		waitersByAgent: make(map[string]int),
@@ -1150,7 +1176,12 @@ func (h *Hub) Broadcast(req BroadcastRequest) (Result, error) {
 // waiters. It returns only once the message is committed and fsynced
 // (invariant 4).
 //
-// An unknown recipient is ErrUnknownRecipient and nothing is written.
+// The recipient must be addressable: either enrolled on THIS bus, or — since
+// RELAY-16 — a foreign id that the configured RemoteRouter says a peer bus holds.
+// Anything else is ErrUnknownRecipient and nothing is written. A message accepted
+// for a remote recipient is durable on this bus before this returns, exactly like
+// a local one (invariant 4); handing it onward is a later, separate step and is
+// never a substitute for the write.
 func (h *Hub) Send(req SendRequest) (Result, error) {
 	if _, _, _, err := ids.ParseAgentID(req.To); err != nil {
 		return Result{}, fmt.Errorf("%w: %s", ErrInvalidRecipient, err)
@@ -1241,13 +1272,39 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %q", ErrUnknownSender, sender)
 	}
 	for _, r := range recipients {
-		if !h.Enrolled(r) {
-			// Checked BEFORE the write so an unknown recipient costs nothing
-			// durable. Note it is checked against this bus's roster only: the
-			// RELAY epic is what will make a foreign "<bus>.<agent>" routable,
-			// and until then a 404 is the truthful answer.
+		// THE ROSTER IS ASKED FIRST, AND BEFORE THE DURABLE WRITE. Both halves of
+		// that sentence are requirements, not style.
+		//
+		// BEFORE THE WRITE, so a recipient nobody can reach costs nothing durable —
+		// and, since cca64afd, because a local id admitted by anything other than
+		// the roster is a permanent id-space injury: a relay ingest naming
+		// "<local-bus>.alpha-18446744073709551615" would push that name's suffix
+		// floor to the top and exhaust "alpha" across every future restart (see
+		// cmd/agent-bus/suffixfloors.go). Do not move this below the write.
+		//
+		// FIRST, so the roster remains the ONLY authority on this bus's own
+		// namespace. routeRemote enforces the same thing from its side by refusing
+		// to offer a locally-qualified id to the router at all.
+		if h.Enrolled(r) {
+			continue
+		}
+		// NOT ON THE ROSTER. Before RELAY-16 that was the end of it. Now a
+		// FOREIGN "<bus>.<agent>" may be admissible if a peer bus holds it — and
+		// with no router configured, routeRemote returns false for everything, so
+		// this reduces to the pre-RELAY-16 refusal exactly.
+		if _, ok := h.routeRemote(r); ok {
+			continue
+		}
+		if h.router == nil {
+			// Byte-identical to the pre-RELAY-16 message: a bus with no router
+			// must not report federation it does not have.
 			return Result{}, fmt.Errorf("%w: %q is not enrolled on this bus", ErrUnknownRecipient, r)
 		}
+		// A federated bus can say more, and should: "unknown" here means BOTH
+		// authorities were asked and neither holds the recipient. The honest 404
+		// is the feature — a routable-looking id that no peer advertises must not
+		// be accepted and then silently dropped.
+		return Result{}, fmt.Errorf("%w: %q is not enrolled on this bus and no peer bus advertises it", ErrUnknownRecipient, r)
 	}
 
 	h.writeMu.Lock()

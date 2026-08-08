@@ -2,8 +2,11 @@ package hub
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
 // Agent is one entry of the bus's agent list, as GET /v1/agents returns it.
@@ -69,6 +72,127 @@ type RosterSource interface {
 	// straight to the HTTP layer, so a source that returned its own backing
 	// array would let a response handler edit the roster.
 	List() []Agent
+}
+
+// RemoteRouter answers ONE question, for a recipient this bus does NOT hold:
+// is that fully-qualified id reachable through a peer bus, and which peer.
+//
+// It is the egress-admission seam (RELAY-16). It is OPTIONAL — Options.RemoteRouter
+// may be nil, and a nil router means this bus is not federated, so every recipient
+// it does not hold is refused with ErrUnknownRecipient exactly as it was before
+// this interface existed. That equivalence is the point: the seam lands before
+// anything is wired to it, and the non-federated bus cannot tell the difference.
+//
+// # What it is NOT
+//
+// It is not delivery. Route is a QUESTION asked BEFORE the durable write, so that
+// a recipient nobody can reach costs nothing durable and gets the truthful 404 it
+// got before. Answering true is an assertion that the message is DELIVERABLE, not
+// a request to deliver it: the message becomes durable on this bus first
+// (invariant 4), and the egress path that carries it to peerBusID is a separate
+// mechanism with its own durable outbox. A router that says "yes" for an id no
+// peer actually holds converts an honest refusal into an accepted-then-dropped
+// message, which is the one outcome this task exists to avoid.
+//
+// # THE SEQUENCING CONSTRAINT — DO NOT INJECT A ROUTER EARLY
+//
+// For that same reason, no router may be wired until the egress path that carries
+// an admitted message onward exists and is durable. Injecting one sooner does not
+// make the bus federated: it makes it accept messages it has no way to deliver,
+// silently, having removed the truthful 404 that was protecting the client. An
+// unwired seam refuses honestly; a wired seam with nowhere to send is exactly the
+// failure this seam exists to prevent, reached through the front door.
+//
+// # The contract on the answer
+//
+// peerBusID must be a valid bus id (ids.ValidateBusID) and must NOT be this bus:
+// this bus's own agents are the ROSTER'S business, and a router that claims one
+// would be answering a question it was never asked. Both are checked by the hub
+// and a violation is refused and logged at ERROR rather than trusted — the router
+// is in-process code, but it is the component that turns a 404 into an
+// acceptance, so its answer is validated like any other input.
+//
+// An implementation MUST be safe for concurrent use: Route is called from request
+// goroutines, once per non-local recipient, on the send path.
+type RemoteRouter interface {
+	// Route reports the peer bus that agentID is reachable through, and whether
+	// it is reachable at all. It must not block: it sits on the send path,
+	// before the durable write, and every caller is holding a client's request
+	// open.
+	Route(agentID string) (peerBusID string, ok bool)
+}
+
+// routeRemote reports whether recipient is admissible as a REMOTE recipient, and
+// through which peer.
+//
+// The order of the checks is the whole of its correctness:
+//
+//  1. NO ROUTER => not routable. This is what makes a nil router behaviourally
+//     identical to the bus before RELAY-16: publish's recipient loop falls
+//     straight through to the same ErrUnknownRecipient it always returned.
+//  2. MALFORMED => not routable. A recipient that is not a fully-qualified
+//     "<bus-id>.<agent-id>" names nobody (invariant 2), so there is nothing to
+//     route and no router is consulted about it.
+//  3. THIS BUS'S OWN NAMESPACE => not routable, WITHOUT asking the router. The
+//     local roster is the ONLY authority on ids qualified with this bus, and this
+//     line is what keeps that true: were a router able to admit
+//     "<local-bus>.alpha-18446744073709551615", relay ingest could make the bus
+//     accept a local id that was never minted here and permanently exhaust the
+//     name "alpha" across every future restart (cca64afd's precondition; see
+//     cmd/agent-bus/suffixfloors.go). The roster check therefore both PRECEDES
+//     the durable write and remains the last word for local ids.
+//  4. Only then is the router asked, and its answer is validated.
+//
+// BOTH COMPARISONS AGAINST THIS BUS'S OWN ID ARE CASE-INSENSITIVE, and that is
+// deliberate rather than sloppy. ids.BusIDPattern admits both cases, but every
+// comparison in internal/relay is folded (registry.go, peer.go, path.go), so the
+// layer that will IMPLEMENT this interface already treats "PeerBus" and "peerbus"
+// as one bus. A guard whose failure is PERMANENT — the exhausted agent name — must
+// not be the looser of two comparisons, and folding here can only ever produce an
+// additional REFUSAL, never an additional acceptance.
+func (h *Hub) routeRemote(recipient string) (string, bool) {
+	if h.router == nil {
+		return "", false
+	}
+	busID, _, _, err := ids.ParseAgentID(recipient)
+	if err != nil {
+		return "", false
+	}
+	if strings.EqualFold(busID, h.busID) {
+		return "", false
+	}
+	peer, ok := h.router.Route(recipient)
+	if !ok {
+		return "", false
+	}
+	// The answer is validated, not trusted. A router that returns ok with an
+	// empty or malformed peer — or with THIS bus — has admitted a message to
+	// nowhere, and admitting it would replace an honest 404 with silent loss.
+	// Refusing here keeps the refusal truthful; logging it at ERROR keeps the
+	// misconfiguration from being invisible (invariant 6's rule: never silent).
+	//
+	// THE PEER STRING ITSELF IS NOT ECHOED, only its LENGTH. ids.ValidateBusID
+	// formats the offending id with %q and applies no length cap of its own, so
+	// logging the error would put an arbitrarily long value into a log line — the
+	// same echo ids.ParseAgentID checks its length first specifically to avoid.
+	// The router is in-process code an operator wrote, and "your router returned a
+	// peer bus id of N bytes that is not a legal bus id" locates the bug without
+	// making the log a channel for whatever it returned.
+	if err := ids.ValidateBusID(peer); err != nil {
+		h.log.Error("REMOTE ROUTER RETURNED AN UNUSABLE PEER BUS ID: the recipient is being refused as unroutable rather than accepted for delivery to a bus that cannot be named; a message accepted here would be durably stored and never deliverable. The value is reported by LENGTH only, because it is unvalidated and headed for a log line",
+			"recipient", recipient,
+			"peer_bytes", len(peer),
+		)
+		return "", false
+	}
+	if strings.EqualFold(peer, h.busID) {
+		h.log.Error("REMOTE ROUTER CLAIMED A RECIPIENT IS REACHABLE VIA THIS BUS ITSELF: only the roster may admit an id in this bus's namespace, and the recipient is not on it, so the send is refused",
+			"recipient", recipient,
+			"bus_id", h.busID,
+		)
+		return "", false
+	}
+	return peer, true
 }
 
 // StaticRoster is an in-memory RosterSource with an Add method: the roster of a
@@ -177,8 +301,9 @@ func (h *Hub) enrolmentEpoch(agentID string) (time.Time, bool) {
 	return a.EnrolledAt, true
 }
 
-// noteRecoveredIdentities reports, at ERROR, every agent id that a message
-// replayed from disk names but that the roster does NOT hold.
+// noteRecoveredIdentities reports, at ERROR, every agent id IN THIS BUS'S OWN
+// NAMESPACE that a message replayed from disk names but that the roster does NOT
+// hold. Ids qualified with another bus are skipped — see the filter in the loop.
 //
 // # What this is, and why it survived the deletion of NoteEnrolment
 //
@@ -234,6 +359,36 @@ func (h *Hub) noteRecoveredIdentities() {
 	}
 	missing := make([]string, 0, len(h.recovered))
 	for id := range h.recovered {
+		// ONLY IDS IN THIS BUS'S OWN NAMESPACE ARE CANDIDATES (RELAY-16).
+		//
+		// This detector's claim is a strong one — "a different keypair once held
+		// this id, and the name it was minted from is free again" — and it is a
+		// claim about THIS bus's id space, which this bus's roster is the
+		// authority on. Before egress admission every recovered id was local by
+		// construction (a send could name no other kind), so no filter was needed;
+		// once a message may durably name "<peer>.<agent>", every foreign
+		// recipient is by definition absent from the local roster and would be
+		// reported here on EVERY start, for ever, as a reuse that never happened.
+		//
+		// That is not merely noise, it is two defects. It makes the false half
+		// drown the true half, which is the shape of a lost floors file and the
+		// only reason this line exists. And the ids are chosen by whoever sent the
+		// messages, so an unfiltered list is a client-influenced, uncapped value
+		// re-emitted at every startup of a log that never compacts.
+		//
+		// cmd/agent-bus/suffixfloors.go and internal/auth/floors.go already filter
+		// the same SHAPE for the same reason — a foreign id burned no LOCAL suffix
+		// — though both compare exactly rather than folding. The difference is
+		// deliberate and each is on its own safe side: an exact match there SKIPS
+		// fewer ids and so derives a HIGHER floor, while folding here KEEPS more
+		// ids and so reports MORE. Both err towards the loud answer.
+		//
+		// A malformed id is kept — it is qualified with nothing, it should never
+		// have reached disk (store.Decode parses every sender and recipient), and
+		// on the day one does it is worth shouting about.
+		if bus, _, _, err := ids.ParseAgentID(id); err == nil && !strings.EqualFold(bus, h.busID) {
+			continue
+		}
 		if _, ok := h.roster.Lookup(id); !ok {
 			missing = append(missing, id)
 		}
