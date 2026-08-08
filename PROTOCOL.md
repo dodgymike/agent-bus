@@ -611,12 +611,19 @@ field would be a second claim that could disagree with the first.
 **Recipient ORDER is outside the signed payload, and every other notion of "the same message" must
 agree with that.** `Canonicalize` sorts a copy of the recipient set, so one signature covers every
 permutation of one set. The relay's idempotency fingerprint (`relayFingerprint`) therefore sorts too.
-It did not always, and the mismatch was a weapon rather than an inconsistency: a peer that merely
-re-ordered a legitimately signed recipient array produced the *same* idempotency key — the origin
-message id — with a *different* fingerprint, which is `idem.OutcomeViolation`, which invariant 10
-requires be answered by **disconnecting the sender**. Re-ordering was thus a way to get an honest peer,
-holding a perfectly valid signature, disconnected. **The rule to carry forward: the fingerprint's
-notion of "the same payload" must match the signature's, exactly.** Nothing is lost by sorting —
+It did not always, and the mismatch was a defect worth closing regardless of severity: a peer that
+merely re-ordered a legitimately signed recipient array produced the *same* idempotency key — the
+origin message id — with a *different* fingerprint, which is `idem.OutcomeViolation`. Invariant 10
+as narrowed (2026-08-08) answers `OutcomeViolation` with reject-and-log only, never a disconnect —
+so re-ordering can no longer get an honest peer's connection dropped — but reject-and-log is still
+the wrong answer here: `idem.Store.Lookup` remembers only the FIRST fingerprint it saw under a key
+(`internal/idem/store.go`), so whichever re-ordered copy arrives first is accepted as `OutcomeNew`
+and delivered — the harm lands on the *second* arrival, which is not new content from a confused or
+malicious sender, it is the SAME signed payload honestly re-sent, and treating it as a violation means
+the honest peer can never get THAT delivery acknowledged on this route (until the key's retention
+window expires) and is logged as a protocol violator for content it was never told was wrong.
+**The rule to carry forward: the fingerprint's notion of "the same payload" must match the
+signature's, exactly.** Nothing is lost by sorting —
 re-*addressing* a message changes the recipient set, hence the sorted list, hence both the fingerprint
 and the canonical bytes, so a retry still cannot quietly re-address anything. Only a pure permutation
 collapses, and it collapses because the sender signed a set and not a sequence.
@@ -894,9 +901,12 @@ topology, the *same* message legitimately arrives at one bus by more than one ro
 carries a *different* `bus_path` — that is the normal steady state, not an edge case. If the path were
 covered by the fingerprint, the second arrival would present the same idempotency key (the origin
 message id — see below) with a different fingerprint, which is `idem.OutcomeViolation`. CLAUDE.md
-invariant 10 mandates that a violation is rejected, logged, **and the offending peer disconnected** —
-so covering the path would make two correct peers disconnect each other as the *ordinary* behaviour of
-a correct mesh, a self-inflicted partition produced by the very mechanism meant to make retries safe.
+invariant 10 (as narrowed 2026-08-08) mandates that a violation is rejected and logged — it does
+**not** disconnect the sender, so covering the path would no longer partition a correct mesh — but it
+would still make every second-and-later arrival of one message over a diamond topology get rejected
+and logged as a protocol violation against a peer that did nothing wrong, which is exactly the false
+positive the fingerprint exists to avoid: the *ordinary* behaviour of a correct mesh would be
+misclassified as an attack on every legitimately duplicate delivery.
 Relatedly, the relay idempotency key is not a per-hop value the forwarding peer mints — it **is** the
 origin's `message_id` (`idem.HeaderName` on the wire), enforced by `ValidateRelayRequest`. That
 identity is what makes two copies of one message, arriving by two disjoint paths, resolve to *one*
