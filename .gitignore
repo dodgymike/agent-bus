@@ -13,3 +13,82 @@
 # local agent config / scratch
 /.claude/settings.local.json
 /scratch/
+
+# secrets — NEVER commit key material (CORE-10)
+#
+# This is a mechanical backstop, not a policy. Anything that stages with
+# `git add -A` (a stop hook, a `git commit -a`, an agent tidying up) will
+# happily commit a private key that landed in the working tree, because none of
+# its guards look for credentials. These patterns make that a non-event.
+#
+# It becomes materially more important once the CRYPTO epic starts writing
+# agent Ed25519 private keys and the bus's self-signed TLS key to disk
+# (invariants 3 and 11) — at that point key material in the tree is the normal
+# case rather than an accident.
+#
+# The real spec-cloud credentials already live OUTSIDE the repo and must stay
+# there; this is defence for the material we cannot keep out.
+#
+# NOT listed, deliberately: *.crt / *.cer. A certificate is the PUBLIC half —
+# invariant 11 pins the bus's self-signed cert fingerprint into the invite blob
+# precisely so it can be handed around — and a test fixture certificate is a
+# thing this repo may legitimately want to track. Ignoring the public half buys
+# no secrecy and would silently drop a fixture someone meant to commit.
+#
+# If you ever need to commit one of the files below on purpose, `git add -f`
+# says so explicitly and shows up in review. That is the intended escape hatch.
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+*credentials*
+*-creds*
+*_creds*
+id_rsa*
+id_ed25519*
+*.token
+
+# ...but NEVER a source or script file, and never a directory. The three name
+# patterns above are unanchored substring matches, so without these negations a
+# perfectly ordinary `internal/auth/credentials.go`, `session_creds.go`,
+# `credentials_test.go`, `scripts/rotate-credentials.sh` or `credentials.md`
+# would be silently ignored — and an ignored file leaves `git status
+# --porcelain` CLEAN, which is precisely how half a change gets left behind in
+# the working tree (CLAUDE.md step 10; it has already left `main`
+# un-compilable in this repo once).
+#
+# Negation only re-includes paths an earlier pattern excluded, so these lines
+# cannot widen what is tracked beyond that over-match. They do NOT rescue
+# `*.pem` / `*.key` / `*.token` — nothing named `foo.key` is source.
+#
+# The directory negations are separate and necessary: those patterns match
+# DIRECTORIES too, and git will not even descend into an excluded directory, so
+# a negation on a file inside one cannot fire. Without them an
+# `internal/credentials/` package would be invisible in its entirety. Cost,
+# stated honestly: a data file inside such a directory (`credentials/api.json`)
+# becomes trackable again.
+!*credentials*/
+!*-creds*/
+!*_creds*/
+#
+# DELIBERATELY NOT NEGATED — reviewed 2026-08-08 and both gates agreed:
+#   *.yml / *.yaml — YAML is a DATA format, not source. `credentials.yml`,
+#     `db_creds.yaml`, `prod-creds.yaml` are far likelier to BE credentials than
+#     to be code about them, and negating them gave back the highest-value slice
+#     of this control for no benefit (the only YAML in this repo is
+#     `docker-compose.yml`, which no pattern above matches anyway).
+#   .env.example / *.json.example — a documented real-world leak vector: the
+#     file exists to be copied and someone eventually fills in a live value.
+#     Neither exists here. If one ships, `git add -f` it deliberately.
+!*.go
+!*.sh
+!*.md
+!*.py
+#
+# ...and `.env.*` back LAST, because the last matching pattern wins. A dotenv
+# file is never source whatever suffix it carries, and `!*.sh` above would
+# otherwise rescue `.env.sh` — a very common way to spell "a file full of
+# exported secrets".
+.env.*
