@@ -592,3 +592,37 @@ func (r *Registry) Roster(busID string) ([]string, uint64, bool) {
 	sort.Strings(out)
 	return out, st.version, true
 }
+
+// PeerBaseURL reports where a known peer lives, and whether one is known.
+//
+// Its signature is exactly ForwarderOptions.PeerBaseURL's, so a wiring site
+// can pass `registry.PeerBaseURL` directly instead of hand-writing its own
+// closure over the Registry's internals — which is the defect this method
+// fixes: every existing wiring site was doing that, and each one is a fresh
+// chance to get the locking wrong.
+//
+// It is SAFE FOR CONCURRENT USE, the same guarantee LocalRoster's doc states
+// on its two call sites (ClientConfig.LocalRoster, handshake.Config's
+// LocalRoster): this method takes the same RLock as Route and Knows, and it
+// is called concurrently by Enqueue and by every per-peer worker goroutine.
+// That concurrency is also what makes a RemovePeer or SetPeerBaseURL
+// observable to a job already sitting in a peer's retry queue: forward.go's
+// attempt re-resolves the address on every attempt rather than freezing it at
+// enqueue time precisely so a de-peering or an address move takes effect on
+// the NEXT attempt instead of being invisible for the rest of the retry
+// horizon (see "THE ADDRESS IS RE-RESOLVED ON EVERY ATTEMPT" in forward.go).
+//
+// An empty base URL is folded into "not found": SetPeerBaseURL is the only
+// way to give a peer a non-empty address, so a peer that has handshaked but
+// never had its address configured reports (_, false) rather than ("", true),
+// which would look like a routable, contactless peer to a caller checking
+// only the second return value.
+func (r *Registry) PeerBaseURL(busID string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	st, ok := r.peers[strings.ToLower(busID)]
+	if !ok || st.busID != busID || st.baseURL == "" {
+		return "", false
+	}
+	return st.baseURL, true
+}

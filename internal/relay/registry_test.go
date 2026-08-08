@@ -686,6 +686,65 @@ func TestRegistryRemovePeerAndBaseURL(t *testing.T) {
 	}
 }
 
+// TestRegistryPeerBaseURLObservesRemovePeer proves the property RELAY-8 is
+// actually about: not merely that PeerBaseURL returns the right string, but
+// that a RemovePeer landing MID-RETRY is visible to the very next call an
+// in-flight retry makes.
+//
+// It simulates Forwarder.attempt's per-attempt re-resolution
+// (forward.go:853, "THE ADDRESS IS RE-RESOLVED ON EVERY ATTEMPT") with a
+// goroutine that calls PeerBaseURL(peerBus) once per lockstepped "attempt",
+// and drives RemovePeer from the test BETWEEN two attempts of that SAME
+// simulated job — exactly the window a real retry sits in while it is queued
+// and re-resolving on every pass. If PeerBaseURL only reflected registry
+// state as of when the closure was built (the defect this accessor fixes),
+// or if the accessor were not lock-protected the same way Route and Knows
+// are, the second attempt would still see the stale, removed peer.
+func TestRegistryPeerBaseURLObservesRemovePeer(t *testing.T) {
+	r := newTestRegistry(t)
+	mustUpsert(t, r, peerBus, peerBus+".beta-1")
+	if err := r.SetPeerBaseURL(peerBus, "https://peer.example:8443"); err != nil {
+		t.Fatalf("SetPeerBaseURL: %v", err)
+	}
+
+	proceed := make(chan struct{})
+	results := make(chan bool)
+	go func() {
+		for i := 0; i < 3; i++ {
+			<-proceed
+			_, ok := r.PeerBaseURL(peerBus)
+			results <- ok
+		}
+	}()
+
+	// Attempt 1: the peer is known and addressed, exactly like the first
+	// attempt of a freshly enqueued job.
+	proceed <- struct{}{}
+	if ok := <-results; !ok {
+		t.Fatal("attempt 1: PeerBaseURL did not resolve a known, addressed peer")
+	}
+
+	// The operator de-peers WHILE the simulated job would still be retrying —
+	// there is no re-synchronisation here beyond the channel handshake above,
+	// so this is a genuine race between RemovePeer and the next attempt.
+	if !r.RemovePeer(peerBus) {
+		t.Fatal("RemovePeer reported no peer removed")
+	}
+
+	// Attempt 2: the IN-FLIGHT retry's very next re-resolution must observe
+	// the removal, not the address it was queued with.
+	proceed <- struct{}{}
+	if ok := <-results; ok {
+		t.Fatal("attempt 2: PeerBaseURL still resolved the peer after RemovePeer; an in-flight retry did not observe the removal")
+	}
+
+	// Attempt 3: a removed peer must never resolve again on its own.
+	proceed <- struct{}{}
+	if ok := <-results; ok {
+		t.Fatal("attempt 3: PeerBaseURL resolved a removed peer again; nothing re-added it")
+	}
+}
+
 func TestNewRegistryRejectsIncompleteOptions(t *testing.T) {
 	for _, tc := range []struct {
 		name string

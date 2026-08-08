@@ -199,6 +199,14 @@ type ForwarderOptions struct {
 	// PeerBaseURL reports where a peer lives. Required: without it the
 	// forwarder would have a routing decision and nowhere to send it, and
 	// defaulting it to anything at all would mean guessing at an address.
+	//
+	// It is called once per Enqueue (targets resolution) and, separately, once
+	// per attempt by every per-peer worker goroutine — see Forwarder.attempt's
+	// "THE ADDRESS IS RE-RESOLVED ON EVERY ATTEMPT" — so it MUST BE SAFE FOR
+	// CONCURRENT USE, the same requirement ClientConfig.LocalRoster and
+	// handshake.Config.LocalRoster already state on themselves. Registry's own
+	// PeerBaseURL method satisfies this (it takes Registry's RLock) and is the
+	// intended value here rather than a hand-written closure over a Registry.
 	PeerBaseURL func(peerBusID string) (string, bool)
 
 	// QueueDepth is the per-peer queue depth. 0 means DefaultQueueDepth;
