@@ -26,7 +26,8 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `GET` | `/healthz` | none | 200 | `{"status":"ok"}` |
 | `GET` | `/v1/info` | none | 200 | `{"bus_id":"...","version":"...","uptime_seconds":0.0,"discovery":"/v1/discovery"}` |
 | `GET` | `/v1/discovery` | none | 200 | **NEW 2026-08-07 (DISCOVERY-DOC).** The bounded, STATIC protocol-discovery document — observed ~6.1 KB in practice (varies only with the length of `bus_id`), well under the 16 KiB ceiling `discovery_test.go` enforces. See `### Discovery document` below for the full shape. |
-| other | `/healthz`, `/v1/info`, `/v1/discovery` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET` |
+| `HEAD` | `/healthz`, `/v1/info`, `/v1/discovery` | none | 200 | **CHANGED 2026-08-08 (CORE-7): HEAD is now ACCEPTED on every GET route** and was a 405 before. Same status as the corresponding `GET`, and the same `Content-Type` / `X-Content-Type-Options`, with **no body** — `writeJSON`/`writePreformattedJSON` suppress it. **`Content-Length` is absent** (measured: `GET /healthz` sends `Content-Length: 16`, `HEAD /healthz` sends none), because net/http computes it from bytes written and the handler writes none. Legal under RFC 9110 §8.6, which permits omitting it; do not read "same headers" more strongly than this row states. Probes (load balancers, container healthchecks, uptime monitors) commonly issue `HEAD /healthz`; that used to be a false alarm from the one route whose job is to report liveness honestly. |
+| other | `/healthz`, `/v1/info`, `/v1/discovery` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET, HEAD` — the `Allow` value changed with CORE-7 and now names every method the route serves |
 | `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
 | `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
 | `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key` than its first use — a protocol violation, not a retry (invariant 10). Rejected and logged; **the connection is KEPT** — narrowed 2026-08-08, this row carried `Connection: close` until then (see `## Headers`) |
@@ -44,7 +45,7 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
 | any | any path off the six-entry allow-list (`/healthz`, `/v1/info`, `/v1/discovery`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
 | any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
-| any | unregistered path, valid bearer token | valid bearer token | 404 | `net/http.ServeMux`'s built-in `text/plain` "404 page not found" — **not** the JSON error envelope — because the middleware let the request through and the mux, honestly, has no route there. Known follow-up: CORE-8 (register a catch-all so unmatched paths get the same JSON envelope); that catch-all MUST be registered INSIDE the auth wrapper (through `(*Server).route`, so it is itself subject to `authMiddleware`) or it becomes the one unauthenticated route that leaks the surface. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
+| any | unregistered path, valid bearer token | valid bearer token | 404 | **CHANGED 2026-08-08 (CORE-8): now `{"error":"not found"}` with `Content-Type: application/json; charset=utf-8` and `X-Content-Type-Options: nosniff`.** It was `net/http.ServeMux`'s built-in `text/plain` "404 page not found", which broke the JSON error contract every other route honours — a client, or a wrapper piping through a JSON parser, got a parse error exactly when something was already wrong. Served by a catch-all registered at `RouteCatchAll` (`"/"`) **through `(*Server).route`, i.e. INSIDE the auth wrapper** — see the row above for why that placement is load-bearing. **Every method gets 404, never 405**: 405 would assert the resource exists but not via that verb, which is false here and lets a caller separate "path exists, wrong method" from "path does not exist" by method-probing. The body never echoes the requested path. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
 
 ### Discovery document (added 2026-08-07, DISCOVERY-DOC)
 
@@ -150,7 +151,8 @@ added to it.
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 400 | `cursor` malformed, not base64url, an unknown cursor version, or **bound to a different agent**; `limit` not a positive integer or over 256; `timeout` not a positive whole number of seconds or over 300 |
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on this bus's roster. The read paths **fail closed** rather than returning an empty batch; see the enrolment epoch below for why an unknown reader must never be read with no epoch. |
 | `GET` | `/v1/wait` | bearer | 503 | this agent already has `hub.MaxWaitersPerAgent` (32) long polls parked; `Retry-After: 5` |
-| `GET` | `/v1/messages`, `/v1/wait` | bearer | 405 | any method but `GET`; `Allow: GET` |
+| `HEAD` | `/v1/agents`, `/v1/messages`, `/v1/wait` | bearer | 200 | **Added 2026-08-08 (CORE-7).** Accepted exactly as on the unauthenticated GET routes: same status, same headers, no body. Authentication is unchanged — `HEAD` goes through the same default-deny `authMiddleware` as `GET`, so an anonymous `HEAD` is 401. Safe because every `requireGET` route is a pure read: the cursor is the client-supplied `after`/`cursor` parameter, so a `HEAD` consumes and advances nothing a later `GET` needed. |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 405 | any method but `GET` or `HEAD`; `Allow: GET, HEAD` (was `GET` before CORE-7) |
 | `GET` | `/v1/wait` | bearer | (none) | A **cancelled request context** (client hung up, or server shutting down) writes no response at all — there is nobody to write to. Distinct from a timeout, which is a 200. |
 
 A `<message>` on the read path is (`timestamp_ms` and `signature` **added 2026-08-07, SIGN-6**):
@@ -369,7 +371,7 @@ passes the hub as the WAL's `Applier`:
 | `X-Request-Id` | in/out | Inbound value accepted only if it matches `[A-Za-z0-9._-]{1,64}` (`httpapi.MaxRequestIDLen = 64`); otherwise replaced with a server-generated id (`crypto/rand` 16 hex chars, falling back to a `seq-<n>` counter). Always echoed on the response. |
 | `Authorization` | in | Required on every route off the six-entry allow-list (`## Authentication`). Exactly one header, form `Bearer <token>` (scheme case-insensitive); `<token>` must be non-empty, contain no space, be no longer than `httpapi.MaxBearerTokenLen` (512), and consist only of the base64url alphabet `[A-Za-z0-9_-]`. Zero headers, more than one, a non-`Bearer` scheme, or a token failing any of those checks is treated as "no usable credential" (401, `error="invalid_request"`) — distinct from a syntactically fine token that simply does not authenticate (401, `error="invalid_token"`). Never logged, echoed, truncated or hashed into any response or log line — only the resulting agent id ever leaves `authMiddleware`. |
 | `WWW-Authenticate` | out | On every 401: `Bearer realm="agent-bus", error="invalid_request"` when no usable credential was presented, or `Bearer realm="agent-bus", error="invalid_token"` when a well-formed token failed to authenticate (unknown, pending, or expired — the three are deliberately indistinguishable to the caller). |
-| `Allow` | out | Set to `GET` on a 405 from `/healthz`, `/v1/info`, `/v1/discovery`, `/v1/agents`, `/v1/messages` or `/v1/wait`. |
+| `Allow` | out | Set to `GET, HEAD` (the exported constant `httpapi.AllowGET`) on a 405 from `/healthz`, `/v1/info`, `/v1/discovery`, `/v1/agents`, `/v1/messages` or `/v1/wait`. **CHANGED 2026-08-08 (CORE-7)** — it was `GET`, and `HEAD` was 405'd; now `HEAD` is served, so `Allow` names it. An `Allow` that omitted a method the route serves would be the same inconsistency CORE-7 fixed, one layer out. |
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
 | `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, on `POST /v1/send`'s 201, and (added 2026-08-07) on `POST /v1/mint`'s 201, when the response was replayed rather than freshly applied — from the applied-key table for `enroll`/`send`, from the outstanding-reservation table for `mint`. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied (and, for `mint`, allocated) nothing. Not reachable on `/v1/broadcast`, which answers 501. |
@@ -610,7 +612,10 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `RouteDiscovery` | `"/v1/discovery"` — added 2026-08-07 (DISCOVERY-DOC). On the allow-list. `DiscoveryResponse` and its nested types (`DiscoveryEndpoint`, `DiscoveryEnrolment`, `DiscoverySession`, `DiscoveryClient`) live in `internal/httpapi/discovery.go`; see `### Discovery document` above for the shape. |
 | `PrincipalFromContext(ctx) (auth.Principal, bool)` | The authenticated identity, or `ok == false` on an allow-listed route (not an error condition — it is the definition of an unauthenticated route). |
 | `AgentIDFromContext(ctx) string` | The fully-qualified `<bus-id>.<agent-id>` (invariant 2) of the caller, or `""` when no principal is attached. |
-| `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. |
+| `(*Server).Routes() []string` | Every pattern registered through `(*Server).route`, sorted. This is the real surface `TestEveryRouteRequiresAuth` walks, because Go 1.19's `http.ServeMux` cannot otherwise be enumerated. **Since 2026-08-08 (CORE-8) it includes `"/"`.** |
+| `AllowGET` | `"GET, HEAD"` — added 2026-08-08 (CORE-7). The `Allow` header value every `requireGET` route sends with its 405. |
+| `RouteCatchAll` | `"/"` — added 2026-08-08 (CORE-8). The pattern the JSON-404 handler is registered at. **Never** on the allow-list; `IsUnauthenticatedRoute("/")` is false and a test asserts it, because a catch-all outside the auth wrapper would turn the whole server into a route oracle. |
+| `PanickedField` / `PanicAfterWriteField` / `HijackedField` | `"panicked"` / `"panic_after_write"` / `"hijacked"` — added 2026-08-08 (CORE-14). Log keys, not HTTP; see `### Panic log records` below. |
 | `RouteAgents` / `RouteMint` / `RouteBroadcast` / `RouteSend` / `RouteMessages` / `RouteWait` | `/v1/agents`, `/v1/mint`, `/v1/broadcast`, `/v1/send`, `/v1/messages`, `/v1/wait` — the messaging surface. `RouteMint` added 2026-08-07. All are registered only when the server has a hub; **never** on the allow-list. `/v1/broadcast` is registered and authenticates, and then answers 501. |
 | `MaxMessageRequestBytes` | `128 << 10` — the request-body cap on `/v1/mint`, `/v1/broadcast` and `/v1/send`. The real payload limit is `store.MaxBodyBytes` (64 KiB decoded); this one only stops an unbounded stream reaching the decoder. |
 | `hub.SeqFloorRecordKind` / `hub.MintBatchSize` | `"seqfloor"` / `256` — the durable sequence floor that makes the mint safe across a restart. See `CONTRACTS-ONDISK.md`. |
@@ -621,6 +626,82 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `store.Message.VisibleTo(agentID string, enrolledAt time.Time) bool` | The **one** authorization boundary of the read path. Applied on all four read paths (history, the long-poll fast path, its post-registration re-read, and its wake re-read) and by the wake filter itself, always with the AUTHENTICATED principal and that agent's roster entry — never with anything taken from a cursor. A zero `enrolledAt` disables the epoch check and exists only for roster-less callers (an audit tool); it must never be reached from a request path. |
 | `hub.Result` / `hub.Batch` | What a send returns and what a read returns; see `internal/hub/hub.go` and `internal/hub/wait.go`. |
 | `store.RecordKind` / `store.RecordVersion` | `"message"` / **`2`** (was `1`; bumped 2026-08-07 by SIGN-6, reserved from the Spec Server `store-record-version` namespace) — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. v2 adds REQUIRED `timestamp_ms` and `signature`, and **refusing v1 records at recovery is a destructive, bidirectional break** — see `CONTRACTS-ONDISK.md`. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
+
+### Panic log records (added 2026-08-08 — CORE-14, CORE-6)
+
+`LoggingMiddleware` emits one `msg=request` record per request. Two fields are added to it, **and
+only ever when the handler panicked**, so an ordinary line is unchanged and a log query can select on
+their presence:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `panicked` | `true` | The handler panicked. **This, not `status`, is the field an error-rate metric must key on.** |
+| `panic_after_write` | `true` / `false` | `false`: recovery answered 500 and `status` is the truth. `true`: the response had already begun under a status that promised success — very often `200` — and HTTP gives no way to retract it. |
+
+One further field, emitted independently of a panic:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `hijacked` | `true` | The handler took the raw connection over via `http.Hijacker`. `status` is then **`0`** — "not known here": from that point the handler writes its own status line straight to the socket and the middleware never sees it, and inventing `200` would be the same fabricated success this section is about. **Exception:** if the handler wrote a real status *before* hijacking (an upgrade sends `101` first), that status is kept, because it genuinely is what went out. A `Write` *after* the hijack cannot change it. |
+
+**Why this exists (CORE-14).** A handler that wrote a response and *then* panicked used to log
+`status=200` and nothing else. The response itself is unfixable once bytes are on the wire — that is
+HTTP — but the LOG was reporting a failed request as a success, so anyone reading the logs, or any
+error-rate metric built from them, saw green. That is the same defect class as a control that reports
+success while the thing it controls has failed, and it is a correctness bug in the audit trail, not
+cosmetics. **Measured against a real `net/http` server, what the client receives is not visibly
+broken** — a correctly framed `200` with no read error (`Content-Length` set if the handler never
+flushed, a properly terminated `Transfer-Encoding: chunked` body if it did) — which is exactly why
+the log has to say otherwise; it is the only place the failure is visible at all. `status` still reports what
+the client actually received, which is the honest answer; the markers say when that number cannot be
+taken at face value. The `level=error` `msg="panic serving request"` record that precedes it carries
+`panic_after_write` too, since that is the line an operator reads first.
+
+**The hijack case, found by the security gate 2026-08-08 and fixed in the same task.** A hijacking
+handler bypasses the recorder entirely, so `wrote` stays false. Without the `hijacked` flag, a
+handler that hijacked, served a response on the raw socket and then panicked logged
+`panicked=true panic_after_write=false status=500` — claiming recovery had answered cleanly while the
+client had already been sent something else. That is a **false negative in the control itself**, and
+it is reachable precisely because CORE-13 (below) made `Hijack` work through the wrapper.
+`panic_after_write` is therefore computed from "the response has begun" — `wrote || hijacked` — and
+recovery does **not** attempt its 500 on a hijacked connection. No handler hijacks today; the POLL
+epic is the likely first.
+
+**Stack traces are no longer truncated (CORE-6).** `internal/logging` caps every field value at
+`maxValueLen` = 1024 bytes so an attacker-controlled value (a header, a request id, an error string
+built from client input) cannot turn one record into a multi-kilobyte payload. The `stack` key is now
+**exempt**, with its own larger bound:
+
+| Constant (`internal/logging`) | Value | Note |
+| --- | --- | --- |
+| `StackKey` | `"stack"` | The one exempt field key. |
+| `MaxStackValueLen` | `8192` | The exempt cap. A bound, **not** "unlimited". |
+
+Every other field, and `msg`, keep the 1024-byte cap. The exemption is narrow because the reasoning
+behind the cap is untouched for every other field: a stack is produced by `runtime/debug.Stack`, so
+its length is the *server's*, not the caller's. It mattered because a stack's **tail** is its useful
+half — the deepest frames are where the panic happened — so a 1024-byte cut discarded exactly what an
+operator needs. Measured: a real `net/http` request path renders 1238 bytes, while the pre-existing
+test drove the handler through `httptest`, whose shorter call stack rendered 962 bytes, stayed under
+the cap and passed. **The test now searches for a recursion depth that provably exceeds the old cap**
+rather than hardcoding one (a frame's rendered size depends on the absolute source path, so a fixed
+depth is not portable), which is what stops the blind spot returning the next time the constant is
+tuned.
+
+### Response-writer capabilities through the middleware (added 2026-08-08 — CORE-13)
+
+`LoggingMiddleware` hands the handler a wrapper, and that wrapper advertises `http.Flusher`,
+`http.Hijacker` and `io.ReaderFrom` **if and only if the underlying `http.ResponseWriter` does**. It
+previously declared `Flush()` and `Hijack()` unconditionally, so `w.(http.Flusher)` and
+`w.(http.Hijacker)` always succeeded — feature detection, which is the correct pattern for optional
+interfaces, was being told a lie, and a handler took the streaming or upgrade path only to find out
+at call time. `io.ReaderFrom` was dropped entirely, costing `net/http`'s sendfile fast path for large
+responses; it is now forwarded, and the bytes it copies are counted in the record's `bytes` field.
+
+`http.CloseNotifier` and `http.Pusher` are deliberately **not** forwarded (`CloseNotifier` is
+deprecated in favour of `Request.Context`; `Pusher` is HTTP/2 server push, which this bus does not
+serve). Neither was advertised before, so nothing regresses. Relevant to the POLL epic, which may
+want `Flush`.
 
 **Rule for every future route: register it through `(*Server).route`, never `mux.HandleFunc`
 directly.** A route registered the wrong way is still authenticated — the middleware wraps the whole
