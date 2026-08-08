@@ -109,12 +109,33 @@ one needs an explicit decision recorded in `DECISIONS.md`.
       point of idempotency: it exists so a well-behaved client can safely retry, and punishing that
       would break exactly the clients doing the right thing.
     - **Same key + DIFFERENT payload = a protocol violation.** The client is reusing a key for new
-      content, which is either a serious bug or an attack. Reject it, log it, and **disconnect the
-      offending client.**
+      content, which is either a serious bug or an attack. **Reject it and log it, but do NOT
+      disconnect** (narrowed 2026-08-08, by user decision, after the behaviour was measured at the
+      raw socket). The key is the caller's OWN — keys are scoped per agent — so this is
+      overwhelmingly a client that lost track of its keys, and dropping the socket destroys every
+      other request it had pipelined there, including its parked long-poll. That is an abuse defence
+      landing on the party most likely to be honest.
     - **Replay of an already-accepted signed message** (by a peer, a relay, or a third party) is
-      rejected outright and disconnects the sender. A signature does not stop replay — a valid signed
-      message can be resent verbatim — so freshness comes from the server-minted monotonic sequence
-      plus recipient-side cursor, not from the signature.
+      rejected outright **and disconnects the sender**. A signature does not stop replay — a valid
+      signed message can be resent verbatim — so freshness comes from the server-minted monotonic
+      sequence plus recipient-side cursor, not from the signature. This is the one party the
+      disconnect is for: it presents material it was never issued. On `/v1/send` it is detected by
+      the `sender` inside the signed bytes not being the authenticated principal, and **the
+      disconnect fires ONLY when that claim is a well-formed fully-qualified `<bus-id>.<agent-id>`**
+      — an absent, unqualified or whitespace-padded claim names nobody, is still refused, and must
+      NOT disconnect.
+    - **Before adding ANY disconnect, ask two questions.** Can a merely BUGGY client reach this
+      line? And does this connection carry only ONE principal's traffic? The second is not yet
+      load-bearing but becomes so the moment relay ingest lands, where a peer bus legitimately
+      presents `sender != principal` for many agents at once. Both questions exist because the first
+      implementation of this narrowing *reproduced the very bug it was fixing* — it disconnected on
+      any sender mismatch, so an empty sender, a dropped bus prefix and a trailing space each
+      dropped an honest client's socket.
+    - **One ambiguity is deliberately left un-disconnected**: `409 no-matching-reservation` is
+      byte-identical for a third party spending someone else's mint and for an agent re-presenting
+      its OWN spent reservation. The minting agent is not recoverable at that point, so disconnecting
+      would punish the honest case. A test asserts that indistinguishability, so it goes RED the day
+      it becomes resolvable.
 
     Relay is where this earns its keep: a cyclic peer topology plus at-least-once delivery means
     duplicates are not an edge case but the normal steady state, and loop-prevention via the traversed
