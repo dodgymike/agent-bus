@@ -355,6 +355,18 @@ type pendingEnrolment struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// String redacts the seed. See Credential.String's comment: this is the same
+// safety net for the same reason, and it exists for the same failure mode —
+// no code path formats a pendingEnrolment today, but the whole point of a
+// redacting String() is that it protects the field BEFORE someone adds the
+// %v that would print it, not after. pendingEnrolment carries only
+// PrivateKeySeed (no messaging key — that field is minted later, once the
+// enrolment is promoted to a full Credential), so one field to redact here.
+func (p pendingEnrolment) String() string {
+	return fmt.Sprintf("pendingEnrolment{IdempotencyKey:%s Name:%s BusURL:%s PublicKey:%s PrivateKeySeed:[REDACTED] CreatedAt:%s}",
+		p.IdempotencyKey, p.Name, p.BusURL, p.PublicKey, p.CreatedAt)
+}
+
 // pendingTTL is how long an unresolved enrolment's key material is kept.
 //
 // Long enough to survive an outage a human sleeps through, short enough that

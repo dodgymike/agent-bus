@@ -219,6 +219,39 @@ func TestCredentialStringRedactsSeed(t *testing.T) {
 	}
 }
 
+// TestPendingEnrolmentRedactsItsSeed is pendingEnrolment's half of
+// TestCredentialStringRedactsSeed. pendingEnrolment carries the SAME class of
+// secret (a raw Ed25519 seed) as Credential, and until this test existed it
+// had no String() at all — so the default struct formatting would print every
+// field, seed included, into the first %v or log line anyone added. No code
+// path does that today (85da3164), which is exactly why the redaction has to
+// be pinned before the leak, not after.
+func TestPendingEnrolmentRedactsItsSeed(t *testing.T) {
+	p := pendingEnrolment{
+		IdempotencyKey: "resume-key-1",
+		Name:           "agent",
+		BusURL:         "http://bus.example",
+		PublicKey:      "cHVibGljLWtleS1iYXNlNjQ=",
+		PrivateKeySeed: "dGhpcy1pcy1hLXNlY3JldC1zZWVkLXZhbHVlLTEyMzQ1",
+		CreatedAt:      "2026-08-08T00:00:00Z",
+	}
+	s := p.String()
+	if strings.Contains(s, p.PrivateKeySeed) {
+		t.Fatalf("pendingEnrolment.String() leaks the private key seed: %q", s)
+	}
+	// Also check the %v path directly — fmt.Stringer is picked up automatically
+	// by %v/%s, and a caller reaching for %v is exactly the accident this
+	// exists to survive.
+	if v := fmt.Sprintf("%v", p); strings.Contains(v, p.PrivateKeySeed) {
+		t.Fatalf("fmt.Sprintf(%%v, pendingEnrolment) leaks the private key seed: %q", v)
+	}
+	if !strings.Contains(s, "resume-key-1") {
+		// The identity fields are not secret and SHOULD appear; this proves the
+		// check above isn't vacuous by matching everything.
+		t.Fatalf("pendingEnrolment.String() = %q, want it to still name the idempotency key", s)
+	}
+}
+
 // TestLockReleaseOnlyRemovesOwnToken checks the ownership-token protocol
 // described on Store.lock: a release must only remove the lock file if its
 // contents still match the token that release closed over. Without that
