@@ -166,21 +166,31 @@ type Credential struct {
 	// the bus already holds the auth public key and could then be the one
 	// deciding what a "verified" message from this agent says.
 	//
+	// # Where it comes from: enrolment, or first use for an older credential
+	//
+	// Since RELAY-13 it is MINTED AT ENROLMENT and its public half is registered
+	// with the bus in the same request (see Enrol and pendingEnrolment). That is
+	// what lets the origin bus later ATTEST `fq-agent-id -> messaging public key`
+	// to a peer bus: a bus cannot attest a key it never recorded.
+	//
 	// # Optional and ADDITIVE, on purpose
 	//
 	// It is omitempty and storeFormatVersion is deliberately NOT bumped: a
 	// credential written before signing existed is still perfectly valid, and
 	// refusing to load it would lock an agent out of a bus it is legitimately
-	// enrolled on over a field it never needed. A credential without one gets a
-	// key MINTED ON FIRST USE (Store.EnsureMessagingKey), under the store lock,
-	// and the minting is the only write.
+	// enrolled on over a field it never needed. Such a credential gets a key
+	// MINTED ON FIRST USE (Store.EnsureMessagingKey), under the store lock, and
+	// the minting is the only write. That path is now the LEGACY one rather than
+	// the normal one, and it stays because the bus has no route to add a
+	// messaging key to an existing enrolment — the field is write-once server
+	// side, so an agent that enrolled without one keeps a key its own bus cannot
+	// attest until it re-enrols under a new id.
 	//
-	// # It never leaves the machine
+	// # The PRIVATE half never leaves the machine
 	//
-	// Nothing sends it, nothing prints it, and there is no route that accepts
-	// one. Only the PUBLIC half is ever handed out, and only out of band —
-	// `agent-busctl keygen` prints it for a human to pass to a peer. When CRYPTO-4
-	// lands, the public half is what gets registered; this field stays here.
+	// Nothing sends the seed, nothing prints it, and there is no route that
+	// accepts one. Only the PUBLIC half is ever handed out: to the bus at
+	// enrolment as `messaging_public_key`, and to a peer out of band.
 	MessagingKeySeed string `json:"messaging_key_seed,omitempty"`
 
 	// IdempotencyKey is the key this enrolment was accepted under.
@@ -219,6 +229,32 @@ func (c Credential) PrivateKey() (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(seed), nil
 }
 
+// damagedMessagingSeedRemedy is what to do when the stored messaging seed
+// cannot be read back.
+//
+// It used to say "remove the messaging_key_seed field and mint a new one, then
+// re-distribute the public key to your peers". That advice was correct only
+// while the messaging key was purely local. Since RELAY-13 the BUS records the
+// public half at enrolment and the field is WRITE-ONCE server side — there is no
+// route to update it — so minting a replacement leaves the agent signing with a
+// key its own bus still attests the predecessor of. Every peer that verifies
+// through an attestation would then reject every message, and re-distributing by
+// hand fixes only the peers that trust out of band. Re-enrolling is the only
+// route that puts the bus and the agent back in agreement.
+//
+// It is stated as one value used by both damaged-seed branches so the two cannot
+// drift apart, which is how one of them would keep the stale advice.
+//
+// It says "the bus recorded this messaging key at enrolment" as a flat fact
+// where it strictly means a CONSERVATIVE ASSUMPTION: a credential whose key was
+// minted locally by EnsureMessagingKey (the legacy path this file still keeps)
+// has no bus-recorded key, and Credential carries no field that distinguishes
+// the two, so the remedy cannot branch. Re-enrolling is correct in both cases
+// and is the only advice that is never wrong; the alternative wording would be
+// hedged enough to read as optional, on a path where following the old advice
+// silently breaks every attestation-verifying peer.
+const damagedMessagingSeedRemedy = "the credential store is damaged; the bus recorded this messaging key at enrolment and cannot be told a new one, so re-enrol with `agent-busctl enrol --bus <url> --name <name>` — you will get a NEW agent id, and minting a replacement key locally would leave you signing with a key the bus does not attest"
+
 // MessagingPrivateKey expands the stored messaging seed into a usable Ed25519
 // private key.
 //
@@ -238,13 +274,13 @@ func (c Credential) MessagingPrivateKey() (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, wrapError(KindConfig, "messaging key",
 			"the stored messaging key for "+c.AgentID+" is not valid base64",
-			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `agent-busctl keygen`, then re-distribute the new public key to your peers",
+			damagedMessagingSeedRemedy,
 			err)
 	}
 	if len(seed) != ed25519.SeedSize {
 		return nil, newError(KindConfig, "messaging key",
 			fmt.Sprintf("the stored messaging key for %s is %d bytes, expected %d", c.AgentID, len(seed), ed25519.SeedSize),
-			"the credential store is damaged; remove the messaging_key_seed field for this identity and run `agent-busctl keygen`, then re-distribute the new public key to your peers")
+			damagedMessagingSeedRemedy)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }
@@ -350,20 +386,46 @@ type pendingEnrolment struct {
 	// PrivateKeySeed is the base64 32-byte Ed25519 seed. SECRET.
 	PrivateKeySeed string `json:"private_key_seed"`
 
+	// MessagingKeySeed is the base64 32-byte Ed25519 seed of the MESSAGING key
+	// this attempt registered. SECRET, and stored for the same reason
+	// PrivateKeySeed is, one step further.
+	//
+	// The enrolment payload carries the messaging PUBLIC key (RELAY-13), so the
+	// messaging key is now part of what makes a retry "same key + SAME payload".
+	// Without this field a resumed `enrol --idempotency-key` would mint a FRESH
+	// messaging key, present the old idempotency key with different content, and
+	// be answered with a 409 — turning the one correct response to an
+	// interrupted enrolment into a permanent failure, which is exactly what
+	// invariant 10 exists to prevent.
+	//
+	// It is also the half the bus does NOT hold: the bus records the public key
+	// and can attest it, and if this seed were regenerated after the bus had
+	// recorded its predecessor, every peer verifying against the attested key
+	// would reject everything this agent signs.
+	//
+	// omitempty, and an EMPTY value is meaningful rather than merely absent: a
+	// pending record written before this field existed registered no messaging
+	// key at all, so its retry must register none either. Enrol reads it that
+	// way — see the resume path there.
+	MessagingKeySeed string `json:"messaging_key_seed,omitempty"`
+
 	// CreatedAt is when the record was written, RFC3339. Used only for
 	// pruning; nothing depends on its accuracy.
 	CreatedAt string `json:"created_at"`
 }
 
-// String redacts the seed. See Credential.String's comment: this is the same
+// String redacts BOTH seeds. See Credential.String's comment: this is the same
 // safety net for the same reason, and it exists for the same failure mode —
 // no code path formats a pendingEnrolment today, but the whole point of a
 // redacting String() is that it protects the field BEFORE someone adds the
-// %v that would print it, not after. pendingEnrolment carries only
-// PrivateKeySeed (no messaging key — that field is minted later, once the
-// enrolment is promoted to a full Credential), so one field to redact here.
+// %v that would print it, not after.
+//
+// It carries TWO secrets since RELAY-13 — the messaging seed is minted at
+// enrolment rather than on first send — and, exactly as Credential.String's
+// comment warns, the redaction is enumerated rather than derived, so a new
+// secret field added above must be added here too.
 func (p pendingEnrolment) String() string {
-	return fmt.Sprintf("pendingEnrolment{IdempotencyKey:%s Name:%s BusURL:%s PublicKey:%s PrivateKeySeed:[REDACTED] CreatedAt:%s}",
+	return fmt.Sprintf("pendingEnrolment{IdempotencyKey:%s Name:%s BusURL:%s PublicKey:%s PrivateKeySeed:[REDACTED] MessagingKeySeed:[REDACTED] CreatedAt:%s}",
 		p.IdempotencyKey, p.Name, p.BusURL, p.PublicKey, p.CreatedAt)
 }
 

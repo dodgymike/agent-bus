@@ -18,14 +18,25 @@ USAGE
   agent-busctl enrol --bus <url> --name <name> [flags]
 
 WHAT IT DOES
-  Generates an Ed25519 key pair locally, sends ONLY the public half, and
-  receives the fully-qualified agent id the BUS minted, ` + "`<bus-id>.<agent-id>`" + `.
-  You do not choose your own id: two agents may ask for the name "planner"
-  and the bus tells them apart.
+  Generates TWO Ed25519 key pairs locally, sends ONLY their public halves,
+  and receives the fully-qualified agent id the BUS minted,
+  ` + "`<bus-id>.<agent-id>`" + `. You do not choose your own id: two agents may ask
+  for the name "planner" and the bus tells them apart.
 
-  The private key is written to the credential store (a 0600 file in a 0700
-  directory) BEFORE the request is sent, and never leaves this machine. The
-  new identity becomes the current one unless --keep-current is given.
+  The two keys do different jobs and are never the same key:
+    - the AUTH key proves you TO THE BUS, in the session handshake;
+    - the MESSAGING key proves you TO YOUR PEERS. Registering its public
+      half here is what lets this bus attest your key to another bus, so
+      agents on a peer bus can verify messages you signed. A bus cannot
+      attest a key it never recorded.
+
+  Registering it does not PROVE you hold the matching private key — nothing
+  at enrolment does — so it establishes who a key is recorded against, not
+  possession of it.
+
+  Both private keys are written to the credential store (a 0600 file in a
+  0700 directory) BEFORE the request is sent, and never leave this machine.
+  The new identity becomes the current one unless --keep-current is given.
 
 THE BUS'S CERTIFICATE — PASS IT ONCE, HERE
   Bus certificates are SELF-SIGNED and there is no certificate authority, so
@@ -70,9 +81,9 @@ FLAGS
 
 RETRIES — WHAT TO DO WHEN AN ENROLMENT DOES NOT ANSWER
   Re-run it with --idempotency-key <the key the error named>. That resumes
-  the SAME enrolment: the key pair generated for the first attempt was saved
-  before the request went out, so the bus sees a byte-identical payload and
-  replays its original answer instead of enrolling a second agent.
+  the SAME enrolment: BOTH key pairs generated for the first attempt were
+  saved before the request went out, so the bus sees a byte-identical payload
+  and replays its original answer instead of enrolling a second agent.
   "replayed" in the output says that is what happened.
 
   Do NOT reuse a key for a different name or a different bus. The bus treats

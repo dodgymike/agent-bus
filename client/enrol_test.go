@@ -7,17 +7,61 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// assertEnrolBodyFields asserts the enrol request body carries EXACTLY the
+// named fields — no extras, none missing.
+//
+// It replaced a bare `len(body) != 3` plus a presence loop. The count was the
+// reason RELAY-13's client half could not land inside its own file boundary:
+// adding a field failed the count with "has 4 keys, want exactly 3", which
+// names an arithmetic disagreement rather than the field that changed, and
+// leaves the reader unable to tell an intended addition from an accidental one.
+//
+// Asserting the SET keeps the property that mattered — nothing undocumented
+// reaches an UNAUTHENTICATED route, and no secret is smuggled onto the wire by
+// a stray json tag on a struct that also holds seeds — while making the next
+// addition fail by NAME. Extras and omissions are reported separately because
+// they are different bugs: an extra field is something escaping, a missing one
+// is something that stopped being sent.
+func assertEnrolBodyFields(t *testing.T, body map[string]interface{}, want ...string) {
+	t.Helper()
+	expected := make(map[string]bool, len(want))
+	for _, k := range want {
+		expected[k] = true
+	}
+	var missing, unexpected []string
+	for k := range expected {
+		if _, ok := body[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	for k := range body {
+		if !expected[k] {
+			unexpected = append(unexpected, k)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(unexpected)
+	if len(missing) > 0 || len(unexpected) > 0 {
+		t.Fatalf("enrol request body carries the wrong fields:\n  missing:    %v\n  unexpected: %v\n  want exactly: %v\n  got: %v",
+			missing, unexpected, want, body)
+	}
+}
 
 // countingDoer fails the test if it is ever called — used to prove a code
 // path that must fail LOCALLY never reaches the network.
@@ -72,8 +116,10 @@ func (d *flakyDoer) Do(req *http.Request) (*http.Response, error) {
 }
 
 // TestEnrolHappyPath checks the request the client actually sends — exactly
-// the three documented fields, and a public key that decodes to 32 bytes —
-// and that the server-minted result lands in a correctly permissioned store.
+// the four documented fields, and an auth public key that decodes to 32 bytes
+// — and that the server-minted result lands in a correctly permissioned store.
+// The messaging key's own properties are pinned by
+// TestEnrolRegistersMessagingPublicKey.
 func TestEnrolHappyPath(t *testing.T) {
 	type seen struct {
 		body map[string]interface{}
@@ -125,14 +171,7 @@ func TestEnrolHappyPath(t *testing.T) {
 		t.Fatalf("server saw %d requests, want 1", len(requests))
 	}
 	body := requests[0].body
-	if len(body) != 3 {
-		t.Fatalf("request body has %d keys, want exactly 3 (name, public_key, idempotency_key): %v", len(body), body)
-	}
-	for _, k := range []string{"name", "public_key", "idempotency_key"} {
-		if _, ok := body[k]; !ok {
-			t.Fatalf("request body missing key %q: %v", k, body)
-		}
-	}
+	assertEnrolBodyFields(t, body, "name", "public_key", "messaging_public_key", "idempotency_key")
 	pubStr, _ := body["public_key"].(string)
 	pub, err := base64.StdEncoding.DecodeString(pubStr)
 	if err != nil {
@@ -846,5 +885,503 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 				t.Fatalf("the pending record was dropped for an AMBIGUOUS failure — it may still have been applied, so the key material must be kept for a retry")
 			}
 		})
+	}
+}
+
+// idempotentEnrolBus is a stub /v1/enroll that enforces the SERVER's rule from
+// invariant 10, which the plain 201-always stubs above do not: the same
+// idempotency key with the SAME payload replays the original answer, and the
+// same key with a DIFFERENT payload is a 409.
+//
+// That distinction is the whole point of the resumed-retry test. Against a stub
+// that always answers 201, a client which regenerated its messaging key on
+// retry would look perfectly healthy — the defect only shows up against a bus
+// that compares payloads, which the real one does (internal/auth compares the
+// messaging key too since RELAY-13).
+type idempotentEnrolBus struct {
+	mu       sync.Mutex
+	applied  map[string]map[string]interface{} // idempotency key -> the payload it was applied with
+	results  map[string]enrolResponseBody
+	requests []map[string]interface{}
+	minted   int
+}
+
+func newIdempotentEnrolBus() *idempotentEnrolBus {
+	return &idempotentEnrolBus{
+		applied: map[string]map[string]interface{}{},
+		results: map[string]enrolResponseBody{},
+	}
+}
+
+func (b *idempotentEnrolBus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != routeEnroll {
+		http.NotFound(w, r)
+		return
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "unreadable body", http.StatusBadRequest)
+		return
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		http.Error(w, "not JSON", http.StatusBadRequest)
+		return
+	}
+	key, _ := body["idempotency_key"].(string)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.requests = append(b.requests, body)
+
+	if prev, seen := b.applied[key]; seen {
+		if !reflect.DeepEqual(prev, body) {
+			// Rejected and logged, connection preserved (invariant 10 as
+			// narrowed 2026-08-08) — no disconnect.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"idempotency key reused with different content"}`))
+			return
+		}
+		w.Header().Set(idempotencyReplayedHeader, "true")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(b.results[key])
+		return
+	}
+
+	b.minted++
+	name, _ := body["name"].(string)
+	res := enrolResponseBody{
+		AgentID:    fmt.Sprintf("bus-test01.%s-%d", name, b.minted),
+		BusID:      "bus-test01",
+		Name:       name,
+		EnrolledAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	b.applied[key] = body
+	b.results[key] = res
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (b *idempotentEnrolBus) seen() []map[string]interface{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]map[string]interface{}, len(b.requests))
+	copy(out, b.requests)
+	return out
+}
+
+// lossyDoer forwards the first `lose` calls to the bus and then THROWS AWAY the
+// answer, reporting a network failure instead.
+//
+// It reproduces the one failure the idempotency machinery exists for and which
+// flakyDoer does not: the request WAS applied and the acknowledgement was lost.
+// flakyDoer fails before forwarding, so the bus never sees the first attempt and
+// the retry is its first sight of the key — which cannot produce a 409 no matter
+// what the client regenerates.
+type lossyDoer struct {
+	lose  int
+	inner HTTPDoer
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *lossyDoer) Do(req *http.Request) (*http.Response, error) {
+	resp, err := d.inner.Do(req)
+	d.mu.Lock()
+	d.calls++
+	n := d.calls
+	d.mu.Unlock()
+	if n <= d.lose {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, errors.New("lossyDoer: the answer was lost in flight")
+	}
+	return resp, err
+}
+
+// TestEnrolRegistersMessagingPublicKey is the client half of RELAY-13.
+//
+// The bus attests `fq-agent-id -> messaging public key` to a peer bus, and it
+// cannot attest a key it never recorded — so enrolment has to register one. This
+// pins the three things that makes true: the key is on the wire, it is a second
+// key rather than the auth key wearing a different name, and the PRIVATE half it
+// was derived from is the one kept locally.
+func TestEnrolRegistersMessagingPublicKey(t *testing.T) {
+	bus := newIdempotentEnrolBus()
+	srv := httptest.NewServer(bus)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	c, err := New(Config{BusURL: srv.URL, IdentityDir: dir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := c.Enrol(context.Background(), EnrolOptions{Name: "myagent", Save: true, MakeCurrent: true})
+	if err != nil {
+		t.Fatalf("Enrol: %v", err)
+	}
+
+	seen := bus.seen()
+	if len(seen) != 1 {
+		t.Fatalf("bus saw %d requests, want 1", len(seen))
+	}
+	body := seen[0]
+	assertEnrolBodyFields(t, body, "name", "public_key", "messaging_public_key", "idempotency_key")
+
+	msgPub, _ := body["messaging_public_key"].(string)
+	if msgPub == "" {
+		t.Fatalf("messaging_public_key is empty; the bus would have nothing to attest")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(msgPub)
+	if err != nil {
+		t.Fatalf("messaging_public_key is not standard, padded base64: %v", err)
+	}
+	if len(decoded) != ed25519.PublicKeySize {
+		t.Fatalf("messaging_public_key decodes to %d bytes, want exactly %d — the bus refuses any other length",
+			len(decoded), ed25519.PublicKeySize)
+	}
+	authPub, _ := body["public_key"].(string)
+	if msgPub == authPub {
+		t.Fatalf("messaging_public_key equals public_key; the bus refuses one key serving both roles, and the two must have independent lifetimes")
+	}
+
+	// The key the bus recorded must be the public half of the seed WE keep. If
+	// these could drift, the bus would attest a key that verifies nothing this
+	// agent signs — every peer rejecting every message, with a symptom nowhere
+	// near the cause.
+	cred, err := c.Store().Resolve(res.AgentID)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", res.AgentID, err)
+	}
+	if cred.MessagingKeySeed == "" {
+		t.Fatalf("the stored credential has no messaging key seed; the private half of the key just registered was thrown away")
+	}
+	storedPub, err := cred.MessagingPublicKey()
+	if err != nil {
+		t.Fatalf("Credential.MessagingPublicKey: %v", err)
+	}
+	if storedPub != msgPub {
+		t.Fatalf("the bus recorded messaging key %s but the credential holds the seed for %s", msgPub, storedPub)
+	}
+
+	// The SEED must never be on the wire. Check the whole serialised body, not
+	// just the fields we know about: the point is to catch a field nobody
+	// remembered to look for.
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("re-marshalling the captured body: %v", err)
+	}
+	if bytes.Contains(rawBody, []byte(cred.MessagingKeySeed)) {
+		t.Fatalf("the messaging PRIVATE key seed appears in the enrol request: %s", rawBody)
+	}
+	if bytes.Contains(rawBody, []byte(cred.PrivateKeySeed)) {
+		t.Fatalf("the auth PRIVATE key seed appears in the enrol request: %s", rawBody)
+	}
+}
+
+// TestEnrolResumedRetryReusesTheMessagingKey is the test for the failure mode
+// that makes the messaging seed part of the PENDING record rather than
+// something minted at promotion time.
+//
+// The scenario is the ordinary one: the bus applied the enrolment and the
+// acknowledgement was lost. The documented remedy is to re-run with the same
+// --idempotency-key. That is only legitimate if the payload is byte-identical
+// (invariant 10) — and the payload now contains the messaging public key. A
+// client that regenerated it would present the same key with different content
+// and be answered with a 409, turning the one correct response to an
+// interrupted enrolment into a permanent failure.
+//
+// It is deliberately end to end rather than a field-comparison: the assertion
+// that matters is that the RETRY SUCCEEDS against a bus which enforces the rule.
+func TestEnrolResumedRetryReusesTheMessagingKey(t *testing.T) {
+	bus := newIdempotentEnrolBus()
+	srv := httptest.NewServer(bus)
+	defer srv.Close()
+
+	doer := &lossyDoer{lose: 1, inner: srv.Client()}
+	dir := t.TempDir()
+	c, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  doer,
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	opts := EnrolOptions{Name: "resumer", Save: true, IdempotencyKey: "resume-msgkey"}
+
+	if _, err := c.Enrol(context.Background(), opts); err == nil {
+		t.Fatalf("first Enrol = nil error, want the lost acknowledgement to surface as a network failure")
+	} else if KindOf(err) != KindNetwork {
+		t.Fatalf("KindOf(err) = %q, want %q", KindOf(err), KindNetwork)
+	}
+
+	pending, found, perr := c.Store().FindPending("resume-msgkey", srv.URL)
+	if perr != nil {
+		t.Fatalf("FindPending: %v", perr)
+	}
+	if !found {
+		t.Fatalf("no pending record survived the lost acknowledgement")
+	}
+	if pending.MessagingKeySeed == "" {
+		t.Fatalf("the pending record kept no messaging key seed, so the retry can only regenerate one and earn a 409")
+	}
+
+	// A SECOND client over the same store, because the realistic resume happens
+	// in a new process: the first one was killed.
+	c2, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  srv.Client(),
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New (resuming process): %v", err)
+	}
+	res, err := c2.Enrol(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("resumed Enrol: %v — a retry with the same key must recover the identity, not be refused", err)
+	}
+	if !res.Replayed {
+		t.Fatalf("resumed Enrol Replayed = false, want true: the bus had already applied this enrolment")
+	}
+
+	seen := bus.seen()
+	if len(seen) != 2 {
+		t.Fatalf("bus saw %d requests, want 2 (the applied-but-unacknowledged one, then the retry)", len(seen))
+	}
+	if !reflect.DeepEqual(seen[0], seen[1]) {
+		t.Fatalf("the retry payload differs from the original, which is a protocol violation rather than a retry:\n  first: %v\n  retry: %v", seen[0], seen[1])
+	}
+	first, _ := seen[0]["messaging_public_key"].(string)
+	if first == "" {
+		t.Fatalf("the original attempt carried no messaging_public_key, so this proves nothing about reusing it")
+	}
+
+	// And the credential finally stored holds the seed for the key the bus
+	// recorded on the FIRST attempt — the one it will attest.
+	cred, err := c2.Store().Resolve(res.AgentID)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", res.AgentID, err)
+	}
+	storedPub, err := cred.MessagingPublicKey()
+	if err != nil {
+		t.Fatalf("Credential.MessagingPublicKey: %v", err)
+	}
+	if storedPub != first {
+		t.Fatalf("the bus recorded %s at enrolment but the stored credential holds the seed for %s", first, storedPub)
+	}
+}
+
+// TestEnrolResumedPreUpgradePendingSendsNoMessagingKey checks the ONE path on
+// which the client deliberately sends no messaging key.
+//
+// A pending record written before the messaging seed existed belongs to an
+// attempt that registered no messaging key. Minting one for its retry would be
+// "same key + DIFFERENT payload" — a 409 — so the retry must reproduce the old,
+// three-field payload exactly. The resulting identity keeps a locally-minted
+// messaging key the bus cannot attest, which is the pre-RELAY-13 state and is
+// the correct outcome: recovering the identity beats registering a key.
+func TestEnrolResumedPreUpgradePendingSendsNoMessagingKey(t *testing.T) {
+	bus := newIdempotentEnrolBus()
+	srv := httptest.NewServer(bus)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// flakyDoer, not lossyDoer: this attempt must NOT reach the bus, so that the
+	// bus's first sight of the key is the retry. It stands in for an enrolment
+	// made by the previous build, whose pending record is all that survives.
+	doer := newFlakyDoer(1, srv.Client())
+	c, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  doer,
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	opts := EnrolOptions{Name: "oldbuild", Save: true, IdempotencyKey: "pre-upgrade-key"}
+	if _, err := c.Enrol(context.Background(), opts); err == nil {
+		t.Fatalf("first Enrol = nil error, want a network failure that leaves a pending record")
+	}
+
+	// Rewrite the pending record the way the previous build would have written
+	// it: no messaging_key_seed at all.
+	path := filepath.Join(dir, storeFileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the store: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the store is not JSON: %v", err)
+	}
+	pendings, ok := doc["pending"].([]interface{})
+	if !ok || len(pendings) != 1 {
+		t.Fatalf("want exactly 1 pending record in the store, got %v", doc["pending"])
+	}
+	rec, ok := pendings[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("the pending record is not an object: %v", pendings[0])
+	}
+	if _, present := rec["messaging_key_seed"]; !present {
+		t.Fatalf("the pending record has no messaging_key_seed to remove, so this test would pass vacuously")
+	}
+	delete(rec, "messaging_key_seed")
+	rewritten, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-marshalling the store: %v", err)
+	}
+	if err := os.WriteFile(path, rewritten, storeFileMode); err != nil {
+		t.Fatalf("rewriting the store: %v", err)
+	}
+
+	c2, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  srv.Client(),
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New (resuming process): %v", err)
+	}
+	res, err := c2.Enrol(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("resuming a pre-upgrade pending record: %v", err)
+	}
+
+	seen := bus.seen()
+	if len(seen) != 1 {
+		t.Fatalf("bus saw %d requests, want 1", len(seen))
+	}
+	assertEnrolBodyFields(t, seen[0], "name", "public_key", "idempotency_key")
+
+	cred, err := c2.Store().Resolve(res.AgentID)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", res.AgentID, err)
+	}
+	if cred.MessagingKeySeed != "" {
+		t.Fatalf("the promoted credential invented a messaging key the bus never recorded (%q); it must stay empty so first-use minting still applies",
+			cred.MessagingKeySeed)
+	}
+}
+
+// TestEnrolResumedDamagedMessagingSeedIsRefusedLocally covers the one new
+// branch in Enrol that both gates found untested: a resumed attempt whose
+// stored messaging seed cannot be read back.
+//
+// Two properties, and the second is the security-relevant one:
+//
+//   - It is refused LOCALLY, as KindConfig, and never reaches the bus. Sending
+//     a key derived from unreadable material is not possible, and sending NONE
+//     would change the payload of an attempt that had already sent one — a 409.
+//   - The message carries NO fragment of the damaged material. It names the
+//     idempotency key, which is charset-bounded caller input, and nothing else.
+func TestEnrolResumedDamagedMessagingSeedIsRefusedLocally(t *testing.T) {
+	bus := newIdempotentEnrolBus()
+	srv := httptest.NewServer(bus)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	doer := newFlakyDoer(1, srv.Client())
+	c, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  doer,
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	opts := EnrolOptions{Name: "damaged", Save: true, IdempotencyKey: "damaged-msgseed-key"}
+	if _, err := c.Enrol(context.Background(), opts); err == nil {
+		t.Fatalf("first Enrol = nil error, want a network failure that leaves a pending record")
+	}
+
+	// Corrupt ONLY the messaging seed, the way a hand-edited or partially
+	// restored store would. The auth seed stays valid, so a failure here is
+	// unambiguously the new branch and not the pre-existing auth-seed one.
+	// Deliberately distinctive AND unambiguously not base64, so that the
+	// sliding-window leak check below cannot collide by accident with ordinary
+	// English in the remedy text.
+	const damaged = "!!!!DAMAGEDSEEDMATERIALMARKER!!!!"
+	path := filepath.Join(dir, storeFileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the store: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the store is not JSON: %v", err)
+	}
+	pendings, ok := doc["pending"].([]interface{})
+	if !ok || len(pendings) != 1 {
+		t.Fatalf("want exactly 1 pending record in the store, got %v", doc["pending"])
+	}
+	rec, ok := pendings[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("the pending record is not an object: %v", pendings[0])
+	}
+	if _, present := rec["messaging_key_seed"]; !present {
+		t.Fatalf("the pending record has no messaging_key_seed to damage, so this test would pass vacuously")
+	}
+	rec["messaging_key_seed"] = damaged
+	rewritten, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-marshalling the store: %v", err)
+	}
+	if err := os.WriteFile(path, rewritten, storeFileMode); err != nil {
+		t.Fatalf("rewriting the store: %v", err)
+	}
+
+	c2, err := New(Config{
+		BusURL:      srv.URL,
+		IdentityDir: dir,
+		HTTPClient:  srv.Client(),
+		Retry:       RetryPolicy{Attempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New (resuming process): %v", err)
+	}
+	_, err = c2.Enrol(context.Background(), opts)
+	if err == nil {
+		t.Fatalf("resuming with a damaged messaging seed = nil error, want a refusal")
+	}
+	if KindOf(err) != KindConfig {
+		t.Fatalf("KindOf(err) = %q, want %q", KindOf(err), KindConfig)
+	}
+	if seen := bus.seen(); len(seen) != 0 {
+		t.Fatalf("bus saw %d requests, want 0 — this must be refused before anything is sent: %v", len(seen), seen)
+	}
+
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	rendered := e.Error() + " " + e.Remedy
+	// Every window of the material, not just the whole string. The security
+	// gate measured the weaker check: an error echoing only a PREFIX of the
+	// damaged value — which is how key material usually leaks, truncated into a
+	// "context" clause — slipped past `strings.Contains(rendered, damaged)`
+	// while the test still reported the property as pinned.
+	const leakWindow = 8
+	for i := 0; i+leakWindow <= len(damaged); i++ {
+		if frag := damaged[i : i+leakWindow]; strings.Contains(rendered, frag) {
+			t.Fatalf("the error echoes %d bytes of the damaged key material (%q) back: %q", leakWindow, frag, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "damaged-msgseed-key") {
+		// The idempotency key IS safe to name — it is charset-bounded caller
+		// input and it is the handle that resumes the attempt. Asserting it
+		// appears also proves the check above is not vacuous by matching an
+		// empty string.
+		t.Fatalf("the error = %q, want it to name the idempotency key so the attempt can be identified", rendered)
 	}
 }

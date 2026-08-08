@@ -226,24 +226,35 @@ func TestCredentialStringRedactsSeed(t *testing.T) {
 // field, seed included, into the first %v or log line anyone added. No code
 // path does that today (85da3164), which is exactly why the redaction has to
 // be pinned before the leak, not after.
+//
+// It covers BOTH seeds since RELAY-13 put the messaging seed in this record.
+// The redaction is enumerated rather than derived, so a second secret field is
+// exactly the case that silently regresses it.
 func TestPendingEnrolmentRedactsItsSeed(t *testing.T) {
 	p := pendingEnrolment{
-		IdempotencyKey: "resume-key-1",
-		Name:           "agent",
-		BusURL:         "http://bus.example",
-		PublicKey:      "cHVibGljLWtleS1iYXNlNjQ=",
-		PrivateKeySeed: "dGhpcy1pcy1hLXNlY3JldC1zZWVkLXZhbHVlLTEyMzQ1",
-		CreatedAt:      "2026-08-08T00:00:00Z",
+		IdempotencyKey:   "resume-key-1",
+		Name:             "agent",
+		BusURL:           "http://bus.example",
+		PublicKey:        "cHVibGljLWtleS1iYXNlNjQ=",
+		PrivateKeySeed:   "dGhpcy1pcy1hLXNlY3JldC1zZWVkLXZhbHVlLTEyMzQ1",
+		MessagingKeySeed: "bWVzc2FnaW5nLXNlY3JldC1zZWVkLXZhbHVlLTk4NzY1",
+		CreatedAt:        "2026-08-08T00:00:00Z",
 	}
 	s := p.String()
 	if strings.Contains(s, p.PrivateKeySeed) {
 		t.Fatalf("pendingEnrolment.String() leaks the private key seed: %q", s)
+	}
+	if strings.Contains(s, p.MessagingKeySeed) {
+		t.Fatalf("pendingEnrolment.String() leaks the MESSAGING key seed: %q", s)
 	}
 	// Also check the %v path directly — fmt.Stringer is picked up automatically
 	// by %v/%s, and a caller reaching for %v is exactly the accident this
 	// exists to survive.
 	if v := fmt.Sprintf("%v", p); strings.Contains(v, p.PrivateKeySeed) {
 		t.Fatalf("fmt.Sprintf(%%v, pendingEnrolment) leaks the private key seed: %q", v)
+	}
+	if v := fmt.Sprintf("%v", p); strings.Contains(v, p.MessagingKeySeed) {
+		t.Fatalf("fmt.Sprintf(%%v, pendingEnrolment) leaks the MESSAGING key seed: %q", v)
 	}
 	if !strings.Contains(s, "resume-key-1") {
 		// The identity fields are not secret and SHOULD appear; this proves the
@@ -620,5 +631,182 @@ func TestIdentityJSONHasNoPrivateKeyField(t *testing.T) {
 	}
 	if bytes.Contains(body, []byte("private_key")) {
 		t.Fatalf("Identity JSON mentions a private key field at all: %s", body)
+	}
+}
+
+// TestPendingEnrolmentMessagingSeedSurvivesDisk checks the messaging seed a
+// pending enrolment carries is DURABLE — written to the file and read back by a
+// separate Store, the way a resumed `enrol --idempotency-key` in a NEW process
+// reads it.
+//
+// It is not a JSON-tag tautology. The whole point of putting the messaging seed
+// in the pending record (RELAY-13) is that the process which resumes the
+// enrolment is usually not the process that started it: the first one was
+// killed. A field that round-tripped only in memory would leave that second
+// process regenerating the messaging key, presenting the original idempotency
+// key with different content, and being answered with a 409 — a correct retry
+// turned into a permanent failure.
+//
+// It also pins that the seed does NOT escape through ListPending, which is the
+// public, printable view of the same record.
+func TestPendingEnrolmentMessagingSeedSurvivesDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	const (
+		key    = "durable-msgseed-key"
+		busURL = "http://bus.example"
+	)
+	want := pendingEnrolment{
+		IdempotencyKey:   key,
+		Name:             "agent",
+		BusURL:           busURL,
+		PublicKey:        base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		PrivateKeySeed:   base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, ed25519.SeedSize)),
+		MessagingKeySeed: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, ed25519.SeedSize)),
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if _, err := s.ClaimEnrolment(want, time.Now()); err != nil {
+		t.Fatalf("ClaimEnrolment: %v", err)
+	}
+
+	// A SECOND Store over the same directory — no shared memory with the first,
+	// so this reads the file rather than a cached struct.
+	reopened, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore (second): %v", err)
+	}
+	got, found, err := reopened.FindPending(key, busURL)
+	if err != nil {
+		t.Fatalf("FindPending: %v", err)
+	}
+	if !found {
+		t.Fatalf("no pending record found after reopening the store")
+	}
+	if got.MessagingKeySeed != want.MessagingKeySeed {
+		t.Fatalf("pending MessagingKeySeed after a reopen = %q, want %q — a resumed enrolment in a new process would mint a DIFFERENT messaging key and earn a 409",
+			got.MessagingKeySeed, want.MessagingKeySeed)
+	}
+	if got.PrivateKeySeed != want.PrivateKeySeed {
+		t.Fatalf("pending PrivateKeySeed after a reopen = %q, want %q", got.PrivateKeySeed, want.PrivateKeySeed)
+	}
+
+	// The PUBLIC view must not carry either secret.
+	listed, err := reopened.ListPending()
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("ListPending() returned %d records, want 1", len(listed))
+	}
+	rendered := fmt.Sprintf("%+v", listed[0])
+	if strings.Contains(rendered, want.MessagingKeySeed) {
+		t.Fatalf("ListPending() leaks the messaging key seed: %q", rendered)
+	}
+	if strings.Contains(rendered, want.PrivateKeySeed) {
+		t.Fatalf("ListPending() leaks the private key seed: %q", rendered)
+	}
+}
+
+// TestPendingEnrolmentWithoutMessagingSeedLoads checks a pending record written
+// by a build that predates the messaging seed still loads, with an EMPTY seed
+// rather than an error.
+//
+// The empty value is MEANINGFUL, not merely absent: Enrol reads it as "that
+// attempt registered no messaging key, so this retry must register none
+// either". A record that failed to load, or that was repaired by minting a
+// seed here, would break the retry it exists to make possible.
+func TestPendingEnrolmentWithoutMessagingSeedLoads(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{
+  "version": 1,
+  "current": "",
+  "identities": [],
+  "pending": [
+    {
+      "idempotency_key": "legacy-key",
+      "name": "agent",
+      "bus_url": "http://bus.example",
+      "public_key": "cHVibGljLWtleS1iYXNlNjQ=",
+      "private_key_seed": "c2VlZA==",
+      "created_at": "` + time.Now().UTC().Format(time.RFC3339Nano) + `"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, storeFileName), []byte(legacy), storeFileMode); err != nil {
+		t.Fatalf("writing a legacy store: %v", err)
+	}
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	got, found, err := s.FindPending("legacy-key", "http://bus.example")
+	if err != nil {
+		t.Fatalf("FindPending: %v", err)
+	}
+	if !found {
+		t.Fatalf("a pending record written before messaging_key_seed existed did not load")
+	}
+	if got.MessagingKeySeed != "" {
+		t.Fatalf("MessagingKeySeed = %q, want empty — nothing may invent key material for an attempt that registered none", got.MessagingKeySeed)
+	}
+}
+
+// TestDamagedMessagingSeedRemedyDoesNotAdviseLocalReminting pins the ADVICE in
+// damagedMessagingSeedRemedy, which nothing else does.
+//
+// It exists because that string was already wrong once. It told the operator to
+// delete the messaging_key_seed field and mint a replacement locally — correct
+// while the messaging key never left the machine, and actively harmful once
+// RELAY-13 made the bus record the public half at enrolment. The field is
+// write-once server side, so a locally minted replacement leaves the agent
+// signing with a key its own bus still attests the predecessor of: every peer
+// that verifies through an attestation rejects every message, and no test went
+// red. Prose that only a human re-reading it can falsify is prose that decays.
+//
+// It asserts the SHAPE of the advice — no local re-mint, re-enrolment named —
+// rather than the exact sentence, so wording can improve without a test edit
+// while the substance cannot silently revert.
+func TestDamagedMessagingSeedRemedyDoesNotAdviseLocalReminting(t *testing.T) {
+	remedy := damagedMessagingSeedRemedy
+
+	// The specific reverted-to advice, and the command that would carry it out.
+	for _, forbidden := range []string{"keygen", "re-distribute"} {
+		if strings.Contains(remedy, forbidden) {
+			t.Fatalf("the damaged-messaging-seed remedy mentions %q: %q\n"+
+				"minting a replacement key locally leaves the agent signing with a key the bus does not attest, because the bus recorded the key at enrolment and the field is write-once",
+				forbidden, remedy)
+		}
+	}
+	if !strings.Contains(remedy, "enrol") {
+		t.Fatalf("the damaged-messaging-seed remedy = %q, want it to name re-enrolment, which is the only route that puts the bus and the agent back in agreement", remedy)
+	}
+
+	// And it must actually be the remedy BOTH damaged-seed branches carry, which
+	// is the drift the constant exists to prevent.
+	for _, tc := range []struct {
+		name string
+		cred Credential
+	}{
+		{"not base64", Credential{MessagingKeySeed: "!!! not base64 !!!"}},
+		{"wrong length", Credential{MessagingKeySeed: base64.StdEncoding.EncodeToString([]byte("short"))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.cred.MessagingPrivateKey()
+			if err == nil {
+				t.Fatalf("MessagingPrivateKey() = nil error, want one")
+			}
+			var e *Error
+			if !errors.As(err, &e) {
+				t.Fatalf("error is not a *client.Error: %v", err)
+			}
+			if e.Remedy != remedy {
+				t.Fatalf("Remedy = %q, want the shared damagedMessagingSeedRemedy %q", e.Remedy, remedy)
+			}
+		})
 	}
 }

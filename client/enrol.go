@@ -68,9 +68,10 @@ type EnrolOptions struct {
 	IdempotencyKey string
 
 	// Save stores the resulting credential in the credential store. Callers
-	// that only want to test enrolment can turn it off — but note that the
-	// private key is then lost when the process exits, and the enrolment it
-	// created stays on the bus.
+	// that only want to test enrolment can turn it off — but note that BOTH
+	// private keys are then lost when the process exits, and the enrolment they
+	// created stays on the bus, holding a messaging public key nobody can ever
+	// sign for.
 	Save bool
 
 	// MakeCurrent selects the new identity as the one subsequent commands act
@@ -108,8 +109,35 @@ type EnrolResult struct {
 // enrolRequestBody mirrors httpapi.EnrolRequestBody. The server rejects
 // unknown fields, so this struct is exactly the wire shape and nothing more.
 type enrolRequestBody struct {
-	Name           string `json:"name"`
-	PublicKey      string `json:"public_key"`
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+
+	// MessagingPublicKey is the base64 (standard, padded) public half of this
+	// identity's MESSAGING key — the one PEERS verify signed messages with, and
+	// the one this bus later ATTESTS to a peer bus. It is a DIFFERENT key from
+	// PublicKey and the server refuses an enrolment that presents one value for
+	// both roles.
+	//
+	// Registering it HERE is what makes cross-bus trust possible at all: the
+	// attestation binds `fq-agent-id -> messaging public key`, and a bus cannot
+	// attest a key it never recorded.
+	//
+	// The PRIVATE half is not sent, is not derivable from this, and never leaves
+	// the machine (Credential.MessagingKeySeed).
+	//
+	// omitempty, and the server accepts an absent value. That is not
+	// forward-compatibility theatre — it is load-bearing on ONE path: resuming an
+	// enrolment whose pending record was written before this field existed, which
+	// must resend that attempt's payload byte for byte or be answered with a 409
+	// (invariant 10). Every fresh enrolment sends one.
+	//
+	// Note what it does NOT prove. There is no proof-of-possession of the
+	// messaging private key at enrolment: an enroller can register a public key
+	// it harvested from somewhere else. That is a known, accepted gap — it is
+	// NOT covered by AUTH-1-FU-POPKEY, which is about the auth key — so nothing
+	// downstream may treat "the bus recorded this key" as "this agent holds it".
+	MessagingPublicKey string `json:"messaging_public_key,omitempty"`
+
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
@@ -128,23 +156,36 @@ const idempotencyReplayedHeader = "Idempotency-Replayed"
 
 // Enrol registers a new agent with the bus and stores the credential.
 //
-// The private key is generated HERE and only the public half is sent. The bus
-// can therefore verify this agent's calls and can never forge them.
+// TWO key pairs are generated HERE and only their public halves are sent, so
+// the bus can verify this agent and can forge neither of them:
 //
-// # Ordering: the key is on disk BEFORE the request goes out
+//   - the AUTH key, which proves this agent TO THE BUS in the session
+//     handshake;
+//   - the MESSAGING key, which proves this agent TO ITS PEERS. Its public half
+//     is registered at enrolment (RELAY-13) because the origin bus attests
+//     `fq-agent-id -> messaging public key` to a peer bus, and a bus cannot
+//     attest a key it never recorded.
 //
-// The seed is written to the credential store as a PENDING enrolment before
+// Registering it is not a claim that this agent HOLDS the matching private
+// key: enrolment obtains no proof of possession of the messaging key, so a
+// caller could register one it harvested. That gap is known and accepted here.
+//
+// # Ordering: both keys are on disk BEFORE the request goes out
+//
+// The seeds are written to the credential store as a PENDING enrolment before
 // /v1/enroll is called, and promoted to a full credential when the bus
 // answers. Two things fall out of that ordering, and both are the point:
 //
 //   - A process killed after the bus minted an id but before the answer was
-//     stored does not lose the private key. Retrying with the SAME idempotency
-//     key recovers the identity, because the same key material is still there.
+//     stored does not lose either private key. Retrying with the SAME
+//     idempotency key recovers the identity, because the same key material is
+//     still there — and, for the messaging key, because the bus has recorded a
+//     public half whose private half must not be regenerated underneath it.
 //   - A retry is a real retry. Invariant 10 defines one as "same key + SAME
-//     payload"; the payload contains the public key, so a client that
-//     regenerated its key pair would be sending "same key + DIFFERENT payload"
-//     — a protocol violation that gets it DISCONNECTED. Reusing the pending
-//     record is what makes the retry legitimate rather than an offence.
+//     payload"; the payload contains BOTH public keys, so a client that
+//     regenerated either key pair would be sending "same key + DIFFERENT
+//     payload" — which the bus answers with a 409. Reusing the pending record
+//     is what makes the retry legitimate rather than an offence.
 //
 // When the same idempotency key is presented with different content, Enrol
 // refuses LOCALLY. It could send it and let the bus refuse, but the bus's
@@ -202,9 +243,15 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		return EnrolResult{}, err
 	}
 
-	// A fresh key pair for a new attempt. ClaimEnrolment may hand back an
-	// earlier attempt's material instead, in which case this one is discarded
-	// unused — cheap, and it keeps the random draw outside the lock.
+	// TWO fresh key pairs for a new attempt — the AUTH key, which proves this
+	// agent to the bus, and the MESSAGING key, whose public half the bus records
+	// so it can later attest it to a peer bus. They must never be the same key
+	// (the server refuses that outright), which is why these are two independent
+	// draws and not one seed used twice.
+	//
+	// ClaimEnrolment may hand back an earlier attempt's material instead, in
+	// which case both of these are discarded unused — cheap, and it keeps the
+	// random draws outside the lock.
 	seed := make([]byte, ed25519.SeedSize)
 	if _, err := rand.Read(seed); err != nil {
 		return EnrolResult{}, wrapError(KindInternal, op,
@@ -212,13 +259,20 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 	}
 	pubB64 := base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey))
 
+	msgSeed := make([]byte, ed25519.SeedSize)
+	if _, err := rand.Read(msgSeed); err != nil {
+		return EnrolResult{}, wrapError(KindInternal, op,
+			"cannot generate a messaging key pair: the system random source failed", "", err)
+	}
+
 	want := pendingEnrolment{
-		IdempotencyKey: idemKey,
-		Name:           name,
-		BusURL:         busURL.String(),
-		PublicKey:      pubB64,
-		PrivateKeySeed: base64.StdEncoding.EncodeToString(seed),
-		CreatedAt:      c.now().UTC().Format(time.RFC3339Nano),
+		IdempotencyKey:   idemKey,
+		Name:             name,
+		BusURL:           busURL.String(),
+		PublicKey:        pubB64,
+		PrivateKeySeed:   base64.StdEncoding.EncodeToString(seed),
+		MessagingKeySeed: base64.StdEncoding.EncodeToString(msgSeed),
+		CreatedAt:        c.now().UTC().Format(time.RFC3339Nano),
 	}
 
 	effective := want
@@ -267,6 +321,35 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			"enrol again without --idempotency-key to generate a fresh key pair")
 	}
 
+	// The messaging public key is DERIVED from the seed this attempt is
+	// committed to, through Credential.MessagingPublicKey — the one derivation
+	// in this package — rather than recomputed here. A second copy of "seed to
+	// public key" is a second place for the two to disagree, and a messaging
+	// public key that does not match the seed we keep is the worst failure
+	// available: the bus records and attests it, and then every peer rejects
+	// everything this agent signs, with a symptom that points nowhere near the
+	// cause.
+	//
+	// An EMPTY seed means a resumed attempt from a pending record written before
+	// this field existed. Send NO messaging key then. The alternative — mint one
+	// now — would present the original idempotency key with different content,
+	// which the bus answers with a 409 (invariant 10): the retry of an
+	// interrupted enrolment would become a permanent failure. Such an identity
+	// keeps a locally-minted messaging key its bus cannot attest, which is the
+	// pre-RELAY-13 state and is recoverable only by re-enrolling under a new id.
+	msgSeedB64 := effective.MessagingKeySeed
+	msgPubB64 := ""
+	if msgSeedB64 != "" {
+		if msgPubB64, err = (Credential{MessagingKeySeed: msgSeedB64}).MessagingPublicKey(); err != nil {
+			// Deliberately NOT the wrapped error from MessagingPublicKey: it
+			// names an agent id, and there is no agent id yet on this path, so
+			// it would read "the stored messaging key for  is not valid base64".
+			return EnrolResult{}, newError(KindConfig, op,
+				"the saved messaging key material for idempotency key "+idemKey+" is damaged",
+				"enrol again without --idempotency-key to generate a fresh key pair")
+		}
+	}
+
 	ctx, cancel := c.contextWithTimeout(ctx)
 	defer cancel()
 
@@ -276,9 +359,10 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		path:   routeEnroll,
 		op:     op,
 		body: enrolRequestBody{
-			Name:           name,
-			PublicKey:      pubB64,
-			IdempotencyKey: idemKey,
+			Name:               name,
+			PublicKey:          pubB64,
+			MessagingPublicKey: msgPubB64,
+			IdempotencyKey:     idemKey,
 		},
 		out: &body,
 		// Safe to repeat: the request carries an idempotency key and the
@@ -338,7 +422,14 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			EnrolledAt:      body.EnrolledAt,
 		},
 		PrivateKeySeed: seedB64,
-		IdempotencyKey: idemKey,
+		// Stored because the BUS now holds its public half. Dropping it here
+		// would leave EnsureMessagingKey to mint a different key on the first
+		// send, and the agent would sign with a key that is not the one its own
+		// bus recorded and attests — so every peer would reject every message.
+		// Empty only on the legacy-resume path above, where the bus recorded no
+		// messaging key either, and first-use minting is then still correct.
+		MessagingKeySeed: msgSeedB64,
+		IdempotencyKey:   idemKey,
 	}
 
 	result := EnrolResult{
