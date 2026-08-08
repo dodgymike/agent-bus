@@ -43,12 +43,83 @@ const (
 
 	// shutdownGrace bounds the drain of in-flight requests after the
 	// server-lifetime context has been cancelled.
+	//
+	// # THE CONTRACT A POLL HANDLER MUST HONOUR (CORE-11)
+	//
+	// shutdownGrace (10s) is SHORTER than defaultPollTimeout (30s), so a parked
+	// long-poll OUTLIVES the graceful-shutdown window. Read that again: the grace
+	// period cannot, on its own, drain a poll that has just parked.
+	//
+	// What makes shutdown work anyway is the ORDERING in waitAndShutdown:
+	// cancelRoot() fires FIRST, and rootCtx is the parent of every request
+	// context via http.Server.BaseContext, so cancelling it cancels the requests
+	// and the handlers return before Shutdown starts counting. The grace period
+	// then only has to cover handlers already on their way out.
+	//
+	// So the requirement, which is a CONTRACT and not an implementation detail:
+	//
+	//	A POLL HANDLER MUST select on ctx.Done() (r.Context()) ALONGSIDE its own
+	//	timeout. It MUST NOT block on a bare time.After(pollTimeout).
+	//
+	// A handler that ignores ctx.Done() hangs for its full poll timeout, blows
+	// through shutdownGrace, and is killed mid-response -- the client sees a
+	// truncated reply on shutdown rather than a clean empty poll. Nothing in the
+	// type system enforces this, which is exactly why it is written down: the
+	// safety here is a property of two numbers and one statement order, and it
+	// was previously true only by accident.
+	//
+	// # Why the numbers were NOT simply reordered
+	//
+	// The obvious alternative is to raise shutdownGrace above defaultPollTimeout.
+	// It was not chosen. -poll-timeout is OPERATOR-CONFIGURABLE, so any constant
+	// here can be exceeded by a flag and the ordering would be a coincidence
+	// again; and it would make every shutdown wait for the slowest poll, turning
+	// a 10s drain into a 30s+ one on a bus whose polls are idle by definition.
+	// Cancelling the contexts is both faster and correct for any poll timeout.
 	shutdownGrace = 10 * time.Second
 
 	// readHeaderTimeout bounds how long a client may take to send its request
 	// headers; it deliberately does NOT bound the whole request, because
 	// long-polls are meant to be slow.
 	readHeaderTimeout = 15 * time.Second
+
+	// idleTimeout bounds how long an idle KEEP-ALIVE connection is held open
+	// between requests (CORE-9).
+	//
+	// It bounds a connection that is doing NOTHING, which is why it is safe here
+	// while a read or write timeout is not: a parked long-poll is an in-flight
+	// request, not an idle connection, so this timer is not running during one.
+	//
+	// The value is comfortably above the default long-poll (defaultPollTimeout,
+	// 30s) so that an agent looping on /v1/wait re-uses its connection instead of
+	// re-handshaking TLS on every poll. That is a real cost on this bus: every
+	// connection is TLS and there is no plaintext listener (invariant 11).
+	//
+	// Deliberately NOT justified by mutual TLS. ClientAuth is still
+	// tls.NoClientCert (cmd/agent-bus/tlslisten.go) -- MTLS-CLIENTAUTH has not
+	// landed -- so a comment resting on client certificates would assert an
+	// authentication property this server does not yet have, in a place a later
+	// auditor would trust. When client auth does land the handshake gets more
+	// expensive, which strengthens this value rather than changing it.
+	//
+	// What this does NOT bound: an ACTIVE attacker. A client that sends a
+	// trivial request more often than every 120s refreshes the timer for ever,
+	// so this is a bound on ABANDONED keep-alives, not a connection cap. There
+	// is no concurrent-connection limit; the loopback listen default is what
+	// bounds who can reach the port.
+	idleTimeout = 120 * time.Second
+
+	// maxHeaderBytes bounds the header memory a single connection can make the
+	// server allocate before any handler runs (CORE-9). net/http's own default
+	// is 1 MB; 64 KB is far more than any legitimate request to this bus needs,
+	// and every credential that travels in a header here -- the session token --
+	// is a short opaque handle.
+	//
+	// This bounds HEADERS ONLY. Request BODIES are bounded separately and
+	// per-handler with http.MaxBytesReader inside internal/httpapi's JSON-decode
+	// helper, because the right body limit differs per route and a single number
+	// here could not express it.
+	maxHeaderBytes = 64 << 10
 )
 
 // Config is the fully validated runtime configuration.
@@ -213,6 +284,20 @@ func run(cfg Config) error {
 	// on the first durable write. 0o700: the store holds agent credentials.
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return fmt.Errorf("preparing -data-dir %q: %w", cfg.DataDir, err)
+	}
+
+	// ...and MkdirAll does NOTHING to a directory that already exists: no
+	// chmod, no check, no warning. So the 0o700 above is a statement about
+	// directories WE create and nothing else, and a pre-created 0777 data
+	// directory sailed straight through it until this call was added.
+	//
+	// It runs HERE, before dirIsEmpty reads the directory and before
+	// dirlock.Acquire writes into it, because every step below trusts that the
+	// files in this directory cannot be substituted by another local user.
+	// Checking later would also mean a refusal that has already written key
+	// material into a world-writable directory, which no refusal can take back.
+	if err := enforceDataDirPermissions(cfg.DataDir, lg); err != nil {
+		return err
 	}
 
 	// Was this data dir EMPTY when the process started? Read here and nowhere
@@ -541,6 +626,13 @@ func run(cfg Config) error {
 		},
 		NextIndex:   rec.NextIndex,
 		Quarantined: rec.Repaired.Quarantined,
+		// LogRepaired answers ONE question for the hub: did recovery physically
+		// remove records from this log? It is the predicate that decides whether
+		// a MISSING message-seq-floor file may be rebuilt from the log — safe on
+		// the ordinary upgrade path, an invariant-1 violation when the log has
+		// holes. See describeLogRepair for what counts and, more importantly,
+		// what deliberately does not.
+		LogRepaired: describeLogRepair(rec),
 		Roster:      hubRoster{roster: authRoster},
 		Logger:      lg,
 		PollTimeout: cfg.PollTimeout,
@@ -578,10 +670,38 @@ func run(cfg Config) error {
 		Hub: h,
 	})
 
+	// THE RESOURCE BOUNDS ON THE SERVER (CORE-9).
+	//
+	// # ReadTimeout AND WriteTimeout ARE DELIBERATELY UNSET. DO NOT "COMPLETE THE SET".
+	//
+	// This is the guardrail comment, and it is the point of the task that added
+	// these fields. Both of those are ABSOLUTE DEADLINES ON THE WHOLE
+	// REQUEST/RESPONSE, measured from when the connection is accepted -- they are
+	// not idle timers. A long-poll on /v1/wait parks for up to -poll-timeout
+	// (defaultPollTimeout, 30s) BY DESIGN, so any WriteTimeout shorter than that
+	// kills the poll mid-flight and any ReadTimeout shorter than that kills it
+	// before the handler ever answers. The failure is not a clean error either:
+	// the client sees a truncated response or a reset connection on the bus's
+	// core mechanic, intermittently, only under the timing that matters.
+	//
+	// "Add a sensible timeout to the HTTP server" is exactly the well-intentioned
+	// hardening change a later contributor makes without realising it breaks
+	// long-polling, so the absence of those two fields is RECORDED HERE rather
+	// than left to be inferred from their absence. If a request-lifetime bound is
+	// ever genuinely needed, it belongs per-handler on the request context, where
+	// the poll handler can opt out -- not on the server, where it cannot.
+	//
+	// What IS set: ReadHeaderTimeout bounds the slow-headers attack (a request
+	// that never finishes its headers occupies a connection and no handler),
+	// IdleTimeout bounds idle keep-alives, and MaxHeaderBytes bounds header
+	// memory. All three bound a connection that is NOT serving a request, so none
+	// of them can fire during a long-poll.
 	srv := &http.Server{
 		Handler:           handler,
 		BaseContext:       func(net.Listener) context.Context { return rootCtx },
 		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
 	// THE ONE LISTENER, AND IT IS TLS (MTLS-LISTENER, invariant 11).

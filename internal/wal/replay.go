@@ -535,4 +535,16 @@ type Recovered struct {
 	// replay ran. It is zero when nothing was repaired. Replay itself never
 	// changes a file and never sets this; Open fills it in from RepairLog.
 	Repaired Repair
+
+	// AuditRepaired describes what recovery removed or rebuilt in the SEPARATE
+	// append-only message audit log (<data-dir>/bus.audit, DUR-5). It is zero
+	// when nothing was repaired, and always zero from Replay -- which replays a
+	// WAL and knows nothing about the audit file. Only Open fills it in.
+	//
+	// It is reported SEPARATELY from Repaired rather than merged into it because
+	// the two losses mean different things: damage in the WAL may have cost
+	// accepted history, damage in the audit log costs the provenance record of
+	// messages that are otherwise intact. An operator needs to be able to tell
+	// which happened.
+	AuditRepaired Repair
 }

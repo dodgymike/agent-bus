@@ -695,6 +695,14 @@ func (f *indexFloor) persistLocked(reserved, written uint64, sealed bool) error 
 		return fmt.Errorf("wal: internal error: refusing to write an index floor to %s claiming %d indices burned but only %d reserved; an index cannot be used before it is authorised",
 			f.path, written, reserved)
 	}
+	// NOTE FOR ANYONE TEMPTED TO ADD A maxCredibleFloorIndex CHECK HERE. Do not.
+	// It was tried and it made things worse: `begin` raises reserved by
+	// indexReserveBlock on every Open, so a floor loaded at exactly the ceiling
+	// persists just above it, and refusing THAT write turns an attacker-planted
+	// number into a bus that will not start. The ceiling belongs on the READ of
+	// UNTRUSTED input only -- see readIndexFloorFile and maxCredibleFloorIndex.
+	// log.go's MaxUint64 refusal remains the backstop for a number that somehow
+	// reaches the end of the space.
 	if len(f.key) == 0 {
 		// Writing an unkeyed floor is the forgeable shape this change exists to
 		// stop writing, so it is refused rather than silently downgraded. Every
@@ -933,8 +941,160 @@ func readIndexFloorFile(path string, key []byte, keyIsOriginal bool) (floorFile,
 	if ff.written > ff.reserved {
 		return floorFile{}, indexFloorCorrupt(path, fmt.Sprintf("it claims %d indices burned but only %d reserved; an index cannot have been used before it was authorised, so the file contradicts itself", ff.written, ff.reserved))
 	}
+	// THE SANITY CEILING ON UNAUTHENTICATED INPUT. See maxCredibleFloorIndex.
+	//
+	// TWO THINGS ABOUT ITS PLACEMENT ARE LOAD-BEARING, and both were established
+	// by getting them wrong first.
+	//
+	// IT RUNS BEFORE THE REWRITE. `begin` re-persists this file under the current
+	// key within the same recovery, so a number accepted here is a number about
+	// to be SIGNED -- after which nothing can ever again distinguish an
+	// attacker's value from one the bus wrote. There is no "after" that helps.
+	//
+	// IT APPLIES ONLY TO THE UNAUTHENTICATED SHAPES. Guarding the keyed shape too
+	// looks stricter and is strictly worse, which a security probe demonstrated:
+	// `begin` raises reserved by indexReserveBlock, so a legacy floor planted at
+	// exactly the ceiling was accepted, signed, persisted just ABOVE the ceiling
+	// -- and then refused on every subsequent start, for ever. Bounding the keyed
+	// shape converted a bounded loss into a permanent, attacker-chosen brick. A
+	// tag that verifies under this data directory's own key says the bus wrote
+	// the number; if our own writer produced an impossible one, refusing to boot
+	// over it IS the brick. log.go's MaxUint64 refusal is the backstop there.
+	if ff.legacy || ff.unverified {
+		// `written` cannot exceed `reserved` (checked just above), so in practice
+		// the `reserved` test fires first. Both are written out anyway: the
+		// invariant between them is not this function's to rely on, and a future
+		// reordering must not silently leave `written` unbounded.
+		if n := ff.reserved; n > maxCredibleFloorIndex {
+			return floorFile{}, indexFloorAbsurd(path, "reserved", n, ff.unverified)
+		}
+		if n := ff.written; n > maxCredibleFloorIndex {
+			return floorFile{}, indexFloorAbsurd(path, "written", n, ff.unverified)
+		}
+	}
 	ff.existed = true
 	return ff, nil
+}
+
+// maxCredibleFloorIndex is the largest WAL record index a floor file may claim.
+//
+// # Why a ceiling exists at all
+//
+// `reserved` and `written` are believed only UPWARD -- they can raise the start
+// index, never lower it -- so for a long time the reasoning was that a wrong
+// value could cost index density and nothing else. That reasoning has a floor of
+// its own, and a security probe found it: a value near the top of the 64-bit
+// space does not cost density, it costs the BUS. Open refuses to start once no
+// index can be issued without reusing one, and the message-sequence floor
+// derived from it fails every mint after that. Permanently, with no remedy.
+//
+// # Why it is load-bearing for the UNAUTHENTICATED shapes in particular
+//
+// A floor carrying the legacy unkeyed `sha256=` digest is checked with a plain
+// hash over its own body, which anyone able to write the data directory can
+// recompute. `sealed` is already discarded on that path as a trust decision the
+// digest cannot support -- but `reserved` and `written` were believed. So an
+// attacker WITHOUT the MAC key could write a legacy floor claiming an arbitrary
+// index, and recovery would accept it and then rewrite it with a valid
+// HMAC-SHA256 tag, laundering a chosen value into one that is authenticated
+// under the real key and indistinguishable from a legitimate one for ever after.
+// This ceiling is what stops the brick, and it must run BEFORE that rewrite.
+//
+// # Why 2^48, and what it does and does not claim
+//
+// It is a CREDIBILITY bound, not a capacity limit, and it is deliberately absurd
+// rather than tight. Every WAL record costs at least FrameHeaderSize (48) bytes
+// on disk, so a log of 2^48 RECORDS is something over 13 petabytes in a single
+// data directory. (Indices, strictly, are not records: holes are legal and every
+// unclean restart burns up to indexReserveBlock-1 of them without writing
+// anything. The conclusion survives that by about twelve orders of magnitude --
+// it would take ~4e12 unclean restarts to burn 2^48 indices -- but the two are
+// not the same quantity and this comment should not pretend they are.)
+//
+// No bus has been within many orders of magnitude of it, and there is still a
+// factor of 65536 of headroom above it before the 64-bit space runs out -- so a
+// real deployment cannot reach it.
+//
+// # What it does NOT do, stated because an earlier draft claimed otherwise
+//
+// It is NOT applied to a floor whose keyed tag verified, so it is NOT true that
+// "no file this bus reads can hold a value beyond it". `begin` raises reserved
+// by indexReserveBlock on every Open, so a legacy floor accepted at the ceiling
+// is persisted just ABOVE it under the real key, and that keyed file is read
+// back without complaint on the next start. That is deliberate: bounding the
+// keyed shape as well is what turned a bounded loss into a permanent brick (see
+// readIndexFloorFile).
+//
+// # The residual, which the ceiling bounds rather than removes
+//
+// An attacker who can write the data directory can still plant an unkeyed floor
+// claiming anything UP TO the ceiling, and the bus will believe it and then sign
+// it. That costs up to 2^48 of index space and is not nothing -- but it
+// preserves invariant 1 (the sequence only ever moves up; no id is reissued),
+// leaves ~1.8e19 indices, and the bus keeps running. The number that mattered
+// was the one near 2^64, which bricks it permanently with no remedy.
+//
+// THE REAL FIX FOR THAT RESIDUAL IS TO STOP ACCEPTING THE UNKEYED SHAPE AT ALL,
+// so the key is a boundary again rather than a ramp. This ceiling only caps how
+// much damage a forged value buys; it does not make the file authentic. Retiring
+// the ramp is a compatibility decision -- it needs a dated DECISIONS.md entry and
+// evidence that every live data directory has already been converted -- and is
+// the follow-up this guard defers to, not a tightening of the bound.
+const maxCredibleFloorIndex uint64 = 1 << 48
+
+// indexFloorAbsurd reports a floor whose numbers no run of this code can have
+// written.
+//
+// IT DELIBERATELY DOES NOT GO THROUGH indexFloorCorrupt, even though it reports
+// the same sentinel. indexFloorCorrupt's standing remedy is written for a file
+// that FAILED ITS TAG, and every clause of it is wrong for this diagnosis -- a
+// reviewer read the combined text as an operator and found three contradictions:
+//
+//   - "CHECK wal-mac.key FIRST: this file is authenticated under that key" sends
+//     the operator to restore a key that is not the question. The ceiling check is
+//     key-INDEPENDENT, and on the legacy shape the file was never authenticated
+//     under that key at all. It is the wrong first move on what may be an
+//     intrusion.
+//   - "you CANNOT read that from this file, because the flag recording it lives
+//     in the very body that will not verify" is false here: the body DID verify.
+//     The number in it is impossible; the bytes are readable.
+//   - "DELETING IT IS A LAST RESORT AND IT FORFEITS INVARIANT 1" is wrong advice
+//     for a file that never encoded a real floor. Deleting a planted file forfeits
+//     nothing, and telling an operator otherwise leaves them stuck.
+//
+// So this writes its own remedy. It names the authentication shape, because that
+// is what the operator's next move actually turns on.
+// It is only ever reached for an UNAUTHENTICATED file -- readIndexFloorFile does
+// not apply the ceiling to a floor whose keyed tag verified -- so there is no
+// "the tag was fine" branch here. An earlier draft had one, and it told the
+// operator this was "either damage that kept a valid tag or a defect in the
+// writer", pointing away from tampering on the only path that can reach it.
+func indexFloorAbsurd(path, field string, n uint64, unverified bool) error {
+	// THE TWO ARMS GET DIFFERENT ADVICE, and collapsing them is a real hazard
+	// rather than a wording preference. A reviewer reproduced the state that
+	// proves it: the ceiling deliberately lets a legacy value AT the ceiling be
+	// absorbed and re-signed just above it, so a data directory can legitimately
+	// hold a keyed floor above the ceiling. If wal-mac.key is then lost, that
+	// GENUINE floor arrives here on the unverified arm -- and the legacy arm's
+	// advice ("it never encoded a real floor, deleting it costs nothing") would
+	// walk the operator into deleting a floor that is real, rewinding the WAL
+	// index and the message sequence below numbers already issued. That is the
+	// invariant-1 violation this whole file exists to prevent.
+	shape := "carried only the legacy UNKEYED sha256 digest, which anyone able to write this data directory can recompute without " + MACKeyFileName +
+		" -- so nothing here says agent-bus wrote this number. TREAT IT AS TAMPERING until you can rule that out, and CHECK WHO CAN WRITE THIS DIRECTORY. Restoring " + MACKeyFileName +
+		" will NOT help: this check does not use the key"
+	provenance := "IT HAS NOT BEEN MODIFIED, so an impossible number has NOT been signed under this data directory's key and the evidence is intact."
+	remedy := "If the file was planted, DELETING IT COSTS NOTHING -- it never encoded a real floor, so there is no floor to lose. Prefer restoring a known-good one from a backup or a replica."
+	if unverified {
+		shape = "could not be verified, because this data directory had no MAC key when it was opened and recovery minted a new one -- so nothing this directory can still check says who wrote this number. It may have been TAMPERED WITH, or it may be this bus's own floor written under the key that was lost"
+		// "IT HAS NOT BEEN MODIFIED" would contradict the sentence before it on a
+		// plain reading -- tampering IS modification, and that sentence has just
+		// said this directory can no longer tell. The subject has to be named.
+		provenance = "AGENT-BUS HAS NOT MODIFIED IT, so whatever it is, the evidence is intact."
+		remedy = "RESTORE " + MACKeyFileName + " AND RETRY: under the original key this file either verifies -- in which case the number is real and this is a genuine, if extraordinary, floor -- or it does not, which settles the question. DO NOT DELETE IT until you have tried that: if it IS this directory's own floor, deleting it rewinds the WAL record index and the message sequence below numbers already handed out, which is precisely the invariant-1 violation this file exists to prevent."
+	}
+	return fmt.Errorf("%w: %s: it claims %s %d, which is above the largest credible record index %d (a log of 2^48 RECORDS is over 13 PB at %d bytes per record minimum, so no real deployment has produced this). The file %s. %s %s Whatever you do, do not simply raise the number to make the bus start: the WAL record index -- and the message sequence derived from it -- must never be resumed below one already handed out (invariant 1)",
+		ErrIndexFloorCorrupt, path, field, n, maxCredibleFloorIndex, FrameHeaderSize, shape, provenance, remedy)
 }
 
 // verifyIndexFloorTag checks the header's tag field against the body and

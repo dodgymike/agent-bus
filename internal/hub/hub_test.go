@@ -113,7 +113,60 @@ func mintedSend(t *testing.T, h *hub.Hub, req hub.SendRequest) (hub.Result, erro
 func mintedBroadcast(t *testing.T, h *hub.Hub, req hub.BroadcastRequest) (hub.Result, error) {
 	t.Helper()
 	req.SignedMint = mintFor(t, h, req.Sender, "broadcast", req.IdempotencyKey)
-	return h.Broadcast(req)
+	res, err := h.Broadcast(req)
+	skipIfBroadcastHasNoSigningDigest(t, err)
+	return res, err
+}
+
+// skipIfBroadcastHasNoSigningDigest skips the calling test when a broadcast was
+// refused because signing format v1 cannot canonicalize one.
+//
+// # Why these tests are SKIPPED and not REWRITTEN
+//
+// DUR-5 made every message carry an audit record, and PROTOCOL.md 8.6 binds its
+// content hash to signing.CanonicalDigest. signing.Canonicalize REJECTS an empty
+// recipient set, and store.Message stores a broadcast as a FLAG rather than an
+// expanded roster, so a broadcast has no canonical bytes and therefore no
+// content hash. internal/hub fails CLOSED rather than inventing one, because any
+// value chosen here would settle SIGN-3's open question -- what the canonical
+// audience of a broadcast IS -- by accident, and would write that answer into an
+// APPEND-ONLY trail that cannot be edited afterwards.
+//
+// The tempting alternative is to rewrite these tests to assert the refusal. That
+// was considered and REJECTED (2026-08-08, operator ruling): a suite asserting
+// "a broadcast is refused" reads as the SETTLED DESIGN, and the next person
+// would find a green test suite documenting the interim posture as if it were
+// the decision. A skip says the opposite -- this is unresolved, and here is the
+// question that resolves it.
+//
+// # Why this is a SINGLE check and not ~40 hand-placed t.Skip calls
+//
+// It is exact and it is self-healing. Exact, because it fires ONLY on
+// signing.ErrInvalid: a broadcast test failing for any OTHER reason is a real
+// regression and still fails, loudly, rather than hiding behind a convenient
+// explanation. Self-healing, because the day SIGN-3 lands and hub.Broadcast
+// starts succeeding, every one of these tests comes back on its own -- nobody
+// has to find and delete forty skips, and there is no way to leave one behind.
+//
+// The match is on the SENTINEL, never on message text. Within hub.publish the
+// only source of signing.ErrInvalid is the audit content hash (store.NewMessage
+// reports its own ErrInvalidMessage), and this helper is reached only by
+// broadcasts, so sentinel plus caller is precise.
+//
+// SAFETY: every mintedBroadcast call site in this package is on the TEST
+// goroutine -- the go func() blocks in wait_test.go and recovery_test.go call
+// h.Wait, never this. That matters because t.Skip from a non-test goroutine is
+// undefined behaviour.
+func skipIfBroadcastHasNoSigningDigest(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !errors.Is(err, signing.ErrInvalid) {
+		return
+	}
+	t.Skipf("SKIPPED pending SIGN-3: signing format v1 has not defined a canonical broadcast audience, "+
+		"so a broadcast has no signing digest and cannot produce the audit-log content hash DUR-5 requires "+
+		"(PROTOCOL.md 8.6); internal/hub fails closed rather than inventing one. /v1/broadcast answers 501 "+
+		"today, so nothing in production is affected. UN-SKIP WHEN SIGN-3 LANDS -- this test needs no change, "+
+		"it will simply start running again. Refusal was: %v", err)
 }
 
 // mintFor reserves an assignment and dresses it as the SignedMint a client

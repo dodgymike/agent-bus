@@ -9,9 +9,26 @@ import (
 	"sync"
 )
 
-// fileMode is the permission bits for a newly created log. 0600: the log is
-// the audit trail and holds every message body, so it is readable only by the
-// user the server runs as.
+// fileMode is the permission bits for a NEWLY CREATED log. 0600: the WAL holds
+// every message body and the audit log holds the full routing record of who
+// said what to whom, so both are readable only by the user the server runs as.
+//
+// IT IS NOT ENFORCED ON AN EXISTING FILE, and saying so is the point of this
+// paragraph. openWriter passes it to os.OpenFile for a file that already exists,
+// where the mode argument is IGNORED by the kernel -- so a bus.wal or bus.audit
+// that has been chmod'ed 0666 stays 0666 across a restart and goes on receiving
+// bodies and routing metadata. The security gate measured exactly that. It is
+// PRE-EXISTING behaviour affecting both files, it is not introduced or worsened
+// by the audit log, and correcting it (chmod on open, or refuse-and-log on
+// wider-than-expected bits) is a change to the WAL's own open path that belongs
+// in its own task rather than smuggled into DUR-5. Raised as a follow-up; the
+// comment is corrected here so it stops asserting a property the code does not
+// have.
+//
+// (An earlier version of this comment also said the AUDIT log held every message
+// body. It does not, and must not -- invariant 6, corrected 2026-08-02. The
+// bodies are in the WAL, which is replayed into serving state; the audit trail
+// is metadata and routing info only. See audit.go.)
 const fileMode os.FileMode = 0600
 
 // Writer is an append-only file writer whose Append does not return until the
@@ -288,6 +305,19 @@ func (w *Writer) setIndexFloor(f *indexFloor) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.floor = f
+}
+
+// poisonErr reports the latched failure if a write or fsync has already failed,
+// or nil.
+//
+// It exists so a caller can decline work it KNOWS will fail rather than
+// discovering it half way through a two-phase write. It is advisory only: the
+// Writer can poison between the question and the answer, so Append remains the
+// authority and every caller must still handle its error.
+func (w *Writer) poisonErr() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.poisoned
 }
 
 // NextIndex reports the index the next Append will use.

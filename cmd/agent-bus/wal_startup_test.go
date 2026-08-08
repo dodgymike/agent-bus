@@ -347,6 +347,14 @@ func TestServerQuarantinesACorruptLogAndStartsAnyway(t *testing.T) {
 	// guard armed and makes the corrupt log the ONLY damage present, so a green
 	// result means exactly what the test name says.
 	seedSuffixFloorsFile(t, dir)
+	// Same argument, second guard. A quarantine on a directory with no
+	// message-seq-floor file is now refused, because the floor would have to be
+	// rebuilt from a log that has just been thrown away. That refusal is
+	// correct and is pinned by TestMissingSeqFloorWithADamagedLogRefusesToStart;
+	// here it would be a SECOND kind of damage masking the one under test. See
+	// seedSeqFloorFile for why seeding (rather than disarming) keeps the guard
+	// armed.
+	seedSeqFloorFile(t, dir)
 
 	proc := startServer(t, dir)
 
@@ -482,6 +490,10 @@ func TestStartupSummaryLogsQuarantineFields(t *testing.T) {
 	// stays armed. This test needs the server to REACH its startup summary line
 	// at all, and a refusal over a missing floors file would stop it before then.
 	seedSuffixFloorsFile(t, dir)
+	// Likewise for the message-sequence floor: a quarantine with no floor file
+	// is refused before the startup summary is ever reached. See
+	// seedSeqFloorFile.
+	seedSeqFloorFile(t, dir)
 
 	proc := startServer(t, dir)
 	addr := proc.awaitServerStarted(t)

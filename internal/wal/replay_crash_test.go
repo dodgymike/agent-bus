@@ -57,6 +57,21 @@ const (
 	// record -- and dies. See TestWALCrashTornFrameTailIsRepaired for exactly
 	// what this does and does not prove.
 	crashMidFrameWrite = "mid-frame-write"
+
+	// crashAuditInsideApply: DUR-5. The child writes three AUDITED messages
+	// through the real two-phase path and dies inside the third Apply -- so the
+	// third message's prepare, AUDIT record and commit record are all fsynced
+	// and the caller was never told. It proves the direction "nothing that
+	// reached commit is missing from the audit trail".
+	crashAuditInsideApply = "audit-inside-apply"
+
+	// crashAuditBeforeCommit: DUR-5, the other direction. The child leaves the
+	// byte state the write path is in between the AUDIT fsync and the COMMIT
+	// fsync, and dies. It proves the audit trail is a SUPERSET of committed
+	// history: a record may exist for a message that never committed, never the
+	// reverse. See TestAuditLogCrashBetweenAuditAndCommit for what it does and
+	// does not prove.
+	crashAuditBeforeCommit = "audit-before-commit"
 )
 
 // crashFrameTime is the fixed timestamp the torn frame's prepare payload
@@ -114,6 +129,71 @@ func TestWALCrashChild(t *testing.T) {
 			}
 		}
 		t.Fatalf("child: wrote every entry and is still alive: the applier never killed the process")
+
+	case crashAuditInsideApply:
+		// The REAL write path, all the way through, killed inside the third
+		// Apply. Commit appends and fsyncs the audit record and then the commit
+		// record BEFORE calling Apply, so at the instant of death the third
+		// message is accepted history and is in the audit trail -- and the
+		// caller has been told nothing.
+		l, err := Open(LogOptions{Dir: dir, Applier: &suicideApplier{killAt: len(crashAuditEntries)}})
+		if err != nil {
+			t.Fatalf("child: Open: %v", err)
+		}
+		for i, e := range crashAuditEntries {
+			if _, err := l.Write(e); err != nil {
+				t.Fatalf("child: Write %d: %v", i, err)
+			}
+		}
+		t.Fatalf("child: wrote every entry and is still alive: the applier never killed the process")
+
+	case crashAuditBeforeCommit:
+		l, err := Open(LogOptions{Dir: dir})
+		if err != nil {
+			t.Fatalf("child: Open: %v", err)
+		}
+		// Two messages through the REAL path first, so the good prefix is
+		// genuinely fsynced accepted history rather than a hand-built fixture.
+		for i, e := range crashAuditEntries[:2] {
+			if _, err := l.Write(e); err != nil {
+				t.Fatalf("child: Write %d: %v", i, err)
+			}
+		}
+		// -------------------------------------------------------------------
+		// HONEST ACCOUNT OF WHAT THIS INJECTS, in the same voice as
+		// crashMidFrameWrite above.
+		//
+		// The window between the audit fsync and the commit fsync is a few
+		// statements wide inside Txn.Commit, and there is no way to land a
+		// signal in it from outside without a hook in production code -- which
+		// would be a seam that exists only for a test, in the one file where a
+		// wrong seam costs durability.
+		//
+		// So the child performs those statements ITSELF, with the SAME writers
+		// and the SAME encoder Commit uses, at the SAME transaction index: Begin
+		// (real prepare, real fsync), then encodeAudit + audit.Append (real audit
+		// record, real fsync), then death. The bytes on disk afterwards are
+		// exactly the bytes Commit would have left had the machine lost power one
+		// statement later.
+		//
+		// What the SIGKILL proves, and it is the part that cannot be faked: no
+		// Close, no Sync, no deferred cleanup and no runtime shutdown ran. What
+		// is on the platter is what the fsyncs put there.
+		// -------------------------------------------------------------------
+		e := crashAuditEntries[2]
+		txn, err := l.Begin(e)
+		if err != nil {
+			t.Fatalf("child: Begin: %v", err)
+		}
+		payload, err := encodeAudit(e.Audit, txn.PrepareIndex())
+		if err != nil {
+			t.Fatalf("child: encodeAudit: %v", err)
+		}
+		if _, err := l.audit.Append(TypeAuditMessage, payload); err != nil {
+			t.Fatalf("child: appending the audit record: %v", err)
+		}
+		// No commit, no Close, no defer: the next statement is the kill.
+		suicide()
 
 	case crashMidFrameWrite:
 		// Two entries through the REAL write path first, so the good prefix is

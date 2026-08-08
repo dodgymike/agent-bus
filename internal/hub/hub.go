@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -175,6 +176,37 @@ type Options struct {
 	// sequence high-water mark from before it is unrecoverable and message ids
 	// may repeat values the quarantined file already used.
 	Quarantined string
+
+	// LogRepaired, when non-empty, says that recovery PHYSICALLY REMOVED
+	// records from the durable log before this replay ran, phrased for an
+	// operator (for example: "the tail was truncated, removing 4096 bytes").
+	// It is "" on the ordinary start, where the log was read exactly as it was
+	// written.
+	//
+	// # What it is FOR, and why NextIndex does not already cover it
+	//
+	// It is the predicate for the one case where a MISSING message-seq-floor
+	// file is unsafe. All three log-derived floor sources — the high-water
+	// index, the replayed "seqfloor" records and the highest replayed message
+	// sequence — assume the log is COMPLETE. Truncate it, rewrite its middle or
+	// quarantine it and every one of them silently drops to whatever survived,
+	// while the numbers already handed out by /v1/mint did not.
+	//
+	// NextIndex cannot stand in for this. Since the mint burns numbers in
+	// batches of MintBatchSize, 300 sequences can be carried by a handful of
+	// records, so the index high-water mark is no upper bound on the sequence
+	// at all: measured, a bus that had handed out 300 sequences resumed at 25
+	// after this exact damage.
+	//
+	// The CALLER decides what counts as removal, because the caller is the one
+	// holding wal.Recovered. Today cmd/agent-bus sets it for a quarantine, a
+	// truncation, a mid-file rewrite, and bytes discarded at the framing stage.
+	// It deliberately does NOT set it for a dangling prepare or for holes in
+	// the index sequence: those are the ordinary signature of a clean crash and
+	// of index ranges a reservation burned but no record ever used, they remove
+	// nothing from the file, and treating them as loss would refuse to start
+	// every legacy data directory that had ever crashed.
+	LogRepaired string
 
 	// Logger receives recovery, discard and poisoning events. Defaults to a
 	// discarding logger.
@@ -617,6 +649,67 @@ func Open(o Options) (*Hub, error) {
 	//
 	// raise(0) on a genuinely fresh data directory is a no-op and writes NOTHING,
 	// so a first start leaves no file behind until the first mint burns a batch.
+	// THE GUARD ON THE MIGRATION PATH. It must sit HERE — after every log-derived
+	// source has been folded in, and before the derived floor is persisted and
+	// sealed — because it is a statement about the floor that was just derived:
+	// that it was derived from a log this same start has already proven
+	// incomplete.
+	//
+	// # The case, and the measurement
+	//
+	// A missing floor file is a SUPPORTED UPGRADE PATH: a data directory written
+	// by an agent-bus that predates the file has none, and rebuilding one from
+	// the log is exactly right — WHEN THE LOG IS INTACT. Combine it with a
+	// damaged log and the fallback becomes a fabrication. Measured on a real
+	// directory: 300 sequences minted, handed out and signable; delete the floor
+	// file, truncate the log; the bus starts happily and mints 25, walking back
+	// up through 275 numbers a client may hold a signature over.
+	//
+	// # Why the harm is invisible rather than noisy
+	//
+	// The reissued number produces a SECOND message under an existing message
+	// id, with different content. Our own documentation requires consumers to
+	// deduplicate on message id — so a CORRECTLY IMPLEMENTED consumer sees the
+	// repeat, concludes it is the duplicate it was told to expect, and DROPS the
+	// new message. The more correct the client, the more reliably it loses data,
+	// and neither end sees anything wrong.
+	//
+	// # Why refusing, and not deriving something clever
+	//
+	// This is the same answer the CORRUPT path already gives, and that path's
+	// error already states this precondition in as many words: the log fallback
+	// is "correct ONLY if that log has not also been damaged or quarantined".
+	// The corrupt path refused and explained itself; this path performed the
+	// identical unsafe fallback silently and then logged that it had "closed the
+	// window". Only the guard was missing — the knowledge was already written
+	// down, in openSeqFloorFile's own comment naming "missing-file plus
+	// quarantine on the SAME start" as the one uncovered case.
+	//
+	// There is no sound derivation to fall back to. Nothing left on disk knows
+	// what /v1/mint handed out, which is the entire reason the floor file exists
+	// outside the log. Resuming from a guess would be inventing an id-authority
+	// claim, and invariant 1 is not a thing to be approximated.
+	//
+	// # Availability, honestly
+	//
+	// This can only fire when the floor file is ABSENT, so the population is
+	// legacy data directories and directories where someone removed the file.
+	// One clean start writes the file and the guard can never fire again. A
+	// genuinely fresh directory has no log to damage, so it cannot trip. The
+	// cost is therefore a one-time refusal on a legacy directory whose log was
+	// ALSO damaged — and on that directory the alternative is not availability,
+	// it is silent id reuse.
+	if h.seqFloorFile != nil && !h.seqFloorFile.existedAtOpen() && o.LogRepaired != "" {
+		return nil, fmt.Errorf("%w: %s does not exist AND the durable log %s, so the sequence high-water mark cannot be recovered from either source. "+
+			"The floor file is the only record of numbers handed out by /v1/mint and never written to the log; without it the floor falls back to what the log proves, and this start has just proven the log incomplete. "+
+			"Starting would resume the message sequence at %d, reissue every number above that which was already handed to a client and possibly SIGNED, and produce two different messages under one message id (invariant 1) — which a correctly-implemented consumer deduplicating on message id will resolve by silently DROPPING the new one. "+
+			"This is the case openSeqFloorFile documents as uncovered: a data directory that predates %s, restarted after damage to its log. "+
+			"DO NOT SIMPLY RESTART: this refusal is a property of the data directory, not a transient failure, so restarting reaches this same point — and if your supervisor restarts the bus automatically (docker-compose ships `restart: unless-stopped`), it is doing exactly that on your behalf. Stop the supervisor before working through the remedies below, or you will be repairing a directory that is being restarted underneath you. "+
+			"Remedies, in order of preference: restore %s from a backup taken before the damage and restart; or, if you know a value at or above the highest sequence this bus ever handed out, write it to %s yourself — the format is two plain-text lines, %q followed by \"floor <n>\", where the digest is an unkeyed SHA-256 over the second line (a floor that is too HIGH is safe, it only skips numbers; too low is the reuse this refuses); or, if this directory has no history worth preserving, move it aside and start a fresh one",
+			ErrSeqFloorUnprovable, h.seqFloorFile.Path(), o.LogRepaired, floor+1, SeqFloorFileName,
+			h.seqFloorFile.Path(), h.seqFloorFile.Path(), seqFloorFileMagic+" v"+strconv.Itoa(seqFloorFileVersion)+" sha256=<hex>")
+	}
+
 	if h.seqFloorFile != nil {
 		migrating := !h.seqFloorFile.existedAtOpen() && floor > 0
 		if err := h.seqFloorFile.raise(floor); err != nil {
@@ -629,10 +722,29 @@ func Open(o Options) (*Hub, error) {
 			// sequence. It is a WARN and not an ERROR because the window is now
 			// CLOSED — one start, and the derivation it was seeded from is the
 			// best the log can prove.
-			h.log.Warn("this data directory had no durable message sequence floor file: it was written by an agent-bus that predates it. Until now a WAL quarantine could have reissued sequence numbers already handed out by /v1/mint. The file has been created from the floor the log proves, so this start closes the window",
+			//
+			// "CLOSES THE WINDOW" IS ONLY TRUE BECAUSE OF THE GUARD ABOVE, and
+			// the sentence is qualified accordingly. Before that guard existed
+			// this line was reachable on a start whose log had just been
+			// truncated, where the floor it announces was BELOW numbers already
+			// handed out — an operator was being told the opposite of what had
+			// happened, at WARN, with the wrong number attached. The guard makes
+			// the claim defensible by making this line unreachable on any start
+			// that removed records from the log; the wording now says so, so
+			// that anyone who weakens the predicate can see what it was holding
+			// up.
+			h.log.Warn("this data directory had no durable message sequence floor file: it was written by an agent-bus that predates it. Until now a WAL quarantine could have reissued sequence numbers already handed out by /v1/mint. The file has been created from the floor the log proves, and this start verified that recovery removed no records from that log, so this start closes the window",
 				"seq_floor_file", h.seqFloorFile.Path(),
 				"floor", floor,
 			)
+		}
+		// And make the file exist even when the floor is 0, which raise()
+		// deliberately will not do. This is what makes "the file is absent"
+		// mean exactly one thing — a data directory older than the file —
+		// instead of also covering a fresh directory that has never minted.
+		// The guard above depends on that distinction; see ensureExists.
+		if err := h.seqFloorFile.ensureExists(); err != nil {
+			return nil, fmt.Errorf("hub: creating the durable message sequence floor before serving: %w", err)
 		}
 	}
 
@@ -1188,6 +1300,19 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		return Result{}, fmt.Errorf("hub: encoding the applied-key record for message %s: %w", m.ID, err)
 	}
 
+	// THE AUDIT RECORD, built and validated BEFORE the durable write, for the
+	// same reason the applied-key record above is: a record that cannot be
+	// formed must fail the send with NOTHING written, rather than surfacing from
+	// inside wal.Begin with a prepare already on disk.
+	//
+	// It is built HERE, from the message, and not inside the wal.Entry literal
+	// below, so that the error names the message it belongs to. See audit.go —
+	// in particular, do not "simplify" the content hash to m.ContentSHA256.
+	auditRec, err := auditRecordFor(m)
+	if err != nil {
+		return Result{}, err
+	}
+
 	// THE DURABLE WRITE. Nothing below this line may run before it returns, and
 	// nothing above it may be acknowledged to a client.
 	//
@@ -1199,9 +1324,11 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// is not; a crash there plus a client retry is a duplicate, and the window
 	// is small enough to be invisible in ordinary testing.
 	//
-	// Audit is set non-nil to REQUEST an audit record. wal carries the field
-	// today and DUR-5 writes it; store.Record is already shaped so DUR-5 lifts
-	// every field invariant 6 names and drops exactly one (the body).
+	// Audit carries the message's audit-log record (DUR-5, invariant 6), built
+	// above from this very message. A non-nil Audit that does not validate FAILS
+	// the write before anything is appended, which is the fail-closed bargain
+	// that makes the trail trustworthy: every field invariant 6 names is
+	// present, and the body is not.
 	//
 	// The returned wal.Committed is DISCARDED, and that is a change from before
 	// SIGN-6: its PrepareIndex was the input to the poison check documented
@@ -1214,7 +1341,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		Kind:  store.RecordKind,
 		Body:  payload,
 		Idem:  encodedIdem,
-		Audit: &wal.AuditRecord{},
+		Audit: auditRec,
 	}); err != nil {
 		return Result{}, fmt.Errorf("hub: durably recording message %s: %w", m.ID, err)
 	}

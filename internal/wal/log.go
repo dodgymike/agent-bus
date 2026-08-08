@@ -39,7 +39,12 @@ import (
 // of the file because indices are never reused, and there is no second counter
 // that would itself have to be made durable and kept in step.
 type Log struct {
-	w       *Writer
+	w *Writer
+	// audit is the append-only message audit log (DUR-5, invariant 6): a
+	// SEPARATE file in the same data directory, under the same MAC key, holding
+	// metadata and routing info only and never a message body. It is non-nil for
+	// every Log built by Open. See audit.go.
+	audit   *Writer
 	applier Applier
 	logger  *logging.Logger
 	now     func() time.Time
@@ -115,22 +120,22 @@ type Entry struct {
 	// longer says what history was accepted gets served as if it did. It is
 	// written down so it is known rather than discovered.
 	Idem json.RawMessage
-	// Audit, when non-nil, requests an audit-log record for this entry.
-	// DUR-5 implements it; this task only carries the field. The audit record
-	// is metadata and routing info ONLY -- never the message body (invariant 6,
-	// corrected 2026-08-02: the bus is getting E2E encryption with forward
+	// Audit, when non-nil, requests a record in the append-only MESSAGE AUDIT
+	// LOG -- a second file, distinct from this WAL (DUR-5, invariant 6). The
+	// audit record is metadata and routing info ONLY -- never the message body
+	// (corrected 2026-08-02: the bus is getting E2E encryption with forward
 	// secrecy, so the audit trail is a provenance record, not a content
-	// archive).
+	// archive). See audit.go for the record, the exclusion and the ordering.
+	//
+	// A nil Audit means this entry gets no audit record, which is the right
+	// answer for every entry that is not a message: roster, invite and session
+	// records share this WAL and are not part of the message trail.
+	//
+	// A NON-NIL Audit THAT DOES NOT VALIDATE FAILS THE WRITE, before anything is
+	// appended to either file (see AuditRecord.validate and ErrInvalidAudit).
+	// A message that cannot be audited is not accepted.
 	Audit *AuditRecord
 }
-
-// AuditRecord requests an append-only audit-log record for an Entry.
-//
-// It is a PLACEHOLDER in this task: DUR-5 fills in its fields (message id,
-// sequence, sender, recipients, bus path, timestamp, size, content hash) and
-// writes the record. It exists now only so that the Entry shape does not have
-// to change when DUR-5 lands.
-type AuditRecord struct{}
 
 // Committed describes an entry that reached commit and is durable.
 type Committed struct {
@@ -666,7 +671,28 @@ func Open(opts LogOptions) (*Log, error) {
 			"path", path, "prepare_index", prepareIndex)
 	}
 
-	return &Log{w: w, applier: opts.Applier, logger: opts.Logger, now: now, recovered: rec}, nil
+	// ---------------------------------------------------------------------
+	// THE APPEND-ONLY MESSAGE AUDIT LOG (DUR-5, invariant 6). A SECOND file in
+	// the same data directory, recovered by the same rules as the WAL and
+	// authenticated by the same per-directory key.
+	//
+	// It is opened LAST, deliberately: everything above it can still fail, and
+	// opening it first would mean unwinding a descriptor on every one of those
+	// paths. From here there is exactly one failure to unwind, and it closes the
+	// WAL writer before returning.
+	//
+	// It gets NO INDEX FLOOR. The floor protects the WAL's index because message
+	// SEQUENCES are derived from it; nothing is derived from an audit record's
+	// index. See audit.go.
+	// ---------------------------------------------------------------------
+	auditW, auditRepair, err := openAuditLog(opts.Dir, c, rec.Records, opts.Logger)
+	if err != nil {
+		wErr := w.Close()
+		return nil, fmt.Errorf("wal: open log %s: opening the append-only message audit log: %w (wal close: %v)", path, err, wErr)
+	}
+	rec.AuditRepaired = auditRepair
+
+	return &Log{w: w, audit: auditW, applier: opts.Applier, logger: opts.Logger, now: now, recovered: rec}, nil
 }
 
 // maxDanglingLogged bounds how many discarded prepares Open names individually.
@@ -686,6 +712,16 @@ func (l *Log) Recovered() Recovered {
 // Path returns the WAL file the Log appends to.
 func (l *Log) Path() string { return l.w.Path() }
 
+// AuditPath returns the append-only message audit log this Log writes to
+// (<data-dir>/bus.audit), or "" if there is none. It is for operator messages,
+// fsck tools and tests.
+func (l *Log) AuditPath() string {
+	if l.audit == nil {
+		return ""
+	}
+	return l.audit.Path()
+}
+
 // IndexFloorPath returns the durable record-index floor file backing this Log
 // (<data-dir>/wal-index-floor), or "" if there is none.
 //
@@ -699,15 +735,25 @@ func (l *Log) IndexFloorPath() string {
 	return l.w.floor.Path()
 }
 
-// Close closes the underlying WAL.
+// Close closes the underlying WAL and the append-only message audit log.
 //
 // It blocks until any in-flight transaction has committed or aborted, because
 // closing the file underneath an open prepare would leave a caller holding a
 // Txn that can no longer be resolved. It is idempotent.
+//
+// BOTH files are closed even if the first close fails, and the FIRST error is
+// the one returned: leaving the audit log's descriptor open because the WAL
+// failed to close would leak it on every restart of an already-unhappy bus.
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.w.Close()
+	err := l.w.Close()
+	if l.audit != nil {
+		if aErr := l.audit.Close(); aErr != nil && err == nil {
+			err = aErr
+		}
+	}
+	return err
 }
 
 // Write records one entry durably and applies it. It is the normal path: the
@@ -754,6 +800,49 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal: prepare in %s: %w: entry idem record: %v", l.Path(), ErrInvalidBody, err)
 	}
+	// THE AUDIT RECORD IS VALIDATED HERE, with the body and the idem record, and
+	// for the same reason: an entry that cannot be written completely must leave
+	// BOTH files byte-for-byte unchanged. Validating in Commit instead would mean
+	// discovering the problem with a durable prepare already on disk, which turns
+	// a rejected write into a dangling transaction for recovery to clean up.
+	//
+	// It FAILS THE WRITE rather than skipping the audit record. Invariant 6 says
+	// every message is written to the audit log; a message the trail cannot
+	// describe is one this bus declines to accept.
+	//
+	// THE RECORD IS COPIED BEFORE IT IS VALIDATED, and the COPY is what gets
+	// written. Commit encodes it later, and between here and there the caller's
+	// memory is its own: without the copy, a caller that reused its AuditRecord
+	// or its Recipients slice would have its LATER value written to the trail,
+	// unvalidated, and "validated in Begin" would be a claim about bytes nobody
+	// ever wrote. Body and Idem are canonicalised into fresh bytes just above
+	// for the same reason.
+	auditRec := e.Audit.clone()
+	if auditRec != nil {
+		if err := auditRec.validate(); err != nil {
+			return nil, fmt.Errorf("wal: prepare in %s: %w", l.Path(), err)
+		}
+		// AN ALREADY-POISONED AUDIT LOG IS REFUSED HERE, NOT IN Commit.
+		//
+		// The audit writer's poison LATCHES until the process restarts, so once
+		// a write or fsync on bus.audit has failed, every later message is going
+		// to fail. Discovering that in Commit costs a PREPARE and an ABORT record
+		// -- two fsynced WAL appends and an ERROR line -- per attempt, and a
+		// client doing the right thing and retrying would grow the WAL and the
+		// operator log without limit while never getting a different answer. The
+		// security gate measured 4714 WAL bytes and 40 fsyncs over 20 retries.
+		//
+		// So the answer is given before anything is written. This is a
+		// FAST PATH, not the guarantee: the writer can poison between this check
+		// and the append, which is why Commit still routes an audit failure
+		// through failBeforeCommit.
+		if l.audit != nil {
+			if err := l.audit.poisonErr(); err != nil {
+				return nil, fmt.Errorf("wal: prepare in %s: the message audit log %s cannot be written, so this message cannot be accepted (invariant 6: every message is written to the audit log): %w",
+					l.Path(), l.audit.Path(), err)
+			}
+		}
+	}
 
 	l.mu.Lock()
 	// The lock is released here on every FAILURE path and kept on the success
@@ -780,7 +869,7 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 	}
 
 	handedOver = true
-	return &Txn{l: l, prepareIndex: rec.Index, entry: Entry{Kind: e.Kind, Body: body, Idem: idemRec, Audit: e.Audit}}, nil
+	return &Txn{l: l, prepareIndex: rec.Index, entry: Entry{Kind: e.Kind, Body: body, Idem: idemRec, Audit: auditRec}}, nil
 }
 
 // Txn is one in-flight two-phase write, between prepare and commit. Its
@@ -821,10 +910,44 @@ func (t *Txn) Commit() (Committed, error) {
 	l := t.l
 	defer l.mu.Unlock()
 
-	// DUR-5 AUDIT SEAM. When t.entry.Audit is non-nil the audit record is
-	// written and fsynced HERE, between prepare-fsync and commit-fsync, so the
-	// audit log is a SUPERSET of committed history: an entry can appear in the
-	// audit trail without having committed, but never the reverse.
+	// -----------------------------------------------------------------------
+	// THE AUDIT RECORD (DUR-5, invariant 6), written and fsynced HERE: AFTER the
+	// prepare fsync and BEFORE the commit fsync.
+	//
+	// That position is the whole design and must not be moved. It makes the
+	// audit log a SUPERSET of committed history -- a crash in this window leaves
+	// an audit record for a message that never committed, and recovery discards
+	// the dangling prepare while the audit record stays. The trail may therefore
+	// OVER-report, never under-report. Writing it after the commit fsync would
+	// invert that: a crash would leave an acknowledged message with no trace in
+	// the trail, which is the failure this file exists to prevent.
+	//
+	// It is fsynced before the commit for the same reason (Writer.Append does not
+	// return until the bytes are on stable storage). No "write the trail lazily"
+	// optimisation is admissible here; it would trade the property above for
+	// nothing but latency.
+	// -----------------------------------------------------------------------
+	if t.entry.Audit != nil {
+		if l.audit == nil {
+			// Unreachable today -- only Open builds a Log, and Open always opens
+			// the audit file -- but it goes through failBeforeCommit like every
+			// other failure in this block. A bare return here would be the ONE
+			// path that leaves a durable prepare with no abort record and no
+			// operator line, which is precisely the state recovery should never
+			// have to infer.
+			return Committed{}, t.failBeforeCommit(fmt.Errorf("wal: commit prepare %d in %s: the entry requests an audit record but this Log has no audit log open",
+				t.prepareIndex, l.Path()))
+		}
+		auditPayload, err := encodeAudit(t.entry.Audit, t.prepareIndex)
+		if err != nil {
+			return Committed{}, t.failBeforeCommit(fmt.Errorf("wal: commit prepare %d in %s: encode audit payload: %w",
+				t.prepareIndex, l.Path(), err))
+		}
+		if _, err := l.audit.Append(TypeAuditMessage, auditPayload); err != nil {
+			return Committed{}, t.failBeforeCommit(fmt.Errorf("wal: commit prepare %d in %s: appending to the message audit log %s: %w",
+				t.prepareIndex, l.Path(), l.audit.Path(), err))
+		}
+	}
 
 	payload, err := encodeCommit(t.prepareIndex)
 	if err != nil {
@@ -854,6 +977,45 @@ func (t *Txn) Commit() (Committed, error) {
 		}
 	}
 	return c, nil
+}
+
+// failBeforeCommit resolves a transaction that failed AFTER its prepare was
+// fsynced but BEFORE its commit record was written -- today, only a failure to
+// write the audit record.
+//
+// It writes a durable ABORT so recovery is told, in the file, that this prepare
+// will never commit, rather than leaving a dangling prepare for replay to infer.
+// The entry is NOT accepted history and was never acknowledged, so nothing is
+// lost by abandoning it; what would be lost is the operator's ability to tell
+// "the bus was killed mid-transaction" from "the bus could not write the audit
+// trail", and those call for different responses.
+//
+// THE ABORT IS BEST-EFFORT AND ITS FAILURE NEVER MASKS THE ORIGINAL CAUSE. If
+// the audit log could not be written, the WAL is quite likely unwritable too
+// (same disk, probably full); a prepare left dangling is a state recovery already
+// handles correctly -- it is discarded and its index burned. The caller is
+// always told about the FIRST failure, which is the one that explains the rest.
+//
+// The caller must hold the transaction lock, which Commit does for its whole
+// body, and must not call Commit's remaining steps afterwards.
+func (t *Txn) failBeforeCommit(cause error) error {
+	l := t.l
+	l.logger.Error("wal could not complete a durable write and is abandoning the transaction",
+		"path", l.Path(), "prepare_index", t.prepareIndex, "kind", t.entry.Kind, "err", cause,
+		"effect", "the entry is NOT accepted history and was never acknowledged; the prepare is abandoned and its record index is burned")
+	payload, err := encodeAbort(t.prepareIndex, "the audit record could not be written")
+	if err != nil {
+		l.logger.Error("wal could not encode the abort record for an abandoned transaction",
+			"path", l.Path(), "prepare_index", t.prepareIndex, "err", err,
+			"effect", "the prepare is left dangling; recovery discards it and burns its index, which is the same outcome")
+		return cause
+	}
+	if _, err := l.w.Append(TypeAbort, payload); err != nil {
+		l.logger.Error("wal could not record the abort for an abandoned transaction",
+			"path", l.Path(), "prepare_index", t.prepareIndex, "err", err,
+			"effect", "the prepare is left dangling; recovery discards it and burns its index, which is the same outcome")
+	}
+	return cause
 }
 
 // Abort resolves the transaction by writing a durable ABORT record, so that a

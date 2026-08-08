@@ -184,8 +184,27 @@ func TestMintBurnsTheSequenceOnDiskBeforeHandingItOut(t *testing.T) {
 	alpha := agentID(t, testBusID, "alpha")
 	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
 
-	if _, existed := readSeqFloor(t, dir); existed {
-		t.Fatalf("a fresh data directory already holds %s; the file must be created by the first mint, not by opening the hub, or every start would rewrite a file it has nothing new to say about", hub.SeqFloorFileName)
+	// CHANGED 2026-08-07, and the reversal is load-bearing. This used to assert
+	// the file did NOT exist yet, on the grounds that "the file must be created
+	// by the first mint, not by opening the hub, or every start would rewrite a
+	// file it has nothing new to say about".
+	//
+	// The stated worry does not happen — the file is written only when it is
+	// ABSENT, so it is created once and never rewritten with the same content.
+	// And the old behaviour left "the file is missing" meaning two different
+	// things: a data directory older than the file, and a fresh directory that
+	// has simply never minted. Open REFUSES to start on the first of those when
+	// the log has also been damaged, because the floor would have to be rebuilt
+	// from a log just proven incomplete — so the two cases must be
+	// distinguishable, or a brand-new bus that was kill -9'd before its first
+	// mint would be refused as if it were a damaged legacy directory. Writing
+	// the file at Open collapses the ambiguity. See seqFloorFile.ensureExists.
+	floor0, existed0 := readSeqFloor(t, dir)
+	if !existed0 {
+		t.Fatalf("opening a hub on a fresh data directory left no %s; its absence is what Open uses to recognise a data directory older than the file, so it must not also describe a fresh one", hub.SeqFloorFileName)
+	}
+	if floor0 != 0 {
+		t.Fatalf("a hub opened on a FRESH data directory recorded floor %d, want 0; nothing has been issued, so claiming anything is burned would skip numbers for no reason", floor0)
 	}
 
 	m := mustMint(t, h, alpha, "send", "k-1")
@@ -243,8 +262,15 @@ func TestAMintWhoseFloorCannotBePersistedIssuesNothing(t *testing.T) {
 	if m, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-1"}); err == nil {
 		t.Fatalf("Mint returned %s (sequence %d) on a data directory it cannot write the sequence floor to; the number would be known to a client and to nothing else", m.MessageID, m.Seq)
 	}
-	if _, existed := readSeqFloor(t, dir); existed {
-		t.Fatalf("%s exists after a mint that could not write it", hub.SeqFloorFileName)
+	// The file itself now exists from Open (see ensureExists), so its PRESENCE
+	// no longer distinguishes anything. The claim that actually matters is
+	// unchanged and is asserted directly instead: the failed mint burned
+	// NOTHING, so the floor is still 0 and does not cover the sequence the mint
+	// would have returned. This is the stronger assertion of the two — "no file"
+	// would also have passed for an implementation that wrote a file claiming
+	// the number WAS burned and then failed.
+	if floor, existed := readSeqFloor(t, dir); !existed || floor != 0 {
+		t.Fatalf("after a mint that could not persist its floor, %s reports (floor=%d, exists=%v), want (0, true): the mint issued nothing, so nothing may be recorded as burned", hub.SeqFloorFileName, floor, existed)
 	}
 
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -537,37 +563,98 @@ func TestOpenRefusesADurableHubWithNoDataDir(t *testing.T) {
 	}
 }
 
-// TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed pins the overflow boundary,
-// which is the one place an arithmetic slip is unrecoverable.
+// TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed pins what happens at the top
+// of the sequence space — and it REVERSES a decision this test used to encode.
 //
-// The mint burns MintBatchSize numbers AHEAD, so within a batch of MaxUint64 the
-// target addition would wrap. A wrapped floor would claim a LOW number is burned
-// and permit reissuing every id this bus has ever minted — so the code saturates
-// instead, and the bus simply stops issuing: loudly, at the mint, with nothing
-// handed out.
+// # What it used to assert, and why that was wrong
 //
-// The fixture is written BY THE TEST, in the documented format, rather than
-// produced by the writer. That is deliberate twice over: it proves the file is
-// readable by something other than its own writer (an operator or a tool with a
-// recovery job to do), and it is the only way to reach this state without
-// issuing 1.8e19 sequences.
+// It used to seed math.MaxUint64 and require the hub to OPEN, on the stated
+// grounds that "an exhausted id space is a legitimate state to recover, not
+// corruption. Refusing to start here would be indistinguishable from a damaged
+// file and would send an operator after the wrong problem."
+//
+// That reasoning treats a physically unreachable state as legitimate — the test's
+// own comment conceded the fixture was "the only way to reach this state without
+// issuing 1.8e19 sequences" — and in doing so it left the file's most damaging
+// forgery indistinguishable from a normal start. A security review demonstrated
+// the consequence: because the file's digest is UNKEYED, anyone who can write the
+// data directory writes floor=2^64-1 with a valid digest, and the bus then boots
+// completely healthy (/healthz ok, roster intact, log replayed, no warning) while
+// every /v1/mint answers 500 for ever, across every restart, because the file
+// persists. The operator is sent after the wrong problem WITH NO MESSAGE AT ALL.
+//
+// # Why refusing is better on availability too, not just security
+//
+// The comparison is not "refuse" versus "keep working". It is:
+//
+//	adopt  -> a bus that serves, enrols, and cannot deliver a single message,
+//	          permanently, with no diagnosis anywhere;
+//	refuse -> a bus that stops, names the file, the value, and a one-step remedy.
+//
+// A legitimately exhausted bus is equally unable to mint either way, so refusing
+// costs it nothing it still had. See maxPlausibleSeqFloor for the bound and for
+// the one honest caveat about the word "tampered".
+//
+// # What was lost, and why that is acceptable
+//
+// The saturation branch in ensureSeqFloorLocked (target wraps -> clamp to
+// MaxUint64) can no longer be reached through the file, so it is no longer
+// exercised here. It is now unreachable BY CONSTRUCTION rather than merely
+// untested: reaching it requires a floor above 2^56 to be loadable, and it is
+// not. The boundary that IS reachable is pinned instead, below and in
+// seqfloorbound_test.go.
+//
+// The fixture is still written BY THE TEST, in the documented format, because
+// that proves the file is readable and writable by something other than its own
+// writer — an operator with a recovery job to do.
 func TestSeqFloorAtTheEndOfTheSequenceSpaceFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	writeSeqFloorFixture(t, dir, math.MaxUint64)
 	lg := openTestLog(t, dir, true)
+
+	_, err := hub.Open(hub.Options{
+		BusID:     testBusID,
+		DataDir:   dir,
+		Durable:   lg,
+		Replay:    func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(lg.Path(), fn) },
+		NextIndex: lg.Recovered().NextIndex,
+		Roster:    hub.NewStaticRoster(),
+	})
+	if err == nil {
+		t.Fatalf("hub.Open ADOPTED a floor of MaxUint64; the bus would start looking perfectly healthy and then fail every send for ever, with no diagnosis and no remedy")
+	}
+	if !errors.Is(err, hub.ErrSeqFloorFileCorrupt) {
+		t.Fatalf("hub.Open error = %v, want it to wrap ErrSeqFloorFileCorrupt so the caller treats it as fatal", err)
+	}
+	for _, want := range []string{"implausibly high", "TAMPERED WITH", hub.SeqFloorFileName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not mention %q, so an operator cannot act on it: %v", want, err)
+		}
+	}
+
+	// The refusal must NOT rewrite the file. Leaving the bytes alone is what
+	// lets an operator see what was actually on disk — and lowering a floor is
+	// the one thing this file must never do, even to a value it distrusts.
+	if floor, _ := readSeqFloor(t, dir); floor != math.MaxUint64 {
+		t.Fatalf("the durable floor is now %d, want it unchanged at MaxUint64; a refusal that edits the file destroys the evidence and could LOWER a floor", floor)
+	}
+}
+
+// TestSeqFloorAtThePlausibleBoundStillMints is the false-positive guard on the
+// test above: the bound refuses implausible values WITHOUT refusing large
+// legitimate ones. Without it, maxPlausibleSeqFloor could be 0 and every
+// assertion above would still pass.
+func TestSeqFloorAtThePlausibleBoundStillMints(t *testing.T) {
+	dir := t.TempDir()
+	const justBelowTheBound = uint64(1<<56) - 1
+	writeSeqFloorFixture(t, dir, justBelowTheBound)
+	lg := openTestLog(t, dir, true)
 	alpha := agentID(t, testBusID, "alpha")
 
-	// It opens: an exhausted id space is a legitimate state to recover, not
-	// corruption. Refusing to start here would be indistinguishable from a
-	// damaged file and would send an operator after the wrong problem.
 	h, _ := openMintHub(t, dir, lg, nil, "", "alpha")
-
-	m, err := h.Mint(hub.MintRequest{Sender: alpha, Op: "send", IdempotencyKey: "k-1"})
-	if err == nil {
-		t.Fatalf("Mint returned %s (sequence %d) with the whole 64-bit sequence space durably burned; the only numbers left are ones this directory has already promised never to issue", m.MessageID, m.Seq)
-	}
-	if floor, _ := readSeqFloor(t, dir); floor != math.MaxUint64 {
-		t.Fatalf("the durable floor is now %d, want it unchanged at MaxUint64; a floor that WRAPPED would claim a low number is burned and permit reissuing every id this bus ever minted", floor)
+	m := mustMint(t, h, alpha, "send", "k-1")
+	if m.Seq <= justBelowTheBound {
+		t.Fatalf("Mint returned sequence %d, at or below the durable floor %d it inherited", m.Seq, justBelowTheBound)
 	}
 }
 

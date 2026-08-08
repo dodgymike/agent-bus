@@ -1,9 +1,35 @@
-// Package wal owns the append-only write-ahead/audit log.
+// Package wal owns the two append-only logs a data directory holds.
 //
-// Every message is written to this log (invariant 6). It is append-only in the
-// strict sense during NORMAL operation: no in-place edits, and nothing is ever
-// rewritten by the write path. Recovery is the exception, and the size of that
-// exception changed on 2026-08-02 -- see "Recovery policy" below.
+// TWO FILES, ONE FORMAT, ONE KEY, DIFFERENT JOBS:
+//
+//	<data-dir>/bus.wal    WALFileName    the write-ahead log. Prepare/commit/
+//	                                     abort records, replayed into the serving
+//	                                     copy at startup. It carries message
+//	                                     BODIES, because replay has to be able to
+//	                                     rebuild state from it.
+//	<data-dir>/bus.audit  AuditFileName  the append-only MESSAGE AUDIT LOG
+//	                                     (invariant 6, DUR-5). Every message that
+//	                                     is durably accepted is written here too,
+//	                                     as METADATA AND ROUTING INFO ONLY --
+//	                                     message id, sequence, sender,
+//	                                     recipient(s), bus path traversed,
+//	                                     timestamp, size, content hash -- and
+//	                                     NEVER the body. See audit.go for why the
+//	                                     exclusion is deliberate and must not be
+//	                                     "improved", and for the write ordering
+//	                                     that makes the trail a SUPERSET of
+//	                                     committed history.
+//
+// They share the on-disk framing described below, the per-directory MAC key, and
+// the whole of the recovery policy. They are told apart by their file magic, and
+// reading one as the other is a fatal error rather than damage to be repaired.
+// Only the WAL gets the durable index floor; see "The durable record-index
+// floor" below and the note in audit.go for why the audit log does not need one.
+//
+// Both are append-only in the strict sense during NORMAL operation: no in-place
+// edits, and nothing is ever rewritten by the write path. Recovery is the
+// exception, and the size of that exception changed on 2026-08-02 -- see
+// "Recovery policy" below.
 //
 // On-disk layout (format version 2). All integers are big-endian so a hex dump
 // reads left to right, and every tag is HMAC-SHA256 over the key described

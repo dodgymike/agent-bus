@@ -370,6 +370,50 @@ func (k *killAfterPrepare) Write(e wal.Entry) (wal.Committed, error) {
 // rather than at the message write.
 func passThroughSeqFloorRecord(e wal.Entry) bool { return e.Kind == hub.SeqFloorRecordKind }
 
+// exitBroadcastUnsignable is the child's exit code meaning "a broadcast was
+// refused because signing format v1 cannot canonicalize one" (SIGN-3).
+//
+// It exists because this harness's signal is a WAIT STATUS, not a message: the
+// parent asserts the child died on SIGKILL, and every ordinary child failure is
+// exit status 1. A refused broadcast is neither — it is a test that CANNOT RUN
+// yet — and status 1 is indistinguishable from the crash genuinely failing to
+// inject, which is a real defect this harness must keep catching.
+//
+// 42 is chosen simply because `go test` uses 1 and the shell reserves 2 and
+// 126-165; nothing else in this tree exits 42.
+const exitBroadcastUnsignable = 42
+
+// exitIfBroadcastHasNoSigningDigest exits the CHILD with exitBroadcastUnsignable
+// when err is the SIGN-3 refusal, so the parent can skip.
+//
+// # Why the child exits instead of the parent skipping up front
+//
+// This is the same mechanism internal/hub uses (skipIfBroadcastHasNoSigningDigest
+// in hub_test.go) reached across a process boundary, and it is chosen for the
+// same two reasons. It is EXACT: it fires only on signing.ErrInvalid, so a
+// broadcast crash-injection failing for any other reason — including the crash
+// genuinely not injecting — still fails loudly. And it is SELF-HEALING: the day
+// SIGN-3 lands, the broadcast reaches the durable write, the kill wrapper fires,
+// the child dies on SIGKILL and this test runs again WITH NO EDIT.
+//
+// A literal t.Skip at the top of the parent test would need a human to find and
+// remove it, and a skip nobody removes silently un-covers a path everyone
+// believes is tested.
+//
+// os.Exit is safe here precisely because of what this harness is: the child is
+// built to be SIGKILLed, so it already runs no deferred cleanup on its intended
+// path, and openCrashLog is opened with closeOnCleanup=false throughout.
+func exitIfBroadcastHasNoSigningDigest(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !errors.Is(err, signing.ErrInvalid) {
+		return
+	}
+	// Written to the child's captured output so the parent's skip message can
+	// carry the real refusal rather than only an exit code.
+	fmt.Printf("child: broadcast refused, no canonical digest (SIGN-3): %v\n", err)
+	os.Exit(exitBroadcastUnsignable)
+}
+
 // killSelfNow kills this process with SIGKILL. SIGKILL cannot be caught, blocked
 // or ignored, so nothing deferred, buffered or graceful runs afterwards — which
 // is the entire evidentiary value of these tests over a polite Close.
@@ -415,6 +459,11 @@ func TestIdemCrashInjectionRestartChild(t *testing.T) {
 	case crashBroadcastPostCommit:
 		h := openCrashHub(t, &killAfterCommit{l: lg}, lg)
 		res, err := h.Broadcast(freshBroadcastRequest(t, h, crashBody))
+		// SIGN-3: the broadcast never reached the durable write, so the kill
+		// wrapper was never armed and this child cannot die as designed. Report
+		// it to the PARENT as a distinguished exit code rather than as a test
+		// failure — see exitBroadcastUnsignable.
+		exitIfBroadcastHasNoSigningDigest(t, err)
 		t.Fatalf("child: Broadcast returned (%+v, %v) but the durable log kills this process the instant the COMMIT is fsynced; the crash was never injected", res, err)
 
 	case crashPostAck:
@@ -587,6 +636,19 @@ func runRestartCrashChild(t *testing.T, point, dir string) {
 	ws, ok := ee.Sys().(syscall.WaitStatus)
 	if !ok {
 		t.Fatalf("crash child %q: wait status is %T, want syscall.WaitStatus", point, ee.Sys())
+	}
+	// SIGN-3, checked BEFORE the SIGKILL assertion: the child refused the
+	// broadcast before the durable write, so the kill wrapper was never armed
+	// and there is no crash to assert on. This is a test that cannot run yet,
+	// not a harness that stopped working — and the distinguished exit code is
+	// what keeps the two apart (see exitBroadcastUnsignable).
+	if !ws.Signaled() && ws.ExitStatus() == exitBroadcastUnsignable {
+		t.Skipf("SKIPPED pending SIGN-3: signing format v1 has not defined a canonical broadcast audience, "+
+			"so a broadcast has no signing digest and cannot produce the audit-log content hash DUR-5 requires "+
+			"(PROTOCOL.md 8.6); internal/hub fails closed rather than inventing one, so the broadcast never "+
+			"reaches the durable write and the crash cannot be injected. /v1/broadcast answers 501 today, so "+
+			"nothing in production is affected. UN-SKIP WHEN SIGN-3 LANDS -- this test needs no change, it will "+
+			"simply start running again.\n--- child output ---\n%s", out.String())
 	}
 	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
 		t.Fatalf("crash child %q exited with status %d instead of dying on SIGKILL; the crash was never injected\n--- child output ---\n%s",

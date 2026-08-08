@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,12 @@ const SeqFloorFileName = "message-seq-floor"
 // so a stray file in a data directory is identifiable by `head -1` alone.
 const seqFloorFileMagic = "agent-bus-message-seq-floor"
 
+// maxSeqFloorFileSize bounds how much of this file is read into memory. A valid
+// one is a header line plus "floor <n>" — under 200 bytes — so 4 KiB is orders
+// of magnitude of headroom while still refusing a file planted to exhaust memory
+// at startup.
+const maxSeqFloorFileSize int64 = 4 << 10
+
 // seqFloorFileVersion is the on-disk format version of this file.
 //
 // It is RESERVED, not chosen: value 5 in the Spec Server `ondisk-format-version`
@@ -42,9 +49,56 @@ const seqFloorFileMagic = "agent-bus-message-seq-floor"
 // exists to make impossible.
 const seqFloorFileVersion = 5
 
+// maxPlausibleSeqFloor is the highest floor a REAL bus could ever have reached,
+// and anything above it is treated as corrupt-or-tampered rather than adopted.
+//
+// # Why a bound is needed at all, when the file already has a digest
+//
+// The digest is UNKEYED (see encodeSeqFloor), so it is an integrity check
+// against media damage and accidental editing, not an authentication check:
+// anyone who can write the data directory can recompute it in one line. And
+// writing this file needs DIRECTORY write, not write on the 0600 file itself —
+// replacing a file is unlink+create or rename, both permissions on the parent.
+//
+// A floor of math.MaxUint64 with a valid digest was demonstrated to brick a bus
+// permanently and silently: it starts perfectly healthy, /healthz is fine, the
+// roster and the log are intact, no warning is emitted — and every /v1/mint
+// answers 500 "ids: sequence exhausted" for ever, across every restart, because
+// the file persists. That is the WORST possible failure shape: total loss of the
+// product's function, with no diagnosis anywhere.
+//
+// Note that "forging this file is equivalent to deleting it" is TRUE and
+// IRRELEVANT. Deleting it RECOVERS — the bus rebuilds the floor from what the
+// log proves and carries on. Forging it HIGH bricks. They are opposite outcomes,
+// so an argument that collapses the two has only checked the harmless direction.
+//
+// # Why 2^56, and why the bound does not need to be tight
+//
+// The bound's only job is to separate "a value a real bus reached" from "a value
+// only a tamperer or catastrophic corruption produces", and a false positive
+// here refuses a start — so it is set generously.
+//
+// 2^56 is 72,057,594,037,927,936. At a sustained ONE MILLION minted sequences
+// per second — four orders of magnitude beyond what a single-node bus on a
+// laptop does — reaching it takes about 2,285 years. Meanwhile it leaves more
+// than 1.8e19 numbers between it and exhaustion, so a value that passes this
+// bound cannot bring exhaustion within reach either: an attacker gains nothing
+// by picking the largest value that still passes.
+//
+// # The one honest caveat
+//
+// Only the READ is bounded; persistLocked is not. ensureSeqFloorLocked
+// deliberately writes math.MaxUint64 on true arithmetic overflow ("claiming the
+// whole space is burned is the safe direction"), and bounding writes would need
+// a policy for that path rather than a constant. A bus that genuinely overflowed
+// would therefore refuse its next start with a message that says "tampered",
+// which would be the wrong word — but it is 1.8e19 messages away, and such a bus
+// is already permanently unable to mint, so the refusal costs it nothing it had.
+const maxPlausibleSeqFloor uint64 = 1 << 56
+
 // ErrSeqFloorFileCorrupt is returned by openSeqFloorFile when the file EXISTS
-// but does not verify: bad header, unknown version, checksum mismatch, or a
-// malformed number.
+// but does not verify: bad header, unknown version, checksum mismatch, a
+// malformed number, or a floor above maxPlausibleSeqFloor.
 //
 // It is FATAL, and the file is deliberately NEVER regenerated. That is the same
 // posture wal.ErrIndexFloorCorrupt and ids.ErrSuffixFileCorrupt take, for the
@@ -70,6 +124,23 @@ const seqFloorFileVersion = 5
 // The error message names a concrete one-step remedy, so the bus is never
 // permanently bricked — see seqFloorCorrupt.
 var ErrSeqFloorFileCorrupt = errors.New("hub: the persisted message sequence floor is corrupt")
+
+// ErrSeqFloorUnprovable is returned by Open when the floor file is ABSENT and
+// recovery has removed records from the durable log on the SAME start, so
+// neither source can prove the sequence high-water mark.
+//
+// It is a DIFFERENT error from ErrSeqFloorFileCorrupt on purpose. Corrupt means
+// "the bytes on disk are not what was written"; this means "there are no bytes,
+// and the thing we would otherwise derive them from has holes in it". They send
+// an operator to different remedies — one to a file to move aside, the other to
+// a backup of the log or a floor value only they can supply — and collapsing
+// them would hand out the wrong instruction on whichever case was not thought
+// about.
+//
+// Like the corrupt case this is one of the narrow IDENTITY-file exceptions to
+// invariant 6, not a bus refusing to boot over log corruption: a damaged log on
+// a directory that HAS its floor file still starts, discards loudly and serves.
+var ErrSeqFloorUnprovable = errors.New("hub: the message sequence floor cannot be proven from anything on disk")
 
 // seqFloorFile is the DURABLE, MONOTONIC message-sequence floor for one data
 // directory. It lives OUTSIDE the log, and that is the entire point.
@@ -246,6 +317,38 @@ func (f *seqFloorFile) raise(n uint64) error {
 	return f.persistLocked(n)
 }
 
+// ensureExists creates the file at the CURRENT floor if it is not on disk yet,
+// and does nothing when it already is.
+//
+// # Why a floor of 0 is worth an fsync
+//
+// raise(0) deliberately writes nothing, so before this existed a data directory
+// only grew a floor file once something had actually burned a number. That left
+// "the file is absent" meaning two completely different things — a directory
+// written by a binary older than the file, and a directory this binary has
+// opened but which has never minted — and the guard in Open has to tell them
+// apart, because it REFUSES to start on the first.
+//
+// Measured, and this is the case that forced it: a brand-new bus that is opened
+// and then kill -9'd with no traffic leaves an empty log whose durable index
+// floor has already reserved a block (records=0, NextIndex=65). That is
+// indistinguishable, from the log alone, from a log whose records were
+// destroyed. Writing the file on every start collapses the ambiguity at the
+// source: after ANY start with this binary the file exists, so its absence means
+// "legacy directory" and nothing else.
+//
+// It also closes the migration window one step earlier than before — at the
+// first START rather than the first MINT — which is strictly better, since the
+// window is exactly the interval in which the file is missing.
+func (f *seqFloorFile) ensureExists() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.existed {
+		return nil
+	}
+	return f.persistLocked(f.floor)
+}
+
 // persistLocked writes floor atomically and only then adopts it in memory. The
 // caller must hold f.mu.
 //
@@ -284,9 +387,31 @@ func (f *seqFloorFile) persistLocked(floor uint64) error {
 // The checksum is an INTEGRITY check against media damage and accidental
 // editing, NOT an authentication check: anyone who can write the file can
 // recompute the digest. It defends the data directory's integrity, not its
-// authenticity — exactly as the agent-suffixes and wal-index-floor digests do,
-// and for the same reason (an attacker with write access to the data directory
-// can read the WAL MAC key sitting next to it anyway).
+// authenticity — exactly as the agent-suffixes and wal-index-floor digests do.
+//
+// # CORRECTED 2026-08-07 — the reason that used to be given here was WRONG
+//
+// This comment previously justified leaving the digest unkeyed on the grounds
+// that "an attacker with write access to the data directory can read the WAL MAC
+// key sitting next to it anyway". THAT IS FALSE, and it equates two independent
+// permissions. Replacing this file needs write on the DIRECTORY — unlink+create,
+// or rename — while reading wal-mac.key needs read on a 0600 FILE. A local user
+// on a group- or other-writable data directory has the first and not the second,
+// so there really is an attacker who can forge this unkeyed file and cannot
+// forge the keyed WAL index floor. The keying is exactly the difference.
+//
+// The fix for that is NOT to key this digest. Keying would not help the attacker
+// who CAN read the key, and it would leave every other file in the directory
+// creatable, deletable and renameable by the same user. The permission itself is
+// the defect, so it is closed at the DIRECTORY, once, for every file in it: see
+// enforceDataDirPermissions in cmd/agent-bus/datadirperm.go, which refuses to
+// start on an other-writable data directory and tightens a group-writable one.
+// Keying this file remains worth doing for consistency with wal-index-floor, but
+// as a separate and honestly-labelled change — it is not the answer to that
+// finding, and recording it as one would leave the real hole open.
+//
+// maxPlausibleSeqFloor is the second half of the answer, in depth: whatever the
+// permissions, a value no real bus could reach is refused rather than adopted.
 func encodeSeqFloor(floor uint64) []byte {
 	var body bytes.Buffer
 	body.WriteString("floor ")
@@ -316,12 +441,28 @@ func encodeSeqFloor(floor uint64) []byte {
 // out of them could be LOWER than the one persisted — which is exactly the
 // silent rewind this whole file exists to prevent.
 func readSeqFloorFile(path string) (floor uint64, existed bool, err error) {
-	data, rerr := os.ReadFile(path)
+	// BOUNDED READ. A legitimate floor file is two short lines — well under 200
+	// bytes — but this one is written by whoever can write the data directory,
+	// which is precisely the attacker this file's other defences exist for. An
+	// unbounded os.ReadFile on a multi-gigabyte "message-seq-floor" would be a
+	// trivial memory-exhaustion at startup, before anything has authenticated.
+	// maxSeqFloorFileSize is far above any real file and far below anything that
+	// matters, and the over-long case is reported as corruption because that is
+	// exactly what it is.
+	f, rerr := os.Open(path)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
 			return 0, false, nil
 		}
 		return 0, false, fmt.Errorf("hub: reading the durable message sequence floor from %s: %w", path, rerr)
+	}
+	defer f.Close()
+	data, rerr := io.ReadAll(io.LimitReader(f, maxSeqFloorFileSize+1))
+	if rerr != nil {
+		return 0, false, fmt.Errorf("hub: reading the durable message sequence floor from %s: %w", path, rerr)
+	}
+	if int64(len(data)) > maxSeqFloorFileSize {
+		return 0, false, seqFloorCorrupt(path, fmt.Sprintf("it is larger than %d bytes; a real floor file is two short lines, so this is damaged or planted and is NOT read into memory", maxSeqFloorFileSize))
 	}
 
 	nl := bytes.IndexByte(data, '\n')
@@ -388,6 +529,15 @@ func parseSeqFloorLine(path, line string) (uint64, error) {
 	n, err := strconv.ParseUint(num, 10, 64)
 	if err != nil {
 		return 0, seqFloorCorrupt(path, fmt.Sprintf("its floor field %q is not a 64-bit decimal number: %v", clipSeqFloorFragment(num), err))
+	}
+	// THE PLAUSIBILITY BOUND. It is checked here, at the last point before the
+	// value becomes a floor, and it is deliberately a REFUSAL rather than a
+	// clamp: silently lowering a number this file exists to keep monotonic is
+	// the one operation it must never perform, and silently ADOPTING it is the
+	// permanent brick this bound was added to close. See maxPlausibleSeqFloor.
+	if n > maxPlausibleSeqFloor {
+		return 0, seqFloorCorrupt(path, fmt.Sprintf("its floor is %d, which is implausibly high: no bus reaches %d in any lifetime (that is roughly 2,285 years at a million minted sequences a second), so this file has been TAMPERED WITH or the media is damaged. Adopting it would exhaust the sequence allocator and make every send fail with \"sequence exhausted\", permanently and across every restart, on a bus that otherwise looks completely healthy",
+			n, maxPlausibleSeqFloor))
 	}
 	return n, nil
 }
