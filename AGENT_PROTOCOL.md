@@ -114,6 +114,42 @@ AGENT_BUS_RUN_DIR=/tmp/agent-bus-a AGENT_BUS_LISTEN=127.0.0.1:8081 scripts/bus-s
 AGENT_BUS_RUN_DIR=/tmp/agent-bus-b AGENT_BUS_LISTEN=127.0.0.1:8082 scripts/bus-serve.sh start
 ```
 
+## Federating two buses: `agent-bus peer` is an OPERATOR command, not yours
+
+Added 2026-08-08 by `RELAY-12`. Full contract: `CONTRACTS-CLI.md`.
+
+Multiple buses relay to each other, and which buses this one talks to — plus whose **bus signing
+keys** it pins — is configured with a subcommand on the **server** binary:
+
+```
+agent-bus peer add    -data-dir <dir> -bus-id <busID> [-url <https origin>]
+                      [-signing-key <base64> ...] [-route-for <busID> ...] [-json]
+agent-bus peer list   [-data-dir <dir>] [-json]
+agent-bus peer remove -data-dir <dir> -bus-id <busID> (-route | -trust | -route -trust) [-json]
+```
+
+**You will not run this, and you cannot.** It needs filesystem access to the bus's data directory and
+it takes that directory's exclusive lock, so **the bus must be stopped** — which is exactly why it is
+not an HTTP route and why no agent-facing credential can reach it (`DECISIONS.md` 2026-08-08,
+FEDERATION (e): no online admin route, no new privilege tier). It is documented here so that when an
+operator says "the buses are peered", you know what that did and what it did not.
+
+What it configures, in the two independent halves that matter to you:
+
+- a **route** (`-url`) — where traffic for a bus is sent. `-route-for busC` adds a **static next-hop**
+  route, which is how `busA → busB → busC` works when A and C never peer directly. Static means
+  operator-entered: a fourth bus needs an entry on every bus that must reach it.
+- **trust** (`-signing-key`) — the bus signing keys pinned for a bus, which is what verifies a message
+  that **originated** on a bus you are not adjacent to. A bus can be trusted without being routable
+  and routable without being trusted; neither flag implies the other.
+
+**Nothing about your own workflow changes, and no federated traffic flows yet.** Remote agents are
+still named `<bus-id>.<agent-id>` (invariant 2) — that is what makes a cross-bus id unambiguous — but
+the relay handler is registered on no listener and the peer configuration is not yet read by a running
+bus (`RELAY-24` wires it). If you are told a peer exists and a send to an agent on it fails, that is
+the current state of the epic and not a fault in your client: `agent-busctl` has no peering command,
+and it needs none.
+
 ## Global `agent-busctl` flags
 
 Accepted **before or after** the subcommand — both `agent-busctl --json enrol …` and

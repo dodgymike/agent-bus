@@ -183,6 +183,15 @@ func main() {
 		os.Exit(runHealthcheckCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `agent-bus peer add|list|remove` is the operator's federation-configuration
+	// surface (RELAY-12). It is a subcommand for `invite mint`'s reason, recorded
+	// in DECISIONS.md FEDERATION (e): peer configuration is offline, under the
+	// dirlock, and adds NO online admin route and no new privilege tier. See
+	// cmd/agent-bus/peer.go.
+	if len(os.Args) > 1 && os.Args[1] == peerCommandName {
+		os.Exit(runPeerCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -218,6 +227,9 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 			"                        run `%s %s mint -h` for details\n", prog, inviteCommandName, prog, inviteCommandName)
 		fmt.Fprintf(out, "  %s %s    probe GET /healthz over TLS, trusting only this data dir's certificate\n"+
 			"                        (safe against a RUNNING bus; run `%s %s -h` for details)\n", prog, healthcheckCommandName, prog, healthcheckCommandName)
+		fmt.Fprintf(out, "  %s %s add|list|remove\n"+
+			"                        configure federation: peer routes and pinned bus signing keys\n"+
+			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, peerCommandName, prog, peerCommandName)
 	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")

@@ -240,6 +240,182 @@ disabling verification outright.
 
 ---
 
+### `agent-bus peer add|list|remove` — the operator's federation configuration
+
+Added 2026-08-08 by `RELAY-12`. Source: `cmd/agent-bus/peer.go`. Durable records:
+`internal/relay/peerstore.go` (see `CONTRACTS-ONDISK.md` for the `peer` / `bustrust` record shapes).
+
+```
+agent-bus peer add    -data-dir <dir> -bus-id <busID> [-url <https origin>]
+                      [-signing-key <base64> ...] [-route-for <busID> ...] [-json]
+agent-bus peer list   [-data-dir <dir>] [-json]
+agent-bus peer remove -data-dir <dir> -bus-id <busID> (-route | -trust | -route -trust) [-json]
+```
+
+**It is a subcommand on the SERVER binary, not an HTTP route, and it adds NO new privilege tier.**
+`DECISIONS.md`, 2026-08-08 FEDERATION **(e)**: peer configuration is offline under the dirlock,
+following the `invite mint` / E4 precedent. What that costs is recorded in the same ruling — **online
+re-peering is given up; a topology change needs a restart.**
+
+**THE BUS MUST BE STOPPED — for `list` too.** `add` and `remove` append through the two-phase WAL path
+and take the data directory's exclusive `dirlock`, which a running bus holds. `list` writes nothing
+(it uses `wal.Replay`, the package's read-only fsck: no repair, no truncation, no file created) but
+takes the same lock anyway, because a read racing an append can see a half-written tail record and
+would then either report a peer that is not yet durable or fail with a corruption error against a
+perfectly healthy bus.
+
+#### A ROUTE and a TRUST PIN are independent records, and the flags keep them that way
+
+This is the load-bearing property of the surface, and it comes from the topology the FEDERATION epic
+exists for — `laptop(A) ↔ internet(B) ↔ this machine(C)`, where **C never peers with A** but must
+still pin A's bus signing key, because a message *originating* at A is verified by C against that pin
+and B is not allowed to vouch for it (`internal/relay/signed.go`: "presentation is not attestation").
+
+| Invocation | Writes | Does **not** write |
+| --- | --- | --- |
+| `peer add -bus-id busA -signing-key <b64>` | one `bustrust` record — **trust with NO route** | any route |
+| `peer add -bus-id busB -url https://b:8443` | one `peer` record — **a route with NO trust** | any pin |
+| both flags together | **two** records, trust first | — |
+
+`-url` never implies a pin and `-signing-key` never implies a route. A surface that required them
+together would foreclose the case the epic turns on, and the mistake would surface only at `RELAY-17`.
+`TestPeerAddListRemove/a_TRUST_entry_survives_with_NO_route` and `/a_ROUTE_survives_with_NO_trust`
+assert both **on disk**.
+
+**Write order is a safety property, not a style choice.** `add` writes **trust first**, then the
+peer's own route, then the `-route-for` routes; `remove` withdraws the **route first**, then trust.
+Each record is durable on its own, so a failure part-way leaves the earlier ones on disk — and of the
+two possible half-states, "pinned but not routed" is inert while "routed but unverifiable" is not.
+`TestPeerAddListRemove/both_together_write_TWO_independent_records` pins the ordering by `config_seq`.
+
+#### `-route-for` — STATIC next-hop routing, and what it looks like on disk
+
+`DECISIONS.md` FEDERATION **(f)**: static routes, not a routing protocol. **Given up: topology
+discovery — a fourth bus needs its own `-route-for` entry on every bus that must reach it.**
+
+The encoding is worth stating because nothing in the record says it: **a route record's bus id is the
+DESTINATION, and its base URL is the address to DIAL to reach that destination.** For a directly
+peered bus those are the same machine; for a non-adjacent one they are not.
+
+```
+agent-bus peer add -bus-id busB -url https://b.example:8443 -route-for busC
+```
+
+writes **two** `peer` records: `busB → https://b.example:8443` and `busC → https://b.example:8443`,
+i.e. "traffic for busC leaves via the peer at that address". **The durable record does not remember
+that the next hop is busB — only the address.** `peer add --json` reports `next_hop_bus_id` because it
+knows it from the same command line; `peer list` does not, and says so in its output.
+
+| Flag (`add`) | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | **Never created, and neither is the `bus-id` file in it** (exit `4` otherwise). Unlike `invite mint` the **certificate is NOT required**: peer configuration pins no certificate of ours. |
+| `-bus-id` | *(REQUIRED)* | The peer bus this entry is about. Validated with `ids.ValidateBusID` behind a length guard (`relay.MaxPeerBusIDLen` = 64) so an oversized value cannot size the diagnostic. **May not be this bus's own id** (invariant 2) — refused before anything is written. |
+| `-url` | *(none)* | A **BARE https origin**: scheme, host, optional port, and nothing else. No path, query (including a bare `?`), fragment, userinfo or opaque form; `https` only (invariant 11); ≤ `relay.MaxPeerBaseURLLen` (512). One trailing `/` is trimmed; **nothing else is rewritten**, so the address an operator typed is the address the bus will dial. |
+| `-signing-key` | *(none)* | A pinned Ed25519 **bus signing** key, standard base64 (44 chars). **Repeatable, at most 2** (`relay.MaxPinnedBusSigningKeys`) — two means a **rollover window**, the outgoing key and the incoming one, not a general-purpose accept list. Repeating the flag **REPLACES** the pin set; it never adds to it. Order is preserved and is part of the record. |
+| `-route-for` | *(none)* | Repeatable. Installs a static next-hop route for another bus through `-url`. **Requires `-url`**; may not name this bus, may not name `-bus-id` (that route is what `-url` installs), and may not repeat a destination (two spellings differing only by ASCII case are the same routing key). |
+| `-json` | off | One JSON object on **stdout**. |
+| `-log-level` | `warn` | Severity floor for recovery/durability lines on stderr. |
+
+`remove` takes `-data-dir`, `-bus-id`, `-json`, `-log-level` plus `-route` and `-trust`. **At least
+one of `-route`/`-trust` is REQUIRED and neither is implied by the other.** The two mistakes are not
+symmetric: withdrawing a route you meant to keep breaks federation loudly and is repaired by re-adding
+it, while leaving a key pinned that you meant to **revoke** fails silently and looks exactly like a
+working bus. A default either way would make one of those easy, so the command will not guess.
+Removal leaves a **tombstone** rather than deleting (that is what stops a duplicated older record
+resurrecting a withdrawn configuration); `peer list` does not show tombstones.
+
+**There is no flag that supplies a `config_seq`, and none may be added** (invariant 1): the store
+mints it from its own replayed high-water mark. Operator input names *which* bus and *where* it lives
+and never influences a minted number.
+
+#### Exit codes (`agent-bus peer`)
+
+`0`–`4` are deliberately **the same numbers with the same meanings as `agent-bus invite`**.
+
+| Code | Meaning | Remedy |
+| --- | --- | --- |
+| `0` | Every requested change is durable — or was already the configuration on disk, which writes nothing and reports `"unchanged": true`. | — |
+| `1` | A change failed. Anything already durable is listed under `applied` in `--json` (and after `ALREADY DURABLE:` on stderr otherwise). | Read the message; `peer list`; retry. |
+| `2` | Usage: bad flag, unknown subcommand, positional argument, malformed bus id, bad `-url`/`-signing-key`, a self-peer, or a combination that would do nothing (`add` with neither `-url` nor `-signing-key`; `remove` with neither `-route` nor `-trust`; `-route-for` without `-url`). Nothing is written. | `agent-bus peer -h` |
+| `3` | The data directory is **locked** — a bus is running. | Stop the bus, configure peering, start it again. |
+| `4` | The data directory is missing, is not a directory, or holds no `bus-id` file. **Nothing is written, not even `bus.lock`.** | Start the bus once if it has **never run**; restore `bus-id` from backup if it has. |
+| `5` | `remove` found **none** of the record kinds it was asked to withdraw, so **nothing is written**. If one of `-route`/`-trust` existed and the other did not, the one that existed **is** withdrawn, the command exits `0`, and the absent kind is named in `not_found`. | `agent-bus peer list` and check the spelling — a bus id differing only by ASCII case is a **different** bus. |
+
+`5` is separate from `1` because a provisioning script that removes-then-adds must be able to tell
+"there was nothing to remove" (fine) from "the removal failed" (not fine). **It fires only when
+nothing at all was withdrawn**, and that matters: an earlier version returned on the first absent
+record, so `peer remove -bus-id busA -route -trust` against a bus that is pinned but not routed —
+exactly the non-adjacent case above — aborted on the missing route and **left the trust anchor
+pinned** while exiting with the code a script is told it may ignore. Both gates reproduced it. `-h`/`--help` print to
+**stdout** and exit `0`; only errors go to stderr, and an unknown subcommand is **not echoed back**.
+
+#### JSON shapes — CONTRACT
+
+`add` / `remove` success, and `list`:
+
+```json
+{"ok":true,"bus_id":"<this bus>","changes":[
+  {"kind":"trust","bus_id":"busA","state":"active","signing_keys":["<b64>"],"config_seq":1,"updated_at":"…"},
+  {"kind":"route","bus_id":"busB","state":"active","base_url":"https://b.example:8443","config_seq":2,"updated_at":"…"},
+  {"kind":"route","bus_id":"busC","state":"active","base_url":"https://b.example:8443","next_hop_bus_id":"busB","config_seq":3,"updated_at":"…"}]}
+
+{"ok":true,"bus_id":"<this bus>","routes":[…],"trust":[…]}
+```
+
+`remove` may also carry `"not_found":["route"]` — the requested kinds this bus held nothing for,
+reported rather than dropped so a partial withdrawal is visible. `kind` is `"route"` or `"trust"`;
+`state` is `"active"` or `"removed"`. `unchanged: true` appears when
+the store found that exact configuration already applied and therefore wrote **nothing** — `config_seq`
+then names the **earlier** generation. `next_hop_bus_id` is **this command's knowledge, not a durable
+field**. `list` reports ACTIVE records only, each sorted by bus id.
+
+Failure (`--json`, on **stdout**, so a caller that discarded stderr still gets a parseable answer):
+
+```json
+{"ok":false,"error":"…","remedy":"…","exit_code":2,"applied":[…]}
+```
+
+`applied` lists what became **durable before** the failure — a configuration change is several records,
+and a partial failure leaves the earlier ones on disk.
+
+#### Two things this does NOT do
+
+- **Nothing serves this yet.** Records written here are durable and are replayed, but no running bus
+  reads them: `relay.Handler` is registered on no listener and `relay.PeerStore` is not yet wired into
+  server startup (`RELAY-24` is the composition root). This command configures a topology that is not
+  yet served.
+- **It does not fix `RELAY-36`.** `internal/relay/client.go`'s `peerURL` — the function that actually
+  dials — still accepts a path. This command's `-url` check is **strictly tighter** than `peerURL`, so
+  no value it writes can reach that gap, and `TestPeerAddURLRulesMatchTheDurableRecord` pins the CLI
+  check against the durable record's own rule so the duplicate cannot drift in either direction.
+
+**A `-route-for` record's address belongs to a DIFFERENT bus than its bus id.** Consequence for
+`RELAY-20`/`RELAY-24`: anything that later keys a per-peer credential off the record's bus id — a TLS
+certificate pin, a client certificate, a peer principal — would pin the *destination's* identity
+against a connection that terminates at the *next hop*, and would break every non-adjacent hop. The
+identity on the wire is the next hop's; the record's bus id is the destination.
+
+**Dependency on `RELAY-34`.** `openPeerStore` passes `relay.PeerStoreOptions.Dir = <data-dir>` on
+**both** the writable and the read-only path. Withdrawals are refused by the store without it (a
+withdrawal recorded only in the log can be un-said by a discarded tail, and for the trust table that
+means a revoked pinned key comes back), and `peer list` needs it so a revocation an operator just
+made is not displayed as still pinned. **RELAY-12 therefore must not be committed before RELAY-34.**
+
+**The replay precondition, and how this command satisfies it.**
+`relay.PeerStoreOptions.Durable` requires the log to be replayed into the store **before the first
+write**: `config_seq` rebuilds only from the records `Apply` sees, so an un-replayed store mints
+`config_seq=1` over a log already holding `1..N` and the **superseded generation wins** on the next
+replay (reproduced by a security gate during `RELAY-10`). The package cannot enforce it. This command
+does so **structurally**: the store is constructed around `deferredLog` (`cmd/agent-bus/invite.go`),
+whose `Write` **errors** while the log is nil, and the log is handed over only after `wal.Open` — which
+replays into the `Applier` before returning — has succeeded. A write before replay is therefore
+unreachable, and would fail loudly rather than silently mint `1`.
+`TestPeerAddReplaysTheLogBeforeTheFirstWrite` asserts the `config_seq` sequence on disk across three
+separate invocations and that a full replay reconstructs the **latest** configured address; it was
+confirmed RED against a build with the `Applier` removed.
+
+---
+
 ## `cmd/agent-busctl` — the client
 
 Binary directory `cmd/agent-busctl`; the importable package it shells over is
