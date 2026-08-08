@@ -146,10 +146,14 @@ func TestDiscoveryEndpoint(t *testing.T) {
 			wantStatus int
 			wantAllow  string
 		}{
+			// "GET, HEAD" since CORE-7: requireGET accepts HEAD, so Allow must
+			// name it. HEAD's own behaviour on this route is pinned by
+			// TestHeadRequest, more strongly than a row here could, so it is
+			// deliberately not duplicated into this table.
 			{"get", http.MethodGet, http.StatusOK, ""},
-			{"post", http.MethodPost, http.StatusMethodNotAllowed, http.MethodGet},
-			{"put", http.MethodPut, http.StatusMethodNotAllowed, http.MethodGet},
-			{"delete", http.MethodDelete, http.StatusMethodNotAllowed, http.MethodGet},
+			{"post", http.MethodPost, http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"put", http.MethodPut, http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"delete", http.MethodDelete, http.StatusMethodNotAllowed, "GET, HEAD"},
 		}
 		for _, tc := range cases {
 			tc := tc

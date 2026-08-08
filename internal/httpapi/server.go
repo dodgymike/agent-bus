@@ -250,6 +250,29 @@ func New(opts Options) *Server {
 		s.route(mux, RouteWait, s.handleWait)
 	}
 
+	// The catch-all (CORE-8). Registered LAST for readability only --
+	// http.ServeMux resolves by longest matching pattern, not by registration
+	// order, so "/" wins only where nothing more specific matched.
+	//
+	// It is registered through s.route, and that is the SECURITY-LOAD-BEARING
+	// part of this line. A catch-all hung on the raw mux, or wrapped outside
+	// authMiddleware, would itself be an unauthenticated route and would turn
+	// the whole server into a route oracle: an anonymous caller could probe any
+	// path and read 404-vs-401 to learn exactly which surfaces this build
+	// serves. Inside the wrapper, default-deny still answers FIRST, so:
+	//
+	//   anonymous  + any path, known or not -> 401, indistinguishable.
+	//   authorised + an unknown path        -> 404, and now in the JSON error
+	//                                          envelope every other route uses.
+	//
+	// So this changes NOTHING an anonymous caller can observe. What it fixes is
+	// the authenticated case, where the answer used to be net/http's built-in
+	// "404 page not found" as text/plain -- a client (or a wrapper piping
+	// through a JSON parser) that trusts the documented contract got a parse
+	// error instead of a structured one, i.e. the response was least usable
+	// exactly when something was already wrong.
+	s.route(mux, RouteCatchAll, s.handleNotFound)
+
 	// The order is LOAD-BEARING. authMiddleware wraps the WHOLE mux, so
 	// invariant 3 is enforced by default-deny rather than route by route: a
 	// route added later is authenticated because it is registered, not because
@@ -362,18 +385,59 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RouteCatchAll is the pattern the JSON 404 handler is registered at. In
+// http.ServeMux "/" is a subtree pattern that matches every request no more
+// specific pattern claims, which is exactly "no such route here".
+const RouteCatchAll = "/"
+
+// handleNotFound answers any path this build does not serve, in the same JSON
+// error envelope as every other failure (CORE-8). Its registration in New
+// explains why it must be registered through (*Server).route; two properties
+// belong here, at the handler:
+//
+//   - EVERY METHOD gets 404, never 405. 405 means "this resource exists but
+//     not via that method" -- false here, and a disclosure: it would let a
+//     caller separate "path exists, wrong method" from "path does not exist".
+//   - The body is the fixed string "not found" and never echoes r.URL.Path,
+//     which is attacker-controlled and, on this route by definition, has had
+//     no other validation applied to it.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, r, http.StatusNotFound, ErrorResponse{Error: "not found"})
+}
+
 // ErrorResponse is the body of any non-2xx JSON reply.
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// requireGET answers 405 with an Allow header for anything but GET, and
-// reports whether the handler should continue.
+// AllowGET is the Allow header a GET route sends with its 405. It names HEAD
+// as well because requireGET accepts HEAD -- an Allow header that omitted a
+// method the route serves would be a second, quieter version of the same
+// inconsistency CORE-7 fixed.
+const AllowGET = "GET, HEAD"
+
+// requireGET answers 405 with an Allow header for anything but GET or HEAD,
+// and reports whether the handler should continue.
+//
+// HEAD IS ACCEPTED (CORE-7, decided 2026-08-08); it previously was not, while
+// writeJSON carried a body-suppression guard for HEAD that could therefore
+// never run. Two things about the decision that are not obvious from the code:
+//
+//   - It is SAFE because every requireGET route is a pure READ. The message
+//     cursor is the client-supplied `after`/`cursor` parameter, so a HEAD
+//     consumes and advances nothing a later GET needed. A HEAD on a route with
+//     side effects would be a different question; there is no such route.
+//   - Authentication is UNAFFECTED. HEAD reaches these handlers through the
+//     same default-deny authMiddleware as GET, so an anonymous HEAD to a
+//     protected route is 401 like any other method.
+//
+// The rest of the rationale (probes issue HEAD; RFC 9110 makes it a GET
+// without a body) is in CONTRACTS-HTTP.md.
 func (s *Server) requireGET(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return true
 	}
-	w.Header().Set("Allow", http.MethodGet)
+	w.Header().Set("Allow", AllowGET)
 	s.writeJSON(w, r, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
 	return false
 }
@@ -391,7 +455,13 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, status int, v
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error":"internal error"}`+"\n")
+		// Same HEAD suppression as the success path below. net/http would
+		// discard the body anyway, but writing it still miscounts the response
+		// size in the request log -- and a failure path that handles HEAD
+		// differently from the success path is how the two drift.
+		if r.Method != http.MethodHead {
+			_, _ = io.WriteString(w, `{"error":"internal error"}`+"\n")
+		}
 		return
 	}
 	body = append(body, '\n')

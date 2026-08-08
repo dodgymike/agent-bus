@@ -40,14 +40,20 @@ func TestHealthzInfo(t *testing.T) {
 			wantStatus int
 			wantAllow  string
 		}{
+			// wantAllow is "GET, HEAD" since CORE-7: requireGET accepts HEAD, so
+			// an Allow header naming only GET would understate what the route
+			// serves. HEAD's own behaviour is pinned by TestHeadRequest, whose
+			// assertions are strictly stronger than a row here could be (same
+			// status as GET, AND empty body, AND matching Content-Type), so it
+			// is deliberately not duplicated into this table.
 			{"healthz get", http.MethodGet, "/healthz", http.StatusOK, ""},
 			{"info get", http.MethodGet, "/v1/info", http.StatusOK, ""},
-			{"healthz post", http.MethodPost, "/healthz", http.StatusMethodNotAllowed, http.MethodGet},
-			{"healthz put", http.MethodPut, "/healthz", http.StatusMethodNotAllowed, http.MethodGet},
-			{"healthz delete", http.MethodDelete, "/healthz", http.StatusMethodNotAllowed, http.MethodGet},
-			{"info post", http.MethodPost, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
-			{"info put", http.MethodPut, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
-			{"info delete", http.MethodDelete, "/v1/info", http.StatusMethodNotAllowed, http.MethodGet},
+			{"healthz post", http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"healthz put", http.MethodPut, "/healthz", http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"healthz delete", http.MethodDelete, "/healthz", http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"info post", http.MethodPost, "/v1/info", http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"info put", http.MethodPut, "/v1/info", http.StatusMethodNotAllowed, "GET, HEAD"},
+			{"info delete", http.MethodDelete, "/v1/info", http.StatusMethodNotAllowed, "GET, HEAD"},
 			{"unknown path", http.MethodGet, "/nope", http.StatusUnauthorized, ""},
 			{"unknown path under info", http.MethodGet, "/v1/info/nope", http.StatusUnauthorized, ""},
 		}
