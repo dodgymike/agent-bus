@@ -65,7 +65,18 @@ func auditRecordFor(m store.Message) (*wal.AuditRecord, error) {
 		// shape: a broadcast that arrived here carrying a roster snapshot would
 		// be freezing membership into a record that describes ROUTING.
 		Recipients: m.Recipients,
-		BusPath:    m.BusPath,
+		// The FULL path, however many hops it has. Since RELAY-11 this is one hop
+		// for a local send and the whole traversed list for a message ingested from
+		// a peer -- which is what makes a relay hop auditable at all (invariant 6).
+		//
+		// It is carried, not re-derived and not re-validated: store's constructor is
+		// where an untrusted, peer-supplied path is checked hop by hop
+		// (store.NewMessageWithBusPath), so a path that reached a store.Message has
+		// already been through ids.ValidateBusID and the MaxBusPath bound. Checking
+		// it a second time here would put a second, drifting definition of a legal
+		// path between the message and its trail; wal.AuditRecord.validate applies
+		// the framing-layer bounds on the far side.
+		BusPath: m.BusPath,
 		// The SERVER's clock (store.Message.SentAt), never the sender's claimed
 		// TimestampUnixMilli. The trail records what this bus will swear to; the
 		// sender's clock is covered by the signature and is the sender's claim,

@@ -308,9 +308,23 @@ func ContentHash(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// NewMessage builds a validated Message from server-derived parts. It is the
-// ONLY constructor: the fields are interdependent (id derives from seq, hash
-// derives from body) and building one by hand is how they drift apart.
+// LocalBusPath is the bus path of a message this bus accepted DIRECTLY from one
+// of its own clients: this bus, and nothing else.
+//
+// It is a function rather than an inline literal at each site so that "the path
+// of a locally-accepted message" has one definition. Every caller gets a FRESH
+// slice, which matters because the value ends up on a Message that outlives the
+// call and on an audit record that is about to be written.
+func LocalBusPath(busID string) []string { return []string{busID} }
+
+// NewMessage builds a validated Message for a send this bus accepted DIRECTLY
+// from a local client. Its bus path is LocalBusPath(busID) — one hop, this bus.
+//
+// It is the constructor for the local write path; NewMessageWithBusPath below is
+// the same constructor for a message INGESTED FROM A PEER, which arrives with
+// the hops it has already traversed. Between them they are the ONLY constructors:
+// the fields are interdependent (id derives from seq, hash derives from body) and
+// building a Message by hand is how they drift apart.
 //
 // timestampUnixMilli and signature are the two SENDER-supplied fields, and both
 // are MANDATORY. That is SIGN-6: there is no unsigned message type, so a
@@ -320,6 +334,87 @@ func ContentHash(body []byte) string {
 // The bound on the signature is a LENGTH and nothing more; see Message.Signature
 // for why this package must not verify.
 func NewMessage(busID, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body []byte, idempotencyKey string, timestampUnixMilli int64, signature []byte) (Message, error) {
+	// The path is built HERE and is by construction valid, so while the bus-path
+	// checks below still RUN on this entry point, none of them can FAIL on it: a
+	// local send is refused for exactly the reasons it was refused before this
+	// function had a sibling.
+	return NewMessageWithBusPath(busID, sender, broadcast, recipients, seq, sentAt, body, idempotencyKey, timestampUnixMilli, signature, LocalBusPath(busID))
+}
+
+// NewMessageWithBusPath is NewMessage for a message that reaches this bus over a
+// RELAY HOP, carrying the ordered list of buses it has already traversed.
+//
+// # Why this exists at all
+//
+// Invariant 6 says the audit log records "the bus path traversed", and that is
+// the entire reason a relay hop is auditable. Until RELAY-11 the path was
+// hard-coded to []string{busID} inside the one constructor, so a multi-hop path
+// was UNWRITABLE: wal.AuditRecord.BusPath existed and was validated, and nothing
+// could ever put more than one hop in it.
+//
+// # busPath is UNTRUSTED INPUT, and is validated as such
+//
+// It arrives from a PEER BUS over the network, so every hop is checked with the
+// same ids.ValidateBusID the recovery decoder applies, and the list is bounded by
+// MaxBusPath. An unvalidated hop list would be attacker-chosen content echoed
+// verbatim to every client that reads the message, written into an APPEND-ONLY
+// trail that cannot be edited afterwards.
+//
+// # THE LAST HOP MUST BE THIS BUS, and the caller appends it
+//
+// A path is APPEND-ONLY and ORIGIN-FIRST: [origin, …, this bus]. The ingesting
+// caller appends its own bus id before calling, and this constructor refuses a
+// path that does not end in busID.
+//
+// That is deliberately checkable rather than done for the caller, because the
+// path AS RECEIVED ON THE WIRE has a different last hop — the PEER that sent it —
+// and internal/relay must check THAT against the authenticated connection
+// (internal/relay/doc.go, gap 6) before appending anything. Doing the append here
+// would erase the distinction between "the path a peer asserted" and "the path
+// this bus is willing to swear to", and the first is exactly what must not be
+// written to the trail unexamined. A refusal here is loud; a trail at bus C that
+// never names C would be silently wrong for ever.
+//
+// It also keeps ONE meaning for the field on disk. A locally-accepted message has
+// always recorded [busID] — the recording bus, last and only — so "the final hop
+// is the bus whose record this is" holds for every record in the trail rather
+// than for some of them, and a reader never has to know how a message arrived to
+// know whether this bus is on its path.
+//
+// # THE TRAP FOR THE RELAY INGEST, stated because the two conventions differ
+//
+// internal/relay stamps its own hop at EGRESS, not at ingress: RelayedMessage
+// carries the path AS RECEIVED (relay.CheckIncomingPath REFUSES one that already
+// contains this bus), and relay.Forward calls relay.AppendHop when it re-relays
+// onward. PROTOCOL.md §10's "the last element is always whichever bus most
+// recently forwarded it" describes THAT wire value — §10 is "Loop prevention and
+// the relay envelope"; §8 is the canonical signing format and says nothing about
+// this.
+//
+// So an ingest holds TWO different paths and must not conflate them:
+//
+//	// ends at THIS bus. A FRESH slice, never append(m.BusPath, …): the
+//	// received slice may have spare capacity, and appending into it would
+//	// rewrite a path another outbound forward is about to read.
+//	stored here = append(append([]string(nil), m.BusPath...), localBusID)
+//
+//	// the received path, UNCHANGED — what Forward must be given
+//	m.BusPath
+//
+// Handing the stored path to Forward is refused as relay.ErrRelayLoop, and
+// handing the received path to this constructor is refused here. Both directions
+// fail closed and loudly, which is the point of stating it rather than papering
+// over it with an append nobody sees.
+//
+// # What is deliberately NOT checked here
+//
+// LOOP PREVENTION. A path that already contains busID is a routing loop, and
+// refusing it belongs to the relay's ingest decision — together with the split
+// horizon and the "forward only on a new acceptance" rule — not to a constructor
+// that cannot see the topology. This function's job is that the path is
+// well-formed and names this bus last; whether the message should have arrived at
+// all is answered before it gets here.
+func NewMessageWithBusPath(busID, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body []byte, idempotencyKey string, timestampUnixMilli int64, signature []byte, busPath []string) (Message, error) {
 	id, err := ids.MessageID(busID, seq)
 	if err != nil {
 		return Message{}, fmt.Errorf("%w: %s", ErrInvalidMessage, err)
@@ -343,6 +438,33 @@ func NewMessage(busID, sender string, broadcast bool, recipients []string, seq u
 		// for a log line, and its LENGTH is the whole of what was wrong.
 		return Message{}, fmt.Errorf("%w: signature is %d bytes, but every message carries a detached Ed25519 signature of exactly %d (SIGN-6)", ErrInvalidMessage, len(signature), signing.SignatureSize)
 	}
+	// THE BUS PATH, checked LAST of the input checks so that every error a local
+	// send could produce before RELAY-11 is still produced with the same message
+	// and in the same order. Nothing below can FAIL for NewMessage, which builds
+	// the path itself — the checks run there, they just cannot fire.
+	//
+	// These are the SAME bounds Decode applies to a path read off disk, for the
+	// same reason: both are boundaries for a list this process did not build.
+	if len(busPath) == 0 {
+		// An empty path is NOT quietly defaulted to this bus. That would turn a
+		// relay ingest that lost its path into a durable, append-only record
+		// asserting the message ORIGINATED here — a provenance claim nobody made,
+		// indistinguishable afterwards from a genuine local send.
+		return Message{}, fmt.Errorf("%w: the bus path is empty; a message has always been accepted by at least one bus, and a locally-accepted message is built with LocalBusPath", ErrInvalidMessage)
+	}
+	if len(busPath) > MaxBusPath {
+		return Message{}, fmt.Errorf("%w: bus path has %d hops, the limit is %d", ErrInvalidMessage, len(busPath), MaxBusPath)
+	}
+	for i, b := range busPath {
+		if err := ids.ValidateBusID(b); err != nil {
+			return Message{}, fmt.Errorf("%w: bus path hop %d: %s", ErrInvalidMessage, i, err)
+		}
+	}
+	if last := busPath[len(busPath)-1]; last != busID {
+		// The offending hop IS echoed, and safely: it has just passed
+		// ids.ValidateBusID, so it is at most 64 characters of [A-Za-z0-9_-].
+		return Message{}, fmt.Errorf("%w: the bus path ends at %q, but this bus is %q; the path is append-only and origin-first, so the ingesting bus appends itself as the final hop before building the message", ErrInvalidMessage, last, busID)
+	}
 	m := Message{
 		Seq:       seq,
 		ID:        id,
@@ -351,8 +473,12 @@ func NewMessage(busID, sender string, broadcast bool, recipients []string, seq u
 		// Copied, not aliased: the caller may still hold the slice, and a
 		// mutation after acceptance would silently re-address a message that is
 		// already durable.
-		Recipients:     append([]string(nil), recipients...),
-		BusPath:        []string{busID},
+		Recipients: append([]string(nil), recipients...),
+		// Copied for the same reason the recipient list is, and with one more: this
+		// slice may be the peer-supplied one the relay is still holding, and a
+		// mutation after acceptance would rewrite the provenance of a message that
+		// is already durable.
+		BusPath:        append([]string(nil), busPath...),
 		SentAt:         sentAt,
 		Body:           append([]byte(nil), body...),
 		ContentSHA256:  ContentHash(body),
@@ -546,7 +672,13 @@ func Decode(raw json.RawMessage) (Message, error) {
 	}
 	busPath := rec.BusPath
 	if len(busPath) == 0 {
-		busPath = []string{busID}
+		// A COMPATIBILITY DEFAULT, and the one place an absent path is read as a
+		// local one. It is not the same judgement NewMessageWithBusPath makes when
+		// it REFUSES an empty path: there the caller is a live ingest that has lost
+		// its path and must be told, here the record is already durable and the
+		// only question is what to serve for it. Written through LocalBusPath so
+		// there is one definition of "the path of a locally-accepted message".
+		busPath = LocalBusPath(busID)
 	}
 	return Message{
 		Seq:            rec.Seq,

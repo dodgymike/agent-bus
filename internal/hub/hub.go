@@ -1177,6 +1177,26 @@ type publishRequest struct {
 	body       []byte
 	key        string
 	signedMint SignedMint
+
+	// busPath is the ordered list of buses this message has already traversed,
+	// ending with THIS bus, and it is set ONLY for a message INGESTED FROM A
+	// PEER (RELAY-11).
+	//
+	// EMPTY MEANS LOCAL, and that is the default on purpose: Send and Broadcast
+	// leave it unset and publish substitutes store.LocalBusPath(h.busID), so a
+	// send from one of this bus's own clients records exactly the single hop it
+	// recorded before a path could be supplied at all. The audit trail's
+	// continuity depends on that default being the same value, not merely a
+	// similar one.
+	//
+	// IT IS NEVER CLIENT INPUT. There is no field on SendRequest or
+	// BroadcastRequest that reaches here, and there must not be one: a client
+	// that could choose its own bus path could forge the provenance of a message
+	// in an append-only trail, claiming it originated on a bus it has never
+	// spoken to. The only legitimate source is the relay ingest path, which
+	// derives it from the authenticated peer connection and appends this bus
+	// itself. store.NewMessageWithBusPath re-validates every hop regardless.
+	busPath []string
 }
 
 // publish is the ONE durable write path for a message. Broadcast and Send
@@ -1366,7 +1386,18 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		return Result{}, err
 	}
 
-	m, err := store.NewMessage(h.busID, sender, broadcast, recipients, seq, h.now().UTC(), body, key, req.signedMint.TimestampUnixMilli, req.signedMint.Signature)
+	// THE BUS PATH (RELAY-11). A relayed message carries the hops it travelled;
+	// everything else is a local send and carries the single hop it has always
+	// carried. The default is taken here, at the ONE call site, rather than by
+	// letting the constructor treat an empty path as "local": an ingest that
+	// silently lost its path would then write a durable record claiming the
+	// message originated on this bus, which is a provenance claim nobody made and
+	// which nothing downstream could ever tell from a genuine local send.
+	busPath := req.busPath
+	if len(busPath) == 0 {
+		busPath = store.LocalBusPath(h.busID)
+	}
+	m, err := store.NewMessageWithBusPath(h.busID, sender, broadcast, recipients, seq, h.now().UTC(), body, key, req.signedMint.TimestampUnixMilli, req.signedMint.Signature, busPath)
 	if err != nil {
 		return Result{}, err
 	}
