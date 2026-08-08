@@ -148,8 +148,24 @@ tasks' status notes.
      -d '{"namespace":"task-key-BUS","reserved_by":"<you>"}'
    # -> {"value": 30}  =>  title it "BUS-30: ..."
    ```
-   Create the namespace the same way for each epic — but **seed it past that epic's existing max
-   first**, because a fresh namespace starts at 1 and would collide immediately.
+   Create the namespace the same way for each epic. A **fresh** namespace starts at 1, which is
+   correct when no task in that epic exists yet — that is the normal case, and you should NOT seed it.
+
+   **If the namespace already has reservations, `POST` now returns `409`, and the ONLY correct
+   response is to REPEAT THE REQUEST UNCHANGED** (Spec Server, 2026-08-08). Do **not** raise
+   `initial_value` and retry: `initial_value` is applied only when the counter row does not exist, so
+   once it does, a higher seed is structurally ignored — it returns another `409` **and advances the
+   counter**. Repeating unchanged converges; raising the seed loops and burns numbers. This guidance
+   previously said to seed past the epic's existing max, which is exactly the request that now 409s,
+   and "raise the seed" is the intuitive reaction it would have led you to.
+
+   **A gap in the sequence is expected and is not a defect.** Allocation is no longer atomic with its
+   audit row, so a crash mid-retry burns a number. You get a GAP — never a duplicate, never a rewind.
+   That is the same trade invariant 1 makes here: uniqueness and monotonicity hold, contiguity does
+   not and never did. Do not write a check that asserts reservation values are contiguous.
+
+   Use the **full UUID** for any task lookup — prefix resolution does not exist, and an 8-hex id
+   404s with the same response as a deleted task.
 
 2. **Or don't use a numbered key at all.** A descriptive title plus the server-assigned `public_id`
    is a perfectly good identity, and it is what most tasks in this project already do. Prefer this
