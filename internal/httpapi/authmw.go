@@ -226,8 +226,17 @@ const (
 //   - It does not parse, decode or verify the token. Tokens are opaque
 //     server-side handles (DECISIONS.md, 2026-08-02), not signed claims.
 //   - It does not CACHE the result. Every request resolves against live
-//     session state, which is what makes revocation and expiry immediate; a
-//     cache would be a window in which a revoked credential still works.
+//     session state, which is what keeps invariant 3's choice real: tokens
+//     are opaque server-side handles rather than signed claims PRECISELY so
+//     they can be revoked before they expire, and a cache would hand back a
+//     window of its own TTL in which a revoked credential still works.
+//     But note the scope: "every request" is not "every moment". The check
+//     runs at ADMISSION and is never re-run for a request already in flight,
+//     so revocation and expiry are immediate only for the NEXT request. Polls
+//     admitted the instant before a revoke run to the end of their poll
+//     timeout and still deliver -- late by at most hub.MaxPollTimeout
+//     (5 minutes), never indefinitely. See KNOWN COVERAGE BOUNDARIES (2)
+//     below for the exact path and bound.
 //   - It never logs, echoes or otherwise records the token -- not truncated,
 //     not hashed, not in an error string. The only value that ever leaves this
 //     function is the resulting agent id.
@@ -237,8 +246,12 @@ const (
 // would let a caller probe which handles exist. The LOG gets the wrapped error
 // from internal/auth, which names the reason precisely.
 //
-// KNOWN COVERAGE BOUNDARY, verified rather than assumed (security audit,
-// 2026-08-02): this covers the mux, and the mux is everything this package
+// KNOWN COVERAGE BOUNDARIES, verified rather than assumed. There are two, and
+// they are different in kind: (1) is a request this function never sees, (2) is
+// a request it sees exactly once and then stops watching.
+//
+// (1) SPATIAL -- `OPTIONS *` never reaches the mux (security audit,
+// 2026-08-02). This covers the mux, and the mux is everything this package
 // serves -- but ONE request never reaches it. Go's net/http answers
 // `OPTIONS * HTTP/1.1` itself, in serverHandler.ServeHTTP, with
 // globalOptionsHandler: a bare 200 and Content-Length: 0, before the
@@ -249,6 +262,30 @@ const (
 // go1.20+ and this module is pinned at go1.19 (see go.mod). Written down so
 // the next person to audit the 401 surface does not spend an afternoon
 // rediscovering it.
+//
+// (2) TEMPORAL -- an admitted long poll outlives the check that admitted it
+// (external security review, 2026-08-08, F8/S8b). This function is a gate, not
+// a supervisor: it runs ONCE, at admission, and nothing re-evaluates the
+// credential while the handler runs. That is invisible for a handler returning
+// in microseconds and load-bearing for one that parks. handleWait
+// (GET /v1/wait, in messages.go) does NOT authenticate -- it reads the principal
+// THIS function already attached, via messagingPrincipal, which checks nothing --
+// and then blocks in hub.Wait for the poll timeout with no re-check. So a poll
+// admitted the instant before its session is revoked -- or before it expires --
+// serves to the end of that timeout and still delivers the messages that arrive
+// during it. Two bounds, both hard. TIME: one poll timeout. hub.Wait clamps to
+// hub.MaxPollTimeout (5 minutes) and hub.Open clamps the operator's
+// -poll-timeout flag to the same ceiling, so neither a client asking for more
+// (readTimeoutParam 400s it) nor a misconfigured flag can widen it. VOLUME: an
+// agent may hold up to hub.MaxWaitersPerAgent (32) polls at once, so the lag can
+// cover 32 batches, not one. Re-polling does NOT chain past a revoke: /v1/wait
+// is not on unauthenticatedRoutes, so the next poll is refused here.
+// Closing it is AUTH-2-FU-POLLEXPIRY
+// (03d7ca66-110e-4560-803e-1a7825d1accc), which caps the wait at
+// min(pollTimeout, time.Until(principal.ExpiresAt)) and re-authenticates before
+// delivering. Until that lands, "revocation is immediate" (DECISIONS.md,
+// 2026-08-02) should be read as immediate for the next request, and up to one
+// poll timeout late for a poll already parked.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if IsUnauthenticatedRoute(r.URL.Path) {
