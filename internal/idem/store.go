@@ -19,7 +19,19 @@ import (
 //     breaks exactly the clients doing the right thing.
 //   - Same key + DIFFERENT payload is a PROTOCOL VIOLATION. The client is
 //     reusing a key for new content, which is either a serious bug or an
-//     attack. Reject it, log it, and disconnect the offending client.
+//     attack. Reject it, log it — but do NOT disconnect (narrowed 2026-08-08,
+//     CLAUDE.md invariant 10). A raw-socket measurement of the PRE-narrowing
+//     code (DECISIONS.md, 2026-08-08) found it backwards: same-agent key
+//     reuse closed the connection while a genuine third-party replayer's
+//     connection stayed open — the abuse defence landing on the party most
+//     likely to be honest, not the attacker. The key is the caller's OWN —
+//     keys are scoped per agent — so this is overwhelmingly a client that
+//     lost track of its keys, not an attacker; dropping the socket would
+//     destroy every other request it had pipelined there, including a parked
+//     long-poll. The one case that still disconnects is different: a third
+//     party replaying an already-accepted SIGNED message it was never issued,
+//     and only when the claimed sender is a well-formed fully-qualified
+//     <bus-id>.<agent-id> (see internal/httpapi's checkSignedMint).
 //
 // Collapse the two and you must pick one behaviour for both: either every
 // correct retry is punished, or every key-reuse-with-new-content is silently
@@ -32,8 +44,8 @@ const (
 	// OutcomeRetry: same key + SAME payload. Return the ORIGINAL result,
 	// re-apply nothing, error nothing, DISCONNECT NOBODY.
 	OutcomeRetry
-	// OutcomeViolation: same key + DIFFERENT payload. Reject, log, and
-	// DISCONNECT the client.
+	// OutcomeViolation: same key + DIFFERENT payload. Reject and log; do NOT
+	// disconnect (narrowed 2026-08-08 — see the Outcome doc comment above).
 	OutcomeViolation
 )
 

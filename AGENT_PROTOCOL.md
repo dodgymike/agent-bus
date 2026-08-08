@@ -662,14 +662,22 @@ logical operation rather than a new one.
   in the JSON, a "replayed" note in human output, **exit 0**. This is the whole point — a client
   that lost the acknowledgement is meant to retry, freely, and the bus never disconnects it for
   doing so.
-- **Same key + different payload = a protocol violation.** The bus answers `409` **and
-  disconnects**, surfaced as a loud `KindRejected` error, **exit 7**, with a remedy that says so in
-  plain terms. Retrying will not help; a fresh key is required for genuinely new content. Reusing
-  a key for different content on `enrol` is refused **locally** before the request is even sent,
-  because `agent-busctl` already knows what that key produced.
+- **Same key + different payload = a protocol violation.** The bus answers `409` and logs it — **it
+  does NOT disconnect you** (narrowed 2026-08-08). A raw-socket measurement of the pre-narrowing bus
+  found it backwards: same-agent key reuse closed the connection while a genuine third party
+  replaying someone else's message kept its connection open, landing the abuse defence on the party
+  most likely to be honest rather than the attacker. This is surfaced as a loud `KindRejected` error,
+  **exit 7**, with a remedy that says so in plain terms; your connection and any other request
+  pipelined on it — including a parked `watch` — are untouched. Retrying under the *same* key will
+  not help; a fresh key is required for genuinely new content. Reusing a key for different content on
+  `enrol` is refused **locally** before the request is even sent, because `agent-busctl` already
+  knows what that key produced.
 
-**After a disconnect, reconnect and retry with the SAME key if the content is unchanged — that is
-correct, not a mistake.** Only mint a fresh key when the content is genuinely different.
+**A `409` here never drops your connection — mint a fresh key for the new content and retry
+immediately, no reconnect required.** The one case that DOES disconnect you is different: presenting
+an already-accepted **signed** message under a `sender` claim that names an agent you are not (see
+"Replay of an already-accepted signed message" below) — that is a third party replaying material it
+was never issued, not a client that reused its own key.
 
 ### Retrying an ambiguous failure (`send`/`broadcast`)
 
@@ -721,11 +729,24 @@ This is a different guarantee from the idempotency key above, and it applies to 
 relay plane rather than to anything `agent-busctl` drives directly today (relay has no `agent-busctl`
 subcommand yet). A signature does not stop replay — a validly signed message can be resent
 verbatim by a peer, a relay, or a third party — so the server rejects an already-accepted signed
-message outright and disconnects the sender. Freshness comes from the server-minted monotonic
-sequence plus the recipient-side cursor (the same cursor `agent-busctl watch` persists), never from the
-signature alone. Nothing is required of you here beyond the ordinary rule already stated for
-`watch`: deduplicate on `message_id`, because at-least-once delivery — including across relayed
-buses — means you will see duplicates as the normal steady state.
+message outright, and **this is the one case in the whole protocol where the connection is
+disconnected**, because the sender presented material it was never issued. On `/v1/send` this is
+detected by the `sender` inside the signed bytes not matching the authenticated principal, and the
+disconnect fires **only** when that claim is a well-formed, fully-qualified `<bus-id>.<agent-id>` —
+an absent, unqualified, or whitespace-padded claim names nobody, so it is still refused (403) but
+does **not** disconnect you. **No "was this already accepted" lookup is involved in the check** —
+the trigger is purely the sender claim not matching the authenticated principal, so a first-time
+impersonation attempt is caught identically to a genuine replay. Freshness against actual replays
+comes from the server-minted monotonic sequence plus the recipient-side cursor (the same cursor
+`agent-busctl watch` persists), never from the signature alone. Nothing is required of you here
+beyond the ordinary rule already stated for `watch`: deduplicate on `message_id`, because
+at-least-once delivery — including across relayed buses — means you will see duplicates as the
+normal steady state.
+
+**If you are disconnected here and believe you did nothing wrong**, the most likely innocent cause is
+a mismatched pairing: a process holding more than one enrolment can send a request signed by one
+agent's key while authenticated under a *different* agent's session token. Reconnect, and check that
+the session token and the signing identity you used belong to the same enrolment before retrying.
 
 ## Exit codes
 

@@ -4,7 +4,8 @@
 // validation (invariant 1: a client-supplied value is checked, never trusted),
 // and its PER-AGENT scoping. It does NOT implement the durable applied-key
 // store (IDEM-11), the retry-returns-original-result behaviour (IDEM-12), or
-// the key-reuse-different-payload violation/disconnect path (IDEM-14) — those
+// the key-reuse-different-payload violation path (IDEM-14; reject+log only,
+// no disconnect — narrowed 2026-08-08, CLAUDE.md invariant 10) — those
 // tasks consume the types defined here and must not re-derive them.
 //
 // # Why this lives in doc.go and not CONTRACTS.md / PROTOCOL.md

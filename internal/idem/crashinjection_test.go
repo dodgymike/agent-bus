@@ -44,7 +44,8 @@
 //     verbatim replay from 32 goroutines at once, under -race.
 //   - TestIdemCrashInjectionRestartKeyReuseIsStillTheViolation is the other
 //     side: after the same crash, the SAME key with a DIFFERENT payload must be
-//     ErrIdempotencyKeyReused (the disconnect path) and must NOT be reported as
+//     ErrIdempotencyKeyReused (reject+log only, narrowed 2026-08-08 — no
+//     disconnect) and must NOT be reported as
 //     the routine, retriable ErrUnknownMint — misfiling a violation as routine
 //     aims the defence at nobody at all.
 //
@@ -673,7 +674,7 @@ func runRestartCrashChild(t *testing.T, point, dir string) {
 //     answered ErrUnknownMint — which is documented as ROUTINE and retriable,
 //     with the remedy "re-mint under the same key and re-send". It must NOT be
 //     ErrIdempotencyKeyReused: the client did nothing wrong and must not be
-//     disconnected for a crash on our side.
+//     told it committed a protocol violation for a crash on our side.
 //   - After a POST-COMMIT or POST-ACK crash the operation IS part of accepted
 //     history, so the same verbatim replay must return the ORIGINAL result with
 //     no error and no re-mint.
@@ -784,7 +785,7 @@ func TestIdemCrashInjectionRestartYieldsExactlyOneEffect(t *testing.T) {
 					t.Fatalf("replaying a reservation that died with the process returned err = %v, want ErrUnknownMint: the reservation table is in memory and does not survive a restart, and the documented remedy is to re-mint under the SAME key", err)
 				}
 				if errors.Is(err, hub.ErrIdempotencyKeyReused) {
-					t.Fatalf("a client whose send NEVER COMMITTED was told its idempotency key was reused (%v); that is the disconnect path, aimed at a client that did nothing wrong", err)
+					t.Fatalf("a client whose send NEVER COMMITTED was told its idempotency key was reused (%v); that is the protocol-violation path, aimed at a client that did nothing wrong", err)
 				}
 				// The remedy the error names must actually work, first time.
 				// The reservation is checked explicitly because freshSendRequest
@@ -868,7 +869,7 @@ func TestIdemCrashInjectionRestartHonestRetryIsNeverPunished(t *testing.T) {
 			t.Fatalf("replay %d was refused with ErrUnknownMint: the applied-key lookup must run BEFORE the reservation lookup, or every honest retry across a restart is refused for a message that IS durable", attempt)
 		}
 		if errors.Is(err, hub.ErrIdempotencyKeyReused) {
-			t.Fatalf("replay %d of an IDENTICAL payload was treated as a key-reuse violation: that is the disconnect path and it is aimed at the wrong party", attempt)
+			t.Fatalf("replay %d of an IDENTICAL payload was treated as a key-reuse violation: that is the reject-and-log path and it is aimed at the wrong party", attempt)
 		}
 		if err != nil {
 			t.Fatalf("replay %d of %d returned err = %v, want the original result: a well-behaved client retrying a lost acknowledgement must be answered, not refused", attempt, 3, err)
@@ -1078,7 +1079,7 @@ func TestIdemCrashInjectionRestartBroadcastRetryIsAnsweredOnce(t *testing.T) {
 	}
 	res, err := h.Send(sendUnderSameKey)
 	if errors.Is(err, hub.ErrIdempotencyKeyReused) {
-		t.Fatalf("a SEND reusing the BROADCAST's key string was rejected as a key-reuse violation (%v): the idempotency scope is the (agent, op, key) tuple, so one key across two routes is two operations and this honest client was disconnected for nothing", err)
+		t.Fatalf("a SEND reusing the BROADCAST's key string was rejected as a key-reuse violation (%v): the idempotency scope is the (agent, op, key) tuple, so one key across two routes is two operations and this honest client was told it committed a protocol violation for nothing", err)
 	}
 	if err != nil {
 		t.Fatalf("a send under the same key string as the recovered broadcast returned err = %v, want success: different op, different scope", err)
@@ -1111,12 +1112,13 @@ func TestIdemCrashInjectionRestartBroadcastRetryIsAnsweredOnce(t *testing.T) {
 // merely that one does.
 //
 // After the same crash, the same key with a DIFFERENT payload is a protocol
-// violation: reject, log, disconnect. The payload fingerprint that detects it
-// has to have survived the crash on disk, and the check has to run ahead of the
-// reservation lookup — because the reservation table is empty after a restart,
-// so a violation checked second would come back as the ROUTINE, retriable
-// ErrUnknownMint and the offender would be invited to try again rather than
-// disconnected.
+// violation: reject and log (narrowed 2026-08-08 — no disconnect; see
+// internal/idem/store.go's Outcome doc comment). The payload fingerprint that
+// detects it has to have survived the crash on disk, and the check has to run
+// ahead of the reservation lookup — because the reservation table is empty
+// after a restart, so a violation checked second would come back as the
+// ROUTINE, retriable ErrUnknownMint and the offender would be invited to try
+// again rather than told it violated the protocol.
 func TestIdemCrashInjectionRestartKeyReuseIsStillTheViolation(t *testing.T) {
 	dir := t.TempDir()
 	runRestartCrashChild(t, crashPostCommitPreAck, dir)
@@ -1130,10 +1132,10 @@ func TestIdemCrashInjectionRestartKeyReuseIsStillTheViolation(t *testing.T) {
 	// The SPECIFIC misdiagnosis is checked FIRST. Checking the general case
 	// first would make this branch unreachable and cost the failure its
 	// diagnosis: a violation misfiled as ErrUnknownMint is not merely "the wrong
-	// error", it is the difference between disconnecting the offender and
-	// inviting it to try again.
+	// error", it is the difference between telling the offender it violated the
+	// protocol and inviting it to try again.
 	if errors.Is(err, hub.ErrUnknownMint) {
-		t.Fatalf("a key-reuse violation after a restart was reported as ErrUnknownMint (%v), which is documented as ROUTINE and retriable: the violation check must run BEFORE the reservation lookup, or every post-restart violation is misfiled as a routine re-mint and the offending client is never disconnected", err)
+		t.Fatalf("a key-reuse violation after a restart was reported as ErrUnknownMint (%v), which is documented as ROUTINE and retriable: the violation check must run BEFORE the reservation lookup, or every post-restart violation is misfiled as a routine re-mint and the offending client is never told it violated the protocol", err)
 	}
 	if !errors.Is(err, hub.ErrIdempotencyKeyReused) {
 		t.Fatalf("reusing the key for DIFFERENT content after the crash gave err = %v, want ErrIdempotencyKeyReused: the payload fingerprint must survive the crash on disk, or a key reused for new content is silently answered with somebody else's result", err)
