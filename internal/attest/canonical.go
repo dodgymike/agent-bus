@@ -109,12 +109,12 @@ type Attestation struct {
 	// (invariant 2). Its BUS HALF IS the attesting bus: there is deliberately
 	// no separate BusID field, because two independent claims about which bus
 	// made this statement would force every consumer to choose one of them.
-	AgentID string
+	AgentID string `json:"agent_id"`
 
 	// MessagingPublicKey is the agent's Ed25519 MESSAGING public key — the key
 	// that signs that agent's messages (internal/signing), NOT its auth key and
 	// NOT any bus key. Exactly ed25519.PublicKeySize bytes.
-	MessagingPublicKey ed25519.PublicKey
+	MessagingPublicKey ed25519.PublicKey `json:"messaging_public_key"`
 
 	// KeyEpoch is the origin bus's epoch for this binding.
 	//
@@ -133,7 +133,7 @@ type Attestation struct {
 	//
 	// Zero is accepted: nothing assigns epochs yet, so 0 is the honest "no
 	// epoch assigned" value rather than a malformed field.
-	KeyEpoch uint64
+	KeyEpoch uint64 `json:"key_epoch"`
 
 	// IssuedAtUnixMilli is the origin bus's wall clock at minting: Unix
 	// milliseconds UTC as a signed 64-bit integer, encoded fixed-width.
@@ -149,7 +149,7 @@ type Attestation struct {
 	// agents, and the origin bus already controls attribution of its own agents
 	// completely, so a "not yet valid" check would buy nothing and would reject
 	// honest traffic under clock skew.
-	IssuedAtUnixMilli int64
+	IssuedAtUnixMilli int64 `json:"issued_at_unix_ms"`
 
 	// NotAfterUnixMilli is when this binding stops being acceptable. Verify
 	// ENFORCES it — a MUST, not a SHOULD (see Verify).
@@ -161,12 +161,12 @@ type Attestation struct {
 	// re-attestation, the one thing the design forbids), so a message queued at
 	// an intermediate across a partition longer than this window becomes
 	// permanently undeliverable.
-	NotAfterUnixMilli int64
+	NotAfterUnixMilli int64 `json:"not_after_unix_ms"`
 
 	// Signature is the detached Ed25519 signature over Canonicalize's output,
 	// made with the ORIGIN bus's BUS SIGNING key. Exactly
 	// ed25519.SignatureSize bytes. It is NOT part of the canonical bytes.
-	Signature []byte
+	Signature []byte `json:"signature"`
 }
 
 // Canonicalize returns the exact bytes to be signed and verified for a.

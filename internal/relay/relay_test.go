@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -915,10 +916,18 @@ func TestMaxRelayBytesFitsAMaximumMessage(t *testing.T) {
 		Recipients:         recipients,
 		BusPath:            path,
 		TimestampUnixMilli: 1 << 42,
-		Signature:          make([]byte, ed25519.SignatureSize),
-		Size:               len(body),
-		ContentSHA256:      store.ContentHash(body),
-		Body:               body,
+		OriginAttestation: attest.Attestation{
+			AgentID:            strings.Repeat("o", 64) + ".b" + longName + "-18446744073709551615",
+			MessagingPublicKey: make([]byte, ed25519.PublicKeySize),
+			KeyEpoch:           ^uint64(0),
+			IssuedAtUnixMilli:  1,
+			NotAfterUnixMilli:  1 << 62,
+			Signature:          make([]byte, ed25519.SignatureSize),
+		},
+		Signature:     make([]byte, ed25519.SignatureSize),
+		Size:          len(body),
+		ContentSHA256: store.ContentHash(body),
+		Body:          body,
 	})
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
@@ -940,6 +949,8 @@ func TestRelayedMessageCopiesEverything(t *testing.T) {
 	req.Recipients[0] = localBus + ".impostor-1"
 	req.BusPath[0] = thirdBus
 	req.Body[0] = 'X'
+	req.OriginAttestation.MessagingPublicKey[0] ^= 0xff
+	req.OriginAttestation.Signature[0] ^= 0xff
 
 	if m.Recipients[0] != localBus+".alpha-1" {
 		t.Error("Recipients aliases the decoded payload")
@@ -949,6 +960,12 @@ func TestRelayedMessageCopiesEverything(t *testing.T) {
 	}
 	if m.Body[0] != testBody[0] {
 		t.Error("Body aliases the decoded payload")
+	}
+	if m.OriginAttestation.MessagingPublicKey[0] == req.OriginAttestation.MessagingPublicKey[0] {
+		t.Error("OriginAttestation.MessagingPublicKey aliases the decoded payload")
+	}
+	if m.OriginAttestation.Signature[0] == req.OriginAttestation.Signature[0] {
+		t.Error("OriginAttestation.Signature aliases the decoded payload")
 	}
 }
 
@@ -983,6 +1000,24 @@ func TestForwardCarriesEveryFieldVerbatim(t *testing.T) {
 	if len(out.Recipients) != 1 || out.Recipients[0] != localBus+".alpha-1" {
 		t.Fatalf("Forward changed the recipients: %v", out.Recipients)
 	}
+	if out.OriginAttestation.AgentID != req.OriginAttestation.AgentID ||
+		out.OriginAttestation.KeyEpoch != req.OriginAttestation.KeyEpoch ||
+		out.OriginAttestation.IssuedAtUnixMilli != req.OriginAttestation.IssuedAtUnixMilli ||
+		out.OriginAttestation.NotAfterUnixMilli != req.OriginAttestation.NotAfterUnixMilli ||
+		!bytes.Equal(out.OriginAttestation.MessagingPublicKey, req.OriginAttestation.MessagingPublicKey) ||
+		!bytes.Equal(out.OriginAttestation.Signature, req.OriginAttestation.Signature) {
+		t.Fatalf("Forward changed the origin attestation:\n got %+v\nwant %+v", out.OriginAttestation, req.OriginAttestation)
+	}
+	// Forward owns fresh slices; changing its output must not rewrite the
+	// verified message retained by this bus.
+	out.OriginAttestation.MessagingPublicKey[0] ^= 0xff
+	out.OriginAttestation.Signature[0] ^= 0xff
+	if bytes.Equal(out.OriginAttestation.MessagingPublicKey, m.OriginAttestation.MessagingPublicKey) ||
+		bytes.Equal(out.OriginAttestation.Signature, m.OriginAttestation.Signature) {
+		t.Fatal("Forward aliased origin-attestation slices from the validated message")
+	}
+	// Restore the forwarded values before proving the next hop accepts them.
+	out.OriginAttestation = cloneAttestation(m.OriginAttestation)
 
 	// The forwarded envelope must be acceptable to the NEXT bus.
 	if _, err := ValidateRelayRequest(thirdBus, out.MessageID, out, fakeCrossBusTrustForTest); err != nil {

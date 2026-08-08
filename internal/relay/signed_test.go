@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
@@ -27,20 +28,12 @@ import (
 // The test federation's keys.
 // ---------------------------------------------------------------------------
 
-// attestationContext domain-separates the FAKE attestation this test keyring
-// builds, so it can never be confused with signing.Context's canonical message
-// bytes. CRYPTO-4 owns the real bundle format; this is only enough of one to
-// make the CrossBusTrust seam exercisable — an origin bus SIGNS its agent's
-// messaging key with its BUS SIGNING key, and a verifier may check that
-// signature against nothing but the peering-time pins it was handed.
-const attestationContext = "agent-bus-test/attested-agent-key/1|"
-
 // attestedAgent is one agent's messaging key plus the ORIGIN bus's attestation
 // of it.
 type attestedAgent struct {
 	priv        ed25519.PrivateKey
 	pub         ed25519.PublicKey
-	attestation []byte // signed by the agent's OWN bus's signing key
+	attestation attest.Attestation // signed by the agent's OWN bus's signing key
 }
 
 // testKeyring mints, and then remembers, one Ed25519 BUS SIGNING key per bus id
@@ -110,17 +103,17 @@ func (k *testKeyring) agent(fqAgentID string) attestedAgent {
 	if err != nil {
 		panic("relay test: generating an agent messaging key: " + err.Error())
 	}
-	a := attestedAgent{
-		priv:        priv,
-		pub:         pub,
-		attestation: ed25519.Sign(k.busSigningKeyLocked(busID), attestationBytes(fqAgentID, pub)),
+	signedAttestation, err := attest.Sign(
+		k.busSigningKeyLocked(busID), busID, fqAgentID, pub, 1,
+		time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		panic("relay test: signing an agent attestation: " + err.Error())
 	}
+	a := attestedAgent{priv: priv, pub: pub, attestation: signedAttestation}
 	k.agents[fqAgentID] = a
 	return a
-}
-
-func attestationBytes(fqAgentID string, pub ed25519.PublicKey) []byte {
-	return append([]byte(attestationContext+fqAgentID+"|"), pub...)
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +171,7 @@ func (tr *testTrust) PinnedBusSigningKeys(busID string) ([]ed25519.PublicKey, er
 	return testKeys.busPins(busID), nil
 }
 
-func (tr *testTrust) AttestedSignerKey(fqAgentID string, pinnedOriginBusSigningKeys []ed25519.PublicKey) (ed25519.PublicKey, error) {
+func (tr *testTrust) AttestedSignerKey(fqAgentID string, originAttestation attest.Attestation, pinnedOriginBusSigningKeys []ed25519.PublicKey) (ed25519.PublicKey, error) {
 	tr.mu.Lock()
 	tr.attestCalls = append(tr.attestCalls, fqAgentID)
 	tr.mu.Unlock()
@@ -207,16 +200,10 @@ func (tr *testTrust) AttestedSignerKey(fqAgentID string, pinnedOriginBusSigningK
 		return nil, errors.New("test: no pins were supplied, so no attestation can be checked")
 	}
 
-	a := testKeys.agent(fqAgentID)
-	for _, pin := range pinnedOriginBusSigningKeys {
-		if len(pin) != ed25519.PublicKeySize {
-			continue
-		}
-		if ed25519.Verify(pin, attestationBytes(fqAgentID, a.pub), a.attestation) {
-			return a.pub, nil
-		}
-	}
-	return nil, fmt.Errorf("test: no pin for bus %q attests a messaging key for %q", busID, fqAgentID)
+	return attest.Verify(pinnedOriginBusSigningKeys, originAttestation, attest.Subject{
+		FQAgentID: fqAgentID,
+		OriginBus: busID,
+	}, time.Now())
 }
 
 func (tr *testTrust) calls() (pins, attests []string) {
@@ -293,7 +280,9 @@ func signRelay(req *RelayRequest) error {
 	if err != nil {
 		return err
 	}
-	req.Signature = ed25519.Sign(testKeys.agent(req.Sender).priv, b)
+	a := testKeys.agent(req.Sender)
+	req.OriginAttestation = cloneAttestation(a.attestation)
+	req.Signature = ed25519.Sign(a.priv, b)
 	return nil
 }
 
@@ -313,7 +302,9 @@ func signRelayedMessage(m *RelayedMessage) error {
 	if err != nil {
 		return err
 	}
-	m.Signature = ed25519.Sign(testKeys.agent(m.Sender).priv, b)
+	a := testKeys.agent(m.Sender)
+	m.OriginAttestation = cloneAttestation(a.attestation)
+	m.Signature = ed25519.Sign(a.priv, b)
 	return nil
 }
 
@@ -357,7 +348,9 @@ func TestSign7SignedOnAVerifiesForARecipientOnB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Canonicalize: %v", err)
 	}
-	req.Signature = ed25519.Sign(testKeys.agent(sender).priv, signedBytes)
+	a := testKeys.agent(sender)
+	req.OriginAttestation = cloneAttestation(a.attestation)
+	req.Signature = ed25519.Sign(a.priv, signedBytes)
 
 	// Bus B ingests it, with A's bus signing key pinned from peering.
 	trust := newTestTrust(t)
@@ -486,8 +479,8 @@ func TestSign7MutatedFieldNeverReachesDelivery(t *testing.T) {
 		{
 			name: "sender",
 			mut:  func(r *RelayRequest) { r.Sender = peerBus + ".beta-2" },
-			want: ErrBadSignature,
-			why:  "the key attested for the substituted agent does not verify the original's signature",
+			want: ErrNoSignerKey,
+			why:  "the origin attestation binds exactly one sender, so re-attribution is refused before the message signature",
 		},
 		{
 			name: "a recipient is re-pointed",
@@ -567,7 +560,7 @@ func TestSign7MutatedFieldNeverReachesDelivery(t *testing.T) {
 				t.Fatalf("AcceptRelay was called %d times for a tampered envelope, want 0: a rejected message must never reach delivery (%s)", n, tc.why)
 			}
 			wantStatus := http.StatusBadRequest
-			if errors.Is(err, ErrBadSignature) {
+			if errors.Is(err, ErrBadSignature) || errors.Is(err, ErrNoSignerKey) {
 				wantStatus = http.StatusForbidden
 			}
 			if status != wantStatus {
@@ -812,6 +805,11 @@ func TestSign7RelayedBroadcastIsUnsignable(t *testing.T) {
 		r.Broadcast = true
 		r.Recipients = nil
 	})
+	// relayFixture cannot sign an uncanonicalizable broadcast, so it also cannot
+	// attach its ordinary valid fixture attestation. Supply that independent
+	// origin-bus artefact so this test reaches the broadcast tripwire rather than
+	// the earlier missing-attestation shape check.
+	req.OriginAttestation = cloneAttestation(testKeys.agent(req.Sender).attestation)
 
 	// The premise, stated rather than assumed: there are no bytes to sign.
 	if _, err := canonicalizeRelay(req); !errors.Is(err, signing.ErrInvalid) {

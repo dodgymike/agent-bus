@@ -386,7 +386,7 @@ func ErrorCode(err error) string {
 		return CodeUnpeeredBus
 	case errors.Is(err, ErrNoSignerKey), errors.Is(err, ErrBadSignature):
 		return CodeBadSignature
-	case errors.Is(err, ErrInvalidRelay):
+	case errors.Is(err, ErrMissingAttestation), errors.Is(err, ErrInvalidRelay):
 		return CodeInvalidRelay
 
 	// Roster sync (RELAY-2). ErrPeerBusIDCollision is folded into the existing

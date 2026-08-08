@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
@@ -68,10 +69,12 @@ const DropLoop = "loop"
 //	            quotes and a comma)                                  =  9,792
 //	bus_path    MaxBusPath (64) x (64-byte bus id + 3)               =  4,288
 //	signature   64 raw bytes base64-expanded by 4/3, padded          =    88
+//	attestation agent id (150) + key (44 base64) + signature (88
+//	            base64) + epoch/timestamps (60) + field names        =   ~400
 //	fixed       origin_bus (64) + message_id (85) + sender (150) +
 //	            content_sha256 (64) + timestamp_unix_ms (20) +
 //	            size (10) + the flags and every field name           = ~1,024
-//	                                                         total  ~ 102,488
+//	                                                         total  ~ 102,888
 //
 // 256 KiB leaves ~2.5x headroom, so a legal maximum-size relayed message can
 // always be encoded and can never be rejected by this cap — while an unbounded
@@ -151,6 +154,13 @@ type RelayRequest struct {
 	// not yet on any wire and there is nothing to stay compatible with.
 	TimestampUnixMilli int64 `json:"timestamp_unix_ms"`
 
+	// OriginAttestation is the ORIGIN bus's signed binding of Sender to the
+	// messaging public key that signed this envelope. It is minted with the
+	// origin bus's BUS SIGNING key, forwarded unchanged by every intermediate,
+	// and verified only against pins configured out of band for OriginBus. It is
+	// never re-attested by an intermediate bus.
+	OriginAttestation attest.Attestation `json:"origin_attestation"`
+
 	// Signature is the origin AGENT's detached Ed25519 signature over
 	// signing.Canonicalize of the fields above — ed25519.SignatureSize (64)
 	// bytes, produced over the canonical bytes UNHASHED (signing.Context is
@@ -162,13 +172,12 @@ type RelayRequest struct {
 	// unmarshals and remarshals this envelope changes key order, number
 	// formatting and base64 padding, none of which the signature sees.
 	//
-	// There is deliberately NO key-id or key-epoch field here yet. Today a
-	// verifier obtains the signing key through CrossBusTrust (signed.go): the
-	// ORIGIN bus's attestation for this Sender, checked against a signing key
-	// pinned when we peered with that bus. CRYPTO-4 owns the attested bundle's
-	// format and `key_epoch`, neither number is reserved, and nobody picks a
-	// numbered wire field by eyeballing the list — so CRYPTO-4 is the task that
-	// must add it to THIS envelope, at the same time it adds it everywhere else.
+	// There is deliberately no separate message-key id. The adjacent
+	// OriginAttestation carries its own covered KeyEpoch, which is recorded but
+	// not yet enforced: messages from two epochs may arrive out of order through
+	// different relay paths, so a naive monotonicity check would drop legitimate
+	// traffic. CrossBusTrust returns exactly the messaging key that attestation
+	// binds for Sender.
 	Signature []byte `json:"signature"`
 
 	// Size is the declared body length. It is cross-checked against the actual
@@ -271,6 +280,11 @@ type RelayedMessage struct {
 	// operator, never an input to a visibility or ordering decision.
 	TimestampUnixMilli int64
 
+	// OriginAttestation is the origin bus's signed binding for Sender. It is a
+	// value (never a pointer) and both nested byte slices are freshly allocated,
+	// so a decoded request cannot mutate the bytes after verification.
+	OriginAttestation attest.Attestation
+
 	// Signature is the origin agent's detached Ed25519 signature over the
 	// canonical bytes CanonicalBytes re-derives. Freshly allocated; never
 	// aliases the decoded payload.
@@ -297,6 +311,16 @@ type RelayedMessage struct {
 	// IDENTITY-DEFINING content, computed by relayFingerprint. It deliberately
 	// EXCLUDES BusPath; read relayFingerprint's comment before changing that.
 	Fingerprint idem.Fingerprint
+}
+
+// cloneAttestation snapshots both slices inside a value-typed attestation.
+// Struct assignment alone would still alias peer-owned key and signature
+// bytes, reopening a time-of-check/time-of-use gap after verification.
+func cloneAttestation(a attest.Attestation) attest.Attestation {
+	out := a
+	out.MessagingPublicKey = append(ed25519.PublicKey(nil), a.MessagingPublicKey...)
+	out.Signature = append([]byte(nil), a.Signature...)
+	return out
 }
 
 // Scope builds the idem.Scope this message must be looked up and remembered
@@ -373,6 +397,16 @@ func (m RelayedMessage) Scope() (idem.Scope, error) {
 // IDENTITY-DEFINING CONTENT — who sent it, to whom, when, and what — while the
 // bus path is PER-COPY ROUTING METADATA that says how this particular copy got
 // here. Changing the content is a violation; arriving by another route is not.
+
+// # OriginAttestation MUST NOT BE IN THE FINGERPRINT EITHER
+//
+// The attestation is per-copy attribution evidence rather than message
+// identity. An origin may mint a fresh, still-valid attestation for a retry, or
+// two rollover keys may sign equivalent bindings. Both copies still carry the
+// same agent-signed message bytes. Including the attestation would turn those
+// legitimate copies into same-key/different-payload violations. Substitution
+// buys an attacker nothing: validation verifies the attestation first and then
+// verifies the unchanged message signature with exactly the key it binds.
 //
 // # THE SIGNED TIMESTAMP IS COVERED, AND IT MUST BE
 //
@@ -632,6 +666,15 @@ func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, t
 		return RelayedMessage{}, fmt.Errorf("%w: the envelope carries %d signature bytes, and an Ed25519 signature is exactly %d", ErrMissingSignature, len(req.Signature), ed25519.SignatureSize)
 	}
 
+	// 11b. The origin-bus attestation is present and has a canonicalizable
+	// shape. This does NOT trust it: VerifyRelayed checks its bus signature and
+	// subject binding against OriginBus's configured pins. Shape validation here
+	// keeps a malformed wire value in the 400 family and ensures the value built
+	// below can be copied without carrying an unbounded id or unusable key.
+	if err := validateOriginAttestation(req.OriginAttestation); err != nil {
+		return RelayedMessage{}, err
+	}
+
 	// 11a. A RELAYED BROADCAST IS REFUSED. FAIL-CLOSED, ON PURPOSE.
 	//
 	// signing.Canonicalize REFUSES an empty recipient set — "an empty recipient
@@ -672,6 +715,7 @@ func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, t
 		Recipients:         append([]string(nil), req.Recipients...),
 		BusPath:            append([]string(nil), req.BusPath...),
 		TimestampUnixMilli: req.TimestampUnixMilli,
+		OriginAttestation:  cloneAttestation(req.OriginAttestation),
 		Signature:          append([]byte(nil), req.Signature...),
 		Body:               append([]byte(nil), req.Body...),
 		ContentSHA256:      req.ContentSHA256,
@@ -693,12 +737,13 @@ func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, t
 // Forward re-encodes the message for onward relay, with THIS bus's hop appended
 // to the path.
 //
-// Every other field is carried VERBATIM, INCLUDING THE SIGNATURE AND THE SIGNED
-// TIMESTAMP. PROTOCOL.md §8.5: "a relay must forward the signed bytes verbatim
-// — any normalisation on the path breaks verification at the far end". Nothing
-// here re-derives, re-orders, re-hashes, re-encodes or re-signs; the ONLY thing
-// that changes on a hop is the bus path, which is the one field that is outside
-// the signature and can never be inside it, because it GROWS on every hop.
+// Every other field is carried VERBATIM, INCLUDING THE SIGNATURE, THE SIGNED
+// TIMESTAMP AND THE ORIGIN ATTESTATION. PROTOCOL.md §8.5: "a relay must forward
+// the signed bytes verbatim — any normalisation on the path breaks verification
+// at the far end". Nothing here re-derives, re-orders, re-hashes, re-encodes,
+// re-signs or re-attests; the ONLY thing that changes on a hop is the bus path,
+// which is outside both signatures and can never be inside them, because it
+// GROWS on every hop.
 //
 // # "Verbatim" means the FIELD VALUES, and that is what makes it safe
 //
@@ -731,6 +776,7 @@ func (m RelayedMessage) Forward(localBusID string) (RelayRequest, error) {
 		Recipients:         append([]string(nil), m.Recipients...),
 		BusPath:            path,
 		TimestampUnixMilli: m.TimestampUnixMilli,
+		OriginAttestation:  cloneAttestation(m.OriginAttestation),
 		Signature:          append([]byte(nil), m.Signature...),
 		Size:               len(m.Body),
 		ContentSHA256:      m.ContentSHA256,

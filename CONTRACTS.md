@@ -255,6 +255,7 @@ stay compatible with.
 |---|---|---|---|
 | ~~SentAtUnixNs~~ | ~~`sent_at_unix_ns`~~ | **REMOVED** | it was the ORIGIN BUS's nanosecond clock, not the sender's signed clock, so the canonical bytes could not be reconstructed from the envelope at all |
 | TimestampUnixMilli | `timestamp_unix_ms` | **ADDED** (`int64`) | the SENDING AGENT's signed wall clock in Unix ms — the exact integer `signing.Message.TimestampUnixMilli` covers, carried verbatim with no conversion anywhere. Must be > 0 (0 is an unset field, not the epoch). **PROVENANCE ONLY — never the local `store.Message.SentAt`**, which is an authorization input (`VisibleTo` compares it against the enrolment instant) |
+| OriginAttestation | `origin_attestation` | **ADDED** (object) | the origin bus's signed binding of `sender` to its messaging key. Its stable snake-case fields are `agent_id`, `messaging_public_key`, `key_epoch`, `issued_at_unix_ms`, `not_after_unix_ms`, and `signature`; it is carried unchanged across hops and verified only against pins configured for `origin_bus`, never re-attested by an intermediate |
 | Signature | `signature` | **ADDED** (64 bytes, base64 in JSON) | the origin agent's detached Ed25519 signature over `signing.Canonicalize`'s output, unhashed, carried verbatim on every hop. Exactly `ed25519.SignatureSize`; any other length is treated as no signature |
 
 Every other `RelayRequest` field is unchanged. The relay **fingerprint** (`relayFingerprint`) now
@@ -268,7 +269,11 @@ excludes the signature itself. See `PROTOCOL.md` §8.5 and §10.
 `relay.CrossBusTrust` — is **required**, and `NewRelayHandler` returns an error without one.
 `ValidateRelayRequest` takes it as a required parameter and runs `VerifyRelayed` before returning, so
 no validated-but-unverified `RelayedMessage` can exist. A nil trust is a refusal, never a skipped
-check; there is no "verification disabled" mode and no default implementation ships.
+check; there is no "verification disabled" mode or default construction. `relay.PeerStore` is the
+production implementation: it verifies the envelope-carried origin attestation against the durable,
+operator-configured pins for that origin bus, and refuses a store without RELAY-34's durable
+withdrawal floor. It remains an internal unwired seam — no mux or composition-root wiring is added
+here.
 
 **New error codes, appended to the status mapping in the entry above.** All three are FINAL — a retry
 cannot change any of the verdicts — so none is a 503 and none is a `dropped_reason` (which rides on
@@ -277,6 +282,7 @@ HTTP 200 and means "settled, and not your fault"):
 | Condition | HTTP | Body | Notes |
 |---|---|---|---|
 | Missing, wrong-length or uncanonicalizable signature — **including a relayed broadcast** | **400** | `CodeUnsigned` = `"unsigned"` | "nobody could verify this envelope". A relayed broadcast has no recipient list, canonical format v1 refuses an empty recipient set, so no signature over one can exist; exempting broadcasts would be an unauthenticated downgrade selectable from the wire. **Relayed broadcasts do not work today, deliberately — SIGN-3 owns the fix.** |
+| Missing or malformed `origin_attestation` | **400** | `CodeInvalidRelay` = `"invalid_relay"` | malformed origin-attribution evidence is refused before trust lookup or delivery |
 | Signature does not verify, or no attested signer key for the sender | **403** | `CodeBadSignature` = `"bad_signature"` | an authorization answer: "we will not attribute this to that agent" |
 | No peering-time pin held for the origin bus's signing key | **403** | `CodeUnpeeredBus` = `"unpeered_bus"` | a distinct **operator** problem from `bad_signature`: the remedy is to complete a peering, not to hunt a forgery. NOT a "not yet" — nothing a retry does establishes a pin, and there is deliberately no trust-on-first-use fallback |
 
@@ -290,15 +296,13 @@ clients from the invite blob's certificate fingerprint) and the bus **SIGNING** 
 at peering time) are different keys with different rotation blast radii and different compromises, and
 pinning one does not give you the other. Normative text and the reasoning: `PROTOCOL.md` §8.5.
 
-**KNOWN GAP — the peering handshake carries no key, so no pin can be established and relay ingest
-cannot be served at all.** `PeerEnrollRequest` / `PeerEnrollResponse` still carry only `bus_id` and
-`agents`: no bus signing key, no certificate fingerprint. `CrossBusTrust.PinnedBusSigningKeys`
-therefore has no source of truth and every relayed message is `unpeered_bus` by construction. Adding
-that field belongs to `INVITE-PEERGUARD` (`f5d91dbe`), which owns the peering handshake — it is
-peering material and must arrive over the same operator-mediated channel the invite uses.
-`internal/relay/doc.go` handoff item 8 is the full text. Separately, `internal/buscert`
-(`MTLS-BUSCERT`) does mint and load both key files (`bus-tls.key`, `bus-signing.key`), but as of this
-writing nothing on the startup path imports it, so a running bus produces neither.
+**KNOWN GAP — the peering handshake still does not bootstrap a signing-key pin, and RELAY-17 does
+not serve relay ingress.** `PeerEnrollRequest` / `PeerEnrollResponse` still carry only `bus_id` and
+`agents`; an operator instead records the origin pin durably with `agent-bus peer add -signing-key`
+(the independently documented offline configuration path). The server composition root still does
+not construct the `PeerStore` trust implementation or register a peer relay route, so no running bus
+accepts relay traffic yet. Adding a handshake key field remains `INVITE-PEERGUARD` (`f5d91dbe`): it
+must arrive over the operator-mediated peering channel, never as trust-on-first-use.
 
 **Still no reserved relay wire-protocol version.** SIGN-7 added fields to `RelayRequest` without one,
 for the same reason the entry above gives: nothing serves these handlers, so the format is not yet on

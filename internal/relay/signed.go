@@ -6,20 +6,22 @@ import (
 	"fmt"
 
 	"github.com/dodgymike/agent-bus/internal/attest"
+	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
 
 // Signature failures on the relay ingress. All are checkable with errors.Is,
 // alongside ErrInvalidRelay and ErrRelayKeyMismatch in message.go.
 //
-// They are FIVE sentinels rather than one because they need two different
-// answers on the wire and they blame three different parties. ErrMissingSignature
-// and ErrUnsignable are "this envelope can never be verified by anyone" — a
-// malformed request, 400. ErrNoSignerKey and ErrBadSignature are "this envelope
-// is not attributable to the agent it names" — a refusal, 403. ErrUnpeeredBus is
-// a refusal too, but it blames a THIRD party — the operators, on both ends, who
-// have not peered these buses — and it is kept separate for exactly that reason.
-// All are FINAL: a retrying peer must never be told to send the same bytes again.
+// They are SIX sentinels rather than one because they need two different
+// answers on the wire and they blame three different parties.
+// ErrMissingSignature, ErrMissingAttestation and ErrUnsignable are "this
+// envelope can never be verified by anyone" — a malformed request, 400.
+// ErrNoSignerKey and ErrBadSignature are "this envelope is not attributable to
+// the agent it names" — a refusal, 403. ErrUnpeeredBus is a refusal too, but it
+// blames a THIRD party — the operators, on both ends, who have not configured
+// the origin bus's pins — and it is kept separate for exactly that reason. All
+// are FINAL: a retrying peer must never be told to send the same bytes again.
 //
 // THESE ARE NOT THE ONLY SENTINELS A CALLER MAY TEST FOR (RELAY-27). A failure
 // coming out of CrossBusTrust keeps its OWN sentinel as well — errors.Is finds
@@ -45,6 +47,12 @@ var (
 	// purpose: neither can be verified and neither becomes verifiable by being
 	// resent, so distinguishing them only helps an attacker probe.
 	ErrMissingSignature = errors.New("relay: relayed message carries no signature")
+
+	// ErrMissingAttestation reports an absent or malformed origin-bus
+	// attestation. Such an envelope can never be attributed, regardless of its
+	// message signature, so it is a malformed request (400), not an attribution
+	// refusal (403).
+	ErrMissingAttestation = errors.New("relay: relayed message carries no usable origin-bus attestation")
 
 	// ErrUnsignable reports a message that signing.Canonicalize refuses, so no
 	// signature over it can exist to be checked. A relayed BROADCAST is the case
@@ -303,10 +311,10 @@ func (m RelayedMessage) CanonicalBytes() ([]byte, error) {
 // rule "verify against the ORIGIN bus and nothing else" stops being a comment an
 // implementor may overlook and becomes the only thing the signature admits.
 //
-// This package ships NO implementation of this interface and NO default. That
-// omission is deliberate and is not an oversight to be helpfully corrected: a
-// default is the one thing every wiring site would reach for, and there is no
-// default that is safe. There is likewise no "verification disabled" mode.
+// *PeerStore is the production implementation. It reads only durable,
+// operator-configured origin-bus pins and refuses stores built without the
+// RELAY-34 withdrawal floor. There is deliberately NO default and likewise no
+// "verification disabled" mode.
 type CrossBusTrust interface {
 	// PinnedBusSigningKeys returns the ORIGIN bus's Ed25519 BUS SIGNING keys as
 	// pinned at PEERING time — the keys with which that bus attests its own
@@ -353,14 +361,9 @@ type CrossBusTrust interface {
 	// attestation does not verify against one of the pins it was handed, the
 	// answer is an error.
 	//
-	// THIS METHOD DOES NOT DEFINE CRYPTO-4'S KEY BUNDLE. The bundle's BYTES, its
-	// TRANSPORT (carried inside the relay envelope versus fetched from the origin
-	// bus), and `key_epoch` are all CRYPTO-4's to settle, and none of those wire
-	// numbers is reserved yet — nobody picks one by eyeballing a list (CLAUDE.md,
-	// "Parallel-agent coordination"). What this interface fixes is only the SEAM:
-	// whatever bundle format CRYPTO-4 ships, it is verified against a
-	// PEERING-TIME PIN of the origin bus's signing key, because that is the only
-	// input this method is given.
+	// originAttestation is the value carried beside the message from the ORIGIN
+	// bus and forwarded verbatim by intermediates. An implementation verifies
+	// that exact value; it must not fetch or substitute another binding.
 	//
 	// RETURNING AN ERROR IS ALWAYS SAFE, AND THE ERROR YOU RETURN IS KEPT
 	// (RELAY-27). Every failure is a REFUSAL — there is no error this method can
@@ -391,7 +394,20 @@ type CrossBusTrust interface {
 	// wrong in effect: it answered a peer "bad_signature" — forgery — for an
 	// unfinished peering and for an expired attestation alike. See
 	// relaySentinelForTrustError.
-	AttestedSignerKey(fqAgentID string, pinnedOriginBusSigningKeys []ed25519.PublicKey) (ed25519.PublicKey, error)
+	AttestedSignerKey(fqAgentID string, originAttestation attest.Attestation, pinnedOriginBusSigningKeys []ed25519.PublicKey) (ed25519.PublicKey, error)
+}
+
+// validateOriginAttestation checks the wire shape without trusting the
+// attestation. Canonicalize owns the field bounds and timestamp rules;
+// ValidateSignature owns the panic-preventing Ed25519 length check.
+func validateOriginAttestation(a attest.Attestation) error {
+	if _, err := attest.Canonicalize(a); err != nil {
+		return fmt.Errorf("%w: %v", ErrMissingAttestation, err)
+	}
+	if err := signing.ValidateSignature(a.Signature); err != nil {
+		return fmt.Errorf("%w: %v", ErrMissingAttestation, err)
+	}
+	return nil
 }
 
 // VerifyRelayed verifies m's signature against the messaging key the ORIGIN bus
@@ -470,6 +486,32 @@ func VerifyRelayed(m RelayedMessage, trust CrossBusTrust) error {
 		return fmt.Errorf("%w: the message carries %d signature bytes, and an Ed25519 signature is exactly %d", ErrMissingSignature, len(m.Signature), ed25519.SignatureSize)
 	}
 
+	// 2b. A zero or malformed attestation is refused independently of
+	// ValidateRelayRequest. VerifyRelayed is exported and must remain fail-closed
+	// when a caller constructs a RelayedMessage directly.
+	if err := validateOriginAttestation(m.OriginAttestation); err != nil {
+		return err
+	}
+
+	// 2c. Repeat the origin/sender namespace binding here for the same standalone
+	// reason. Without it a bus whose signing key is pinned for origin A could
+	// attest a foreign B.agent and have a directly-constructed message attributed
+	// across namespaces. Deriving attest.Subject.OriginBus from Sender alone would
+	// make that check tautological.
+	if len(m.OriginBus) > MaxPeerBusIDLen {
+		return fmt.Errorf("%w: origin bus is %d bytes, over the %d-byte bound", ErrInvalidRelay, len(m.OriginBus), MaxPeerBusIDLen)
+	}
+	if err := ids.ValidateBusID(m.OriginBus); err != nil {
+		return fmt.Errorf("%w: origin bus: %v", ErrInvalidRelay, err)
+	}
+	senderBus, _, _, err := ids.ParseAgentID(m.Sender)
+	if err != nil {
+		return fmt.Errorf("%w: sender: %v", ErrInvalidRelay, err)
+	}
+	if senderBus != m.OriginBus {
+		return fmt.Errorf("%w: sender %q belongs to bus %q, not origin bus %q", ErrInvalidRelay, m.Sender, senderBus, m.OriginBus)
+	}
+
 	// 3. THE PEERING-TIME PIN, UNCONDITIONALLY AND FIRST. An origin bus we hold
 	// no pin for is refused HERE, before anything can look a key up by any other
 	// route — which is what makes the "unpeered means unverifiable" rule
@@ -499,7 +541,7 @@ func VerifyRelayed(m RelayedMessage, trust CrossBusTrust) error {
 	// and nothing else. The pins go no further than this call.
 	//
 	// m.Sender is likewise a validated, bounded, fully-qualified agent id.
-	pub, err := trust.AttestedSignerKey(m.Sender, pins)
+	pub, err := trust.AttestedSignerKey(m.Sender, cloneAttestation(m.OriginAttestation), pins)
 	if err != nil {
 		// RELAY-27: the trust's error keeps its OWN sentinel. relaySentinelFor-
 		// TrustError picks the relay sentinel that fixes the wire answer, and

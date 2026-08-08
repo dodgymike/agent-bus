@@ -28,7 +28,7 @@ func (tr *attestSentinelTrust) PinnedBusSigningKeys(string) ([]ed25519.PublicKey
 	return []ed25519.PublicKey{tr.pin}, nil
 }
 
-func (tr *attestSentinelTrust) AttestedSignerKey(string, []ed25519.PublicKey) (ed25519.PublicKey, error) {
+func (tr *attestSentinelTrust) AttestedSignerKey(string, attest.Attestation, []ed25519.PublicKey) (ed25519.PublicKey, error) {
 	return nil, tr.failure
 }
 
@@ -49,9 +49,17 @@ func newAttestSentinelTrust(t *testing.T, failure error) *attestSentinelTrust {
 // body and the signature bytes are irrelevant and are deliberately not signed —
 // signing them would suggest the outcome depended on them.
 func attestSentinelMessage() RelayedMessage {
+	sender := peerBus + ".beta-1"
 	return RelayedMessage{
 		OriginBus: peerBus,
-		Sender:    peerBus + ".beta-1",
+		Sender:    sender,
+		OriginAttestation: attest.Attestation{
+			AgentID:            sender,
+			MessagingPublicKey: make([]byte, ed25519.PublicKeySize),
+			IssuedAtUnixMilli:  1,
+			NotAfterUnixMilli:  2,
+			Signature:          make([]byte, ed25519.SignatureSize),
+		},
 		Signature: make([]byte, ed25519.SignatureSize),
 	}
 }

@@ -1521,15 +1521,16 @@ still serves the route written before the crash, and (c) the pre-crash record re
 
 ### NOT YET WIRED, and nothing about a running bus changed
 
-`PeerStore` is not constructed by `cmd/agent-bus`, is not registered as a `wal.Applier`, does not
-populate `relay.Registry`, and implements no part of `CrossBusTrust` (`PinnedKeys` is the storage
-side of its first method and nothing more — that interface must also VERIFY an attestation, which is
-RELAY-17's work). **No existing data directory gains a `"peer"` or `"bustrust"` record, and no
-existing log is read differently** — an applier that does not exist cannot mis-read one. Restoring a
-`Registry` from a recovered `PeerStore`, and the offline `agent-bus peer` subcommand that writes one
-(`DECISIONS.md`, FEDERATION (e)), are separate tasks. **No new HTTP route, CLI flag, env var,
-`AGENT_PROTOCOL.md` entry or `scripts/bus-*.sh` wrapper** — an operator cannot observe any of this
-yet.
+`PeerStore` now implements `CrossBusTrust`: it reads only the durable, operator-configured pins for
+the **origin** bus and uses `internal/attest` to verify the envelope-carried origin attestation.
+It refuses a store without RELAY-34's durable withdrawal floor, and neither performs TOFU nor lets
+an intermediate re-attest the binding. That is an internal implementation seam only. `cmd/agent-bus`
+still does not construct it for relay serving, register it as a `wal.Applier`, populate
+`relay.Registry`, or mount a peer relay route. RELAY-17 itself adds no records and changes no
+existing log decoding; the offline `agent-bus peer` command remains the operator path that creates
+`"peer"` and `"bustrust"` records. **No new HTTP route, CLI flag, env var, `AGENT_PROTOCOL.md`
+entry or `scripts/bus-*.sh` wrapper is added by RELAY-17** — a running bus cannot yet observe this
+trust implementation.
 
 ## On-disk files in the data directory: the durable PEER WITHDRAWAL floor (`RELAY-34`, added 2026-08-08)
 
