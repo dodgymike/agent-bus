@@ -2,28 +2,106 @@
 // handshake: the payload shapes, the validation of a peer's claimed roster, an
 // http.Handler for the responder side, and a Client for the initiator side.
 //
-// # THE HANDLER IS DELIBERATELY NOT REGISTERED ON ANY MUX. DO NOT REGISTER IT.
+// # THE BLANKET IMPORT BAN IS RETIRED, AND THIS IS WHAT REPLACED IT
 //
-// Handler is constructed, exercised by tests, and reachable from nowhere. It
-// performs NO AUTHENTICATION OF THE PEER, and none is missing by accident: the
-// two mechanisms that authenticate a peer bus are separate, unlanded tasks, and
-// both must land BEFORE this handler is served on a listener:
+// Until RELAY-18 this package could not be named from anywhere: a guard failed
+// if any file outside internal/relay imported it. That ban was retired
+// DELIBERATELY — its own comment asked for exactly that — and REPLACED, never
+// deleted, by three narrower guards in guards_test.go:
 //
-//   - INVITE-PEERGUARD (spec task f5d91dbe) — redeeming an operator-minted,
-//     single-use, expiring invite is the ONLY route onto the bus, INCLUDING for
-//     peer buses (CLAUDE.md invariant 3). Until that gate exists, serving this
-//     handler creates exactly the ungated federation-enrolment path that task
-//     exists to forbid.
-//   - MTLS-RELAYGUARD (spec task 8192c3c7) — bus-to-bus links are MUTUALLY
-//     authenticated with TLS client certificates (CLAUDE.md invariant 11). A
-//     peer bus needs BOTH an invite and mutual TLS; neither alone is sufficient.
+//   - this package is IMPORTED ONLY BY cmd/agent-bus AND internal/httpapi. Any
+//     other importer fails TestRelayImportedOnlyByWiringSites, including
+//     cmd/agent-busctl: the CLI reaches a bus over HTTP and has no business
+//     embedding the bus-side ingress.
+//   - the relay ingress is constructible ONLY with a non-nil CrossBusTrust.
+//     NewRelayHandler refuses a nil one; every field of RelayHandler is
+//     unexported, so no caller outside this package can assemble one any other
+//     way; and TestRelayIngressCannotBeBuiltWithoutCrossBusTrust asserts that
+//     refusal AND the shape of every relay.RelayConfig literal at a wiring site.
+//   - NO PEER ROUTE IS REGISTERED ON A MUX, enforced by refusing to let one be
+//     NAMED: TestRelayPeerRoutesAreNotMountedYet fails if any file outside this
+//     package mentions PeerEnrollPath, PeerRelayPath or PeerRosterPath, or a
+//     string literal under "/v1/peer/". Registration is checked that broadly
+//     because internal/httpapi registers every route through a helper of its
+//     own, so the mount site need not import this package at all — an
+//     argument-shaped check on Handle/HandleFunc misses the NORMAL wiring shape,
+//     not merely a contrived one. It also refuses letting a peer route ESCAPE
+//     this package — mounted here, or handed to a wiring site in a route table,
+//     an exported return value, a variable, a var/const declaration or a map
+//     key — which a naming rule cannot see, because this is the package that
+//     legitimately names these paths. Dialling a peer's path is untouched,
+//     which is what the existing peerURL call sites do. This is the guard that carries most of what the blanket ban carried
+//     (its residuals are listed in guards_test.go, and they are adversarial
+//     rather than accidental), and it exists because the first
+//     draft of the
+//     replacement did not have it: the handshake (Config/NewHandler) and the
+//     roster sync (RosterConfig/NewRosterHandler) have NO trust parameter to
+//     omit, so a wiring site could have mounted both with every other guard
+//     green. Comments are untouched — it is an AST walk over literals and
+//     selectors, so prose about these routes is unaffected. Two legitimate
+//     things it does refuse, with the remedy in the same message: a fake remote
+//     peer bus fixture, and a route-absence probe. Both belong in
+//     internal/relay, where such fixtures already live.
 //
-// So: wiring relay.Handler into internal/httpapi (or any other mux) as part of
-// a task that is not INVITE-PEERGUARD or MTLS-RELAYGUARD is a security
-// regression, not a convenience. guards_test.go fails if any other package in
-// the repository imports internal/relay, so the mistake is caught rather than
-// relied upon to be remembered. RELAY-1 shipped the exchange; those two guard
-// tasks ship the gate.
+// Why replaced rather than kept: the ban would have failed the moment correct
+// work started, because the composition root has to build a peer store, an
+// outbox and a client. A guard that fails correct work is a guard someone
+// deletes to make the build green, and then nothing is left. The property it was
+// protecting was never "unreachable" — it is "reachable from a short reviewed
+// list, never built without a trust chain, and not served at all yet", which is
+// what the three guards above say.
+//
+// # IMPORTING IS NOT SERVING, and what governs serving is a recorded ruling
+//
+// Handler still performs NO AUTHENTICATION OF THE PEER, and none is missing by
+// accident. Nothing in this package registers a route; the MOUNT is what has to
+// carry a peer principal, and RELAY-20 owns building it.
+//
+// RELAY-20 IS NEITHER OF THE TWO TASKS THE RULING NAMES, and that distinction is
+// the one most likely to be skipped past. Ruling (c) resolves only "once
+// f5d91dbe and 8192c3c7 both land and the handler is wired to a listener", and
+// its own "given up" clause is "nothing — this ruling authorises no shortcut;
+// the handler stays unregistered until both gating tasks land". So writing a
+// peer principal is necessary and is not by itself sufficient: RELAY-20 either
+// lands under those two tasks or amends the ruling in DECISIONS.md first.
+//
+// A SEPARATE, NARROWER BLOCKER SITS ON RELAY INGEST SPECIFICALLY, and it is not
+// waived by either: no implementation of CrossBusTrust exists (RELAY-17 owns
+// it), so every relayed message is ErrUnpeeredBus by construction. Note that
+// gap 8 below, written before RELAY-10, gives a reason that has since changed:
+// it says no pin can ever be ESTABLISHED because the peering handshake carries
+// no bus signing key. RELAY-10 (f1a787c) landed the pin's source of truth as an
+// operator-configured durable record — BusTrustRecord.SigningKeys in
+// peerstore.go — deliberately NOT on the wire. So the gap's conclusion still
+// holds and its stated cause no longer does; correcting the numbered list is
+// RELAY-17's to do, since it owns the seam that closes it.
+//
+// The authority is DECISIONS.md, 2026-08-08, "FEDERATION (RELAY-6): deployment
+// assumptions and what they defer", landed at 77d2b73. Three of its rulings bear
+// directly on serving these handlers:
+//
+//   - (a) every bus-to-bus link is an SSH tunnel and no bus process ever listens
+//     publicly; one operator holds both ends of every tunnel.
+//   - (b) INVITE-GATE does not block the FEDERATION epic, and it does not
+//     BECAUSE OF (a): with no reachable /v1/enroll, the pre-auth attacker that
+//     gate exists to stop does not exist. That deferral is bought entirely by
+//     the topology, so it REVERSES MECHANICALLY on any ONE of — a bus bound to a
+//     non-loopback interface, a tunnel endpoint shared with a non-operator, a
+//     second local user on any of the three machines, or a peer bus the operator
+//     does not control. What it does NOT buy, stated so nobody over-reads it:
+//     the tunnel authenticates the MACHINE and not the bus process, and a bus
+//     listening on loopback cannot tell tunnelled traffic from local traffic.
+//   - (c) peer-principal authentication is NOT part of that deferral. It is a
+//     forward precondition, and the ruling as landed names INVITE-PEERGUARD
+//     (f5d91dbe) and MTLS-RELAYGUARD (8192c3c7) as the tasks that close it. A
+//     mount that authenticates no peer principal is therefore outside the ruling
+//     whatever the topology looks like, and the way to change that is to amend
+//     DECISIONS.md — never to soften this comment.
+//
+// Two of the gaps listed below are the FUNCTIONALITY half of (c), and neither is
+// closed here: roster updates are not bound to the authenticated connection
+// (gap 3), and a bus path's last hop is not checked against the sending peer
+// (gap 6). RELAY-1 shipped the exchange; the mount ships the principal.
 //
 // What this package does provide, and what it is careful about:
 //
@@ -240,16 +318,15 @@
 // PeerRosterPath, Registry), loop prevention over the traversed bus path
 // (path.go) and a background Forwarder.
 //
-// # THESE ARE ALSO NOT REGISTERED ON ANY MUX. DO NOT REGISTER THEM.
+// # THESE ARE ALSO UNMOUNTED, AND UNDER THE SAME RULING AS THE HANDSHAKE
 //
-// Everything above is gated by the SAME two unlanded tasks as the handshake —
-// INVITE-PEERGUARD (f5d91dbe) and MTLS-RELAYGUARD (8192c3c7) — and the relay
-// surface raises the stakes rather than lowering them: an ungated relay ingress
-// accepts messages attributed to another bus's agents, and an ungated roster
-// push edits our routing table. Registry.ApplyRosterUpdate's "a known peer
-// only" rule is the ONLY thing between an anonymous POST and that table, which
-// is why an update may never CREATE a peer: allowing it would make roster sync
-// a second, ungated enrolment path around both gates.
+// Nothing here registers a route either, and the relay surface raises the stakes
+// rather than lowering them: an ungated relay ingress accepts messages
+// attributed to another bus's agents, and an ungated roster push edits our
+// routing table. Registry.ApplyRosterUpdate's "a known peer only" rule is the
+// ONLY thing between an anonymous POST and that table, which is why an update
+// may never CREATE a peer: allowing it would make roster sync a second, ungated
+// enrolment path around whatever principal the mount enforces.
 //
 // # Key reuse is REJECT-AND-LOG, and relay is the worst place to assume otherwise
 //
