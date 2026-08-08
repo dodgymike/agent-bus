@@ -1293,3 +1293,236 @@ Asserted by `go test -race -run TestPeerRetryBackoffHorizonStaysInsideTheOutageB
 — it is gated behind INVITE-PEERGUARD and MTLS-RELAYGUARD, so none of this is live/observable from a
 running bus yet. The outbound queue this retry logic drains is still IN-MEMORY with no durable
 outbox, so cross-bus delivery remains BEST EFFORT, not reliable, even once wired.
+
+## Two durable peer-configuration records: ROUTES and TRUST PINS (RELAY-10, added 2026-08-08)
+
+`relay.Registry` (`internal/relay/registry.go`) is the SERVING copy of the routing table and it
+persists **nothing**: every peer it holds vanishes on restart. That is invariant 5 with one half
+missing — memory is the serving copy, but there was no disk for it to be the truth of — and for the
+three-machine SSH-tunnelled federation this epic targets it meant re-peering every machine, by hand,
+after every restart. RELAY-10 is the missing disk: `internal/relay/peerstore.go`.
+
+### ROUTING AND TRUST ARE TWO RECORDS, NOT ONE — read this before extending either
+
+The target topology is `laptop(A) <-> internet(B) <-> this machine(C)`, and **C never peers with A**.
+C has no address for A and no reason to acquire one; B is the hop. But C must still **pin A's bus
+signing key**, because a relayed message ORIGINATING at A is verified by C against that pin and B is
+explicitly not allowed to vouch for it (`internal/relay/signed.go`'s `CrossBusTrust`: "presentation
+is not attestation"). So **C needs TRUST for A with NO ROUTE for A**, and the mirror case is just as
+real: a bus we relay THROUGH but accept no origin traffic from has a route and no pins. A single
+record coupling an address to a key cannot express either, and the mistake would be undiscoverable
+until RELAY-17 tried to use it — by which point changing the shape is a migration, not an edit. The
+split comes from RELAY-7's cross-bus trust deep-dive.
+
+| `wal.Entry.Kind` | Go type | carries | never carries |
+| --- | --- | --- | --- |
+| `"peer"` | `relay.PeerRecord` | `bus_id`, `config_seq`, `state`, `base_url` | any key material |
+| `"bustrust"` | `relay.BusTrustRecord` | `bus_id`, `config_seq`, `state`, `bus_signing_keys[]` | any transport/address |
+
+`bus_signing_keys` is a **LIST, not a scalar**, and that is load-bearing rather than generous:
+`signed.go:178-182` fixes the meaning — "MORE THAN ONE KEY IS RETURNED ONLY DURING A SIGNING-KEY
+ROLLOVER WINDOW ... It is NOT a general-purpose key list". A scalar would force a federation-wide
+outage on every signing-key rotation. `MaxPinnedBusSigningKeys = 2` is derived from that sentence: a
+rollover has exactly two participants, the outgoing key and the incoming one. It is also a
+per-message CPU bound — every extra pin is one more `ed25519.Verify` attempt on the inbound relay
+path.
+
+**NO new WAL record type, NO `ondisk-format-version` bump. NOTHING WAS RESERVED, and nothing needed
+to be.** Both `Entry.Kind` values are — exactly as `auth.RecordKind = "agent"` and
+`invite.RecordKind = "invite"` are documented above — FREE-FORM APPLICATION DISCRIMINATORS. They sit
+inside the PREPARE payload, above the framing layer that `wal.Type` (`TypePrepare`, `TypeCommit`, …)
+owns; the numbered record types and format versions belong to `internal/wal` and are reserved through
+the Spec Server `record-type` / `ondisk-format-version` namespaces, and `Entry.Kind` is not one of
+them. `internal/wal/format.go` was not touched. This is stated explicitly because **"numbers are
+reserved, not chosen" is a standing rule in this repo** and the next reader should not go and reserve
+a number nothing requires. Both entries ride in the same two-phase prepare-fsync-commit-fsync frames
+as a message, an enrolment or an invite — no new frame shape, no new fsync, no `Entry.Audit` (peer
+configuration is not part of the message trail).
+
+**Two more `Entry.Kind` values now share the log**, alongside `store.RecordKind = "message"`,
+`auth.RecordKind = "agent"`, `invite.RecordKind = "invite"`, `"seqfloor"` and any others documented
+above (the set grows; this section deliberately does not state a count, because a count in one
+section goes stale the moment another task adds a kind). `PeerStore.Apply` returns `nil` immediately
+for any kind it does not own, the same shape every other applier uses, so none of them treats
+another kind's records as damage.
+
+### The JSON shapes
+
+Read off the struct tags in `internal/relay/peerstore.go` (`peerRecordJSON`, `busTrustRecordJSON`):
+
+```
+{"v":1,"rec":"peer","bus_id":"<bus id>","config_seq":<uint64 >=1>,"state":"active"|"removed",
+ "base_url":"https://host[:port]",              // ONLY when state=="active"
+ "updated_at":"<RFC3339Nano UTC>"}
+
+{"v":1,"rec":"bustrust","bus_id":"<bus id>","config_seq":<uint64 >=1>,"state":"active"|"removed",
+ "bus_signing_keys":["<base64 std, 32 bytes>", …],  // ONLY when state=="active", 1..2 entries
+ "updated_at":"<RFC3339Nano UTC>"}
+```
+
+**`rec` repeats the `Entry.Kind` INSIDE the body, deliberately.** Without it the two kinds'
+TOMBSTONES are byte-identical — both are `{v, bus_id, config_seq, state:"removed", updated_at}` — so a
+`Kind` mix-up in future wiring would land a route withdrawal in the trust table with no decode error
+at all, silently un-pinning a bus. Each decoder refuses a body whose `rec` disagrees with the record
+it is being read as.
+
+| field | on-disk encoding | omitted when |
+| --- | --- | --- |
+| `v` | `relay.PeerRecordVersion` = **1**; any other value is REFUSED by the decoder, so a future shape change is diagnosable as "version 2, this binary reads 1" rather than as an unrecognised field | never |
+| `rec` | the record kind repeated inside the body: `"peer"` or `"bustrust"`, and it must match the `Entry.Kind` it is read as | never |
+| `bus_id` | canonical spelling, `ids.ValidateBusID` + `<= MaxPeerBusIDLen` (64). There is no separate server-minted record id: a bus id already names exactly one bus (invariant 2) | never |
+| `config_seq` | decimal, `>= 1`, `<= 2^53-1` (`jq` reads JSON numbers as float64, so above that the value an operator reads would stop being the value on disk) | never |
+| `state` | **fixed string** `"active"` / `"removed"` — never the numeric enum, for the reason the invite record states | never |
+| `base_url` | a **BARE https origin** — scheme, host, optional port and **nothing else**, `<= MaxPeerBaseURLLen` (512, derived: `https://` + a 253-byte DNS name + `:65535` = 267, with headroom for a bracketed IPv6 literal) | `state != "active"`, and always on a trust record |
+| `bus_signing_keys` | **base64 std**, matching `auth.RosterEntry`'s `auth_pub`; each exactly 32 bytes, pairwise distinct, all-zero REFUSED (uninitialised or corrupt, and a small-order point) | `state != "active"`, and always on a route record |
+| `updated_at` | `RFC3339Nano`, UTC. On a tombstone it is also the input to `PeerTombstoneRetention` | never |
+
+**`base_url` is validated more strictly HERE than the package's live-dial helper.** `peerURL`
+(`internal/relay/client.go`) rejects a query, a fragment and userinfo but ACCEPTS a path, so it would
+let `https://h.example/../../x` become durable and then be joined with `PeerRelayPath` at every dial
+for the rest of that peer's life. A rejected request is a moment; a persisted bad address is forever.
+`validateBareHTTPSOrigin` therefore also refuses a path. Tightening `peerURL` itself is a follow-up
+(it changes every caller).
+
+**Both records are OPERATOR CONFIGURATION, never a peer's assertion** — the same point
+`Registry.SetPeerBaseURL` makes, and it applies twice as hard to a pin: a key learned from the
+network would be a trust anchor chosen by whoever we are trying to authenticate. The keys are copied
+out of band exactly as the invite blob carries a bus's TLS certificate fingerprint (`DECISIONS.md`,
+E6). A `"removed"` record is a TOMBSTONE and carries NO live configuration — no `base_url`, no keys,
+enforced field by field in both directions.
+
+### `config_seq` is a BUS-WIDE counter, and that is a fix, not a style choice
+
+**Every entry carries the COMPLETE record in its post-transition state, never a delta** (invite's
+rule), and `busTable.upsert` is MONOTONIC on `config_seq`: strictly greater applies, equal is
+idempotent only if the record is the same generation, **lower is REFUSED and logged at ERROR**.
+
+- *Why not keyed on `state`.* An invite's states are terminal and refusing to go back IS single use.
+  A peer's are not — an operator legitimately re-peers a bus they removed, rotates a key, or moves a
+  peer — so `removed -> active` is ordinary. State-keyed monotonicity would either forbid re-peering
+  (making removal unrecoverable short of wiping the log) or permit anything.
+- *Why not keyed on the timestamp.* Clocks step backwards; a trust anchor must not be decided by NTP.
+- *Why BUS-WIDE rather than per-peer.* **A per-peer counter is derived from that peer's own entry,
+  and that entry can legitimately LEAVE the table** — swept once its tombstone expires, or discarded
+  on replay by the capacity cap. The next write for that bus would then restart at 1 while the log
+  still held records at 1..N, and on the following replay the OLD generation, arriving first at an
+  equal sequence, WINS: the operator's current address or pin set silently replaced by a superseded
+  one. That is invariant 1's rule ("recovery may not reissue an index it has already handed out,
+  **even for a record it discards**") being broken. One bus-wide counter cannot regress that way
+  because it is raised by EVERY record replay decodes, **before any decision to discard it**, and is
+  never lowered by a sweep, a cap discard or a removal. Asserted by
+  `go test -race -run TestPeerStoreConfigSeqNeverRewinds ./internal/relay`, which covers both routes.
+- *What it costs.* A bus's numbers are not contiguous (bus A gets 1, bus B gets 2, A's next is 3).
+  Same trade invariant 1 already makes: **uniqueness and monotonicity hold, contiguity does not and
+  never did.** Do not write a check that asserts they are contiguous.
+- *The residual, stated rather than glossed.* The mark is raised from a record only once that record
+  DECODES, so a number carried by a body this binary cannot read is unknown to it and could be issued
+  again. Two ways there: a CORRUPT frame (harmless — corruption does not heal, recovery discards the
+  same frame on every start, so no two SURVIVING records can ever claim one number), and an INTACT
+  body this binary refuses, most concretely a `"v":2` record written by a newer binary and read by an
+  older one. The latter is the same downgrade hazard `internal/wal` states for `Entry.Idem`, with the
+  same answer: **downgrade is not a supported operation here.** A durable floor file (the
+  `wal-index-floor` pattern above) would close both and is deliberately not built — that is the
+  durability layer's mechanism, and this counter is not an id.
+
+### Bounds, retention and recovery behaviour
+
+- **`MaxPeers` (64) is enforced on the REPLAY path too**, per table, counting active records and
+  tombstones together. It is a MEMORY bound, and a bound one path could exceed is not a bound. A live
+  write checks the same bound before writing and holds `writeMu` through the fold, so no other WRITE
+  can take the slot in between. **An already-durable record can still reach this refusal**, and the
+  earlier wording here denied it: the bound is only as stable as the SWEEP that frees slots, and the
+  sweep reads the clock, so a write admitted at live time because a tombstone had expired can be
+  refused at replay time on a corrected clock where that tombstone is inside its retention again and
+  the table is full again. Reproduced with a four-entry table and a two-hour skew. Fail-closed, logged
+  specifically, and self-healing once the clock is right.
+- **`PeerTombstoneRetention` = `30 * idem.PeerOutageBudget` = 30 days.** Derived from the only other
+  constant that says how long a peer stays relevant after it stops answering: a tombstone must
+  outlive the retry traffic of the peer it buried, while withdrawn records must not permanently
+  occupy the table. **An ACTIVE record is never swept.**
+- **A tombstone stamped in the FUTURE is swept too, not only an expired one.** A record stamped ahead
+  of the clock has a negative age, so an "older than retention" rule alone leaves it in the table
+  forever. That needs no WAL access to produce — a write stamps the LOCAL clock, so an operator
+  machine that is far ahead when a peer is withdrawn writes one — and enough of them fill the bounded
+  table until every new peering is refused. The rule is symmetric, and safe because ACTIVE records are
+  never swept in either direction: the only thing a wrong clock can drop is a WITHDRAWAL. The
+  comparison is made on **times, not on a `time.Duration`**: a duration saturates at ±292 years and
+  negating it at the saturation point returns the same value, so a duration-based symmetric test stops
+  firing exactly where the stamp is most absurd (asserted with a year-9999 stamp).
+- **A SWEPT tombstone leaves an ADMISSION FLOOR behind (`busTable.sweptMax`).** This is the correction
+  to what an earlier draft of this section claimed. A tombstone does two jobs and the sweep only ends
+  one: while it is present an older duplicate is refused by monotonicity, but once it is gone the bus
+  is UNKNOWN and the insert path would take whatever arrives — resurrecting a withdrawn route at its
+  old address, or a REVOKED PINNED SIGNING KEY. `config_seq`'s high-water mark could NOT serve as that
+  floor (it is a MINTING floor, raised by every record including the newest, so testing an arriving
+  record against it would refuse the very record that had just raised it — self-refusal, not a
+  concurrent-write race). So each sweep hands the tombstone's sequence to a per-table floor that only
+  rises, and the insert path refuses anything at or below it. Asserted by
+  `go test -race -run TestPeerStoreASweptTombstoneStillRefusesAnOlderRecord ./internal/relay`.
+- **The floor is only safe because WRITES ARE SERIALISED, and that is a correctness requirement, not a
+  performance choice.** `PeerStore.writeMu` is held across mint → durable write → fold, so **the order
+  of records in the log IS the order their sequences were minted in**. Without it two concurrent
+  writers minting 2 and 3 could land in the log as 3 then 2; both are acknowledged, and on a later
+  replay past the tombstone retention the seq-2 record arrives behind a swept seq-3 tombstone and the
+  floor refuses it — an acknowledged operator configuration lost permanently, on every subsequent
+  boot. Both review gates reproduced that against the unserialised version. Serialising costs nothing
+  because writes come from an OFFLINE operator subcommand under the dirlock (`DECISIONS.md`,
+  FEDERATION (e)). Asserted by
+  `go test -race -run TestPeerStoreConcurrentWritesRespectTheCapAndTheSequence ./internal/relay`,
+  which requires the sequences in the real WAL to be strictly increasing.
+- **Recovery is therefore clock-independent.** Whatever a skewed clock (NTP step-back, a restored VM
+  snapshot) does to the tombstones, an older record is refused: by the tombstone if it is there, by the
+  floor if the sweep has just removed it. Asserted by
+  `go test -race -run TestPeerStoreReplayIsClockIndependent ./internal/relay`, which replays one
+  history — INCLUDING duplicated older records behind a withdrawal — under two clocks a decade apart
+  and requires the same recovered state.
+- **`PeerStore.Apply` NEVER returns a non-nil error**, per invariant 6: from a live write that would
+  poison the log (`wal.ErrDiverged`), and from recovery it would refuse the start. Every failure — an
+  undecodable record, an invalid one, the capacity bound, a non-monotonic sequence, a record naming
+  our OWN bus, an ASCII-case confusable of a known bus — is a DISCARD logged loudly and specifically
+  at ERROR, naming the table, the prepare/commit index and the reason — plus the bus, except for a
+  record that could not be DECODED, which cannot name the bus because that is exactly what could not be
+  read (it names the entry kind instead). Silent discard is the defect, not discard itself. **A discard here is fail-closed in the direction that matters:** the bus
+  either stays unknown or keeps the generation already in memory. It can cost availability (the
+  operator must re-apply).
+
+  **But be precise about the direction, because only half of it is comfortable.** `Apply` never
+  INSTALLS an address or a pinned key this bus did not already hold. **It can, however, fail to
+  REMOVE one.** Every entry carries the complete post-transition state, so if recovery discards a
+  WITHDRAWAL — a torn tail, a bit-rotted frame, a filesystem snapshot rolled back past it, all of
+  which invariant 6 requires us to survive rather than refuse to boot — the previous generation is the
+  surviving truth and is reinstated. For routes that means an un-peered bus is routable again; **for
+  the trust table it means a REVOKED PINNED SIGNING KEY IS PINNED AGAIN. Revocation fails OPEN.**
+  Reproduced by truncating eight bytes from a `bus.wal` tail. Not reachable today (nothing outside
+  `internal/relay` constructs a `PeerStore`), and closing it needs a mechanism this record does not
+  have — a revocation that cannot be un-said by losing one entry — so it is a **P1 follow-up**, stated
+  here so RELAY-17 builds on what is true rather than on the comfortable half of it.
+
+**A note for whoever wires this up:** `PeerStore` must have the log REPLAYED INTO IT before its first
+write. `config_seq` starts at zero and is rebuilt only from the records `Apply` is handed, so a store
+wired to a log it has not replayed would mint sequence 1 over a log already holding 1..N and
+reintroduce the defect above. Both supported wirings satisfy this — pass the store as
+`wal.LogOptions.Applier` (Open replays before it returns), or call `wal.Replay(path, store.Apply)`
+first — and the package cannot check it, so it is stated rather than assumed.
+
+### Acceptance evidence is a REAL `kill -9`
+
+`go test -race -run TestPeerStoreSurvivesReplay ./internal/relay` re-execs a child that ROTATES a
+bus's pinned signing key and is SIGKILLed the instant the commit is fsynced — before `PutTrust`
+returns and before anything is acknowledged (the parent asserts `syscall.WaitStatus.Signaled()`, so a
+child that merely failed its own assertions cannot pass for a crash). It proves (a) the rotation is
+on stable storage, (b) a fresh store rebuilt only from the crashed log serves the ROTATED pin and
+still serves the route written before the crash, and (c) the pre-crash record replayed a SECOND time
+— with the real bytes off the crashed log — does NOT put the old pin back.
+
+### NOT YET WIRED, and nothing about a running bus changed
+
+`PeerStore` is not constructed by `cmd/agent-bus`, is not registered as a `wal.Applier`, does not
+populate `relay.Registry`, and implements no part of `CrossBusTrust` (`PinnedKeys` is the storage
+side of its first method and nothing more — that interface must also VERIFY an attestation, which is
+RELAY-17's work). **No existing data directory gains a `"peer"` or `"bustrust"` record, and no
+existing log is read differently** — an applier that does not exist cannot mis-read one. Restoring a
+`Registry` from a recovered `PeerStore`, and the offline `agent-bus peer` subcommand that writes one
+(`DECISIONS.md`, FEDERATION (e)), are separate tasks. **No new HTTP route, CLI flag, env var,
+`AGENT_PROTOCOL.md` entry or `scripts/bus-*.sh` wrapper** — an operator cannot observe any of this
+yet.
