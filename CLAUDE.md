@@ -2,8 +2,9 @@
 
 **agent-bus** is a small, very durable inter-agent message bus written in Go. Claude Code agents
 enrol with it, wait on an HTTP long-poll, and broadcast or DM each other. Multiple buses relay to
-each other. Agents drive it entirely through shell wrappers — **an agent should never have to
-construct an HTTP call.**
+each other. Agents drive it entirely through the compiled Go CLI (`cmd/agent-busctl`) — **an agent
+should never have to construct an HTTP call.** The `scripts/bus-*.sh` wrappers are RETIRED; do not
+add one (invariant 7).
 
 Always follow the backlog. Task state is the **Spec Server** (source of truth, project slug
 `agent-bus`); `SPEC.md` is its generated mirror — see the "Spec Server" section below.
@@ -12,205 +13,99 @@ reviewer → security → documentation.
 
 ## What this project is (the standing design contract)
 
-These are the load-bearing invariants. Every change is measured against them; a change that weakens
-one needs an explicit decision recorded in `DECISIONS.md`.
+These are the load-bearing invariants, stated as rules. Every change is measured against them; a
+change that weakens one needs an explicit decision recorded in `DECISIONS.md`.
 
-1. **The server is AUTHORITATIVE on every id.** Bus ids, agent ids, message ids, and sequence
-   numbers are minted by the server and never by a client. A client-supplied id is input to be
-   validated, never an identity to be trusted. **Ids are never reused, including across restarts —
-   and this was reaffirmed WITHOUT narrowing on 2026-08-02.** Recovery may not reissue an index it
-   has already handed out, even for a record it discards: a salvage path that reuses the index of a
-   damaged tail record is a DEFECT to fix, not a licence to narrow this invariant. When recovery
-   discards a record, the sequence advances past the hole; it never rewinds. Contrast invariant 4,
-   which WAS deliberately narrowed — this one was not.
-2. **Every agent id is fully qualified: `<bus-id>.<agent-id>`.** That namespacing is what makes
-   cross-bus routing and agent-list exchange unambiguous. Buses have ids for the same reason.
-3. **Enrolment is INVITE-ONLY (2026-08-02), and the CLIENT signs a SERVER-PROVIDED session
-   token.** No agent may enrol without redeeming an operator-minted invite. This closes the root
-   cause of a whole family of pre-auth attacks rather than patching them one at a time: an
-   unauthenticated enrolment route let an attacker mint its own agents, and from there exhaust the
-   session table, lock out a named agent, or enumerate the roster. Invites must be single-use,
-   expiring, and revocable, and redeeming one is the ONLY way onto the bus — including for peer
-   buses.
+> **These state what MUST be true, not what IS true today.** Several are only partly enforced in
+> code: enrolment is NOT yet invite-gated (`InviteRequired: false`), the server does NOT request a
+> client certificate (`ClientAuth: tls.NoClientCert`), recipients CANNOT verify message signatures,
+> and enrol idempotency is in-memory only. Do not build on a guarantee without checking it holds.
 
-   On the credential itself: Note the direction — an earlier wording had
-   this backwards ("the server signs the agent's key"), which is neither the decision nor the code.
-   At enrolment the agent presents its Ed25519 **public** key and the server records it. To get a
-   credential the agent asks for a session, the **server** provides the token value, the agent
-   **signs that value** with its private key, and the server verifies against the recorded public
-   key. The client never chooses the bytes it signs — a client-chosen challenge permits
-   pre-computation and proves far less. Sessions last **at most one hour**; the client refreshes at
-   75% of lifetime. Tokens are **opaque server-side handles, not signed claims**, which is precisely
-   what makes immediate revocation possible — stateless claims cannot be revoked before they expire.
-   Sessions do NOT survive a restart. Every route authenticates EXCEPT the three that necessarily
-   cannot: enrolment, session-begin and session-complete (they are how a credential is obtained),
-   plus `/healthz` and `/v1/info`.
-4. **Nothing is acknowledged before it is durable.** A send returns success only after the message
-   is committed via the two-phase (prepare → commit) write path and fsynced. Never trade that for
-   latency. **Narrowing (2026-08-02):** this guarantees we never lose acknowledged data through our
-   own write path. It does NOT promise acknowledged data survives damaged media — see invariant 6,
-   where availability wins and the discard is logged.
-5. **Memory is the serving copy; disk is the truth.** State is held in memory for speed and rebuilt
-   by replaying the durable store on start. A crash at any point must recover to a state that is a
-   prefix of the accepted history — no torn records, no acknowledged-but-lost messages.
-6. **Every message is also written to an append-only log — METADATA AND ROUTING INFO ONLY.** The log
-   is the audit trail: message id, sequence, sender, recipient(s), bus path traversed, timestamp,
-   size, and content hash. It does **not** record message bodies. That is a deliberate decision
-   (2026-08-02) taken so the audit trail stays compatible with end-to-end encrypted, forward-secret
-   payloads — a log holding plaintext would be unwritable the moment PFS lands, and a log holding
-   ciphertext it can never decrypt would be dead weight. The log is append-only in the strict sense: no in-place edits.
-   **Recovery ALWAYS reaches a running server (2026-08-02): damaged records are discarded and the
-   bus starts.** It must never refuse to boot over corruption — a bus held hostage by one bad sector
-   is worse than a bus that has lost a message and said so. The absolute requirement is that every
-   discard is LOGGED, loudly and specifically: silent discard is the actual defect (it was rated P0),
-   not discard itself. Integrity is protected by a keyed MAC (`crypto/hmac` + `crypto/sha256`), never
-   a CRC — a CRC is unkeyed and linear, and a remote client was shown able to forge one.
+**The REASONING lives in `INVARIANTS.md`, and you must read the relevant entry IN FULL before working
+on that plane.** The lines below are reminders, not specifications — each one is a summary of several
+paragraphs that exist because an agent already violated the short version. If a task touches ids,
+auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `INVARIANTS.md` first.
+
+1. **The server is AUTHORITATIVE on every id.** Bus, agent and message ids and sequence numbers are
+   minted by the server, never by a client. **Ids are never reused, including across restarts.** When
+   recovery discards a record the sequence advances past the hole; it never rewinds.
+   **REAFFIRMED WITHOUT NARROWING (2026-08-02) — contrast invariant 4, which WAS deliberately
+   narrowed.** A salvage path that reuses the index of a damaged tail record is a **DEFECT to fix,
+   not a licence to narrow this invariant.** If closing a reissue gap seems to require narrowing
+   invariant 1, you have the wrong fix.
+2. **Every agent id is fully qualified: `<bus-id>.<agent-id>`.** Never shorten it — that namespacing
+   is what makes cross-bus routing unambiguous.
+3. **Enrolment is INVITE-ONLY, and the CLIENT signs a SERVER-PROVIDED session token** (not the
+   reverse). Invites are single-use, expiring, revocable, and are the ONLY way onto the bus. Sessions
+   last at most one hour, are opaque server-side handles rather than signed claims (which is what
+   makes immediate revocation possible), and do not survive a restart. Every route authenticates
+   except enrolment, session begin/complete, `/healthz` and `/v1/info`.
+4. **Nothing is acknowledged before it is durable** — two-phase prepare→commit, fsynced. Never trade
+   this for latency. **NARROWED (2026-08-02):** this guarantees we never lose acknowledged data
+   through OUR OWN WRITE PATH. It does NOT promise acknowledged data survives damaged media — see
+   invariant 6, where availability wins and the discard is logged. **Invariants 4 and 6 are not in
+   conflict; if you think you have found a contradiction, you have found this narrowing.**
+5. **Memory is the serving copy; disk is the truth.** A crash must recover to a prefix of the
+   accepted history: no torn records, no acknowledged-but-lost messages.
+6. **The append-only log records METADATA AND ROUTING ONLY — never message bodies.** Recovery ALWAYS
+   reaches a running server: damaged records are discarded and the bus starts, but **every discard
+   must be logged loudly and specifically** — silent discard is the defect. Integrity is a keyed MAC
+   (`crypto/hmac` + `crypto/sha256`), never a CRC.
 7. **Nobody hand-writes HTTP — the compiled Go CLI is THE client.** Every capability ships with a CLI
-   subcommand and an `AGENT_PROTOCOL.md` entry **in the same task**. A feature without its subcommand
-   is not done. The CLI **replaces** the `scripts/bus-*.sh` wrappers (decided 2026-08-02); shell
-   wrappers are no longer the delivery vehicle, and the ones that exist are to be retired as their
-   subcommands land. It does all the heavy lifting: key generation and storage, session-token refresh,
-   long-polling with cursor management, reconnect/backoff, and verification of inbound messages.
-
-   It has **three audiences, and all three are requirements, not aspirations**:
-   - **A human**, interactively: readable default output, sane defaults, `--help` that answers the
-     common question, and errors that name the remedy rather than the stack.
-   - **An agent**, shelling out: `--json` on every command, stable documented exit codes, never an
-     interactive prompt, and credentials from config/env rather than a TTY. The long-poll command
-     streams newline-delimited JSON so it can be piped and consumed incrementally.
-   - **An agent, embedding it**: the CLI is a thin shell over a reusable Go client package. That
-     package therefore CANNOT live under `internal/` — an importable client is the whole point of
-     "embed", and putting it in `internal/` silently forecloses it.
-8. **Simple beats clever.** Go stdlib first. A third-party dependency needs a justification in
-   `DECISIONS.md`.
-9. **NEVER write your own crypto.** This is absolute and overrides every other preference in this
-   file, including invariant 8's stdlib-first bias and any argument from simplicity, elegance,
-   dependency count, or performance. Always use a well-known, standard, audited crypto library, and
-   pick the one that **wraps as much of the problem as possible** — prefer a high-level,
-   misuse-resistant API (`crypto_sign`-style sign/verify, sealed boxes) over assembling primitives
-   yourself. Specifically forbidden without explicit user consent recorded in `DECISIONS.md`:
-   implementing or "adapting" a cipher, hash, MAC, KDF, signature scheme, key exchange, or ratchet;
-   hand-rolling a padding, nonce, or IV scheme; inventing a bespoke construction out of otherwise-
-   good primitives. The reason this outranks everything else is that broken crypto **fails
-   silently** — it still encrypts, it still verifies, it simply provides none of the protection it
-   appears to. No ordinary test suite detects it, so "our tests pass" is not evidence. When no
-   suitable library exists, the answer is to change the requirement or stop and ask — never to
-   write it yourself.
-
-10. **Duplicate detection and idempotency, everywhere.** Every mutating operation — enrol, send,
-    broadcast, leave, peer-enrol, relay — carries a client-supplied idempotency key and is safe to
-    retry. The server durably remembers which keys it has already applied, and that memory survives
-    restart (it is part of the recovered state, not an in-memory cache). No operation may be applied
-    twice.
-
-    **The distinction that makes this correct, and must not be collapsed:**
-    - **Same key + same payload = a legitimate retry.** The ack was probably lost in flight. Return
-      the ORIGINAL result, do not re-apply, do not error, and do NOT disconnect. This is the whole
-      point of idempotency: it exists so a well-behaved client can safely retry, and punishing that
-      would break exactly the clients doing the right thing.
-    - **Same key + DIFFERENT payload = a protocol violation.** The client is reusing a key for new
-      content, which is either a serious bug or an attack. **Reject it and log it, but do NOT
-      disconnect** (narrowed 2026-08-08, by user decision, after the behaviour was measured at the
-      raw socket). The key is the caller's OWN — keys are scoped per agent — so this is
-      overwhelmingly a client that lost track of its keys, and dropping the socket destroys every
-      other request it had pipelined there, including its parked long-poll. That is an abuse defence
-      landing on the party most likely to be honest.
-    - **Replay of an already-accepted signed message** (by a peer, a relay, or a third party) is
-      rejected outright **and disconnects the sender**. A signature does not stop replay — a valid
-      signed message can be resent verbatim — so freshness comes from the server-minted monotonic
-      sequence plus recipient-side cursor, not from the signature. This is the one party the
-      disconnect is for: it presents material it was never issued. On `/v1/send` it is detected by
-      the `sender` inside the signed bytes not being the authenticated principal, and **the
-      disconnect fires ONLY when that claim is a well-formed fully-qualified `<bus-id>.<agent-id>`**
-      — an absent, unqualified or whitespace-padded claim names nobody, is still refused, and must
-      NOT disconnect.
-    - **Before adding ANY disconnect, ask two questions.** Can a merely BUGGY client reach this
-      line? And does this connection carry only ONE principal's traffic? The second is not yet
-      load-bearing but becomes so the moment relay ingest lands, where a peer bus legitimately
-      presents `sender != principal` for many agents at once. Both questions exist because the first
-      implementation of this narrowing *reproduced the very bug it was fixing* — it disconnected on
-      any sender mismatch, so an empty sender, a dropped bus prefix and a trailing space each
-      dropped an honest client's socket.
-    - **One ambiguity is deliberately left un-disconnected**: `409 no-matching-reservation` is
-      byte-identical for a third party spending someone else's mint and for an agent re-presenting
-      its OWN spent reservation. The minting agent is not recoverable at that point, so disconnecting
-      would punish the honest case. A test asserts that indistinguishability, so it goes RED the day
-      it becomes resolvable.
-
-    Relay is where this earns its keep: a cyclic peer topology plus at-least-once delivery means
-    duplicates are not an edge case but the normal steady state, and loop-prevention via the traversed
-    bus path is a *complement* to idempotency, never a substitute for it.
-
-11. **TLS is the required transport. There is no plaintext listener.** Decided 2026-08-02. Every
-    HTTP surface — client and bus-to-bus relay — is served over TLS, and the server refuses to
-    start rather than fall back to plaintext. This is not defence in depth layered on something
-    already safe: without it the session token, which is a **bearer credential**, crosses the wire
-    in clear, and an on-path observer can read it or kill a pending challenge. The loopback default
-    (invariant: `-listen 127.0.0.1:8080`) stays — it bounds exposure, it does not replace TLS, and a
-    bus deliberately exposed on a real interface needs both.
-
-    Consequences that must be designed, not assumed:
-    - **Certificates are SELF-SIGNED and TLS is MUTUAL (decided 2026-08-02).** Both ends present a
-      certificate and both verify. There is no CA, and **there is no trust-on-first-use either**:
-      the **invite blob carries the bus's certificate fingerprint** alongside the bus id, address and
-      invite secret, so the client knows what to expect BEFORE its first connection. The agent's
-      client-certificate fingerprint is bound to its server-minted agent id at enrolment. A bus runs
-      on a laptop with no certificate authority anywhere in the picture.
-
-      **Consequence: the invite blob is now the trust anchor, so the integrity of the channel it
-      travels over is load-bearing.** Whoever can substitute an invite can point an agent at a bus of
-      their choosing. That is a real requirement on invite distribution, not a footnote — and it is
-      the price of eliminating the TOFU window, which is the right trade.
-    - **Certificate rotation serves TWO certificates during rollover** so clients can re-pin without
-      downtime. Rotation must never require every client to re-enrol.
-    - **mTLS and the session token are BOTH required, and they do different jobs.** mTLS proves which
-      key holder is on the connection; the session token is the revocable, time-bounded application
-      credential. Do not let one silently replace the other — but DO cross-check them: a session
-      token presented over a connection whose client certificate belongs to a different agent must
-      be rejected, which is a stronger property than either mechanism gives alone.
-    - **The CLI must make the trusted path the easy path.** Whatever the scheme, `bus enrol` against
-      a fresh bus has to work without the user hand-editing a trust store.
-    - Never disable certificate verification to make something work, and never ship a flag that
-      does it silently — we read that as forbidding such a flag AT ALL, since a documented hole is
-      not better than a hidden one, it is a hole with a manual. Per invariant 9 the TLS stack is
-      stdlib `crypto/tls` — configured, never reimplemented.
-    - **`InsecureSkipVerify: true` is permitted in EXACTLY ONE FILE — `client/pin.go` — and only
-      paired with `VerifyPeerCertificate` (narrowed 2026-08-07, MTLS-PIN).** The earlier absolute
-      ban could not survive contact with this invariant's own requirements: self-signed, **no CA**,
-      **no TOFU**. Go's default chain verification cannot succeed and cannot be configured to — there
-      is no root to chain to, and the client holds a 32-byte fingerprint rather than the certificate,
-      so it cannot build an `x509.CertPool` either. `crypto/tls` supports exactly one way to
-      substitute a verification policy: disable the default chain check and supply
-      `VerifyPeerCertificate`. A ban with no exception would not have prevented the exception — it
-      would have pushed it into a package the guard does not scan, which is strictly worse than one
-      loud, reviewed occurrence.
-
-      **Read this before "fixing" that line: deleting it, or deleting the callback beside it, does
-      not harden anything — it silently disables pinning.** A `tls.Config` with the callback removed
-      still compiles, still completes handshakes, still returns working connections, and verifies
-      nothing. Every positive test passes either way.
-
-      What replaces the ban is stricter and mechanical, in `client/guard_test.go`: the literal must
-      appear in exactly one file **exactly once** (counted, so naming it in prose there fails too);
-      an **AST** walk — not a grep — requires any composite literal setting it `true` to set
-      `VerifyPeerCertificate` non-nil **in the same literal**, bans setting it by assignment (an
-      assignment can be conditional and far from the literal), and requires **at least one** such
-      paired literal to exist, so the guard cannot pass on a tree where pinning was deleted.
-
-      What is given up, exactly: CA chain building (there is none, by design) and **hostname
-      verification** — for which the pin substitutes and is strictly stronger, since a name check
-      asks "does this certificate claim this address" and the pin asks "is this the exact certificate
-      the invite named". **Certificate expiry is NOT checked** — a real gap owned by `MTLS-VERIFY`.
-      Full reasoning in `DECISIONS.md` (2026-08-07, MTLS-PIN §2), which supersedes the absolute
-      wording at `DECISIONS.md:1290` and `:2461` in place.
+   subcommand and an `AGENT_PROTOCOL.md` entry **in the same task**. Three audiences, all
+   requirements: a human interactively; an agent shelling out (`--json` everywhere, stable documented
+   exit codes, never an interactive prompt); and an agent embedding it — which is why the client
+   package **cannot live under `internal/`**.
+8. **Simple beats clever.** Go stdlib first. A third-party dependency needs a `DECISIONS.md`
+   justification.
+9. **NEVER write your own crypto.** Absolute, and it overrides every other preference here including
+   invariant 8. Always use a well-known, audited library, and prefer the one that wraps as much of
+   the problem as possible. **Specifically forbidden without explicit user consent in `DECISIONS.md`:
+   implementing or "adapting" a cipher, hash, MAC, KDF, signature scheme, key exchange or ratchet;
+   hand-rolling a padding, nonce or IV scheme; inventing a bespoke construction out of otherwise-good
+   primitives** — that last one does not FEEL like writing your own crypto, which is exactly why it is
+   enumerated. Broken crypto **fails silently** — it still encrypts, still verifies, and provides none
+   of the protection it appears to, so "our tests pass" is not evidence. When no suitable library
+   exists, change the requirement or stop and ask.
+10. **Duplicate detection and idempotency, everywhere**, durable across restart. Three cases that must
+    not be collapsed: same key + **same** payload is a legitimate retry — return the original result,
+    do not re-apply, **do not disconnect**; same key + **different** payload is a protocol violation —
+    reject and log it, but **do not disconnect**; only **replay of an already-accepted signed
+    message** disconnects, and only when the sender claim inside the signed bytes is a well-formed
+    fully-qualified id — an absent, unqualified or whitespace-padded claim names nobody, **is still
+    REFUSED**, and must not disconnect. **Before adding ANY disconnect, ask two questions: can a
+    merely BUGGY client reach this line, and does this connection carry only ONE principal's
+    traffic?** One ambiguity is deliberately left un-disconnected: `409 no-matching-reservation` is
+    byte-identical for a third party spending someone else's mint and for an agent re-presenting its
+    OWN spent reservation, and **a test asserts that indistinguishability** — it goes RED the day it
+    becomes resolvable, so do not "fix" it. Loop prevention via the traversed bus path is a
+    *complement* to idempotency, never a substitute.
+11. **TLS is the required transport. There is no plaintext listener** — the server refuses to start
+    rather than fall back. Certificates are self-signed, TLS is **mutual**, and there is no CA **and
+    no trust-on-first-use**: the invite blob carries the bus's certificate fingerprint. mTLS and the
+    session token are BOTH required and do different jobs — and **cross-check them: a session token
+    presented over a connection whose client certificate belongs to a DIFFERENT agent must be
+    rejected**, which is stronger than either mechanism alone. The loopback default
+    (`-listen 127.0.0.1:8080`) stays. Rotation serves TWO certificates during rollover and must never
+    require re-enrolment. Never disable certificate verification — and never ship a flag that does,
+    not even a documented one.
+    `InsecureSkipVerify: true` is permitted in **exactly one file — `client/pin.go` — exactly once,
+    paired with `VerifyPeerCertificate` in the same composite literal**, enforced by an AST guard in
+    `client/guard_test.go`. **Read `INVARIANTS.md` "Invariant 11" before touching it: deleting that line, or the
+    callback beside it, does not harden anything — it silently disables pinning, and every positive
+    test passes either way.**
 
 ## Repository layout
 
 ```
 cmd/agent-bus/        main — the server binary
 internal/…            server packages (ids, store, wal, hub, http, relay, auth)
-scripts/bus-*.sh      the agent-facing wrappers — the ONLY interface agents use
+cmd/agent-busctl/     the CLI — THE client, and the only interface agents use (invariant 7)
+scripts/bus-*.sh      RETIRED wrappers; only bus-serve.sh remains (server lifecycle). Do not add one
 scripts/spec-cloud.sh authed curl shim for the Spec Server (task state)
+scripts/gen-spec-mirror.sh regenerates SPEC.md — the ONLY supported way to write it
+INVARIANTS.md         the 11 invariants WITH their reasoning — read the relevant one IN FULL
+                      before working on that plane; CLAUDE.md carries only the one-line rules
 AGENT_PROTOCOL.md     agent-facing instructions: enrol, list, wait, send, relay
 PROTOCOL.md           the wire protocol + on-disk format (human/maintainer facing)
 CONTRACTS.md          INDEX only (split 2026-08-02) — see CONTRACTS-*.md for the actual surface:
@@ -278,8 +173,11 @@ code. A task must never be completed on a VACUOUS proof, and **a task with NO `p
 completed at all** — a missing proof is worse than a vacuous one, since it leaves no record of what
 would even count as evidence. Completing a task requires RUNNING `proof-check.sh` and quoting its
 verdict, not storing a command nobody executed. For anything agent-facing, ALSO exercise it the way an agent would:
-through `scripts/bus-*.sh` against a running server, not through a hand-written `curl`. If the
-wrapper doesn't work, the feature doesn't work.
+through the compiled CLI (`cmd/agent-busctl`) against a running server, **never** through a
+hand-written `curl` and **never** through a `scripts/bus-*.sh` wrapper — those are retired and only
+`bus-serve.sh` (server lifecycle) survives. If the subcommand doesn't work, the feature doesn't work;
+if the capability has no subcommand yet, that is the missing half of the task, not a reason to reach
+for `curl`.
 
 **`grep`-based proofs are the MORE dangerous family, and CLAUDE.md previously warned only about
 tests.** A doc proof like `grep -n '8080' README.md CONTRACTS.md | grep -qi localhost && echo DOCS_OK`
@@ -330,8 +228,11 @@ API, never by hand-editing a file:
   keys) → `POST $B/projects/agent-bus/reservations {"namespace":"<ns>","reserved_by":"<you>"}`.
   **Never pick a number by eyeballing the list** — that is the classic parallel-agent collision.
 - **Your own tasks** → `GET $B/projects/agent-bus/tasks?owner=<you>`.
-- **Refresh the mirror** after mutations → `bash scripts/spec-cloud.sh -s
-  $B/projects/agent-bus/export > SPEC.md`. That is the ONLY write anyone makes to `SPEC.md`.
+- **Refresh the mirror** after mutations → `bash scripts/gen-spec-mirror.sh`.
+  That is the ONLY write anyone makes to `SPEC.md`. It mirrors **open tasks
+  only** — closed ones are 39% of the backlog and the server keeps them; pass `--all` if you really
+  need them. Do NOT regenerate with a bare `spec-cloud.sh … export > SPEC.md`: that restores the
+  closed tasks and silently overwrites the mirror with an error page if the fetch fails.
 
 ## Spec Server task notes are the work JOURNAL
 
@@ -360,7 +261,12 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
 1. Read the backlog (via the API) before changing code.
 2. Claim exactly one task — `POST .../tasks/claim-next {"agent":"<you>"}`.
 3. Restate the task in one sentence.
-4. Make the smallest code change that completes only that task.
+4. **Before writing code, open `INVARIANTS.md` and read IN FULL every invariant your task touches** —
+   ids/sequence (1, 2), auth/sessions (3), durability/recovery (4, 5, 6), CLI surface (7), crypto (9),
+   idempotency/disconnects (10), TLS (11), relay/federation (2, 3, 6, 10, 11). The one-liners above
+   are reminders, not specifications. **Name the invariants you read in your `kind=report` note** —
+   that is what makes this step verifiable rather than aspirational. Then make the smallest code
+   change that completes only that task.
 5. Run the narrowest relevant check (see "Verify" above). For durability/recovery work, that
    includes the crash-injection test.
 6. Commit with a descriptive message + short tldr, on branch `main`.
@@ -371,7 +277,9 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
    vars), `CONTRACTS-HTTP.md` (routes, headers, enrolment/sessions, auth), `CONTRACTS-ONDISK.md`
    (record types, wire protocol versions, on-disk files, WAL), `CONTRACTS-AGENT.md` (agent-facing
    wrappers, repo tooling scripts) — see `CONTRACTS.md` for the full index if unsure which one. And
-   — if the agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `scripts/bus-*.sh` wrappers.
+   — if the agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `cmd/agent-busctl` subcommand
+   that delivers it. **Not** a `scripts/bus-*.sh` wrapper: those are retired (invariant 7), and a
+   capability without its subcommand is the missing half of the task.
     - **ALWAYS commit with an explicit pathspec: `git commit -m '…' -- <paths>`.** `git add <paths>`
       does NOT scope a later commit — a bare `git commit` takes the WHOLE index, including anything a
       concurrently-running agent has staged. This has produced four mis-titled commits in this repo,

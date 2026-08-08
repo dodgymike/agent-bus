@@ -1,881 +1,393 @@
 # Agent Bus
 
+> This mirror lists OPEN tasks only (todo, in progress, blocked, deferred).
+> 137 closed tasks are omitted; the Spec Server holds them in full.
+> Regenerate with `bash scripts/gen-spec-mirror.sh` (`--all` to include closed).
+
 > Checkbox legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` superseded/cancelled.
 
 ## Backlog
 
-- [ ] None · AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediate revocation — auth, P1
-  Origin: security audit of AUTH-2, 2026-08-02, found forward-looking. Authentication is evaluated ONCE at request entry, and -poll-timeout is validated only as > 0 (cmd/agent-bus/main.go:137) with no ceiling against the 1h auth.SessionLifetime. A poll parked at entry keeps serving after its session expires or is revoked. auth.Principal already carries ExpiresAt, so a handler CAN enforce it but nothing requires it. The POLL epic must cap the wait at min(PollTimeout, time.Until(principal.ExpiresAt)) and re-Authenticate before delivering. P1 because "revocation is immediate" (DECISIONS.md 2026-08-02) is otherwise false for any poll already in flight.
-- [ ] None · RELAY-2-FU-IDEM-ROSTEROP: internal/idem has no OpRosterSync, so roster pushes borrow OpPeerEnrol — idem, P2
-  internal/idem/scope.go's Operation set is CLOSED and validated (OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay). A roster push is its own mutating operation but has no constant, so relay.RosterUpdateFingerprint uses OpPeerEnrol as the nearest correct neighbour. Consequence, bounded but real: a peer that reuses ONE key across a peer-enrol AND a roster push lands both in the same scope, so the second is adjudicated a violation -- a peer bug either way, but diagnosed as the wrong bug. Fix: add OpRosterSync, add it to MutatingOperations and valid(), then switch RosterUpdateFingerprint. Adding it was outside RELAY-2's file boundary.
-- [ ] None · post-200 validation failures on send say may or may not have been applied — cli, P3
-  client/messages.go: the four validation failures AFTER a 200 was received are routed through writeFailed and so are told this send may or may not have been applied, when in fact a 200 WAS received and the bus did accept it. Errs safe but is inaccurate; consider a distinct wording for the post-acceptance validation path.
-- [-] None · EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner pass) — auth, P0
-  USER DECISION, 2026-08-02 (DECISIONS.md "Five decisions" #2; CLAUDE.md invariant 3, amended). Root fix for the entire pre-auth attack family. Enrolment is currently UNAUTHENTICATED, so an attacker can mint its own agents and, from there, exhaust the session table (AUTH-1-FU-ACTIVECAP, raised to P0 as defence-in-depth behind this gate), lock out a named agent (AUTH-1-FU-PENDINGCAP, already fixed), or enumerate the roster. Capping table sizes patches the symptoms one at a time; the invite removes the capability that makes all of them possible.
-  
-  REQUIREMENTS (from the user, verbatim in substance):
-  - Invites are SINGLE-USE, EXPIRING and REVOCABLE, minted by an operator.
-  - Redeeming an invite is the ONLY route onto the bus -- including for PEER buses (bus-to-bus enrolment/federation must also go through invite redemption, not a separate unauthenticated path).
-  - Composes with mTLS (see the paired mTLS epic): the invite is what AUTHORISES binding a new client certificate to a new agent id -- invite redemption and certificate binding happen together, not as two independent gates either of which alone would suffice.
-  - CLAUDE.md invariant 3 now covers this directly: "Enrolment is INVITE-ONLY... No agent may enrol without redeeming an operator-minted invite... Invites must be single-use, expiring, and revocable, and redeeming one is the ONLY way onto the bus -- including for peer buses." Read that invariant in full before design.
-  
-  CONSENT-SENSITIVE: this changes AUTHN DEFAULTS (enrolment moves from open to gated) -- per this project operating rules that is a consent-gated action even though the user has already decided the shape; the atomic tasks under this epic should still each be explicit about what changes for an operator standing up a fresh bus (an invite must now be minted before the FIRST agent can enrol, including whatever bootstraps the operators own tooling).
-  
-  NEEDS A PLANNER PASS before implementation: this is an epic, not an atomic task. A planner should break it into atomic tasks covering at minimum: invite data model + storage (durable, survives restart -- consider how this interacts with the WAL/store), invite minting (operator-facing, likely a CLI/admin route), invite redemption at enrolment (single-use enforcement, expiry check, replaces or gates todays open enrol route), revocation, peer-bus enrolment redemption (federation path), CONTRACTS-HTTP.md + AGENT_PROTOCOL.md updates, and the mTLS cert-binding integration point once the mTLS epic lands enough to bind to.
-  
-  Does not yet have atomic sub-tasks; do not claim-next this epic directly -- claim-next the atomic tasks a planner files under it once that pass runs.
-- [ ] None · Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE — docs, P2
-  Both DECISIONS.md and AGENT_LOG.md were HOT during the 2026-08-07 triage pass -- three uncommitted appended sections plus a prior integrator/append race were already sitting in the working tree -- so the feature agents dispatched against INVITE-MINT (public_id 1d0d0e60-06d3-4610-aa09-1439159a114d) and MTLS-ROTATE (public_id c2e8df5b-cafa-4a38-8384-a99e7f66f968) were EXPLICITLY forbidden from editing either file this pass, and told instead to post their journal text as kind=report notes on their own tasks.
-  
-  This task exists so that deviation from CLAUDE.md step 8 ("Record decisions in DECISIONS.md; append to AGENT_LOG.md") is tracked and paid down deliberately, rather than quietly lost the moment both tasks are marked done.
-  
-  WHEN DECISIONS.md and AGENT_LOG.md are next safe to edit (i.e. not concurrently held by another in-flight agent), copy the design-decision content from INVITE-MINT's task notes into a new dated DECISIONS.md section, and the work-log content from both INVITE-MINT's and MTLS-ROTATE's task notes into new dated AGENT_LOG.md entries -- append-only, do not edit existing dated history in either file.
-  
-  SOURCE TASK IDS TO COPY FROM:
-    - INVITE-MINT: public_id 1d0d0e60-06d3-4610-aa09-1439159a114d (GET .../tasks/1d0d0e60.../notes)
-    - MTLS-ROTATE: public_id c2e8df5b-cafa-4a38-8384-a99e7f66f968 (GET .../tasks/c2e8df5b.../notes)
-  _Proof: grep -q 'INVITE-MINT' DECISIONS.md && grep -q 'MTLS-ROTATE' AGENT_LOG.md && grep -q 'INVITE-MINT' AGENT_LOG.md_
-- [ ] MTLS-CLIENTCERT · MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certificate (0600) and presents it on every connection — agentif, P1
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN, CLI-1 (0495d133) | BLOCKS: MTLS-PIN
-  
-  Client-side half of the mutual handshake, in the importable client/ package (NOT under internal/ -- CLI-1's non-negotiable). Key stored 0600 in the user's config dir, never in the repo, no interactive prompt, no TTY-dependent input. Stdlib crypto/tls + crypto/x509 only. DEPENDS ON CLI-1 (0495d133) -- no client package exists today.
-  _Proof: go test -race -run 'TestClientGeneratesClientCert|TestClientTLSKeyIs0600' ./client/..._
-- [-] None · [SUPERSEDED by epic a1b628fb-8cbf-47e8-9682-034fda8636c7] No transport security (TLS) anywhere in the server -- decision made, options list is stale — security, P1
-  BLOCKED ON USER DECISION -- do not start implementation. This task exists to record the gap and lay out options; a design/consent decision from the user is required before any code changes.
-  
-  The server has no transport security of any kind. This is now load-bearing rather than theoretical: with no per-agent binding left on the session token, token unguessability is the ONLY thing protecting a session, and an on-path network observer can also kill a pending challenge outright (no confidentiality or integrity on that handshake). The default listen address was just moved to loopback (task c27f9439), which contains the exposure for a single-host deployment but does nothing for the Docker Compose / multi-bus relay target, where buses talk to each other over a real network -- that is precisely invariant 2's cross-bus routing, so the relay path is plaintext today.
-  
-  Options to lay out for the user (none pre-selected):
-  1. Terminate TLS in the server itself (Go stdlib crypto/tls + net/http's ListenAndServeTLS -- this is stdlib, not 'writing your own crypto': TLS termination via crypto/tls is exactly the audited, high-level API the project's crypto rule calls for, as opposed to hand-rolling a handshake). Needs a cert/key provisioning story (self-signed for dev, ACME/reverse-proxy-issued for prod).
-  2. Require a reverse proxy / sidecar (e.g. Caddy, nginx, an Envoy sidecar) in front of the server and document that as the SUPPORTED deployment; the Go server stays plaintext-over-localhost/private-network only. Simplest for the single-bus case, weakest for bus-to-bus relay unless every hop also proxies.
-  3. Mutual TLS specifically between relaying buses (bus-to-bus federation traffic authenticates both ends via client + server certs), leaving agent<->bus traffic on option 1 or 2. Most targeted at the actual multi-bus relay risk, but adds cert lifecycle for every bus pair.
-  
-  Constraints that bear on the decision:
-  - NEVER WRITE OUR OWN CRYPTO (absolute project rule, CLAUDE.md rule 9) -- any of the above must use crypto/tls or an equivalently audited, high-level library. No hand-rolled handshake, padding, or nonce scheme under any option.
-  - Invariant 3: enrolment issues a signed credential and every route except enrolment authenticates -- TLS is a complement to that credential, not a replacement; the credential-forging and replay protections stay required regardless of which TLS option is chosen.
-  - Invariant 2: cross-bus routing depends on unambiguous `<bus-id>.<agent-id>` addressing carried over relay hops -- whichever TLS option is chosen must not break that addressing or the relay's loop-prevention (traversed bus path).
-  - Exposing the bus on a non-loopback interface, and any change to authn/authz defaults, are CONSENT-GATED actions per this project's operating rules -- flagging explicitly here since options 1 and 3 both imply the server (or a sidecar in front of it) eventually listens on a non-loopback interface for the Compose/multi-bus target.
-  
-  No proof_cmd yet -- there is nothing to prove until a decision is made and an implementation task is filed against it. When unblocked, split into: (a) the chosen TLS mechanism, (b) cert/key provisioning + rotation story, (c) the paired <KEY>-DEPLOY/<KEY>-VERIFY task per CLAUDE.md's committed-vs-running rule, since 'TLS code compiles' and 'a bus-to-bus relay call in Docker Compose is actually encrypted on the wire' are different claims.
-- [ ] None · AUTH-2-FU-SESSMU: auth.Service.Authenticate now takes an exclusive mutex on every request's hot path — auth, P2
-  Origin: security audit of AUTH-2, 2026-08-02. internal/auth/service.go guards the session table with a plain sync.Mutex. AUTH-2 puts Authenticate on EVERY request, while the UNAUTHENTICATED BeginSession holds the same mutex for an O(n) sweepLocked. An anonymous /v1/session/begin flood can therefore stall legitimate authenticated traffic in a way it could not before AUTH-2. Fix: give Authenticate an RWMutex read path, or amortise the sweep. Note this lives in internal/auth, which AUTH-2 deliberately did not touch.
-- [ ] None · Unify the atomic temp+rename+fsync file writer duplicated between ids.writeBusIDFile and ids.atomicWriteFile — id, P2, msg-fu-suffixfloor-followup
-  Deliberately not done inside MSG-FU-SUFFIXFLOOR (public_id 94159d93-fe87-4c3e-b938-86fe7068c787) under CLAUDE.md's no-unrequested-refactor rule; reviewer explicitly endorsed leaving them separate for that task's scope but flagged the duplication as worth its own follow-up. Two byte-identical copies of a durability-critical sequence (temp file create, write, fsync file, rename, fsync dir) now exist in internal/ids -- internal/ids/busid.go's writeBusIDFile and internal/ids/suffixstore.go's atomicWriteFile. If either changes, both must. Unify into one shared helper.
-  _Proof: go build ./internal/ids/... && go test -race ./internal/ids/..._
-- [ ] None · MSG-FU-MAINWIRING: main should construct the hub and pass it as BOTH httpapi.Options.Hub and wal.LogOptions.Applier — core, P1
-  The MSG/POLL wave could not touch cmd/** (file ownership), so httpapi.New builds the hub itself whenever Options.Durable also satisfies Path() + Recovered() -- see openHub in internal/httpapi/server.go, which documents this as transitional. Two costs to remove: (1) the durable log is REPLAYED TWICE at startup, once as an fsck by wal.Open with a nil Applier and once read-only by the hub to rebuild the store; (2) a rebuild FAILURE cannot be fatal because httpapi.New returns no error -- it is logged at ERROR and the messaging routes are left unregistered, so an operator sees 404s rather than a refusal to start, which is indistinguishable from running an old build. FIX: main constructs the hub, passes it as wal.LogOptions.Applier so replay happens exactly once inside wal.Open, seals the sequence floor from wal.Recovered, and hands it to httpapi.Options.Hub; a failure is then a startup error. openHub and the recoverableLog assertion are deleted in the same change. ALSO IN SCOPE: cmd/agent-bus/main_test.go TestShutdownReleasesLongPoll parks a SYNTHETIC handler -- point it at the real GET /v1/wait now that the route exists, so the ordering guard covers the real park.
-  _Proof: go test -race -run TestRunWiresTheHub ./cmd/agent-bus_
-- [ ] None · RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy — relay, P1
-  internal/relay/forward.go's per-peer queues are in-memory. A message accepted by Enqueue is lost if the process crashes with a non-empty queue, and dropped (counted in Stats().Dropped.Full, logged at Warn) when a peer stays down long enough to fill its queue. There is no retry. RELAY-4 owns retry/backoff; this task owns the DURABLE outbox they need to be meaningful. Until both land, cross-bus delivery is BEST EFFORT and no doc may claim otherwise (already stated in internal/relay/doc.go and forward.go).
-- [ ] None · Spec Server /export (both format=markdown and format=json) silently drops the commits[] array that /complete correctly persists -- SPEC.md and format=json readers see no commit_sha/test_summary even though the server holds it — tooling, P2
-  CORRECTION TO THE ORIGINAL BRIEF (verified 2026-08-07 by spec-keeper before filing, per instructions): the claim "the Spec Server does not persist commit_sha or test_summary at all" is FALSE. It IS persisted. What is actually broken is narrower: the `/export` endpoint (both `format=markdown`, which is what generates SPEC.md, and `format=json`) silently DROPS the commit record, even though the server holds it and two other surfaces expose it correctly.
-  
-  REPRODUCTION (ran against the live cloud server, project agent-bus, task MTLS-PIN / public_id 8c46dc93-16d0-4eea-8ad3-ac51136551e2, completed with commit_sha=61e6067):
-  
-  1. Direct single-task GET DOES carry the commit:
-     `bash scripts/spec-cloud.sh -s /api/v1/projects/agent-bus/tasks/8c46dc93-16d0-4eea-8ad3-ac51136551e2`
-     -> top-level field `"commits": [{"created_at":"2026-08-07T18:56:39.469539+00:00","repo":null,"sha":"61e6067","test_summary":"proof-check.sh verdict=PASS ..."}]` is present and correct.
-  
-  2. The task LIST endpoint also carries it:
-     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/tasks?status=done&limit=500"`
-     -> every returned task object includes the same `commits` array (verified: of 64 tasks with status=done, 64/64 -- ALL of them -- have a non-empty `commits` array; 0 are missing it at the source-of-truth level). So the blast radius the original brief worried about ("every task ever completed ... has an unverifiable completion claim") does not exist: nothing has been lost.
-  
-  3. The `completed` event also carries it independently:
-     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/events?task=8c46dc93-16d0-4eea-8ad3-ac51136551e2&event_type=completed&limit=5"`
-     -> `payload` = `{"commit_sha":"61e6067","proof_cmd":"...","test_summary":"proof-check.sh verdict=PASS ..."}`. Same values, third independent surface.
-  
-  4. THE ACTUAL BUG -- the export endpoint, both formats, drops the field entirely:
-     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/export?format=json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sorted(d['tasks'][0].keys()))"`
-     -> `['completed_at', 'component', 'created_at', 'description', 'epic_key', 'key', 'position', 'priority', 'proof_cmd', 'public_id', 'section', 'status', 'status_note', 'tags', 'title', 'updated_at']` -- no `commits`, no `commit_sha`, no `test_summary`. Confirmed the same for the markdown export consumed into SPEC.md: `grep -n '61e6067' SPEC.md` returns nothing; the only occurrence of the literal string "commit_sha" anywhere in SPEC.md (`grep -c commit_sha SPEC.md` = 1) is free prose inside an unrelated task's description ("commit_sha will be 10dd7f4 plus ..."), not a rendered field.
-  
-  DOES /complete ERROR OR SILENTLY ACCEPT? Neither in the sense the brief feared -- it accepts and CORRECTLY PERSISTS commit_sha/test_summary (see reproduction 1-3 above; 64/64 done tasks have it). There is no silent-drop at the /complete or GET layer. The silent drop is specifically in /export's task-serialisation, which uses a narrower field projection than the GET/list endpoints.
-  
-  WHY THIS STILL MATTERS: SPEC.md is the human/mirror-reading surface (CLAUDE.md: "SPEC.md is a GENERATED MIRROR ... treat it as read-only history that other agents/tools (and humans) can skim"). Anyone who trusts the mirror for "what commit closed this task" sees nothing, even though the server has the answer -- the same *class* of defect as e109c867 (PATCH rejecting `key`): documented workflow and actual server contract disagreeing, just at the export layer rather than at /complete itself. It is P2, not P0/P1, precisely because reproduction 1-3 show no data has actually been lost -- it is a visibility gap in the mirror, not a durability gap in the store.
-  
-  INTERIM MITIGATION (already standard practice, now written down rather than left to habit): spec-keeper continues to record commit_sha/test_summary redundantly in a `kind=report` note on the task at completion time, in addition to the `commit` API field -- e.g. "Completed with commit_sha=<sha>." This is now belt-and-braces (the primary record survives fine in `commits[]`), but keep doing it because it is the only copy that reaches SPEC.md today, and because free-text notes are more visible to a human skimming the mirror's linked task detail than a field the export layer currently discards.
-  
-  FIX (out of scope for this bookkeeping task, left for an implementer): have the export serialiser (both format=json and the markdown renderer that produces SPEC.md) include each task's `commits` array, or at minimum the latest entry's `sha`/`test_summary`, alongside the existing fields.
-  
-  CROSS-REFERENCE: e109c867 (PATCH rejecting `key`) -- same class, workflow/contract mismatch discovered by direct empirical testing rather than by trusting the docs.
-  _Proof: bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/tasks/8c46dc93-16d0-4eea-8ad3-ac51136551e2" | python3 -c "import json,sys; t=json.load(sys.stdin); assert t.get('commits'), 'expected commits on direct GET'" && bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/export?format=json" | python3 -c "import json,sys; d=json.load(sys.stdin); mt=[t for t in d['tasks'] if t.get('public_id')=='8c46dc93-16d0-4eea-8ad3-ac51136551e2'][0]; assert 'commits' not in mt, 'export now includes commits -- bug fixed, flip this task'" && echo EXPORT_DROPS_COMMITS_BUG_CONFIRMED_
-- [x] TRIAGE-LOCK · TRIAGE-LOCK: backlog-triage mutex — process, P0
-  Reusable mutex. in_progress = held, done = free. Whoever holds it is the only agent allowed to dispatch from the backlog. Acquire = compare-and-set on status via If-Match: "v<version>"; on 412 you lost the race, STOP, do not retry. Release = PATCH {status:done}. Do NOT use /complete on it. NEVER delete this task. Holder identity lives in status_note, never here.
-  _Proof: n/a - process lock_
-- [x] None · busctl send/broadcast lose the minted idempotency key on an ambiguous failure — cli, P1
-  cmd/busctl/send.go discarded the client-minted idempotency key when Send/Broadcast returned an error. After an AMBIGUOUS failure (network error, or a 5xx -- the message may or may not have been applied) the key was never shown and could not be recovered, so any retry used a fresh key and became a SECOND message -- invariant 10 defeated in exactly the lost-acknowledgement case it exists for. send.go's help already promised 'The key is ALWAYS printed back'. Fixed in the CLIENT layer so an embedding agent benefits too: client.Error.IdempotencyKey, client.IdempotencyKeyOf(err), client.ErrorPayload.IdempotencyKey (json idempotency_key, omitempty), and client/messages.go writeFailed() which stamps the key on all six failure paths of submit() and APPENDS (never replaces) a retry clause for KindNetwork/KindServer.
-  _Proof: go test -race -run 'TestCLISendFailureReportsIdempotencyKey|TestCLIBroadcastFailureReportsIdempotencyKey|TestCLISendFailureNamesIdempotencyKeyInHumanMode|TestCLISendNetworkFailureReportsIdempotencyKey|TestIdempotencyKeyOfFollowsTheUnwrapChain|TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry' ./client/... ./cmd/agent-busctl/..._
-- [ ] None · client.canonicalHost drops IPv6 brackets when removing a default port — cli, P2
-  Found by the INVITE-MINT feature-runner while investigating the server-side sibling of this bug (cmd/agent-bus/invite.go's canonicalInviteHost, which it fixed in its own task). The client-side copy at client/config.go:392-395 has the identical defect and was left unfixed because it is outside that agent's task boundary.
-  
-  VERIFIED (spec-keeper, 2026-08-07) by reading client/config.go:385-396:
-  
-    func canonicalHost(scheme, host string) string {
-        h, port, err := net.SplitHostPort(host)
-        if err != nil { return strings.ToLower(host) }
-        h = strings.ToLower(h)
-        if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
-            return h   // <-- BUG: no brackets re-added for an IPv6 literal
-        }
-        return net.JoinHostPort(h, port)
-    }
-  
-  For an IPv6 host with a default port, net.SplitHostPort strips the brackets into a bare `h` (e.g. "::1"), and the default-port branch returns `h` unbracketed instead of re-wrapping it. Examples: canonicalHost("https", "[::1]:443") -> "::1" (should be "[::1]"); canonicalHost("http", "[::1]:80") -> "::1"; canonicalHost("https", "[2001:db8::1]:443") -> "2001:db8:" is WRONG too -- actually returns "2001:db8::1" unbracketed. The non-default-port path (net.JoinHostPort(h, port)) re-brackets correctly; only the default-port early-return is missing it.
-  
-  Impact: this string becomes part of the bus URL used as an idempotency scope key (see the CANONICALISE comment at config.go:369-376) and, once parsed back, Hostname()-style re-parsing of the malformed string no longer names the same host -- e.g. "::1" re-split by net.SplitHostPort has no colon-count invariant that survives a further :port append, and a caller that does host+":"+port on the unbracketed form produces an invalid/ambiguous address. Server-side, the identical bug (now fixed) was flagged as producing an UNDIALLABLE address in the invite trust anchor; here it corrupts the client's own idempotency scope key and any address the client reconstructs from it. Not a security bypass (fails closed / produces a malformed string rather than a wrong-but-valid one), but a real correctness bug in code every client-facing operation depends on (invariant 10's idempotency-key scoping).
-  
-  SEQUENCING: client/config.go is currently owned by the live MTLS-ROTATE feature-runner (client/**, cmd/agent-busctl/**, CONTRACTS-CLI.md). This task must NOT be picked up until MTLS-ROTATE reports and its work is committed -- editing client/config.go concurrently risks the same overlapping-ownership collision recorded in the companion 'process' triage task filed 2026-08-07.
-  
-  Fix: mirror net.JoinHostPort's bracketing on the default-port return, e.g. `if strings.Contains(h, ":") { return "[" + h + "]" }` before returning `h`, or restructure to always call net.JoinHostPort and then strip only a non-bracketed default port. Add IPv6-with-default-port table rows (e.g. https://[::1]:443, http://[::1]:80, https://[2001:db8::1]:443) to whatever table-driven test covers canonicalHost today.
-  _Proof: go test -race -run TestCanonicalHostIPv6DefaultPort ./client_
-- [~] None · DISCOVERY-DOC: self-describing unauthenticated discovery document so an agent with only a bus URL can bootstrap — httpapi, P1, in progress
-  GET /v1/info returns only {bus_id, version, uptime_seconds}, which tells an agent nothing about HOW TO JOIN. An agent handed only a bus URL cannot enrol. Serves invariant 7 (nobody hand-writes HTTP; the compiled Go CLI is THE client) by making the bus self-describing.
-  
-  Precedent: the Spec Server's own GET /api/v1/agent-enrollments — an unauthenticated, machine-readable document with a `service` name, an ordered `steps` array, exact URLs, an explicit token_source explanation, and what the caller must save.
-  
-  Scope (server side ONLY, this task): internal/httpapi/** and CONTRACTS-HTTP.md. Add a bounded, static, unauthenticated discovery document describing: what the service is + bus id; the ORDERED enrolment steps with exact paths; whether enrolment is invite-only (describe what is TRUE today and flag what is imminent — INVITE-GATE is still `todo`); that the agent supplies an Ed25519 public key and receives a SERVER-MINTED fully-qualified <bus-id>.<agent-id> it does not choose (invariant 1); the session model (client signs a SERVER-PROVIDED token, max one hour, refresh at 75%); where to get the client and that an importable Go package exists at client/; and the HONEST LIMITS (no TLS yet so loopback only; messages are signed but NOT verified on receipt because key distribution (CRYPTO-4) does not exist).
-  
-  SECURITY LINE — describe the PROTOCOL, never the ROSTER. No agent list, no agent count, no data-dir path, no peer list, no key material, no on-disk file paths. An unauthenticated caller learns HOW TO JOIN and nothing about WHO HAS JOINED. The response must be bounded and static — its size must NOT grow with bus state (that is both an information leak and a DoS surface). internal/httpapi has a test pinning /v1/info's EXACT field set; it must be updated deliberately, never weakened or deleted.
-  
-  Design question to settle and record in DECISIONS.md: extend /v1/info vs add a separate endpoint.
-  
-  Explicitly OUT OF SCOPE (follow-up): the CLI subcommand half, AGENT_PROTOCOL.md and CONTRACTS-CLI.md — cmd/** and client/** are owned by other agents right now.
-  _Proof: go test -race ./internal/httpapi/... && D=$(mktemp -d) && P=18173 && (go run ./cmd/agent-bus -listen 127.0.0.1:$P -data-dir "$D" &>"$D/log" & echo $! >"$D/pid") && for i in $(seq 1 30); do curl -sf http://127.0.0.1:$P/healthz >/dev/null 2>&1 && break; sleep 0.5; done && curl -sf http://127.0.0.1:$P/v1/discovery | jq . && kill "$(cat "$D/pid")" 2>/dev/null; rm -rf "$D"_
-- [-] None · Wire the durable agent-id suffix floors into server startup — id, P0, msg-fu-suffixfloor-followup
-  MSG-FU-SUFFIXFLOOR (public_id 94159d93-fe87-4c3e-b938-86fe7068c787) shipped a durable per-name suffix allocator (internal/ids/suffixstore.go, DurableNameSuffixes) but left cmd/agent-bus/main.go unwired, so acceptance criteria (a)-(d) of that task remain OPEN. This task closes them: cmd/agent-bus/main.go:327 must construct ids.OpenNameSuffixes(dataDir), fold in whatever per-name floors can be derived from replay via RaiseFloor (NOTE: internal/auth/floors.go is concurrently building a SuffixFloors derivation -- check whether it landed and compose with it), call Seal() exactly ONCE with the error CHECKED, and treat ANY failure as FATAL at startup with explicitly NO fallback to ids.NewNameSuffixes(). Then flip ids.NewNameSuffixes to born-unsealed or delete it, and add the guard test asserting no production package outside cmd/ calls it. Proof must be a RUNNING server: enrol a name through scripts/bus-*.sh, restart the bus, enrol the same name, assert the suffix is strictly greater. Blocked-by note: must land BEFORE or WITH durable enrolment (internal/auth roster work), never after.
-  _Proof: restart-cycle enrol via scripts/bus-*.sh against a running server; assert strictly-greater suffix on re-enrolment of the same name_
-- [x] None · CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every proof_cmd — documentation, P1
-  Split the single CONTRACTS.md file into per-plane files (a pure content move, verbatim, no rewording) to remove a single-writer chokepoint that has caused three P0s in two consecutive triage loops. Keep CONTRACTS.md at the old path as an index. Retarget every queued task whose proof_cmd or description names CONTRACTS.md and specific line numbers, since after the split those line numbers move to different files. Update CLAUDE.md's repository-layout section and step-9 workflow instruction to say which file to update for which surface. Known affected tasks to repoint: c27f9439 (AUTH-1-FU-LISTENADDR), b0a5630b (LISTENADDR-FU-CONTRACTS, needs a proof_cmd added), 5b178dde (DUR-11-FU-CONTRACTS), 8c9b6489 (ID-2-WIRING-SEAL), c31f6999 (ID-2-WIRING-OBSERVER), 2d92b699 (AUTH-1-FU-ACTIVECAP), a24bb214 (DOCS-3).
-  _Proof: test -f CONTRACTS-HTTP.md && test -f CONTRACTS-ONDISK.md && test -f CONTRACTS-AGENT.md && test -f CONTRACTS-CLI.md && grep -q "CONTRACTS-HTTP.md" CONTRACTS.md && grep -q "CONTRACTS-ONDISK.md" CONTRACTS.md && grep -q "CONTRACTS-AGENT.md" CONTRACTS.md && grep -q "CONTRACTS-CLI.md" CONTRACTS.md && ! grep -q "^## Routes" CONTRACTS.md_
-- [ ] None · Amortise the agent-suffixes write: reserve a block of suffixes per name instead of one file rewrite per enrolment — id, P1, msg-fu-suffixfloor-followup
-  Flagged by the security gate on MSG-FU-SUFFIXFLOOR (public_id 94159d93-fe87-4c3e-b938-86fe7068c787). Today DurableNameSuffixes.NextSuffix rewrites the WHOLE floor map (O(distinct names ever seen)) and fsyncs twice per issued suffix. The map never shrinks by design (a departed name's counter must never be reset). While the roster cap bounds distinct names this is tolerable, but the moment a leave/revocation path frees roster slots, enrol-leave churn makes cumulative I/O quadratic from unauthenticated ~100-byte requests. Fix: persist a RESERVED high-water block (e.g. floor+N) and issue from memory within it; the gaps that leaves are already declared correct by point 4 of the ids.NameSuffixes doc.
-  _Proof: go test -race -run TestDurableNameSuffixes ./internal/ids -v_
-- [ ] INVITE-CLIENT · INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -- invariant 7's delivery vehicle is the CLI subcommand, NOT a bus-enrol.sh — agentif, P1
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE, CLI-1 (0495d133), CLI-2 (39318208) | BLOCKS: none
-  
-  DECIDED AND RECORDED HERE so it is not re-litigated -- invite redemption reaches an agent as a flag on the existing CLI identity subcommand (agent-bus-cli enrol --invite <blob>), NOT as a new scripts/bus-*.sh wrapper. This is consistent with the 2026-08-02 amendment to invariant 7 (DECISIONS.md:605-637, "The Go CLI replaces the shell wrappers"), with CLI-2 (39318208) which absorbed enrolment, and with AGENTIF-2 (15e4509c) which is already superseded. DEPENDS ON CLI-1 (0495d133) and CLI-2 (39318208) -- neither exists yet; there is no client package and no second cmd binary today. CONTRADICTION TO RESOLVE BEFORE STARTING (flagged by the planner, who was boundary-blocked from editing CLI-*): CLI-2's recorded proof_cmd enrols with no invite and over http://, so it is invalidated by BOTH this task and MTLS-LISTENER.
-  _Proof: go test -race -run TestClientEnrolWithInvite ./client/... && grep -qi 'invite' AGENT_PROTOCOL.md && grep -qi 'invite' CONTRACTS-AGENT.md_
-- [ ] None · enrolFailed replaces the remedy and never sets Error.IdempotencyKey — cli, P2
-  client/enrol.go:349-367 REPLACES e.Remedy on a failed enrolment, so `enrol` against an unreachable bus loses the check --bus / AGENT_BUS_URL and that the bus is running remedy (verified live). It also ignores e.fatal, and never sets Error.IdempotencyKey -- so `enrol --json` reports no idempotency_key where `send` now does, and client/errors.go documents an empty key as meaning no key existed, which is false for enrol. Converge it on client/messages.go writeFailed()'s composing shape.
-- [ ] None · MSG-FU-SUFFIXFLOOR-FU-ENROLRECORDS: fold ENROLMENT records into the legacy-dir suffix backfill now that AUTH-3 has landed — id, P2
-  Flagged by the security gate as a HAND-OFF HAZARD on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), and now live: AUTH-3 (durable roster, commit ece714f) landed immediately before the suffix wiring (commit 6985d2c).
-  
-  WHAT IS PINNED TODAY. cmd/agent-bus/suffixfloors.go's walAgentIDFloors folds the SENDER and RECIPIENTS of store.RecordKind records ONLY. Enrolment records (kind=agent) are deliberately EXCLUDED, and cmd/agent-bus/suffixfloors_test.go pins that with the subtest 'records of another kind are skipped'. That exclusion was RIGHT when it was written: enrolment was memory-only, so on every dir the shipped binary had produced the enrolment-record set was EMPTY while message records were the entire population -- which is exactly why internal/auth/floors.go's doc forbids auth.EnrolmentSuffixesInWAL as a floor SOURCE.
-  
-  WHY IT IS NOW WORTH REVISITING. With durable enrolment, kind=agent records DO carry agent ids, and the pin means a legacy backfill cannot see them. The exposure is currently NARROW and is not a live bug: any binary built from this tree has BOTH changes, and the first start against any dir writes the agent-suffixes file, after which the backfill never runs again. The only dir that could be affected is one written by a build taken BETWEEN ece714f and 6985d2c, which is not a released artifact.
-  
-  DO. Fold enrolment records into the backfill as defence in depth -- either by extending walAgentIDFloors to recognise auth.RecordKind (its record.go is now committed, so the dependency is stable) or by cross-checking with auth.EnrolmentSuffixesInWAL, which that function's own doc explicitly sanctions as a CROSS-CHECK even though it forbids it as a sole source. Folding it can only RAISE a floor, and raising is always safe. Update the pinning subtest and say in the comment why the exclusion existed, so the history is not lost.
-  
-  SEE ALSO 6f4c17ef-220c-465f-b8d8-a0f04aac1905 (streaming scan): if both land, do the enrolment fold in the same single streaming pass rather than adding a second full read.
-  
-  ACCEPTANCE. A test that a legacy dir whose ONLY agent-id evidence is an enrolment record does not re-mint that name; go test -race ./cmd/agent-bus green.
-- [ ] None · IDEM-11-FU-THROUGHPUT: sustained ceiling roughly halves to ~0.36 ops/s and nothing surfaces IdempotencyStats to an operator — performance, P2
-  Performance note from the IDEM-11 gates, 2026-08-03. Not a blocker; the durability cost is deliberate (invariant 4 -- nothing acked before durable, never traded for latency).
-  
-  Two follow-ups: (1) the sustained throughput ceiling roughly halves to ~0.36 ops/s with the applied-key record sharing the prepare's fsync -- this deserves an explicit operator-facing line in the docs rather than being discovered under load; (2) IDEM-11 added hub.IdempotencyStats() idem.Stats but nothing exposes it, so an operator cannot see how close the 65536 cap is to filling until it 503s. CORE-5 (metrics/observability) should surface it. That matters more given IDEM-11-FU-FAIRSHARE: without visibility, table exhaustion is indistinguishable from a general outage.
-  
-  Also latent, P2 within this task: idem.MaxResultBytes=512 vs store.MaxRecipients=64 -- only 0-1 recipients can reach publish today, so the bound is unreachable, but it becomes reachable the moment multi-recipient sends land.
-- [ ] None · SEC: ed25519.Verify panics on wrong-size public key -- remote DoS across AUTH-1/CRYPTO-10/SIGN-2 call sites — security, P1
-  Cross-cutting security gap surfaced by RATCHET-7 and VERIFIED FIRST-HAND by backlog-triage by reading this box's own stdlib source at crypto/ed25519/ed25519.go (Go 1.19 GOROOT): ed25519.Verify PANICS -- it does not return false -- when len(publicKey) != ed25519.PublicKeySize. This is a remote DoS trap because it is ASYMMETRIC with malformed-signature handling: a bad/tampered signature safely returns false, but a wrong-size (or nil) public key crashes the process. A call site that validates the signature but not the key length therefore looks correct in review and is remotely crashable in production.
-  
-  This matters immediately because at least three call sites accept or load attacker-influenceable public keys and will call ed25519.Verify on them:
-  - AUTH-1 (POST /v1/enroll): the public key is client-supplied at enrolment -- untrusted input by definition (invariant 1: a client-supplied value is input to be validated, never an identity to be trusted).
-  - CRYPTO-10 (`agent-bus verify` + wrapper validate-before-accept): verifies contact-list/sender public keys, including keys reloaded from the on-disk roster after a restart.
-  - SIGN-2 (sign on the send path) and any downstream recipient-side verification against a sender's messaging public key.
-  
-  SCOPE OF THIS TASK: own the fix and its verification ACROSS all of the above call sites (do not let each task independently reinvent the guard -- provide or point to one shared, tested helper, e.g. a `safeVerify(pub, msg, sig []byte) bool` that length-checks before delegating to ed25519.Verify) plus any other Verify call site discovered during implementation, including ed25519.PublicKey values loaded from the roster on disk after a restart (DUR/recovery path).
-  
-  ACCEPTANCE CRITERIA:
-  1. Every ed25519.Verify call site in the codebase length-checks the public key against ed25519.PublicKeySize before calling Verify, and returns/propagates a normal validation error on mismatch -- never a panic.
-  2. A shared helper exists (not copy-pasted per-call-site logic) so future call sites get the guard by construction.
-  3. Each affected call site (AUTH-1's enrolment path, CRYPTO-10's verify subcommand, SIGN-2's send/verify path, and the roster-reload-from-disk path) carries a negative test that feeds a wrong-size public key AND a nil/empty public key, asserting a clean rejection with no panic/crash (run with -race per project convention for anything touching concurrent paths).
-  4. Documented in CONTRACTS.md or DECISIONS.md as a standing invariant so it is not silently reintroduced by a later call site.
-  
-  This task should land alongside (or ahead of) AUTH-1/CRYPTO-10/SIGN-2's implementation since it is a prerequisite acceptance criterion on each of them, but is filed separately because it is a security trap spanning multiple call sites, not a single-task scope.
-  _Proof: go test -race -run TestSafeVerify ./... ; go test -race -run TestEnroll_MalformedPublicKey ./internal/auth ; go test -race -run TestVerify_MalformedPublicKey ./internal/... -- all pass with no panic on wrong-size/nil public keys_
-- [-] None · AUTH-2-FU-RATELIMIT: Rate-limit the unauthenticated routes and the 401 path — auth, P2
-  Origin: security audit of AUTH-2, 2026-08-02. Measured amplification is ~2.5x over the per-request access log LoggingMiddleware already emits (forged token = 400 bytes/2 lines vs a 158-byte/1-line baseline), so this is a constant factor on a pre-existing vector, NOT a new unbounded one -- which is why it did not block AUTH-2. Security explicitly recommends NOT deleting the Info-level "bearer token did not authenticate" line: it is the only signal an operator gets that someone is guessing credentials. The honest fix is per-source rate limiting on /v1/enroll, /v1/session/begin and the 401 path, plus log rotation.
-- [ ] None · proof-check.sh cannot tell "executed" from "asserted" -- adopt a zero-probe guard convention — tooling, P1
-  scripts/proof-check.sh classifies a proof PASS / FAIL / VACUOUS / UNVERIFIABLE, and it correctly catches the classic vacuity of `go test -run TestThatDoesNotExist ./pkg` (prints `ok ... [no tests to run]` and EXITS 0). But it only verifies tests EXECUTED -- not that they ASSERTED anything. Observed in this project (AGENT_LOG.md, 2026-08-02 AUTH-2 entry): TestEveryRouteRequiresAuth's headline loop passed with ZERO children -- every registered route was on the allow-list, so `continue` fired every iteration and the body never ran. The existing `len(routes)==0` guard did not catch it because the slice was non-empty; it was the FILTERED set that was empty. The test ran, exited 0, and proved nothing.
-  
-  Proposed fix is a CONVENTION, not full mutation testing (out of proportion here): a test that loops over cases must count the probes it actually asserted (a `probed` counter) and `t.Fatalf` when that count is zero -- with the guard placed AFTER any filtering, since filtering is exactly what silently empties the set. Where zero is a legitimate expected outcome on the current build (as with TestEveryRouteRequiresAuth today, where every route IS on the allow-list), the convention must allow a documented exception (t.Logf with a named companion test that keeps the real assertion alive, per the existing pattern in internal/httpapi/authmw_internal_test.go's TestEveryRouteRequiresAuthOnASyntheticRoute) -- but that exception must be an explicit, reviewed choice, not silent.
-  
-  Scope:
-  (a) Document the convention in CLAUDE.md's "Verify" section under a heading/phrase containing "zero-probe convention", including the AFTER-filtering placement rule and the documented-exception carve-out.
-  (b) Survey the repo for enumeration-shaped tests (loops with a filter/continue) and apply the convention -- audit internal/httpapi/authmw_test.go and internal/httpapi/authmw_internal_test.go (both already have partial `probed` counters -- confirm/align them with the finished convention) plus any other loop-shaped test found elsewhere in the tree.
-  (c) Decide, and record in DECISIONS.md under a section containing the phrase "zero-probe convention", whether proof-check.sh itself can detect the zero-probe case mechanically (e.g. via -v output inspection for `probed`/counter patterns) or whether the hand-written convention is the whole answer for now. Either way, write down the reasoning.
-  
-  Cross-reference: CLAUDE.md's "Verify" section already warns that grep-based doc proofs are the MORE dangerous vacuous family, because a loose pattern can match an unrelated line -- not hypothetical: task c27f9439's proof passed over a still-broken CONTRACTS.md:51 by matching an unrelated line in README.md. A doc proof must pin the SPECIFIC line/phrase it claims to prove and must be CONFIRMED RED before the fix -- a proof never observed failing is not evidence it CAN fail.
-  
-  proof_cmd was confirmed RED on 2026-08-02 (before this task's work) via:
-    bash scripts/proof-check.sh "grep -A2 'zero-probe convention' CLAUDE.md | grep -q 'AFTER any filtering' && grep -q 'zero-probe convention' DECISIONS.md"
-  Verdict: FAIL (class=file-assertion, exit=1) -- neither CLAUDE.md nor DECISIONS.md yet contains the phrase, confirming the proof is not vacuous-by-accident (it can and does fail today).
-  
-  Coordination note: CLAUDE.md and DECISIONS.md are shared files -- confirm no other agent is mid-edit on them before touching (per CLAUDE.md's parallel-agent-coordination rule: only one agent at a time, prefer adding a new dated section over editing existing lines). At time of filing (2026-08-02) a parallel loop had an agent editing CLAUDE.md/CONTRACTS.md/SPEC.md; do not clobber that work -- re-read the file immediately before editing.
-  _Proof: bash scripts/proof-check.sh "grep -A2 'zero-probe convention' CLAUDE.md | grep -q 'AFTER any filtering' && grep -q 'zero-probe convention' DECISIONS.md"_
-- [ ] None · Wire `-backfill-suffix-floors` through scripts/bus-serve.sh and document it (invariant 7 gap) — docs, P1
-  Invariant 7 (agents never hand-write HTTP / a feature ships with its scripts/bus-*.sh wrapper AND an AGENT_PROTOCOL.md entry in the same task) is currently violated for the suffix-floor backfill migration: the flag `-backfill-suffix-floors` exists at cmd/agent-bus/main.go:121, but there is NO sanctioned wrapper path to pass it -- scripts/bus-serve.sh does not accept or forward it -- and the string "backfill" appears in ZERO .md files in the repo (verified by grep). So an operator who needs to run the suffix-floor backfill migration has no documented, wrapper-mediated way to do it and must hand-construct the server invocation, which is exactly what invariant 7 forbids. Acceptance: (1) scripts/bus-serve.sh accepts a flag/env var and forwards `-backfill-suffix-floors` to the server binary; (2) AGENT_PROTOCOL.md documents when/why an operator would run the backfill and how to invoke it via the wrapper; (3) CONTRACTS.md and/or CONTRACTS-CLI.md record the flag, its default, and its effect.
-- [x] None · IDEM-11-FU-FAIRSHARE: applied-key capacity is bus-wide fail-closed with no per-agent share -- one agent can pin the table for everyone — security, P1
-  Security gate finding on IDEM-11 (staged, uncommitted), 2026-08-03. Recorded as the ONE open P1 in that task's GATES INCOMPLETE report.
-  
-  idem.MaxEntries (65536) is a single bus-wide, fail-closed cap: once full, the bus 503s. There is no per-agent share, so one agent -- buggy or hostile -- can consume the whole table and deny idempotency to every other agent. Enrolment is authenticated, so this is an insider/compromised-agent vector, not pre-auth.
-  
-  NOT INTRODUCED BY IDEM-11: an identical bus-wide cap exists at HEAD (hub.MaxIdempotencyEntries, documented in CONTRACTS-HTTP.md as a 503 with Retry-After: 5). What IDEM-11 changes is the HOLD TIME -- retention widens from ~24h (message-tied) to the derived 50h10m22s window -- so roughly double the time to fill and stay full. Filed separately rather than as a rider because the fix needs its own replay-consistency design and its own crash test.
-  
-  SECURITY'S PROPOSAL: fair-share cap of MaxEntries / (agents holding >=1 record), enforced ONLY under pressure, so a single-agent bus loses nothing and the common case is unchanged. Whatever is chosen must survive restart -- the share is derived from RECOVERED state, so the eviction/refusal decision must be identical before and after a replay, or two runs of the same log disagree about what was accepted.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [ ] None · DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy verbatim — documentation, P1
-  Discovered during the DUR-11 orphaned-task reconciliation pass (2026-08-02). HALF OF THIS TASK IS ALREADY DONE: c7e017d removed the stale "provably torn tail" / "refuses to start and leaves the file byte-for-byte" / "RepairTail" phrasing (verified absent from CONTRACTS-ONDISK.md, the plane the WAL-repair section moved to in the CONTRACTS split, 360a2679). THE REMAINING, UNMET HALF: CONTRACTS-ONDISK.md has ZERO mention of RepairLog, the bus.wal.corrupt-<ts> quarantine-rename-aside artefact name, the .repair temp-file-during-rewrite artefact name, or the Repair/Recovered struct fields actually surfaced to callers (Rewritten, Quarantined, DiscardCount, MissingRecords, Exhausted) -- confirmed via grep, zero matches for every one of the eight terms (2026-08-02). Fix: document the SHIPPED RepairLog / quarantine / always-restart behaviour in CONTRACTS-ONDISK.md, naming the on-disk artefacts and enumerating the struct fields.
-  
-  *** BLOCKING: DO NOT DISPATCH until DUR-12 (cbc9ab0c) lands. *** DUR-12 is rewriting the on-disk WAL format (CRC32C -> HMAC-SHA256 MAC, format version 2) right now and will change this exact plane -- documenting the WAL surface concurrently would be stale on arrival, same ordering constraint applied to e120153b and db350e39.
-  _Proof: grep -qF "RepairLog" CONTRACTS-ONDISK.md && grep -qF "bus.wal.corrupt-" CONTRACTS-ONDISK.md && grep -qF ".repair" CONTRACTS-ONDISK.md && grep -qF "Rewritten" CONTRACTS-ONDISK.md && grep -qF "Quarantined" CONTRACTS-ONDISK.md && grep -qF "DiscardCount" CONTRACTS-ONDISK.md && grep -qF "MissingRecords" CONTRACTS-ONDISK.md && grep -qF "Exhausted" CONTRACTS-ONDISK.md && ! grep -qE "provably torn tail|refuses to start and leaves the file byte-for-byte|RepairTail" CONTRACTS-ONDISK.md_
-- [ ] None · ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known, wrapper script not yet written) — process, P3
-  Found 2026-08-02 while proving DEPLOY-2-FU-CONTAINERNAME. EVERY docker invocation from an agent shell fails, not just compose:
-  
-    $ docker ps
-    cannot create user data directory: /home/mike/snap/docker/3505: Not a directory
-  
-  ROOT CAUSE (verified independently by triage, not just claimed by the sub-agent): /home/mike is a SYMLINK to /mnt/sdb4/mike/mike (ls -ld /home/mike -> lrwxrwxrwx root root 19 Jul 25 20:22). The docker snap's confinement does not resolve through that symlink, so it cannot create its per-user data dir. Reproduced with the sandbox disabled and with HOME overridden -- it is a snap-confinement/environment defect, entirely unrelated to agent-bus.
-  
-  CONSEQUENCE: any task whose proof_cmd shells out to docker or docker compose can only ever return UNVERIFIABLE from an agent. That includes DEPLOY-2's patched project-isolated proof (docker compose -p agentbus-proof up -d --build), DEPLOY-2-FU-CONTAINERNAME's own proof, and DEPLOY-3 -- which is the ONLY planned path to end-to-end RELAY verification. So this environment defect, not any code defect, is what currently blocks proving the container story.
-  
-  NEEDS THE USER (environment change, outside an agent's remit): e.g. install docker from the apt/official repo instead of snap, or give the docker snap a real non-symlinked HOME, or run compose proofs manually and paste the transcript. Agents must NOT attempt to reconfigure snap or docker themselves.
-  
-  Until this is fixed, treat every docker-based proof_cmd as UNVERIFIABLE and say so rather than recording a pass.
-- [ ] None · Invert stale internal/hub/hub.go quarantine reissue-permitted assertions once MSG-FU-SEQHIGHWATER lands — durability, P1
-  internal/hub/hub.go contains two locations describing post-quarantine message-id reuse as EXPECTED/accepted framing, which is now SUPERSEDED (DECISIONS.md 2026-08-07, "SUPERSEDES two earlier passages"; invariant 1 stands unnarrowed -- reuse is a DEFECT, not a documented limit):
-  
-  - hub.go:137-140 (doc comment on Options.Quarantined): "...so the sequence high-water mark from before it is unrecoverable and message ids may repeat values the quarantined file already used."
-  - hub.go:383-394 (Open, the Quarantined branch): a comment block plus the h.log.Error(...) call whose MESSAGE TEXT literally states "message ids may repeat values the quarantined log already used (invariant 1)" -- this is a PRODUCTION log line an operator reads as ground truth.
-  
-  These were correct when written (2026-08-02, before the WAL index-floor fix) but are STALE once 6ebe51be (MSG-FU-SEQHIGHWATER, raised to P0 2026-08-07) lands and is verified: internal/wal/indexfloor.go (uncommitted as of 2026-08-07 -- see db350e39s implementer note, 2026-08-07T12:25) already updates every equivalent comment INSIDE internal/wal to the new invariant-1-preserving language ("an index this data directory has authorised is never authorised again"), but internal/hub is OUT OF that agents file ownership (internal/wal only) and was explicitly flagged "NOT DONE" ("hub-side assertions") in their report.
-  
-  SCOPE: once 6ebe51be is verified fixed -- hubs derived sequence floor (o.NextIndex = wal.Recovered.NextIndex) is provably protected across quarantine, not just asserted to be -- invert these two hub.go passages to state the CORRECT, current guarantee instead of the superseded one. Reconsider the h.log.Error(...) call level once quarantine no longer implies id-reuse exposure (may drop to WARN, or the branch may become unnecessary -- implementing agents call, backed by a test).
-  
-  ALSO check internal/wal/recover_test.go:443 ("the next append reissues the index the discarded frame carried") -- as of 2026-08-07 this is a stale assertion sitting in a file already mid-edit (git-modified) by the live agent fixing db350e39/e120153bs 9 newly-failing wal tests; verify it lands there rather than duplicating the fix here.
-  
-  NOT IN SCOPE (already correctly handled by this projects append-only-log convention -- no action needed): DECISIONS.md:1541 and AGENT_LOG.md:1048, both historical journal entries already superseded via the NEW 2026-08-07 DECISIONS.md section ("SUPERSEDES two earlier passages") rather than edited in place, per the append-only rule.
-  
-  Do NOT invert this language before 6ebe51be actually lands and is verified end-to-end -- inverting the wording while the underlying defect might still be present would be worse than todays honest-but-stale warning.
-  _Proof: grep -n "may repeat" internal/hub/hub.go; test $? -ne 0_
-- [ ] None · PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes when a proof_cmd nests another proof-check.sh invocation of a go-test command — tooling, P2
-  Discovered 2026-08-02 during bookkeeping verification of the Proof-command guard task (84b76d5e). Composing `bash scripts/proof-check.sh --quiet "<a command that itself calls bash scripts/proof-check.sh --quiet 'go test ...'">` causes runaway recursive shim processes: the outer invocation's PATH-prepended go-shim directory persists into the nested bash -c subshell, so the inner proof-check.sh installs its OWN shim ahead of the outer one, the inner go test call resolves to a shim that itself re-invokes go test, and this recurses/forks until killed. Observed live: dozens of `/tmp/proof-check.*/bin/go test ...` and `tee -a .../gotest.log` processes accumulating; had to pkill -9 -f proof-check to recover. No repo file was touched, no lasting damage, but on a shared box this is a resource-exhaustion foot-gun for any agent that tries to write a self-checking or meta proof_cmd. Suggested direction (not investigated in depth): proof-check.sh should strip its own shim dir(s) from PATH before invoking a nested shell, or refuse/detect recursive invocation via a marker env var (e.g. if PROOF_CHECK_ACTIVE is already set, run the proof verbatim without installing a second shim). Reproduce: bash scripts/proof-check.sh --quiet 'bash scripts/proof-check.sh --quiet "go test -run TestNoSuchTest ./internal/wal"' (kill it within a few seconds, do not let it run to completion).
-  _Proof: timeout 60 bash scripts/proof-check.sh 'bash scripts/proof-check.sh "true"'; test $? -ne 124_
-- [ ] None · AGENT_PROTOCOL.md error-block label says remedy: but the CLI prints try: — docs, P3
-  AGENT_PROTOCOL.md's error-block examples label the second line "remedy:" (e.g. lines ~203 and ~208, the mTLS certificate-mismatch examples), but cmd/agent-busctl/output.go:148 actually prints `  try: %s` via fmt.Fprintf(o.stderr, "  try: %s\n", payload.Remedy). The `agent-busctl: %s` prefix on the first line (output.go:146) IS correct and matches the doc. This is PRE-EXISTING -- present at 29cdafc and earlier, not introduced by MTLS-ROTATE's doc work, though that work carried the mislabeled examples forward so it now appears more than once (two blocks). Consequence: an agent grepping AGENT_PROTOCOL.md for "remedy:" to programmatically extract a remedy line will never find one, because the CLI never emits that word -- only "try:". Fix: either update the doc examples to say "  try:" (matching code, the simpler and safer fix since output.go is otherwise correct and already has one legitimate "try:" example elsewhere in the doc at line ~648), or rename payload.Remedy's label in code to match the doc -- doc-only fix is preferred absent a reason to touch the CLI. Verified independently: git show HEAD:cmd/agent-busctl/output.go lines 146/148, and grep -n remedy: AGENT_PROTOCOL.md returns lines 203 and 208.
-  _Proof: grep -qF '"  try: %s\n"' cmd/agent-busctl/output.go && grep -A2 -F 'REFUSING to talk' AGENT_PROTOCOL.md | grep -qF '  try:'_
-- [ ] None · MSG-FU-SEQHIGHWATER: persist the message-sequence high-water mark so deep log damage cannot regress it — durability, P0
-  THE DEFECT (general, MEASURED, plus the whole-log-quarantine instance folded in from db350e39, now superseded): the hub derives its sequence floor from wal.Recovered.NextIndex-1, raised to the highest replayed sequence. Each message burns 1 sequence and 2 WAL indices, so a truncation removing MORE records than the bus issued sequences leaves the floor at or below a sequence already issued, and the bus reissues message ids (invariant 1). Measured over a 585-offset truncation sweep of a 2523-byte WAL: 70 offsets regressed, all at n <= 1449 of 2523 -- every cut losing more than half the records. Inside the genuine crash window (a tear between two fsyncs, n >= 2038) the strong property HOLDS and is asserted by TestMessagingCrashRecovery; deep cuts are media damage and the information needed to reconstruct the mark is gone with the bytes.
-  
-  STRICTLY WORSE INSTANCE, folded in from db350e39 (SUPERSEDED, collapsed into this task 2026-08-07 by spec-keeper): internal/wal/recover.go (pre-fix, ~lines 252-262) -- when the ENTIRE WAL log is quarantined as corrupt, recovery started a FRESH log at index 1. No PREPARE record survived anywhere in the log. The derived high-water mark was therefore 0, and a bus that then minted sequences from 1 reissued EVERY sequence number it had EVER used -- not one index at a damaged tail, but the buss entire history. Nothing downstream could detect this; it was silent.
-  
-  REMEDY (unambiguous, per user ruling recorded in commit 888f6c6, 2026-08-07 -- supersedes any earlier framing): persist the message-sequence high-water mark OUTSIDE the log, in its own small fsynced file, WRITTEN AHEAD of the sequence number it authorises, read by recovery even when the WAL is damaged or quarantined -- exactly the shape internal/ids/suffixstore.go (commit 61b7c9a) already uses for the per-name agent-id suffix floor. Do NOT frame post-quarantine id reuse as an accepted, bounded risk anywhere in new work -- that framing is SUPERSEDED (DECISIONS.md 2026-08-07, "SUPERSEDES two earlier passages"); invariant 1 stands unnarrowed, reuse is a DEFECT.
-  
-  IMPLEMENTATION STATUS (found by spec-keeper triage 2026-08-07, code exists but is UNCOMMITTED -- verify before writing anything new): an implementer working task db350e39 has ALREADY BUILT this exact mechanism at the WAL layer: internal/wal/indexfloor.go (NEW) plus companion changes to internal/wal/{doc,log,recover,replay,salvage,writer}.go. It persists a durable WAL record-index floor (<data-dir>/wal-index-floor, on-disk format version 4) written ahead of each reservation. hub.go derives its sequence floor from o.NextIndex = wal.Recovered.NextIndex, so this WAL-layer fix APPEARS to close this tasks hub-level hazard too, transitively, via the existing derivation path -- without needing a separate hub-owned persisted file. NOT YET VERIFIED, and this task should not be marked done until it is: (1) 9 internal/wal tests are currently failing pending a test-engineer pass fixing assertions that encoded the old reissue-permitted behaviour; (2) internal/hub/hub.go:137-140 and :383-394 still contain a comment and an ERROR log message asserting ids "may repeat" after quarantine -- STALE once this lands, tracked separately as 68c1788f-6043-4c2d-b409-887f71507d69; (3) no test yet proves the hub-level guarantee end-to-end (this tasks own proof_cmd, TestSequenceHighWaterSurvivesDeepDamage, does not exist yet -- do not complete on a VACUOUS proof). CHECK whether internal/wal/indexfloor.go already satisfies this task before writing new code.
-  
-  ON-DISK RECORD TYPE: needs a RESERVED format/record-type number -- do NOT pick one by eyeballing the list. One already exists that appears to be the SAME mechanism this task needs: ondisk-format-version value=4, reserved by feature-runner 2026-08-07T12:06:32Z, note "WAL record-index floor file (internal/wal/indexfloor.go, <data-dir>/wal-index-floor) -- the durable ceiling that stops recovery reissuing indices after a tail discard or a whole-log quarantine (tasks e120153b, db350e39)". Confirm this covers the message-sequence case (it appears to, since hub derives sequence purely from wal.Recovered.NextIndex) before reserving a NEW number for what may be a redundant record type.
-  
-  CROSS-REFERENCES: db350e39 (SUPERSEDED 2026-08-07, collapsed into this task -- quarantine-specific evidence folded in above); e120153b (separate task, tail-discard-specific instance of the same invariant, NOT a duplicate of this one, also apparently closed by the same indexfloor.go work per its own implementer note -- do not touch e120153b from this task); 68c1788f-6043-4c2d-b409-887f71507d69 (hub.go stale-assertion inversion, filed by spec-keeper 2026-08-07, blocked on this task landing).
-  _Proof: go test -race -run TestSequenceHighWaterSurvivesDeepDamage ./internal/hub_
-- [ ] None · MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN: export a streaming raw WAL scan and reinstate the every-start suffix-floor cross-check — wal, P1
-  Found by the reviewer AND security gates on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), which shipped the startup wiring.
-  
-  PROBLEM. cmd/agent-bus/suffixfloors.go derives legacy-dir suffix floors with wal.ScanAll, which accumulates EVERY record INCLUDING FULL PAYLOADS in memory (internal/wal/reader.go: recs = append(recs, rec)). The WAL never rotates or compacts and enrolment is unauthenticated, so peak RSS at startup is proportional to the whole log. internal/wal already has a measured incident on record where a per-record INDEX LIST -- far smaller than payloads -- cost 1.76 MB on a 23.7 MB log and was called 'the boot-time OOM the eviction was written to avoid' at 10 GiB. wal.Replay is streaming by contrast (scanFrom callback); the raw scan is not, because scanFrom is UNEXPORTED.
-  
-  MITIGATION ALREADY SHIPPED: the scan is gated on !alloc.Existed(), so it runs at most once per data directory (the legacy backfill). That bounds the exposure to the migration start, and it is why this is P1 and not P0.
-  
-  WHAT IT COST. Gating it also removed the every-start CROSS-CHECK: a WAL suffix exceeding the persisted floor is a detectable integrity failure (a rewound or restored-from-backup agent-suffixes file), and nothing detects it now. A DELETED floors file is still caught (Existed()==false triggers the backfill, and the missing-file case is logged at ERROR when the dir has history); a CORRUPT one is caught by ids.ErrSuffixFileCorrupt; a REWOUND-BUT-VALID one is not.
-  
-  DO. (1) Export the streaming seam internal/wal already has -- e.g. wal.ScanFunc(path, kind, fn error) wrapping scanFrom, whose own doc calls it 'the seam recovery uses for a streaming replay'. (2) Rewrite cmd/agent-bus/suffixfloors.go's walAgentIDFloors to fold floors as records arrive: O(record) peak, not O(log). (3) Reinstate the cross-check on EVERY start, comparing the derived floors against ids.DurableNameSuffixes.Floors(); on a WAL suffix ABOVE the persisted floor, log at ERROR and RaiseFloor to it (raising can never lower a floor, and detection without correction leaves the bus knowingly re-minting a visible id -- both gates endorsed raise-over-refuse; refuse-to-boot would hand anyone with data-dir write access a permanent boot-denial primitive).
-  
-  PROOF. A test that a dir whose agent-suffixes file has been rewound to a stale-but-checksum-valid version does NOT re-mint, and logs at ERROR. Plus a memory assertion, or at minimum a test that the scan never materialises the whole log.
-  
-  ACCEPTANCE. wal exports a streaming raw scan; cmd/agent-bus/suffixfloors.go uses it; the every-start cross-check is restored and proven by a rewound-floors-file test; go test -race green.
-- [ ] None · Correct stale wave label AUTH-7 to its real task identity across code and docs — process, P2
-  The label "AUTH-7" is referenced in roughly 12 Go comments and in CONTRACTS-ONDISK.md, but NO task with that key exists in the backlog -- the work those comments describe is actually tracked as MSG-FU-ROSTERSOURCE (public_id fa26036c). This is a stale/incorrect cross-reference: anyone grepping the backlog for AUTH-7 finds nothing, and anyone reading the code comments is pointed at a task identity that was never real (or superseded and never corrected). Acceptance: every Go code comment and every doc (including CONTRACTS-ONDISK.md) naming AUTH-7 is corrected to reference MSG-FU-ROSTERSOURCE (fa26036c) instead, so the code/doc trail and the backlog agree.
-- [ ] None · os.MkdirAll(cfg.DataDir, 0o700) at main.go:157 never tightens an ALREADY-LOOSE pre-existing data dir — durability, P1
-  cmd/agent-bus/main.go:157 -- `if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil { ... }`. The comment above it (main.go:155-156) says "0o700: the store holds agent credentials", but os.MkdirAll's mode argument is ONLY applied when it actually creates the directory; per the Go stdlib doc and POSIX mkdir(2) semantics, MkdirAll on a directory that already exists is a no-op with respect to permissions -- it does not chmod it. So a data dir that pre-exists with a looser mode (world-readable/writable -- left over from a bad deploy script, an operator `cp -r` that didn't preserve modes, a container image built with a permissive umask, or a restore from backup) silently KEEPS that loose mode forever. Every subsequent invariant this project cares about (agent credentials in AUTH's roster store, the WAL itself) then lives inside a directory that is not actually 0700, contradicting the comment's own stated intent.
-  
-  Confirmed experimentally this pass (standalone stdlib-only probe, no repo file touched): os.Chmod(dir, 0o777) followed by the EXACT call at main.go:157 (os.MkdirAll(dir, 0o700) on that already-existing dir) leaves the directory at 0777 -- MkdirAll returns nil and never touches the mode of a directory that was already there.
-  
-  DONE means: run() explicitly Stat()s the data dir after MkdirAll and, if the existing mode is looser than 0700, either os.Chmod(dir, 0o700)s it (loudly logged, since silently tightening permissions under something already running could theoretically break another process assuming looser access -- unlikely here but worth a WARN) or refuses to start with a clear error naming the actual mode found, whichever the implementer judges correct after reading DUR-8's dirlock precedent (internal/dirlock already assumes an 0700-equivalent trust boundary on this same directory).
-  
-  proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- no os.Chmod call exists anywhere in main.go yet. Will PASS once the fix adds one.
-  _Proof: grep -q "os.Chmod" cmd/agent-bus/main.go_
-- [ ] None · writeFailed's empty-Remedy branch is unreachable-by-fixture and untested — cli, P3
-  client/messages.go writeFailed() has a branch for an empty e.Remedy. It IS reachable (networkError on context.Canceled has Remedy: "") but the client test table Fatalf's on an empty fixture remedy, so it can never cover it. Add a case that exercises it.
-- [x] None · busctl watch help documents a fatal 503 under exit 5 but client.ExitCode yields 6 — agentif, P1
-  cmd/busctl/watch.go:107-108 lists '(a fatal 503: the bus cannot durably accept)' under exit code 5 in a two-column table, but client/errors.go:124 keeps a fatal 503 as KindServer, and KindServer -> ExitServer = 6 (client/errors.go:77,215). Exit codes are a published contract in CONTRACTS-CLI.md. Verdict: 6 is correct (a fatal 503 IS the bus reporting a failure of its own); the doc is wrong. Fix the doc in watch.go and CONTRACTS-CLI.md, and add a regression test that DERIVES the assertion from the observed exit code so the two cannot drift again.
-  _Proof: go test -race -run 'TestWatchFatalUnavailableExitCodeMatchesDocumentedTable|TestHelpExitCodeTablesAgreeWithClientExitCodes' ./cmd/agent-busctl/..._
-- [ ] None · client/enrol.go enrolFailed does not compose the remedy or carry IdempotencyKey, unlike writeFailed — cli, P2
-  Discovered by reviewer during the 9accb65 gate (2026-08-07, task 797fb15f notes). client/messages.go writeFailed() composes a retry clause onto e.Remedy and stamps e.IdempotencyKey on every failure path; client/enrol.go:349-367 enrolFailed still REPLACES e.Remedy wholesale (losing check --bus / AGENT_BUS_URL and that the bus is running on an unreachable-bus failure) and never sets e.IdempotencyKey, so IdempotencyKeyOf(err) and the --json idempotency_key field are silently empty for a failed enrol while populated for a failed send/broadcast -- an inconsistent contract on a newly exported field, and errors.go:113-115 documents empty as meaning no key existed, which is false for enrol. Fix: bring enrolFailed in line with writeFailed (compose, do not replace; always stamp the key) with a regression test mirroring TestWriteFailedComposesRemedyAndNeverTellsAFatalBusToRetry.
-- [ ] None · MTLS re-bind route: an agent renews its client certificate against its EXISTING agent id, without spending an invite — security, P1, needs-user-ratification
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN (39dcdcff), MTLS-BIND | NEEDS USER RATIFICATION
-  
-  MTLS-DESIGN decided (DECISIONS.md, 2026-08-07 entry) that an agent whose client cert is approaching NotAfter, while still holding a valid session token, calls a NEW re-bind route authenticated by that session token to bind the NEW cert fingerprint to its EXISTING, unchanged agent id -- no invite spent, no new identity minted. The rationale is E3's rule that routine key hygiene must not be indistinguishable from a security incident.
-  
-  THIS ADDS A NEW ROUTE TO THE AUTHENTICATED SURFACE AND WAS DECIDED BY A SUB-AGENT, NOT BY THE USER -- it is RECORDED but NOT RATIFIED, and must not be implemented until the user confirms it.
-  
-  Deliberately NOT folded into MTLS-BIND, which covers only the FIRST binding at enrolment.
-  
-  Interaction with AUTH-1-FU-POPKEY (6e3083b0): the re-bind must prove possession of the existing AUTH key, never of the TLS key alone, since the TLS key is exactly what is being replaced.
-- [ ] MTLS-RELAYGUARD · MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance criterion plus a guard test — security, P2
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-CLIENTAUTH, INVITE-PEERGUARD | BLOCKS: RELAY-1 (9bc9d6c4), RELAY-2 (654140d7)
-  
-  Every relay hop is both a certificate-verifying TLS client and a TLS server, and invariant 2's <bus-id>.<agent-id> addressing plus traversed-bus-path loop prevention must keep working over it. internal/relay/ is a stub (internal/relay/doc.go:8), so the landable increment now is the guard and the acceptance criterion; RELAY-1 (9bc9d6c4) and RELAY-2 (654140d7) must satisfy it (the planner was not permitted to edit those tasks). Pairs with INVITE-PEERGUARD: a peer bus needs BOTH an invite and mutual TLS.
-  _Proof: go test -race -run 'TestRelayDialerRequiresMutualTLS|TestRelayListenerRequiresClientCert' ./internal/relay_
-- [ ] None · DECISIONS.md carries the pre-correction (wrong) accepted-limit sentence for the MAC key; PROTOCOL.md has the fix, DECISIONS.md does not — documentation, P2
-  The DUR-12 security gate established that the original accepted-limit rationale for the HMAC key
-  (section 1 of the 2026-08-02 "Five decisions" entry) is factually wrong as written, and corrected it
-  IN PROTOCOL.md -- but DECISIONS.md, which is outside DUR-12's task boundary, still carries the
-  original wrong sentence uncorrected.
-  
-  WRONG (DECISIONS.md line ~1089-1090, section 1 "The HMAC key lives in the DATA DIR..."):
-    "It buys nothing against an attacker who already has data-directory write access; such an attacker
-    can read the key and forge freely."
-  
-  This is wrong because replacing a file on POSIX needs only w+x on the DIRECTORY, not any permission
-  on the 0600 key file inside it -- so "can read the key" overstates what the attacker needs and
-  understates what they can actually do.
-  
-  CORRECTED (PROTOCOL.md lines ~248-255, section 7):
-    "But the reason usually given for that is wrong, and the difference matters. The stock
-    justification -- 'such an attacker can read wal-mac.key, same directory, same trust boundary' -- is
-    a statement about READ access, and reading is not what the attacker needs. Replacing a file on
-    POSIX needs only w+x on the directory, not any permission on the 0600 key inside it. The accurate
-    statement is that an attacker with directory-write access can replace the key and the log together
-    -- plant a v2 log of their own making alongside a key of their own choosing -- and the bus will
-    replay it as history. That is why the limit is real; it does not depend on the key being readable."
-  
-  FIX SCOPE: DECISIONS.md is append-only by convention (see its own section 4, "Commit history: LEAVE
-  IT" -- the pattern established for this file is record corrections, don't rewrite history in place).
-  So the fix here is almost certainly a DATED CORRECTION APPENDED at the end of the file (new section,
-  today's date), quoting the wrong original sentence, stating it is superseded, and pointing at
-  PROTOCOL.md section 7 for the accurate wording -- NOT an in-place edit of the 2026-08-02 "Five
-  decisions" entry's original text. Whoever takes this should confirm that convention still holds
-  before editing, since the append-only rule is a repo convention rather than something this task
-  verified is universal.
-  
-  Not urgent -- this is a documentation-only inconsistency; the operationally-authoritative statement
-  (PROTOCOL.md, which operators actually read for the accepted-limit boundary) is already correct.
-  DECISIONS.md is history/rationale, not the operator-facing doc, which is why this is P2 not higher.
-  _Proof: grep -qi 'replace the key and the log' DECISIONS.md_
-- [x] None · Proof-command guard: a `-run` pattern that matches no test must FAIL, not pass vacuously — process, P0
-  TRAP FOUND 2026-08-02 by backlog-triage. `go test -race -run TestCorruptTailTruncation ./internal/wal` prints "ok ... [no tests to run]" and EXITS 0. Every proof_cmd in this backlog is of that shape, so a task can be flipped to done with a proof command that proves literally nothing. Verified: DUR-4 and DUR-6 proofs both exit 0 today with zero tests run. Verified also that NO completed task is currently affected -- all 13 done tasks' proofs were re-run and each executes >0 tests -- so this is a PREVENTIVE guard, not a cleanup of existing corruption. Deliverable: (1) scripts/proof-check.sh -- runs a proof command and FAILS unless it can show at least one test actually ran (parse `-v` RUN/PASS output or `[no tests to run]`), while still supporting the non-Go proofs already in the backlog (test -s FILE, grep -q, scripts/bus-*.sh invocations) -- those must remain valid and must not be forced into a test-count check. (2) A sweep report of all ~70 proof_cmd values classifying each as test-based / file-assertion / wrapper-based / unverifiable, posted as a task note. (3) CONTRACTS.md entry for the script. Policy question to ANSWER in the deliverable: should completion require proof-check.sh rather than a bare command?
-  _Proof: bash scripts/proof-check.sh 'go test -race -run TestThatDoesNotExist12345 ./internal/idem'; test $? -eq 4_
-- [ ] None · IDEM-11-FU-DOWNGRADE: an old binary SILENTLY DISCARDS acknowledged writes after IDEM-11 -- bump FormatVersion so it refuses to start instead — durability, P1
-  NEEDS A USER DECISION (on-disk format). Raised by triage 2026-08-03 reviewing IDEM-11's staged (UNCOMMITTED) work.
-  
-  IDEM-11 adds an additive `idem` field to the WAL prepare payload (internal/wal/log.go, Entry.Idem json.RawMessage). Forward direction is correct and mandated: old logs replay unchanged under the new binary. The REVERSE direction is the problem.
-  
-  internal/wal/log.go:791 decodePayload uses dec.DisallowUnknownFields(). A binary built BEFORE this field, reading a log written AFTER it, treats EVERY prepare carrying an idem record as an undecodable payload -- and recovery DISCARDS it. That is an ACKNOWLEDGED WRITE LOST on downgrade, silently, not a degraded-but-correct read. The implementing agent documented this honestly in a FORWARD-COMPATIBILITY HAZARD block at internal/wal/log.go:104-115 and mitigated it by POLICY ("downgrade is not a supported operation here -- one binary, one container, forward-only") rather than by enforcement.
-  
-  TRIAGE'S POSITION: policy is not a mechanism. FormatVersion is still 2 (internal/wal/format.go:30) even though the payload shape changed, so nothing on disk tells an older binary that it is out of its depth. The house failure mode everywhere else in this codebase is REFUSE TO START, loudly; here it is DISCARD, silently -- the worst possible pairing with invariant 4 (nothing acked before durable). Bumping FormatVersion (RESERVED through the Spec Server, never picked by hand) makes an old binary refuse to start on a new log, converting silent data loss into a loud, correct failure. The new binary still reads v2 logs, so the mandated ordering (a format change ships WITH the recovery path for previous-format logs) is preserved.
-  
-  NOTE ON PROVENANCE: triage's own dispatch brief explicitly FORBADE the IDEM-11 agent from touching FormatVersion, to keep it out of the contested recovery code. That guard was right about recover.go and wrong about the version field. This task exists to correct triage's guard, not the agent's work -- the agent complied with its brief and documented what it could not fix.
-  
-  DECISION NEEDED FROM THE USER: (a) bump FormatVersion to 3 so downgrade fails closed, accepting that a v3 log can never be read by any released binary; or (b) accept the forward-only policy as-is and record it in DECISIONS.md as an explicit, dated acceptance of silent-data-loss-on-downgrade. Do NOT choose (c) loosen the decoder -- a lenient decoder is how a file that no longer says what history was accepted gets served as if it did.
-  
-  Related: DUR-12-FU-VERSIONFLIP already tracks a single-bit version-field flip misidentifying a v2 log, so the version field's failure behaviour is under review anyway.
-- [ ] None · CLI-FU-SEEDREDACT: pendingEnrolment holds a raw private-key seed with no redacting String() — security, P2
-  Found by the security gate during the MSG/POLL wave (2026-08-02), reported as provisional because client/ was untracked and under concurrent edit at the time. client/store.go: Credential has a redacting String() (around store.go:122-125) but pendingEnrolment carries the same PrivateKeySeed and does NOT. No code path formats it today, so this is parity hardening rather than a live leak -- but the whole point of a redacting String() is that it protects the field before someone adds the %v that would print it. Add the same redaction, and a test that a formatted pendingEnrolment contains no byte of the seed. Owner: the CLI epic (client/** was outside the MSG/POLL wave's ownership).
-  _Proof: go test -race -run TestPendingEnrolmentRedactsItsSeed ./client_
-- [x] ENROL-SHAPE · ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE, before invite, mTLS or proof-of-possession break it three times — auth, P0
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: none | BLOCKS: INVITE-STORE, INVITE-GATE, MTLS-BIND, AUTH-3 (d53e3b21), AUTH-1-FU-POPKEY (6e3083b0-c113-4b26-9dd6-025825671ceb)
-  
-  BLOCKED ON USER DECISION -- do not implement until the escalated questions are answered (bootstrap/who mints the first invite; how a client learns the bus cert fingerprint; migration for already-enrolled agents; rotation/expiry). Three separately-filed changes each break POST /v1/enroll's request body: the invite field (INVITE-GATE), the client-cert fingerprint binding (MTLS-BIND), and the proof-of-possession signature already filed as AUTH-1-FU-POPKEY (6e3083b0-c113-4b26-9dd6-025825671ceb, which explicitly says "this CHANGES THE ENROL WIRE SHAPE ... do not land it unilaterally"). Landing them independently revises the same contract three times. This task records ONE target shape in DECISIONS.md covering: the enrol request/response fields, the final auth.RosterEntry field set (internal/auth/roster.go:16-37 -- today AgentID/Name/PublicKey/EnrolledAt; it needs a client-cert fingerprint field), and the ordering rule that AUTH-3 (d53e3b21, durable roster) must encode that final field set so the durable record is written once, not migrated. Deliverable is a DECISIONS.md entry ONLY -- do NOT update CONTRACTS-HTTP.md, which documents SHIPPED behaviour, and none of this has shipped. Escalation context: today the roster, sessions and idempotency table are ALL in-memory (internal/auth/roster.go MemoryRoster, internal/auth/service.go:161), so there is currently NOTHING persisted to migrate -- that window closes the moment AUTH-3 lands.
-  _Proof: grep -qF '## 2026-08-07 — ENROL-SHAPE: the final `/v1/enroll` shape and `auth.RosterEntry` field set' DECISIONS.md && grep -q AuthPublicKey DECISIONS.md && grep -q MessagingPublicKey DECISIONS.md && grep -q InviteID DECISIONS.md && grep -q CertBindings DECISIONS.md && grep -q Epoch DECISIONS.md_
-- [ ] MTLS-LISTENER-FU-CLIENTHTTP · MTLS-LISTENER-FU-CLIENTHTTP: client/config.go still allows unpinned http:// to loopback, and its own comment says to delete that case when the TLS listener ships — security, P2
-  From the MTLS-LISTENER security gate (L3), flagged as out of the runner's boundary and provisional. client/config.go:326-344's case "http": permits unpinned plaintext to any loopback host, carrying the comment // DELETE THIS CASE ENTIRELY when the TLS listener ships. The TLS listener has now shipped. Harmless against this bus (the 400 stops it), but it leaves the CLI with a code path requiring no pin, reachable through any loopback forward (ssh -L, docker publish 127.0.0.1:...). Decide deliberately: delete the case, or keep it and rewrite the comment to say why it survived. Coordinate with whoever owns client/ -- MTLS-EXPIRY was in flight there on 2026-08-07.
-  _Proof: go test -race -run 'TestParseBusURL|TestTransportSecurity' ./client_
-- [ ] DISCOVERY-DOC-FU-GITIGNORE · DISCOVERY-DOC-FU-GITIGNORE: stale untracked busctl binary at repo root is not gitignored — repo-hygiene, P2
-  Found independently by BOTH the reviewer and security gates during DISCOVERY-DOC. A 7.6 MB ELF executable named busctl sits untracked at the repo root, left behind by the cmd/busctl -> cmd/agent-busctl rename. .gitignore lists /agent-bus and /agent-busctl but NOT /busctl, so git check-ignore busctl reports it is NOT ignored and any git add -A would commit a binary into the repo. Given this project's documented history of index-sweeping commits mixing several agents' work, this is a live hazard. Fix: delete the artefact and add /busctl to .gitignore (or drop the entry deliberately if the old name is considered gone for good). Outside DISCOVERY-DOC's ownership boundary, so flagged not fixed.
-- [~] None · MSG-FU-SUFFIXFLOOR: resume per-name agent-id suffix counters from disk (agent ids are now durable) — id, P0, in progress
-  Found by the security gate during the MSG/POLL wave (2026-08-02). cmd/agent-bus/main.go builds ids.NewNameSuffixes() -- a FRESH counter every start -- justified by the comment 'nothing in this path writes an agent id to disk'. THAT PREMISE IS NOW FALSE: store.Record persists sender and recipients as fully-qualified agent ids, hub.publish writes them through the WAL, hub.Apply replays them, and the WAL never compacts. So after a restart the suffix counter restarts at 1 and anyone who enrols the name 'alpha' is minted the id the previous alpha held (invariant 1 broken). CONFIDENTIALITY IS ALREADY CLOSED by the enrolment epoch shipped in the same wave (store.Message.VisibleTo refuses any message sent before the reader enrolled -- proved on a live server: a re-enrolled beta-1 reads 0 of the previous holder's DMs while the message is still in the store), and the reuse is logged at ERROR by hub.NoteEnrolment. WHAT REMAINS is identity continuity: a new keypair holding an id with a prior history, whose future messages are attributed to it. FIX: derive a per-name suffix floor from the highest suffix EVER WRITTEN TO DISK -- parse every sender and recipient seen during replay through ids.ParseAgentID and keep the max per name -- and seed ids.ResumeNameSuffixes with it before the listener binds. internal/hub already collects exactly these ids in Apply (see Hub.recovered), so the derivation belongs there and main passes it to the minter. ALSO correct the now-false justification comment at cmd/agent-bus/main.go:312-317: it is what will make the next reader believe this is safe. AUTH-3 (durable roster) is the complete fix; this is the half that does not depend on it.
-  ---
-  
-  ## ACCEPTANCE CRITERIA ADDED 2026-08-03 (spec-keeper, dictated by security)
-  
-  Security's PASS-WITH-NOTES verdict on `ID-2-WIRING-SEAL-FU-NAMESUFFIXES` (public_id
-  `1c207a62-e904-4988-84c2-f4b69712ee35`) named these as MUST-CLOSE-BEFORE-ENROLMENT-IS-DURABLE
-  conditions for THIS task:
-  
-  (a) `cmd/agent-bus/main.go` constructs the allocator via `ids.ResumeNameSuffixes` (or `RaiseFloor`
-      folded over the replay stream) and calls `Seal()` exactly ONCE with the error CHECKED.
-  (b) A derivation that cannot complete is a FATAL startup error -- explicitly NEVER a fallback to
-      `ids.NewNameSuffixes()`, which is the residual hole this task exists to close by name.
-  (c) Once `main.go` no longer calls `ids.NewNameSuffixes()`, flip `NewNameSuffixes` to born-unsealed
-      to restore parity with `Sequence`, or delete it.
-  (d) Cheap interim guard worth adding: a test asserting no production package outside `cmd/` calls
-      `ids.NewNameSuffixes`.
-  
-  See `ID-2-WIRING-SEAL-FU-NAMESUFFIXES` notes for the full security/reviewer context this closes the
-  residual gap in.
-  _Proof: go test -race -run TestAgentIDSuffixesResumeAcrossRestart ./internal/ids ./internal/hub_
-- [~] MTLS-VERIFY · MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is TLS-only and mutually authenticated (committed is not running) — security, P1, in progress
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-LISTENER, MTLS-CLIENTAUTH, MTLS-PIN | BLOCKS: none
-  
-  Paired committed-vs-running verification per CLAUDE.md. scripts/bus-serve.sh:54 sets HEALTH_URL="http://${LISTEN}/healthz" and curls it at :80 and :161; that is the only surviving bus-*.sh wrapper (AGENTIF-1, done) and it BREAKS the moment MTLS-LISTENER lands, taking every other task's server-startup proof with it. Live assertions required: a plaintext client is refused; a TLS client with NO client certificate is refused; a TLS client with a client certificate and the correct pin reaches /healthz. ALSO FLAG (planner was boundary-blocked from editing them): DEPLOY-1 (fa0c5a4e) and DEPLOY-2 (14f8ec3b) both assume a plaintext listener, and a Compose healthcheck cannot curl plaintext against a TLS-only bus.
-  _Proof: go test -race -run 'TestLiveBusServeWrapperOverTLS' ./cmd/agent-bus && ! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh_
-- [ ] None · Question whether a peer belongs on the legitimate floor-source list at all (ids.RaiseFloor) — ids, P2
-  Filed per security recommendation on ID-2-WIRING-SEAL-FU-NAMESUFFIXES (public_id
-  1c207a62-e904-4988-84c2-f4b69712ee35), explicitly NOT part of that task.
-  
-  Both `internal/ids/agentmint.go` (~:474-477) and `internal/ids/sequence.go` (:194, :343-344) list
-  "a peer" as a legitimate source for assembling a floor claim passed to RaiseFloor. Security's
-  judgement: a peer has NO basis for knowledge about THIS bus's own per-name suffix or sequence
-  high-water mark -- that is derivable only from this bus's own disk -- and under invariants 1 and 2
-  (server-authoritative ids; ids are never client-supplied identities to be trusted) a remote claim
-  about our own namespace should not be a floor source at all.
-  
-  SEVERITY NOTE, recorded so it is not read as a lesser hazard than the whole-bus Sequence case: a
-  per-NAME exhaustion is repeatable per name, so a peer able to reach RaiseFloor exhausts the WHOLE
-  enrollable name space one call at a time, converging on the same outcome as the whole-bus Sequence
-  exhaustion case at O(names) cost. It is not a smaller version of that hazard, just a slower one.
-  
-  WHAT NOT TO DO: security recommends AGAINST an in-code bound inside RaiseFloor itself -- RaiseFloor
-  must stay able to accept a genuinely high LOCALLY-derived floor (that is its entire legitimate job),
-  so a bound inside it is the wrong layer and would plant a policy number in the wrong place.
-  
-  THE FIX is one of:
-    (1) remove "a peer" from both source lists (agentmint.go and sequence.go), or
-    (2) if a real relay/peer-enrol requirement emerges later, bound the peer-supplied claim at the
-        PEER-INPUT layer, validated against the locally-derived maximum plus configured headroom,
-        before it ever reaches RaiseFloor.
-  
-  NOT URGENT: there is no peer/relay code yet and no production caller of either RaiseFloor today.
-  File against the relay/peer-enrol work when that lands; do not block on it now.
-- [ ] None · The hub id-reuse detector is narrower than its log line implies (broadcast-only agents leave no trace) — hub, P2, msg-fu-suffixfloor-followup
-  Reported by the MSG-FU-SUFFIXFLOOR runner (public_id 94159d93-fe87-4c3e-b938-86fe7068c787), who did not own this file so filed rather than fixed. internal/hub/roster.go:65-88 fires only when the reused id is in h.recovered, and internal/hub/hub.go:497-499 populates that set ONLY from store.Message.Sender and .Recipients. An agent that enrolled, never sent a message, and was only ever a BROADCAST recipient (broadcasts are stored as a flag, not an expanded recipient list) leaves no trace, so its id can be reused with NO error logged at all. The detector is a partial backstop and must not be relied on as a safety net for invariant 1 (server-authoritative, never-reused ids). Fix should ensure the recovered/seen-id set also captures enrolment events themselves, not just message sender/recipient references.
-  _Proof: go test -race -run TestHubIDReuse ./internal/hub_
-- [-] None · EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listener (needs planner pass) — security, P0
-  USER DECISION, 2026-08-02 (DECISIONS.md "Five decisions" #5; CLAUDE.md invariant 11, amended). Supersedes the three-option "BLOCKED ON USER DECISION" framing in 0c8dc0aa-2cc2-4431-bdbf-ec5e44f3c308 -- the user has now DECIDED, that task is being corrected in the same pass to point here rather than sit with a stale open-question framing.
-  
-  THE DECISION: SELF-SIGNED certificates, MUTUAL TLS, NO certificate authority anywhere. Both ends present and verify a certificate.
-  - Trust is established at ENROLMENT (the trust-establishing moment the design already needed): the agents client-certificate fingerprint is bound to its server-minted agent id, and the client pins the buss certificate fingerprint. This reuses the TOFU machinery the design already needs rather than inventing a second trust model -- a bus runs on a laptop with no CA in the picture.
-  - mTLS does NOT replace the session token -- BOTH are required, and they do DIFFERENT jobs. mTLS proves which key holder is on the connection; the session token is the revocable, time-bounded application credential -- revocability is exactly what a bare certificate lacks without a CRL.
-  - CROSS-CHECK REQUIRED: a session token presented over a connection whose client certificate belongs to a DIFFERENT agent must be REJECTED. This is a stronger property than either mechanism alone and is free once both exist -- do not let one silently substitute for the other.
-  - NEW INVARIANT 11 (CLAUDE.md, read in full before design): TLS is the required transport, there is no plaintext listener, and the server REFUSES TO START rather than fall back to plaintext. The loopback default (-listen 127.0.0.1:8080) stays but BOUNDS exposure, it does not replace TLS -- a bus deliberately exposed on a real interface needs both.
-  
-  NEVER WRITE OUR OWN CRYPTO (CLAUDE.md invariant 9, absolute, outranks stdlib-first). The implementation MUST use Go stdlib crypto/tls for the handshake/transport and an audited library for anything cert-generation-adjacent that crypto/tls itself does not cover -- no hand-rolled handshake, padding, nonce or certificate-parsing logic under any circumstance.
-  
-  INTERACTIONS TO DESIGN AROUND, NOT ASSUME:
-  - Composes with the invite-only-enrolment epic (filed separately, 2026-08-02): the invite is what AUTHORISES binding a NEW client certificate to a NEW agent id in the first place -- invite redemption and cert binding happen together.
-  - DEPLOY-1 (fa0c5a4e, Dockerfile) and DEPLOY-2 (14f8ec3b, docker-compose.yml): both currently assume a plaintext listener; cert/key provisioning and the compose healthcheck need to account for TLS (e.g. a healthcheck cannot curl plaintext against a TLS-only listener).
-  - The relay plane: invariant 2s cross-bus <bus-id>.<agent-id> addressing and loop-prevention (traversed bus path) must keep working over mTLS bus-to-bus links; every relay hop is now also a certificate-verifying TLS client and server.
-  
-  NEEDS A PLANNER PASS before implementation: this is an epic, not an atomic task. A planner should break it into atomic tasks covering at minimum: self-signed cert generation + storage for the bus itself, the client-cert generation/storage story per agent, the enrolment-time fingerprint-binding + TOFU pinning flow, the crypto/tls server config (mutual auth required, no plaintext fallback -- refuse to start without valid certs per invariant 11), the session-token/client-cert cross-check, CONTRACTS-HTTP.md + PROTOCOL.md + AGENT_PROTOCOL.md updates, and paired <KEY>-DEPLOY/<KEY>-VERIFY tasks per the committed-vs-running rule since Compose/relay behaviour must be verified live, not just compiled.
-  
-  Does not yet have atomic sub-tasks; do not claim-next this epic directly -- claim-next the atomic tasks a planner files under it once that pass runs.
-- [ ] None · Conjunction-masking vacuous-proof family: filtered-clause proof_cmds hidden by an unfiltered && clause report PASS on a zero-match filter — tooling, P1
-  THIRD vacuous-proof family, distinct from (1) a proof naming a test that does not exist, and (2) a negative-only grep satisfiable by deletion. This one is the most deceptive: proof_cmd of the shape go test -run '<filter>' ./pkg && go test ./pkg reports PASS with a LARGE tests_run even when the -run filter matches ZERO tests, because the second, UNFILTERED clause runs the whole package and its exit code carries the overall verdict. Unlike the first two families this fails LOUD-LOOKING: hundreds of genuinely passing tests mask a filter that matched nothing.
-  
-  AUDIT (2026-08-02, main/orchestrator): scanned the full backlog for proof_cmd containing both -run and && where the SECOND clause is an unfiltered go test on the same/related package (i.e. genuinely of this shape, as opposed to the many proof_cmds that chain two DIFFERENT -run-filtered clauses, or a -run clause with a grep/CLI check -- those are fine). Exactly THREE tasks have this shape, all P0:
-    - 8c9b6489-abb1-444e-9eeb-3ff87646f632 (ID-2-WIRING-SEAL) -- status done. proof_cmd: go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids
-    - cbc9ab0c-3b34-48d0-acd8-5eabd4dc4a02 (DUR-12) -- status done. proof_cmd: go test -race -run 'TestWALFrameMACRejectsAlteredPayload|...' ./internal/wal && go test -race ./internal/wal
-    - c31f6999-da4e-400d-ab55-178b82e2a42e (ID-2-WIRING-OBSERVER) -- status todo. proof_cmd: go test -race -run TestWALReplayObservesEveryPrepare ./internal/wal && go test -race ./internal/wal
-  
-  The two DONE ones are NOT false passes: each was verified separately by the completing agent running and reporting the FILTERED clause alone (recorded tests_run=15 and tests_run=19 respectively in their completion test_summary/notes), so no already-completed work is in doubt. The risk is entirely FORWARD-LOOKING.
-  
-  THE LIVE EXPOSURE is c31f6999 (ID-2-WIRING-OBSERVER), still todo. Ran its proof_cmd verbatim through proof-check.sh on 2026-08-02: the filtered clause (TestWALReplayObservesEveryPrepare, a test that does not exist yet) reports 'no tests to run', but the unfiltered second clause runs the whole internal/wal package and the tool reports verdict=PASS tests_run=245 top_level=74 -- i.e. today, BEFORE any fix, this task could be closed on a proof that never ran the test it claims to add. (There IS a warning line about an empty package in proof-check.sh output, but the overall verdict is still PASS, which is the masking defect.)
-  
-  SCOPE for whoever takes this:
-    (a) Fix c31f6999's proof_cmd so the filtered clause is verified ALONE (e.g. the DUR-3-style pattern: test $(go test -run X -v ./pkg 2>&1 | grep -c RUN) -gt 0 && go test -run X ./pkg -- both clauses filtered, so a zero-match filter fails the count check before the second clause can mask it).
-    (b) Add this family to CLAUDE.md's 'Verify' section, alongside the existing two vacuous-proof warnings (test-that-does-not-exist; negative-only grep). NOTE: CLAUDE.md is a contended shared file -- coordinate the edit, prefer adding a new bullet rather than rewriting the section.
-    (c) RECOMMENDED FIX (2026-08-02, main/orchestrator, reproduced directly -- see kind=report note for the full repro transcript): proof-check.sh ALREADY COMPUTES the right signal. Running c31f6999's live proof_cmd through it shows the filtered clause alone prints 'ok ... [no tests to run]', and proof-check.sh's own output includes both a human-readable warning ("READ THIS LINE before completing: if the test THIS task claims to add is in one of those packages, the proof did not exercise it") and a machine field `empty_pkgs=1` -- yet the final line still reads `verdict=PASS`. The defect is NOT detection (empty_pkgs is computed correctly); it is that this signal does not affect the verdict. CLAUDE.md tells every agent to quote the verdict specifically, so the one field the protocol trusts is exactly the field that lies, while the accurate signal sits one line away in a field nobody is told to read.
-        THE FIX: make `empty_pkgs > 0` DOWNGRADE the verdict (to VACUOUS, or a new PARTIAL/UNVERIFIABLE value) instead of merely printing a warning -- a one-line conditional in a script that already computes the input, not a redesign. This automatically also closes vacuous-proof family (1) (a -run naming a nonexistent test), since that too yields empty_pkgs>0 -- one conditional covers two of the three families. Family (3) here (negative-only greps satisfiable by deletion) is a separate proof-authoring-convention problem and is NOT fixed by this.
-        Refusing a proof_cmd containing && outright is now the FALLBACK option, not the leading one: conjunctions are a reasonable way to express "the named test passes AND the package stays green," and banning them outright would push authors toward worse proofs instead of fixing the real defect (a verdict that contradicts evidence the tool already gathered). Only consider the narrower "refuse a -run-filtered clause followed by an unfiltered same-package go test without an explicit non-empty-match check" rule if the empty_pkgs>0 downgrade proves insufficient in practice.
-  
-  PROOF_CMD for use of this scoping is confirmed RED (verdict=FAIL) via: bash scripts/proof-check.sh "grep -qi 'conjunction' CLAUDE.md && grep -q 'refuse' scripts/proof-check.sh" -> verdict=FAIL class=wrapper,file-assertion exit=1 (neither CLAUDE.md nor proof-check.sh yet mention this family -- confirmed BEFORE the fix, as required).
-  
-  
-  ---
-  FOURTH VACUOUS-PROOF FAMILY (2026-08-02, main/orchestrator): a PRE-SATISFIED CLAUSE. This task's OWN original proof_cmd -- `grep -qi 'conjunction' CLAUDE.md && grep -q 'refuse' scripts/proof-check.sh` -- was defective in exactly this new way: `grep -c 'refuse' scripts/proof-check.sh` returns 2 TODAY, before any fix, so that clause contributed zero verification (proof-check.sh already says 'refuse' twice, in unrelated prose about the decision NOT to refuse outright). The whole conjunction was held RED only by the other clause -- and it was pinned to the now-demoted 'refuse &&' fallback wording rather than the current leading fix (empty_pkgs>0 downgrade), so a correct implementation may never even add the word 'refuse'. A clause that is already true before the work starts makes a proof LOOK more rigorous (two checks!) while one of the checks verifies nothing. This is distinct from family (1) (a -run naming a nonexistent test), family (2) (a negative-only grep satisfiable by deletion), and family (3) (conjunction masking, this task's main subject): always verify EACH clause of a compound proof independently -- confirm it is actually RED on today's tree -- before combining them, and watch for clauses that can mask each other.
-  
-  REPLACEMENT proof_cmd (2026-08-02, main/orchestrator), verified clause-by-clause before combining:
-    new proof_cmd: ! bash scripts/proof-check.sh 'go test -run TestDefinitelyDoesNotExistAnywhere ./internal/wal && go test ./internal/wal' | grep -q 'verdict=PASS' && grep -q 'empty_pkgs' CLAUDE.md
-    - clause 1 (behavioural, not lexical): runs family (3)'s exact defect shape (`go test -run <nonexistent> ./internal/wal && go test ./internal/wal`) through scripts/proof-check.sh and asserts its verdict is NOT PASS. Verified RED today in isolation: the inner command currently reports `verdict=PASS class=test exit=0 tests_run=245 top_level=74 skipped=2 failed=0 empty_pkgs=1` (the -run filter matches zero tests, empty_pkgs=1, yet the unfiltered second clause still carries the verdict to PASS), so the negated grep for 'verdict=PASS' currently fails (exit 1) -- correctly RED, because the tool has not yet been fixed to downgrade on empty_pkgs>0.
-    - clause 2 (documentation): pinned to the specific string 'empty_pkgs' -- the field name the recommended fix must act on -- rather than the loose word 'conjunction' used before. Verified absent from CLAUDE.md today: `grep -c 'empty_pkgs' CLAUDE.md` returns 0.
-    - both clauses verified independently RED before combining (per the trap this task itself documents: clauses that can mask each other). Combined command verified RED directly in bash (`bash -c "$CMD"`, exit 1) and, separately, run itself through `scripts/proof-check.sh "$CMD"`, which reports: `proof-check: verdict=FAIL class=wrapper,file-assertion exit=1 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0` -- confirmed RED, reproduced twice for stability.
-  _Proof: ! bash scripts/proof-check.sh 'go test -run TestDefinitelyDoesNotExistAnywhere ./internal/wal && go test ./internal/wal' | grep -q 'verdict=PASS' && grep -q 'empty_pkgs' CLAUDE.md_
-- [ ] None · IDEM-11-FU-HUBAPPLY: hub.Apply returns early for non-message Entry.Kind, so IDEM-13/14/15 cannot fold their own Entry.Idem — durability, P2
-  Noted by the IDEM-11 agent 2026-08-03 as a structural blocker for the rest of the epic, not a defect in shipped behaviour.
-  
-  hub.Apply returns early for any Entry.Kind that is not a message, so a prepare carrying an Entry.Idem record for a NON-message operation (enrol, leave, peer-enrol) is never folded into the applied-key store during replay. IDEM-13 (idempotent enrol/leave/peer-enrol) and IDEM-14 (the violation path) therefore cannot work until Apply is extended to route by Kind and fold Idem for every kind that carries one.
-  
-  Whoever takes IDEM-13 should expect to do this first, or it should be split out ahead of them. Flagging it now so it is not rediscovered as a surprise mid-task.
-- [ ] None · Enrol accepts a duplicate enrolment public key -- one keypair can hold unlimited agent ids — auth, P2
-  Found by the security gate on AUTH-1-FU-ACTIVECAP, verified empirically (three enrolments with a byte-identical public key were all accepted, minting alpha-1/-2/-3, after which ONE private key held 3x the per-agent active-session cap). Service.Enrol validates the public key's LENGTH but never checks whether that key is already enrolled against another agent id, and the Roster interface offers no by-key lookup to do so. Two consequences. First, it is the direct reason AUTH-1-FU-ACTIVECAP raises the flood cost by only ~1.6%: the "512 distinct enrolments" the cap forces are 512 unauthenticated POSTs from ONE keypair, not 512 identities an attacker must obtain. Second, it makes key->identity one-to-many where several planned features assume one-to-one: the invite-only + self-signed-mTLS design (invariant 11) binds a client-certificate fingerprint to an agent id at enrolment, AUTH-4 revocation is naturally expressed per key, and a roster listing two agents with identical keys is a spoofing surface. The right answer is NOT obviously "reject" -- refusing a duplicate leaks "this key is already enrolled" to an unauthenticated caller, which is its own oracle. Needs a recorded DECISIONS.md decision (reject / allow-and-document / defer to the invite gate, which would moot it) rather than a silent code change.
-- [x] None · LISTENADDR-FU-CONTRACTS: CONTRACTS.md CLI-flag table still shows -listen default :8080 — docs, P1
-  The AUTH-1-FU-LISTENADDR change (task c27f9439-c821-4d86-9e92-bac352ec1fd3) changes defaultListen in cmd/agent-bus/main.go from ":8080" to a loopback address (DECISIONS.md settled on localhost as the correct default), but its agent was DELIBERATELY denied ownership of CONTRACTS.md this loop because another agent (AUTH-1-FU-PENDINGCAP) holds that file -- CONTRACTS.md is single-writer by project rule this loop. CONTRACTS.md CLI flags (cmd/agent-bus) table (currently around line 52: `| -listen | :8080 | TCP address to bind, e.g. :8080 or 127.0.0.1:8080 |`) therefore still documents the old :8080 default and must be corrected once the code change lands. The LISTENADDR agent was instructed to report the exact replacement text in its own task journal (c27f9439) -- check there first; as of this filing (2026-08-02 ~19:43 UTC) that task had posted no notes yet (still in flight), so the exact replacement wording is not yet available and must be pulled from that tasks journal once it reports. This is tracked doc debt, deliberately incurred by the file-ownership boundary, not an oversight.
-  _Proof: grep -qE "^\| \`-listen\` \| \`127\.0\.0\.1:8080\` \|" CONTRACTS-CLI.md && echo ALL_OK_
-- [ ] DISCOVERY-DOC-FU-CLI · DISCOVERY-DOC-FU-CLI: `agent-busctl` subcommand that fetches and renders the bus discovery document (+ AGENT_PROTOCOL.md / CONTRACTS-CLI.md entries) — cli, P1
-  Invariant 7's delivery half of DISCOVERY-DOC. The server now serves a machine-readable discovery document; an agent must be able to read it through the compiled Go CLI rather than hand-writing HTTP. Add the subcommand over the importable client/ package, plus the AGENT_PROTOCOL.md entry and the CONTRACTS-CLI.md row, in the same task. Blocked on the cmd/busctl -> cmd/agent-busctl rename settling. Depends on DISCOVERY-DOC (server side).
-- [ ] MTLS-ROTATE-FU-SERVERSIDE · MTLS-ROTATE-FU-SERVERSIDE: the bus serves ONE certificate, so DECISIONS.md E3's two-certificate rollover is only half built — security, P1
-  Raised by the documentation pass on MTLS-LISTENER. MTLS-ROTATE (29cdafc) built the CLIENT half -- a client pins an accept-SET of up to two fingerprints. The SERVER half does not exist: cmd/agent-bus/tlslisten.go puts exactly one tls.Certificate in tls.Config.Certificates, and internal/buscert states it has "no rotation machinery yet". Invariant 11 requires certificate rotation to serve TWO certificates during rollover so clients can re-pin without downtime, and requires that rotation never force every client to re-enrol. Until this lands, a rotation is still an outage.
-  _Proof: go test -race -run 'TestBusTLSConfig' ./cmd/agent-bus_
-- [ ] DISCOVERY-DOC-FU-README · DISCOVERY-DOC-FU-README: README.md still documents the old three-field /v1/info body — docs, P2
-  Found by the reviewer gate during DISCOVERY-DOC. README.md (around line 100) still shows GET /v1/info returning only {bus_id, version, uptime_seconds}. It now also returns discovery: /v1/discovery, a constant path pointing at the new unauthenticated protocol-discovery document. README.md was outside DISCOVERY-DOC's file-ownership boundary so it was flagged rather than edited. Fix the README body and, while there, consider whether README should mention /v1/discovery as the bootstrap entry point for an agent handed only a URL.
-- [-] None · [RESOLVED 2026-08-02 -- SUPERSEDED] CRC32C tail-repair proofs are remotely forgeable => permanent refuse-to-start, no operator override — durability, P1
-  RESOLVED. THE USER ANSWERED BOTH HALVES OF THIS ESCALATION ON 2026-08-02, AND EACH ANSWER KILLS THE
-  FINDING BY A DIFFERENT ROUTE. Superseded rather than done, because nothing was implemented here.
-  
-  This task asked three questions. All three are answered:
-  
-   (1) "Does an operator override belong here at all?" -- MOOT. The bus ALWAYS restarts (DECISIONS.md,
-       2026-08-02, section 1): damaged records are discarded, logged loudly and specifically, and the
-       server keeps running. There is no permanent refuse-to-start state left to override. The decision
-       says so in terms: "This also removes the permanent-refuse-to-start DoS, and with it the need for
-       the operator escape hatch that was previously recommended: always-restart *is* the escape hatch."
-       => carried by DUR-11 (884d3da4), in flight.
-  
-   (2) "Is the right fix instead upstream -- authenticate WAL frames?" -- YES, DECIDED, and it is the
-       chosen fix. Section 3: CRC32C is replaced by an HMAC-SHA256 keyed MAC, precisely because
-       "CRC32C is an error-detecting code, not an integrity primitive: it is unkeyed and GF(2)-linear,
-       which is precisely why security demonstrated that an ordinary remote client could craft a payload
-       making a torn tail look like a complete record. A keyed MAC eliminates that attack by
-       construction -- a client cannot compute a MAC over a key it does not hold."
-       => carried by DUR-12 (reserved ondisk-format-version=2), BLOCKED on where the MAC key lives.
-  
-   (3) "Is a self-inflicted DoS via one's own future crash an acceptable trust boundary?" -- MOOT for
-       the same reason as (1): under always-restart there is no denial of service to inflict.
-  
-  THE ONE THING THAT SURVIVES, and it is DUR-12's, not this task's: a key stored beside the WAL defends
-  against the REMOTE CLIENT in this finding but NOT against an attacker who already has
-  data-directory write access. That residual is stated in the decision and is DUR-12's open blocker.
-  
-  DO NOT PICK THIS UP. Work DUR-11 and DUR-12.
-  
-  --- ORIGINAL ESCALATION retained below for the mechanism, which is a good record of how the finding
-  --- was constructed (Gaussian elimination over the 32 CRC columns, printable-ASCII JSON payload). See
-  --- the DUR-10 security kind=response of 2026-08-02T15:23 for the end-to-end reproduction.
-  _Proof: go run ./cmd/agent-bus -h 2>&1 | grep -qiE "repair|force-start|allow-corrupt-tail"_
-- [ ] None · IDEM-11-FU-PAPERTRAIL: DECISIONS.md and CONTRACTS-HTTP.md state the OPPOSITE of what IDEM-11 shipped — docs, P1
-  Reviewer gate finding on IDEM-11 (staged, uncommitted), 2026-08-03. Raised as a P1 in the PAPER TRAIL, not in the code -- the code is right and the docs contradict it. Deliberately out of the implementing agent's file boundary (DECISIONS.md / CONTRACTS-HTTP.md were single-writer-locked during a 4-agent parallel wave), hence this task.
-  
-  1. DECISIONS.md:706-708 says idempotency keys "fail closed" and retention is "1 day or 1 GB". Neither is what shipped: retention is a DERIVED 50h10m22s window with a fail-closed COUNT cap of 65536, and an expired key is NOT rejected -- it is applied as a NEW operation.
-  
-  2. CONTRACTS-HTTP.md:164-176 still documents the message-retention coupling that IDEM-11 deleted.
-  
-  SUPERSEDING TEXT PROPOSED BY THE IMPLEMENTING AGENT (review before landing, do not paste blind):
-  "IDEM-11 supersedes items 8-11 of the 2026-08-02 sixteen-questions decision. Idempotency keys are retained for a DERIVED bounded window (50h10m22s = (24h peer-outage budget + 1h max session + 5m max parked poll + 11s client retry horizon) x 2) with a fail-closed count cap of 65536. A retry arriving after its key expires is NOT rejected -- it is applied as a NEW operation. Fail-closed is unimplementable over opaque client-supplied keys (IDEM-10): an evicted key is byte-indistinguishable from a never-seen key, and every legitimate first attempt is a never-seen key. The honest guarantee is 'duplicates are suppressed within the retention window', never unconditional exactly-once."
-  
-  That last sentence is the load-bearing one and should survive editing: the system does NOT provide unconditional exactly-once, and any doc implying it is wrong.
-  
-  Also fold in the operator-facing note: no migration needed (existing logs replay unchanged), rebuild the binary, and see IDEM-11-FU-DOWNGRADE for the downgrade hazard.
-- [ ] MTLS-LISTENER-FU-TLS13 · MTLS-LISTENER-FU-TLS13: raise both ends of the TLS floor to 1.3 and drop the reachable CBC-SHA1 suites — security, P2
-  From the MTLS-LISTENER security gate (L2). The server floors at TLS 1.2 to match client/pin.go's pinnedTLSConfig, which is correct today. The gate traced Go 1.19.4's cipherSuitesPreferenceOrder against the Ed25519 leaf and bounded the reachable 1.2 suite set to AES-GCM-{128,256}, ChaCha20-Poly1305 and ECDHE_ECDSA_AES_{128,256}_CBC_SHA. Every reachable suite is ECDHE so forward secrecy holds, Go's server ignores client preference, and the negotiation is signed so there is no downgrade attack -- the gate explicitly did NOT ask for this to change now. Raising BOTH ends to 1.3 removes CBC entirely. Blocked on confirming no non-Go consumer needs 1.2 (an operator's curl --cacert against /healthz is one such consumer).
-  _Proof: go test -race -run 'TestBusTLSConfig' ./cmd/agent-bus && grep -n 'VersionTLS13' cmd/agent-bus/tlslisten.go client/pin.go_
-- [ ] None · Client-certificate expiry is not enforced anywhere: RequireAnyClientCert does no chain verification, so NotAfter is never checked — security, P1
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN (39dcdcff) | RELATED: MTLS-CROSSCHECK (2b2af075)
-  
-  tls.RequireAnyClientCert requires a client certificate but performs NO verification, so Go's stdlib TLS handshake does not check the presented client cert's NotBefore/NotAfter. MTLS-DESIGN has now set a 365-day validity policy, but nothing enforces it -- the policy is real and the enforcement path is absent.
-  
-  Whoever implements MTLS-CROSSCHECK (2b2af075) must EITHER (a) read the presented cert's NotAfter at the application layer after the handshake and reject a connection past it, mirroring the session-token expiry check, OR (b) explicitly decide expiry is advisory and the session-token/revocation layer is the sole enforcement -- and record which in DECISIONS.md.
-- [ ] MTLS-VERIFY-FU-DOCSCHEME · MTLS-VERIFY-FU-DOCSCHEME: README + AGENT_PROTOCOL still tell agents to dial http:// a bus that is now https-only — docs, P0
-  MTLS-LISTENER made the bus TLS-only, so a plaintext request gets a bare 400 Bad Request ("Client sent an HTTP request to an HTTPS server.") from net/http and never reaches a route. These files were OUTSIDE the feature-runner's file-ownership boundary and are still wrong: README.md:113-114 (agent-busctl --bus http://127.0.0.1:8080 enrol --name planner and --name builder --keep-current) and AGENT_PROTOCOL.md:266 (agent-busctl enrol --bus http://127.0.0.1:8080 --name planner). AGENT_PROTOCOL.md:252 is worse than an example: it states as fact "today every real bus is http://127.0.0.1:... and no fingerprint is involved", which is now false. PROTOCOL.md:195 says "The listener is still plaintext HTTP". FIX: change each to https:// plus --bus-fingerprint <hex>, and rewrite the two prose claims. RATED P0 BY THE SECURITY GATE, with this reasoning: "A documented command that fails with a transport error is the single most reliable generator of 'just add an insecure flag' in the field, and invariant 11 forbids exactly that flag." Must land before this change is announced to agents.
-  _Proof: ! grep -rn "bus http://" README.md AGENT_PROTOCOL.md && ! grep -n "listener is still plaintext" PROTOCOL.md_
-- [ ] None · Triage dispatched two concurrent agents with overlapping ownership of CONTRACTS-CLI.md — process, P2
-  Self-reported defect, 2026-08-07: triage (main) dispatched INVITE-MINT and MTLS-ROTATE concurrently, and both agents' tasks required editing CONTRACTS-CLI.md. This is a triage error, not an agent error -- caught only because the INVITE-MINT agent inspected its own diff before staging.
-  
-  What happened: the shared worktree means a single `git add CONTRACTS-CLI.md` stages whatever ANY agent has written to that file, not just the calling task's hunks. INVITE-MINT's `git add` swept in MTLS-ROTATE's concurrent edits -- the file's working-tree diff was +274/-32 across 11 hunks, and only ONE +134 hunk (the invite section) belonged to INVITE-MINT; the other nine belonged to MTLS-ROTATE (--bus-fingerprint, `busctl pin`, the accept-set, identities.json). The INVITE-MINT agent caught this by diffing its own change before commit and correctly unstaged the file rather than committing another task's work under its own commit message and task id -- but nothing in the process forces that check; it depended on the individual agent noticing.
-  
-  CLAUDE.md already documents the mechanical half of this failure mode: `git add <paths>` does not scope a later commit (a bare `git commit` after a broad add takes the whole index), and the newer rule (commit d7ebc2b) records that a pathspec-scoped commit takes the WORKTREE at commit time, not the index at add time -- so even a careful `git commit -- CONTRACTS-CLI.md` would have picked up MTLS-ROTATE's uncommitted worktree changes to that same file, not just what INVITE-MINT staged. A shared doc file being edited by two concurrent agents is therefore doubly dangerous: both the index-sweep failure mode AND the worktree-at-commit-time failure mode apply to it simultaneously, and neither is guarded by any mechanism -- only by an agent choosing to diff-inspect before staging.
-  
-  Recommendation: triage should treat every CONTRACTS-*.md plane file (CONTRACTS-CLI.md, CONTRACTS-HTTP.md, CONTRACTS-ONDISK.md, CONTRACTS-AGENT.md) as a single-owner resource per triage pass, exactly like DECISIONS.md and AGENT_LOG.md already are per CLAUDE.md's 'Parallel-agent coordination' section -- i.e. do not dispatch two concurrently-running agents whose tasks both touch the same CONTRACTS-*.md file; sequence them instead, or route both doc edits through a single agent/pass.
-  _Proof: grep -n 'CONTRACTS-\*\.md plane file as a single-owner resource' CLAUDE.md_
-- [ ] None · RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can permanently exhaust an agent name — relay, P1
-  Found by the security gate on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787). LATENT ONLY BECAUSE RELAY IS UNWIRED -- nothing outside internal/relay imports it today.
-  
-  CHAIN. cmd/agent-bus/suffixfloors.go derives per-name agent-id suffix floors from the SENDER and RECIPIENTS of durable store message records, and it is safe to do so because those fields are SERVER-DERIVED: internal/hub/hub.go:678 requires every recipient to be Enrolled on this bus before anything is written. internal/relay/message.go:519-530 validates recipient SHAPE ONLY.
-  
-  EXPLOIT once relay is served. A hostile (or merely buggy) peer relays a message naming the local recipient '<local-bus>.alpha-18446744073709551615'. It reaches the durable log. On the next start that dir's backfill folds it into alpha's floor, ids.RaiseFloor applies NO upper bound, and the name 'alpha' is EXHAUSTED (ids.ErrSuffixExhausted) for that bus PERMANENTLY, across every future restart. That is denial of one agent NAME, forever, from a remote party. ids.NameSuffixes.RaiseFloor's own doc names this shape in as many words: 'Validate and BOUND a peer's claim BEFORE it reaches RaiseFloor.'
-  
-  DO. Roster-check local-bus recipients in the relay ingress path before the durable write, exactly as hub.publish does. Note the sender vector is already closed (ValidatePeerBusID plus the sender-bus check), so this is specifically about RECIPIENTS.
-  
-  PROOF. A test that a relayed message naming an unenrolled local recipient is REFUSED before anything is written, and that the suffix floor for that name is unchanged after a restart.
-- [x] None · scripts/spec-cloud.sh leaks SPEC_CLOUD_PASSWORD on the `aws` argv (readable via /proc/*/cmdline) — tooling, P2
-  PRE-EXISTING, and outside the CORE-1..4 change wave -- filed here because the reviewer/security pass over that wave noticed it, not because that wave introduced it. scripts/spec-cloud.sh authenticates to Cognito by passing `PASSWORD=$SPEC_CLOUD_PASSWORD` as an element of the `aws` command's ARGV. Process arguments are world-readable on Linux via /proc/<pid>/cmdline, so for the lifetime of that aws invocation ANY local user on the box can read the plaintext Spec Server password -- a plain `ps auxww` or a tight loop over /proc is enough. It may also land in shell history, audit logs, or a process accounting record.
-  
-  Fix: keep the secret off argv. Options, best first: (a) feed the auth parameters via `--cli-input-json file:///dev/stdin` (or a 0600 temp file in a private dir, removed with a trap) so the password travels on stdin/in a file rather than the command line; (b) use an aws-cli mechanism that reads the value from the environment. Note that the ENVIRONMENT is better than argv but not perfect -- /proc/<pid>/environ is readable by the same UID -- so prefer stdin. Keep the credentials file itself outside the repo where it already correctly lives (/mnt/sdc/mike/claude-scratch/spec-cloud-creds.env), and check its permissions are 0600 while you are there.
-  
-  Verify by running the wrapper and confirming a concurrent `ps auxww | grep -c <password>` finds nothing (use a throwaway value to test, never the real one). This touches the tooling every agent uses to reach the Spec Server, so change it carefully and confirm `bash scripts/spec-cloud.sh -sf /readyz` still succeeds and a cached token still refreshes on 401.
-  _Proof: grep -q -- "--cli-input-json" scripts/spec-cloud.sh && ! grep -q "PASSWORD=\$SPEC_CLOUD_PASSWORD" scripts/spec-cloud.sh_
-- [ ] INVITE-HARDEN · INVITE-HARDEN: constant-time invite-secret comparison and ONE indistinguishable failure response for unknown/expired/revoked/already-consumed — security, P1
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE | BLOCKS: none
-  
-  Mirrors the existing deliberate indistinguishability of the 401 and 404 surfaces (CONTRACTS-HTTP.md:19, :235-239) -- distinguishing the four invite failure modes is an enumeration oracle. Comparison uses stdlib crypto/subtle.ConstantTimeCompare. INVARIANT 9: do not hand-roll a comparison, a hash, or a token format; if any part of this looks like inventing a scheme, stop and escalate.
-  _Proof: go test -race -run 'TestInviteRedeemFailuresIndistinguishable|TestInviteSecretComparedInConstantTime' ./internal/httpapi ./internal/invite_
-- [ ] None · MSG-FU-SUFFIXFLOOR-FU-UNSEAL: make ids.NewNameSuffixes born-unsealed (or delete it) now that cmd/ no longer calls it — id, P1
-  Acceptance criteria (c) and (d) of MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), dictated by the security gate as MUST-CLOSE-BEFORE-ENROLMENT-IS-DURABLE. They live in internal/ids, which was outside the wiring task's file-ownership boundary, and the task that previously carried them (2db4a36f) is SUPERSEDED, so nothing else holds them.
-  
-  (c) ids.NewNameSuffixes (internal/ids/agentmint.go:339) is born SEALED, and its doc justifies that solely by 'a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds ids.NewNameSuffixes() on every start'. THAT CALLER IS GONE -- verified: there are currently ZERO production callers of ids.NewNameSuffixes anywhere in the tree. So flip it to born-UNSEALED for parity with NewSequence (so even the empty case has to say out loud that it is empty), or delete it outright. Born-sealed with no caller is a loaded footgun: the next startup path that reaches for the obvious-looking constructor gets a silently sealed, all-zero floor map.
-  
-  (d) Add a guard that no PRODUCTION package calls ids.NewNameSuffixes. cmd/agent-bus/suffixfloors_test.go:TestNoFreshSuffixCounterInCmd already does this for package main, by parsing the AST (not grepping, so doc comments naming the constructor do not trip it) and resolving the ids import name so an alias or dot-import cannot evade it. Generalise that to the whole module, or place the equivalent in internal/ids.
-  
-  PROOF. go test -race ./internal/ids ./cmd/... green; the new guard fails when a call is reintroduced (prove the RED).
-- [ ] INVITE-REVOKE · INVITE-REVOKE: durably revoke an un-redeemed invite, and state what revocation does to an agent that already redeemed one — auth, P1
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-STORE, INVITE-GATE | BLOCKS: none
-  
-  Revocation must survive restart (same durable store as INVITE-STORE). BLOCKED ON THE ESCALATED DECISION: does revoking an invite cascade to the agent that already redeemed it and kill its live sessions (requires AUTH-4 leave/revocation, a853261d), or is an invite simply spent at redemption so revocation only affects un-redeemed invites? Whichever the user picks, this task must state it explicitly in CONTRACTS-HTTP.md -- silence here is the failure mode.
-  _Proof: go test -race -run 'TestInviteRevokedCannotBeRedeemed|TestInviteRevocationSurvivesRestart' ./internal/invite && grep -qi 'revocation' CONTRACTS-HTTP.md_
-- [x] None · Whole-log quarantine reissued EVERY sequence number ever minted -- fixed by a durable index floor outside the log (invariant 1, second instance) — durability, P0
-  THE DEFECT: internal/wal/recover.go:252-262 -- when the entire WAL log is quarantined as corrupt, recovery starts a FRESH log at index 1. No PREPARE record survives anywhere in the log. The message-sequence high-water mark derived at startup is therefore 0, and a bus that then mints sequences from 1 REISSUES EVERY SEQUENCE NUMBER IT HAS EVER USED -- not one index at a damaged tail, but the bus's entire history. Nothing downstream can detect this; it is silent.
-  
-  This is INVARIANT 1 (CLAUDE.md: 'ids are never reused ... including across restarts') and the user's ruling stands WITHOUT narrowing (commit 4110946; DECISIONS.md 'Five decisions...' section 3; amended invariant 1 in CLAUDE.md). That ruling was made about the tail-salvage reissue tracked on e120153b-9d8a-4b6a-bd4e-89431954496b. THIS TASK IS A SEPARATE, STRICTLY WORSE INSTANCE OF THE SAME VIOLATION and is explicitly NOT covered by e120153b and NOT a duplicate of it: e120153b is about reissuing one index at a damaged tail; this is about the WHOLE log vanishing and the floor silently becoming 0.
-  
-  REQUIRED BEHAVIOUR (fail-closed, proposed): startup must distinguish 'legitimately empty -- a brand-new bus that has never minted anything' from 'quarantined -- the high-water mark is UNKNOWN because the log that would prove it was discarded as corrupt'. In the second case startup must REFUSE TO START rather than silently resuming from 1. This is a deliberate, narrow exception to the always-restart rule -- in the same family as the user's decision that a missing/wrong MAC key is FATAL. Always-restart exists to stop media damage holding the bus hostage; it does not exist to license silently reissuing every id the bus ever minted.
-  
-  *** CONSENT-SENSITIVE -- CONFIRM WITH THE USER BEFORE IMPLEMENTATION ***. The user reverted a broader refuse-to-start policy once already. The fail-closed DIRECTION follows from invariant 1 as ruled, but the specific mechanism (what marks 'legitimately empty' vs 'quarantined-unknown', where that marker is durably recorded, and the exact refuse-to-start condition) needs explicit sign-off before code is written, not just inferred from the earlier ruling on the tail-salvage case.
-  
-  CROSS-REFERENCES:
-  - e120153b-9d8a-4b6a-bd4e-89431954496b -- the tail-salvage reissue defect at the same invariant, different site (damaged tail, not whole-log quarantine). This task is NOT a duplicate; do not merge them.
-  - 8c9b6489-abb1-444e-9eeb-3ff87646f632 (ID-2-WIRING-SEAL, landing now) -- provides the machinery this needs: Seal()/ErrFloorUnproven, where a sequence allocator is born UNSEALED and Next() refuses to issue until the floor is proven. Its in-tree doc comment already states the requirement verbatim: the floor must be derived 'from the highest sequence number EVER WRITTEN TO DISK -- every prepare, committed, aborted and dangling alike'. The whole-log-quarantine case is PRECISELY the case where that derivation is impossible -- so the seal must never be taken, and Next() must keep refusing (ErrFloorUnproven), which is the mechanism this task should most likely use to implement the refuse-to-start behaviour rather than inventing a new one.
-  - c31f6999-da4e-400d-ab55-178b82e2a42e (ID-2-WIRING-OBSERVER) and 838677e6-d424-45ed-8580-924cb2da28a6 (ID-2-WIRING) -- the floor-derivation machinery this interacts with. The ID-2-WIRING-SCHEMA agent (80b54ee4-55d5-44b8-a479-c0a13343d15a) recorded this whole-log-quarantine case as a required fail-closed behaviour of what it called 'ID-2-WIRING-STARTUP' while choosing Option A'.
-  
-  ORDERING: lives in internal/wal, which DUR-12 (cbc9ab0c-3b34-48d0-acd8-5eabd4dc4a02, in_progress -- CRC32C to HMAC-SHA256 MAC swap, on-disk format v2) owns this loop right now. Do NOT dispatch/implement until DUR-12 lands -- same ordering constraint that applies to e120153b.
-  
-  PROOF_CMD VERDICT (recorded now, pre-implementation): `bash scripts/proof-check.sh 'go test -race -run TestRecover_WholeLogQuarantine_RefusesStartOnUnprovenSequenceFloor ./internal/wal'` returns verdict=VACUOUS (exit 4, 'no tests to run', empty_pkgs=1) because the test does not exist yet -- this is expected and is recorded here explicitly so nobody mistakes an unwritten-test 0-exit for a pass. DO NOT complete this task on a VACUOUS proof; the test must be written (quarantine a log holding sequences up to N, restart, assert the bus REFUSES TO START rather than minting from 1) and proof-check must report PASS before this is marked done.
-  
-  --- SUPERSEDED PREMISE (appended 2026-08-07 by spec-keeper, original text above left intact) ---
-  
-  This task's TITLE and description originally asserted, as the REQUIRED BEHAVIOUR: "startup must
-  REFUSE TO START rather than silently resuming from 1" on a whole-log quarantine, and the task was
-  marked *** CONSENT-SENSITIVE -- CONFIRM WITH THE USER BEFORE IMPLEMENTATION ***.
-  
-  That premise is SUPERSEDED by a newer, explicit, always-restart decision: DECISIONS.md 2026-08-02
-  "Availability over retention" plus CLAUDE.md invariant 6 ("recovery ALWAYS reaches a running
-  server"), reaffirmed and reconciled with invariant 1 in commit 888f6c6 (2026-08-07, "Resolve a
-  self-contradiction in DECISIONS.md about id reuse and refuse-to-start"). The refuse-to-start
-  mechanism was NOT implemented. Reasons: (1) a refusal would directly contradict the newer,
-  explicit always-restart decision -- invariant 6 is not narrowed by this task, any more than
-  invariant 1 is narrowed by e120153b; (2) it is unnecessary, because a durable index floor
-  (internal/wal/indexfloor.go, <data-dir>/wal-index-floor, on-disk format version 4, reserved
-  2026-08-07 by feature-runner) makes the high-water mark KNOWABLE even after a whole-log quarantine
-  -- the floor is persisted OUTSIDE the log, written ahead of the index it authorises, so recovery
-  never has to choose between "refuse" and "reissue"; it just reads the floor. The SHIPPED fix
-  therefore does neither horn of the false dilemma the original framing posed: the bus ALWAYS boots
-  (invariant 6 holds), and it resumes strictly ABOVE every index/sequence ever minted, proven by the
-  floor file rather than by anything that survived in the (possibly quarantined) log itself
-  (invariant 1 holds, unnarrowed).
-  
-  The task's recorded proof_cmd named a test, TestRecover_WholeLogQuarantine_RefusesStartOnUnprovenSequenceFloor,
-  that was deliberately NEVER WRITTEN, precisely because its name enshrines the superseded
-  refuse-to-start policy; writing it would have committed the test suite to asserting a mechanism
-  the project explicitly rejected. The crash-injection coverage that actually proves the shipped
-  behaviour lives instead in internal/wal/indexfloor_crash_test.go
-  (TestWALIndexFloorCrashNeverReissuesAnIndex and TestWALIndexFloorCrashedRunThatJumpedIsRemembered),
-  which kill -9 a real writer mid-run, quarantine the resulting log, and assert the next index is
-  strictly greater than every index the killed process was handed -- see test-engineer's report on
-  sibling task e120153b for the full run-down.
-  
-  This task is REOPENED (un-superseded) to track that shipped fix through review/security, rather
-  than staying folded into 6ebe51be-2486-4ab9-a25d-675b627675f6, because the actual implementation and
-  test work for the whole-log-quarantine defect described above was done under this task (and its
-  sibling e120153b) by the currently in-flight feature-runner pass, not under 6ebe51be. 6ebe51be
-  remains cross-referenced as largely subsumed by this same mechanism, with one residual gap noted on
-  it (data directories that predate the floor file, quarantined on their first start under the new
-  binary) -- see the response note posted there today.
-  _Proof: go test -race -count=1 -run 'TestWALIndexFloorAcceptsTheBodyShippedInMain|TestWALIndexFloorLegacyDigestNeverCarriesASeal|TestWALIndexFloorForgedSealIsNotBelieved|TestWALIndexFloorTamperedUnderItsOwnKeyIsFatal|TestWALIndexFloorRemedyDoesNotUnderstateItsCost|TestWALIndexFloorSurvivesALostMACKey|TestWALIndexFloorReapIsNotAGlobPattern|TestWALIndexFloorCorruptFileIsFatalAndNamesTheRemedy|TestWALIndexFloorP0BTruncationSweepNeverReissues|TestWALSevereDiscardIsNeverCrowdedOutOfTheLog' ./internal/wal_
-- [-] COMMIT-HYGIENE-MIXED-22E8EB6 · COMMIT-HYGIENE-PRACTICE-NOTE: standing practice -- git commit should carry an explicit pathspec (accusation against 22e8eb6 was FALSE, see corrected note) — process, P2, cancelled
-  CORRECTED 2026-08-02 (main/orchestrator). This task originally accused a "concurrent agent" of running a bare git commit that swept unrelated DUR-12 files into commit 22e8eb6. THAT ACCUSATION IS FALSE and has been verified directly: git log -1 --format="%H %an <%ae> %s" 22e8eb6 shows the sole author is "mike <dodgymike@gmail.com>" -- the user, and the ONLY committer on this project. No agent committed anything; there was no concurrent-agent bare git commit incident. This is the same misreading-user-commits-as-rogue-agent failure that has burned this project before (one prior agent even withheld work over it) -- see DECISIONS.md "Commit history: LEAVE IT" (2026-08-02), which the user already ruled on: the history stands as-is, nothing to fix, no rewrite.
-  
-  The ONE genuinely useful residue, KEPT here as a standing practice note (not a bug report): when several agents concurrent stage work in the same working tree, a plain "git commit" with no pathspec takes the WHOLE index, not just the files the committing party intended. So the standing rule -- already reflected in this repos own git-commit guidance -- is: git commit should be given an explicit pathspec / reviewed staged diff before committing, never a bare git commit -A or blind git add -A, when multiple agents may have staged files concurrently. No corrective action needed beyond this note; there is no incident to remediate.
-- [-] ZZ-LOCKTEST · ZZ-LOCKTEST: verify If-Match CAS — process, P3, cancelled
-  throwaway; verifies the triage mutex protocol
-- [ ] None · Spec Server: PATCH /tasks/{id} rejects the key field outright (422 Unknown field) -- a keyless task can never acquire one in place — tooling, P2
-  Observed 2026-08-07 while bookkeeping the agent-bus backlog. CLI-1-FU-BINARYNAME (public_id 6a1eb5fa-5cfe-4808-a47d-224092f69c14) was created with key: null, and CLAUDE.md / task descriptions across this project cite it by the title-embedded name "CLI-1-FU-BINARYNAME" as if it were a real key -- it is not; it has no key at all.
-  
-  CORRECTION TO THE ORIGINAL DISPATCH BRIEF, recorded here rather than silently fixed: the brief that raised this described the bug as "PATCH silently ignores key". Empirically that is NOT what happens -- confirmed live against the running server, 2026-08-07. PATCH /tasks/{id} with a body containing "key":"..." returns HTTP 422 {"errors":{"json":{"key":["Unknown field."]}}}. The request is REJECTED, not silently accepted-and-dropped. The observable consequence is the same either way -- a keyless task can never acquire a key post-creation through the documented PATCH surface -- but the mechanism is a loud validation error, not a silent no-op, and the earlier characterisation should not be repeated.
-  
-  CONSEQUENCE: key is accepted only at creation time (POST .../tasks {"key":"...", ...}) per AGENTS_API.md's 'Create a task' example. There is no documented way to add or change a key on an existing task via the single-task PATCH endpoint. Our own docs and task descriptions routinely cite tasks by key (e.g. "BLOCKS: INVITE-GATE", "DEPENDS ON: MTLS-BUSCERT"); a keyless task silently breaks that convention for anyone or anything resolving by key.
-  
-  WORKAROUND on record: an export/import round-trip. GET /projects/{slug}/export?format=json returns every task including keyless ones with stable public_id; import is documented as idempotent on public_id (POST /projects/{slug}/import), so editing the key field in the exported JSON before re-importing should update it in place -- not verified end-to-end in this pass, flagged for whoever picks this up to confirm import actually treats key as updatable where PATCH does not.
-  
-  REPRODUCTION (run 2026-08-07, task subsequently cancelled -- public_id e36661b0-687e-465e-b72f-e33245088e38):
-    1. POST /projects/agent-bus/tasks {"title":"probe"}  (no key field) -> 201, public_id=P, key=null
-    2. PATCH /projects/agent-bus/tasks/{P} {"key":"PROBE-1"} -> 422 {"errors":{"json":{"key":["Unknown field."]}}}
-    3. GET /projects/agent-bus/tasks/{P} -> key is still null, confirming (2) was rejected outright, not applied
-  
-  Fix: either add key to PATCH's accepted schema (uniqueness-checked, same as at creation), or -- if key is deliberately immutable-after-creation by design -- say so explicitly in AGENTS_API.md's PATCH section so the export/import workaround is the documented path rather than something an agent has to discover by trial and error.
-  _Proof: PID=$(bash scripts/spec-cloud.sh -s -X POST "$B/projects/agent-bus/tasks" -H "Content-Type: application/json" -d '{"title":"keypatch-probe"}' | jq -r .public_id) && bash scripts/spec-cloud.sh -s -X PATCH "$B/projects/agent-bus/tasks/$PID" -H "Content-Type: application/json" -d '{"key":"KEYPATCH-PROBE-1"}' >/dev/null 2>&1; bash scripts/spec-cloud.sh -s "$B/projects/agent-bus/tasks/$PID" | jq -r .key | grep -q KEYPATCH-PROBE-1_
-- [ ] None · RELAY-2-FU-LOOPTEST-FLAKE: Unreproduced single failure of TestMessageRelay's loop subtest — relay, P2
-  During RELAY-2/3 the test-engineer observed ONE failure of TestMessageRelay/a_loop_is_200_with_a_dropped_reason,_never_an_error_status on the tree BEFORE any of its edits, and could not capture the failing assertion. Not reproduced in ~3,500 subsequent executions (~2,900 by the test-engineer including 8-way parallel load and cold-testcache runs, ~600 by feature-runner at -count=200). The only non-deterministic path in that subtest is doRelay's t.Fatalf("request: %v", err) on a transient httptest connection error, which would be HARNESS FRAGILITY rather than a product defect -- but that is a hypothesis, not a diagnosis. Task: either reproduce it, or make doRelay distinguish a transport error from an assertion failure so the next occurrence is self-diagnosing.
-- [-] None · keypatch-probe (spec-keeper bug repro, safe to cancel) — cancelled
-- [ ] None · MSG-FU-SUFFIXFLOOR-FU-DOCS: PROTOCOL.md and internal/ids docs still say the suffix wiring is NOT done — docs, P1
-  Found by the reviewer gate on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787). The startup wiring LANDED: cmd/agent-bus/main.go now constructs ids.OpenNameSuffixes via openSuffixAllocator, seals once, and has no fallback. Several docs still assert the opposite and were OUTSIDE that task's file-ownership boundary, so they ship contradicting the code.
-  
-  FIX, all of them:
-  1. PROTOCOL.md:592-597 -- 'Production wiring - NOT yet done ... cmd/agent-bus/main.go does not call ids.OpenNameSuffixes anywhere today; it still constructs a fresh ids.NewNameSuffixes() on every start, so no agent-suffixes file is written or read by a running bus yet, and the restart re-minting bug this file exists to close is unchanged in production.' EVERY CLAUSE IS NOW FALSE.
-  2. internal/ids/doc.go:56-75 -- still says cmd/agent-bus/main.go:327 builds a fresh ids.NewNameSuffixes() on every start.
-  3. internal/ids/agentmint.go:296-337 -- NewNameSuffixes' doc justifies being born SEALED by 'a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds ids.NewNameSuffixes() on every start'. That caller no longer exists; see the paired -FU-UNSEAL task.
-  4. CONTRACTS-HTTP.md:330 quotes the startup WARN verbatim, including the clause 'and agent id suffixes restart from 1 for every name' and the wording that followed it. The WARN was rewritten: the suffix claim was REMOVED from it entirely (it cannot be stated unconditionally -- a data dir whose floors file is lost DOES resume from 1), and the truth now lives in the per-start 'agent-id suffix floors' line, which is INFO / WARN / ERROR depending on the case. Re-quote the current line.
-  
-  PROOF. grep the four files for the stale claims; go build ./... green.
-- [ ] None · RELAY-2-FU-FORWARDER-REAP: Forwarder never reclaims a departed peer's queue or goroutine — relay, P2
-  internal/relay/forward.go creates one bounded channel plus one goroutine per peer on first enqueue and never removes either; there is no counterpart to Registry.RemovePeer. Peer churn or a flapping topology leaks a DefaultQueueDepth-slot channel and a goroutine per bus id ever routed to. Bounded in practice by the peer set, unbounded in principle.
-- [ ] None · Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:122, CLAUDE.md:332 — documentation, P2
-  Discovered by the CONTRACTS-SPLIT agent (360a2679, 2026-08-02) while splitting CONTRACTS.md into per-plane files (CONTRACTS-CLI/HTTP/ONDISK/AGENT.md, with CONTRACTS.md left as an index). That agent flagged but could not fix these -- outside its file-ownership boundary for that pass:
-  
-  1. README.md:88 -- `- [`CONTRACTS.md`](./CONTRACTS.md) — every route, flag, env var, and record type` still claims CONTRACTS.md directly HOLDS that table. It does not any more; it is now a short index pointing at the four plane files. Fix: reword to describe it as the index, and/or link the plane files directly.
-  
-  2. AGENT_PROTOCOL.md:122 -- `... see `CONTRACTS.md`, `## Authentication`) ...` cites a specific heading, `## Authentication`, inside CONTRACTS.md. That heading no longer exists there -- it moved verbatim to CONTRACTS-HTTP.md:192 (`## Authentication (added 2026-08-02)`) in the split. Fix: repoint the citation to CONTRACTS-HTTP.md.
-  
-  3. CLAUDE.md:332 (Parallel-agent coordination section) -- `- For the remaining shared files (`DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS.md`), only ONE agent at a time; prefer adding a new dated section over editing existing lines.` This is actively MISLEADING post-split: naming CONTRACTS.md alongside DECISIONS.md/AGENT_LOG.md as a single-writer-contended file is exactly the chokepoint the split (360a2679) existed to remove -- three P0s across two triage loops were caused by concurrent agents needing to land a doc update in that one file. Leaving this warning in place would keep agents needlessly serialising on a file that no longer holds the contended content (CONTRACTS.md is now a stable ~36-line index; the actual content lives in CONTRACTS-CLI/HTTP/ONDISK/AGENT.md, each independently editable). Fix: remove CONTRACTS.md from this single-writer list (the plane files still need their own single-writer discipline if a task touches more than one at once, but that is a materially different, narrower risk than the old whole-file chokepoint).
-  
-  NOTE: CLAUDE.md line ~158 (repository-layout section) and step 9 were ALREADY updated by the split agent to name CONTRACTS.md as INDEX only -- this task is only the three residual pointers above, do not re-touch line 158.
-  
-  PROOF STRENGTHENED 2026-08-02 (spec-keeper): the original proof_cmd was three negative assertions only, which is satisfiable by DELETING the three stale lines rather than fixing them (the same structural flaw fixed on 5b178dde) -- it now also requires positive evidence that each file points at the correct replacement (README.md cites CONTRACTS-HTTP.md/CONTRACTS-CLI.md/CONTRACTS-ONDISK.md, AGENT_PROTOCOL.md cites CONTRACTS-HTTP.md, and CLAUDE.md's "remaining shared files" bullet now names a CONTRACTS-*.md plane file instead of just dropping CONTRACTS.md from the list).
-  _Proof: grep -qF "CONTRACTS-HTTP.md" README.md && grep -qF "CONTRACTS-CLI.md" README.md && grep -qF "CONTRACTS-ONDISK.md" README.md && ! grep -qF ") — every route, flag, env var, and record type" README.md && grep -qF "CONTRACTS-HTTP.md" AGENT_PROTOCOL.md && ! grep -qF "see `CONTRACTS.md`, `## Authentication`" AGENT_PROTOCOL.md && grep -A2 "remaining shared files" CLAUDE.md | grep -qF "CONTRACTS-" && ! grep -qF "For the remaining shared files (`DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS.md`), only ONE agent at" CLAUDE.md_
-- [ ] INVITE-PEERGUARD · INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate the routes and assert it — security, P1
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE | BLOCKS: RELAY-1 (9bc9d6c4), MTLS-RELAYGUARD
-  
-  The user's decision says redemption is the only route onto the bus INCLUDING for peer buses. internal/relay/ is a 9-line doc.go stub today (internal/relay/doc.go:8) and no peer route exists, so the landable increment now is the GUARD, not the feature: a test that walks (*Server).Routes() (internal/httpapi/server.go, the same enumeration TestEveryRouteRequiresAuth uses) and the five-entry allow-list (internal/httpapi/authmw.go:57-63) and fails if any peer/federation/relay-enrolment path is reachable without invite redemption. RELAY-1 (9bc9d6c4) must satisfy this guard rather than route around it; record that as an acceptance criterion in this task's own description (the planner was not permitted to edit RELAY-1).
-  _Proof: go test -race -run 'TestNoUnauthenticatedPeerEnrolRoute|TestAllowListIsExactlyTheFiveKnownPaths' ./internal/httpapi && grep -qi 'peer' CONTRACTS-HTTP.md_
-- [~] None · DEPLOY-REDEPLOY: recreate the Compose bus fresh (volume included) and prove two agents exchange a message on it — deploy, P1, in progress
-  The existing `agentbus` Compose project predates messaging/signing/the durable roster and cannot carry a message. The on-disk store.RecordVersion 1->2 break makes its volume unusable and its contents are throwaway, so `down -v` is USER-AUTHORISED (ruling recorded in DECISIONS.md at commit fe02ebb). docker is NOT usable via bare `docker` on PATH -- that resolves to a broken snap wrapper. Use /snap/docker/current/bin/docker for the docker CLI and the compose plugin at /snap/docker/3505/usr/libexec/docker/cli-plugins/docker-compose, with DOCKER_HOST set appropriately. Steps: `docker compose down -v` (via the paths above) to fully clear the old project and volume, then `docker compose up -d --build` to recreate fresh. Constraint: docker-compose.yml declares no `ports:` -- the server binds 127.0.0.1:8080 INSIDE the container only. Do NOT widen the listener / do NOT add a ports: mapping to satisfy this task. busctl is not present in the built image (see CLI-BUSCTL-IMAGE, public_id 9be2105d, status todo), so proof requires `docker cp`-ing a statically built client binary into the running container and invoking it there (or via `docker exec`) against the container-local listener. Acceptance criterion is VERIFICATION BY EXECUTION, not container health: the container being healthy/Up is NOT sufficient. The task is only done once two distinct agents actually enrol against the freshly recreated bus and exchange at least one message, with the transcript/output captured as proof.
-- [ ] None · MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes enrolment durable — core, P1
-  internal/hub keeps its OWN roster view, fed by internal/httpapi/auth.go calling hub.NoteEnrolment on every accepted enrolment. That is honest TODAY only because the two views have identical lifetimes: auth.MemoryRoster is in memory only and lost on restart, and so is the hub's. auth.Roster exposes Put/Get/Len and NO listing, and internal/auth was outside the MSG/POLL wave's ownership, which is why it was done this way. THE DAY AUTH-3 LANDS THIS BECOMES A LANDMINE: auth's roster survives a restart while the hub's starts empty, so sessions authenticate fine but hub.publish returns 403 (ErrUnknownSender) for every send, 404 for every recipient, and both read paths fail closed with ErrUnknownSender -- a bus that authenticates everyone and serves nobody. FIX: add List (or an iterator) to auth.Roster and auth.MemoryRoster, inject it into hub.Options, and delete NoteEnrolment together with its call site in handleEnroll. CRITICAL DETAIL: the enrolment epoch (store.Message.VisibleTo) reads Agent.EnrolledAt, so the durable roster MUST carry each agent's ORIGINAL enrolment instant. With it, a genuinely continuous agent keeps seeing everything sent since it enrolled, which is exactly the behaviour the epoch was designed to preserve. MUST land in the same change as AUTH-3, never after it.
-  _Proof: go test -race -run TestHubReadsTheDurableRoster ./internal/hub_
-- [ ] None · Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 + DUR-4-FU-* + ID-2-WIRING + PROOF-CHECK-FU-RECURSION), and require proof_cmd at completion time — process, P2
-  Verified via the Spec Server export this session: 20 of the 137 tasks in the agent-bus project have `proof_cmd == null` (the count given in the brief was correct). Of those 20, 6 are in a terminal state that will never be completed (5 RATCHET-* tasks: d86aaa65, be658b02, 58fd8bc3, e376433d, 9a404c64 -- all `superseded`; and ZZ-LOCKTEST e091e451 -- `cancelled`), so they arguably do not need a backfilled proof_cmd at all, only a decision that they are exempt. The remaining 14 are live/actionable and genuinely need one:
-  
-    CLI-1 (0495d133), CLI-2 (39318208), CLI-3 (6e70abe5), CLI-4 (137465b9), CLI-5 (86dea094),
-    CLI-6 (47001cb4), CLI-7 (e600bde6), CLI-8 (ae4caacc), CLI-9 (93973755),
-    ID-2-WIRING (838677e6, currently in_progress -- an owning agent should backfill this one directly rather than have it done for them),
-    DUR-4-FU-DOCS (0b6d5c11), DUR-4-FU-DECISIONS (180f11f8), DUR-4-FU-TOOLING (26c2ce16),
-    PROOF-CHECK-FU-RECURSION (69eb6f56).
-  
-  DONE means: every one of the 14 actionable tasks above gets a real, non-vacuous proof_cmd (validated with `bash scripts/proof-check.sh '<cmd>'` before it is saved, exactly as this pass did for its own new tasks) -- for the CLI-* tasks that is naturally deferred until each CLI-N's shape is decided (a `scripts/bus-*.sh`-style invocation or a `go build ./cmd/agent-bus-cli && ...` smoke test, per whichever the implementer lands), and for the terminal 6 either a proof_cmd of `true` with a status_note explaining why, or spec-keeper leaves them proof-less on record as an accepted exemption for non-actionable tasks -- either is fine as long as it is a DECISION, not an omission.
-  
-  POLICY RECOMMENDATION (the actual point of filing this): a missing proof_cmd should block flipping a task to `done` at LEAST as hard as a VACUOUS one does. Today scripts/proof-check.sh classifies and grades whatever proof_cmd IS supplied, but nothing stops `complete` from succeeding when proof_cmd was never set in the first place -- which is a strictly WORSE version of the vacuous-pass problem this project already fixed once (task 84b76d5e, "a `-run` pattern that matches no test must FAIL, not pass vacuously"): at least a vacuous `-run` pattern names something checkable in principle; a null proof_cmd names nothing at all. Recommend: (1) completing a task should require running `bash scripts/proof-check.sh '<cmd>'` and quoting its verdict in test_summary, not just asserting things worked; (2) the Spec Server's `complete` endpoint (or a spec-keeper-side check ahead of calling it) should refuse a task with proof_cmd unset UNLESS an explicit skip reason is recorded (mirroring how AGENT_LOG.md already carries explicit skip justifications for the reviewer/security chain).
-  
-  proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- 14 actionable tasks currently have proof_cmd unset; the count will read 0 once every one of them is backfilled or explicitly exempted. (Scoped to non-terminal tasks: cancelled/superseded tasks are excluded from the count on purpose, per the exemption discussion above.)
-  _Proof: test "$(bash scripts/spec-cloud.sh -s '/api/v1/projects/agent-bus/tasks?limit=500' | jq '[.[] | select(.proof_cmd == null and (.status != "cancelled" and .status != "superseded"))] | length')" = "0"_
+### EPIC ADMIN — ADMIN: the local operator console (agent-busadm)
+
+- [ ] ADMIN-11 · ADMIN-11: remove an agent from the console (BLOCKED on AUTH-4) — admin, P3, blocked
+  BLOCKED ON `AUTH-4` (`a853261d`, P1, todo -- `POST /v1/leave`, leave / revocation). DEPENDENCIES: AUTH-4,
+  ADMIN-4.
+  
+  Let the operator remove an agent from a bus through the console. This is the epic's first genuinely
+  DESTRUCTIVE action, and the console is a read-first surface everywhere else, so it needs:
+  - explicit confirmation naming the fully-qualified agent id (`<bus-id>.<agent-id>`, invariant 2) -- never a
+    one-click removal, never a removal keyed on an ambiguous short name;
+  - the refusal path rendered visibly if the bus declines (same principle as ADMIN-C3: an invisible refusal
+    trains the operator to assume success);
+  - no new bus authority: it calls the ordinary authenticated `/v1/leave` route as an authenticated agent. If
+    the bus does not permit the console to remove another agent, THAT IS THE ANSWER, and the console shows it.
+  
+  WHY BLOCKED: `/v1/leave` does not exist yet. Its semantics -- who may revoke whom, what happens to in-flight
+  sessions and cursors -- are AUTH-4's to decide, and the console must follow them rather than invent them.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestAdmRemoveAgentCallsLeave|TestAdmRemoveAgentRequiresExplicitConfirmation|TestAdmRemoveAgentSurfacesRefusal' ./cmd/agent-busadm_
+- [ ] ADMIN-7 · ADMIN-7: audit view in the console, for a CO-LOCATED bus only (D5) — admin, P3
+  DEPENDENCIES: ADMIN-6 (the streaming reader), ADMIN-4 (the multi-bus console).
+  
+  Render the audit log in the console for a bus whose data directory is on THE SAME MACHINE, read through
+  ADMIN-6's streaming reader. Per D5 there is NO REMOTE AUDIT READING and no route is added for it: the audit log
+  is the bus's complete social graph, and reading it stays an operator/filesystem capability exactly as
+  invite-minting already is.
+  
+  So the view must REFUSE, visibly and with a reason, for any configured bus that has no local data-dir path --
+  not silently show an empty panel. A blank panel and "you are not permitted to read this remotely" are the same
+  pixels and completely different facts.
+  
+  Show what the log holds and nothing else: message id, sequence, sender, recipient(s), traversed bus path,
+  timestamp, size, content hash. NO BODIES (invariant 6). The TRAVERSED BUS PATH is also the ONLY sanctioned way
+  to build a topology view -- importing `internal/relay` breaks the build
+  (`TestHandshakeHandlerIsNotWiredIntoAnyMux`).
+  
+  Surface ADMIN-6's torn-tail signal in the UI. Silent discard is the defect; a UI that hides an incomplete tail
+  reintroduces it one layer up.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestAuditViewRequiresColocatedDataDir|TestAuditViewRefusesRemoteBus|TestAuditViewShowsTornTailNotice' ./cmd/agent-busadm_
+- [ ] ADMIN-3 · ADMIN-3: `agent-busadm serve` -- loopback-only console with a capability token and an embedded page showing one bus's status — admin, P2
+  DEPENDENCIES: ADMIN-1 (rulings recorded), ADMIN-2 (the status capability it renders).
+  
+  THE FIRST USABLE THING IN THIS EPIC: a new binary `cmd/agent-busadm` with a `serve` subcommand that binds
+  loopback only, mints a per-process capability token, and serves ONE embedded HTML page showing a single bus's
+  status via `client.Info/Health/Discovery`.
+  
+  Per D1 the console surface is plaintext HTTP on loopback -- a console surface, not a bus surface. That makes
+  these mandatory, not optional:
+  - bind 127.0.0.1 only; refuse a non-loopback bind rather than warn;
+  - a per-process capability token, required on every request (in-memory, regenerated each start, never written
+    to a world-readable path);
+  - strict `Origin` / `Sec-Fetch-Site` checks so a page in the operator's browser cannot drive the console;
+  - a 0600 unix socket for non-browser access.
+  
+  FIRST `go:embed` IN THE REPO -- the page ships inside the binary; no runtime asset path, no directory the
+  operator must keep in sync with the binary. Note the Go version requirement in the task's report if it forces
+  anything (see the Docker Compose toolchain section of CLAUDE.md).
+  
+  PRIVILEGE CONCENTRATION starts here: the console holds bus credentials that no single component holds today.
+  Mitigations that begin in this task and continue through ADMIN-4: a distinct identity per bus, 0600 storage for
+  anything credential-bearing, and a blast radius bounded by the lease (ADMIN-C2/C3).
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestServeBindsLoopbackOnly|TestCapabilityTokenRequired|TestCrossOriginRequestRejected|TestUnixSocketIs0600|TestEmbeddedPageRendersBusStatus' ./cmd/agent-busadm && grep -Fq 'agent-busadm serve' CONTRACTS-CLI.md_
+- [ ] ADMIN-2 · ADMIN-2: client.Info/Health/Discovery + `agent-busctl status [--json]`, shipped together (invariant 7) — client, P2
+  DEPENDENCIES: NONE -- this is startable independently of ADMIN-1's docs (though the epic-wide sequencing
+  below still applies). `/healthz` and `/v1/info` are on the unauthenticated allow-list, so this works BEFORE
+  enrolment, which is exactly why it is the console's first real capability.
+  
+  Add `Info`, `Health` and `Discovery` methods to the exported `client/` package (it CANNOT live under
+  `internal/` -- invariant 7's third audience is an agent EMBEDDING the client), and ship the
+  `agent-busctl status [--json]` subcommand in the SAME task. A capability without its subcommand and its
+  `AGENT_PROTOCOL.md` / `CONTRACTS-AGENT.md` entry is not done.
+  
+  Requirements:
+  - Human output is readable by default; `--json` is a stable documented shape; exit codes documented; never an
+    interactive prompt; credentials from config/env.
+  - Every request still goes out over the pinned mutual-TLS transport built by `client/transport.go` /
+    `client/pin.go`. Unauthenticated ROUTE does not mean unpinned CONNECTION.
+  
+  THE NEGATIVE IS PART OF THE PROOF: `TestNoBusRequestBypassesPinnedTLSConfig` must fail if ANY code path in
+  `client/` or `cmd/agent-busctl` can reach a bus without going through `pinnedTLSConfig` (e.g. a bare
+  `http.DefaultClient`, an `http.Get`, or a hand-rolled `&http.Client{}`). Model it on the existing
+  `client/guard_test.go` style. Without that negative, the positive tests pass just as happily against an
+  unpinned connection.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestClientInfoHealthDiscovery|TestStatusCommandJSONShape|TestNoBusRequestBypassesPinnedTLSConfig' ./client ./cmd/agent-busctl && grep -Fq 'agent-busctl status' CONTRACTS-AGENT.md_
+- [ ] ADMIN-8 · ADMIN-8: GET /v1/status -- authenticated, in-process counters, exhaustive field-set pin, leaks no configuration — httpapi, P3
+  DEPENDENCIES: ADMIN-2.
+  
+  SUPERSEDES CORE-5 (`06c5b1f5-99e4-4823-a679-2c074c2aee80`, "Observability: metrics/inspect endpoint") -- that
+  task is being marked superseded by this one. Do NOT file or implement a second inspect endpoint.
+  
+  Add an AUTHENTICATED `GET /v1/status` returning in-process counters (uptime, message count, connected agents
+  count, sequence high-water, and similar aggregates).
+  
+  DO NOT ADD IT TO `unauthenticatedRoutes` (internal/httpapi/authmw.go). Default-deny already handles it: the
+  existing `TestEveryRouteRequiresAuth` golden-list pin will pass without any edit, and that no-edit is the
+  point. Adding a route to the allow-list is meant to be a visible, justified diff -- this route needs no such
+  diff, and any change to that allow-list in this task is a review failure.
+  
+  MUST LEAK NO CONFIGURATION -- no data-directory path, no listen address, no peer list, no roster, no invite
+  state. That is the same rule `/v1/info`'s pin already enforces, and for the same reason: an authenticated agent
+  is not an operator.
+  
+  `TestStatusFieldSetIsExhaustive` must pin the EXACT field set (fail on an unexpected field as well as on a
+  missing one), so that a future field cannot be added without someone consciously re-reading the leak rule.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestStatusRouteRequiresAuth|TestStatusFieldSetIsExhaustive|TestStatusLeaksNoConfiguration|TestEveryRouteRequiresAuth' ./internal/httpapi && grep -Fq 'GET /v1/status' CONTRACTS-HTTP.md_
+- [ ] ADMIN-9 · ADMIN-9: the console enrols by redeeming an invite blob (BLOCKED on INVITE-GATE) — admin, P3, blocked
+  BLOCKED ON `INVITE-GATE` (`05a5216d`, P0, todo). DEPENDENCIES: INVITE-GATE, ADMIN-3/ADMIN-4.
+  
+  The console becomes an enrolled agent the ONE way anything becomes an enrolled agent: by redeeming an
+  operator-minted, single-use, expiring invite blob (invariant 3, invite-only enrolment). No side door, no
+  special console enrolment path, no new authority.
+  
+  The invite blob is also the TRUST ANCHOR: it carries the bus's certificate fingerprint alongside the bus id,
+  address and invite secret, so the console knows what to expect BEFORE its first connection -- there is no
+  trust-on-first-use window to widen. Enrolment must pin from the blob and refuse if the presented certificate
+  does not match.
+  
+  Per ADMIN-4, each bus gets its own IdentityDir, so redeeming N invites produces N distinct client certificates,
+  not one fleet-wide key.
+  
+  WHY BLOCKED, not merely ordered: until INVITE-GATE lands, `/v1/enroll` does not require an invite at all, so
+  this task cannot assert the behaviour that makes it correct. Building it first would encode the open-enrolment
+  world into the console.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestAdmEnrolRedeemsInviteBlob|TestAdmEnrolPinsBusFingerprintFromInvite|TestAdmEnrolRefusesWithoutInvite' ./cmd/agent-busadm ./client_
+- [ ] ADMIN-C1 · ADMIN-C1: versioned control/telemetry schema in a new internal/adminctl -- unknown kinds and versions are REFUSED, not ignored — adminctl, P3
+  DEPENDENCIES: ADMIN-1.
+  
+  A new package `internal/adminctl` defining the versioned control/telemetry message schema, version 1 (reserved:
+  `admin-control-schema` namespace, value 1 -- D7). Four kinds:
+  
+  - `telemetry.lease.request`  -- console asks a node to stream telemetry for a bounded period
+  - `telemetry.lease.granted`  -- node consents, with the interval and expiry IT chose
+  - `telemetry.lease.refused`  -- node declines, WITH A REASON
+  - `telemetry.sample`         -- one sample under a live lease
+  
+  UNKNOWN KINDS AND UNKNOWN VERSIONS ARE REFUSED, NOT IGNORED. Silently ignoring an unknown control message is
+  how a control plane ends up in a state neither end believes it is in: the sender thinks it asked, the receiver
+  thinks nothing happened, and no one can tell that from a lost message. Refusal is observable; silence is not.
+  
+  WHAT THIS IS NOT, and the proof/gates must hold this line:
+  - NOT a new wire protocol version. Do not reserve `signing-format-version` or bump the protocol.
+  - NOT a new on-disk record type. Do not reserve `record-type`, do not touch the WAL format.
+  It is an APPLICATION PAYLOAD carried inside an ordinary authenticated `/v1/send` body -- the bus does not know
+  or care what it means. That is precisely why it needs its own independent schema version.
+  
+  Note `/v1/broadcast` answers 501 unconditionally: every one of these is a DM.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestUnknownControlKindIsRefused|TestUnknownSchemaVersionIsRefused|TestLeaseRequestGrantedRefusedRoundTrip|TestTelemetrySampleRoundTrip' ./internal/adminctl_
+- [ ] ADMIN-10 · ADMIN-10: online invite mint from the console (BLOCKED -- ruled out for now by D6; filed so the reasoning is not lost) — admin, P3, blocked
+  BLOCKED -- RULED OUT FOR NOW BY D6. Filed deliberately so the reasoning survives and nobody re-derives it
+  from scratch, or worse, implements it without noticing the constraint.
+  
+  D6: `agent-bus invite mint` takes the EXCLUSIVE data-directory lock and therefore requires the bus to be
+  STOPPED. A console that is by design a read-first, always-on observer cannot stop the node it is observing in
+  order to mint an invite, and a mint path that did not take the dirlock would be writing to a directory another
+  process owns exclusively.
+  
+  WHAT SHIPS INSTEAD (and what the proof pins today): the console LINKS TO THE COMMAND -- it shows the exact
+  `agent-bus invite mint` invocation for the selected node and states that the bus must be stopped. The proof is
+  therefore a NEGATIVE plus a positive: the console has no online mint path, and it does display the command.
+  
+  UNBLOCKING WOULD REQUIRE a decision recorded in DECISIONS.md about minting without the exclusive dirlock (for
+  example an in-server authenticated mint route), which is a change to how invites -- the system's trust anchor --
+  are created. That is a security-gate conversation, not an implementation detail.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestConsoleDoesNotMintInvitesOnline|TestConsoleShowsInviteMintCommand' ./cmd/agent-busadm_
+- [ ] ADMIN-C3 · ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST BE VISIBLE — admin, P3
+  DEPENDENCIES: ADMIN-C2 (the node reporter), ADMIN-4 (the multi-bus console).
+  
+  The console side of the control plane: issue `telemetry.lease.request` to selected nodes, renew before expiry,
+  and render the arriving `telemetry.sample` stream.
+  
+  A REFUSAL MUST BE VISIBLE. `telemetry.lease.refused` -- and its reason -- is rendered as a refusal, next to the
+  node it came from. A control plane whose refusals are invisible trains the operator to assume success: "no data
+  from node 7" then means indistinguishably "node 7 is quiet", "node 7 is down", and "node 7 told you no". Those
+  are three different operational situations and the console must not merge them.
+  
+  Same rule for expiry: when a lease lapses, the panel says the lease lapsed. It never keeps rendering the last
+  sample as though it were current -- stale data presented as live is the same failure wearing a nicer coat.
+  
+  The console renders the interval and expiry THE NODE CHOSE (ADMIN-C2), never the ones it requested.
+  
+  COST DISCIPLINE, verbatim from the epic: every telemetry sample is two round trips (`/v1/mint` then
+  `/v1/send`), a two-phase fsynced durable write, a permanent audit record that can never be deleted, and a
+  sequence number that can never be reused. Ten nodes at one sample/second is ~864,000 permanent audit records a
+  day whose entire content is "fine". This bus is engineered never to lose a message, which makes it a poor
+  telemetry sink. PREFER THE POLL PLANE (ADMIN-2 / ADMIN-8) for anything the console can simply ask for -- default
+  the lease interval accordingly, and make the UI state the cost when the operator shortens it.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestConsoleRendersRefusalVisibly|TestConsoleRenewsLeaseBeforeExpiry|TestConsoleShowsLeaseExpiredNotStaleData' ./cmd/agent-busadm_
+- [ ] ADMIN-C2 · ADMIN-C2: `agent-busctl report` -- the node reporter: allow-list check, refuse-with-reason or grant a bounded lease, hard minimum interval, no survival across restart — cli, P3
+  DEPENDENCIES: ADMIN-C1.
+  
+  The node-side reporter, as an `agent-busctl report` SUBCOMMAND (D2) -- not a third binary. It receives
+  `telemetry.lease.request` messages and decides.
+  
+  1. ALLOW-LIST (D4): check the SENDER's fully-qualified agent id against a LOCAL allow-list of admin agent ids
+     configured on this node. Not on the list => `telemetry.lease.refused` with a reason. No new bus authority,
+     no new route, no role tier -- this is literally the "configured to allow it" in the request.
+     **THE REFUSAL ASSERTION IS THE AUTHORISATION MODEL.** `TestReportRefusesSenderNotOnAllowList` is not a
+     politeness test; it is the whole security property. If it is missing or weak, any enrolled agent on the bus
+     can make any node stream telemetry to it.
+  2. BOUNDED LEASE (D3): a grant is bounded and EXPIRES. It does NOT survive a restart -- on restart the node
+     reverts to its configured default and streams nothing until asked again. Cost accepted: if the console is
+     down, telemetry stops. That is fail-closed on a control channel, and a stolen console credential buys an
+     attacker only until the lease expires.
+  3. HARD MINIMUM INTERVAL REGARDLESS OF WHAT WAS ASKED. The node clamps; it never adopts a requested interval
+     below its own floor. Remember the cost per sample: two round trips (`/v1/mint` then `/v1/send`), a two-phase
+     fsynced durable write, a permanent audit record that can never be deleted, and a sequence number that can
+     never be reused. A node that honoured "every 10ms" would be asked to do it.
+  4. The grant reports the interval and expiry THE NODE CHOSE, not the ones requested, so the console renders
+     truth rather than its own hopes.
+  
+  Telemetry samples are DMs -- `/v1/broadcast` answers 501 unconditionally.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestReportRefusesSenderNotOnAllowList|TestReportEnforcesHardMinimumIntervalRegardlessOfRequest|TestLeaseDoesNotSurviveRestart|TestReportRefusalCarriesReason' ./cmd/agent-busctl ./internal/adminctl_
+- [ ] ADMIN-1 · ADMIN-1: record the operator-console trust/transport/control rulings D1-D7 in DECISIONS.md, and name agent-busadm in the CONTRACTS.md index — docs, P2, blocked
+  DEPENDENCIES: none. BLOCKS EVERYTHING ELSE IN THE ADMIN EPIC -- no console code lands before the rulings are written down.
+  
+  Write a dated DECISIONS.md section whose heading is EXACTLY (the proof pins this string, so do not paraphrase it):
+  
+      ## <date> -- ADMIN: the operator console is LOCAL, CONSENT-BASED and READ-FIRST (D1-D7)
+  
+  and inside it, seven bullets that each BEGIN `- **D1**` ... `- **D7**` (the proof counts exactly 7 such lines):
+  
+  - **D1** UI TRANSPORT: plaintext HTTP on loopback + a per-process capability token, strict `Origin` /
+    `Sec-Fetch-Site` checks, plus a 0600 unix socket for non-browser access. Ruled EXPLICITLY, not defaulted:
+    this is a console surface, not a bus surface, and TLS here would reintroduce the browser trust-store problem
+    the architecture exists to eliminate. Record WHY this does not weaken invariant 11: invariant 11 governs bus
+    surfaces (client and relay), and every bus connection this console makes is still pinned mutual TLS via
+    `client/`.
+  - **D2** the reporter is an `agent-busctl report` subcommand, not a third binary.
+  - **D3** ADVISORY LEASE: bounded, expires, does NOT survive restart. Cost accepted -- if the console is down,
+    telemetry stops; that is fail-closed on a control channel, and a stolen console credential buys an attacker
+    only until the lease expires. Durable standing configuration was EXPLICITLY REJECTED (it would need a new
+    durable record type, let a remote party permanently alter a node's behaviour, and make revocation a
+    distributed problem).
+  - **D4** authorisation is a LOCAL ALLOW-LIST of admin agent ids per node. No new bus authority, no new route,
+    no role tier.
+  - **D5** NO REMOTE AUDIT READING. Co-located filesystem read only: the audit log is the bus's complete social
+    graph, and reading it stays an operator/filesystem capability exactly as invite-minting already is.
+  - **D6** NO ONLINE INVITE MINT. `agent-bus invite mint` takes the exclusive dirlock and needs the bus stopped;
+    the console links to the command instead.
+  - **D7** the control-message schema gets its OWN reserved namespace, `admin-control-schema` (v1 reserved
+    2026-08-08), so it can never be confused with `signing-format-version` or `ondisk-format-version`.
+  
+  Also record the epic-wide constraints: relay must not be imported (`TestHandshakeHandlerIsNotWiredIntoAnyMux`
+  fails the build if any package outside `internal/relay` imports it), `/v1/broadcast` answers 501 so telemetry
+  must be DM, the telemetry cost warning (two round trips + a fsynced durable write + a permanent audit record +
+  a never-reusable sequence number per sample; ten nodes at 1/s is ~864k permanent records a day saying "fine" --
+  this bus is engineered never to lose a message, which makes it a poor telemetry sink), and the fact that the
+  console is a NEW concentration of privilege created by the request rather than by the implementation.
+  
+  Then add `cmd/agent-busadm` to the CONTRACTS.md INDEX (CONTRACTS.md is an index only -- name the binary and say
+  which plane file will document its flags: CONTRACTS-CLI.md).
+  
+  PROOF DISCIPLINE: the proof pins the exact heading text and counts the seven `- **Dn**` bullets rather than
+  grepping the word "admin" (an incidental match elsewhere in DECISIONS.md would green-light nothing). CONFIRM IT
+  IS RED BEFORE THE FIX and quote scripts/proof-check.sh's verdict; a doc proof never observed failing is not
+  evidence.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: grep -Fq 'ADMIN: the operator console is LOCAL, CONSENT-BASED and READ-FIRST (D1-D7)' DECISIONS.md && test "$(grep -cE '^- \*\*D[1-7]\*\*' DECISIONS.md)" = 7 && grep -Fq 'cmd/agent-busadm' CONTRACTS.md_
+- [ ] ADMIN-4 · ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall the others; one IdentityDir per bus — admin, P2
+  DEPENDENCIES: ADMIN-3.
+  
+  Read a config file listing N buses and show them all. THE LOAD-BEARING REQUIREMENT: one hung or unreachable bus
+  MUST NOT stall the others -- per-bus timeouts, per-bus goroutines, per-bus error state rendered as an error
+  rather than as an absence. A console that goes blank because one node is wedged is worse than no console.
+  
+  ONE `IdentityDir` PER BUS. `client-tls/{cert,key}.pem` is shared per credential store, and the console wants a
+  DISTINCT client certificate per bus: sharing one client cert across the fleet would make the console a single
+  key whose theft is fleet-wide, and would let any one bus operator identify the console on every other bus. This
+  is also the concrete form of the epic's privilege-concentration mitigation.
+  
+  PROOF UNDER `-race`. This is the epic's ONLY genuinely concurrent code, and per CLAUDE.md a data race here is a
+  P0. The hung-bus test must use a bus stub that accepts the connection and never answers (not one that refuses
+  the connection) -- refusal is the easy case and does not exercise the timeout path.
+  
+  DO NOT import `internal/relay` for any fan-out or topology work: `TestHandshakeHandlerIsNotWiredIntoAnyMux`
+  fails the build if any package outside it imports it. The fan-out lives here, in the console.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestOneHungBusDoesNotStallOthers|TestPerBusIdentityDirIsDistinct|TestConfigFileLoadsNBuses' ./cmd/agent-busadm_
+- [ ] ADMIN-6 · ADMIN-6: bounded, tail-tolerant STREAMING audit reader in internal/wal (no dir lock, torn tail surfaced) — wal, P2
+  DEPENDENCIES: ADMIN-1.
+  
+  `wal.ScanAll` (internal/wal/reader.go) loads the WHOLE file and errors on ANY malformed frame, which makes it
+  unusable against a LIVE, GROWING log: the last frame is routinely a partial write, and a growing file has no
+  bounded size. The streaming seam already exists inside the package but is unexported.
+  
+  Export a bounded streaming reader: read forward from an offset, yield records incrementally, stop at a caller
+  supplied bound (record count and/or byte budget), and TOLERATE a torn tail instead of failing the whole read.
+  
+  TWO HARD CONSTRAINTS:
+  1. It MUST NOT take the data-directory lock. `bus.lock` is EXCLUSIVE and held by the running bus; a reader that
+     takes it either fails or -- worse -- would have to wait for the bus to stop. This is a read-only,
+     lock-free, second-opener path.
+  2. THE TORN TAIL MUST BE SURFACED, not swallowed. Invariant 6 is explicit that SILENT DISCARD IS THE DEFECT
+     (rated P0), not discard itself. The reader returns a distinguishable "the tail is incomplete at offset N"
+     signal that callers (ADMIN-7) render; it never quietly returns a short list that looks complete.
+  
+  Also required: never write to the log, never truncate, never repair. This is a reader. Any temptation to
+  "fix up" the tail belongs to the recovery path, which is a different task with different gates.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestStreamAuditSurfacesTornTail|TestStreamAuditTakesNoDirLock|TestStreamAuditIsBounded' ./internal/wal_
+- [ ] ADMIN-5 · ADMIN-5: roster + live flow view from the console's OWN long-poll (/v1/wait) -- metadata only, never a body — admin, P2
+  DEPENDENCIES: ADMIN-4.
+  
+  Show each bus's roster, and a live flow view driven by the console's OWN long-poll against `/v1/wait`. Render
+  per message: sender, recipient(s), sequence, timestamp, size, content hash. NEVER THE BODY (invariant 6: the
+  audit trail is metadata and routing info only, deliberately so that it stays compatible with end-to-end
+  encrypted, forward-secret payloads).
+  
+  THE NEGATIVE IS THE INVARIANT-6 GUARD: `TestFlowViewRendersContentHashAndNeverBody` must assert BOTH that the
+  rendered output CONTAINS the content hash AND that it does NOT contain the body bytes. Use a distinctive body
+  sentinel so the negative can actually fail. A positive-only test passes just as happily on a view that leaks
+  the payload.
+  
+  DOCUMENT THE HONEST LIMIT, in the UI and in the docs: this shows the CONSOLE AGENT'S OWN DMs, not the bus's
+  whole traffic. The console is an ordinary enrolled agent; it sees what is addressed to it. Anything broader is
+  the audit-log path (ADMIN-6/ADMIN-7), which is co-located-only per D5. Do not let the UI imply fleet-wide
+  visibility it does not have.
+  
+  `/v1/broadcast` answers 501 unconditionally -- nothing in this view may wait on broadcast.
+  
+  SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a5216d) lands -- enrolment is currently open, so this console would hold fleet-wide credentials against a bus anyone can enrol against.
+  _Proof: go test -race -run 'TestFlowViewRendersContentHashAndNeverBody|TestRosterViewRendersAgents' ./cmd/agent-busadm_
+
 ### EPIC AGENTIF — Agent-facing surface (shell wrappers + protocol doc)
 
-- [-] AGENTIF-2 · AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry — agentif, P0
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's enrolment work is carried by **CLI-2**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for POST /v1/enroll -- generates/loads local key material, submits it, stores the returned token+agent-id locally for subsequent wrapper calls. Pairs with the enroll-endpoint task; per invariant 7 they ship together.
-  _Proof: scripts/bus-enrol.sh --name testagent_
-- [-] AGENTIF-6 · AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry — agentif, P1
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's long-poll wait work is carried by **CLI-3**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for GET /v1/wait, looping the cursor forward across calls and printing new messages as they arrive. Pairs with the long-poll endpoint task; per invariant 7 they ship together.
-  _Proof: scripts/bus-wait.sh --timeout 5_
-- [-] AGENTIF-8 · AGENTIF-8: scripts/bus-peer.sh + AGENT_PROTOCOL.md entry — agentif, P2
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's peer add/list/remove work is carried by **CLI-7**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for the peer-enrolment handshake (add/list/remove a peer bus). Pairs with the peer-enrolment task; per invariant 7 they ship together.
-  _Proof: scripts/bus-peer.sh add http://peer-host:8081_
-- [-] None · AGENTIF-9: Envelope/schema validation in scripts/bus-*.sh before accepting a server response — agentif, P1, cancelled
-  Origin: user instruction 2026-08-02, "add a mechanism to validate messages in the agent script before accepting them" -- split into two layers. CRYPTO-10 covers the CRYPTO-verification layer (MAC/decrypt, wired in once the CRYPTO epic lands). THIS task covers the layer underneath that and independent of it: basic envelope/schema validation of what a shell wrapper accepts from the server BEFORE it hands the payload to the calling agent, needed from day one (AGENTIF-3/4/5/6/7/8 all parse server JSON today with no such check specified).
-  
-  A shell wrapper (bash + jq/curl) that trusts server JSON blindly is fragile and, on a compromised/misbehaving/relay-hopped bus (invariant 2: multiple buses relay to each other -- a message may have crossed a bus you don't directly trust), a foot-gun: a malformed or unexpected-shaped response fed straight into `msg=$(...)`, `eval`, or interpolated into a follow-up curl call can corrupt state or worse. Scope, for every scripts/bus-*.sh wrapper that consumes a server response (bus-agents.sh, bus-broadcast.sh, bus-send.sh, bus-wait.sh, bus-leave.sh, bus-peer.sh):
-  - Validate the response is well-formed JSON before doing anything else with it (a wrapper must not treat a non-2xx or non-JSON body as if it were data).
-  - Validate the expected top-level shape/required fields are present and are the expected JSON type (e.g. `id` is a string, `messages` is an array) before extracting and printing/using any field -- reject with a clear non-zero exit and a stderr message on anything else, printing nothing usable to stdout on failure (same "fail loud, fail closed" contract CRYPTO-10 uses for the crypto layer, so the two layers compose instead of conflicting).
-  - Cap/guard against absurd sizes (a pathological huge response should not be slurped unbounded into a bash variable).
-  - Document the validation contract (accepted shape, exit codes) in AGENT_PROTOCOL.md per invariant 7 -- ships in the same task as the wrapper behaviour it documents.
-  
-  Does NOT cover cryptographic verification, decryption, or replay/sender-identity checks -- that is CRYPTO-10, layered on top of this once it lands. This task is not gated on the CRYPTO epic and should land first since every wrapper needs it regardless of whether E2E crypto is ever enabled.
-  _Proof: bash scripts/bus-wait.sh (against a throwaway server) fed a malformed/truncated response -- exits non-zero, prints nothing usable to stdout_
-- [x] AGENTIF-1 · AGENTIF-1: scripts/bus-serve.sh + AGENT_PROTOCOL.md entry — agentif, P0
-  Wrapper to start/stop/status a local agent-bus server (foreground or backgrounded with a pidfile) plus its AGENT_PROTOCOL.md section. Pairs with the main-entrypoint task -- needed first since every other wrapper assumes a running server to talk to. Per invariant 7 the wrapper and doc entry land in the SAME task/commit as the feature it fronts.
-  _Proof: scripts/bus-serve.sh start && scripts/bus-serve.sh status && scripts/bus-serve.sh stop_
-- [-] AGENTIF-7 · AGENTIF-7: scripts/bus-leave.sh + AGENT_PROTOCOL.md entry — agentif, P1
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's leave / logout work is carried by **CLI-2**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for POST /v1/leave, clearing the locally stored token afterward. Pairs with the leave/revocation task; per invariant 7 they ship together.
-  _Proof: scripts/bus-leave.sh_
-- [-] AGENTIF-3 · AGENTIF-3: scripts/bus-agents.sh + AGENT_PROTOCOL.md entry — agentif, P1
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's roster listing work is carried by **CLI-5**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for GET /v1/agents. Pairs with the roster-listing task; per invariant 7 they ship together.
-  _Proof: scripts/bus-agents.sh_
-- [-] AGENTIF-4 · AGENTIF-4: scripts/bus-broadcast.sh + AGENT_PROTOCOL.md entry — agentif, P1
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's broadcast work is carried by **CLI-4**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for POST /v1/broadcast. Pairs with the broadcast task; per invariant 7 they ship together.
-  _Proof: scripts/bus-broadcast.sh "hello bus"_
-- [-] AGENTIF-5 · AGENTIF-5: scripts/bus-send.sh + AGENT_PROTOCOL.md entry — agentif, P1
-  SUPERSEDED 2026-08-02 -- THE GO CLI REPLACES THE SHELL WRAPPERS.
-  
-  User decision (DECISIONS.md, 2026-08-02): *"the go cli should take the place of the .sh files and be
-  easy to use for a human + friendly for an agent to use or embed"*, and "Merge the CLI and AGENTIF
-  epics". Invariant 7 is AMENDED, not weakened -- nobody hand-writes HTTP, but the vehicle is a CLI
-  subcommand, not `scripts/bus-*.sh`.
-  
-  This task's direct message work is carried by **CLI-4**. Do not write the shell wrapper.
-  
-  --- ORIGINAL DESCRIPTION ---
-  Wrapper for POST /v1/send (DM). Pairs with the direct-message task; per invariant 7 they ship together.
-  _Proof: scripts/bus-send.sh <agent-id> "hello"_
+- [ ] None · Wire `-backfill-suffix-floors` through scripts/bus-serve.sh and document it (invariant 7 gap) — docs, P1
+  Invariant 7 (agents never hand-write HTTP / a feature ships with its scripts/bus-*.sh wrapper AND an AGENT_PROTOCOL.md entry in the same task) is currently violated for the suffix-floor backfill migration: the flag `-backfill-suffix-floors` exists at cmd/agent-bus/main.go:121, but there is NO sanctioned wrapper path to pass it -- scripts/bus-serve.sh does not accept or forward it -- and the string "backfill" appears in ZERO .md files in the repo (verified by grep). So an operator who needs to run the suffix-floor backfill migration has no documented, wrapper-mediated way to do it and must hand-construct the server invocation, which is exactly what invariant 7 forbids. Acceptance: (1) scripts/bus-serve.sh accepts a flag/env var and forwards `-backfill-suffix-floors` to the server binary; (2) AGENT_PROTOCOL.md documents when/why an operator would run the backfill and how to invoke it via the wrapper; (3) CONTRACTS.md and/or CONTRACTS-CLI.md record the flag, its default, and its effect.
+- [ ] None · RUN_DIR created with no ownership check -- enables binary swap and pidfile symlink attack — security, P1
+  Pre-existing, found by the security gate on parent task 10e93262-8e34-4738-b435-bfe23d880057, outside that task's scope. scripts/bus-serve.sh does mkdir -p "$RUN_DIR" (default /tmp/agent-bus) without verifying ownership or mode. An attacker who owns that directory can (a) swap $RUN_DIR/bin/agent-bus between the go build and the nohup that executes it -- code execution as the operator -- and (b) symlink $RUN_DIR/agent-bus.pid or agent-bus.log for an arbitrary truncate+write, since start does : > "$LOG_FILE". Note this is now the ONLY remaining security value in that log: after the parent task the log is no longer a trust anchor, so this is about the binary swap and the symlink, not the fingerprint. Fix should verify ownership/mode of $RUN_DIR (and refuse, not repair, a dir owned by someone else), and create the log/pidfile with O_NOFOLLOW semantics. File: scripts/bus-serve.sh.
+  _Proof: bash scripts/proof-check.sh 'RUN_DIR ownership/symlink hazard test to be authored by implementer -- see task description'_
 
 ### EPIC AUTH — Enrolment & authentication
 
 - [ ] None · AUTH-1-FU-ACTIVECAP-RETRYAFTER: a per-agent cap 503 tells the client the wrong thing and the wrong Retry-After — httpapi, P1
   NOTE: this proof_cmd is VACUOUS today by construction -- TestSessionCapRetryAfter does not exist yet; writing it is part of this task. Found by the reviewer gate on AUTH-1-FU-ACTIVECAP. internal/httpapi/auth.go:48-52 documents `capacityRetryAfterSeconds = "5"` on the premise that "every capacity limit in internal/auth is a live, in-memory bound that a departing agent or an expiring session can relieve within seconds". That premise is now FALSE. The new per-agent ACTIVE-session cap reaches the same mapping (auth.go:225 -> writeAuthError -> auth.go:289) but persists until one of the agent's OWN sessions expires -- up to SessionLifetime, one hour. A genuine agent at its own cap receives 503 {"error":"server at capacity, retry later"} with Retry-After: 5: it blames the SERVER for a client-side condition, and the retry advice is wrong by up to three orders of magnitude (5s vs 3600s). A conforming client honouring Retry-After polls ~720 times over the hour while its operator diagnoses a bus outage that is not happening. Fix the SURFACE, not the cap value 32: a distinct sentinel (e.g. ErrAgentSessionCapacity) or at minimum a distinct terse client message and a Retry-After derived from the agent's own soonest-expiring session. Note the disclosure constraint the security gate confirmed: the branch is unreachable without the agent's private key, so distinguishing it to THAT caller is not an oracle. Out of scope for AUTH-1-FU-ACTIVECAP, whose boundary was internal/auth only.
   _Proof: go test -race -run TestSessionCapRetryAfter ./internal/httpapi_
+- [ ] None · AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediate revocation — auth, P1
+  Origin: security audit of AUTH-2, 2026-08-02, found forward-looking. Authentication is evaluated ONCE at request entry (handleWait does not re-authenticate; it reads the principal authMiddleware already attached via messagingPrincipal, which checks nothing). CORRECTED 2026-08-08 (was: '-poll-timeout is validated only as > 0 with no ceiling against the 1h auth.SessionLifetime' -- that was WRONG, see kind=report note): -poll-timeout IS ceilinged, at hub.MaxPollTimeout (5 minutes), on all three paths -- hub.Wait clamps (wait.go:165-166), hub.Open clamps the operator's -poll-timeout flag (hub.go:498-499), and readTimeoutParam refuses rather than clamps an over-ceiling client request (messages.go:947-949, 400). So the pre-fix exposure was always <=5 minutes, never <=1 hour. A poll parked at entry still keeps serving after its session expires or is revoked, up to that 5-minute bound, and up to hub.MaxWaitersPerAgent (32) parked polls per agent, so the lag can cover up to 32 batches, not one. auth.Principal already carries ExpiresAt, so a handler CAN enforce it but nothing requires it. The POLL epic must cap the wait at min(PollTimeout, time.Until(principal.ExpiresAt)) and re-Authenticate before delivering. Re-polling does NOT chain past a revoke: /v1/wait is not on unauthenticatedRoutes, so the next poll is refused. P1 because 'revocation is immediate' (DECISIONS.md 2026-08-02) is otherwise false for any poll already in flight -- STAYS P1 today (no reachable revocation surface exists yet; only expiry is reachable, a bounded <=5min overrun by a principal that legitimately held the credential moments earlier) but becomes P0 the day AUTH-4 (/v1/leave) ships, since that is the day an operator starts relying on immediate revocation. ORDERING CONSTRAINT: this task MUST land before AUTH-4 (a853261d-2829-4101-906d-31a8a81eb59f) -- recorded as a `blocks` relation -- so revocation never ships without covering the parked-poll case. The same argument extends to MTLS-CROSSCHECK (2b2af075-a295-4cf3-9826-b1a3554c8795, planner note on this task, 2026-08-02): it adds a second property, the cert-to-agent binding, that a parked poll can equally outlive, so a re-check must cover both the session AND the cross-check -- however MTLS-CROSSCHECK has NOT shipped either (no reachable exposure yet), so no `blocks` relation is added there, only this note; revisit if MTLS-CROSSCHECK lands first. STATUS SPLIT (2026-08-08): the DOC-ACCURACY half of the underlying audit finding (F8/S8b, overstated 'revocation and expiry immediate' comment in internal/httpapi/authmw.go) has landed as a comment-only change (see task notes for the diff/verification) -- reviewer PASS, security PASS. The BEHAVIOUR half -- the min(pollTimeout, time.Until(ExpiresAt)) cap and re-authenticate-before-delivering in handleWait/hub.Wait -- is UNTOUCHED. This task's definition-of-done is the behaviour fix; it stays `todo` until that lands, not merely documented.
 - [ ] None · AUTH-1-FU-SESSIONSCALE: session-table O(n) scans and refuse-not-evict policy cause CPU/lock amplification — auth, P1
   Follow-up to AUTH-1 (public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). Security measured roughly 1.04 ms of exclusive global-mutex time per ~180-byte request at default caps with a full table (a ~960 req/s ceiling for the WHOLE auth surface), caused by the O(n) sweepLocked / countPendingLocked / oldestPendingLocked scans over a 16384-entry table, all held under sessMu. Separately, MaxSessions currently REFUSES new session-begins rather than evicting the globally-oldest PENDING session, so once the table fills, every legitimate agent is denied until entries time out -- an unauthenticated flooder can hold the table full indefinitely. Fix: replace the O(n) scans with an amortized structure (e.g. a min-heap or a periodically-swept ring keyed on expiry) and change the full-table policy to evict-oldest-pending rather than refuse. NOTE: AUTH-1 already split Service.mu into enrolMu + sessMu, so this task's fix must NOT reunify them -- keep AUTH-3's durable enrolment fsync off the Authenticate hot path.
   _Proof: go test -race -run TestSessionTableEvictsOldestPendingUnderLoad ./internal/auth_
-- [-] AUTH-6 · AUTH-6: Auth FAIL-OPEN risk -- wrap the mux with auth + an explicit unauthenticated allow-list — auth, P1
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s; the three P1s are being fixed in-wave. SECURITY FINDING P1-3 and the most important of the follow-ups. Routes are registered INDIVIDUALLY on the mux, which means authentication will be applied per-route once the AUTH epic lands. That is a fail-OPEN design: when an implementer later adds `mux.HandleFunc("/v1/send", ...)` and forgets to wrap it in the auth middleware, the result is a fully unauthenticated route on a message bus, and NO TEST FAILS. The mistake is silent, it is the easy mistake to make, and nothing in the current structure catches it.
+- [ ] None · AUTH-2-FU-SESSMU: auth.Service.Authenticate now takes an exclusive mutex on every request's hot path — auth, P2
+  Origin: security audit of AUTH-2, 2026-08-02. internal/auth/service.go guards the session table with a plain sync.Mutex. AUTH-2 puts Authenticate on EVERY request, while the UNAUTHENTICATED BeginSession holds the same mutex for an O(n) sweepLocked. An anonymous /v1/session/begin flood can therefore stall legitimate authenticated traffic in a way it could not before AUTH-2. Fix: give Authenticate an RWMutex read path, or amortise the sweep. Note this lives in internal/auth, which AUTH-2 deliberately did not touch.
+- [ ] None · SEC: unauthenticated enrol permanently bricks the roster -- 4096-cap fails closed forever, no eviction, survives restart — auth, P0
+  Found independently twice within the same hour (an external security-testing agent reading the route table, and the AUTH-3 security-gate review) -- corroboration is why this is filed as established rather than a claim.
   
-  Fix -- invert the default so forgetting means 401, not open: wrap the WHOLE mux in the auth middleware and carry an EXPLICIT allow-list of unauthenticated paths (`/healthz`, `/v1/info`, `/v1/enrol`). Any path not on that list requires a credential; a newly-added route is therefore authenticated by default and an implementer must make a deliberate, visible, reviewable edit to the allow-list to open one up.
+  Compose three individually-reasonable facts: (1) POST /v1/enroll is unauthenticated (invite gate not yet landed -- INVITE-GATE). (2) DefaultMaxRosterEntries = 4096 (internal/auth/service.go:30) and enrolment fails CLOSED at the cap. (3) The roster is durable across restart (internal/auth roster WAL replay, AUTH-3) and there is NO route or method that removes a roster entry -- verified: no /v1/leave, no Remove/Delete/Evict/Leave on the roster. AGENT_PROTOCOL.md confirms bus logout is local-only (server_notified: false).
   
-  PIN IT WITH A TEST, or the property decays: enumerate the registered routes (keep a single registry/slice the mux is built from so the test can iterate it) and assert that each route is EITHER on the allow-list OR returns 401 when called without a credential. That test is the actual deliverable -- it fails the moment someone adds an unprotected route, which is precisely the event nothing currently detects.
+  Consequence: 4096 unauthenticated POSTs -- no key material, no invite, no session, no client cert -- and the roster is full FOREVER. Not until a TTL; not until a restart, because restart REPLAYS the durable roster and restores the attacker entries. The only remedy today is an operator deleting the whole data directory, destroying every legitimate agent id and the message history along with it.
   
-  Also assert the allow-list itself is minimal and intentional (a test that the allow-list contains exactly the expected three paths, so ADDING to it is also a visible diff). Coordinate with AUTH-2 (token verification middleware) -- this is the shape AUTH-2 should be built into rather than a later retrofit -- and with CORE-8 (JSON 404 catch-all): decide deliberately whether an unauthenticated request to an UNKNOWN path returns 401 or 404, since a catch-all registered outside the wrapper would itself be an unauthenticated route.
-  _Proof: go test -race -run TestEveryRouteRequiresAuth ./internal/httpapi_
+  The security gate's independent wording: durable enrolment turned a TRANSIENT DoS into a PERMANENT one -- no /v1/leave, no delete on WALRoster, first-write-wins, WAL never compacts.
+  
+  Why this is filable rather than a restatement of "INVITE-GATE is unfinished": internal/auth/session.go (~line 244-260) carries a careful availability analysis of the session-table flood, concluding it is untargeted, unamplified and SELF-HEALING. That write-up is the canonical analysis of what an unauthenticated caller can cost the bus -- and it stops one resource short. The roster version is untargeted and unamplified too, but it is NOT self-healing, not TTL-bounded, and survives reboot. A permanent cost sitting undocumented beside a careful analysis of a transient one is worse than an undocumented hole, because a reader reasonably concludes the analysis is complete.
+  
+  SEVERITY: the reporter rated this P0 and explicitly declined to inflate it, noting the listener is loopback-only (127.0.0.1:18080 by default) so the reachable attacker set today is a local process. spec-keeper judgement recorded here: rated P0 anyway, on impact rather than current reachability -- the damage is irreversible (destroys the data directory to recover, which also destroys legitimate history) and invariant 11's own text anticipates a bus deliberately exposed on a real interface as a real, intended deployment target, not a hypothetical; a permanent-DoS primitive should not wait for that exposure to be reprioritised. Track reachability separately: if it becomes reachable from a non-loopback interface before this and INVITE-GATE both ship, that is an immediate re-escalation trigger, not a new finding.
+  
+  This is a TRACKING/UMBRELLA task for the finding. Three concrete follow-ups are filed separately: extending session.go's availability analysis (doc), an operator-side roster-reclamation escape hatch independent of INVITE-GATE, and a priority note on INVITE-GATE (already P0) plus AUTH-4 (leave/revocation, P1) as the in-protocol remedy once auth exists.
+  _Proof: grep -n roster internal/auth/session.go | grep -qi bricked || grep -n roster CONTRACTS-HTTP.md | grep -qi permanent_
 - [ ] None · AUTH-1-FU-ACTIVECAP-DOCS: document the per-agent ACTIVE-session cap in CONTRACTS-HTTP.md + AGENT_PROTOCOL.md — docs, P1
   The code shipped in AUTH-1-FU-ACTIVECAP; the docs could not, because CONTRACTS*.md and AGENT_PROTOCOL.md were owned by concurrent agents during that loop. This is tracked debt, deliberately incurred. The proof globs CONTRACTS*.md so it survives the CONTRACTS split. Four edits, all in CONTRACTS-HTTP.md unless stated:
   (a) NEW row in the admission-control caps table (~line 122-124, columns Cap | Default | Behaviour at the cap):
@@ -890,93 +402,20 @@
 - [ ] AUTH-5 · AUTH-5: Auth crash/recovery test — auth, P1
   End-to-end crash-injection test: enrol an agent, simulate a crash before/after the commit fsync at each stage, restart, and assert the token is valid iff the enrolment was durably committed; separately, revoke an agent, crash, restart, and assert the token stays rejected.
   _Proof: go test -race -run TestAuthCrashRecovery ./internal/auth_
-- [x] None · AUTH-1-FU-ACTIVECAP: cap ACTIVE sessions per agent -- the one place an agent-id-keyed cap is SAFE — auth, P0
-  Discovered by the security gate on AUTH-1-FU-PENDINGCAP. Nothing caps ACTIVE sessions per agent, and enrolment is itself unauthenticated, so an attacker that enrols its own agent can complete MaxSessions handshakes and fill the session table with ACTIVE entries. Those are reclaimed only after SessionLifetime (1 hour), not after ChallengeTTL (2 minutes), so this costs roughly 9 req/s to hold rather than ~137, and the resulting denial of NEW session establishment outlives the flood by an hour. Verified empirically by the security agent: advancing the clock past ChallengeTTL reclaims nothing. This is PRE-EXISTING and NOT a regression from AUTH-1-FU-PENDINGCAP -- the cap removed there counted only SessionPending entries and never protected against this. THE LOAD-BEARING INSIGHT, and the reason this is not a repeat of the mistake AUTH-1-FU-PENDINGCAP just fixed: unlike a PENDING-challenge cap, an ACTIVE-session cap keyed on agent id is SAFE, because an active session can only be created by proving possession of that agent private key. The key is a PROVEN identity, not an attacker-supplied victim identifier, so a flooder cannot make its sessions land in a victim bucket. Must be argued explicitly in the implementation comment so the distinction is not lost, and must ship with an adversarial test in the shape of TestSessionBeginNoVictimLockout. Note this is referenced by name from internal/auth/session.go BeginSession and from CONTRACTS.md, so the key AUTH-1-FU-ACTIVECAP must not change.
-  _Proof: go test -race -run TestSessionActiveCap ./internal/auth_
 - [ ] None · AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes — auth, P1
   Follow-up to AUTH-1 (public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). POST /v1/enroll, POST /v1/session/begin and POST /v1/session/complete are unauthenticated by design, but there is currently NO per-source (per-IP or similar) rate limit on any of them -- every admission-control cap that exists today is GLOBAL. Consequence: an anonymous caller can deny enrolment bus-wide by exhausting MaxRosterEntries (4096) with enrol requests, and can deny session establishment bus-wide by exhausting MaxSessions (16384) with begins. Security measured roughly 137 req/s as enough to sustain the session-table denial from a single source. Add per-source rate limiting (token bucket or similar, stdlib-first per invariant 8) in front of these three routes so a single source cannot exhaust a bus-wide cap alone.
   _Proof: go test -race -run TestSessionBeginRateLimit ./internal/httpapi_
-- [x] AUTH-2 · AUTH-2: Token verification middleware — auth, P0
-  Middleware that validates the bearer token on every route except /healthz, /v1/info, and /v1/enroll (invariant 3) -- rejects missing/malformed/forged/expired tokens with 401, and attaches the verified fully-qualified agent id to the request context for downstream handlers.
-  _Proof: bash scripts/proof-check.sh 'go test -race -run "TestAuthMiddleware|TestEveryRouteRequiresAuth" ./internal/httpapi'_
-- [x] AUTH-1 · AUTH-1: POST /v1/enroll -- signed credential issuance — auth, P0
-  CORRECTED 2026-08-02 (spec-keeper) -- STATUS UNTOUCHED, a feature-runner is in flight. THREE PARTS OF
-  THIS TASK'S PREVIOUS TEXT WERE STALE AND HAVE BEEN REMOVED. They are listed here so nobody restores
-  them from an older copy.
+- [ ] None · MTLS-VERIFY-FU-DOCSCHEME (README/PROTOCOL half): main still documents the bus as plaintext HTTP after MTLS-LISTENER shipped TLS-only — docs, P1
+  MTLS-LISTENER is COMMITTED at HEAD (invariant 11: TLS is the required transport, no plaintext listener; cmd/agent-bus/tlslisten_test.go is tracked and passing). But at committed HEAD, README.md:113-114 still reads agent-busctl --bus http://127.0.0.1:8080 enrol ... with no --bus-fingerprint, and PROTOCOL.md:195 still states as fact The listener is still plaintext HTTP. Both are false today, not merely about to become false -- confirmed by git show HEAD:README.md / git show HEAD:PROTOCOL.md. Any agent enrolling by following mains own docs today is told to dial a scheme the bus no longer serves.
   
-   REMOVED (1) THE "OPEN QUESTION" ON BEARER-VS-PER-REQUEST SIGNING. It is ANSWERED, do not re-open it
-   and do not spend a DECISIONS.md entry deciding it. The settled design (DECISIONS.md 2026-08-02):
-   enrolment records the public key; then the CLIENT ASKS FOR A SESSION, THE **SERVER** PROVIDES THE
-   TOKEN VALUE, AND THE CLIENT **SIGNS** IT with its enrolment private key; the server verifies against
-   the recorded public key and thereafter accepts that session. Signing happens ONCE PER SESSION, NOT
-   PER REQUEST, so the hot path (long-poll, send) is a cheap credential check. The token is
-   server-provided so the client never chooses the value it signs -- a client-chosen challenge would
-   allow pre-computation and prove far less.
+  AGENT_LOG.md already has an entry for this fix (2026-08-07 -- MTLS-VERIFY-FU-DOCSCHEME: README.md:113-114, AGENT_PROTOCOL.md:266/252/174, PROTOCOL.md:195), and the working tree currently HAS that fix applied (confirmed: grepping for the stale strings in README.md, AGENT_PROTOCOL.md and PROTOCOL.md all return nothing in the working tree) -- but it has never been committed (git status shows README.md, PROTOCOL.md and AGENT_LOG.md all modified/uncommitted), so main still ships the stale docs.
   
-   REMOVED (2) "THE SERVER SIGNS THE PUBLIC KEY + MINTED ID INTO THE CREDENTIAL USING A PERSISTED BUS
-   SIGNING SECRET." THAT IS THE OLD DESIGN AND IT IS SUPERSEDED. **Tokens are OPAQUE SERVER-SIDE
-   HANDLES, not signed claims** (decision, 2026-08-02). That is precisely what makes IMMEDIATE
-   revocation possible -- a stateless signed claim cannot be revoked. So: DO NOT generate or persist a
-   bus signing secret for credential issuance, and do not put claims in the token. The server keeps the
-   session state; the token is a lookup key into it.
+  ADDITIONALLY, that same AGENT_LOG.md entry explicitly deferred two more instances rather than fixing them, and they are STILL stale in the current working tree too (checked directly, not from the log entrys say-so): README.md:87-91 (until mutual TLS lands (invariant 11), enrolment and session material would cross the wire in cleartext -- mTLS has already landed) and README.md:95-99 (a curl quickstart example with no scheme, in a What works today section). Both were explicitly left for the owning task / CONTRACTS-HTTP.md pass to avoid colliding with the listener agents own doc updates -- that pass never happened.
   
-   REMOVED (3) THE CONSTRAINT MANDATING `scripts/bus-enrol.sh` + AGENTIF-2 IN THE SAME TASK. Invariant 7
-   was AMENDED on 2026-08-02: the compiled Go CLI replaces the shell wrappers. AGENTIF-2 is SUPERSEDED
-   and its work is CLI-2. There is no openssl-in-bash keypair requirement any more -- the CLI generates
-   and stores the key. AUTH-1 is therefore SERVER-SIDE ONLY. The pairing rule itself survives in
-   amended form: this endpoint is not "done" for an agent until CLI-2 ships, so keep them cross-linked.
+  SCOPE: finish and commit the fix. (1) Get the already-drafted README.md/AGENT_PROTOCOL.md/PROTOCOL.md/AGENT_LOG.md changes committed (they are sitting in the working tree now). (2) Additionally fix the two deferred README.md passages (87-91, 95-99) to reflect that TLS is now mandatory and self-signed/mTLS-pinned (invariant 11), not upcoming. (3) AGENT_LOG.md lands in the SAME commit as the doc changes it describes, per the shared-append-only-file convention.
   
-  WHAT AUTH-1 IS, AS IT NOW STANDS.
-  
-  POST /v1/enroll. The agent submits a desired short name plus the PUBLIC half of a client-generated
-  Ed25519 AUTH keypair. This is an ASYMMETRIC keypair, not a shared secret -- a symmetric option
-  (HMAC over agent-id+key with a persisted bus secret) is NOT acceptable and must not be implemented:
-  the server must never hold material that would let it FORGE an agent's calls, only material that lets
-  it VERIFY them. Use stdlib `crypto/ed25519` (invariant 9: standard, audited, high-level sign/verify;
-  never assemble primitives). The agent holds the private key; the server stores only the public key
-  against the roster entry.
-  
-  The server MINTS the agent id (invariant 1 -- ids are server-authoritative, never client-supplied;
-  ID-3 provides the `<bus-id>.<name>-<n>` minting). The roster entry binds the minted id to the
-  presented public key, so a caller cannot later present a different key under the same id.
-  
-  THIS AUTH KEYPAIR IS DISTINCT FROM THE MESSAGING IDENTITY KEYPAIR minted in CRYPTO-3 -- two keypairs,
-  two purposes (authentication vs E2E message encryption), never conflated or reused. CRYPTO-3 depends
-  on this task for the roster/enrolment shape it extends.
-  
-  DURABILITY -- AND THE DEPENDENCY THAT MAKES IT SHIPPABLE NOW. A client must never get a credential for
-  an enrolment that is not durable: the roster entry goes through the two-phase prepare->commit write
-  path (invariant 4). **THE PERSISTENCE ITSELF IS DELIVERED BY AUTH-3 (roster persistence & recovery),
-  NOT BY THIS TASK.** AUTH-1 therefore ships against an INJECTED PERSISTENCE INTERFACE -- define the
-  narrow interface AUTH-1 needs, take it as a dependency, and let AUTH-3 supply the durable
-  implementation. Do not inline a bespoke roster file here; do not block on AUTH-3 either.
-  
-  NOTE FOR THE SESSION WORK (AUTH-2/AUTH-4, not this task, but the shape is decided): sessions last AT
-  MOST ONE HOUR; the client refreshes at 75% of lifetime; server-side expiry is authoritative and an
-  expired token is rejected even if the client believes otherwise; **SESSIONS DO NOT SURVIVE A SERVER
-  RESTART** (they are expired on restart, the CLI re-authenticates); and **REVOCATION IS IMMEDIATE** --
-  /v1/leave invalidates outstanding sessions at once, not at the <=1h boundary.
-  
-  ACCEPTANCE CRITERION (RATCHET-7 fallout, verified first-hand by reading this box's stdlib source at
-  crypto/ed25519/ed25519.go under GOROOT): **ed25519.Verify PANICS -- it does not return false -- when
-  len(publicKey) != ed25519.PublicKeySize.** This is a remote DoS trap, and it is ASYMMETRIC with
-  malformed-signature handling (a bad signature safely returns false), so a call site that only checks
-  the signature looks correct and is not. The public key presented here is client-supplied, untrusted
-  input by definition. REQUIRED: length-check the presented public key against ed25519.PublicKeySize
-  BEFORE any ed25519.Verify call in this path, returning a normal validation error on mismatch, never
-  panicking. REQUIRED TEST: a negative test feeding a wrong-size public key and a nil/empty public key
-  through the enrolment path, asserting clean rejection rather than a panic. See the standalone
-  cross-cutting task (4eb903f8) tracking this trap across all Verify call sites (AUTH-1, CRYPTO-10,
-  SIGN-2, and any roster-reload-from-disk path).
-  
-  IDEMPOTENCY (invariant 10): enrol carries a client-supplied idempotency key and is safe to retry --
-  same key + same payload returns the ORIGINAL result and must NOT mint a second id; same key +
-  different payload is a protocol violation. IDEM-13 owns the full treatment; do not design enrol in a
-  way that makes it impossible.
-  _Proof: go test -race -run TestEnroll ./internal/auth_
-- [x] None · AUTH-1-FU-PENDINGCAP: MaxPendingPerAgent is a lockout primitive, not a defence -- rekey or drop it — auth, P0
-  Follow-up to AUTH-1 (public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). MaxPendingPerAgent is keyed on agent_id, but agent_id on the unauthenticated session-begin route is an ATTACKER-SUPPLIED victim identifier. A flooder's challenges land in the victim's bucket, and eviction under the cap then drops the victim's own correctly-issued challenge. The reviewer demonstrated a permanent unauthenticated lockout of a named agent at 9 requests per round. Redesign options: (a) key the cap on the SOURCE of the request instead of the target agent_id, or (b) drop the per-agent cap entirely and rely on the global MaxSessions cap plus ChallengeTTL to bound memory (a pending session is a handful of words, so the memory argument for keeping a per-agent cap is weak). This needs a DECISIONS.md entry recording which option was taken and why. NOTE: the misleading code comments and CONTRACTS.md wording describing this as a defence have ALREADY been corrected as part of AUTH-1's review pass -- this task is the DESIGN fix (the actual keying/eviction behaviour), not a comment fix.
-  _Proof: go test -race -run TestSessionBeginNoVictimLockout ./internal/auth_
+  PRIORITY P1: main currently documents the wrong transport as fact to any agent reading it, which actively misleads enrolment.
+  _Proof: bash scripts/proof-check.sh '! grep -n bus.http:// README.md AGENT_PROTOCOL.md && ! grep -n listener.is.still.plaintext PROTOCOL.md && ! grep -n until.mutual.TLS.lands README.md'_
 - [ ] None · AUTH-1-FU-POPKEY: enrolment does not prove possession of the enrolling private key — auth, P1
   Follow-up to AUTH-1 (public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). Enrolment binds a caller-supplied public key to a fresh server-minted agent id, but never checks that the caller holds the matching private key -- so anyone can bind ANY public key, including someone else's already-published one, to a new identity. Security recommends requiring a signature over (name || public_key || idempotency_key) at enrolment time, verified with the submitted public key, before the binding is accepted. IMPORTANT: this CHANGES THE ENROL WIRE SHAPE (adds a signature field to the request), so it must be coordinated with the Go CLI / AGENTIF work that also touches the enrol payload -- do not land it unilaterally. The invariant that already holds and must be preserved: once an id is bound to a key, it can never later present a different key (this task only adds proof-of-possession at the initial binding, it does not change post-enrolment behaviour).
   _Proof: go test -race -run TestEnrollRequiresProofOfPossession ./internal/auth_
@@ -985,137 +424,27 @@
   
   ACCEPTANCE CRITERION ADDED (spec-keeper, 2026-08-02, from ID-3 reviewer F2 + security LOW finding): internal/ids/agentmint.go point 8 delegates bounding distinct-name growth to admission control, but AUTH-1 (now done) carried no such obligation in its description. Today growth is contained only because the roster never shrinks (no leave existed yet) and admission caps roster.Len(). Once this task lets leave shrink the roster while suffix counters must NOT be reclaimed (ids are never reused), an enrol/leave loop over distinct 64-byte names can grow suffix-counter memory without bound. This task must explicitly state, and test, how it bounds suffix-counter growth under a repeated enrol/leave loop (e.g. a cap on distinct names ever seen, eviction policy, or an explicit accepted-and-documented unbounded-but-slow-growth argument) -- do not ship leave without addressing this.
   _Proof: go test -race -run TestLeaveRevocation ./internal/auth_
-- [x] None · AUTH-1-FU-LISTENADDR: default listen address is :8080 (all interfaces) but DECISIONS.md settled on localhost — auth, P0
-  Follow-up to AUTH-1 (POST /v1/enroll, public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). cmd/agent-bus/main.go:37 has `defaultListen = ":8080"`, binding all interfaces; DECISIONS.md line 709 settled that the default listen address is localhost. This mismatch pre-dates AUTH-1, but AUTH-1 just added THREE UNAUTHENTICATED routes (POST /v1/enroll, POST /v1/session/begin, POST /v1/session/complete) onto that surface, so the exposure is now material -- an anonymous caller on the network, not just localhost, can hit them. Fix is a one-line change in main.go plus doc updates in README.md:41,48 and CONTRACTS.md:46 (out of scope for AUTH-1 itself, since README ownership sits outside that task's file boundary). This is an operator-visible behaviour change (existing deployments binding :8080 today would start binding 127.0.0.1 only) -- call that out in the commit message and/or a DECISIONS.md addendum if a migration note is warranted.
-  _Proof: grep -n "defaultListen" cmd/agent-bus/main.go | grep -q "127.0.0.1" && grep -qE "^\| \`-listen\` \| \`127\.0\.0\.1:8080\` \|" CONTRACTS-CLI.md && echo ALL_OK_
+- [ ] None · Enrol accepts a duplicate enrolment public key -- one keypair can hold unlimited agent ids — auth, P2
+  Found by the security gate on AUTH-1-FU-ACTIVECAP, verified empirically (three enrolments with a byte-identical public key were all accepted, minting alpha-1/-2/-3, after which ONE private key held 3x the per-agent active-session cap). Service.Enrol validates the public key's LENGTH but never checks whether that key is already enrolled against another agent id, and the Roster interface offers no by-key lookup to do so. Two consequences. First, it is the direct reason AUTH-1-FU-ACTIVECAP raises the flood cost by only ~1.6%: the "512 distinct enrolments" the cap forces are 512 unauthenticated POSTs from ONE keypair, not 512 identities an attacker must obtain. Second, it makes key->identity one-to-many where several planned features assume one-to-one: the invite-only + self-signed-mTLS design (invariant 11) binds a client-certificate fingerprint to an agent id at enrolment, AUTH-4 revocation is naturally expressed per key, and a roster listing two agents with identical keys is a spoofing surface. The right answer is NOT obviously "reject" -- refusing a duplicate leaks "this key is already enrolled" to an unauthenticated caller, which is its own oracle. Needs a recorded DECISIONS.md decision (reject / allow-and-document / defer to the invite gate, which would moot it) rather than a silent code change.
+- [ ] None · AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove <id>" escape hatch -- filesystem authority, not an HTTP route, works even when the roster is already full — auth, P0
+  Follow-up 2 of 3 from SEC roster-brick finding (1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa). Today the only remedy for a full roster (whether from an attack or legitimate churn) is an operator deleting the WHOLE data directory, destroying every agent id and the message history. This task adds an operator-facing subcommand on the server binary itself (same precedent as the existing `agent-bus invite mint` -- filesystem/process authority, not a network route) that durably removes one or more roster entries via the two-phase write path, so recovery after a restart reflects the removal. This is DELIBERATELY NOT an HTTP route and does NOT depend on INVITE-GATE, MTLS, or any authenticated in-protocol path -- it exists precisely for the case where the roster is already saturated and no in-protocol path can free space. Judge and record whether this needs a new WAL record type (reserve via POST .../reservations, namespace matching this repo's on-disk record-type convention -- see CONTRACTS-ONDISK.md) or can reuse an existing leave/revoke record type once AUTH-4 lands. Cross-reference AUTH-4 (a853261d, POST /v1/leave, P1, in-protocol/authenticated) -- that is a DIFFERENT mechanism (an agent revoking itself, or an authenticated admin action over HTTP) from this one (operator, out-of-band, works when the bus cannot otherwise be reasoned with). Must be documented in CONTRACTS-CLI.md and AGENT_LOG.md notes the id is never reissued (invariant 1) -- removal frees the roster SLOT, not the id/suffix.
+  _Proof: go build ./... && ./agent-bus roster --help 2>&1 | grep -qi remove_
+- [ ] None · AUTH-3-FU-ROSTERDOS-DOCS: extend session.go availability analysis (untargeted/unamplified/self-healing) to cover the roster, which is NOT self-healing — auth, P1
+  Follow-up 1 of 3 from SEC roster-brick finding (1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa). internal/auth/session.go (~line 244-260) carries a careful availability writeup for the session-table flood, ending with: roughly maxSessions/ChallengeTTL sustained requests per second to hold an UNTARGETED, unamplified, SELF-HEALING outage. Add an adjacent paragraph (or a clearly linked comment on DefaultMaxRosterEntries in service.go) stating the roster case explicitly: enrolling to DefaultMaxRosterEntries (4096) is also untargeted and unamplified, but UNLIKE the session table it is NOT self-healing (no expiry drains a roster entry) and NOT bounded by restart (WAL replay restores it). State the current remedy (operator deletes the whole data directory, destroying legitimate history) and cross-reference the operator-reclamation follow-up and INVITE-GATE. Docs-only / comment-only change -- no route or behaviour change.
+  _Proof: grep -n -i "not self-healing\|self-healing" internal/auth/session.go internal/auth/service.go | grep -qi roster_
 - [~] AUTH-3 · AUTH-3: Roster persistence & recovery — auth, P0, in progress
   The agent roster (id, name, public key/verifier material, enrolled-at) is rebuilt on startup by WAL replay, not held only in memory -- an agent enrolled before a restart is still authenticated and listed after one, with no re-enrolment required.
   
   CORRECTION (spec-keeper, 2026-08-02, from ID-3 security+reviewer gate findings): the resume floor for name suffixes must NOT be derived from the committed roster alone -- internal/ids/agentmint.go point 3 explicitly forbids that derivation. It must be reconstructed from ALL prepares ever written -- committed, aborted, AND dangling -- covering agents still enrolled and agents that have since departed, or a new agent minted with a different keypair can silently inherit a previous agent's id/suffix. This task must land BEFORE any enrolment record reaches the WAL (once an agent id is on disk, id-reuse-on-restart escalates from MEDIUM to CRITICAL). Cross-reference ID-2-WIRING-OBSERVER (c31f6999-da4e-400d-ab55-178b82e2a42e), the task that exposes dangling prepares needed to compute this floor correctly.
   _Proof: go test -race -run TestRosterRecovery ./internal/auth_
+- [ ] None · MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes enrolment durable — core, P1
+  internal/hub keeps its OWN roster view, fed by internal/httpapi/auth.go calling hub.NoteEnrolment on every accepted enrolment. That is honest TODAY only because the two views have identical lifetimes: auth.MemoryRoster is in memory only and lost on restart, and so is the hub's. auth.Roster exposes Put/Get/Len and NO listing, and internal/auth was outside the MSG/POLL wave's ownership, which is why it was done this way. THE DAY AUTH-3 LANDS THIS BECOMES A LANDMINE: auth's roster survives a restart while the hub's starts empty, so sessions authenticate fine but hub.publish returns 403 (ErrUnknownSender) for every send, 404 for every recipient, and both read paths fail closed with ErrUnknownSender -- a bus that authenticates everyone and serves nobody. FIX: add List (or an iterator) to auth.Roster and auth.MemoryRoster, inject it into hub.Options, and delete NoteEnrolment together with its call site in handleEnroll. CRITICAL DETAIL: the enrolment epoch (store.Message.VisibleTo) reads Agent.EnrolledAt, so the durable roster MUST carry each agent's ORIGINAL enrolment instant. With it, a genuinely continuous agent keeps seeing everything sent since it enrolled, which is exactly the behaviour the epoch was designed to preserve. MUST land in the same change as AUTH-3, never after it.
+  _Proof: go test -race -run TestHubReadsTheDurableRoster ./internal/hub_
 
 ### EPIC CLI — Human CLI interface to the bus
 
-- [x] CLI-1 · CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single client that replaces the shell wrappers — cli, P0
-  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
-  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
-  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
-  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
-  wrapper. A feature without its CLI subcommand is still not done.
-  
-  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
-  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
-  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
-  
-  THE DECISION THAT IS ALREADY MADE AND MUST NOT BE RE-LITIGATED: **"embed" is the load-bearing word.**
-  The CLI is a THIN SHELL over a REUSABLE GO CLIENT PACKAGE, and that package **CANNOT LIVE UNDER
-  `internal/`** -- Go would forbid any other module importing it, which defeats the entire requirement.
-  Decided 2026-08-02 precisely because deciding it late would be expensive. Put it at a top-level
-  importable path (e.g. `client/`), and treat its exported surface as a PUBLIC API subject to
-  compatibility care. The binary is a separate `cmd/` (e.g. `cmd/agent-bus-cli`) so the server image
-  never accidentally ships the client, and the client package must NOT import anything under
-  `internal/`.
-  
-  STILL TO DECIDE AND RECORD IN DECISIONS.md (the original CLI-1 question, narrowed): the exact package
-  path and binary name. NOT still open: whether the package is importable (it is), and whether one
-  binary serves both humans and agents (it does).
-  
-  SCOPE.
-   - The client package: transport, base URL, timeouts, retry/backoff, credential handling, cursor
-     management, and typed errors. NO business logic beyond what later CLI tasks need.
-   - Subcommand skeleton and global flags: --bus URL, --identity path, --json, --timeout.
-     Config/env resolution order, documented, deterministic.
-   - EXIT-CODE CONVENTIONS, fixed now and treated as contract: distinct codes for usage error,
-     auth/credential failure, network/unreachable, server-side error, and "nothing to report" so an
-     agent can branch without parsing text. Put them in CONTRACTS.md.
-   - **THE LONG-POLL SUBCOMMAND STREAMS NEWLINE-DELIMITED JSON (NDJSON)** -- one JSON object per line,
-     flushed as it arrives, so a consumer can process incrementally rather than buffering to
-     completion. Establish that convention here even though CLI-3 implements the command.
-   - NO interactive prompts anywhere, and no TTY-dependent credential input. An agent shelling out has
-     no TTY.
-   - CONTRACTS.md gains the CLI's flags, exit codes and JSON shapes -- the binary now has a second
-     consumer with a compatibility expectation.
-  
-  NOT IN SCOPE: any actual endpoint call (CLI-2..CLI-8 own those), and rewriting AGENT_PROTOCOL.md
-  against subcommands (its own task).
-  
-  PROOF. `go build ./... && go test -race ./client/... && go vet ./... && go run ./cmd/agent-bus-cli --help 2>&1 | grep -q 'enrol' && ! go list -deps ./cmd/agent-bus-cli | grep -q 'agent-bus/internal/'`
-  The last clause is the load-bearing one: it MECHANICALLY ENFORCES that the client binary (and hence
-  the client package) does not depend on `internal/`, which is the requirement most likely to be broken
-  by accident. FAILS TODAY by construction -- neither the package nor the binary exists. Adjust the
-  paths to whatever DECISIONS.md settles, but KEEP the internal/-dependency clause.
-  _Proof: go build ./... && go test -race ./client/... && go vet ./... && go run ./cmd/agent-busctl --help 2>&1 | grep -q 'enrol' && ! go list -deps ./cmd/agent-busctl | grep -q 'agent-bus/internal/'_
-- [x] CLI-4 · CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadcast.sh) — cli, P1
-  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
-  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
-  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
-  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
-  wrapper. A feature without its CLI subcommand is still not done.
-  
-  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
-  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
-  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
-  
-  REPLACES AGENTIF-4 (`scripts/bus-broadcast.sh`) and AGENTIF-5 (`scripts/bus-send.sh`), both superseded.
-  
-  Send a DM to a fully-qualified agent id, or broadcast to the roster. Body from an argument, from a
-  file, or piped on stdin (so it composes with other tools). Refuse ambiguous or empty sends with a
-  clear error rather than sending nothing.
-  
-  **IDEMPOTENCY IS THIS COMMAND'S HARD REQUIREMENT (invariant 10).** The client generates the
-  idempotency key ONCE and REUSES IT ON EVERY RETRY of the same logical send. Generating a fresh key per
-  attempt turns the retry that idempotency exists to make safe into a duplicate message. The named test
-  in the proof exists specifically to pin that. Note the two cases must not be collapsed: same key +
-  same payload is a LEGITIMATE RETRY (server returns the original result); same key + DIFFERENT payload
-  is a PROTOCOL VIOLATION (server rejects and disconnects) -- the CLI must never produce the second by
-  mutating a body between attempts. Idempotency keys are retained for a BOUNDED window and FAIL CLOSED,
-  so a retry arriving after the window is rejected rather than silently re-applied: surface that as a
-  specific, actionable error, not a generic failure.
-  
-  DEPENDS ON: MSG epic, IDEM epic, CLI-1, CLI-2.
-  
-  PROOF. FAILS TODAY by construction. See IDEM-18 (wrappers generate the key once) -- that task is
-  re-scoped to this client.
-  _Proof: go test -race -run 'TestCLISend|TestCLIBroadcast' ./client/... ./cmd/agent-busctl/... && go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/..._
-- [x] CLI-2 · CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.sh) — cli, P0
-  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
-  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
-  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
-  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
-  wrapper. A feature without its CLI subcommand is still not done.
-  
-  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
-  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
-  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
-  
-  **THIS TASK ABSORBS AGENTIF-2 ("scripts/bus-enrol.sh"), which is SUPERSEDED.** AGENTIF-2 was a P0
-  telling someone to write a shell wrapper; that is exactly the instruction the 2026-08-02 amendment
-  retires, and leaving it would have had two agents build two enrolment clients. There is ONE
-  enrolment client and it is this subcommand.
-  
-  SCOPE -- identity, for humans AND agents, against the AUTH surface.
-   - `enrol` -- generate the Ed25519 AUTH keypair locally, submit ONLY the public half, receive the
-     SERVER-MINTED fully-qualified id `<bus-id>.<agent-id>` (invariant 1 -- the client never chooses
-     its id), and store the credential.
-   - SESSION HANDLING, per the 2026-08-02 auth decision: the client asks for a session, the SERVER
-     provides the token value, the client SIGNS it with its enrolment private key, and the server
-     verifies against the recorded public key. The session lasts AT MOST ONE HOUR and the client
-     REFRESHES AT 75% OF LIFETIME (server expiry is authoritative; do not refresh at the boundary).
-     Tokens are OPAQUE server-side handles, not signed claims. **SESSIONS DO NOT SURVIVE A SERVER
-     RESTART** -- the CLI must re-authenticate transparently rather than surfacing a confusing failure.
-   - `whoami`, `use` (switch identity/bus), `logout` (calls /v1/leave AND clears the local credential).
-     **Revocation is IMMEDIATE** -- /leave invalidates outstanding sessions at once, not at expiry.
-   - Credential storage under the user's config dir at 0600, NEVER in the repo, never world-readable.
-     No interactive prompt and no TTY-dependent input -- an agent shelling out has no TTY.
-   - A human is just another enrolled participant with no special server-side privilege.
-  
-  DEPENDS ON: AUTH-1 (enrol, in flight), AUTH-2 (token middleware), AUTH-4 (leave/revocation), CLI-1.
-  
-  PROOF. Unit tests plus a REAL end-to-end enrolment against a server brought up through
-  scripts/bus-serve.sh on an isolated run dir and port -- because "the subcommand is written" is not the
-  same as "an agent can enrol". FAILS TODAY by construction (neither the CLI nor /v1/enroll exists).
-  Do NOT complete this on the unit-test clause alone.
-  _Proof: go test -race -run 'TestEnrol|TestCLIEnrol' ./client/... ./cmd/agent-busctl/..._
+- [ ] None · post-200 validation failures on send say may or may not have been applied — cli, P3
+  client/messages.go: the four validation failures AFTER a 200 was received are routed through writeFailed and so are told this send may or may not have been applied, when in fact a 200 WAS received and the bus did accept it. Errs safe but is inaccurate; consider a distinct wording for the post-acceptance validation path.
 - [ ] CLI-6 · CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper idea from the dissolved DUR-4-FU-TOOLING) — cli, P2
   MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
   2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
@@ -1143,12 +472,7 @@
   
   DEPENDS ON: DUR-5 (the audit log itself), CLI-1. PROOF fails today by construction.
   _Proof: go test -race -run 'TestCLILog' ./client/... ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli log --help 2>&1 | grep -qi 'metadata only'_
-- [ ] CLI-3-FU-HASHVERIFY · CLI-3-FU-HASHVERIFY: verify content_sha256 against the decoded body on the read path — cli, P2
-  Raised by the security gate on CLI-3 (2026-08-02), finding P2-4. `client.Message` carries `content_sha256` and `size`, and `client/messages.go`'s `SendResult` doc comment explicitly tells callers "a caller that wants end-to-end assurance can compare it with its own" -- but NOTHING in the client ever compares the hash to `sha256(m.Body)`, nor `Size` to `len(Body)`. A field that can silently disagree with the bytes beside it is a field someone will eventually trust.
-  A separate fix pass has already tightened the SHAPE check to `^[0-9a-f]{64}$` at both sites; this task is the VALUE check, which was deliberately deferred because it adds a new hard failure mode and would have surprised the stub servers in the test suite mid-wave.
-  Decide and record: is a mismatch a hard error that fails the whole batch (consistent with how `Agents` treats a malformed roster entry), or a per-message flag? Invariant 7 names "verification of inbound messages" as a CLI responsibility, which argues for the hard error. Note this is NOT a substitute for message signing (SIGN epic): the hash is computed by the bus, so it detects corruption and a lying bus's inconsistency, not a forged sender. Say that plainly in the doc comment so nobody mistakes it for authenticity. Uses `crypto/sha256` + `encoding/hex` -- stdlib only, invariant 9 unaffected, no new crypto.
-  _Proof: go test -race -run 'TestCLIWatchRejectsBodyHashMismatch' ./client/..._
-- [ ] None · client: 404 on a route the client depends on reports as version skew, not exit-7 message rejection — client, P1
+- [~] None · client: 404 on a route the client depends on reports as version skew, not exit-7 message rejection — client, P1, in progress
   Field-observed (2026-08-07) by a real agent connecting a HEAD-built agent-busctl to an older running bus (~8h uptime, predating the mint work). The old bus has no /v1/mint route. The client gets 404 and surfaces it as exit 7 (rejected) on every send, while enrol/whoami/agents/watch all work normally -- so the skew is invisible until the first send.
   
   Why this matters: exit 7 in CONTRACTS-CLI.md means "the bus understood the request and refused it" (400/404/409/413/415/422 grouped together per client/transport.go statusError). A missing route is not that -- the bus never understood the request because it does not know the route exists. Telling the agent its MESSAGE was rejected when its BUS is too old invites exactly the wrong responses: retry, abandon the message, or report a delivery failure to the operator -- all wrong when the real remedy is "upgrade the bus". CLAUDE.md requires errors that name the remedy rather than the stack; "rejected" names neither the cause nor the fix.
@@ -1157,69 +481,9 @@
   
   Proof must show the OLD behaviour is currently reachable (a 404 on a route-dependent call surfaces as exit 7 today) before showing the fix distinguishes it.
   _Proof: go test -race -run TestVersionSkew ./client/... && grep -qi "version skew\|route.*missing\|upgrade the bus" AGENT_PROTOCOL.md_
-- [x] None · CLI-1-FU-BINARYNAME: Decide the INSTALLED name of the client binary — cli, P1
-  The directory is cmd/busctl, but "busctl" is also systemd's D-Bus tool, present on most Linux hosts (part of systemd, ships in the base install on Debian/Ubuntu/Fedora/Arch), so "go install ./cmd/busctl" or dropping the built binary on PATH SHADOWS the system tool. Nothing in the code depends on the installed name -- module path, package name and all internal references are independent of the final binary filename, so this is a pure decision task, no design work. Needs a user decision: keep "busctl" (accept the collision, document "run via full path or an alias"), rename to "agent-busctl", "abus", or something else. Recorded as an open question in DECISIONS.md 2026-08-02 SS1. Once decided: rename the cmd/ directory if changed, update all docs (CONTRACTS-CLI.md, AGENT_PROTOCOL.md, README.md, Dockerfile/CLI-BUSCTL-IMAGE) and go.mod-relative install instructions to match, and record the final decision + rationale in DECISIONS.md.
-  _Proof: test -d cmd/agent-busctl && ! grep -rP '(?<!agent-)busctl(?!-[0-9a-f])' README.md CONTRACTS.md CONTRACTS-CLI.md CONTRACTS-AGENT.md_
-- [x] CLI-3 · CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replaces bus-wait.sh) — cli, P1
-  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
-  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
-  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
-  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
-  wrapper. A feature without its CLI subcommand is still not done.
-  
-  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
-  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
-  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
-  
-  REPLACES AGENTIF-6 (`scripts/bus-wait.sh`), which is superseded.
-  
-  The headline command. Drives the long-poll wait endpoint in a loop and renders messages as a readable
-  live feed (timestamp, sender, recipient/scope, body), advancing its cursor across reconnects. Handles
-  Ctrl-C cleanly, reconnects with backoff on transient failure, and never busy-loops.
-  
-  **--json STREAMS NDJSON: one JSON object per line, FLUSHED AS IT ARRIVES.** This is the requirement
-  that makes the command usable by an embedding or shelling-out agent at all -- a long-poll that buffers
-  to completion is useless, because it never completes. The test named in the proof must assert
-  INCREMENTAL delivery (a reader sees line 1 before the stream ends), not merely that the output parses.
-  
-  **DELIVERY IS AT-LEAST-ONCE** (decision, 2026-08-02). Duplicates are the NORMAL steady state, not an
-  edge case. The watch loop must not present a duplicate as an error, and the help text must say so, so
-  an agent author writes an idempotent handler instead of assuming exactly-once. Freshness comes from
-  the server-minted monotonic sequence plus the recipient-side cursor.
-  
-  Session refresh (75% of lifetime) and transparent re-authentication after a server restart must be
-  invisible here -- a watch that dies when the bus restarts is a watch nobody can rely on.
-  
-  DEPENDS ON: POLL epic, CLI-1, CLI-2.
-  
-  PROOF. FAILS TODAY by construction. The second clause is deliberately a SEPARATE named test for the
-  incremental-streaming property, because a --json flag that buffers would pass a naive shape test.
-  _Proof: go test -race -run 'TestCLIWatch' ./client/... ./cmd/agent-busctl/... && go test -race -run TestCLIWatchStreamsNDJSONIncrementally ./cmd/agent-busctl/..._
-- [ ] None · CLI-2-FU-GITIGNORE: Add the credential store to .gitignore — cli, P3
-  busctl --identity ./creds (or the default in-repo-relative path if a user runs it from inside the repo) would put Ed25519 private-key seeds in the working tree where a careless "git add -A" commits them permanently into history. Add identities.json and identities.json.tmp-* (the store's O_EXCL temp-write pattern) to .gitignore. Trivial, but it is the file that must never be committed -- a leaked seed is a full identity compromise, not just a credential rotation. (.gitignore was outside the CLI-1/CLI-2 wave's file-ownership boundary, hence this follow-up rather than folding it in.)
-  _Proof: git check-ignore -q identities.json && git check-ignore -q identities.json.tmp-abc123_
-- [x] CLI-5 · CLI-5: agents -- roster listing (replaces bus-agents.sh) — cli, P1
-  MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
-  2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
-  be easy to use for a human + friendly for an agent to use or embed"). Invariant 7 is AMENDED, not
-  weakened: nobody hand-writes HTTP, but the vehicle is a CLI subcommand, not a scripts/bus-*.sh
-  wrapper. A feature without its CLI subcommand is still not done.
-  
-  THREE AUDIENCES, and every subcommand serves all three: a HUMAN (readable output, remedial errors); an
-  AGENT SHELLING OUT (--json, stable exit codes, NO interactive prompts, NO TTY-dependent credential
-  input); an AGENT EMBEDDING (the reusable client package, which therefore CANNOT live under internal/).
-  
-  REPLACES AGENTIF-3 (`scripts/bus-agents.sh`), superseded. Raised P2 -> P1 to match the AGENTIF-3 it
-  absorbs.
-  
-  List the enrolled roster as an aligned human-readable table (id, name, bus, enrolled-at, last-seen),
-  with --json for scripting. **Make the fully-qualified `<bus-id>.<agent-id>` readable WITHOUT
-  TRUNCATING the part that matters for routing** (invariant 2) -- eliding the bus prefix to fit a
-  terminal is exactly the wrong end to cut, because that prefix is what disambiguates a cross-bus id.
-  If the terminal is narrow, wrap or drop a less important column; never the qualified id.
-  
-  DEPENDS ON: MSG-1 (GET /v1/agents), CLI-1, CLI-2. PROOF fails today by construction.
-  _Proof: go test -race -run 'TestCLIAgents' ./client/... ./cmd/agent-busctl/..._
+- [ ] None · cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- latent trap for the 52930611 doc landing — cli, P1, 52930611-followup, exit-codes, latent-trap
+  cmd/agent-busctl/cli_test.go:287-297 (TestHelpExitCodeTablesAgreeWithClientExitCodes) hardcodes a CLOSED `valid` map of exit codes it will accept in any subcommand help-text exit-code table. It lists ExitOK/Error/Usage/Config/Auth/Network/Server/Rejected/Empty but NOT client.ExitVersionSkew (9), added by 52930611 (client/errors.go). It is GREEN TODAY ONLY because no subcommand help text documents exit 9 yet -- confirmed by running it. The moment 52930611 (or any change) adds a `9`/`version skew` row to ANY subcommand's --help text (cmd/agent-busctl/{send,watch,agents,whoami,root}.go all embed their own exit-code tables), this test will fail with `... documents exit code 9 ..., which is not one of the client.Exit* constants` -- in a package (cmd/agent-busctl/) outside client/**, so the doc task's author will appear to have broken an unrelated test in a package they were not touching. Both the reviewer and security gates on 52930611 flagged this independently (security gate F2, 2026-08-08T14:58: "exit 9 appears in ZERO of CONTRACTS-CLI.md/AGENT_PROTOCOL.md/README.md/PROTOCOL.md, and cmd/agent-busctl/cli_test.go:287-297 is a CLOSED valid-code set omitting client.ExitVersionSkew"). Fix: add `client.ExitVersionSkew: "client.ExitVersionSkew"` to the `valid` map (and add a `canonical` phrase entry, e.g. matching "version skew"/"predates" -> client.ExitVersionSkew, mirroring the existing entries) in the SAME change that lands 52930611's CONTRACTS-CLI.md/AGENT_PROTOCOL.md rows -- whoever completes 52930611 must extend this map, not a separate agent working cmd/agent-busctl/ later. Filed as its own task (rather than folded into 52930611) because the file is cmd/agent-busctl/, outside client/**, which is why it was not fixed alongside the client/** code.
+  _Proof: grep -n "client.ExitVersionSkew" cmd/agent-busctl/cli_test.go && go test -race -run TestHelpExitCodeTablesAgreeWithClientExitCodes ./cmd/agent-busctl/_
 - [ ] CLI-9 · CLI-9: shell completion + man/usage polish — cli, P3
   MERGED EPIC 2026-08-02. The CLI and AGENTIF epics are now ONE epic (user decision, DECISIONS.md
   2026-08-02: "Merge the CLI and AGENTIF epics" / "the go cli should take the place of the .sh files and
@@ -1312,6 +576,8 @@
   
   DEPENDS ON: CLI-1, CLI-2.
   _Proof: go test -race -run 'TestCLIDoctor' ./client/... ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli doctor --bus http://127.0.0.1:1 --json; test $? -ne 0_
+- [ ] DISCOVERY-DOC-FU-CLI · DISCOVERY-DOC-FU-CLI: `agent-busctl` subcommand that fetches and renders the bus discovery document (+ AGENT_PROTOCOL.md / CONTRACTS-CLI.md entries) — cli, P1
+  Invariant 7's delivery half of DISCOVERY-DOC. The server now serves a machine-readable discovery document; an agent must be able to read it through the compiled Go CLI rather than hand-writing HTTP. Add the subcommand over the importable client/ package, plus the AGENT_PROTOCOL.md entry and the CONTRACTS-CLI.md row, in the same task. Blocked on the cmd/busctl -> cmd/agent-busctl rename settling. Depends on DISCOVERY-DOC (server side).
 - [ ] AGENTIF-9 · CLI-VALIDATE: envelope/schema validation in the CLIENT before a message is handed to the caller (was AGENTIF-9, was a bash+jq check) — agentif, P1
   RE-SCOPED 2026-08-02 FROM A SHELL-WRAPPER CHECK TO A CLIENT-PACKAGE CHECK. The user's original
   instruction stands verbatim -- "add a mechanism to validate messages in the agent script before
@@ -1356,23 +622,8 @@
   
   Does NOT cover cryptographic verification, decryption, or replay/sender-identity checks -- that is CRYPTO-10, layered on top of this once it lands. This task is not gated on the CRYPTO epic and should land first since every wrapper needs it regardless of whether E2E crypto is ever enabled.
   _Proof: go test -race -run 'TestClientRejectsMalformedEnvelope' ./client/..._
-- [ ] CLI-3-FU-STOREDEDUP · CLI-3-FU-STOREDEDUP: collapse cursorstore.go's duplicated atomic-save and lock discipline into store.go — cli, P2
-  Raised by the reviewer gate on CLI-3 (2026-08-02). `client/cursorstore.go` carries its own `saveCursors`, `lockCursors` and `sweepCursorTempFiles`, duplicating roughly 120 lines of `client/store.go`'s `save`, `lock` and `sweepTempFiles`. It was duplicated rather than refactored only because store.go was outside the implementing agent's file-ownership boundary during a parallel wave.
-  The reviewer read the two side by side and confirmed they AGREE today -- identical O_EXCL-0600-temp -> Write -> Sync -> Close -> Rename -> dir-fsync, identical error-path cleanup, identical lock-ownership-token mint, identical conditional stale-break and conditional release, same timeouts; `newLockToken` and `removeIfToken` are genuinely shared. There is also no lost-update path onto the seed file: the two guard DIFFERENT lock files over DIFFERENT documents and the temp-sweep globs are disjoint. So this is not urgent.
-  It is worth doing because of WHAT the original protects: a divergence between the two copies is a lost-update bug on a file of Ed25519 private-key seeds, and the reasoning that makes the lock correct (why a stale break must be conditional on the ownership token) now lives in one copy and is referenced by the other. Refactor to `lockFile(name string)` / `saveJSON(name string, v interface{})` on `*Store` and have both callers pass their own file name. Preserve every existing comment; the WHY is the valuable part.
-  _Proof: go test -race -run 'TestStore|TestCLIWatchPersistsCursorAcrossRuns|TestCLIWatchCursorStoreIgnoresDamagedFile' ./client/... && test "$(grep -c 'O_EXCL' client/cursorstore.go)" -eq 0_
 - [ ] None · CLI-2-FU-LEAVE: Add /v1/leave and make busctl logout actually revoke — cli, P1
   Today busctl logout only deletes the LOCAL credential: the enrolment stays on the roster and any live session lives out its hour (up to 1h of continued access after a user believes they have logged out). client.LogoutResult.ServerNotified exists and is hardcoded false precisely so a consumer cannot mistake local deletion for revocation; it should flip to true once the bus is genuinely told. CLI-2's originally written scope said logout "calls /v1/leave ... revocation is IMMEDIATE" -- that half of the promise is carried by THIS task: (1) add a /v1/leave (or equivalent) server route that revokes the agent's active session(s) and marks the roster entry left/revoked, following invariant 3 (auth) and invariant 10 (idempotency) exactly as every other mutating route does; (2) wire busctl logout to call it and set ServerNotified=true on success, with a documented fallback (still delete locally, but say so) when the server is unreachable. Depends on AUTH-4 (session/roster machinery). Update CONTRACTS-HTTP.md, CONTRACTS-CLI.md and AGENT_PROTOCOL.md.
-- [ ] CLI-5-FU-WIDTH · CLI-5-FU-WIDTH: busctl agents should use the real terminal width, not a fixed 100 columns — cli, P3
-  Raised by the reviewer gate on CLI-5 (2026-08-02). `cmd/busctl/agents.go`'s `maxAgentTableWidth` is a hard-coded 100, so "if the terminal is narrow, wrap or drop a less important column" -- the task's actual wording -- is not really implemented: the table drops ENROLLED and then BUS at a fixed threshold that has nothing to do with the reader's terminal.
-  The load-bearing half of CLI-5 IS satisfied and must stay satisfied: the fully-qualified `<bus-id>.<agent-id>` is sized to the longest id present and is NEVER truncated or elided, because the bus prefix is the leading part and any "..." truncation cuts exactly the end that disambiguates a cross-bus id (invariant 2). This task must not weaken that.
-  `cliEnv.lookupEnv` is already injected for tests, so reading `COLUMNS` with a fallback to the current 100 is about three lines and stays stdlib-only (invariant 8) -- an ioctl-based terminal-size probe would be a dependency for a sharper answer than this needs. Keep the fallback: `COLUMNS` is frequently unset in a non-interactive shell, which is also exactly when the output is being piped and width does not matter.
-  _Proof: go test -race -run 'TestCLIAgentsHumanTableNeverTruncatesQualifiedID|TestCLIAgentsRespectsColumns' ./cmd/agent-busctl/..._
-- [ ] CLI-3-FU-SAFETEXT · CLI-3-FU-SAFETEXT: export the terminal-safe renderer from client/ and delete busctl's copy — cli, P2
-  Raised by the reviewer gate on CLI-3 (2026-08-02). `cmd/busctl/watch.go`'s `terminalSafe` is a SECOND, independent copy of a security-relevant neutraliser whose original is `client/sanitize.go`'s unexported `safeText`. The two agree today -- both handle <0x20, 0x7f, 0x80-0x9f and RuneError -- and that was verified by reading them side by side, which is exactly the kind of guarantee that decays silently. The duplication exists only because `safeText` is unexported and the CLI must not reach into the client package's internals.
-  The better fix, and the reason this is not merely tidying: invariant 7's THIRD audience is an agent that EMBEDS the client, and an embedder rendering another agent's message body to a terminal needs precisely this function and currently cannot reach it. So the "purely presentational, belongs in the command" justification does not actually cover the embedding case.
-  Export something like `client.TerminalSafe(s string, keepNewlines bool) string`, have `safeText` use it, and delete `cmd/busctl/watch.go`'s copy (keeping the `keepNewlines` behaviour, which the CLI needs and `safeText` does not have). Take the bidi/zero-width handling with it. Widening the client's public API is the point here, not a cost.
-  _Proof: go test -race -run 'TestCLIWatchHumanFeedNeutralisesTerminalEscapes|TestSafeText' ./client/... ./cmd/agent-busctl/... && ! grep -n 'func terminalSafe' cmd/agent-busctl/watch.go_
 - [ ] None · CLI-2-FU-TLSSEAM: The client transport is built before the identity is resolved — cli, P2
   client.New calls newHTTPClient(cfg) before any credential is read, but invariant 11's pinning needs a PER-IDENTITY client certificate and a PER-BUS fingerprint, neither of which is a function of Config alone -- both only become known once an identity/credential has been loaded from the store (or minted at enrol time). The seam is in the right PLACE (newHTTPClient is genuinely the single transport constructor, confirmed by CLI-1/CLI-2 review) but the wrong TIME. Fix: build the *http.Client LAZILY on first authenticated use (or key a small cache by (agentID, busURL) so multiple identities against different buses do not share a transport/connection pool inappropriately). Also, when this lands: delete the loopback-only-plaintext exception in client.parseBusURL (added in CLI-1/CLI-2 specifically because /v1/session/begin returns a bearer token in the response body over what would otherwise be unencrypted HTTP) once the mTLS listener ships and plaintext has no remaining justification. Blocks the mTLS epic. Recorded in DECISIONS.md 2026-08-02 addendum.
   _Proof: go test -race -run TestTransportSeam ./client/..._
@@ -1402,95 +653,613 @@
   DEPENDS ON: RELAY epic, CLI-1, CLI-2. PROOF fails today by construction.
   _Proof: go test -race -run 'TestCLIPeers' ./client/... ./cmd/agent-bus-cli/..._
 
+### EPIC CONTEXT — CONTEXT: cut the token cost of this repo's documentation without losing load-bearing rationale
+
+- [ ] CONTEXT-DRIFT-PHANTOM · CONTEXT-DRIFT-PHANTOM: two agent defs instruct writing to SESSION_REPORT.md, which has never existed — docs, P2
+  Priority P2 justification: feature-runner.md and security.md instruct agents to write to a file
+  that has never existed in this repo. Cheap to hit and cheap to fix: an agent that obeys creates an
+  untracked root-level file and then fails CLAUDE.md step 10's clean-tree requirement.
+  
+  Definition of done: both references removed, or retargeted to the Spec Server task-note journal
+  (kind=report / kind=model notes), whichever the implementer judges reads more naturally in context.
+  
+  Depends on: none besides CONTEXT-DOCCHECK.
+  
+  Parallel-safe: yes. Size: 15 minutes. Saving: approximately 0 tokens; correctness only.
+  _Proof: bash scripts/proof-check.sh '! grep -rq "SESSION_REPORT" .claude/ && ! test -e SESSION_REPORT.md'_
+- [ ] CONTEXT-LOG-RETIRE · CONTEXT-LOG-RETIRE: AGENT_LOG.md freezes its narrative and moves to one line per task — docs, P2
+  Priority P2 justification: AGENT_LOG.md has grown to 43 entries averaging 5,963 B each, all written
+  in 6 days (roughly 43 KB/day, the fastest-growing file in the repo), with no committed tooling that
+  reads it -- the only automated readers were two `todo` proof_cmds. It is also the file that
+  repeatedly shows `MM` in git status and blocks pathspec commits. Every sampled entry has a
+  corresponding Spec Server task whose notes are equal or richer.
+  
+  USER DECISION -- ALREADY RULED, not a blocker (2026-08-08): APPROVED as "freeze + one-line entries".
+  The earlier "needs a user decision before implementation" gate is REMOVED. The ruling: a dated
+  "narrative entries end here" marker; the existing ~3,451 lines of narrative stay UNTOUCHED
+  (append-only is respected, nothing is deleted or rewritten); the new convention going forward is one
+  line per task, <= 240 B, carrying task id, sha, gate verdicts and proof verdict; REVIEWER/SECURITY
+  SKIP JUSTIFICATIONS STAY IN AGENT_LOG.md -- that is the one category CLAUDE.md step 10 uniquely
+  mandates recording there, and it fits on one line. All other narrative moves to `kind=report` task
+  notes on the Spec Server.
+  
+  RECORDED FALSIFIER (keep this, it is load-bearing): if HANDOVER-CONTRIBUTING finds that Spec Server
+  credentials cannot transfer to a new maintainer, REVERSE THIS TASK -- a credential-less maintainer
+  would lose all in-repo narrative from the freeze date forward with no way to read the note journal
+  that replaced it. In that event, build a notes-to-WORKLOG.md exporter instead of retiring the
+  narrative.
+  
+  Definition of done:
+    1. A dated "## 2026-0X-XX -- narrative entries end here" marker appended to AGENT_LOG.md. Existing
+       lines untouched.
+    2. New convention documented and enforced going forward: one line per task, <= 240 B --
+       `date . <task-key/public_id> . <sha> . gates: reviewer=... security=... (or SKIPPED: <one-line
+       reason>) . proof: <proof-check verdict>`.
+    3. Skip justifications stay in AGENT_LOG.md per CLAUDE.md step 10 -- confirm this explicitly in the
+       new convention text so nobody "simplifies" it away later.
+    4. CLAUDE.md steps 8 and 10 updated to describe the new convention. A DECISIONS.md entry recording
+       the change, the loss (credential-less narrative access from the freeze date), and the falsifier
+       above -- do NOT write DECISIONS.md as part of THIS task's own execution if a concurrent appender
+       risk exists; coordinate per CLAUDE.md's shared-file rules.
+  
+  Who loses what: a reader WITHOUT Spec Server credentials loses in-repo narrative detail from the
+  freeze date on. Genuine loss, mitigated by the one-liner carrying the task's public_id so the full
+  narrative is one API call away for a credentialed reader.
+  
+  CONFLICT recorded as a real relation, MUST land first or be rescoped: open task 0ba2372a
+  ("Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE") greps
+  AGENT_LOG.md for narrative content as part of its own proof. If it has not landed before this task
+  starts, either land it first or rescope it to write to the note journal instead of AGENT_LOG.md
+  narrative.
+  
+  Depends on: CONTEXT-DOCCHECK; CONTEXT-DONEGATE-CANON (sixth and LAST of the six CLAUDE.md-serialised
+  tasks). Also depends on 0ba2372a per the conflict above.
+  
+  Parallel-safe: no. Size: half a day.
+  
+  Saving basis -- PER-TASK OUTPUT (distinct from per-spawn and per-read: this is narrative text an
+  agent no longer WRITES, once per completed task, not once per spawn or once per file read): roughly
+  5,700 B of narrative not written per task => approximately -1,425 output tokens/task, approximately
+  -14.3k output tokens/session at 10 tasks/session. Plus the file stops growing ~43 KB/day, plus a
+  large drop in `MM`-blocked commits.
+  _Proof: bash scripts/proof-check.sh 'grep -q "narrative entries end here" AGENT_LOG.md && bash scripts/doc-check.sh section CLAUDE.md "## Work in atomic increments" "one line per task" && bash scripts/doc-check.sh section AGENT_LOG.md "## Convention" "reviewer=" "SKIPPED:"'_
+- [ ] CONTEXT-DRIFT-WRAPPERS · CONTEXT-DRIFT-WRAPPERS: two per-spawn files still call the retired shell wrappers 'the ONLY interface' — docs, P1
+  Priority P1 justification: CLAUDE.md's own repository-layout row and documentation.md:19 instruct
+  agents to maintain a surface that invariant 7 has already retired (the compiled Go CLI is THE
+  client; scripts/bus-*.sh wrappers are retired as their CLI subcommands land). The documentation
+  agent acting on this instruction does WRONG work, not merely wasted work -- this is a correctness
+  fix, not a size fix.
+  
+  Definition of done: CLAUDE.md's repository-layout row and .claude/agents/documentation.md:19
+  restated to match invariant 7: the CLI is the client; wrappers are retired as their subcommands
+  land; do not add a new one. Do NOT touch AGENT_PROTOCOL.md in this task -- an existing CLI-epic task
+  (CLI-10) owns that rewrite; duplicating it here would create the exact two-copies-drift problem this
+  epic exists to fix.
+  
+  Depends on: CONTEXT-DOCCHECK; CONTEXT-NOTESBLOCK (fourth of the six CLAUDE.md-serialised tasks --
+  must run after NOTESBLOCK, before CONTEXT-LOG-RETIRE). CONFLICT recorded as a real relation: the
+  existing open task "Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88,
+  AGENT_PROTOCOL.md:122, CLAUDE.md:332" (public_id f0ef1ed9) ALSO edits CLAUDE.md near this same area
+  -- that existing task must land FIRST; this task is sequenced after it.
+  
+  Parallel-safe: no. Size: 30 minutes. Saving: approximately 0 tokens directly; this is a correctness
+  fix, priced at P1 for that reason alone, not for its (negligible) token saving.
+  _Proof: bash scripts/proof-check.sh '! grep -q "the ONLY interface agents use" CLAUDE.md && ! grep -q "the \`scripts/bus-\*.sh\` wrappers are the" .claude/agents/documentation.md && bash scripts/doc-check.sh section CLAUDE.md "## Repository layout" "retired"'_
+- [ ] CONTEXT-PROTOCOL-WALFLOOR-DEDUP · CONTEXT-PROTOCOL-WALFLOOR-DEDUP: one file owns the WAL-index-floor bytes, not two that can silently diverge — docs, P2
+  Priority P2 justification: PROTOCOL.md section 11 (roughly 7,388 B) and CONTRACTS-ONDISK.md's WAL
+  record-index-floor section (roughly 11,541 B) describe THE SAME on-disk file with the same ASCII
+  header diagram, the same three-shapes compatibility table, the same field semantics word-for-word,
+  the same forensic statistic ("2268 of 2289 measured truncation offsets"), and the same
+  MISSING/UNVERIFIED/CORRUPT taxonomy. PROTOCOL.md's own text even claims the split is "bytes here,
+  rationale there" when in fact both files carry both. This is a live DIVERGENCE risk -- a correction
+  landing in one copy is invisible in the other -- not just a byte-count problem.
+  
+  Definition of done: CONTRACTS-ONDISK.md (its charter per CLAUDE.md's plane-file split) keeps the
+  FULL text, unabridged. PROTOCOL.md section 11 reduces to the byte diagram, the field-name list, and
+  an explicit pointer to CONTRACTS-ONDISK.md. The forensic statistic and the failure-taxonomy prose
+  are kept IN FULL in the owning file -- nothing is deleted from the repository, only de-duplicated.
+  
+  Who loses what: a PROTOCOL.md-only reader loses the failure taxonomy at that specific spot and gets
+  a named pointer instead.
+  
+  CONFLICTS recorded as real relations, both MUST land first (both are higher priority and both own
+  PROTOCOL.md): the open P0 task DUR-4-FU-DOCS (public_id 0b6d5c11) and the open P1 task
+  MSG-FU-SUFFIXFLOOR-FU-DOCS (public_id e5fa08ba) both edit PROTOCOL.md. Sequence this task strictly
+  after both.
+  
+  Depends on: CONTEXT-DOCCHECK; DUR-4-FU-DOCS; MSG-FU-SUFFIXFLOOR-FU-DOCS.
+  
+  Parallel-safe: no. Size: 3 hours.
+  
+  Saving basis -- PER-READ: approximately -1.5k tokens per PROTOCOL.md read, plus removal of a
+  divergence hazard that has no token value but a real correctness value (a correction applied once
+  instead of needing to be applied twice).
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section CONTRACTS-ONDISK.md "durable WAL record-index floor" "2268 of 2289" "UNVERIFIED" && ! grep -q "2268 of 2289" PROTOCOL.md && grep -q "CONTRACTS-ONDISK.md" PROTOCOL.md && test "$(wc -c < PROTOCOL.md)" -le 74000'_
+- [ ] CONTEXT-READRULE · CONTEXT-READRULE: tell agents to grep and range-read the big docs, in the one file every agent gets — docs, P1
+  Priority P1 justification: highest-expected-value item in the epic, and it is ADDITIVE, not a
+  deletion -- it changes HOW a document is fetched, not what information exists.
+  
+  Definition of done: a ~14-line "## Reading the documents in this repo" section in CLAUDE.md: current
+  line/byte sizes of the eight large docs; SPEC.md is NEVER whole-read (`claim-next` and the task API
+  give you the task directly -- the mirror exists for humans without credentials); DECISIONS.md ->
+  read DECISIONS-INDEX.md first, then `Read` with offset/limit, never whole; CONTRACTS-* -> `grep -n
+  '^## '` to locate a section, then range-read it; before whole-reading ANY file over 600 lines, read
+  its first 20 lines first (that is where frozen/superseded banners live).
+  
+  Who loses what: nobody loses information -- this only constrains HOW it is fetched. The bet is that
+  a grepped/range-read answer is as good as a whole-read one. Falsifier: an agent asserting something
+  false about a doc it grep-sampled instead of reading in full. Two occurrences => narrow the rule to
+  "grep to locate, then range-read +/-60 lines" rather than deleting it.
+  
+  Depends on: CONTEXT-DOCCHECK; CONTEXT-CLAUDE-TRIM (second of the six CLAUDE.md-serialised tasks --
+  same file, must run after CLAUDE-TRIM, before CONTEXT-NOTESBLOCK). Soft dependency on
+  HANDOVER-DECISIONS-INDEX: the pointer text here names DECISIONS-INDEX.md, so land this after that
+  task or the pointer names a file that does not yet exist.
+  
+  Parallel-safe: no (owns CLAUDE.md, position 2 of 6 in the serialised chain). Size: 1 hour.
+  
+  Saving basis -- mixed and must NOT be conflated: a PER-SPAWN COST of approximately +900 B
+  (~+225 tokens/spawn, ~+6.8k tokens/session) against a PER-READ saving of roughly -105k tokens each
+  time it prevents one whole-read of SPEC.md (or roughly -76k tokens for a whole-read of DECISIONS.md)
+  -- these are different denominators and differ by orders of magnitude; do not add them as if
+  comparable. Breaks even if it prevents one whole-read per approximately 15 sessions, which is
+  plausible but is an estimate (EV), not a guarantee -- record it as such.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section CLAUDE.md "## Reading the documents in this repo" "never whole-read" "SPEC.md" "DECISIONS-INDEX.md" "offset" "first 20 lines"'_
+- [ ] CONTEXT-RESERVE-CANON · CONTEXT-RESERVE-CANON: the reservation guidance stops disagreeing with itself across four agent defs — docs, P1
+  Priority P1 justification: pure correctness. Three of four copies of the reservation-namespace
+  block instruct an action -- "seed the namespace past the epic's existing max" -- that a 2026-08-08
+  Spec Server change turned into a 409-loop that BURNS reservation numbers. Any agent that files a
+  follow-up task key can hit this. feature-runner.md already carries the corrected copy; the other
+  three defs still ship the disproven instruction.
+  
+  Definition of done: feature-runner.md's corrected copy becomes canonical and moves to
+  .claude/ORCHESTRATION.md (created by CONTEXT-CLAUDE-TRIM). All four defs (planner, spec-keeper,
+  deep-diver, feature-runner) drop their own copy of the block for a 2-line pointer plus the standing
+  one-liner already in CLAUDE.md ("Numbers are reserved, not chosen"). The MOBILE-21/23/24 collision
+  evidence AND the 409-loop correction both survive VERBATIM in the canonical copy -- that narrative
+  is exactly the kind this repo has proven it needs kept, not summarised.
+  
+  Depends on: CONTEXT-CLAUDE-TRIM (creates .claude/ORCHESTRATION.md -- this task cannot start until
+  that file exists).
+  
+  Parallel-safe: yes vs. the CLAUDE.md-chain tasks (this task does not touch CLAUDE.md itself, only
+  ORCHESTRATION.md and the four agent defs); NOT parallel-safe vs. CONTEXT-DISPATCH-RULE -- both own
+  .claude/ORCHESTRATION.md and must be sequenced against each other (order between the two is not
+  mandated; spec-keeper or the implementer picks one at claim time and the other follows).
+  
+  Size: 1 hour.
+  
+  Saving basis -- PER-SPAWN, and the saving is ONLY real because the canonical text lands in an
+  on-demand file rather than CLAUDE.md: roughly 1,900 B removed across 4 defs => a weighted
+  approximately -950 B/spawn, approximately -238 tokens/spawn, approximately -7.1k tokens/session.
+  Putting the canonical text in CLAUDE.md instead would be token-NEUTRAL (paid on all ~30 spawns to
+  save it on ~15) -- do not "simplify" this task by relocating there.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section .claude/ORCHESTRATION.md "## Reserving task keys" "MOBILE-21" "409" "repeat the request unchanged" && test "$(grep -rl "seed it past" .claude/agents/ | wc -l)" -eq 0'_
+- [ ] CONTEXT-CLI-SECTIONS · CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readable sections — docs, P2
+  Priority P2 justification: one `##` section in CONTRACTS-CLI.md spans roughly 75% of the file
+  (lines 243-1,099), containing pinning, signed sends, exit codes, JSON shapes, watch, credential
+  storage, cursor migration, the messaging keypair, idempotency and the client package, all flattened
+  as `###` subsections under ONE heading. It defeats range-reading completely -- a reader looking for
+  exit codes has no way to jump there without reading the whole block.
+  
+  Definition of done: pure heading promotion -- `###` -> `##` at natural topic boundaries. NO PROSE
+  CHANGED, NO BYTES REMOVED -- this is a restructure, not a reduction, and its proof enforces that.
+  Enforce going forward: no `##` section in this file may exceed 250 lines.
+  
+  Depends on: CONTEXT-DOCCHECK. CONFLICT recorded as a real relation, MUST land first: the existing
+  open task "CONTRACTS-CLI.md client export table is missing the three symbols MTLS-EXPIRY added"
+  (public_id 083c468e) also owns this file -- it must land before this task starts.
+  
+  Parallel-safe: no vs. any other CONTRACTS-CLI.md task. Blocks: CONTEXT-PLANE-TOC (regenerate the TOC
+  after this restructure, not before).
+  
+  Size: approximately 1 day -- FLAG, at the epic's stated size limit. Split point if it runs long:
+  (1) pinning + sends + exit codes; (2) watch + credential storage + idempotency + client package.
+  
+  Saving basis -- PER-READ: approximately -14k tokens per targeted lookup that no longer needs the
+  full 857-line block.
+  _Proof: bash scripts/proof-check.sh 'python3 -c "import sys; L=open(\"CONTRACTS-CLI.md\").read().splitlines(); h=[i for i,l in enumerate(L) if l.startswith(\"## \")]+[len(L)]; m=max(b-a for a,b in zip(h,h[1:])); print(\"sections\",len(h)-1,\"max\",m); sys.exit(0 if len(h)-1>=8 and m<=250 else 1)" && test "$(wc -c < CONTRACTS-CLI.md)" -ge 87000'_
+- [ ] CONTEXT-PLANE-TOC · CONTEXT-PLANE-TOC: a generated heading index at the top of every large reference doc — tooling, P2
+  Priority P2 justification: no CONTRACTS-* plane file, PROTOCOL.md or INVARIANTS.md has a table of
+  contents; CONTRACTS-ONDISK.md alone has 12 sections across 1,295 lines and today a reader has to
+  `grep -n '^## '` it themselves to find one. This is the mechanism CONTEXT-READRULE's grep-first
+  guidance depends on actually existing.
+  
+  Definition of done: scripts/gen-doc-toc.sh inserts/refreshes a `<!-- TOC -->...<!-- /TOC -->` block
+  (heading text + line number) in CONTRACTS-CLI.md, CONTRACTS-HTTP.md, CONTRACTS-ONDISK.md,
+  CONTRACTS-AGENT.md, PROTOCOL.md, INVARIANTS.md. Must be IDEMPOTENT (running it twice produces no
+  diff), so it cannot rot; wired into `doc-check.sh budget` as a "TOC is current" assertion.
+  
+  Cost, stated honestly: roughly +800 B per file, paid once per file per read -- this is a per-read
+  cost that pays back on the very first targeted read of any of these files.
+  
+  Depends on: CONTEXT-DOCCHECK; soft-runs-after CONTEXT-CLI-SECTIONS (regenerate the TOC after that
+  task's heading restructure, not before) and after the PROTOCOL.md/CONTRACTS-ONDISK.md dedup task
+  CONTEXT-PROTOCOL-WALFLOOR-DEDUP. NOTE: INVARIANTS.md already has its 11 `### Invariant N` headings
+  (landed 2026-08-08, outside this epic) so this task indexes an already-headed file for that one; no
+  extra dependency needed there.
+  
+  Parallel-safe: yes vs. everything in the epic except CONTEXT-CLI-SECTIONS and
+  CONTEXT-PROTOCOL-WALFLOOR-DEDUP, which it must follow. Size: half a day.
+  
+  Saving basis -- PER-READ: a targeted CONTRACTS-ONDISK.md lookup drops from 1,295 lines to roughly
+  160 lines needed => approximately -24k tokens per targeted lookup.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/gen-doc-toc.sh && git diff --quiet -- CONTRACTS-*.md PROTOCOL.md INVARIANTS.md && for f in CONTRACTS-CLI.md CONTRACTS-HTTP.md CONTRACTS-ONDISK.md CONTRACTS-AGENT.md PROTOCOL.md INVARIANTS.md; do grep -q "<!-- TOC -->" "$f" || exit 1; done'_
+- [ ] CONTEXT-FANOUT-COMPRESS · CONTEXT-FANOUT-COMPRESS: shrink the 2,040 B fan-out doctrine duplicated across five reviewer-family defs — docs, P2
+  Priority P2 justification: real per-spawn saving, but this is the task the planning pass flagged as
+  the FIRST TO CUT if the epic needs to shrink -- it is the one item where no concrete harm from the
+  deleted text could be named (see epic notes for the planner's full disagreement). Keep it filed, but
+  spec-keeper/implementer should treat it as expendable relative to everything else in this epic.
+  
+  Definition of done: the fan-out doctrine block compressed to roughly 500 B in reviewer.md,
+  security.md, architecture-reviewer.md, reliability-reviewer.md, performance-reviewer.md. Rules kept
+  VERBATIM: sub-agents are READ-ONLY; ask a NARROW question; VERIFY any fact the conclusion depends
+  on; prefer one good explorer over five shallow ones. Dropped: the worked good/bad-brief illustrative
+  examples.
+  
+  Who loses what: a reviewer loses the illustrations of a good brief; it keeps every rule verbatim.
+  Falsifier: a reviewer's explorer returning a file dump that the reviewer then has to read anyway --
+  two occurrences => restore the examples.
+  
+  Depends on: CONTEXT-DOCCHECK. Otherwise none -- does not touch CLAUDE.md.
+  
+  Parallel-safe: yes. Size: 1 hour.
+  
+  Saving basis -- PER-SPAWN: roughly -1,540 B on 5 of 14 agent types => a weighted approximately
+  -460 B/spawn, approximately -115 tokens/spawn, approximately -3.5k tokens/session.
+  _Proof: bash scripts/proof-check.sh 'python3 -c "import glob,sys; bad=[f for f in glob.glob(\".claude/agents/*.md\") if \"Fanning out\" in open(f).read() and len(open(f).read().split(\"## Fanning out\")[1].split(chr(10)+chr(35)+chr(35)+chr(32))[0].encode())>700]; print(bad); sys.exit(1 if bad else 0)" && test "$(grep -rc "READ-ONLY" .claude/agents/reviewer.md)" -ge 1'_
+- [ ] CONTEXT-SPEC-BRIEF · CONTEXT-SPEC-BRIEF: the SPEC.md mirror carries the lede of each task, not the full 382 KB of descriptions — tooling, P2
+  Priority P2 justification: the largest single PER-READ number in this epic. Partially overlapping
+  with CONTEXT-READRULE (see the epic-level disagreement note recorded on this epic -- if agents
+  actually stop whole-reading SPEC.md because of the READRULE behavioural change, this task's saving
+  partly evaporates; the two are closer to substitutes than additive, and READRULE should land first
+  since it is cheaper and broader).
+  
+  Definition of done: scripts/gen-spec-mirror.sh gains description truncation: first paragraph, hard
+  capped at 600 B, followed by a pointer -- "full text: bash scripts/spec-cloud.sh -s
+  /api/v1/projects/agent-bus/tasks/<public_id>". A `--full` flag reproduces today's untruncated output
+  exactly. `proof_cmd` and `status_note` lines are KEPT IN FULL -- they are already short (22.8 KB /
+  22.2 KB total across all open tasks) and are exactly what a reader checks first.
+  
+  Who loses what: a CREDENTIAL-LESS reader loses scope/non-scope/cross-reference detail in the mirror.
+  An agent loses nothing -- `claim-next` and `GET tasks/<id>` return the full description from the API
+  regardless of what the mirror shows. This is the same trade the closed-task mirror filter already
+  made, one notch further, and is the item the planning pass was LEAST certain about.
+  
+  Measured: open task descriptions 382,052 B -> first-paragraph-only 150,144 B -> capped@600B
+  approximately 110-130 KB. Saving approximately 250-270 KB, approximately 62-68k tokens PER WHOLE-READ
+  of the mirror.
+  
+  Depends on: HARD dependency on the in-flight SPEC.md-generation-filter task (same script,
+  scripts/gen-spec-mirror.sh) being committed first. Also depends on CONTEXT-DOCCHECK.
+  
+  Parallel-safe: no (owns scripts/gen-spec-mirror.sh). Size: half a day.
+  
+  Saving basis -- PER-READ: approximately -62k tokens each time the mirror would otherwise have been
+  read whole. Also a small per-write saving in the repo diff each time the mirror regenerates.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/gen-spec-mirror.sh --stdout > /tmp/sm.md && test "$(wc -c < /tmp/sm.md)" -le 200000 && grep -q "full text: bash scripts/spec-cloud.sh" /tmp/sm.md && bash scripts/gen-spec-mirror.sh --all --stdout | wc -c | xargs -I{} test {} -ge 600000'_
+- [ ] CONTEXT-CLAUDE-TRIM · CONTEXT-CLAUDE-TRIM: the agent roster descriptions and model-selection rationale leave CLAUDE.md's per-spawn path — docs, P1
+  Priority P1 justification: CLAUDE.md is injected into EVERY agent spawn (per-spawn cost). Two
+  sections in it benefit only the ~4 agent types that spawn others, and today all ~30 spawns in a
+  session pay for them regardless.
+  
+  Definition of done: new `.claude/ORCHESTRATION.md` (read ON DEMAND, not per-spawn) takes: the 14
+  roster descriptions (one paragraph each), the model-selection RATIONALE, and the feature-runner
+  override note. CLAUDE.md keeps: (a) the bare 14 agent names, one line; (b) the one-line rule "ALWAYS
+  pass model explicitly: sonnet = mechanical, opus = judgment/correctness-critical"; (c) an imperative
+  pointer -- "Before spawning ANY sub-agent, read .claude/ORCHESTRATION.md."  This is the same
+  rule-inline / rationale-relocated pattern already applied to CLAUDE.md -> INVARIANTS.md.
+  
+  Who loses what: a non-spawning agent loses the one-paragraph description of every OTHER agent --
+  it never used them. A spawning agent pays one extra Read per session for ORCHESTRATION.md.
+  
+  Depends on: CONTEXT-DOCCHECK (proof instrument). HARD PRE-REQUISITE: the in-flight CLAUDE.md split
+  (rule inline, rationale to INVARIANTS.md) must be COMMITTED before this task starts -- otherwise
+  this edits a file with uncommitted deletions in it, which is exactly the `MM` pathspec-commit trap
+  CLAUDE.md itself warns about (a pathspec commit takes the WORKTREE, not the index).
+  
+  Parallel-safe: NO -- this is the first of six tasks that serialise on CLAUDE.md, in this order:
+  CONTEXT-CLAUDE-TRIM -> CONTEXT-READRULE -> CONTEXT-NOTESBLOCK -> CONTEXT-DONEGATE-CANON ->
+  CONTEXT-DRIFT-WRAPPERS -> CONTEXT-LOG-RETIRE. That serialisation is this epic's schedule risk --
+  each of the six must land, in order, before the next starts; do not parallelise any pair of them.
+  
+  Size: 2 hours.
+  
+  Saving basis -- PER-SPAWN (paid on every one of ~30 spawns/session, NOT the same order of magnitude
+  as a per-read saving): roughly 2,279 B (roster descriptions) + 938 B (model-selection rationale)
+  collapsing to ~630 B of pointer text => approximately -2,587 B/spawn, approximately -647 tokens/spawn,
+  approximately -19,400 tokens/session at 30 spawns (4 bytes/token, markdown-with-code).
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section CLAUDE.md "## Agent roster" "ORCHESTRATION.md" && bash scripts/doc-check.sh section .claude/ORCHESTRATION.md "## Model selection" "claude-opus-5" "feature-runner" && test "$(wc -c < CLAUDE.md)" -le 21500'_
+- [ ] CONTEXT-DISPATCH-RULE · CONTEXT-DISPATCH-RULE: dispatch briefs stop restating standing rules already in every sub-agent's context — docs, P1
+  Priority P1 justification: the only saving in this epic denominated in OUTPUT tokens, which are the
+  expensive direction, and it targets the orchestrator's specific documented habit of repeating
+  standing warnings in nearly every dispatch brief.
+  
+  Definition of done: a "## Writing a dispatch brief" section in .claude/ORCHESTRATION.md: a brief
+  carries ONLY task-specific content -- the task id, the goal, the file-ownership boundary, the proof
+  command, and any correction. It NEVER restates the gofmt-exits-0-while-listing-files trap, the
+  proof-check.sh subtest blind spot, the pathspec/worktree trap, "do not commit", or "do not mutate
+  Spec Server state" -- every sub-agent already receives CLAUDE.md in full plus its own agent
+  definition. Includes one escape hatch: restate a standing rule only when explicitly OVERRIDING it
+  for this task, and say so.
+  
+  Evidence this redundancy is real, not assumed: the planning agent that produced this task breakdown
+  is itself a sub-agent whose context already contained CLAUDE.md in full plus its own agent
+  definition plus all 14 frontmatter descriptions -- restating those rules in a dispatch brief is
+  provably redundant, not merely suspected to be.
+  
+  Who loses what: the orchestrator loses the belt-and-braces feeling of repeating a warning inline.
+  Falsifier: an agent violating one of those five traps AFTER this lands. If that happens, the
+  correct response is to strengthen the rule in CLAUDE.md (paid once per spawn) -- NOT to resume
+  restating it per dispatch (paid per dispatch, forever, in output tokens).
+  
+  Depends on: CONTEXT-CLAUDE-TRIM (creates ORCHESTRATION.md).
+  
+  Parallel-safe: no vs. CONTEXT-RESERVE-CANON (same new file, .claude/ORCHESTRATION.md) -- sequence
+  the two against each other, order not mandated.
+  
+  Size: 45 minutes.
+  
+  Saving basis -- PER-DISPATCH (distinct from per-spawn and per-read; a dispatch happens once per
+  sub-agent invocation, not once per file read): roughly 500 tokens of boilerplate x roughly 30
+  dispatches/session => approximately -15k OUTPUT tokens/session, plus that boilerplate stops
+  accreting permanently in the orchestrator's resident context. Basis is ESTIMATED, not measured --
+  sampled `kind=request` notes are summaries of dispatch briefs, not the briefs themselves, so the
+  actual per-dispatch boilerplate is not recorded anywhere verifiable. This is the epic's
+  least-evidenced number; do not treat it as more certain than the per-spawn figures above.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section .claude/ORCHESTRATION.md "## Writing a dispatch brief" "only task-specific" "never restate" "gofmt" "pathspec" "already receives CLAUDE.md"'_
+- [ ] CONTEXT-CONTRACTS-PARKING · CONTEXT-CONTRACTS-PARKING: CONTRACTS.md admits, in its own text, that it is 90% parking lot — docs, P2
+  Priority P2 justification: only lines 1-36 of CONTRACTS.md are actually an index. Lines 38-352
+  (roughly 26 KB, roughly 90% of the file) are substantive contract tables whose own text says they
+  were "recorded here instead" of their eventual plane file. A reader told "CONTRACTS.md is an index"
+  has to read 351 lines to discover that most of it is not.
+  
+  Definition of done: do NOT fold the parked content into plane files (see rationale below). Insert at
+  line 37 a "## PARKED -- contract text awaiting its plane file" heading, and add a one-line reader
+  instruction in the index block: "lines 1-36 are the index; everything below is parked content, each
+  block naming its owning Spec task -- stop reading at line 36 unless you are working one of those
+  tasks." Each parked block gains its owning task's public_id. Cap CONTRACTS.md's size in
+  docs/doc-budgets.tsv so it cannot grow further without triggering a fold.
+  
+  Why NOT fold: the RELAY-2/3 block (lines 108-237) and the SIGN-7 block (lines 239-306) describe
+  ROUTES THAT DO NOT EXIST YET. Moving them into CONTRACTS-HTTP.md would document unshipped surface as
+  if it were live -- that is precisely why they were parked in the first place, and it remains a good
+  reason. The MSG-FU block (lines 38-106) IS foldable and is already owned by existing FU follow-up
+  tasks -- do not duplicate that work here.
+  
+  Depends on: CONTEXT-DOCCHECK.
+  
+  Parallel-safe: yes. Size: 1 hour.
+  
+  Saving basis -- PER-READ: approximately -6.5k tokens each time an agent consults CONTRACTS.md as an
+  index and can now stop at line 36 instead of reading all 351.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section CONTRACTS.md "## PARKED" "owning Spec task" && head -40 CONTRACTS.md | grep -q "stop reading at line 36"'_
+- [ ] CONTEXT-NOTESBLOCK · CONTEXT-NOTESBLOCK: one canonical note-journal instruction, not twelve copies (two of them wrong) — docs, P1
+  Priority P1 justification: CORRECTNESS first, tokens second. This removes 12 copies of a STALE
+  model id (`claude-opus-4-8` / `claude-sonnet-4-6`) that are today corrupting the one auditable cost
+  signal this project has -- the `kind=model` notes CLAUDE.md itself designates for that purpose.
+  CLAUDE.md's own roster uses the current ids `claude-opus-5` / `claude-sonnet-5`.
+  
+  Definition of done: delete the `### Record your work as Spec Server task notes` block (roughly
+  920-1,121 B each) from all 12 `.claude/agents/*.md` files that carry it; replace each with a 2-line
+  pointer to CLAUDE.md. CLAUDE.md's existing "## Spec Server task notes are the work JOURNAL" section
+  gains the three facts the deleted blocks carried: `author` = your agent slug; every agent posts
+  `kind=report` AND `kind=model` on completion; the EXACT current ids `claude-opus-5` /
+  `claude-sonnet-5`; one `kind=model` note per agent per task.
+  
+  Who loses what: nothing -- the canonical text lives in a file every one of those 12 agents already
+  receives on every spawn.
+  
+  Depends on: CONTEXT-DOCCHECK; CONTEXT-READRULE (third of the six CLAUDE.md-serialised tasks, same
+  ordering constraint as CONTEXT-CLAUDE-TRIM).
+  
+  Parallel-safe: no vs. the other CLAUDE.md tasks in the chain; yes vs. everything else in the epic.
+  Size: 2 hours.
+  
+  Saving basis -- PER-SPAWN: roughly 1,000 B removed from 12 of 14 defs => a weighted approximately
+  -860 B/spawn, approximately -215 tokens/spawn, approximately -6.5k tokens/session.
+  _Proof: bash scripts/proof-check.sh '! grep -rlq "claude-opus-4-8\|claude-sonnet-4-6" .claude/agents/ && test "$(grep -rl "kind=report" .claude/agents/ | wc -l)" -le 2 && bash scripts/doc-check.sh section CLAUDE.md "## Spec Server task notes are the work JOURNAL" "claude-opus-5" "claude-sonnet-5" "one kind=model note per agent per task"'_
+- [ ] CONTEXT-DOCCHECK · CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on — tooling, P1
+  Priority P1 justification: not for size, but because this repo's known failure mode is a doc proof
+  that passes on an incidental match elsewhere in a file -- that has already green-lit a wrong task
+  closure here. Every other CONTEXT task claims a doc changed; without a section-scoped assert, each
+  of those proofs repeats that exact bug. This is proof-check.sh's sibling and is a hard prerequisite
+  to trusting the rest of the epic.
+  
+  Definition of done: scripts/doc-check.sh with three modes:
+    - `section <file> '<heading>' '<needle>'...` -- locates the heading, computes its line range to
+      the next same-level heading, asserts each needle occurs INSIDE that range. Exits non-zero if
+      the heading is absent (cannot pass vacuously).
+    - `budget` -- reads docs/doc-budgets.tsv (path, max_bytes), fails on any overrun; and reads
+      docs/doc-preserve.tsv (path, literal_phrase), fails if a phrase is MISSING. Ceilings apply only
+      to per-spawn and generated files; DECISIONS.md/AGENT_LOG.md are exempt BY DESIGN, with the
+      reason recorded in the tsv file itself.
+    - `--selftest` -- asserts the assert: heading-absent => FAIL, needle-only-outside-section => FAIL,
+      needle-inside => PASS.
+    - Must NOT invoke scripts/proof-check.sh (recursion -- see 69eb6f56).
+  
+  Files: scripts/doc-check.sh, docs/doc-budgets.tsv, docs/doc-preserve.tsv, CONTRACTS-AGENT.md
+  (repo-tooling section, document the new script there).
+  
+  RED verification observed (2026-08-08, spec-keeper filing): scripts/doc-check.sh does not exist --
+  trivially RED, file absent.
+  
+  Depends on: nothing. Soft-relates to HANDOVER-CHECK (0f909b6c) -- wire `doc-check.sh budget` into
+  scripts/check.sh THERE, not here; do not duplicate the wiring in this task.
+  
+  Parallel-safe: yes. Size: half a day. Saving: 0 tokens directly -- this is the enabler every other
+  task's proof_cmd depends on.
+  
+  Chain: this ships a shell script, so it needs reviewer + security, not documentation-only sign-off.
+  
+  Blocks every other CONTEXT task (recorded as real `blocks` relations) -- none of their doc-scoped
+  proof_cmds are trustworthy until this lands.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh --selftest'_
+- [ ] CONTEXT-DONEGATE-CANON · CONTEXT-DONEGATE-CANON: 'do not mark done when the behaviour is not yet live' said once, not three times — docs, P2
+  Priority P2 justification: a byte-identical roughly-1,430 B block ("committed does not mean
+  running") is currently duplicated verbatim in feature-runner.md, implementer.md and spec-keeper.md.
+  
+  Definition of done: the canonical text (condensed to 4-6 lines, all rules kept: keep in_progress
+  with a status_note until deploy is verified, OR complete as code-only with an honest test_summary and
+  a paired <KEY>-DEPLOY/<KEY>-VERIFY follow-up) folded into CLAUDE.md's "## Work in atomic increments"
+  step 7. The three duplicate copies are replaced by a pointer to that step.
+  
+  Depends on: CONTEXT-DOCCHECK; CONTEXT-DRIFT-WRAPPERS (fifth of the six CLAUDE.md-serialised tasks --
+  must run after DRIFT-WRAPPERS, before CONTEXT-LOG-RETIRE). NOTE: the top-level sequencing instruction
+  for this epic states the six-task CLAUDE.md chain runs CLAUDE-TRIM -> READRULE -> NOTESBLOCK ->
+  DONEGATE-CANON -> DRIFT-WRAPPERS -> LOG-RETIRE -- i.e. DONEGATE-CANON precedes DRIFT-WRAPPERS in that
+  ordering. The real `blocks` relations filed for this epic follow that authoritative order
+  (NOTESBLOCK blocks DONEGATE-CANON; DONEGATE-CANON blocks DRIFT-WRAPPERS); treat the ordering
+  statement here as the one that governs, and this task's own dependency line above as describing the
+  same chain position, not a conflicting order.
+  
+  Parallel-safe: no (CLAUDE.md chain). Size: 45 minutes.
+  
+  Saving basis -- PER-SPAWN, small: weighted approximately -415 B/spawn, approximately -104
+  tokens/spawn, approximately -3.1k tokens/session.
+  _Proof: bash scripts/proof-check.sh 'test "$(grep -rl "not yet live" .claude/agents/ | wc -l)" -eq 0 && bash scripts/doc-check.sh section CLAUDE.md "## Work in atomic increments" "not yet live"'_
+- [ ] CONTEXT-BUDGET-WIRE · CONTEXT-BUDGET-WIRE: the byte ceilings from this whole epic become a standing, wired-in check — tooling, P2
+  Priority P2 justification: this is what makes every reduction elsewhere in the epic SAFE rather than
+  a one-time snapshot that silently rots -- without it, nothing stops a later edit from re-growing a
+  file past the ceiling this epic established, and nothing stops a "helpful" future edit from deleting
+  one of the load-bearing traps this epic deliberately preserved.
+  
+  Definition of done: docs/doc-budgets.tsv populated with the ceilings established by every sizing task
+  in this epic. docs/doc-preserve.tsv populated with the load-bearing phrases that must NEVER be
+  deleted -- at minimum: "gofmt -l . && echo CLEAN", "takes the WORKTREE, not the index", "no tests to
+  run", "deleting it, or deleting the callback beside it", "InsecureSkipVerify", "MOBILE-21",
+  "2268 of 2289". `doc-check.sh budget` is invoked from scripts/check.sh.
+  
+  This task is what makes every reduction above safe: the preservation list means "shrink a file by
+  deleting a trap it contains" now fails MECHANICALLY, not just by convention.
+  
+  Depends on (HARD): HANDOVER-CHECK (public_id 0f909b6c) -- scripts/check.sh must exist before this
+  task can wire anything into it. This is also why this task is LAST in the epic: it depends on every
+  sizing task above for the ceiling values it records, in addition to the hard HANDOVER-CHECK
+  dependency.
+  
+  Parallel-safe: no (last task in the epic by design). Size: 2 hours.
+  
+  Saving basis: 0 direct tokens -- this task's value is preventing reversion of every saving recorded
+  elsewhere in this epic, not producing a new one.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh budget && grep -q "doc-check.sh budget" scripts/check.sh'_
+- [ ] CONTEXT-DEEPDIVE-CONVENTION · CONTEXT-DEEPDIVE-CONVENTION: stop the next 75 KB deep-dive from landing at the repo root — docs, P2
+  Priority P2 justification: .claude/agents/deep-diver.md currently mandates writing
+  `<TOPIC>_DEEPDIVE.md` at the repo root. Two such files already exist (113 KB combined, both written
+  within 6 days) and this instruction is a growth generator that will keep producing more of them at
+  root with no staleness signal.
+  
+  Definition of done: deep-diver.md changed to write `docs/deepdives/<TOPIC>.md` with a mandatory
+  4-line header: date, sha measured at, "point-in-time snapshot, not maintained", and "findings must
+  be filed as Spec Server tasks -- this document is evidence, not a plan". A stated soft size ceiling
+  is recorded in the same section. The two EXISTING deep-dive files are NOT moved by this task -- see
+  the epic-level disagreement note recorded on this epic for why (DECISIONS.md cites them by bare
+  filename at multiple sites and is append-only; internal/ids/suffixstore.go:96 cites
+  ID2_WIRING_DEEPDIVE.md in production code and a live task's proof_cmd greps it, so it is cited
+  reference material, not an unmaintained artefact, and moving it would create dangling references in
+  a file this repo is forbidden to repair).
+  
+  Depends on: CONTEXT-DOCCHECK.
+  
+  Parallel-safe: yes. Size: 30 minutes.
+  
+  Saving basis -- AVOIDED FUTURE GROWTH, not a measured reduction of anything existing today:
+  approximately 55 KB per future investigation that no longer lands at root, and each future doc
+  self-declares as stale in its first 4 lines -- which is exactly what CONTEXT-READRULE's
+  head-first-20-lines rule keys off.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh section .claude/agents/deep-diver.md "## Output" "docs/deepdives/" "not maintained" "evidence, not a plan" && ! grep -q "_DEEPDIVE.md\` at the repo root" .claude/agents/deep-diver.md'_
+- [ ] CONTEXT-AGENTDESC-TRIM · CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn agent-def lever — docs, P2
+  Priority P2 justification: a real per-spawn cost with zero correctness risk, but smaller than the
+  P1 items above. NOTE for anyone re-scoping this task: the 14 `.claude/agents/*.md` FILES total
+  93,644 B, but that total is a REPOSITORY size, not a per-spawn cost -- only ONE agent definition is
+  injected per spawn (mean 5,853 B). Do not restate the 93 KB / 16-file figures as a per-spawn cost;
+  that overstates this task's saving by roughly 16x. The genuine per-spawn lever this task addresses
+  is narrower: the frontmatter `description:` field of EVERY agent def IS injected on every spawn that
+  carries the Agent tool (currently 3,545 B total across 14 files, five fields over 350 B each).
+  
+  Definition of done: each of the 14 `description:` fields reduced to <= 120 B: one sentence of what
+  the agent does, plus "Use when...". The routing signal (what it does, when to pick it) is preserved;
+  any worked examples currently living in the description move into the BODY of the def, where they
+  are paid only when that specific agent is spawned.
+  
+  Who loses what: a spawning agent loses per-agent elaboration at selection time, keeping only the
+  short routing sentence. Falsifier: a measurable rise in wrong-agent dispatches after this lands.
+  
+  Depends on: CONTEXT-DOCCHECK. Otherwise none.
+  
+  Parallel-safe: yes -- touches only frontmatter; conflicts with any other agent-def-body task only at
+  the file level (sequence loosely with CONTEXT-NOTESBLOCK / CONTEXT-RESERVE-CANON if they touch the
+  same file, or accept a trivial merge).
+  
+  Size: 45 minutes.
+  
+  Saving basis -- PER-SPAWN: roughly 1,645 B removed, paid by every spawn carrying the Agent tool
+  (~70% of spawns) => a weighted approximately -1,150 B/spawn, approximately -288 tokens/spawn,
+  approximately -8.6k tokens/session.
+  _Proof: bash scripts/proof-check.sh 'python3 -c "import glob,re,sys; bad=[(f,len(re.search(r\"^description:\\s*(.*)\$\",open(f).read(),re.M).group(1).encode())) for f in glob.glob(\".claude/agents/*.md\")]; over=[b for b in bad if b[1]>120]; print(over); t=sum(b[1] for b in bad); print(\"total\",t); sys.exit(0 if not over and t<=1900 else 1)"'_
+- [ ] CONTEXT-LOG-GUARD · CONTEXT-LOG-GUARD: the AGENT_LOG.md freeze is enforced mechanically, not hoped for — tooling, P2
+  Priority P2 justification: a freeze with no enforcement reverts the first time someone is in a hurry
+  -- this closes that gap with a mechanical check rather than a convention nobody re-reads.
+  
+  Definition of done: scripts/doc-check.sh gains an `agentlog` mode that fails if any entry AFTER the
+  freeze marker exceeds 240 B, or if a post-freeze entry lacks a `gates:` field. Registered in
+  docs/doc-budgets.tsv.
+  
+  Depends on: CONTEXT-LOG-RETIRE (needs the freeze marker to exist); CONTEXT-DOCCHECK.
+  
+  Parallel-safe: no. Size: 2 hours. Saving: 0 direct tokens; this task's value is preventing
+  reversion of CONTEXT-LOG-RETIRE's saving, not producing a new one.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/doc-check.sh agentlog --selftest && bash scripts/doc-check.sh agentlog'_
+
 ### EPIC CORE — Repo skeleton & server bootstrap
 
-- [ ] CORE-5 · CORE-5: Observability: metrics/inspect endpoint (follow-up) — observability, P3
-  Low-priority follow-up. Add a GET /v1/debug (or /metrics) endpoint exposing in-process counters (messages sent, active waiters, WAL bytes, roster size, relay peer status) as plain JSON -- stdlib-first, no Prometheus dependency needed initially. Depends on MSG/POLL/RELAY existing to have something worth reporting.
-  _Proof: go test -race -run TestInspectEndpoint ./internal/httpapi_
-- [ ] CORE-14 · CORE-14: A handler that writes then panics logs status=200 -- the audit trail is wrong — core, P3
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. If a handler writes a response (or just the header) and THEN panics, the recovery middleware cannot change the already-sent status: the client receives a truncated 200 body, and the log line records `status=200` for a request that failed. Anyone reading the logs or building an error-rate metric sees a success. The response itself is unfixable once bytes are on the wire -- that is HTTP -- but the LOG must not lie. Add a `panic_after_write` boolean (or an equivalent explicit marker) set when recovery fires after wroteHeader is true, so the log line is unambiguous, and make sure the panic is still logged with its stack (see CORE-6). Test: a handler that writes 200, flushes, then panics -> assert the log line carries the marker and the recorded status.
-  _Proof: go test -race -run TestPanicAfterWrite ./internal/httpapi_
-- [ ] CORE-8 · CORE-8: Unmatched paths return ServeMux's text/plain 404, breaking the JSON error contract — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. Every handled response honours a JSON error envelope, but a request to an unregistered path falls through to net/http.ServeMux's built-in handler and returns `404 page not found` as text/plain. A client (or a bus-*.sh wrapper piping through a JSON parser) that trusts the documented contract gets a parse error instead of a structured error -- the failure mode is worst exactly when something is already wrong. Fix: register a catch-all (`/`) handler, or wrap the mux, so unmatched paths emit the same JSON error envelope with 404 and the correct Content-Type. Note the ordering interaction with AUTH-6 (the auth wrapper + unauthenticated allow-list): a catch-all must NOT become an unauthenticated route that leaks which paths exist -- coordinate the two, and decide deliberately whether an unauthenticated request to an unknown path gets 401 or 404. Test both an unknown path and an unknown method on a known path.
-  _Proof: go test -race -run TestNotFoundJSON ./internal/httpapi_
-- [ ] CORE-10 · CORE-10: .gitignore has no secret patterns while the stop hook stages with `git add -A` — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. LATENT, NOT A LIVE LEAK -- nothing sensitive is currently tracked, and the spec-cloud credentials correctly live outside the repo. The risk is mechanical: .claude/hooks/commit-on-stop.sh stages with `git add -A`, and its guards cover file size and conflict markers but NOTHING for credentials, so any key material an agent or a human drops into the working tree is auto-staged and committed without anyone deciding to. Add secret patterns to .gitignore: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env`, `.env.*`, `*credentials*`, `*-creds*`, `id_rsa*`, `*.token`. Cheap, permanent, and it becomes materially more important once the CRYPTO epic starts putting agent private keys on disk. Verify with `git check-ignore` against a sample of each pattern; do not commit the sample files.
-  _Proof: git check-ignore -q test.pem test.key .env id_rsa my-creds.json && echo ok_
-- [x] CORE-2 · CORE-2: cmd/agent-bus main entrypoint + config/flags — core, P0
-  cmd/agent-bus/main.go wires flag parsing (listen addr, data-dir, bus-id override for testing, long-poll timeout, log level) into a Config struct; server binds the listener and shuts down cleanly on SIGINT/SIGTERM. No routes yet beyond a bare mux. NOTE: -bus-id is a TEST-ONLY affordance -- invariant 1 says the server is authoritative on ids, so this override exists purely to make tests deterministic and must never be relied on by production callers.
-  _Proof: go build ./... && go run ./cmd/agent-bus -h 2>&1 | grep -q -- -data-dir_
-- [ ] CORE-13 · CORE-13: Middleware implements Flusher/Hijacker unconditionally and drops io.ReaderFrom (untested) — core, P3
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. The logging/recovery middleware's responseWriter wrapper declares Flush() and Hijack() unconditionally, so `w.(http.Flusher)` and `w.(http.Hijacker)` ALWAYS succeed at the handler -- even when the underlying ResponseWriter implements neither. A handler that feature-detects (the normal, correct pattern) is misled and will panic or error at call time instead of taking its fallback path. It also drops io.ReaderFrom, which costs net/http's sendfile fast-path for file/large responses. None of this is covered by a test. Fix: either forward the type assertion to the wrapped writer and only advertise what it actually supports, or keep the unconditional methods but return http.ErrNotSupported from Hijack when the inner writer is not a Hijacker -- and add ReaderFrom pass-through. Add a table-driven test that wraps writers with different capability sets and asserts the wrapper advertises exactly the same set. Relevant soon: the POLL epic's long-poll may want Flush.
-  _Proof: go test -race -run TestResponseWriterInterfaces ./internal/httpapi_
-- [ ] CORE-7 · CORE-7: HEAD is 405'd by requireGET while writeJSON still guards MethodHead -- dead code, and probes use HEAD — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. internal/httpapi's requireGET rejects HEAD with 405, but writeJSON still contains a `if r.Method != http.MethodHead` guard that can therefore never be false-branched -- dead code that directly contradicts the handler's actual behaviour, so a reader cannot tell which one expresses the intent. It also matters operationally: load balancers, container health checks and uptime probes commonly issue HEAD, and today HEAD /healthz returns 405. Decide one way and make the code consistent: either accept HEAD on GET routes (net/http will suppress the body automatically, and the writeJSON guard becomes live and correct) -- recommended for at least /healthz -- or reject it and DELETE the writeJSON guard. Pin the decision with a test asserting the status code for HEAD on every GET route, and record the chosen behaviour in CONTRACTS.md.
-  _Proof: go test -race -run TestHeadRequest ./internal/httpapi_
-- [x] CORE-15 · CORE-15: logging.format() calls .String()/.Error() on a typed-nil -> panic inside the logger — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. internal/logging's format() type-switches on fmt.Stringer / error and calls .String() / .Error() on the value. A TYPED NIL (e.g. a (*bytes.Buffer)(nil) or a nil *MyError stored in an interface) satisfies the interface but panics on the method call with a nil-pointer dereference. That panic happens INSIDE THE LOGGER, and the logger is called from the recovery defer -- so a typed nil in a log field during panic handling is a panic DURING panic handling, which takes the process down instead of returning a 500. That escalation is why this is P2 rather than a nit. Fix: recover() around the value formatting (or reflect-check for a nil pointer before invoking) and emit a safe placeholder such as `<nil>` or `<unformattable>`. Table-driven test over: untyped nil, typed-nil Stringer, typed-nil error, a Stringer whose String() itself panics, and a normal value -- asserting the logger always produces a line and never panics.
-  _Proof: go test -race -run TestFormatTypedNil ./internal/logging_
-- [ ] CORE-9 · CORE-9: Set IdleTimeout + MaxHeaderBytes on http.Server -- and deliberately leave Read/WriteTimeout UNSET — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. The http.Server is constructed without resource bounds. Set explicit IdleTimeout (bounds idle keep-alive connections) and MaxHeaderBytes (bounds header memory per connection). DELIBERATELY LEAVE BOTH WriteTimeout AND ReadTimeout UNSET, and write a comment at the construction site saying WHY: either one is an absolute deadline on the whole request/response, so once the POLL epic lands, a 30s long-poll (defaultPollTimeout) is killed mid-flight by any timeout shorter than it -- and 'add a sensible timeout' is exactly the well-intentioned change a later contributor makes without realising it breaks the product's core mechanic. The comment is the guardrail. Request BODY size is bounded separately and per-handler with http.MaxBytesReader inside the JSON-decode helper that the ENROL/SEND epics (AUTH-1, MSG-2, MSG-3) introduce -- that is security finding P1-2, currently UNREACHABLE because both routes 405 before the body is ever touched, which is why it is filed here as a constraint on those tasks rather than as a fix to today's code. Add a note to AUTH-1/MSG-3 so the helper ships with the limit from day one.
-  _Proof: go test -race -run TestServerTimeouts ./internal/httpapi_
-- [-] CORE-12 · CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 — core, P1
-  SETTLED 2026-08-02 BY USER DECISION -- no longer a proposal to weigh. "**The default listen address is
-  localhost.**" (DECISIONS.md, 2026-08-02, answers 8-11.) Raised P2 -> P1 because it is now a decided
-  default that the shipped binary contradicts, not a suggestion. Change defaultListen to 127.0.0.1:8080
-  and record the flag/env override in CONTRACTS.md; a deployment that needs a wider bind says so
-  explicitly. Note DEPLOY-1/DEPLOY-2 (container + Compose) must set the bind explicitly, because a
-  container that listens only on 127.0.0.1 inside its own namespace is unreachable from outside it --
-  that is the one place this default needs an override, and it should be an explicit, commented one.
+- [ ] None · MSG-FU-MAINWIRING: main should construct the hub and pass it as BOTH httpapi.Options.Hub and wal.LogOptions.Applier — core, P1
+  The MSG/POLL wave could not touch cmd/** (file ownership), so httpapi.New builds the hub itself whenever Options.Durable also satisfies Path() + Recovered() -- see openHub in internal/httpapi/server.go, which documents this as transitional. Two costs to remove: (1) the durable log is REPLAYED TWICE at startup, once as an fsck by wal.Open with a nil Applier and once read-only by the hub to rebuild the store; (2) a rebuild FAILURE cannot be fatal because httpapi.New returns no error -- it is logged at ERROR and the messaging routes are left unregistered, so an operator sees 404s rather than a refusal to start, which is indistinguishable from running an old build. FIX: main constructs the hub, passes it as wal.LogOptions.Applier so replay happens exactly once inside wal.Open, seals the sequence floor from wal.Recovered, and hands it to httpapi.Options.Hub; a failure is then a startup error. openHub and the recoverableLog assertion are deleted in the same change. ALSO IN SCOPE: cmd/agent-bus/main_test.go TestShutdownReleasesLongPoll parks a SYNTHETIC handler -- point it at the real GET /v1/wait now that the route exists, so the ordering guard covers the real park.
+  _Proof: go test -race -run TestRunWiresTheHub ./cmd/agent-bus_
+- [~] None · DISCOVERY-DOC: self-describing unauthenticated discovery document so an agent with only a bus URL can bootstrap — httpapi, P1, in progress
+  GET /v1/info returns only {bus_id, version, uptime_seconds}, which tells an agent nothing about HOW TO JOIN. An agent handed only a bus URL cannot enrol. Serves invariant 7 (nobody hand-writes HTTP; the compiled Go CLI is THE client) by making the bus self-describing.
   
-  --- ORIGINAL DESCRIPTION ---
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. defaultListen is ":8080", which binds every interface, over plain HTTP, with no authentication implemented yet. Defaults are sticky: this one persists straight through the AUTH epic, and in the window before AUTH-2's middleware lands, anyone on the network can reach the bus. Change the default to "127.0.0.1:8080" and keep the flag/env var so binding wider is an explicit, deliberate operator choice rather than the path of least resistance. Update CONTRACTS.md and any README/AGENT_PROTOCOL.md example that assumes the old default, and check scripts/bus-serve.sh (AGENTIF-1) agrees.
-  _Proof: go test -race -run TestDefaultListen ./internal/httpapi_
-- [x] CORE-3 · CORE-3: GET /healthz and GET /v1/info endpoints — core, P0
-  GET /healthz returns 200 {"status":"ok"} once the server is accepting connections (liveness only, no auth). GET /v1/info returns bus id, server version/build info, and uptime (also unauthenticated -- needed for pre-enrolment discovery). Both registered on the main mux. The bus id is served through a small interface with a placeholder implementation until the ID epic lands (see invariant 1: the server is authoritative on ids).
-  _Proof: go test -race -run TestHealthzInfo ./internal/httpapi_
-- [x] None · Re-verify CORE-1's gofmt proof with the corrected ($(go env GOROOT)/bin/gofmt) invocation -- its recorded proof_cmd never actually ran gofmt on this box — process, P1
-  CORE-1's recorded proof_cmd is `go build ./... && test -z "$(gofmt -l .)"` (see the task's own record, public_id eea035e4-92de-4ca3-95ed-fa8073cd6a81). VERIFIED THIS SESSION: `gofmt` is NOT on PATH on this box -- only `$(go env GOROOT)/bin/gofmt` (currently /usr/local/go/bin/gofmt) is. A bare `gofmt` invocation fails to launch (exit 127), and critically `test -z "$(gofmt -l .)"` still PASSES in that case, because a command substitution whose command fails to even exec produces EMPTY stdout, and `test -z ""` is true. So CORE-1's proof_cmd, run literally as recorded on THIS box, never actually ran gofmt at all -- it recorded a PASS that proves nothing, i.e. it is VACUOUS in the exact sense scripts/proof-check.sh exists to catch (see task 84b76d5e, "a `-run` pattern that matches no test must FAIL, not pass vacuously" -- this is the same failure class one level up the stack: a whole tool silently absent rather than a test silently unmatched).
+  Precedent: the Spec Server's own GET /api/v1/agent-enrollments — an unauthenticated, machine-readable document with a `service` name, an ordered `steps` array, exact URLs, an explicit token_source explanation, and what the caller must save.
   
-  This is not hypothetical for CORE-1 specifically: reviewer and security's notes on CORE-1 (see its journal) both separately report running gofmt via `$GOROOT/bin/gofmt` or equivalent and finding the repo clean -- so the SUBSTANCE was very likely fine -- but the recorded proof_cmd itself, taken literally, is not evidence of that; it is evidence of nothing.
+  Scope (server side ONLY, this task): internal/httpapi/** and CONTRACTS-HTTP.md. Add a bounded, static, unauthenticated discovery document describing: what the service is + bus id; the ORDERED enrolment steps with exact paths; whether enrolment is invite-only (describe what is TRUE today and flag what is imminent — INVITE-GATE is still `todo`); that the agent supplies an Ed25519 public key and receives a SERVER-MINTED fully-qualified <bus-id>.<agent-id> it does not choose (invariant 1); the session model (client signs a SERVER-PROVIDED token, max one hour, refresh at 75%); where to get the client and that an importable Go package exists at client/; and the HONEST LIMITS (no TLS yet so loopback only; messages are signed but NOT verified on receipt because key distribution (CRYPTO-4) does not exist).
   
-  RE-VERIFICATION ALREADY DONE THIS PASS (spec-keeper, read-only, no repo file touched): ran the CORRECTED command below on the current working tree and got a genuine PASS -- go build succeeds and the real gofmt binary reports zero files needing formatting. So on the evidence gathered so far, CORE-1 does NOT need to be reopened -- but per instructions this is the orchestrator's/user's call, not spec-keeper's, so CORE-1 itself is left untouched (status, version unchanged) and this task exists to carry that re-verification result plus the corrected command for anyone who wants to double-check.
+  SECURITY LINE — describe the PROTOCOL, never the ROSTER. No agent list, no agent count, no data-dir path, no peer list, no key material, no on-disk file paths. An unauthenticated caller learns HOW TO JOIN and nothing about WHO HAS JOINED. The response must be bounded and static — its size must NOT grow with bus state (that is both an information leak and a DoS surface). internal/httpapi has a test pinning /v1/info's EXACT field set; it must be updated deliberately, never weakened or deleted.
   
-  DONE means: this task's proof_cmd (the corrected, non-vacuous gofmt invocation) is run and its verdict is quoted in this task's completion test_summary. If it ever comes back FAIL, file a follow-up (or ask the orchestrator/user) to reopen CORE-1 -- do NOT reopen CORE-1 directly from this task.
+  Design question to settle and record in DECISIONS.md: extend /v1/info vs add a separate endpoint.
   
-  BROADER IMPLICATION (see the companion proof_cmd-backfill task filed alongside this one): every OTHER task in this backlog whose proof_cmd contains a bare `gofmt` call (grep the export for the literal string "test -z \"$(gofmt") is equally suspect on any box where gofmt is not on PATH, and should be corrected to `$(go env GOROOT)/bin/gofmt` or an equivalent PATH-independent invocation as those tasks are touched.
+  Explicitly OUT OF SCOPE (follow-up): the CLI subcommand half, AGENT_PROTOCOL.md and CONTRACTS-CLI.md — cmd/** and client/** are owned by other agents right now.
+  _Proof: go test -race ./internal/httpapi/... && D=$(mktemp -d) && P=18173 && (go run ./cmd/agent-bus -listen 127.0.0.1:$P -data-dir "$D" &>"$D/log" & echo $! >"$D/pid") && for i in $(seq 1 30); do curl -sf http://127.0.0.1:$P/healthz >/dev/null 2>&1 && break; sleep 0.5; done && curl -sf http://127.0.0.1:$P/v1/discovery | jq . && kill "$(cat "$D/pid")" 2>/dev/null; rm -rf "$D"_
+- [ ] None · The data-dir permission gate checks MODE but not OWNERSHIP, and follows symlinks -- and it is now the SOLE defence for invariant 1 against a downward seq-floor forge — security, P1
+  FOUND INDEPENDENTLY BY BOTH SECURITY GATES on be447589-6583-4d5c-a9d4-ec9d9fef0f1c (committed 217a3c0). Two gates working separately corroborated this, which is why it is filed at P1 rather than as a nit.
   
-  proof_cmd validated via scripts/proof-check.sh this session: verdict=PASS (exit 0), class=file-assertion,toolchain -- go build ./... succeeded and the real gofmt binary found zero files to reformat.
-  _Proof: go build ./... && test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"_
-- [x] CORE-4 · CORE-4: Structured logging + request middleware — core, P0
-  A small INTERNAL structured logger built over stdlib log (no third-party dependency, per invariant 8), wired as HTTP middleware logging method/path/status/latency/request-id for every route. Level configurable via the -log-level flag. Note: log/slog landed in go1.21 and is NOT available on this box's go1.19.4 toolchain (verified: log/slog absent from GOROOT/src/log and go list std), so it cannot be used here; the decision is recorded in DECISIONS.md.
-  _Proof: go test -race -run TestLoggingMiddleware ./internal/httpapi_
-- [x] CORE-1 · CORE-1: Repo skeleton: go.mod, internal/ package layout, .gitignore — core, P0
-  PROOF_CMD CORRECTED 2026-08-02 (spec-keeper). The recorded proof was
-  `go build ./... && test -z "$(gofmt -l .)"`. **On this box that never ran gofmt at all**: `gofmt` is
-  NOT on PATH (only `$(go env GOROOT)/bin/gofmt` is), a command substitution whose command fails to exec
-  produces EMPTY stdout, and `test -z ""` is TRUE -- so the clause PASSED by failing to launch. That is
-  the same vacuity class scripts/proof-check.sh exists to catch, one level up the stack: a whole TOOL
-  silently absent rather than a test silently unmatched.
+  MECHANISM, three parts, all at cmd/agent-bus/datadirperm.go:75-96.
+  (1) NO OWNERSHIP CHECK. `enforceDataDirPermissions` reads `info.Mode().Perm()` (datadirperm.go:88 onward) and nothing else. Re-verified at HEAD 16da89f by spec-keeper: `grep -rn 'Uid|Gid|Stat_t|Lstat' cmd/agent-bus/ internal/dirlock/` returns ZERO hits in the whole of both. A 0755 directory OWNED BY ANOTHER UID passes cleanly, and that owner can substitute every identity file.
+  (2) SYMLINKS ARE FOLLOWED. `os.Stat` and `os.Chmod` both follow symlinks, so an attacker with write access to the PARENT can replace the data dir with a symlink to a 0700 directory they own. PROVED: it starts silently and writes all ten identity files into the attacker's target.
+  (3) THE PARENT IS NEVER CONSIDERED. A 0777 non-sticky PARENT also starts silently. Renaming a directory is a permission on its PARENT, so the comment at datadirperm.go:75-96 claiming "every step below trusts that the files in this directory cannot be substituted by another local user" is FALSE in that case -- the directory itself can be swapped wholesale.
   
-  NOT REOPENED, and here is the evidence for that call rather than an assertion. The CORRECTED command
-  was RE-RUN against the current tree on 2026-08-02 through scripts/proof-check.sh:
-  `verdict=PASS class=file-assertion,toolchain exit=0` -- `go build ./...` succeeds and the REAL gofmt
-  binary reports zero files needing formatting. CORE-1's substance was fine; only its evidence was
-  worthless. Reviewer and security notes on this task independently recorded running gofmt via
-  $GOROOT/bin and finding the repo clean, which agrees.
+  WHY THIS IS NOW URGENT RATHER THAN TIDY, and this is the part that changes its priority. One gate traced that `maxPlausibleSeqFloor` is ONE-DIRECTIONAL: it bounds only UPWARD forgery. A DOWNWARD forge is guarded by nothing but the unkeyed digest, and is masked by the log EXCEPT for the minted-but-unspent tail -- i.e. up to `MintBatchSize` = 256 already-signed sequences reissued. That is a genuine INVARIANT 1 violation whose SOLE remaining defence is this directory permission gate. The gate is therefore LOAD-BEARING FOR INVARIANT 1, not defence in depth, and every hole in it is a hole in invariant 1.
   
-  STANDING RULE, now in CLAUDE.md: never use a bare `gofmt`; use `go fmt ./...` or
-  `"$(go env GOROOT)/bin/gofmt" -l .`. See task c0a5bdb6 for the full write-up and fc8cd234 for the
-  sweep of every other proof_cmd containing a bare gofmt call.
+  SCOPE / FIX. cmd/agent-bus/datadirperm.go. Check the owning uid (refuse a foreign-owned dir rather than repair it -- a non-owner cannot be fixed by chmod). Use `os.Lstat` to detect a symlinked data dir, and consider the parent's mode. NOTE THE KNOWN REGRESSION RISK, raised by the security gate that reviewed the original fix and the reason it was deferred there: an ownership check carries a Docker bind-mount regression risk, and two bricking refusals were already produced during that task. Whatever is chosen must be tested against a bind-mounted volume before it lands, and the refuse-vs-warn choice recorded in DECISIONS.md.
   
-  --- ORIGINAL DESCRIPTION ---
-  Initialize go.mod (module github.com/dodgymike/agent-bus, go1.19 toolchain pin), create the internal/ package layout (ids, store, wal, hub, auth, httpapi, relay) as packages with doc.go stubs, and the cmd/agent-bus/ dir. The HTTP package is named `httpapi`, NOT `http`: naming it `http` would shadow stdlib net/http in every file that imports both, which is a needless papercut. .gitignore already covers build artifacts and /data/ -- verify, do not duplicate. No server logic yet -- this is the scaffold every other task builds on.
-  _Proof: go build ./... && test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"_
-- [ ] CORE-6 · CORE-6: logging maxValueLen=1024 truncates panic stack traces (exempt `stack` or raise to 8192) — core, P2
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. internal/logging caps every field value at maxValueLen=1024, which silently truncates the `stack` field of a panic log line -- exactly the field whose tail (the deepest frames, i.e. where the panic actually happened) matters most. Measured: a real net/http request path produces a 1238-byte stack, so production loses the tail. The existing test does NOT catch this because it drives the handler through httptest, whose shorter call stack measures 962 bytes -- under the cap -- so the test passes while production truncates. Fix: either exempt the `stack` key from the cap or raise the cap to 8192 (state which and why; a cap still exists to stop an attacker-controlled header blowing up the log). CRUCIALLY, also fix the TEST so it exercises a stack long enough to trip the old cap -- otherwise the same blind spot reappears the next time the limit is tuned. Keep the cap on all other fields.
-  _Proof: go test -race -run TestPanicStackNotTruncated ./internal/logging ./internal/httpapi_
-- [ ] CORE-11 · CORE-11: shutdownGrace (10s) < defaultPollTimeout (30s) -- record the ctx.Done() contract in doc.go — core, P3
-  Origin: reviewer + security pass over CORE-1..CORE-4 (2026-08-02). Zero P0s were found; the three P1s are being fixed in-wave. This is one of the remaining lower-priority items, filed separately so it is actionable on its own. shutdownGrace is 10s while defaultPollTimeout is 30s, so a parked long-poll outlives the graceful-shutdown window. Today this is SAFE only incidentally: cancelRoot fires first and cancels the request contexts. That safety is an accident of the current wiring, not a stated rule, and the POLL epic is written by someone else later. Record it as an explicit contract in internal/httpapi/doc.go: a POLL handler MUST select on ctx.Done() alongside its timeout, and MUST NOT block on a bare time.After(pollTimeout) -- a handler that ignores ctx.Done() will hang past shutdownGrace and be killed mid-response. Cross-reference from POLL-1's description so the constraint is in front of whoever writes the handler. Doc/comment change only; no behaviour change. Optionally note the alternative (raise shutdownGrace above defaultPollTimeout) and why it was not chosen.
-  _Proof: grep -q 'ctx.Done' internal/httpapi/doc.go_
-
+  RELATED, NOT DUPLICATES: 6c482cc0-ce83-49e9-a7ff-f8575795cb39 (wal.OpenWriter/RepairTail open bus.wal without O_NOFOLLOW -- same class, different file, internal/wal); ae594fa8-03bb-4d51-aa31-641f5ddcae66 (RUN_DIR ownership/symlink in scripts/bus-serve.sh -- same class, different directory).
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON (`grep -c Lstat cmd/agent-bus/datadirperm.go` = 0, so the && short-circuits) -- RED today rather than VACUOUS. Both test halves must ALSO be observed RED before the fix.
+  _Proof: grep -q 'Lstat' cmd/agent-bus/datadirperm.go && go test -race -count=1 -run 'TestRunRefusesASymlinkedDataDir|TestRunRefusesAForeignOwnedDataDir' ./cmd/agent-bus_
+- [ ] None · invite mint bypasses the data-directory permission gate entirely -- the invite blob is the trust anchor, so this is worse than the file substitution the gate closes — security, P0
+  SECURITY GATE FINDING (HIGH) against the data-dir permission gate shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c, committed at 217a3c0. PROVED BY RUNNING CODE, end to end, not by reading.
+  
+  MECHANISM. `enforceDataDirPermissions` is wired into `run()` ONLY. Re-verified at HEAD 16da89f by spec-keeper: the sole call site in the whole tree is cmd/agent-bus/main.go:299 (`grep -rn enforceDataDirPermissions cmd/agent-bus/` returns the definition at datadirperm.go:88 and that one call). `mintInvite` (cmd/agent-bus/invite.go:448-510) stats the dir (invite.go:455), checks IsDir (:464), then takes the lock, replays and APPENDS to the WAL, and publishes the bus certificate fingerprint -- with no permission check anywhere on that path.
+  
+  MEASURED. On a real 0777 data dir: the server REFUSES to start, but `agent-bus invite mint` exits 0, mutates bus.wal (md5 changed) and emits zero warning.
+  
+  THE COMPLETED ATTACK CHAIN (the reason this is P0 and not tidy-up). The bus id is readable from the world-readable bus-tls.crt (0644), so an attacker mints a same-CN certificate, drops it plus keys into the 0777 dir, and the operator's next `invite mint` printed a fingerprint BYTE-IDENTICAL to the attacker's certificate. Under invariant 11 the invite blob is the TRUST ANCHOR -- "whoever can substitute an invite can point an agent at a bus of their choosing" -- so the outcome is strictly worse than the file substitution the gate was built to close. The gate refusing `run()` while `invite mint` sails through on the same directory is the whole defect: one command enforces the trust boundary and the other one, which MINTS THE TRUST ANCHOR, does not.
+  
+  MINIMAL FIX (given by the gate). Call `enforceDataDirPermissions(dataDir, lg)` in `mintInvite` after the `IsDir` check (invite.go:470) and BEFORE `checkBusIdentityPresent`. That placement preserves the existing property that a refusal writes nothing: it is still ahead of the lock and ahead of every write.
+  
+  ALSO RECORDED, EXPLICITLY LOWER PRIORITY -- `healthcheck`. cmd/agent-bus/healthcheck.go takes -data-dir (:122) and reads only bus-tls.crt (:152); it takes no lock and mutates nothing, so an ungated healthcheck can only report a FALSE OK against a substituted certificate, not launder one. Wire the gate into it in the same change if that is cheap; it does not block this task and must not be used to widen it.
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON: the pin `grep -c 'enforceDataDirPermissions(dataDir, lg)' cmd/agent-bus/invite.go` returns 0, so the && short-circuits and the (not-yet-written) test never runs -- i.e. this proof is RED today rather than VACUOUS. The test half must ALSO be observed RED before the fix lands, or it proves nothing.
+  _Proof: grep -q 'enforceDataDirPermissions(dataDir, lg)' cmd/agent-bus/invite.go && go test -race -count=1 -run TestInviteMintRefusesAnOtherWritableDataDir ./cmd/agent-bus_
 ### EPIC CRYPTO — End-to-end message cryptography (dual keypairs, Double Ratchet, agent-side validation)
 
 - [ ] CRYPTO-11 · CRYPTO-11: Audit-log content hash for signed (cleartext) messages -- implements the invariant-6 trade-off — durability, P2
@@ -1499,17 +1268,6 @@
 - [ ] CRYPTO-9 · CRYPTO-9: Cross-bus relay of encrypted messages -- what an intermediate bus can and cannot see — relay, P3, deferred
   GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md entry is recorded -- the spike chooses the crypto library/primitives, the audit-log trade-off, the ratchet-state durability model, the broadcast/relay scheme and the key-trust model. Implementing before that decision exists is guessing. Make E2E messages survive bus-to-bus relay (RELAY-2) end to end: a message from bus A's agent to bus B's agent must be decryptable ONLY by the destination agent, never by either bus. Requires cross-bus key-bundle fetch (how does an agent on bus A obtain and trust the messaging key of <bus-B>.<agent>? bus B attests it, but bus A is now trusting bus B -- implement the chain CRYPTO-1 defined, and state the residual trust plainly). Specify and test what a relaying/intermediate bus can see: envelope metadata, the traversed-bus path (RELAY-3), fully-qualified sender/recipient ids, sizes and timing -- and what it must never see: content, and any key material that would let it join a session. Cover the partial-failure cases the RELAY epic already worries about (peer down, retry/backoff, loop prevention) so a retried relay cannot cause a ratchet double-advance or a duplicate that decrypts twice.
   _Proof: go test -race -run TestRelayEncrypted ./internal/relay_
-- [-] CRYPTO-2 · CRYPTO-2: Adopt the crypto primitive layer chosen by the spike (internal/cryptobox + go.mod/toolchain) — crypto, P2
-  GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md entry is recorded -- the spike chooses the crypto library/primitives, the ratchet-state durability model, the broadcast/relay scheme and the key-trust model. (The audit-log-vs-PFS trade-off is CLOSED per user instruction 2026-08-02 -- see CRYPTO-11/DUR-5 -- and is no longer part of what CRYPTO-1 decides.) Implementing before the remaining decisions exist is guessing.
-  
-  Land the dependency decision CRYPTO-1 recorded: add the chosen module(s) to go.mod, and bump the go directive/toolchain to whatever version the spike says is required.
-  
-  RUNTIME TARGET (user instruction, 2026-08-02): agent-bus ships as a container under Docker Compose. The CONTAINER's builder image pins the Go toolchain, NOT this workstation's ambient go1.19.4 -- CORE-1's go1.19 pin was a dev-box artifact, not a permanent constraint (see CLAUDE.md's "Runtime target: Docker Compose" section). So a bump past go1.19 is no longer something to work around: choose the version the ratchet library actually needs (crypto/ecdh is go1.20+; a current libsignal-compatible stack may want newer) and state it plainly in DECISIONS.md. This relaxes the Go VERSION only -- invariant 8 (stdlib first, third-party deps need a DECISIONS.md justification) is UNCHANGED.
-  
-  SEQUENCING: the actual go.mod/toolchain bump and the container builder image pin are owned by the DEPLOY epic's toolchain-bump task, which is explicitly sequenced to land AFTER the in-flight ID/DUR wave completes (that wave is building against go1.19 right now). Coordinate with spec-keeper on ordering rather than bumping go.mod unilaterally from this task -- if this task's dependency needs the newer toolchain to even compile its test vectors, block on the DEPLOY toolchain-bump task rather than bumping go.mod early.
-  
-  Introduce internal/cryptobox as a NARROW interface over the primitives (keypair generation, X25519 agreement, HKDF, AEAD seal/open, constant-time compare). The point of the narrow interface is that the ratchet code above it does not care which of the spike's options (a)/(b)/(c) won, and swapping the implementation later is a one-package change. Include known-answer/test-vector tests for every primitive -- crypto without test vectors is unverified. NO protocol logic in this task: no X3DH, no ratchet, no wire format. Update DECISIONS.md if the adopted dependency differs in any way from what CRYPTO-1 recorded.
-  _Proof: go build ./... && go vet ./... && go test -race ./internal/cryptobox_
 - [ ] CRYPTO-4 · CRYPTO-4: Key-distribution endpoint -- server-attested messaging key bundles — auth, P1
   RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify; encryption later"): this is now a bundle of SIGNING material, not X3DH session-establishment material. GOVERNED BY INVARIANT 9 -- the bus attests bundles by signing them with its own Ed25519 signing key (crypto/ed25519, stdlib, audited); no custom attestation construction. Add the authenticated route that lets an enrolled agent fetch another agent's messaging (signing) key bundle: {fully-qualified <bus-id>.<agent-id>, messaging public key, key_epoch, issued_at}, signed by a bus signing key so the caller can verify the bus is vouching for this binding. Route is keyed by the fully-qualified id (invariant 2). Requires auth (invariant 3): an unenrolled caller gets 401; consider whether roster enumeration via this route needs rate-limiting or scoping. PLUS mandatory TOFU pinning: a recipient pins a peer's messaging public key on first use, in a local pin file; if the bus later serves a DIFFERENT key for a peer whose key is already pinned, that is a hard failure (never an auto-accept, never a silent re-pin) -- this is the actual defence against a malicious bus MITM-ing an established relationship, since attestation alone only protects first contact. Re-pinning requires an explicit human-driven trust command with an out-of-band comparison. key_epoch is bumped by the server on AUTH-4 leave/revocation and invalidates outstanding bundles. Any on-disk record type number or wire protocol version this needs MUST be reserved via POST /api/v1/projects/agent-bus/reservations -- never hand-picked. NOT NEEDED under this rescope (drop if present in any earlier draft): signed prekeys, one-time prekeys, prekey replenishment/exhaustion policy -- those were X3DH-specific and there is no X3DH; this bundle carries exactly one long-lived signing public key per agent.
   _Proof: go test -race -run TestKeyBundle ./internal/httpapi_
@@ -1519,36 +1277,6 @@
 - [ ] CRYPTO-8 · CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path — crypto, P3, deferred
   GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md entry is recorded -- the spike chooses the crypto library/primitives, the audit-log trade-off, the ratchet-state durability model, the broadcast/relay scheme and the key-trust model. Implementing before that decision exists is guessing. The Double Ratchet is strictly PAIRWISE; agent-bus broadcasts to N agents (MSG-2). Implement whichever scheme CRYPTO-1 chose: pairwise fan-out (N ciphertexts, one per recipient session -- keeps full ratchet PFS, costs N seals and N envelope copies) or a Signal-style SENDER KEY group session (one ciphertext, a distribution message per member -- cheaper, but WEAKER forward secrecy, which is precisely why the choice is the spike's and not the implementer's). Must specify and implement membership change: an agent joining or leaving (AUTH-4) forces a rekey, and a departed agent must not be able to read subsequent broadcasts. Document in the task outcome what the bus sees for a broadcast (recipient set, sizes, timing) versus what it cannot. Tests: every recipient decrypts the same plaintext, a non-member cannot, a removed member cannot read post-removal traffic, and a tampered broadcast is rejected by every recipient.
   _Proof: go test -race -run TestBroadcastEncrypted ./internal/httpapi ./internal/crypto_
-- [x] CRYPTO-1 · CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DECISIONS.md) — crypto, P1
-  INVESTIGATION ONLY -- NO PRODUCTION CODE. Run this as deep-diver (+ planner for the resulting task ordering), model opus: this is judgment/design work where a wrong call is expensive. Throwaway spikes under /tmp to measure or prototype are fine; nothing lands in internal/ or cmd/ from this task.
-  
-  DELIVERABLES: (1) CRYPTO_DEEPDIVE.md at the repo root, resolving every remaining tension below with a recommendation and its rationale; (2) a dated DECISIONS.md entry per decision taken (invariant 8 requires this for any third-party dependency, and several of these decisions WEAKEN a standing invariant, which CLAUDE.md says needs an explicit recorded decision); (3) a revised, ordered task list for CRYPTO-2..CRYPTO-12 handed to spec-keeper -- correct/split/supersede those tasks if the design says so rather than forcing the design to fit them.
-  
-  USER ASK (verbatim, 2026-08-02): "Add to the backlog to add a mechanism to validate messages in the agent script before accepting them. enrolment generates a pub/prv keypair for auth, and for messaging. Use the messaging ratchet library the signal people made for signal /whatsapp to ensure pfs and message integrity / authenticity between agents".
-  
-  TWO OF THE ORIGINAL SIX TENSIONS ARE NOW SETTLED BY DIRECT USER INSTRUCTION (2026-08-02) -- do not reopen them in the spike:
-  
-  - TENSION 2 (audit log vs forward secrecy) IS CLOSED. User's words: "ok, log only metadata and routing info." The append-only audit log (invariant 6, DUR-5) records ONLY message id, sequence, sender, recipient(s), bus path traversed, timestamp, size, and a content hash -- never ciphertext, never plaintext. This resolves the plaintext-becomes-unwritable-under-PFS / ciphertext-is-dead-weight conflict by not storing content at all; the hash keeps the log probative without retention. See CRYPTO-11 (implements this) and DUR-5 (already amended to this shape). Nothing left for this spike to decide here.
-  - THE GO-VERSION HALF OF TENSION 1 IS ALSO SETTLED. User's words: "this bus is meant to run in a docker compose, so use the applicable version for the ratchet requirements." agent-bus ships as a container under Docker Compose; the CONTAINER's builder image pins the Go toolchain, NOT this workstation's ambient go1.19.4. CORE-1's go1.19 pin was an artifact of the dev box, not a permanent product constraint -- see CLAUDE.md's "Runtime target: Docker Compose" section. This does NOT close the rest of tension 1 below (library choice, roll-your-own vs import, invariant 8 dependency justification) -- only the "are we stuck on go1.19.4" sub-question is closed: no, choose on the merits and say what the container must pin.
-  
-  THE TENSIONS THIS SPIKE MUST STILL RESOLVE:
-  
-  1. DEPENDENCY + LIBRARY CHOICE (invariant 8: stdlib first; a third-party dep needs a DECISIONS.md justification). libsignal is Rust/Java/Swift; there is NO official Go binding. Realistic options: (a) an unofficial Go Double Ratchet port -- assess maintenance, audit status, correctness risk; (b) CGO against libsignal -- assess build/cross-compile/static-linking cost and that it drags a Rust toolchain into the build; (c) implement X3DH + Double Ratchet ourselves over stdlib-ish primitives. The go1.19.4-forces-a-third-party-module problem is GONE (see above) -- the container builder image can pin whatever Go version the chosen option needs (crypto/ecdh is go1.20+; a current libsignal-compatible stack may want newer still). State PLAINLY, as the spike's headline conclusion: (i) which option is chosen and why, (ii) the exact Go version the container's builder image must pin as a result, and (iii) that this is a version bump, not a dependency-growth license -- invariant 8 (stdlib first, third-party deps need a DECISIONS.md justification) is UNCHANGED and still governs whether golang.org/x/crypto or a Double Ratchet port gets pulled in. Also state the position on rolling our own crypto vs importing it. NOTE ON SEQUENCING: the actual go.mod/toolchain bump and container builder image are owned by the new DEPLOY epic's toolchain-bump task, which is explicitly sequenced to land AFTER the in-flight ID/DUR wave completes (that wave is building against go1.19 right now) -- this spike recommends the version, it does not perform the bump.
-  
-  2. [CLOSED -- see above.]
-  
-  3. RATCHET STATE vs DURABILITY (invariants 4 and 5: nothing acked before durable; disk is the truth, recovery replays the store). Double Ratchet state is MUTABLE PER-SESSION state that advances with every message -- it is emphatically NOT append-only. If ratchet state is LOST on crash the session breaks; if it is REPLAYED/rolled back on recovery you get KEY AND NONCE REUSE, which is a catastrophic AEAD failure, not a hiccup. Specify: where ratchet state lives, how it is written and fsynced relative to the two-phase message commit (does the state advance commit atomically with the message?), what recovery does with a message whose ratchet step was committed but whose send was not (and vice versa), how skipped/out-of-order message keys are stored and bounded, and how replay of the WAL is prevented from re-advancing or rewinding a ratchet. Name the crash-injection tests that would prove it. This is a first-class durability problem, not an afterthought.
-  
-  4. BROADCAST AND RELAY. The Double Ratchet is strictly PAIRWISE. agent-bus does BROADCAST to N agents and CROSS-BUS RELAY. Signal solves groups with Sender Keys, which have DIFFERENT and WEAKER PFS properties than the pairwise ratchet. Specify how a broadcast is authenticated and encrypted (pairwise fan-out with N ciphertexts vs sender-key group session -- state the cost/PFS trade-off and how membership change forces a rekey), and specify for relay exactly what an INTERMEDIATE relaying bus can and cannot see: envelope metadata, routing path, sender and recipient fully-qualified ids, sizes and timing are presumably visible; content must not be. Cross-reference the RELAY epic (RELAY-1..5) and MSG-2 (broadcast).
-  
-  5. IDS, ENROLMENT AND KEY TRUST (invariant 1: server authoritative on every id; invariant 2: ids are fully qualified <bus-id>.<agent-id>; invariant 3: enrolment issues a signed credential). Enrolment ALREADY issues a signed credential (AUTH-1); this adds a SECOND, messaging keypair. Define: which key signs what (auth key authenticates to the bus; messaging identity key signs prekeys and authenticates peers -- do not conflate them), that the server BINDS the messaging public key to the server-minted fully-qualified <bus-id>.<agent-id> so a client can never assert its own identity, and -- the crux -- HOW AN AGENT FETCHES AND TRUSTS ANOTHER AGENT'S MESSAGING PUBLIC KEY: server-attested (the bus signs the key bundle, so the bus is a trusted introducer and a malicious bus can MITM) vs trust-on-first-use with a safety number/fingerprint an agent can compare (and what changing keys must do to an established session). State the residual threat model plainly: what does a compromised bus get, what does a compromised peer get, what does an offline attacker with the WAL get. Note the AUTH epic OVERLAPS -- cross-reference AUTH-1/AUTH-2/AUTH-3 rather than duplicating them, and say which AUTH tasks need their descriptions amended.
-  
-  6. AGENT-SIDE VALIDATION IN THE WRAPPER (invariant 7: agents never hand-write HTTP; every capability ships its scripts/bus-*.sh wrapper AND its AGENT_PROTOCOL.md entry in the SAME task). The user explicitly asked that the AGENT SCRIPT validate a message BEFORE ACCEPTING it. Shell cannot do X25519/AEAD, so the wrapper must shell out to a helper -- specify it (e.g. an `agent-bus verify` / `agent-bus open` subcommand of the same Go binary), its stdin/stdout contract, its exit codes, where the agent's private keys live on disk and with what permissions, and what 'reject' looks like to the calling agent (non-zero exit + nothing printed to stdout, so a naive wrapper cannot accidentally pass unverified content through). Cover the failure modes: bad MAC, unknown sender, no session, out-of-order/skipped, replayed message, and key-changed-since-last-seen.
-  
-  RESERVATIONS: Any on-disk record type number or wire protocol version this needs MUST be reserved via POST /api/v1/projects/agent-bus/reservations -- never hand-picked. The spike should ENUMERATE which record types and which wire protocol version bumps this design will need, so they can be reserved before implementation starts.
-  
-  OUT OF SCOPE: writing any of the implementation. CRYPTO-2..CRYPTO-12 carry that.
-  _Proof: test -s CRYPTO_DEEPDIVE.md && grep -q 'Message auth/integrity only' DECISIONS.md_
 - [ ] CRYPTO-10 · CRYPTO-10: `agent-bus verify` helper + scripts/bus-*.sh validate-before-accept + AGENT_PROTOCOL.md — agentif, P1
   RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify; encryption later"): this is now VERIFY-ONLY, no decryption. GOVERNED BY INVARIANT 9 -- calls crypto/ed25519.Verify (stdlib, audited, high-level, misuse-resistant) and nothing else; no custom verification logic. THIS IS THE TASK THE USER ACTUALLY ASKED FOR: "a mechanism to validate messages in the agent script before accepting them". Shell cannot do Ed25519, so add a subcommand to the same Go binary (e.g. `agent-bus verify`) that the wrapper shells out to, and wire it into the receive path of the agent-facing wrappers (bus-wait.sh, and bus-agents/bus-send as applicable -- AGENTIF-6/AGENTIF-5) so a message is VERIFIED (per SIGN-1's canonical format, against the sender's messaging public key from CRYPTO-4's bundle/TOFU pin) BEFORE it is handed to the calling agent. Contract: defined stdin/stdout shape; on ANY verification failure exit non-zero and print NOTHING to stdout, so a naive `msg=$(...)` cannot accidentally pass unverified content through. Distinct exit codes per failure mode, at minimum: bad signature (tampered or wrong key), unknown sender (no key binding), replayed message (SIGN-4's cursor), sender identity key CHANGED since pinned (CRYPTO-4's TOFU alarm -- must be loud, never silent), and bundle attestation invalid (bus signature failed). Define where the agent's private key lives and with what file permissions, and refuse to run on world-readable key files. Per invariant 7 the wrapper AND its AGENT_PROTOCOL.md entry ship IN THIS SAME TASK -- a feature without its wrapper is not done. Verify the way an agent would: through scripts/bus-*.sh against a running throwaway bus (own data dir under /tmp), not hand-written curl. NOT NEEDED under this rescope (drop if present in any earlier draft): decrypt/AEAD-open, X3DH session state (no session/handshake required -- verification is stateless given the sender's pinned public key), out-of-order/skipped-key ratchet handling.
   
@@ -1569,9 +1297,6 @@
 
 ### EPIC DEPLOY — Containerised runtime (Docker Compose)
 
-- [x] DEPLOY-2 · DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck — deploy, P1
-  docker-compose.yml running a single agent-bus service built from the Dockerfile (DEPLOY-1): a named volume mounted at the container's data-dir (so `compose down` without `-v` preserves durable state per invariants 4/5), a healthcheck wired to the existing `/healthz` route (interval/timeout/retries tuned so `docker compose ps` and `depends_on: condition: service_healthy` are meaningful), and configuration passed through the EXISTING flags/env the binary already accepts -- no new config surface invented here. Document the compose invocation (`docker compose up -d`, `docker compose logs -f`, `docker compose down`) in a short README section. Depends on DEPLOY-1 (Dockerfile).
-  _Proof: DOCKER_HOST=unix:///run/docker.sock; DOCKER=/snap/docker/current/bin/docker; ! grep -q container_name docker-compose.yml && $DOCKER compose -p agentbus-proof up -d --build && sleep 8 && $DOCKER compose -p agentbus-proof ps --format json | grep -q "\"Health\":\"healthy\"" && $DOCKER compose -p agentbus-proof exec -T agent-bus wget -q -O - http://127.0.0.1:8080/healthz && $DOCKER compose -p agentbus-proof down -v_
 - [ ] DEPLOY-5 · DEPLOY-5: container build/test check (CI or make/script target) — deploy, P2
   A checkable target (a `make docker-build`/`make docker-test` pair, or an equivalent scripts/ci-*.sh, or a CI workflow if this repo gains CI) that builds the Dockerfile (DEPLOY-1) and runs the test suite (or at minimum `go build`/`go vet`/`gofmt -l`/`go test -race`) INSIDE the container, so "it builds in the container" is something anyone can run and verify rather than an assumption carried in a PR description. Should also smoke-test docker-compose.yml (DEPLOY-2): bring the stack up, hit /healthz, bring it down, assert clean exit and volume persistence across a restart. Depends on DEPLOY-1 and DEPLOY-2; benefits from running after DEPLOY-4 (toolchain bump) so the checked build matches the shipped toolchain, but can be written against whatever go.mod pins at the time and re-verified after DEPLOY-4 lands.
   
@@ -1583,15 +1308,21 @@
 - [ ] DEPLOY-3 · DEPLOY-3: multi-bus Compose profile (2+ peered buses) for RELAY end-to-end testing — deploy, P2
   A second Compose profile/override (e.g. docker-compose.multi.yml or a `relay` profile in the same file) that runs 2+ agent-bus services peered with each other over the RELAY epic's peer-enrolment mechanism (RELAY-1..5), each with its own named volume and healthcheck. This is what makes the RELAY epic testable END-TO-END in a realistic topology (message relay, agent-list exchange, loop prevention via traversed-bus path, peer-down retry/backoff) instead of only via unit tests against in-process buses. Depends on DEPLOY-2 (single-bus compose) and on enough of the RELAY epic existing to peer two buses (coordinate timing with spec-keeper -- do not block indefinitely on RELAY if the compose scaffolding itself can be written first with a status_note saying peering is not yet exercisable). Priority reflects that it pairs with and unblocks RELAY verification, so it should be picked up once RELAY has a peer-enrolment route to point it at.
   _Proof: docker compose -f docker-compose.multi.yml up -d && <peer-enrol two buses via scripts/bus-peer.sh, exchange a message, verify relay> && docker compose -f docker-compose.multi.yml down_
-- [x] None · DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any other compose project using the same name — deploy, P1
-  docker-compose.yml:80 sets `container_name: agent-bus` unconditionally. Docker container names are global (not project-namespaced), so `docker compose -p <any-other-project> up` for this same file collides with any OTHER running container also named agent-bus -- including, on this box, the live production `agentbus` compose project (its service container is also named agent-bus). Reproduced 2026-08-02: `docker compose -p agentbus-proof up -d --build` from a clean commit failed cleanly with `Conflict. The container name "/agent-bus" is already in use` while the live agentbus project was running -- Docker refused rather than clobbering anything, so no data was harmed, but it means a project-name-isolated proof_cmd (see DEPLOY-2s patched proof_cmd) still cannot succeed while the live deployment is up. Fix: drop the `container_name:` line (or template it off `${COMPOSE_PROJECT_NAME}`) so compose derives a project-scoped name the normal way.
-  _Proof: DOCKER_HOST=unix:///run/docker.sock; DOCKER=/snap/docker/current/bin/docker; ! grep -q container_name docker-compose.yml && $DOCKER compose -p agentbus-proof up -d --build && sleep 8 && $DOCKER compose -p agentbus-proof ps --format json | grep -q '"Health":"healthy"' && $DOCKER compose -p agentbus-proof exec -T agent-bus wget -q -O - http://127.0.0.1:8080/healthz && $DOCKER ps --format '{{.Names}}' | grep -qx agent-bus && $DOCKER compose -p agentbus-proof down -v   # requires the real snap binary + explicit socket, see DECISIONS.md 2026-08-07 'the working docker invocation for agent shells on this box'_
-- [x] DEPLOY-1 · DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image — deploy, P1
-  Multi-stage Dockerfile: a builder stage on a PINNED Go image tag (pin the exact digest/tag actually used by go.mod's current toolchain -- go1.19 today, until DEPLOY-4 bumps it; re-pin when DEPLOY-4 lands, do not silently float to `latest`), a minimal runtime image (distroless or alpine -- justify the choice in DECISIONS.md per invariant 8), and a non-root user for the runtime stage (never run agent-bus as root in the container). Declare the data-dir as a VOLUME: durability (invariants 4/5/6) lives there, and it must survive `docker compose down` (without `-v`) and a container replace/restart. Wire the existing CLI flags/env the binary already accepts (see cmd/agent-bus -h) rather than inventing container-specific config. This is an ENABLER task, independent of the toolchain bump (DEPLOY-4) -- build against whatever go.mod currently pins; re-pin the builder image when DEPLOY-4 lands.
-  _Proof: docker build -t agent-bus:test . && docker run --rm agent-bus:test -h_
-
+- [ ] None · DEPLOY-REDEPLOY: recreate the Compose bus fresh (volume included) and prove two agents exchange a message on it — deploy, P1
+  The existing `agentbus` Compose project predates messaging/signing/the durable roster and cannot carry a message. The on-disk store.RecordVersion 1->2 break makes its volume unusable and its contents are throwaway, so `down -v` is USER-AUTHORISED (ruling recorded in DECISIONS.md at commit fe02ebb). docker is NOT usable via bare `docker` on PATH -- that resolves to a broken snap wrapper. Use /snap/docker/current/bin/docker for the docker CLI and the compose plugin at /snap/docker/3505/usr/libexec/docker/cli-plugins/docker-compose, with DOCKER_HOST set appropriately. Steps: `docker compose down -v` (via the paths above) to fully clear the old project and volume, then `docker compose up -d --build` to recreate fresh. Constraint: docker-compose.yml declares no `ports:` -- the server binds 127.0.0.1:8080 INSIDE the container only. Do NOT widen the listener / do NOT add a ports: mapping to satisfy this task. busctl is not present in the built image (see CLI-BUSCTL-IMAGE, public_id 9be2105d, status todo), so proof requires `docker cp`-ing a statically built client binary into the running container and invoking it there (or via `docker exec`) against the container-local listener. Acceptance criterion is VERIFICATION BY EXECUTION, not container health: the container being healthy/Up is NOT sufficient. The task is only done once two distinct agents actually enrol against the freshly recreated bus and exchange at least one message, with the transcript/output captured as proof.
 ### EPIC DOCS — Documentation
 
+- [ ] None · Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE — docs, P2
+  Both DECISIONS.md and AGENT_LOG.md were HOT during the 2026-08-07 triage pass -- three uncommitted appended sections plus a prior integrator/append race were already sitting in the working tree -- so the feature agents dispatched against INVITE-MINT (public_id 1d0d0e60-06d3-4610-aa09-1439159a114d) and MTLS-ROTATE (public_id c2e8df5b-cafa-4a38-8384-a99e7f66f968) were EXPLICITLY forbidden from editing either file this pass, and told instead to post their journal text as kind=report notes on their own tasks.
+  
+  This task exists so that deviation from CLAUDE.md step 8 ("Record decisions in DECISIONS.md; append to AGENT_LOG.md") is tracked and paid down deliberately, rather than quietly lost the moment both tasks are marked done.
+  
+  WHEN DECISIONS.md and AGENT_LOG.md are next safe to edit (i.e. not concurrently held by another in-flight agent), copy the design-decision content from INVITE-MINT's task notes into a new dated DECISIONS.md section, and the work-log content from both INVITE-MINT's and MTLS-ROTATE's task notes into new dated AGENT_LOG.md entries -- append-only, do not edit existing dated history in either file.
+  
+  SOURCE TASK IDS TO COPY FROM:
+    - INVITE-MINT: public_id 1d0d0e60-06d3-4610-aa09-1439159a114d (GET .../tasks/1d0d0e60.../notes)
+    - MTLS-ROTATE: public_id c2e8df5b-cafa-4a38-8384-a99e7f66f968 (GET .../tasks/c2e8df5b.../notes)
+  _Proof: grep -q 'INVITE-MINT' DECISIONS.md && grep -q 'MTLS-ROTATE' AGENT_LOG.md && grep -q 'INVITE-MINT' AGENT_LOG.md_
 - [ ] DOCS-2 · DOCS-2: PROTOCOL.md -- wire protocol + on-disk format — docs, P0
   RAISED P1 -> P0 2026-08-02. **PROTOCOL.md DOES NOT EXIST.** Verified first-hand this pass: CLAUDE.md's
   repository-layout section lists it as a tracked contract document ("PROTOCOL.md -- the wire protocol +
@@ -1623,9 +1354,60 @@
   --- ORIGINAL DESCRIPTION ---
   Every HTTP route (method, path, auth requirement, request/response shape) and the on-disk format (WAL record framing, audit log format, roster/counter file layouts) -- maintainer-facing, kept current as routes land.
   _Proof: test -s PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'metadata' PROTOCOL.md_
-- [x] DOCS-1 · DOCS-1: README.md + DECISIONS.md seed — docs, P0
-  README.md -- what agent-bus is, quickstart (build, run one bus, enrol two agents, exchange a message via the wrappers). DECISIONS.md -- seeded with its append-only-dated-entry convention and a placeholder for the enrolment signing-scheme decision. Written early so later tasks have somewhere to record decisions.
-  _Proof: test -s README.md && test -s DECISIONS.md_
+- [ ] None · CONTRACTS-AGENT.md/AGENT_PROTOCOL.md document the removed log-scrape as bus-serve.sh start's contract — documentation, P1
+  CONTRACTS-AGENT.md:43-47 currently says bus-serve.sh start prints the certificate fingerprint scraped from the log (bus_cert_fingerprint=...). As of the fix in parent task 10e93262-8e34-4738-b435-bfe23d880057, that is false and it documents the VULNERABLE behaviour as current: cert_fingerprint() now computes sha256(DER) from $CERT_FILE and never reads $LOG_FILE. Replace with this exact wording, supplied by the documentation gate:
+  
+  "- On success, start additionally prints: the https://host:port URL, the certificate path, the certificate fingerprint computed directly from $CERT_FILE (sha256(DER) of the leaf, via cert_fingerprint(): openssl x509 -noout -fingerprint -sha256, falling back to awk+base64 -d+sha256sum when openssl is absent), and a ready-to-paste agent-busctl enrol --bus ... --bus-fingerprint ... --name <name> line. It is never scraped from $LOG_FILE (fixed 2026-08-07: the log is a mutable artefact under AGENT_BUS_RUN_DIR, default /tmp/agent-bus, so a log-scrape let a local attacker plant a fake bus_cert_fingerprint=... line and win the wrapper's own tail -1, handing the operator a confident, paste-ready fingerprint naming the attacker's certificate). If neither openssl nor the coreutils fallback is available, start still exits 0 (the bus IS up) but prints no fingerprint line -- instead a WARNING to stderr naming the remedy."
+  
+  Also in the same task: CONTRACTS-AGENT.md:48-50 and AGENT_PROTOCOL.md:65-67 should note the new pidfile refusal (exit codes are UNCHANGED: start 0/1/2, status 0/1/3, stop 0/2 -- an unusable pidfile is treated as not running). Files: CONTRACTS-AGENT.md, AGENT_PROTOCOL.md. Note both had uncommitted work from another agent at the time, which is why parent task 10e93262-8e34-4738-b435-bfe23d880057 could not touch them.
+  _Proof: grep -n 'never scraped from' CONTRACTS-AGENT.md && ! grep -n 'scraped from the log' CONTRACTS-AGENT.md_
+- [ ] None · DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy verbatim — documentation, P1
+  Discovered during the DUR-11 orphaned-task reconciliation pass (2026-08-02). HALF OF THIS TASK IS ALREADY DONE: c7e017d removed the stale "provably torn tail" / "refuses to start and leaves the file byte-for-byte" / "RepairTail" phrasing (verified absent from CONTRACTS-ONDISK.md, the plane the WAL-repair section moved to in the CONTRACTS split, 360a2679). THE REMAINING, UNMET HALF: CONTRACTS-ONDISK.md has ZERO mention of RepairLog, the bus.wal.corrupt-<ts> quarantine-rename-aside artefact name, the .repair temp-file-during-rewrite artefact name, or the Repair/Recovered struct fields actually surfaced to callers (Rewritten, Quarantined, DiscardCount, MissingRecords, Exhausted) -- confirmed via grep, zero matches for every one of the eight terms (2026-08-02). Fix: document the SHIPPED RepairLog / quarantine / always-restart behaviour in CONTRACTS-ONDISK.md, naming the on-disk artefacts and enumerating the struct fields.
+  
+  *** BLOCKING: DO NOT DISPATCH until DUR-12 (cbc9ab0c) lands. *** DUR-12 is rewriting the on-disk WAL format (CRC32C -> HMAC-SHA256 MAC, format version 2) right now and will change this exact plane -- documenting the WAL surface concurrently would be stale on arrival, same ordering constraint applied to e120153b and db350e39.
+  _Proof: grep -qF "RepairLog" CONTRACTS-ONDISK.md && grep -qF "bus.wal.corrupt-" CONTRACTS-ONDISK.md && grep -qF ".repair" CONTRACTS-ONDISK.md && grep -qF "Rewritten" CONTRACTS-ONDISK.md && grep -qF "Quarantined" CONTRACTS-ONDISK.md && grep -qF "DiscardCount" CONTRACTS-ONDISK.md && grep -qF "MissingRecords" CONTRACTS-ONDISK.md && grep -qF "Exhausted" CONTRACTS-ONDISK.md && ! grep -qE "provably torn tail|refuses to start and leaves the file byte-for-byte|RepairTail" CONTRACTS-ONDISK.md_
+- [ ] None · AGENT_PROTOCOL.md error-block label says remedy: but the CLI prints try: — docs, P3
+  AGENT_PROTOCOL.md's error-block examples label the second line "remedy:" (e.g. lines ~203 and ~208, the mTLS certificate-mismatch examples), but cmd/agent-busctl/output.go:148 actually prints `  try: %s` via fmt.Fprintf(o.stderr, "  try: %s\n", payload.Remedy). The `agent-busctl: %s` prefix on the first line (output.go:146) IS correct and matches the doc. This is PRE-EXISTING -- present at 29cdafc and earlier, not introduced by MTLS-ROTATE's doc work, though that work carried the mislabeled examples forward so it now appears more than once (two blocks). Consequence: an agent grepping AGENT_PROTOCOL.md for "remedy:" to programmatically extract a remedy line will never find one, because the CLI never emits that word -- only "try:". Fix: either update the doc examples to say "  try:" (matching code, the simpler and safer fix since output.go is otherwise correct and already has one legitimate "try:" example elsewhere in the doc at line ~648), or rename payload.Remedy's label in code to match the doc -- doc-only fix is preferred absent a reason to touch the CLI. Verified independently: git show HEAD:cmd/agent-busctl/output.go lines 146/148, and grep -n remedy: AGENT_PROTOCOL.md returns lines 203 and 208.
+  _Proof: grep -qF '"  try: %s\n"' cmd/agent-busctl/output.go && grep -A2 -F 'REFUSING to talk' AGENT_PROTOCOL.md | grep -qF '  try:'_
+- [ ] None · DECISIONS.md carries the pre-correction (wrong) accepted-limit sentence for the MAC key; PROTOCOL.md has the fix, DECISIONS.md does not — documentation, P2
+  The DUR-12 security gate established that the original accepted-limit rationale for the HMAC key
+  (section 1 of the 2026-08-02 "Five decisions" entry) is factually wrong as written, and corrected it
+  IN PROTOCOL.md -- but DECISIONS.md, which is outside DUR-12's task boundary, still carries the
+  original wrong sentence uncorrected.
+  
+  WRONG (DECISIONS.md line ~1089-1090, section 1 "The HMAC key lives in the DATA DIR..."):
+    "It buys nothing against an attacker who already has data-directory write access; such an attacker
+    can read the key and forge freely."
+  
+  This is wrong because replacing a file on POSIX needs only w+x on the DIRECTORY, not any permission
+  on the 0600 key file inside it -- so "can read the key" overstates what the attacker needs and
+  understates what they can actually do.
+  
+  CORRECTED (PROTOCOL.md lines ~248-255, section 7):
+    "But the reason usually given for that is wrong, and the difference matters. The stock
+    justification -- 'such an attacker can read wal-mac.key, same directory, same trust boundary' -- is
+    a statement about READ access, and reading is not what the attacker needs. Replacing a file on
+    POSIX needs only w+x on the directory, not any permission on the 0600 key inside it. The accurate
+    statement is that an attacker with directory-write access can replace the key and the log together
+    -- plant a v2 log of their own making alongside a key of their own choosing -- and the bus will
+    replay it as history. That is why the limit is real; it does not depend on the key being readable."
+  
+  FIX SCOPE: DECISIONS.md is append-only by convention (see its own section 4, "Commit history: LEAVE
+  IT" -- the pattern established for this file is record corrections, don't rewrite history in place).
+  So the fix here is almost certainly a DATED CORRECTION APPENDED at the end of the file (new section,
+  today's date), quoting the wrong original sentence, stating it is superseded, and pointing at
+  PROTOCOL.md section 7 for the accurate wording -- NOT an in-place edit of the 2026-08-02 "Five
+  decisions" entry's original text. Whoever takes this should confirm that convention still holds
+  before editing, since the append-only rule is a repo convention rather than something this task
+  verified is universal.
+  
+  Not urgent -- this is a documentation-only inconsistency; the operationally-authoritative statement
+  (PROTOCOL.md, which operators actually read for the accepted-limit boundary) is already correct.
+  DECISIONS.md is history/rationale, not the operator-facing doc, which is why this is P2 not higher.
+  _Proof: grep -qi 'replace the key and the log' DECISIONS.md_
+- [ ] None · DECISIONS.md:1302 cites a superseded bus-serve.sh line for the plaintext-probe follow-on — documentation, P3
+  DECISIONS.md:1302 names scripts/bus-serve.sh:54 and HEALTH_URL="http://..." as follow-on work; the plaintext probe was removed by MTLS-LISTENER/MTLS-VERIFY and the line number has moved. DECISIONS.md is append-only so the historical entry must NOT be rewritten -- the right fix is a new dated entry noting the supersession. Low priority, flagging only. Found during review of parent task 10e93262-8e34-4738-b435-bfe23d880057.
+  _Proof: grep -n 'supersed' DECISIONS.md | tail -5_
 - [ ] DOCS-3 · DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table — docs, P1
   A single table of every route, CLI flag, env var, and durable record type, with the convention that every future task updates it in the same commit that changes any of those surfaces (CLAUDE.md step 9).
   _Proof: test -s CONTRACTS-CLI.md && test -s CONTRACTS-HTTP.md && test -s CONTRACTS-ONDISK.md && test -s CONTRACTS-AGENT.md && grep -qF "CONTRACTS-CLI.md" CONTRACTS.md && grep -qF "CONTRACTS-HTTP.md" CONTRACTS.md && grep -qF "CONTRACTS-ONDISK.md" CONTRACTS.md && grep -qF "CONTRACTS-AGENT.md" CONTRACTS.md_
@@ -1636,6 +1418,47 @@
   
   Scope: PROTOCOL.md only. No source, no other docs.
   _Proof: ! grep -n "f5d91dbe\|8192c3c7" PROTOCOL.md | grep -v "Spec Server task"_
+- [ ] DISCOVERY-DOC-FU-README · DISCOVERY-DOC-FU-README: README.md still documents the old three-field /v1/info body — docs, P2
+  Found by the reviewer gate during DISCOVERY-DOC. README.md (around line 100) still shows GET /v1/info returning only {bus_id, version, uptime_seconds}. It now also returns discovery: /v1/discovery, a constant path pointing at the new unauthenticated protocol-discovery document. README.md was outside DISCOVERY-DOC's file-ownership boundary so it was flagged rather than edited. Fix the README body and, while there, consider whether README should mention /v1/discovery as the bootstrap entry point for an agent handed only a URL.
+- [ ] None · IDEM-11-FU-PAPERTRAIL: DECISIONS.md and CONTRACTS-HTTP.md state the OPPOSITE of what IDEM-11 shipped — docs, P1
+  Reviewer gate finding on IDEM-11 (staged, uncommitted), 2026-08-03. Raised as a P1 in the PAPER TRAIL, not in the code -- the code is right and the docs contradict it. Deliberately out of the implementing agent's file boundary (DECISIONS.md / CONTRACTS-HTTP.md were single-writer-locked during a 4-agent parallel wave), hence this task.
+  
+  1. DECISIONS.md:706-708 says idempotency keys "fail closed" and retention is "1 day or 1 GB". Neither is what shipped: retention is a DERIVED 50h10m22s window with a fail-closed COUNT cap of 65536, and an expired key is NOT rejected -- it is applied as a NEW operation.
+  
+  2. CONTRACTS-HTTP.md:164-176 still documents the message-retention coupling that IDEM-11 deleted.
+  
+  SUPERSEDING TEXT PROPOSED BY THE IMPLEMENTING AGENT (review before landing, do not paste blind):
+  "IDEM-11 supersedes items 8-11 of the 2026-08-02 sixteen-questions decision. Idempotency keys are retained for a DERIVED bounded window (50h10m22s = (24h peer-outage budget + 1h max session + 5m max parked poll + 11s client retry horizon) x 2) with a fail-closed count cap of 65536. A retry arriving after its key expires is NOT rejected -- it is applied as a NEW operation. Fail-closed is unimplementable over opaque client-supplied keys (IDEM-10): an evicted key is byte-indistinguishable from a never-seen key, and every legitimate first attempt is a never-seen key. The honest guarantee is 'duplicates are suppressed within the retention window', never unconditional exactly-once."
+  
+  That last sentence is the load-bearing one and should survive editing: the system does NOT provide unconditional exactly-once, and any doc implying it is wrong.
+  
+  Also fold in the operator-facing note: no migration needed (existing logs replay unchanged), rebuild the binary, and see IDEM-11-FU-DOWNGRADE for the downgrade hazard.
+- [ ] MTLS-VERIFY-FU-DOCSCHEME · MTLS-VERIFY-FU-DOCSCHEME: README + AGENT_PROTOCOL still tell agents to dial http:// a bus that is now https-only — docs, P0
+  MTLS-LISTENER made the bus TLS-only, so a plaintext request gets a bare 400 Bad Request ("Client sent an HTTP request to an HTTPS server.") from net/http and never reaches a route. These files were OUTSIDE the feature-runner's file-ownership boundary and are still wrong: README.md:113-114 (agent-busctl --bus http://127.0.0.1:8080 enrol --name planner and --name builder --keep-current) and AGENT_PROTOCOL.md:266 (agent-busctl enrol --bus http://127.0.0.1:8080 --name planner). AGENT_PROTOCOL.md:252 is worse than an example: it states as fact "today every real bus is http://127.0.0.1:... and no fingerprint is involved", which is now false. PROTOCOL.md:195 says "The listener is still plaintext HTTP". FIX: change each to https:// plus --bus-fingerprint <hex>, and rewrite the two prose claims. RATED P0 BY THE SECURITY GATE, with this reasoning: "A documented command that fails with a transport error is the single most reliable generator of 'just add an insecure flag' in the field, and invariant 11 forbids exactly that flag." Must land before this change is announced to agents.
+  _Proof: ! grep -rn "bus http://" README.md AGENT_PROTOCOL.md && ! grep -n "listener is still plaintext" PROTOCOL.md_
+- [ ] None · MSG-FU-SUFFIXFLOOR-FU-DOCS: PROTOCOL.md and internal/ids docs still say the suffix wiring is NOT done — docs, P1
+  Found by the reviewer gate on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787). The startup wiring LANDED: cmd/agent-bus/main.go now constructs ids.OpenNameSuffixes via openSuffixAllocator, seals once, and has no fallback. Several docs still assert the opposite and were OUTSIDE that task's file-ownership boundary, so they ship contradicting the code.
+  
+  FIX, all of them:
+  1. PROTOCOL.md:592-597 -- 'Production wiring - NOT yet done ... cmd/agent-bus/main.go does not call ids.OpenNameSuffixes anywhere today; it still constructs a fresh ids.NewNameSuffixes() on every start, so no agent-suffixes file is written or read by a running bus yet, and the restart re-minting bug this file exists to close is unchanged in production.' EVERY CLAUSE IS NOW FALSE.
+  2. internal/ids/doc.go:56-75 -- still says cmd/agent-bus/main.go:327 builds a fresh ids.NewNameSuffixes() on every start.
+  3. internal/ids/agentmint.go:296-337 -- NewNameSuffixes' doc justifies being born SEALED by 'a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds ids.NewNameSuffixes() on every start'. That caller no longer exists; see the paired -FU-UNSEAL task.
+  4. CONTRACTS-HTTP.md:330 quotes the startup WARN verbatim, including the clause 'and agent id suffixes restart from 1 for every name' and the wording that followed it. The WARN was rewritten: the suffix claim was REMOVED from it entirely (it cannot be stated unconditionally -- a data dir whose floors file is lost DOES resume from 1), and the truth now lives in the per-start 'agent-id suffix floors' line, which is INFO / WARN / ERROR depending on the case. Re-quote the current line.
+  
+  PROOF. grep the four files for the stale claims; go build ./... green.
+- [ ] None · Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:122, CLAUDE.md:332 — documentation, P2
+  Discovered by the CONTRACTS-SPLIT agent (360a2679, 2026-08-02) while splitting CONTRACTS.md into per-plane files (CONTRACTS-CLI/HTTP/ONDISK/AGENT.md, with CONTRACTS.md left as an index). That agent flagged but could not fix these -- outside its file-ownership boundary for that pass:
+  
+  1. README.md:88 -- `- [`CONTRACTS.md`](./CONTRACTS.md) — every route, flag, env var, and record type` still claims CONTRACTS.md directly HOLDS that table. It does not any more; it is now a short index pointing at the four plane files. Fix: reword to describe it as the index, and/or link the plane files directly.
+  
+  2. AGENT_PROTOCOL.md:122 -- `... see `CONTRACTS.md`, `## Authentication`) ...` cites a specific heading, `## Authentication`, inside CONTRACTS.md. That heading no longer exists there -- it moved verbatim to CONTRACTS-HTTP.md:192 (`## Authentication (added 2026-08-02)`) in the split. Fix: repoint the citation to CONTRACTS-HTTP.md.
+  
+  3. CLAUDE.md:332 (Parallel-agent coordination section) -- `- For the remaining shared files (`DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS.md`), only ONE agent at a time; prefer adding a new dated section over editing existing lines.` This is actively MISLEADING post-split: naming CONTRACTS.md alongside DECISIONS.md/AGENT_LOG.md as a single-writer-contended file is exactly the chokepoint the split (360a2679) existed to remove -- three P0s across two triage loops were caused by concurrent agents needing to land a doc update in that one file. Leaving this warning in place would keep agents needlessly serialising on a file that no longer holds the contended content (CONTRACTS.md is now a stable ~36-line index; the actual content lives in CONTRACTS-CLI/HTTP/ONDISK/AGENT.md, each independently editable). Fix: remove CONTRACTS.md from this single-writer list (the plane files still need their own single-writer discipline if a task touches more than one at once, but that is a materially different, narrower risk than the old whole-file chokepoint).
+  
+  NOTE: CLAUDE.md line ~158 (repository-layout section) and step 9 were ALREADY updated by the split agent to name CONTRACTS.md as INDEX only -- this task is only the three residual pointers above, do not re-touch line 158.
+  
+  PROOF STRENGTHENED 2026-08-02 (spec-keeper): the original proof_cmd was three negative assertions only, which is satisfiable by DELETING the three stale lines rather than fixing them (the same structural flaw fixed on 5b178dde) -- it now also requires positive evidence that each file points at the correct replacement (README.md cites CONTRACTS-HTTP.md/CONTRACTS-CLI.md/CONTRACTS-ONDISK.md, AGENT_PROTOCOL.md cites CONTRACTS-HTTP.md, and CLAUDE.md's "remaining shared files" bullet now names a CONTRACTS-*.md plane file instead of just dropping CONTRACTS.md from the list).
+  _Proof: grep -qF "CONTRACTS-HTTP.md" README.md && grep -qF "CONTRACTS-CLI.md" README.md && grep -qF "CONTRACTS-ONDISK.md" README.md && ! grep -qF ") — every route, flag, env var, and record type" README.md && grep -qF "CONTRACTS-HTTP.md" AGENT_PROTOCOL.md && ! grep -qF "see `CONTRACTS.md`, `## Authentication`" AGENT_PROTOCOL.md && grep -A2 "remaining shared files" CLAUDE.md | grep -qF "CONTRACTS-" && ! grep -qF "For the remaining shared files (`DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS.md`), only ONE agent at" CLAUDE.md_
 
 ### EPIC DUR — Durability: WAL, two-phase commit, recovery, audit log
 
@@ -1702,6 +1525,19 @@
   PROOF. `test -f PROTOCOL.md && grep -q 'at-least-once' PROTOCOL.md && grep -q 'always restart' PROTOCOL.md && grep -q 'RepairTail' CONTRACTS.md`
   -- FAILS TODAY at the first clause (PROTOCOL.md does not exist), which is correct and non-vacuous.
   _Proof: test -f PROTOCOL.md && grep -qi "invariant 4.*narrow\|narrow.*invariant 4" PROTOCOL.md && grep -qi "invariant 6.*narrow\|narrow.*invariant 6" PROTOCOL.md && grep -q "RepairTail" CONTRACTS-ONDISK.md_
+- [ ] None · existedAtOpen() is not a snapshot -- it returns a field persistLocked mutates, so reordering raise() above the guard silently disables the P0 seq-floor refusal — core, P1
+  SECURITY/REVIEW GATE FINDING (MEDIUM) against the code shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c (217a3c0). A LATENT FAIL-OPEN: correct today, and correct only by accident of statement order.
+  
+  MECHANISM. `existedAtOpen()` (internal/hub/seqfloorfile.go:285) is a one-liner returning the MUTABLE field `f.existed`, and `persistLocked` SETS `f.existed = true` (seqfloorfile.go:373). The name promises a value captured at open; the code returns a value that changes under it.
+  
+  WHY IT IS CORRECT TODAY, AND ONLY JUST. Re-verified at HEAD 16da89f by spec-keeper: all three readers precede the first mutation. internal/hub/hub.go:599, :732 and :744 read `existedAtOpen()`; the first `raise()` is at hub.go:745, and `ensureExists()` is later still at hub.go:849. So the guard sees the true open-time value purely because nothing has written yet.
+  
+  THE CONSEQUENCE, NAMED PRECISELY. Reorder `raise` above the guard at hub.go:732 -- an ordinary-looking refactor -- and the P0 refusal (`ErrSeqFloorUnprovable`, the one that stops a legacy directory with a damaged log from reissuing already-signed sequences) SILENTLY NEVER FIRES. No test that asserts a positive outcome would notice; the guard simply stops being reachable. That is the exact fail-open shape the guard exists to close, and the method name actively misleads the person doing the reordering into thinking it is safe.
+  
+  MINIMAL FIX (given by the gate). Capture the open-time value into a SEPARATE IMMUTABLE field at construction (e.g. `existedAtConstruction`, set once in `openSeqFloorFile` and never assigned again) and have `existedAtOpen()` return that. Then the guard is order-independent and the name is true. Add a test that calls `raise()`/`ensureExists()` and asserts `existedAtOpen()` is UNCHANGED -- that test is the durable protection, since it goes RED the day someone collapses the two fields back together.
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON: the negated pin matches the CURRENT one-liner exactly (`grep -c` = 1, so `!` makes it false and the && short-circuits) -- RED today rather than VACUOUS. The test half must ALSO be observed RED before the fix.
+  _Proof: ! grep -q 'func (f \*seqFloorFile) existedAtOpen() bool { return f.existed }' internal/hub/seqfloorfile.go && go test -race -count=1 -run TestSeqFloorExistedAtOpenIsASnapshot ./internal/hub_
 - [ ] None · DUR-4-FU-DECISIONS: record the SHIPPED damage-class taxonomy in DECISIONS.md -- which classes discard, what each logs, and the exact list of non-damage errors that stay FATAL — durability, P1
   RE-SCOPED 2026-08-02 AFTER VERIFYING WHAT THE NEW DECISIONS.md ENTRY ALREADY COVERS. All THREE of
   this task's original items are now SATISFIED by the 2026-08-02 user decision (DECISIONS.md,
@@ -1745,88 +1581,127 @@
   the taxonomy is unwritten and flips to PASS when it exists. The written entry must therefore contain
   both phrases literally.
   _Proof: grep -q 'damage class' DECISIONS.md && grep -q 'stays fatal' DECISIONS.md_
+- [ ] None · seq-floor guard predicate keys on discard, not on accounting -- boundary-exact truncation escapes it at every record boundary — durability, P1
+  MECHANISM: internal/hub/hub.go:702 guards with `!h.seqFloorFile.existedAtOpen() && o.LogRepaired != ""`. `LogRepaired` answers "did recovery PHYSICALLY REMOVE records" -- a proxy for "the log is complete". A truncation landing exactly on a record boundary removes nothing during recovery (replay reads cleanly to EOF, nothing is torn), so LogRepaired == "" and the guard does not fire even though records are missing -- they were removed by the CUT, not by recovery. This is a DIFFERENT bug from the ones already fixed under e120153b/db350e39 (which were about the floor's own bookkeeping); this one is that the REFUSAL PREDICATE reads the wrong signal.
+  
+  MEASURED (see 9fd58deb's notes for the full test-oracle writeup): on a purpose-built specimen (7 delivered messages, seqs 1,2,3 and 257-260, floor written=22, 8900-byte WAL), two exhaustive byte-by-byte sweeps covering the WHOLE file (1-4439 and 4440-8900, 8900/8900 offsets) found the escape set is EXACTLY the record-boundary set: 22 of 22 record boundaries escape the guard (offsets 360, 427, 738, 805, 937, 1004, 2016, 2083, 3095, 3162, 4172, 4240, 4372, 4440, 5487, 5555, 6602, 6670, 7717, 7785, 8832, 8900). 13 of those 22 reissue a sequence already delivered; the other 9 are harmless only because the derived floor had already stepped past the delivered high-water by that point in THIS specimen's history -- not a property of the bug, so a differently-shaped directory would have more harmful boundaries. The refusal path itself is measured GOOD (8878/8900 = 99.75% loud refusals, ZERO silent) -- this task is about the remaining escape set, not about weakening or removing the existing refusal.
+  
+  WHY A DISCARD-KEYED PREDICATE CANNOT SEE THIS: a paired measurement showed a boundary-exact cut and a mid-record cut at the SAME offset derive IDENTICAL floors (checked at 1004, 2016, 4240, 4440, 5487, 6602, 7785) -- floor derivation is one monotonic step function, the same on both recovery paths, and its steps land exactly on record boundaries. The two paths cannot disagree about the FLOOR; they only disagree about whether LogRepaired gets set. LogRepaired answers "was something torn", not the question that matters: does the surviving log account for every index durably authorised.
+  
+  FIX REQUIRED: replace (or supplement) the o.LogRepaired-keyed predicate with one keyed on wal.Recovered's highest-CONSUMED-index field, once 9fd58deb exposes it -- i.e. refuse when the floor file is absent AND the log's highest consumed index is provably below what this run's replay can account for, rather than only when recovery physically discarded something. BLOCKED ON 9fd58deb: the field this predicate needs does not exist yet on wal.Recovered.
+  
+  SCOPE: internal/hub/hub.go (the predicate at :702) plus the seq-floor guard tests (cmd/agent-bus/seqfloorrestart_test.go, seqfloormissing_test.go, internal/hub/mint_test.go). Do NOT weaken or remove the existing o.LogRepaired refusal path -- it is independently correct and measured good; this task ADDS coverage for the boundary-exact case, it does not replace working coverage.
+  
+  ORACLE FOR THE FIX: must refuse at all 22 record-boundary offsets on the reference specimen (see 9fd58deb notes for the full list and the reasoning for why 22, not 13, is the right target), not just the 13 that happen to be harmful on that one specimen's history.
+  _Proof: go test -race -run TestSeqFloorGuardCatchesBoundaryExactTruncation ./internal/hub_
 - [ ] DUR-12-FU-AUDITUPGRADE · DUR-12-FU-AUDITUPGRADE: version 1 audit logs have no upgrade path -- must land before the audit log ships (blocks DUR-5) — durability, P2
   P2, durability. MUST BE DONE BEFORE THE AUDIT LOG SHIPS (blocks DUR-5). Reviewer P2-3: upgradeV1 is reachable only from wal.Open, which is WAL-only, so a version 1 AUDIT log has no upgrade path and OpenWriter (writer.go:67) now refuses it outright. Harmless today (no KindAudit file exists outside tests) and a live landmine the moment the audit log lands.
-- [-] None · DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start — durability, P2
-  DISSOLVED 2026-08-02 BY USER DECISION -- ALWAYS-RESTART IS THE ESCAPE HATCH.
+- [ ] None · Bound the wal-index-floor reserved value the same way as the message-seq floor — security, P1
+  SIBLING FINDING to the message-seq-floor brick (see parent task be447589-6583-4d5c-a9d4-ec9d9fef0f1c): An unauthenticated wal-index-floor claiming reserved = 2^64-2 is ACCEPTED and then RE-SIGNED as MaxUint64 under a VALID HMAC -- the same implausible-value shape as the message-seq-floor finding, in internal/wal. The keyed MAC does not help here, because the server re-signs the attackers value itself. The bound must land consistently across both floor files (message-seq-floor in internal/hub and wal-index-floor in internal/wal).
   
-  This task existed because "refuse to start" was the designed answer to several WAL damage classes and
-  an operator facing a refused boot had no runbook and no tooling. The user has decided the bus ALWAYS
-  restarts (DECISIONS.md, 2026-08-02: *"always be able to restart, prefer to discard messages and/or
-  corruption, with logging"*). The decision text says so explicitly: "This also removes the
-  permanent-refuse-to-start DoS, and with it the need for the operator escape hatch that was previously
-  recommended: always-restart *is* the escape hatch."
+  SCOPE: internal/wal only. A DUR-5 agent is live in internal/wal -- coordinate / sequence with that work rather than colliding on the same files. NOT in the parent tasks boundary (parent is cmd/agent-bus + internal/hub only).
   
-  The premise is gone, so the task is superseded rather than done -- nothing was built.
+  Depends on / references the parent task be447589-6583-4d5c-a9d4-ec9d9fef0f1c (data-directory permissions + message-seq floor bound).
+  _Proof: bash scripts/proof-check.sh 'go test -race -run TestWALIndexFloorBound ./internal/wal/...'_
+- [ ] None · CONTRACTS-ONDISK.md and four sibling Go comments overstate the seq-floor migration guard: it says the window CLOSES, but boundary-exact truncation escapes it — docs, P2
+  CONTRACTS-ONDISK.md:326 (message-seq-floor section) currently reads: "hub.Open falls back to sources (1)-(3), logs at WARN when the directory is not otherwise fresh, and -- when the derived floor is non-zero -- CLOSES the window immediately by persisting it." That claim is the same false-all-clear shape already found and fixed in the internal/hub/hub.go WARN log line's own wording (see 9fd58deb's notes and be447589): the guard this sentence describes is keyed on o.LogRepaired (did recovery physically discard something), which is a proxy for log completeness with one hole -- a truncation landing exactly on a record boundary tears nothing, so the guard does not fire even though records are missing. Measured: the escape set is exactly the record-boundary set (22 of 22 record boundaries escape on the reference specimen; see 9fd58deb's notes for the full figures). CONTRACTS-ONDISK.md does not mention this at all; an operator reading it is told the window closes on a successful start with a non-zero derived floor, which is not true at every record-boundary-exact truncation.
   
-  WHAT WAS IN IT THAT IS STILL WANTED, AND WHERE IT WENT -- so this is not a silent loss of three good
-  ideas:
-   - (1) A read-only WAL dumper (offset / index / record-type / length / MAC-ok per frame). Still
-     useful, but as an ORDINARY diagnostic, not an emergency tool. It belongs in the merged CLI epic as
-     a subcommand (see CLI-6 'log' and CLI-8 'doctor'), NOT as a scripts/bus-*.sh wrapper -- invariant 7
-     was amended on 2026-08-02 and the Go CLI replaces the shell wrappers.
-   - (2) Counters for tail-repaired / repair-refused / commit-records-discarded-by-repair. This is now
-     MORE important, not less: under always-restart the discard is the normal path, and the whole point
-     of the decision is that every discard must be OBSERVABLE. It is folded into DUR-11's added scope
-     (discard + SPECIFIC log + continue) and into CORE-5 (metrics/inspect endpoint).
-   - (3) "A bus that repairs its tail on EVERY boot is the signature of failing media." Still true and
-     still worth alarming on; it rides on (2)'s counters and belongs with CORE-5.
+  FIX: qualify the "CLOSES the window" sentence (and the neighbouring "Migration residual" / "Be precise about when the window actually closes" paragraphs a few lines below, which have the same gap) to say plainly: the guard covers DISCARD-DETECTABLE damage (recovery found something torn) and NOT boundary-exact truncation (a cut that lands exactly on a record boundary, which recovery cannot distinguish from a log that legitimately ended there). Cross-reference the tracking task (9fd58deb, and its blocked follow-up 18eac796-d1fd-4619-94cb-1164bf989634) so a reader knows this is tracked, not merely disclosed once and forgotten.
   
-  DO NOT REVIVE THIS TASK. If the dumper is wanted, file it against the CLI epic.
+  SCOPE: CONTRACTS-ONDISK.md only (the message-seq-floor section, roughly lines 299-350). Do not touch internal/hub/hub.go -- its comment/WARN text is being handled under a separate, already-in-flight dispatch; this task is the operator-facing PLANE FILE, which is a different audience and currently has NO version of this caveat at all (checked: grep -n boundary-exact CONTRACTS-ONDISK.md currently finds nothing).
+  WIDENED 2026-08-08 (spec-keeper). The reviewer that PASSed the hub.go/mint_test.go rewrite (owned
+  separately, see Spec Server task 9fd58deb and the new task filed for that specific rewrite) flagged
+  that the SAME false-all-clear claim ("closes/closed the window", "the one uncovered case") survives
+  in FOUR sibling Go comments this task did not originally cover -- and one of them is the very source
+  the new honest hub.go block cites, so fixing only the docs plane leaves the origin uncorrected:
   
-  --- ORIGINAL DESCRIPTION ---
-  "Refuse to start" is now the designed answer to several WAL damage classes (see internal/wal/recover.go, DUR-4/DUR-10/DUR-11) and there is no runbook or tooling to diagnose it. Needs: (1) a read-only WAL dumper (offset / index / record-type / length / CRC-ok, one line per frame); (2) metrics/log counters for tail-repaired, repair-refused, and commit-records-discarded-by-repair; (3) an alarm-worthy signature: a bus that repairs its tail on EVERY boot is the signature of failing media. Ship as a scripts/bus-*.sh wrapper per invariant 7. Depends on DUR-9.
+    - internal/hub/seqfloorfile.go:231 -- "Open logs it at WARN when the data directory is not
+      otherwise fresh, and CLOSES the window immediately by persisting the derived floor."
+    - internal/hub/seqfloorfile.go:241 -- "Missing-file plus quarantine on the SAME start is the one
+      uncovered case" -- stated as the ONLY gap, when boundary-exact truncation on a NON-quarantine
+      start is also uncovered and is the one the new hub.go WARN and 9fd58deb now document.
+    - internal/hub/hub.go:716 -- repeats "the one uncovered case" (quoting seqfloorfile.go's framing)
+      about 40 lines above the new honest block added under 9fd58deb's rewrite, which directly refutes
+      it in the same file.
+    - internal/hub/mint_test.go:455 -- "The window is closed by the very start that finds it open: Open
+      writes the derived floor before it serves." -- same shape, in a test's doc comment this time.
+  
+  FIX for all four: same correction as the hub.go WARN -- state plainly that the guard covers
+  DISCARD-DETECTABLE damage only (o.LogRepaired / recovery physically removed something) and NOT a
+  truncation landing exactly on a record boundary, which recovery cannot distinguish from a log that
+  legitimately ended there. Do not claim the window is closed or that the uncovered case is limited to
+  missing-file-plus-quarantine; boundary-exact truncation on ANY start (quarantine or not) is a second,
+  now-documented uncovered case. Cross-reference 9fd58deb.
+  
+  ALSO WIDENED to two more CONTRACTS-ONDISK.md locations beyond the original 325-327 sentence, both in
+  the message-seq-floor section:
+  
+    - CONTRACTS-ONDISK.md:334-337 ("Migration residual, stated plainly...") and :339-346 ("Be precise
+      about when the window actually closes...") -- both currently frame the ONLY residual as the
+      missing-file-plus-quarantine-on-first-start case. Neither mentions boundary-exact truncation at
+      all, which is a second, independent way the "window" stays open past a successful start with a
+      non-zero derived floor. Add it alongside the existing residual, do not let the new caveat read as
+      though it replaces or narrows the one already documented there.
+  
+    - CONTRACTS-ONDISK.md:269-273 is SEPARATELY STALE (security finding, distinct from the false-
+      all-clear shape above): it documents a valid-digest `floor 18446744073709551615` as *adopted*
+      ("seals the allocator at MaxUint64, every subsequent mint fails permanently"). At HEAD this is no
+      longer true: internal/hub/seqfloorfile.go:539 has a plausibility bound that REFUSES an
+      implausibly-high floor outright (ErrSeqFloorFileCorrupt, naming both the file and the remedy:
+      "move message-seq-floor aside and restart") rather than adopting it and bricking the allocator.
+      Update the bullet to describe the refusal, not the adoption -- the DoS-shaped conclusion
+      ("denial of service, not an id reissue") may no longer be the right framing once the value is
+      refused rather than adopted; the implementer should re-derive whatever the current behaviour's
+      actual failure mode is (refusal is FATAL and not regenerated, per the CORRUPT-file paragraph a
+      few lines below) and write that, not assume the old conclusion still holds.
+  
+  SCOPE stays CONTRACTS-ONDISK.md plus the four Go comment locations listed above. Still do not touch
+  the hub.go WARN log line itself or its guard predicate -- that is 9fd58deb's tracking task and the
+  separately-filed task for the WARN-wording rewrite; this task's job is every OTHER place the same
+  claim was written down.
+  _Proof: bash -c 'grep -q "boundary-exact truncation" CONTRACTS-ONDISK.md && ! grep -rn "CLOSES the window immediately\|the one uncovered case\|window is closed by the very start" internal/hub/seqfloorfile.go internal/hub/hub.go internal/hub/mint_test.go'_
 - [ ] None · Startup scans the WAL twice (soon three times) -- bound the cost — durability, P2
   Startup replay currently scans the WAL twice: the log.go replay pass and the writer.go open pass. DUR-4 (corrupt-tail detection) adds a third scan. This is fine at small WAL sizes but does not bound startup cost as the log grows. Relates to DUR-7 (snapshot/compaction follow-up), which is the real long-term fix for unbounded replay time -- this task is narrower: either (a) collapse the passes where safe, or (b) explicitly document/measure the cost and defer the real fix to DUR-7, whichever the implementer judges correct after reading the current pass structure post-DUR-4.
   _Proof: go test -bench=BenchmarkWALOpen ./internal/wal_
 - [ ] DUR-12-FU-DOUBLEBACKUP · DUR-12-FU-DOUBLEBACKUP: crash between os.Link and os.Rename in upgradeV1 can leave a second .v1-<ns> backup on redo — durability, P3
   P3, durability. Reviewer P2-4: a crash between os.Link and os.Rename in upgradeV1 (recover.go:528) yields a second <log>.v1-<ns> backup on redo. Harmless (hard links to one inode) but it contradicts the "exactly 1 backup" invariant a test asserts; wants a comment or a guard.
-- [x] DUR-2 · DUR-2: Two-phase prepare->commit write path — durability, P0
-  Implement prepare(record)->commit(id) as two distinct fsynced WAL appends; in-memory state is applied ONLY after the commit record is durable. A response is never sent to the caller until commit-fsync completes (invariant 4). This is the write path every mutating route (enrol, send, broadcast, leave) goes through.
-  _Proof: go test -race ./internal/wal/_
-- [-] DUR-4 · DUR-4: Corrupt-tail detection & truncation — durability, P0
-  POLICY REVERSED 2026-08-02 BY USER DECISION -- READ THIS BEFORE ACTING ON ANY OLDER TEXT HERE.
+- [ ] None · maxPlausibleSeqFloor is enforced on the READ path only -- hub can persist a floor its own reader then refuses, and the documented remedy loops — security, P0
+  SECURITY GATE FINDING (HIGH) against the seq-floor bound shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c, committed at 217a3c0. PROVED BY RUNNING CODE (a throwaway test), not by reading.
   
-  THE SENTENCE THIS TASK WAS FILED ON IS NOW WRONG. It said: "A corrupt record anywhere but the tail is
-  a fatal startup error, not a truncation." The user has decided the opposite (DECISIONS.md, 2026-08-02,
-  "Availability over retention: the bus ALWAYS restarts"): *"always be able to restart, prefer to
-  discard messages and/or corruption, with logging"*. Recovery must ALWAYS reach a running server.
-  Damaged records ANYWHERE may be discarded -- each with its own specific log entry. Invariant 6 is
-  narrowed: truncation is no longer restricted to a verified-corrupt TAIL. Invariant 4 is narrowed:
-  acknowledged data may be discarded when found corrupt (we still never lose it through our OWN write
-  path). The defect was never that data was discarded -- it is that the discard was SILENT. Every
-  discard must be OBSERVABLE.
+  MECHANISM. The bound is checked in ONE place, on the READ path: internal/hub/seqfloorfile.go:538 (`if n > maxPlausibleSeqFloor`), inside the parse. The WRITE path bounds nothing: `persistLocked` (seqfloorfile.go:365) refuses only a DECREASE and then writes whatever it was handed. Re-verified at HEAD 16da89f by spec-keeper: the whole persistLocked body is 11 lines and `sed -n '/^func (f \*seqFloorFile) persistLocked/,/^}/p' ... | grep -c maxPlausibleSeqFloor` returns 0.
   
-  ANYONE IMPLEMENTING FROM THIS TASK MUST NOT BUILD THE OLD POLICY. The line that still holds:
-  NON-DAMAGE errors -- permission denied, I/O failure, the data-directory lock already held -- stay
-  FATAL. Do not turn an unreadable disk into a silently empty bus.
+  WHY THAT IS REACHABLE. `hub.Open` derives the floor from three LOG-derived sources and persists it through `raise()` (seqfloorfile.go:311) -> `persistLocked`. So the value the bound exists to reject can arrive from the log rather than from the floor file, and never passes `parseSeqFloorLine` at all.
   
-  WHERE THE REMAINING WORK LIVES. This task's own code shipped at 6f22a99 and has been rewritten twice
-  since (d06c704, dad04aa, c362152). It is kept open only because it was completed over an unresolved
-  reviewer CHANGES-REQUIRED and a security PASS-WITH-CONCERNS. Both of those are now resolved or
-  re-homed:
-    - The reviewer P0 was landed as comment-only corrections at c362152 under DUR-10, which is now DONE
-      (reviewer and security gates both ran; that was the whole point of DUR-10).
-    - Security's two HIGH findings are DUR-11 (884d3da4), IN FLIGHT, re-scoped to the always-restart
-      policy: finding (a) (index-anchored search -- one damaged record must never mass-delete later
-      INTACT records) stands as a real bug; finding (b) is no longer an invariant-4 violation, and its
-      residual is the SILENCE plus the false "provably never fsynced" doc comments.
-    - Security's later MEDIUM (CRC32C is GF(2)-linear, so the completeness "proof" is forgeable by an
-      ordinary remote client) is DUR-12, the CRC32C -> HMAC-SHA256 keyed MAC change, holding reserved
-      ondisk-format-version=2 and BLOCKED on where the MAC key lives.
-    - The "no operator override exists" escalation (c3a27591) is DISSOLVED: always-restart IS the
-      escape hatch.
+  MEASURED. `raise(math.MaxUint64)` is ACCEPTED and fsynced, and the next `openSeqFloorFile` REFUSES the file this package itself just wrote. The documented remedy -- move the floor file aside -- re-derives from the poisoned log and LOOPS. The same test proved a 256-value window in which a floor at the bound plus one `MintBatchSize` bricks the next start.
   
-  THIS TASK CLOSES WHEN DUR-11 CLOSES. It carries no independent implementation work any more; it is
-  the parent record. Do not dispatch an implementer here -- dispatch to DUR-11.
+  COMPOUNDING (do not treat as separate). WAL v1 is accepted with an UNKEYED CRC32 and laundered into a MAC'd v2 log (tracked as DUR-12-FU-V1LAUNDER, daf18983-fb58-47cd-8e1b-b9dc50a36f08), so a directory-write attacker reaches the floor VIA THE LOG and never touches parseSeqFloorLine -- i.e. the read-path bound is not merely incomplete, it is on the wrong side of the actual attack path.
   
-  --- ORIGINAL DESCRIPTION, retained for the record. Its last sentence is REVERSED, see above. ---
-  During replay, a checksum mismatch or short read at the END of the WAL (the torn record a crash mid-write leaves behind) is detected, logged, and the file is truncated at the last verified-good record boundary -- the ONLY truncation ever permitted (invariant 6). A corrupt record anywhere but the tail is a fatal startup error, not a truncation.
-  _Proof: go test -race -run TestWALRepairTail ./internal/wal_
+  MINIMAL FIX (given by the gate). Move the bound into `persistLocked`, the last point before bytes are written. That is the single choke point all four inputs (the three log-derived sources plus the file) pass through, so it fires at the source and covers them at once. Note persistLocked already carries the monotonicity refusal for exactly this reason -- its own comment says a bad value here "is caught at the last point before the bytes are written" -- so this is completing an argument the code already makes, not adding a new one.
+  
+  SIBLING, NOT A DUPLICATE: 259b7033-2191-423f-bb7b-cff8c6b59dc1 bounds the wal-index-floor reserved value in internal/wal. This task is internal/hub only.
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON (the sed/grep pin returns 0 matches inside persistLocked, so the && short-circuits) -- RED today rather than VACUOUS. The test half must ALSO be observed RED before the fix.
+  _Proof: sed -n '/^func (f \*seqFloorFile) persistLocked/,/^}/p' internal/hub/seqfloorfile.go | grep -q maxPlausibleSeqFloor && go test -race -count=1 -run TestSeqFloorPersistRefusesAnImplausibleFloor ./internal/hub_
 - [ ] DUR-12-FU-VERSIONFLIP · DUR-12-FU-VERSIONFLIP: single-bit version-field flip on a v2 log misidentifies it as v1 and quarantines it — durability, P2
   P2, durability. Reviewer P2-1: a version 2 log whose version FIELD alone flips 2->1 is misidentified as v1, nothing verifies under the v1 codec, and the ErrMACKeyMismatch guard at recover.go:306 is skipped because of !c.isV1() -- so an intact log is QUARANTINED and the bus starts empty. Bytes are preserved and it is logged at ERROR, and it is strictly MORE available than the pre-DUR-12 behaviour (which was fatal), so it is not a regression. Fix: in repairLog, when c.isV1() && HeaderDamaged && !Salvageable, try the v2 header tag first to disambiguate.
 - [ ] DUR-12-FU-READONLYKEY · DUR-12-FU-READONLYKEY: read-only fsck paths (ScanAll, Replay) create wal-mac.key as a side effect — durability, P3
   P3, durability. Reviewer P2-2: reader.go:34 (ScanAll) and replay.go:94 (Replay) will CREATE wal-mac.key for a log that exists but is unidentifiable, although both are documented as read-only paths. A read-only fsck should not have a file-creating side effect.
+- [ ] None · Invert stale internal/hub/hub.go quarantine reissue-permitted assertions once MSG-FU-SEQHIGHWATER lands — durability, P1
+  internal/hub/hub.go contains two locations describing post-quarantine message-id reuse as EXPECTED/accepted framing, which is now SUPERSEDED (DECISIONS.md 2026-08-07, "SUPERSEDES two earlier passages"; invariant 1 stands unnarrowed -- reuse is a DEFECT, not a documented limit):
+  
+  - hub.go:137-140 (doc comment on Options.Quarantined): "...so the sequence high-water mark from before it is unrecoverable and message ids may repeat values the quarantined file already used."
+  - hub.go:383-394 (Open, the Quarantined branch): a comment block plus the h.log.Error(...) call whose MESSAGE TEXT literally states "message ids may repeat values the quarantined log already used (invariant 1)" -- this is a PRODUCTION log line an operator reads as ground truth.
+  
+  These were correct when written (2026-08-02, before the WAL index-floor fix) but are STALE once 6ebe51be (MSG-FU-SEQHIGHWATER, raised to P0 2026-08-07) lands and is verified: internal/wal/indexfloor.go (uncommitted as of 2026-08-07 -- see db350e39s implementer note, 2026-08-07T12:25) already updates every equivalent comment INSIDE internal/wal to the new invariant-1-preserving language ("an index this data directory has authorised is never authorised again"), but internal/hub is OUT OF that agents file ownership (internal/wal only) and was explicitly flagged "NOT DONE" ("hub-side assertions") in their report.
+  
+  SCOPE: once 6ebe51be is verified fixed -- hubs derived sequence floor (o.NextIndex = wal.Recovered.NextIndex) is provably protected across quarantine, not just asserted to be -- invert these two hub.go passages to state the CORRECT, current guarantee instead of the superseded one. Reconsider the h.log.Error(...) call level once quarantine no longer implies id-reuse exposure (may drop to WARN, or the branch may become unnecessary -- implementing agents call, backed by a test).
+  
+  ALSO check internal/wal/recover_test.go:443 ("the next append reissues the index the discarded frame carried") -- as of 2026-08-07 this is a stale assertion sitting in a file already mid-edit (git-modified) by the live agent fixing db350e39/e120153bs 9 newly-failing wal tests; verify it lands there rather than duplicating the fix here.
+  
+  NOT IN SCOPE (already correctly handled by this projects append-only-log convention -- no action needed): DECISIONS.md:1541 and AGENT_LOG.md:1048, both historical journal entries already superseded via the NEW 2026-08-07 DECISIONS.md section ("SUPERSEDES two earlier passages") rather than edited in place, per the append-only rule.
+  
+  Do NOT invert this language before 6ebe51be actually lands and is verified end-to-end -- inverting the wording while the underlying defect might still be present would be worse than todays honest-but-stale warning.
+  _Proof: grep -n "may repeat" internal/hub/hub.go; test $? -ne 0_
 - [ ] None · wal.OpenWriter/RepairTail open bus.wal without O_NOFOLLOW -- a planted symlink is followed (writer.go:68, recover.go:593/618) — durability, P1
   internal/wal opens the WAL data file WITHOUT O_NOFOLLOW on both paths that can open a pre-existing name at the log's path, unlike internal/dirlock which already gets this right for bus.lock (dirlock.go:185-193, "O_NOFOLLOW because we TRUNCATE this path once the lock is ours: a symlink here now fails with ELOOP").
   
@@ -1842,21 +1717,40 @@
   
   proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- grep finds no O_NOFOLLOW in either file yet. Will PASS once the fix lands. (A behavioral regression test is also required per the "done" criteria above; the grep is the cheap CI-checkable floor, not a substitute for the test.)
   _Proof: grep -q "O_NOFOLLOW" internal/wal/writer.go && grep -q "O_NOFOLLOW" internal/wal/recover.go_
-- [x] DUR-8 · DUR-8: Exclusive lock on the bus data directory (stop two servers destroying one WAL) — durability, P0
-  There is NO lock on the bus data directory today. `grep -rn 'flock\|LOCK_EX\|lockfile' --include=*.go` over the whole source returns exactly ONE hit and it is a comment, not an implementation: internal/wal/log.go:274. That comment block (lines ~268-276) already states the problem in the code's own words: "THIS IS NOT A LOCK, and must not be mistaken for one. It only catches a change inside the window between the two passes; two servers started on the same data directory can both replay the same bytes, both agree, and then both append at the same offsets, which destroys the log. Excluding a second process needs a real lock on the data directory (an flock held for the Log's lifetime) and is a follow-up." So this is a known, documented, unimplemented gap. Today the only thing preventing two servers colliding on one data dir is a convention line in CLAUDE.md ("Never run two agents against the same bus data directory") enforced by nothing in code.
+- [ ] None · MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN: export a streaming raw WAL scan and reinstate the every-start suffix-floor cross-check — wal, P1
+  Found by the reviewer AND security gates on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), which shipped the startup wiring.
   
-  Why P0: the failure mode is silent, unrecoverable, and corrupts the append-only durable store that invariants 4, 5 and 6 (nothing acked before durable; memory is serving copy, disk is truth; append-only audit log) all rest on. There is no recovery path from two interleaved writers landing at the same offsets -- the audit trail is destroyed, not merely wrong.
+  PROBLEM. cmd/agent-bus/suffixfloors.go derives legacy-dir suffix floors with wal.ScanAll, which accumulates EVERY record INCLUDING FULL PAYLOADS in memory (internal/wal/reader.go: recs = append(recs, rec)). The WAL never rotates or compacts and enrolment is unauthenticated, so peak RSS at startup is proportional to the whole log. internal/wal already has a measured incident on record where a per-record INDEX LIST -- far smaller than payloads -- cost 1.76 MB on a 23.7 MB log and was called 'the boot-time OOM the eviction was written to avoid' at 10 GiB. wal.Replay is streaming by contrast (scanFrom callback); the raw scan is not, because scanFrom is UNEXPORTED.
   
-  Scope:
-  - An exclusive lock acquired at startup BEFORE replay begins, held for the Log's lifetime, released on clean shutdown.
-  - A clear, actionable error when another process already holds it (name the data dir in the error; do not just fail obscurely).
-  - Explicitly state and TEST the stale-lock-after-crash behaviour. An flock is released by the kernel when the holding process dies, so a crash should leave no stale lock -- but the task must ASSERT that rather than assume it. A durability claim needs a kill test: SIGKILL a holder, then prove a fresh process can acquire the lock.
-  - A test that a second Open on the same dir fails while the first is live.
+  MITIGATION ALREADY SHIPPED: the scan is gated on !alloc.Existed(), so it runs at most once per data directory (the legacy backfill). That bounds the exposure to the migration start, and it is why this is P1 and not P0.
   
-  Sequencing: BLOCKED until DUR-4 lands. The lock goes in internal/wal/log.go Open, which the DUR-4 agent is editing right now. Do not start this while DUR-4 is in_progress.
-  _Proof: go test -race -run "TestDirLock|TestAcquire|TestSecondAcquireFailsFast|TestReadHolderPID|TestBusyError" ./internal/dirlock && go test -race -run TestRunRefusesALockedDataDir ./cmd/agent-bus_
+  WHAT IT COST. Gating it also removed the every-start CROSS-CHECK: a WAL suffix exceeding the persisted floor is a detectable integrity failure (a rewound or restored-from-backup agent-suffixes file), and nothing detects it now. A DELETED floors file is still caught (Existed()==false triggers the backfill, and the missing-file case is logged at ERROR when the dir has history); a CORRUPT one is caught by ids.ErrSuffixFileCorrupt; a REWOUND-BUT-VALID one is not.
+  
+  DO. (1) Export the streaming seam internal/wal already has -- e.g. wal.ScanFunc(path, kind, fn error) wrapping scanFrom, whose own doc calls it 'the seam recovery uses for a streaming replay'. (2) Rewrite cmd/agent-bus/suffixfloors.go's walAgentIDFloors to fold floors as records arrive: O(record) peak, not O(log). (3) Reinstate the cross-check on EVERY start, comparing the derived floors against ids.DurableNameSuffixes.Floors(); on a WAL suffix ABOVE the persisted floor, log at ERROR and RaiseFloor to it (raising can never lower a floor, and detection without correction leaves the bus knowingly re-minting a visible id -- both gates endorsed raise-over-refuse; refuse-to-boot would hand anyone with data-dir write access a permanent boot-denial primitive).
+  
+  PROOF. A test that a dir whose agent-suffixes file has been rewound to a stale-but-checksum-valid version does NOT re-mint, and logs at ERROR. Plus a memory assertion, or at minimum a test that the scan never materialises the whole log.
+  
+  ACCEPTANCE. wal exports a streaming raw scan; cmd/agent-bus/suffixfloors.go uses it; the every-start cross-check is restored and proven by a rewound-floors-file test; go test -race green.
 - [ ] DUR-12-FU-CONTRACTS · DUR-12-FU-CONTRACTS: land the six CONTRACTS-ONDISK.md rows deferred from DUR-12 — docs, P2
   P2, docs. Land the six CONTRACTS-ONDISK.md rows quoted in the DUR-12 kind=report note (author feature-runner) on task cbc9ab0c-3b34-48d0-acd8-5eabd4dc4a02: on-disk format version 1 vs 2, wal-mac.key file (mode 0600, 64 lowercase hex chars, wal.MACKeyFileName), exported constant value changes (wal.FormatVersion 1->2, wal.FileHeaderSize 16->48, wal.FrameHeaderSize 20->48, new wal.MACSize=32), new errors.Is-checkable sentinels (wal.ErrMACKeyMissing, wal.ErrMACKeyMalformed, wal.ErrMACKeyMismatch), startup failure modes that REFUSE TO START, and upgrade artefacts left in the data dir (<log>.upgrade, <log>.v1-<unix-nanos>). State in the description that reviewer raised this as P1-1 and that CONTRACTS-ONDISK.md:12 still reads "None yet -- no durable store, no WAL record types...", which is now false. proof_cmd must GLOB so it survives any further CONTRACTS split, and it is CONFIRMED RED right now (exit 1, verified before filing): grep -q 'wal-mac.key' CONTRACTS*.md && grep -q 'ondisk-format-version = 2' CONTRACTS*.md && echo CONTRACTS_ONDISK_OK
+- [ ] None · Settle the message-seq-floor KEYING question as an explicit follow-up, replacing the 'worth doing for consistency' framing -- and fix hub.go's operator-facing forging recipe in the SAME task — security, P2
+  BOTH SECURITY GATES on be447589-6583-4d5c-a9d4-ec9d9fef0f1c AGREED that keying `message-seq-floor` with the WAL MAC is the wrong fix, and EACH supplied a stronger reason than the one currently recorded. This task replaces the recorded framing and closes the one code artefact that depends on the answer.
+  
+  WHAT IS RECORDED TODAY, AND WHY IT IS TOO WEAK. DECISIONS.md (in the 2026-08-07 feature-runner data-directory-permissions section, "What was deliberately NOT done") ends: "Keying remains worth doing for consistency with `wal-index-floor`, as a separate and honestly-labelled change." "For consistency" understates the case in one direction and overstates it in another, and both gates said so.
+  
+  THE TWO STRONGER REASONS, TO BE RECORDED.
+  (1) THREAT-MODEL: keying only helps an attacker with directory-WRITE but WITHOUT file-READ -- precisely the attacker `enforceDataDirPermissions` now EXCLUDES. The attacker who remains (the bus's own uid, or root) can read `wal-mac.key` and forge any MAC we add. So against the POST-GATE threat model it buys approximately nothing.
+  (2) AVAILABILITY: `wal-mac.key`'s documented loss remedy is "move the log aside and restart". Key the floor to that SAME key and that remedy BRICKS THE BUS, because `ErrSeqFloorFileCorrupt` is fatal and the floor file is never regenerated. That couples the ONE FILE THAT EXISTS TO SURVIVE LOG LOSS to the key whose loss already forces abandoning the log -- a direct conflict, not a nicety.
+  (3) Per invariant 9, sharing one key across two message types needs a DOMAIN-SEPARATED SUBKEY, never plain reuse. Any keying that does land must say which construction and why.
+  
+  TWO AMENDMENTS THE GATES ASKED FOR EXPLICITLY.
+  (a) File it as an EXPLICIT FOLLOW-UP with a decision, not as "for consistency" -- because there IS one place keying adds value over the directory gate: the GROUP-WRITABLE TIGHTEN path adopts PRE-PLANTED files and CONTINUES. `enforceDataDirPermissions` chmods a group-writable dir to 0700 and starts; anything already planted in it before that chmod is adopted unchecked. That is the honest scope of what keying would buy, and it should be recorded as the reason rather than "consistency".
+  (b) internal/hub/hub.go CURRENTLY HANDS OPERATORS A COMPLETE FORGING RECIPE for an unkeyed file. In the `ErrSeqFloorUnprovable` remedy text (hub.go, the error block at ~:733-741 at HEAD 16da89f -- the gate cited :707, the line has drifted, the text is confirmed present) it reads: "write it to %s yourself -- the format is two plain-text lines, %q followed by \"floor <n>\", where the digest is an unkeyed SHA-256 over the second line". That is SAFE TODAY (the file genuinely is unkeyed, and the remedy is genuinely needed) and WRONG THE DAY KEYING LANDS -- an operator following it would produce a file the bus rejects. It MUST change in the same task as the keying decision, whichever way that decision goes.
+  
+  SUGGESTED DELIVERABLE. A dated DECISIONS.md section recording the decision and all three reasons above plus amendment (a); and a guard test that asserts hub.go's remedy text agrees with the ACTUAL on-disk scheme produced by `encodeSeqFloor`, so the recipe cannot drift out of truth silently -- that test is valid under EITHER decision and goes RED the day keying lands without the text being updated.
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON (`grep -c 'group-writable tighten path' DECISIONS.md` = 0, so the && short-circuits) -- RED today rather than VACUOUS. The test half must ALSO be observed RED before the fix.
+  _Proof: grep -q 'group-writable tighten path' DECISIONS.md && go test -race -count=1 -run TestSeqFloorRemedyTextMatchesTheOnDiskScheme ./internal/hub_
 - [ ] None · Document what the bus does with an UNKNOWN WAL record type -- the answer is now discard-and-continue, not refuse-to-start (REVERSED 2026-08-02) — docs, P1
   REVERSED 2026-08-02 BY USER DECISION. THE BEHAVIOUR THIS TASK WAS FILED TO DOCUMENT IS BEING REMOVED,
   SO DO NOT DOCUMENT IT.
@@ -1894,102 +1788,45 @@
   (`grep -n "unknown record\|refuses to start\|startup failure" PROTOCOL.md`) named a nonexistent file
   AND grepped for the retired policy's wording.
   _Proof: test -f PROTOCOL.md && grep -q 'unknown record type' PROTOCOL.md_
-- [x] DUR-9 · DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose to handlers) — durability, P0
-  THE DURABILITY PLANE IS NOT WIRED TO THE SERVER. Verified 2026-08-02: `grep -rn 'internal/wal' cmd/ internal/httpapi/` matches only a COMMENT in cmd/agent-bus/main.go:165 -- there is no import; `wal.Open` has ZERO non-test callers in the whole repo; and internal/httpapi/server.go:101-102 registers exactly two routes (/healthz, /v1/info) beside a well-tested WAL library that no request path touches. DUR-1..DUR-4 are all `done` and NONE of their behaviour is live in the binary. That is the single biggest gap between what the backlog claims and what the process does.
+- [ ] None · IDEM-11-FU-DOWNGRADE: an old binary SILENTLY DISCARDS acknowledged writes after IDEM-11 -- bump FormatVersion so it refuses to start instead — durability, P1
+  NEEDS A USER DECISION (on-disk format). Raised by triage 2026-08-03 reviewing IDEM-11's staged (UNCOMMITTED) work.
   
-  SCOPE (this task only wires what already exists -- do NOT add new WAL features):
-  1. Server startup opens the WAL for the configured -data-dir exactly once (wal.Open), holds the *wal.Log for the process lifetime, and closes it on the SIGINT/SIGTERM shutdown path already in main.go.
-  2. Startup REPLAYS on open and applies the recovered state before the listener starts accepting -- serving must never begin from an unreplayed store (invariant 5: memory is the serving copy, disk is the truth).
-  3. A failed open/replay is a FATAL startup error with a non-zero exit and a clear operator message -- never a silent start with an empty store. The one permitted exception is the verified torn tail DUR-4 already repairs.
-  4. The Log is exposed to handlers (a field on the httpapi Server / a narrow interface), so later epics (MSG, AUTH, IDEM, SIGN) have a durable store to commit into. No handler needs to USE it in this task.
-  5. Startup logs, at info, the data dir, the number of records replayed and the repair outcome.
+  IDEM-11 adds an additive `idem` field to the WAL prepare payload (internal/wal/log.go, Entry.Idem json.RawMessage). Forward direction is correct and mandated: old logs replay unchanged under the new binary. The REVERSE direction is the problem.
   
-  GATED ON DUR-8 (exclusive data-dir lock, in flight 2026-08-02). Both edit cmd/agent-bus/main.go startup, and the ORDER is load-bearing: acquire the exclusive data-dir lock FIRST, then open the WAL -- opening a WAL a second process already holds is exactly the corruption DUR-8 exists to prevent. Do not start this until DUR-8 is done, or you will collide in main.go and get the ordering backwards.
+  internal/wal/log.go:791 decodePayload uses dec.DisallowUnknownFields(). A binary built BEFORE this field, reading a log written AFTER it, treats EVERY prepare carrying an idem record as an undecodable payload -- and recovery DISCARDS it. That is an ACKNOWLEDGED WRITE LOST on downgrade, silently, not a degraded-but-correct read. The implementing agent documented this honestly in a FORWARD-COMPATIBILITY HAZARD block at internal/wal/log.go:104-115 and mitigated it by POLICY ("downgrade is not a supported operation here -- one binary, one container, forward-only") rather than by enforcement.
   
-  NOT IN SCOPE: the audit log (DUR-5), snapshots (DUR-7), any new route, any message being written. This is wiring.
+  TRIAGE'S POSITION: policy is not a mechanism. FormatVersion is still 2 (internal/wal/format.go:30) even though the payload shape changed, so nothing on disk tells an older binary that it is out of its depth. The house failure mode everywhere else in this codebase is REFUSE TO START, loudly; here it is DISCARD, silently -- the worst possible pairing with invariant 4 (nothing acked before durable). Bumping FormatVersion (RESERVED through the Spec Server, never picked by hand) makes an old binary refuse to start on a new log, converting silent data loss into a loud, correct failure. The new binary still reads v2 logs, so the mandated ordering (a format change ships WITH the recovery path for previous-format logs) is preserved.
   
-  PROOF NOTES: the proof_cmd is non-vacuous BY CONSTRUCTION and FAILS TODAY (verified: proof-check.sh --quiet -> verdict=FAIL exit=1, stops at clause 1 because main.go has no wal import). Clause 2 is the DUR-3 anti-vacuity guard (assert at least one test actually RUNs before trusting the run). The last clauses are the invariant-7 end-to-end check: a real server brought up through scripts/bus-serve.sh must leave a non-empty bus.wal in its data dir -- 'the handler is written' is not the same as 'a running server does it'. Uses an isolated AGENT_BUS_RUN_DIR/port, never the tracked data/ dir.
-  _Proof: grep -q '"github.com/dodgymike/agent-bus/internal/wal"' cmd/agent-bus/main.go && test $(go test -run TestServerOpensWALOnStart -v ./... 2>&1 | grep -c "=== RUN") -gt 0 && go test -race -run TestServerOpensWALOnStart ./... && rm -rf /tmp/agent-bus-dur9 && AGENT_BUS_RUN_DIR=/tmp/agent-bus-dur9 AGENT_BUS_LISTEN=127.0.0.1:8091 bash scripts/bus-serve.sh start && test -s /tmp/agent-bus-dur9/data/bus.wal && AGENT_BUS_RUN_DIR=/tmp/agent-bus-dur9 AGENT_BUS_LISTEN=127.0.0.1:8091 bash scripts/bus-serve.sh stop_
+  NOTE ON PROVENANCE: triage's own dispatch brief explicitly FORBADE the IDEM-11 agent from touching FormatVersion, to keep it out of the contested recovery code. That guard was right about recover.go and wrong about the version field. This task exists to correct triage's guard, not the agent's work -- the agent complied with its brief and documented what it could not fix.
+  
+  DECISION NEEDED FROM THE USER: (a) bump FormatVersion to 3 so downgrade fails closed, accepting that a v3 log can never be read by any released binary; or (b) accept the forward-only policy as-is and record it in DECISIONS.md as an explicit, dated acceptance of silent-data-loss-on-downgrade. Do NOT choose (c) loosen the decoder -- a lenient decoder is how a file that no longer says what history was accepted gets served as if it did.
+  
+  Related: DUR-12-FU-VERSIONFLIP already tracks a single-bit version-field flip misidentifying a v2 log, so the version field's failure behaviour is under review anyway.
 - [ ] None · Stale references to deleted test name TestServerOpensWALOnStartRefusesACorruptLog in DECISIONS.md and AGENT_LOG.md — durability, P2
   DECISIONS.md:508 and AGENT_LOG.md:173 still name the test TestServerOpensWALOnStartRefusesACorruptLog, which tested the OLD refuse-to-start-on-corruption policy. That test was deleted/replaced by TestServerQuarantinesACorruptLogAndStartsAnyway (cmd/agent-bus/wal_startup_test.go:315), which asserts the current (2026-08-02, availability-over-retention) policy. Fix: update both references to name the current test, keeping the surrounding historical narrative intact (do not rewrite history, just correct the pointer to a test that still exists). NOTE: SPEC.md:1190 has the same stale reference but SPEC.md is a generated mirror of the Spec Server -- do NOT hand-edit it as part of this task; it will self-correct once the underlying task text is fixed and the mirror is regenerated, or via its own text update if it is carried directly in a task description.
   _Proof: ! grep -rn "TestServerOpensWALOnStartRefusesACorruptLog" DECISIONS.md AGENT_LOG.md_
-- [x] DUR-11 · DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record INDEX, and stop truncating a checksum-failing LAST acknowledged record — durability, P0
-  RE-SCOPED 2026-08-02 BY THE USER DECISION "THE BUS ALWAYS RESTARTS" (DECISIONS.md, 2026-08-02, section 1).
-  STATUS DELIBERATELY UNCHANGED -- a feature-runner is in flight against this task under exactly the policy
-  below. Read this whole section before the historical text further down, which was written against the
-  OLD refuse-to-start policy and is retained only as the record of how the findings were discovered.
+- [ ] None · maxPlausibleSeqFloor is 2^56, which exceeds the JSON safe-integer range 2^53 -- seq ships as a bare uint64 JSON number a float64 consumer cannot represent exactly — httpapi, P2
+  SECURITY GATE FINDING (LOW) against the bound shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c (217a3c0).
   
-  THE POLICY THIS TASK NOW IMPLEMENTS.
+  MECHANISM. `const maxPlausibleSeqFloor uint64 = 1 << 56` (internal/hub/seqfloorfile.go:97). `seq` ships on the wire as a BARE uint64 JSON number, so a forged-but-passing floor near the bound yields sequences a float64-parsing consumer (JavaScript, jq's default numeric handling, any language whose JSON number is a double) cannot represent EXACTLY -- it silently rounds, and two distinct sequences can land on one value in the consumer.
   
-  (a) FINDING (a) STANDS AS A REAL BUG, unchanged and still P0. One damaged record must never cause the
-      MASS DELETION of later records that are themselves INTACT. The veto's forward search must be
-      ANCHORED ON RECORD INDEX, not on end-of-file. Security's probe: one flipped bit in a mid-file
-      length field plus one junk byte at EOF deleted 8 committed records, NextIndex 41 -> 33, silently.
-      Anchoring on EOF gives ZERO protection in precisely the case RepairTail exists for -- a genuine
-      torn tail -- because the veto only fires when the file ends exactly on a record boundary.
+  CALL SITES re-verified at HEAD 16da89f by spec-keeper (the gate's line numbers had drifted; the content is confirmed): internal/httpapi/messages.go:176, :225, :252, :263 and internal/store/message.go:269 all declare `Seq uint64` with a plain `json:"seq"` tag. No string encoding, no bounds note.
   
-  (b) FINDING (b) IS NO LONGER AN INVARIANT-4 VIOLATION. Discarding a checksum-failing LAST record is
-      now SANCTIONED behaviour: "always be able to restart, prefer to discard messages and/or
-      corruption, with logging". Invariant 4 is narrowed accordingly -- acknowledged data may be
-      discarded when it is found corrupt; we do not lose acknowledged data through our OWN write path,
-      but we will not hold the bus hostage to damaged media.
-      THE REMAINING DEFECT IN (b) IS THE SILENCE AND THE FALSE DOC COMMENTS, NOT THE DISCARD.
-      - Every discard must be OBSERVABLE: a specific log record naming what was discarded (offset,
-        record index, record type, byte count, and why), not a bare boolean or a silent success.
-      - The doc comments that claim the discard is "provably" of a never-fsynced record are FALSE and
-        must go. Reviewer flagged them as P0 on DUR-4; the implementer already narrowed the worst of
-        them at c362152, but the claim must not survive anywhere: "the frame is torn" does NOT imply
-        "its fsync never completed". The code and the comments must agree.
-      There is no longer a design call to make here and no DECISIONS.md entry is owed for it -- the user
-      has decided. Do NOT re-open the refuse-vs-truncate debate.
+  FIX AND ITS COST. Lower the bound to `1 << 53`. It costs nothing: at 1,000,000 sequences/second 2^53 is still roughly 285 YEARS, so no real bus is constrained by it, and the bound's stated purpose (reject an implausible value) is unaffected. This is strictly a tightening of an arbitrary constant to the boundary that the SERIALISATION already imposes.
   
-  (c) ADDED SCOPE -- CONVERT EVERY DAMAGE-CLASS REFUSAL INTO DISCARD + SPECIFIC LOG + CONTINUE.
-      Recovery must ALWAYS reach a running server. Sweep internal/wal (RepairTail, truncatableTail,
-      inspectTail, and every error path that today propagates out of wal.Open as fatal, plus the
-      fatal-on-repair-refusal handling in cmd/agent-bus/main.go) and turn each DAMAGE-class error into:
-      discard the damaged record(s), log loudly and specifically what was discarded, keep running.
-      Truncation is no longer restricted to a verified-corrupt TAIL (invariant 6 narrowed): damaged
-      records ANYWHERE may be discarded -- with a log entry EACH.
-      THE LINE, AND IT MATTERS: NON-DAMAGE ERRORS STAY FATAL. Permission denied, an I/O failure, the
-      data-directory lock already held, a missing/unwritable data dir -- these are not damaged records
-      and must still refuse to start with a clear operator message and a non-zero exit. Do not turn an
-      unreadable disk into a silently empty bus. Note cmd/agent-bus/wal_startup_test.go currently has
-      TestServerOpensWALOnStartRefusesACorruptLog, which asserts the OLD policy for a garbage file
-      HEADER -- decide explicitly whether a bad file header is damage (discard/reinitialise + log) or a
-      non-damage refusal, say which in the commit message, and make the test assert whichever you chose.
-      This also removes the permanent refuse-to-start DoS, and with it the operator escape hatch that
-      was previously recommended: always-restart IS the escape hatch (DUR-4-FU-TOOLING is superseded).
+  SEQUENCING NOTE: if the persist-path bound task is done first, this becomes a one-constant change covering both paths at once; if this is done first, the read path is safe and the write path is still unbounded. They are independent but the persist-path task is the higher priority of the two.
   
-  OUT OF SCOPE, EXPLICITLY: the CHECKSUM SCHEME and the ON-DISK FORMAT. CRC32C is being replaced by an
-  HMAC-SHA256 keyed MAC under a separate P0 task holding the reserved ondisk-format-version=2. Do not
-  touch format.go's checksum construction, do not bump FormatVersion, and do not try to fix the
-  GF(2)-linearity forgery here. Expect the torn-tail heuristic to get SIMPLER, not more complex, once a
-  strong MAC can distinguish damage from truth -- so do not build elaborate new heuristics that the MAC
-  task will have to unwind.
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON (the pin matches 0 times; `grep -n 'maxPlausibleSeqFloor uint64' internal/hub/seqfloorfile.go` shows the current `1 << 56` at line 97) -- RED today rather than VACUOUS. The test half must ALSO be observed RED before the fix.
+  _Proof: grep -q 'maxPlausibleSeqFloor uint64 = 1 << 53' internal/hub/seqfloorfile.go && go test -race -count=1 -run TestSeqFloorBoundIsJSONSafe ./internal/hub_
+- [ ] None · Expose on wal.Recovered the highest index a record actually CONSUMED — durability, P1
+  SHARED BLOCKER, reached from three directions independently: (1) be447589 (data-directory permissions + message-seq-floor guard) -- the shipped fix removed both durable predicate arms that tried to approximate this (NextIndex accounting, then MissingRecords) after each one PERMANENTLY BRICKED a healthy directory on an ordinary unclean shutdown; feature-runners closing note on that task says explicitly: closing the gap needs internal/wal to expose the highest CONSUMED index -- BLOCKER, outside boundary. (2) e120153b (WAL recovery reissuing a discarded tail record index) -- reviewer found the P0 symptom remains reachable by a non-quarantine route: floor.written is only raised at begin() and at a CLEAN seal(); a crashed run leaves ONLY reserved as evidence, and reserved is consulted only when the log ITSELF proves damage -- so a truncation that looks clean (no torn frame, LostUnidentified=false) can still reissue. (3) An independent measurement (reported by an agent in another repo, see notes on e120153b and be447589) swept 553 byte-exact truncation offsets against a purpose-built specimen (7 delivered messages, seqs 1,2,3 and 257-260, floor written=22 after a restart, 8900-byte WAL) and found a reissuing band (offset 1004-4439, derived floor 256) that is INDISTINGUISHABLE from a healthy directory one restart younger -- valid digest, nothing wrong with the file -- so no plausibility bound, human inspection, or MAC/integrity check can ever see it. Only knowing what the log itself proves was CONSUMED (survived + discarded + quarantined, as opposed to merely reserved-but-never-written) can close this.
   
-  TESTS. Keep TestCrashInjectionSingleBitCorruptionSweep (internal/wal/crash_injection_test.go) green
-  and EXTEND the net: the torn-tail-PLUS-mid-file-corruption combination that finding (a) exploits has
-  no coverage today, and every new discard path needs a test asserting the SERVER STILL STARTS and the
-  specific log line was emitted. A discard with no log line is the bug, so assert the log, not just the
-  absence of an error. Needs the mandated reviewer AND security gates.
+  REQUIRED: add a field to wal.Recovered (or an equivalent accessor) reporting the highest record index the replay/repair pass actually CONSUMED this run -- i.e. observed in the file, whether it survived, was discarded as damaged, or was quarantined -- distinct from NextIndex (which is floor-raised) and distinct from the durable floors reserved/written (which persist across runs and can go stale). wal already computes and LOGS this internally (log.go: indices_skipped / fileNext at the WARN line noted by reviewer), it is just not on the public Recovered struct.
   
-  --- HISTORICAL TEXT, retained as the discovery record. Its "DESIGN CALL REQUIRED" paragraph and its
-  --- refuse-to-start framing are SUPERSEDED by the policy above. ---
+  This unblocks: a narrower be447589 guard predicate (refuse only when the floor is absent AND this-run-consumed exceeds what the log alone can prove, not on every unclean shutdown); a real fix for e120153bs non-quarantine reissue route; and any future low-floor plausibility check (the class of check the independent measurement showed a high-value bound cannot substitute for).
   
-  FILED BY spec-keeper so two DEMONSTRATED, STILL-OPEN silent-data-loss findings are not lost inside a task that is already marked done. Source: the security agent's kind=response on DUR-4 (PASS-WITH-CONCERNS, 2026-08-02T14:13:06), which was posted BEFORE DUR-4 was flipped done and was never resolved or waived. Both findings were reproduced with probes against a /tmp copy, not argued from the code. CRITICALLY, security re-ran its probes against the WORKING-TREE fix (the laterRecordInTail veto that DUR-10 covers) and both holes SURVIVE it -- DUR-10 is a strict improvement but does NOT close these.
-  
-  FINDING (a) HIGH -- the veto's anchor is the wrong thing. laterRecordInTail only fires when the file ends EXACTLY on a record boundary, i.e. when there is NO torn tail. Probe: one flipped bit in a mid-file length field PLUS one junk byte appended at EOF (or one byte truncated off) => 8 committed records deleted, NextIndex 41 -> 33, no error, Open+Replay succeed silently. RECOMMENDED FIX (security's): anchor the forward search on the record INDEX, not on end-of-file.
-  
-  FINDING (b) HIGH -- a checksum-failing LAST record is assumed torn. A single flipped bit in the PAYLOAD of the final record -- a complete, fsynced, ACKNOWLEDGED record -- is byte-indistinguishable from a torn write and is truncated away. Probe: replay applied 2 -> 1, NextIndex 5 -> 4.
-  
-  SEQUENCING: DUR-10 is now DONE (review debt paid; reviewer CHANGES-REQUIRED comment-only, security PASS-WITH-CONCERNS, comment fixes landed at c362152). Proof command validated by scripts/proof-check.sh: verdict=PASS class=test tests_run=60 top_level=17 skipped=1 failed=0 empty_pkgs=0 (re-run 2026-08-02 against HEAD) -- it is a real net today, and must be EXTENDED by this task rather than merely kept passing.
-  _Proof: go test -race -run TestWALResyncSurvivesALargeIndexHole ./internal/wal_
-- [x] None · Startup summary silently omits whole-log quarantine (quarantined/discard_count/discarded_bytes never logged) — durability, P0
-  cmd/agent-bus/main.go:275-285 -- the "write-ahead log opened" startup summary logs only rec.Repaired.Truncated and rec.Repaired.Removed as "repaired"/"repaired_bytes". When wal.Open takes the quarantine path instead (Quarantined/DiscardCount/DiscardedBytes set, Truncated left false), the startup summary prints repaired=false repaired_bytes=0 and never mentions the discard at all -- the only record of a start that just ATE AN ENTIRE LOG is internal/wal own error line, which an operator may not be watching. DECISIONS.md 2026-08-02 ("Availability over retention") is explicit that "the defect was never that data was discarded; it is that the discard was SILENT" -- this is that exact defect, one layer up, at the operator-visible summary line. Fix: add quarantined=/discarded_bytes=/discard_count= (or equivalent) fields to the lg.Info("write-ahead log opened", ...) call so a quarantine is as observable in the startup summary as a repair is. Surfaced during DUR-11 follow-up review; do not fold into DUR-11 itself (it is still open, owned by the user).
-  _Proof: bash scripts/proof-check.sh 'go test -race -run TestStartupSummaryLogsQuarantineFields ./cmd/agent-bus'_
-- [ ] DUR-5 · DUR-5: Append-only message audit log — durability, P0
-  A second, separate append-only file (distinct from the WAL) that every message (broadcast + DM) is written to as part of the same commit, independent of the WAL's own record-keeping -- the audit trail invariant 6 calls out explicitly. The audit record is METADATA AND ROUTING INFO ONLY -- message id, sequence, sender, recipient(s), bus path traversed, timestamp, size, and a content hash of the body -- and never the message body itself. The WAL is NOT affected by this change: it still carries whatever it needs to reconstruct state on replay, including bodies if replay requires them; only this separate audit log is metadata-only. Rationale: agent-bus is getting Signal-style end-to-end encryption with forward secrecy (CRYPTO epic); an audit log holding plaintext becomes unwritable the moment PFS lands, and one holding ciphertext the bus can never decrypt is dead weight -- so the audit trail is deliberately a routing/provenance record, not a content archive, and the content hash preserves the ability to prove WHAT was sent without retaining it. Never edited or truncated except by the verified-corrupt-tail rule. Forward-compatibility requirement: the record must be shaped so the CRYPTO epic can add an encrypted-envelope descriptor field later WITHOUT an on-disk format break (e.g. reserve/permit additional optional fields in the JSON payload).
-  _Proof: go test -race -run TestAuditLog ./internal/wal_
+  SCOPE: internal/wal only. Coordate with whichever agent has DUR-5 (append-only audit log) live in the package to avoid two agents rewriting replay.go/recover.go concurrently.
+  _Proof: bash scripts/proof-check.sh 'go test -race -run TestWALRecoveredExposesHighestConsumedIndex ./internal/wal'_
 - [ ] None · DUR-11-FU-STAGE2SHORTCIRCUIT: resyncFrom never runs the sound stage-2 scan after a stage-1 budget exhaustion — durability, P1
   internal/wal/salvage.go:537-540 (resyncFrom): `o, exhausted, err := scanForFrame(f, c, size, from, lastIndex, true); if err != nil || o >= 0 || exhausted { return o, exhausted, err }`. The `|| exhausted` short-circuit means the sound STAGE 2 scan (the one that drops the index-density window and is what closed security post-fix BLOCKER on DUR-11) never runs once stage 1 reports budget exhaustion. This directly contradicts the doc rule three lines below it: "A BOUNDED SEARCH FINDING NOTHING IS NEVER ON ITS OWN GROUNDS FOR NOTHING FOLLOWS." Stage 2 exists precisely because a bounded stage-1 search wrongly concluded nothing followed -- this short-circuit reintroduces that exact failure mode by a different route.
   
@@ -2003,184 +1840,52 @@
   
   WHY P1 NOT P0 (security's own reasoning, recorded so the call is not silent): (1) it is LOUD, not silent -- the exhausted path already logs two ERROR lines, sets Repair.Exhausted, and the discard reason text states the region was removed WITHOUT proof it was unreadable, so an operator has a true signal even though the outcome is wrong; (2) it is already the one documented remaining cascade path (DUR-11's own doc.go/recover.go narrative names Exhausted as the sole surviving cascade mechanism), not a newly-introduced silent hole; (3) it is NOT client-reachable today -- planting the >=4096 density-passing decoy headers needed to exhaust the stage-1 budget requires raw NUL bytes in a payload, and canonicalBody/json.Compact (the only WAL payload write path) rejects raw control bytes, so this is media-damage-triggerable but not attacker-triggerable via the one payload channel that exists. If a future task widens that payload channel (raw/binary bodies, base64-decoded content, ciphertext), this finding's blast radius should be re-assessed.
   _Proof: grep -n "|| exhausted" internal/wal/salvage.go_
+- [ ] None · internal/hub/hub.go:590's no-floor-file quarantine ERROR promises the file will be written this start, but the LogRepaired guard now refuses Open before that write happens — durability, P2
+  internal/hub/hub.go's quarantine branch (currently around line 591-611, the `switch` inside `if o.Quarantined != ""`) has a `default:` case whose h.log.Error(...) call ends: "This is the one-start migration window for a data directory written before " + SeqFloorFileName + " existed; the file is written on this start, so the next one is covered".
+  
+  That promise is now FALSE, and not merely optimistic -- it is directly CONTRADICTED by the guard a few dozen lines below it in the same function. cmd/agent-bus/logrepair.go's describeLogRepair sets a non-empty LogRepaired string whenever rec.Repaired.Quarantined != "" -- i.e. on every quarantine, unconditionally. hub.go's guard (currently ~line 732): `if h.seqFloorFile != nil && !h.seqFloorFile.existedAtOpen() && o.LogRepaired != "" { return nil, fmt.Errorf(...ErrSeqFloorUnprovable...) }` -- fires on EXACTLY the population the quarantine ERROR at line ~606 is printed for (no seq-floor file on disk, log just repaired/quarantined) and REFUSES to open the hub at all. Open returns an error before it ever reaches the `h.seqFloorFile.raise(floor)` call (~line 745) that would write the file.
+  
+  So the sequence on that start, in order, is: (1) the quarantine block logs the ERROR at line ~606 promising the file is written this start; (2) a few lines later in the SAME Open call, the guard at ~732 refuses and Open returns an error; (3) main.go's caller treats that as fatal (`opening the messaging hub: %w`) and the server does not start. The file is never written. The very next line an operator reads after the reassurance is the refusal that falsifies it.
+  
+  This is the same reassurance SHAPE already corrected in the migration WARN under Spec Server task 9fd58deb (and its still-open follow-up task for the sibling comments/docs) -- a sentence claiming a check or a write closes something that the code, read a few lines further, does not actually let happen on this path.
+  
+  FIX: rewrite the tail of the no-floor-file quarantine ERROR (hub.go, currently ~line 606) to stop promising the file is written this start. State plainly that whether the file gets written on this start depends on the guard below (o.LogRepaired / existedAtOpen()): when DataDir is configured (h.seqFloorFile != nil) this exact condition (no floor file + a repaired/quarantined log) makes Open REFUSE outright rather than write the file and continue -- so for a DataDir-backed bus this ERROR is typically followed immediately by a fatal refusal on the SAME start, not by a covered next one. If there is a real path where the file DOES get written after this ERROR (e.g. no DataDir configured, or seqFloorFile is nil for some other reason), name that path explicitly instead of a blanket claim. Add or extend a hub_test.go/mint_test.go case that starts a hub with a quarantine, no floor file, and a non-empty LogRepaired, and asserts BOTH that this ERROR is logged AND that Open returns ErrSeqFloorUnprovable on the same call -- pinning the contradiction so the wording cannot regress silently.
+  
+  Origin: reviewer flagged this while reviewing the seq-floor migration WARN rewrite (Spec Server task 9fd58deb / its sibling follow-up). Checked the current backlog (search by q= for the exact phrase and for line 590/606, plus a grep of SPEC.md) before filing -- no existing task covers this call site or this specific contradiction; the nearby task 'Invert stale internal/hub/hub.go quarantine reissue-permitted assertions once MSG-FU-SEQHIGHWATER lands' (SPEC.md, no numbered key) covers the OTHER quarantine case (the seqFloorFile-existed-and-survived branch's 'message ids may repeat' language, hub.go ~137-140/383-394) and is explicitly blocked pending 6ebe51be -- this is a different branch, a different defect (promise vs contradiction, not staleness), and is NOT blocked.
+  _Proof: grep -n "so the next one is covered" internal/hub/hub.go; test $? -ne 0_
 - [ ] DUR-7 · DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) — durability, P3
   Low-priority follow-up. As the WAL grows unbounded, startup replay time grows with it; add periodic snapshotting of in-memory state plus safe truncation of the WAL prefix the snapshot covers, so recovery time is bounded by (snapshot load + tail replay) rather than full history. Not required for correctness, only for long-run startup latency.
   _Proof: go test -race -run TestSnapshotCompaction ./internal/wal_
-- [x] DUR-10 · DUR-10: Review the RepairTail truncation veto -- half is already in `main` UNREVIEWED (landed inside DUR-8's commit d06c704) and the rest has been rewritten since — durability, P0
-  VERDICT 2026-08-02 (spec-keeper): THE REVIEW DEBT IS PAID -- this task is (b) satisfied by the gates that actually ran, and it is being completed on that basis. It is NOT (a) an outstanding gate and NOT (c) obsolete: the gates ran, produced findings, and the findings were landed.
-  
-  EVIDENCE, verified first-hand this pass:
-  - `git log --oneline -- internal/wal/recover.go` -> c362152, dad04aa, d06c704, 6f22a99. d06c704 is the never-gated half; dad04aa is the rewrite; c362152 ("WAL: correct comments that claimed a proof where the code has a heuristic (DUR-10)") is the comment-only landing of the reviewer's P0.
-  - REVIEWER GATE RAN (kind=response, 2026-08-02 15:06): CHANGES-REQUIRED, COMMENT-ONLY -- "the code is approved, it is strictly safer than what d06c704 left in main, and every finding is a comment or a scope/test-coverage nit, not a code defect". It re-probed DUR-11 finding (a) over 35 cases with zero silent losses, and mutation-tested rather than argued.
-  - SECURITY GATE RAN (kind=response, 2026-08-02 15:23): PASS-WITH-CONCERNS, byte-verified against dad04aa, ~345k probe cases. Its NEW MEDIUM finding (CRC32C is GF(2)-linear, so lengthOnlyDamage's completeness "proof" is forgeable by an ordinary remote client) is NOT dropped: it is the direct motivation for the 2026-08-02 decision to replace CRC32C with an HMAC-SHA256 keyed MAC, and it is carried by the MAC task, not by this one.
-  - IMPLEMENTER landed the reviewer's P0/P1 comment corrections at c362152 with ZERO executable lines changed (`git diff -U0` had no non-comment +/- lines).
-  - Every agent that touched this task posted kind=report + kind=model; reviewer and security also posted kind=response.
-  
-  WHAT MOVED OUT OF SCOPE, and where it went. The description below still describes "recovery REFUSES TO START rather than cutting" as the designed failure mode. THAT POLICY IS NOW REVERSED by the user decision of 2026-08-02 ("Availability over retention: the bus ALWAYS restarts" -- DECISIONS.md). Converting every damage-class refusal into discard + specific log + continue is DUR-11's scope (884d3da4), in flight. Replacing the CRC32C checksum with a keyed MAC is the MAC task's scope. Neither is a reason to keep this review-debt task open: the debt was "this code reached main without a reviewer or a security gate", and that is now false.
-  
-  --- ORIGINAL DESCRIPTION FOLLOWS (retained verbatim; read the reversal above before acting on any "refuse to start" language in it) ---
-  
-  REVIEW CODE THAT IS ALREADY PARTLY IN `main` AND IS STILL MOVING. This task's premise has been
-  CORRECTED TWICE -- read this paragraph before anything else. It was originally filed (by spec-keeper on behalf of
-  backlog-triage, pass 4b) as "review-and-land an uncommitted fix". That framing is now WRONG on both halves: the code
-  is no longer uncommitted, and what is in the tree is no longer the code that was described. See the kind=response
-  note of 2026-08-02 for the correction and who is responsible for the original error.
-  
-  WHAT IS ACTUALLY TRUE NOW (each fact verified first-hand by spec-keeper, commands quoted).
-  
-  (1) HALF OF IT IS ALREADY IN `main`, COMMITTED WITHOUT ANY REVIEW, UNDER ANOTHER TASK'S TITLE.
-  `git show --stat d06c704` -- a commit titled "Exclusive lock on the bus data directory (DUR-8)" -- includes
-  internal/wal/recover.go (+152), internal/wal/format.go (+22), internal/wal/doc.go (+8),
-  internal/wal/crash_injection_test.go (+616) and internal/wal/recover_test.go (+102). None of that is DUR-8's work.
-  `git log --oneline -- internal/wal/recover.go` returns exactly two commits: 6f22a99 (DUR-4) and d06c704. So the
-  truncation change rode into main under an unrelated task's title. DUR-8's own agents said so: DUR-8's reviewer note
-  records verbatim "Deliberately ignored the in-flight internal/wal/** ... belonging to parallel agents", and DUR-8's
-  security audit lists only internal/dirlock files in its scope. THE PRODUCTION WAL CHANGE IN `main` HAS THEREFORE HAD
-  NO REVIEWER GATE AND NO SECURITY GATE. That -- not "landing a patch" -- is the debt this task exists to pay.
-  
-  (2) IT HAS SINCE BEEN SUBSTANTIALLY REWRITTEN AGAIN, AND THAT REWRITE IS UNCOMMITTED.
-  `git diff --cached --stat internal/wal/` shows a further recover.go +311/-, recover_test.go +141, doc.go +13
-  (staged; `git diff` unstaged for internal/wal is empty, so the working tree == the staged version).
-  The function the original description told a reviewer to look at, `laterRecordInTail`, NO LONGER EXISTS. It has been
-  refactored into `inspectTail` (internal/wal/recover.go:347), with `tailHasRecordsAfterIt` now at :461 and
-  `truncatableTail` at :244; RepairTail is at :118 and calls inspectTail as the second gate at ~:150.
-  A REVIEWER MUST REVIEW THE CURRENT WORKING TREE, NOT MERELY THE DIFF AT d06c704. Reviewing d06c704 alone would
-  review code that has already been replaced.
-  
-  THE BUG BEING FIXED (unchanged, P0 -- silent loss of acknowledged records on the append-only log).
-  truncatableTail decides from the damaged frame's OWN header. A single flipped bit in a NON-FINAL frame's length
-  field that overshoots EOF but stays <= MaxPayloadSize is byte-for-byte the same shape as a genuine torn tail, so
-  recovery started SUCCESSFULLY and silently deleted checksum-valid COMMIT records. Reproduced against the pre-fix
-  sources at 10 single-bit offsets [17 121 160 236 275 276 408 409 447 448]; at offset 17 recovery served 0 of 4
-  acknowledged entries (RepairTail Truncated:true At:16 Removed:573). Violates invariant 4 (nothing acknowledged is
-  ever lost) and invariant 6 (truncation only of a verified-corrupt tail).
-  
-  THE SHAPE OF THE FIX AS IT NOW STANDS (describes `inspectTail`, the CURRENT code, not the superseded
-  laterRecordInTail). RepairTail applies inspectTail as a SECOND gate, only AFTER truncatableTail has already said
-  "tail-shaped". inspectTail reads the region [at, size) that the cut would discard and applies two proofs:
-  (a) lengthOnlyDamage -- recompute the damaged frame's checksum on the hypothesis that its true payload is the bytes
-  actually present; if it verifies, the record is COMPLETE and only its length field is corrupt, so it may have been
-  fsynced and acknowledged; (b) a forward search for any complete, checksum-verifying record inside the discard region
-  whose INDEX continues the file's sequence. Anchoring (b) on record index rather than on end-of-file is a DELIBERATE
-  change from the earlier version and the code comments say so. A candidate cap (maxTailCandidates=4096) bounds the
-  checksum work because the region is attacker-influenced. Any refusal is logged and returned as a fatal error:
-  recovery REFUSES TO START rather than cutting.
-  
-  WHAT THIS TASK REQUIRES (unchanged in substance; the target has moved).
-  (1) REVIEWER GATE on the CURRENT internal/wal/recover.go working tree -- is the veto still strictly additive versus
-  6f22a99, is refusing-to-start the right failure mode versus truncating, and does the rewrite from laterRecordInTail
-  to inspectTail preserve the strict-subset property that justified landing it at all? The "purely additive, zero
-  removed lines in truncatableTail" argument was checked against the FIRST version and MUST BE RE-CHECKED against the
-  +311/- rewrite; do not carry it forward on trust.
-  (2) SECURITY GATE -- a remote-influenced WAL byte must not be able to turn recovery into either data loss OR a
-  permanent startup denial of service. The maxTailCandidates cap and the attacker-influenced-region reasoning in
-  inspectTail's comments are squarely in scope.
-  (3) ONE clean logical commit of the remaining uncommitted recover.go/recover_test.go/doc.go changes, with a message
-  that says plainly that the earlier half landed under DUR-8's title.
-  (4) CONTRACTS.md / PROTOCOL.md touch-up only if the described recovery contract moved.
-  
-  CROSS-REFS. DUR-4 (done at 6f22a99) is the task this file was last completed against, and its reviewer verdict there
-  was CHANGES-REQUIRED, still unresolved. DUR-6 (done at e63ced5) owns the TESTS that ride with this code and
-  explicitly does NOT cover this production change. DUR-11 (884d3da4-bceb-4ac2-93a2-e147c77f9dca) carries two HIGH
-  findings this fix may or may not still leave open -- they were written against laterRecordInTail and must be
-  re-probed against inspectTail. Do not let DUR-10's reviewer re-litigate DUR-11's scope.
-  
-  PROOF RE-VERIFIED against the CURRENT working tree by spec-keeper on 2026-08-02 after the rewrite:
-  scripts/proof-check.sh --quiet "go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal" ->
-  verdict=PASS class=test exit=0 tests_run=42 top_level=14 skipped=1 failed=0 empty_pkgs=0. Not vacuous. The permanent
-  regression net is TestCrashInjectionSingleBitCorruptionSweep in internal/wal/crash_injection_test.go.
-  _Proof: go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal_
 - [ ] None · CONTRACTS.md:55 is stale -- says no WAL record types/wire version exist yet, false as of DUR-1/2/3 — docs, P2
   Verified: CONTRACTS.md:55 still reads "None yet -- no durable store, no WAL record types, no wire protocol version exists in this wave," which is false as of DUR-1/DUR-2/DUR-3 landing: record types 1=PREPARE, 2=COMMIT, 3=ABORT, 4=AUDIT, and ondisk-format-version=1 are all reserved (via the reservations API) and in use in the codebase. Update that section to list them accurately. FLAG: CONTRACTS.md is being edited by another agent right now as part of the parallel DUR wave -- re-read the file fresh before editing to avoid clobbering a concurrent change; this is a targeted one-section fix, not a full rewrite.
   _Proof: ! grep -qF "None yet" CONTRACTS-ONDISK.md && grep -qE "PREPARE[^A-Za-z]*=[^A-Za-z]*1|1[^A-Za-z]*=[^A-Za-z]*PREPARE" CONTRACTS-ONDISK.md && grep -qE "COMMIT[^A-Za-z]*=[^A-Za-z]*2|2[^A-Za-z]*=[^A-Za-z]*COMMIT" CONTRACTS-ONDISK.md && grep -qE "ABORT[^A-Za-z]*=[^A-Za-z]*3|3[^A-Za-z]*=[^A-Za-z]*ABORT" CONTRACTS-ONDISK.md && grep -qE "AUDIT[^A-Za-z]*=[^A-Za-z]*4|4[^A-Za-z]*=[^A-Za-z]*AUDIT" CONTRACTS-ONDISK.md && grep -qi "ondisk-format-version" CONTRACTS-ONDISK.md_
-- [x] DUR-1 · DUR-1: WAL record framing + writer — durability, P0
-  Define the on-disk WAL record format (length-prefixed + CRC32 checksum per record, monotonic record index) in internal/wal, and implement the append-only writer: Append(record) writes framed bytes and fsyncs before returning. The single building block every other DUR task builds on.
-  _Proof: go test -race ./internal/wal/_
-- [x] DUR-12 · DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ondisk-format-version=2) -- UNBLOCKED, key lives in data dir mode 0600 — durability, P0
-  ON-DISK FORMAT CHANGE. THE RESERVED FORMAT VERSION IS **ondisk-format-version = 2**, allocated
-  2026-08-02 from the Spec Server `ondisk-format-version` namespace by spec-keeper (the same namespace
-  internal/wal/format.go:14-19 already cites for FormatVersion = 1). DO NOT PICK A DIFFERENT NUMBER AND
-  DO NOT LET ANOTHER FORMAT CHANGE REUSE IT. Note ID-2-WIRING-SCHEMA may ALSO need a format bump if it
-  chooses Option B -- it must reserve its OWN value. Format changes are ORDERED.
+- [ ] None · CONTRACTS-ONDISK.md: document the bus.audit on-disk file (DUR-5 landed, wave 217a3c0, doc plane never updated) — docs, P2
+  DUR-5 (append-only message audit log, internal/wal/audit.go + audit wiring in internal/hub) landed in commit 217a3c0 and is now a LIVE on-disk file: bus.audit, written on every directed send (message id, sequence, sender, recipient(s), bus path, timestamp, size, content hash -- never the body, per invariant 6). CONTRACTS-ONDISK.md was not updated by that wave: the record-type table at line 19 already reserves and names record-type 4/TypeAuditMessage (so this is a DOC GAP, not an unreserved format change -- nothing to reserve), but there is no dedicated "On-disk files in the data directory" section for bus.audit anywhere in the file, unlike the sibling sections that exist for bus.wal, wal-index-floor, message-seq-floor and the bus certificate/keys. Confirmed: grep -n bus.audit CONTRACTS-ONDISK.md currently finds nothing.
   
-  BLOCKED -- AND THE BLOCKER IS A QUESTION THE USER HAS NOT ANSWERED.
+  FIX: add a section following the existing pattern (see "On-disk files in the data directory: the durable WAL record-index floor" and "...the durable MESSAGE-SEQUENCE floor" for the shape to match) covering: path (<data-dir>/bus.audit), mode, on-disk format version, the record shape (fields, and explicitly that the body is NEVER recorded -- this is the forward-compatibility-for-E2E-encryption rationale and is load-bearing, per invariant 6), how it relates to the WAL's own prepare/commit cycle (audit-fsync happens between prepare-fsync and commit-fsync per the DUR-5 task notes, making the audit trail a superset of committed history), crash-injection behaviour (what a crash between the audit fsync and the commit fsync leaves on disk), and what CanonicalDigest is signing.CanonicalDigest binds per PROTOCOL.md section 8.6 (not store.ContentHash -- the two are both 64 lowercase hex chars and validate() cannot tell them apart, which is exactly why this needs to be written down rather than left to source-reading). Cross-reference the broadcast-audit-fails-closed scope note from the DUR-5 commit (broadcast currently SKIPs pending SIGN-3's canonical-audience answer) so this isn't read as an oversight.
   
-    WHERE DOES THE MAC KEY LIVE?
-  
-    A key stored beside the WAL in the data directory defends against the attack that motivated this
-    change -- an ordinary REMOTE CLIENT crafting a payload -- but it does NOT defend against an
-    attacker who already has DATA-DIRECTORY WRITE ACCESS, because that attacker can read the key and
-    recompute any MAC at will. The candidate answers (key file in the data dir at 0600; key outside the
-    data dir; key from an env var / operator-supplied at start; OS keyring; derived from a passphrase)
-    trade off differently on unattended restart, containerised deployment, key rotation and backup, and
-    the choice determines whether a lost key means a bus that cannot read its own log. THIS IS A
-    PRODUCT DECISION, NOT AN IMPLEMENTATION DETAIL. Do not start coding until it is answered and
-    recorded in DECISIONS.md. Also settle, in the same decision: what happens on a MISSING or WRONG key
-    at startup -- under the always-restart policy that is arguably a NON-DAMAGE error (the media is
-    fine, the operator misconfigured it) and should stay FATAL rather than discard the entire log.
-  
-  WHY THIS CHANGE, in one line the implementer must not lose: CRC32C is an error-detecting code, not an
-  integrity primitive -- it is UNKEYED and GF(2)-LINEAR, and security DEMONSTRATED end-to-end (DUR-10
-  kind=response, 2026-08-02) that an ordinary remote client, submitting nothing but printable-ASCII
-  JSON in its own message body, could solve for bytes that make a TORN prefix of its own record satisfy
-  recovery's completeness "proof". A keyed MAC eliminates that BY CONSTRUCTION: a client cannot compute
-  a MAC over a key it does not hold. User decision, 2026-08-02, verbatim: "don't use crc! use a
-  hash/hmac/more modern approach. We're not optimising for efficiency, we're optimising for integrity
-  and security".
-  
-  CONSTRUCTION -- INVARIANT 9 IS ABSOLUTE HERE. Use the Go stdlib's high-level API: `crypto/hmac` +
-  `crypto/sha256`, via hmac.New / hmac.Equal. NEVER hand-roll, "adapt" or assemble a MAC out of
-  primitives; never compare MACs with bytes.Equal or ==. This outranks invariant 8's stdlib-first bias
-  and any argument from performance -- broken crypto fails SILENTLY, so "our tests pass" is not
-  evidence. No third-party dependency is needed or wanted.
-  
-  SCOPE.
-  1. Replace the CRC32C field in the frame with an HMAC-SHA256 tag over the header-plus-payload bytes
-     the CRC covered today (define the covered range EXACTLY, in PROTOCOL.md, and make it unambiguous:
-     the length field MUST be inside the covered range or the length-inflation class of attack survives
-     the change).
-  2. Bump FormatVersion 1 -> 2 in internal/wal/format.go, using the RESERVED value above.
-  3. A RECOVERY PATH FOR LOGS ALREADY WRITTEN IN THE CRC32C FORMAT IS MANDATORY. Format changes are
-     ordered: a version-1 file must be recognised by its header and either read with the old verifier
-     or converted, with the behaviour stated explicitly and tested. Today `verifyFileHeader`
-     (internal/wal/format.go:328) rejects any version != FormatVersion outright, so a naive bump turns
-     every existing bus into one that will not read its own log. Decide and document the upgrade story
-     (read-v1-verify-with-CRC then write v2 going forward, or an explicit one-shot conversion) and
-     whether a v2 reader may ever DOWNGRADE-write v1 (it should not).
-  4. DUR-4's TORN-TAIL HEURISTIC SHOULD GET **SIMPLER**, NOT MORE COMPLEX. Much of inspectTail /
-     lengthOnlyDamage / truncatableTail exists to compensate for a weak, forgeable checksum. Under a
-     strong MAC, "this frame verifies" becomes trustworthy, so the plausible-boundary search and the
-     completeness "proof" should shrink or disappear. Actively look for code to DELETE here; a change
-     that only adds is a sign the opportunity was missed. Coordinate with DUR-11, which is rewriting
-     the same functions for the always-restart policy -- DUR-11 lands FIRST and this task must not
-     collide with it in internal/wal/recover.go.
-  5. Key handling per the decision above, plus rotation: at minimum say what happens when the key
-     changes, even if the answer is "not supported yet, and here is the error you get".
-  6. CONTRACTS.md + PROTOCOL.md updated with the new frame layout, the covered range, the version-2
-     header and the v1 compatibility statement.
-  
-  TESTS REQUIRED. A negative test that a frame whose payload was altered fails verification; a test
-  that a v1 (CRC32C) log is still readable per the chosen compatibility story; a test that a WRONG key
-  does not silently pass; and the crash-injection sweep kept green against the new format. Constant-time
-  comparison must be asserted by CODE REVIEW (hmac.Equal), not by a timing test.
-  
-  PROOF. `go test -race -run 'TestWALFrameMACRejectsAlteredPayload|TestWALReadsFormatVersion1Log' ./internal/wal && go test -race ./internal/wal`
-  VACUOUS TODAY BY CONSTRUCTION -- neither test exists; they are this task's to write, and they are
-  named for the two things that must not be got wrong (forgery rejection, and not bricking existing
-  logs). MUST NOT BE COMPLETED ON A VACUOUS VERDICT: scripts/proof-check.sh must report PASS with
-  tests_run > 0, and its verdict must be quoted in test_summary.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
+  SCOPE: CONTRACTS-ONDISK.md only.
+  _Proof: grep -n "bus.audit" CONTRACTS-ONDISK.md_
 - [ ] None · Shutdown-timeout path can release the data-dir lock while handlers are still running — durability, P2
   In cmd/agent-bus/main.go waitAndShutdown, when srv.Shutdown exceeds shutdownGrace the code calls srv.Close(), which does NOT wait for in-flight handlers to return. run()'s deferred lock.Release() then drops the data-directory flock while a handler may still be running. Harmless TODAY because no handler writes to the data dir -- but it becomes a real hole the moment DUR-9 puts WAL writes behind those handlers: a second server could acquire the lock while the first is still mid-write. Fix direction: hold the lock until every handler has genuinely returned, or make the data-dir writers refuse to run once shutdown has passed the grace period. Also fold in the DUR-8 security pass's remaining P2: internal/dirlock.Acquire could fstat the opened lock file and require S_ISREG, closing the FIFO/directory-at-the-lock-path cases (both already fail closed today -- FIFO via EINVAL on Truncate, directory via EISDIR -- but the flock is taken on the FIFO first, and O_RDWR-on-a-FIFO-not-blocking is Linux-specific).
   
   Filed by the DUR-8 feature-runner. Related to DUR-9, which will edit the same sequence in run().
   _Proof: TBD by whoever picks this up -- a crash/shutdown-injection test asserting the lock is held until all in-flight handlers return, plus a dirlock test asserting Acquire refuses a non-regular file at the lock path_
-- [x] DUR-6 · DUR-6: Crash-injection test suite for the write path — durability, P0
-  A test harness that writes, then simulates a crash (kill / truncate / corrupt the file at a chosen byte offset) at each stage of the two-phase write path -- before prepare fsync, between prepare and commit, mid-commit-write, after commit fsync -- and asserts recovery always yields a valid PREFIX of the accepted history: nothing acknowledged is ever lost, nothing unacknowledged is ever visible. The load-bearing evidence for invariants 4/5.
-  _Proof: go test -race -run 'TestCrashInjection|TestWALCrash|TestWALReplayCrash' ./internal/wal_
-- [x] DUR-3 · DUR-3: Replay/recovery on start — durability, P0
-  On startup, replay the WAL from the beginning, reconstructing in-memory state (roster, sequence counters, message store) by applying only records that reached commit -- any prepare without a matching commit is discarded. Uncommitted prepares must never be visible after a restart.
-  _Proof: test $(go test -race -run TestWALReplay -v ./internal/wal 2>&1 | grep -c RUN) -gt 0 && go test -race -run TestWALReplay ./internal/wal_
+- [ ] None · Close the two coverage gaps the security gates declared UNVERIFIED on the seq-floor/data-dir work: the exhaustive describeLogRepair fail-open analysis and the high-floor blast-radius sweep — test, P2
+  HONEST COVERAGE RECORD, filed so these are not mistaken for verified-clean. Both security gates on be447589-6583-4d5c-a9d4-ec9d9fef0f1c dispatched sub-agents that DID NOT RETURN before the gates were asked to wrap up, and both said so explicitly rather than implying full coverage. This task carries what they could not finish.
+  
+  UNVERIFIED ITEM 1 -- exhaustive `describeLogRepair` fail-open analysis. cmd/agent-bus/logrepair.go now carries five arms (Quarantined, Truncated, Rewritten, LostUnidentified, and the narrow `rec.Records == 0 && rec.NextIndex > 1` emptied-log arm). Two arms have ALREADY been added and removed for permanently bricking a healthy directory (the NextIndex accounting arm and the MissingRecords arm -- both removals are documented in place at logrepair.go:106-135 and :160-175). No exhaustive analysis exists of which of the SURVIVING arms are one-shot versus durable across restart, so the per-shape claim ("TRUNCATED->ONE-SHOT, INTERIOR->ONE-SHOT, QUARANTINE->every start") rests on targeted tests rather than a sweep.
+  
+  UNVERIFIED ITEM 2 -- full high-floor blast-radius sweep. What a floor near `maxPlausibleSeqFloor` does to every downstream consumer was not swept. Overlaps the JSON safe-integer task; do that one first if both are picked up.
+  
+  ITEM 3 -- RECORDED, AND IT IS NOW STALE. One gate flagged, in its own words, as "UNVERIFIED BY ME, NOT SUSPECTED BROKEN" (preserve that distinction -- it is not a suspicion of a defect): whether `MissingRecords` in `highestIndexSeen` (cited as cmd/agent-bus/logrepair.go:81-86) can ever extend PAST the last surviving record, since if it can, that addition inflates `highestIndexSeen` and masks a real loss -- the one fail-open that would matter.
+  
+      spec-keeper CHECKED THIS AT HEAD 16da89f AND IT NO LONGER APPLIES AS WRITTEN: `highestIndexSeen` HAS BEEN REMOVED. `grep -n 'highestIndexSeen|MissingRecords' cmd/agent-bus/logrepair.go` returns only COMMENTS -- :106 ("MissingRecords IS NOT COUNTED, and this is the second arm removed for the same reason on the same day") and :162 (documenting that the highestIndexSeen arm was removed 2026-08-08 because it bricked healthy directories). Neither symbol is referenced in any live code path under cmd/agent-bus. So the specific fail-open the gate could not rule out is not reachable, because the code that would have contained it is gone.
+  
+      THE UNDERLYING QUESTION SURVIVES THE REMOVAL AND IS ALREADY TRACKED: distinguishing "hole because records were lost" from "hole because a reservation was burned" needs the highest index a record actually CONSUMED, which is exactly task 9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2 ("Expose on wal.Recovered the highest index a record actually CONSUMED"). logrepair.go:126-135 says so in the code. Do NOT re-file it here.
+  
+  PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=VACUOUS, exit 4, tests_run=0, empty_pkgs=2 ("the -run pattern matched nothing, so this command proves nothing"). This proof is VACUOUS TODAY, NOT RED, because neither named test exists -- it names the evidence that must be created. Per CLAUDE.md this task MUST NOT be completed while the proof is still VACUOUS.
+  _Proof: go test -race -count=1 -run 'TestDescribeLogRepairArmsSurviveARestartAsDocumented|TestHighSeqFloorBlastRadius' ./cmd/agent-bus ./internal/hub_
 - [ ] DUR-12-FU-V1LAUNDER · DUR-12-FU-V1LAUNDER: v1-format WAL laundering re-signs forged CRC32C records with the real MAC key — security, P1
   P1, security, HIGH (from DUR-12 security gate, VERIFIED BY RUNNING IT). internal/wal/log.go:256-273 branches to the version 1 path on detectFormat alone, and internal/wal/mackey.go:372-374 returns a keyless v1 codec without consulting the key file. So an attacker who can drop a CRC32C-forged version 1 file at bus.wal gets its records re-framed and SIGNED WITH THE REAL MAC KEY -- forging without ever touching wal-mac.key. Capability required is directory w+x (replace a file), which does NOT require reading the 0600 key. It grants no new class of attacker (directory write already allows planting a key+log pair wholesale) but it destroys FORENSICS: forged records become indistinguishable from genuine ones even to someone holding the original key. THE OBVIOUS FIX IS UNSAFE AS STATED AND THE TASK MUST SAY SO: "refuse the v1 path when a key file already exists" strands a legitimate crash-mid-upgrade redo, which leaves exactly that state (key created, log still v1, rename not yet done). A correct fix must distinguish those two, e.g. by staging the key file and only moving it into place after the upgrade rename. Directly relevant to the in-flight Dockerfile/docker-compose work: a bind-mounted volume with loose permissions is the enabler, and MkdirAll does not tighten an existing directory. Reference: PROTOCOL.md section 7 "Known residual".
 - [~] None · Fix WAL recovery reissuing a discarded tail record index (invariant 1 violation, NOT a narrowing) -- BLOCKED on DUR-12 — durability, P0, in progress
@@ -2207,179 +1912,348 @@
   cmd/agent-bus/main.go:236-245 (the comment on the wal.Open error branch) still says the FATAL path is "deliberately so", "Never degrade to that", and describes "the one damage case that is survivable -- a provably torn tail" as if RepairTail were the only sanctioned recovery. That branch is now UNREACHABLE for the whole quarantine class: DECISIONS.md 2026-08-02 ("Availability over retention") sanctions discarding a checksum-failing LAST record via quarantine so the server always restarts, rather than refusing to start. The comment was written against, and still argues for, the OLD refuse-to-start policy that decision reverted. This is the exact stale-doc pattern that let TestServerOpensWALOnStartRefusesACorruptLog outlive the decision that killed it (see the companion follow-up on that test name). Fix: rewrite the comment to describe what actually remains fatal here (e.g. a torn tail RepairTail itself cannot resolve, or an I/O error unrelated to corruption) now that quarantine handles the checksum-failing-last-record case, and cross-reference the 2026-08-02 decision instead of contradicting it.
   _Proof: grep -q "2026-08-02" cmd/agent-bus/main.go && ! grep -n "Never degrade to that" cmd/agent-bus/main.go_
 
+### EPIC HANDOVER — HANDOVER: make agent-bus ready to hand to a human
+
+- [ ] HANDOVER-CHECK · HANDOVER-CHECK: one command that tells you the health of this repo, plus its recorded output at a named sha — tooling, P1
+  Audience: maintainer (an operator inherits it later via the runbook).
+  
+  Priority P1 justification: today there is no single command, no CI, and the only "green" signal we have (`go test -race ./...` = 16 packages ok) was captured while five other agents ran `go test` against the same checkout -- recon saw three packages FAIL in the same window and could not confirm it. Every downstream HANDOVER doc that says "the suite passes" would be repeating an unverified claim. This is a lie-prevention task, hence P1, and it is deliberately below the open P0s (INVITE-GATE, MTLS-VERIFY-FU-DOCSCHEME, DOCS-2, MTLS-MIGRATE 59883178, e120153b).
+  
+  Definition of done:
+  - /mnt/sdb4/mike/mike/source/agent-bus/scripts/check.sh exists: go build ./..., go vet ./..., the CORRECT gofmt form (`test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"` -- not bare gofmt, not exit-status-judged), go test -race ./..., and it exits non-zero on any failure. It prints a per-package table and a TOTAL SKIP COUNT (top-level *and* nested), because a suite that skips 42 results and reports ok is the failure mode this repo actually has.
+  - It runs against a throwaway data dir under /tmp, never the tracked data/.
+  - It is executed ONCE with the repo quiet -- no other agent running go test against this checkout -- at a named commit, and that transcript (sha, per-package result, skip count, wall time) is recorded in AGENT_LOG.md.
+  
+  CAVEAT (load-bearing): 69eb6f56 (proof-check recursion) means check.sh must NOT itself invoke scripts/proof-check.sh.
+  
+  Depends on: the separately-filed proof-check top-level-counting P1 (public_id cea09b96-72db-40f1-84b4-c2e227eae1cf) -- recorded as a real blocks relation (cea09b96 blocks this task) per the epic critical path, even though HANDOVER-CHECK proof_cmd itself does not literally invoke that fix; it is the epic-wide evidentiary prerequisite (see planner disagreement (d): it outranks everything else in this epic). If it lands first, check.sh should call the fixed counter rather than reimplement it.
+  
+  Parallel-safe: NO. It requires an otherwise-idle checkout. Schedule it alone.
+  
+  Model: sonnet for the script, but the isolation run and its interpretation want opus judgment if the anomaly reproduces. Suggest sonnet with an explicit instruction to escalate on any FAIL.
+  
+  Size: half a day.
+  
+  RED verification observed (2026-08-08): scripts/check.sh does not exist at HEAD -- trivially RED, file absent.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/check.sh'_
+- [ ] HANDOVER-README · HANDOVER-README: README stops telling a human things that are false — docs, P1
+  Audience: both.
+  
+  Priority P1 justification: the "What works today" block hands a human two plaintext curl -s localhost:8080/healthz commands against a TLS-only listener; they return a bare 400 Bad Request from net/http. The Requirements section states Go 1.19.4 as THE requirement while CLAUDE.md says the container pins the toolchain and the E2E plan needs 1.20+. And the Quickstart's <64-hex-from-invite> placeholder has no instruction anywhere for obtaining it, while `agent-busctl agents` is shown with no --as.
+  
+  SCOPE BOUNDARY -- this is the residue that existing tasks do NOT cover. 5f8e0cba owns "bus http://" in README/AGENT_PROTOCOL, "listener is still plaintext" in PROTOCOL.md, and "until mutual TLS lands" in README. cb4fd330 owns the AGENT_PROTOCOL half. DISCOVERY-DOC-FU-README (be3c84f3) owns the stale three-field /v1/info body. NONE OF THEM TOUCH the curl block, the Go-version claim, or the unrunnable Quickstart. This task owns exactly those three and nothing else.
+  
+  Definition of done: the plaintext curl demonstrations are replaced with something a human can actually run (or removed and pointed at the runbook); the Go-version paragraph states what is true at HEAD and defers the pin to DEPLOY-4; the Quickstart either works end-to-end or is replaced by a pointer to RUNBOOK.md; links to INVARIANTS.md and KNOWN_ISSUES.md added.
+  
+  BLOCKED (hard, same file, both ahead of this in priority): 5f8e0cba and cb4fd330 must land first.
+  README.md IS ALSO CONTENDED BY be3c84f3 and f0ef1ed9 (stale CONTRACTS pointer at README.md:88). ALL FOUR must be serialised, with HANDOVER-README LAST.
+  
+  Depends on: HANDOVER-MAP-DOC and HANDOVER-REGISTER (the links must resolve); 5f8e0cba and cb4fd330 (hard, same-file, must land first).
+  
+  Parallel-safe: NO -- README.md is contended by 5f8e0cba, be3c84f3, f0ef1ed9. Serialise all four; this one last.
+  
+  Model: sonnet (writing-heavy, scope is fixed by the task).
+  
+  Size: two hours.
+  
+  RED verification observed (2026-08-08): confirmed via a REAL check (not file-absence), not incidental: the proof_cmd shell fragment (negated grep for the plaintext-curl string, plus greps for the two new doc links) currently exits 1 -- README.md:96 contains the exact plaintext-curl string.
+  _Proof: bash scripts/proof-check.sh '! grep -n "curl -s localhost:8080/healthz" README.md && grep -n "KNOWN_ISSUES.md" README.md && grep -n "INVARIANTS.md" README.md'_
+- [ ] HANDOVER-CONTRIBUTING · HANDOVER-CONTRIBUTING: CONTRIBUTING.md -- how this repo is actually developed, and how to work on it as a human — docs, P2
+  Audience: maintainer. Priority P2 (structural).
+  
+  Justification: the development model here is unusual enough that a competent Go maintainer would violate it on day one. They need to know: task state is a remote Spec Server, not a file; SPEC.md is generated and hand-editing it is destructive; proof-check.sh exists because `go test -run <nonexistent>` exits 0; and the pathspec-commit trap that has produced four mis-titled commits and one un-compilable main.
+  
+  Definition of done: covers (a) the agent chain and which parts are ceremony vs load-bearing; (b) Spec Server access for a human: scripts/spec-cloud.sh, that credentials live outside the repo at a path that must be handed over separately, how to rotate them, the local docker compose fallback, and what to do if they are lost entirely; (c) the commit rules -- explicit pathspec, and that a pathspec commit takes the WORKTREE not the index; (d) "I just want to edit some Go code" -- the minimum honest path, which is scripts/check.sh plus a real proof command.
+  
+  RISK / OPEN QUESTION (record, needs a decision before this task starts): it is NOT KNOWN whether scripts/spec-cloud.sh credentials (which live outside the repo at /mnt/sdc/mike/claude-scratch/spec-cloud-creds.env) can transfer to a new maintainer at all. If they cannot, this task grows from "document the existing access path" into "stand up your own Spec Server and import the export", which is a materially bigger task. This must be resolved with the user before implementation starts -- do not assume either answer.
+  
+  Depends on: HANDOVER-CHECK (must reference a script that exists). Parallel-safe: YES.
+  
+  Model: sonnet. Size: half a day.
+  
+  RED verification observed (2026-08-08): CONTRIBUTING.md does not exist -- trivially RED, file absent.
+  _Proof: bash scripts/proof-check.sh 'grep -n "scripts/spec-cloud.sh" CONTRIBUTING.md && grep -n "SPEC.md is generated" CONTRIBUTING.md && grep -n "takes the WORKTREE" CONTRIBUTING.md && grep -n "scripts/check.sh" CONTRIBUTING.md'_
+- [ ] HANDOVER-BACKLOG-RECONCILE · HANDOVER-BACKLOG-RECONCILE: the inherited backlog stops lying about what is in flight — process, P2
+  Audience: maintainer. Priority P2 -- FILED BUT DELIBERATELY OFF THE HANDOVER CRITICAL PATH (planner's explicit recommendation; see also disagreement (f) in the planner's notes).
+  
+  Justification: 15 tasks sit in_progress, several already shipped. A recipient cannot tell what is being worked on. But the fix is large and the instrument (proof-check.sh) is itself broken in ways that would produce confidently wrong reconciliation.
+  
+  WHY THIS IS OFF THE CRITICAL PATH (record explicitly, per planner + user instruction):
+  - It is blocked on two tooling fixes (521d68b5, a9a433dd) -- reconciling against a broken evidence instrument produces confidently wrong results.
+  - It MUTATES SHARED TASK STATE that P0 work depends on.
+  - It COMPETES FOR SPEC-KEEPER, the single agent permitted to mutate task state.
+  - A SEPARATE AUDIT of the 15 in_progress tasks is running right now (as of filing, 2026-08-08) and covers the cheap half of this work -- do not duplicate it.
+  
+  SPLIT POINT if attempted (task is over a day -- FLAG): split by epic (DUR/MTLS/IDEM/other).
+  
+  Definition of done: each of the 15 in_progress tasks is either completed with a real commit_sha and a quoted proof-check.sh verdict, or reset to todo with a status_note stating precisely what remains; SPEC.md mirror refreshed. spec-keeper owns this -- it is the only agent permitted to mutate task state.
+  
+  Depends on: 521d68b5 (proof-check cannot distinguish executed from asserted) and a9a433dd (conjunction-masking vacuous proofs). Related but distinct: fc8cd234 backfills MISSING proof_cmds; this reconciles STATUS. A third concern -- that 3 of 4 sampled stored proof_cmds were WRONG -- is a separate sweep and should be its own task filed after 521d68b5 lands, not smuggled in here.
+  
+  Parallel-safe: NO (mutates shared task state).
+  
+  Model: sonnet, driven by spec-keeper. Size: over a day -- FLAG (see split point above).
+  
+  RED verification observed (2026-08-08): confirmed via a REAL check (not file-absence) -- ran the exact proof_cmd's python check against the live Spec Server export: currently 15 tasks have status=in_progress, which is > 3, so the proof correctly exits 1 (RED) today.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/export?format=json" | python3 -c "import json,sys; t=json.load(sys.stdin)[\"tasks\"]; n=[x for x in t if x[\"status\"]==\"in_progress\"]; print(len(n)); sys.exit(0 if len(n)<=3 else 1)"'_
+- [ ] HANDOVER-RUNBOOK-SMOKE · HANDOVER-RUNBOOK-SMOKE: an executable cold-start -- certs, invite, two agents, one message — tooling, P1
+  Audience: operator (maintainer benefits).
+  
+  Priority P1 justification: the README Quickstart presents a recipe that cannot be followed -- that is a lie, not merely a gap. Nobody can start a bus without tribal knowledge about data directories, self-signed certificate generation, fingerprints and identity directories.
+  
+  Definition of done: scripts/handover-smoke.sh runs from a clean state against a throwaway /tmp data dir: starts a bus, extracts the certificate fingerprint from the WARN line the server emits, mints an invite via cmd/agent-bus/invite.go, enrols two agents over pinned TLS, sends a directed message, receives it on the watcher, and shuts down cleanly -- exiting non-zero at any step. It must not touch the tracked data/.
+  
+  SPLIT POINT (likely over a day -- FLAG). If attempted, split as:
+    1. Cert generation + fingerprint extraction + single-agent enrol.
+    2. Second agent + send/watch/teardown.
+  
+  Depends on: DEPLOY-REDEPLOY (f801d128, currently in_progress) -- it already proves "two agents exchange a message on a fresh Compose bus". Do NOT re-derive that; consume it. If it has landed, this task encodes its transcript; if not, this task is blocked on it.
+  
+  Parallel-safe: NO -- needs its own bus and data dir, and must not race other bus-running agents.
+  
+  Model: opus (the certificate/fingerprint/invite sequencing is where this will go wrong).
+  
+  Size: likely over a day -- FLAG (see split point above).
+  
+  RED verification observed (2026-08-08): scripts/handover-smoke.sh does not exist -- trivially RED, file absent.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/handover-smoke.sh'_
+- [ ] HANDOVER-WIRED · HANDOVER-WIRED: assert and document which packages are present but not wired — test, P1
+  Audience: maintainer.
+  
+  Priority P1 justification: this is the repo's most expensive lie and it is told by the FILE TREE, not by prose. internal/relay is a complete federation plane with zero production importers; internal/invite is a 1183-line crash-tested store whose Redeem has zero non-test callers; verifySignedMessage has zero production callers. A maintainer reading `go list ./...` reasonably concludes all sixteen packages are live. None of the existing tasks state the unwired set as a set.
+  
+  Definition of done:
+  - A guard test -- following the existing repo convention of tests that assert a GAP (TestReadDoesNotYetVerifyReceivedMessages, cmd/agent-bus/tlslisten_test.go:823 pinning NoClientCert) -- that enumerates the currently-unwired surfaces and FAILS when one of them gains a production caller. It therefore goes RED the day INVITE-GATE or the relay wiring lands, forcing the doc to be updated instead of rotting.
+  - A short "Present but not wired" section listing each entry with its owning Spec task id, consumed by HANDOVER-MAP-DOC and HANDOVER-REGISTER.
+  
+  Depends on: none in this epic. Parallel-safe: YES (new test files only).
+  
+  Model: opus -- deciding what counts as "wired" and where the guard lives is a judgment call, and a sloppy guard is worse than none.
+  
+  Size: half a day.
+  
+  RED verification observed (2026-08-08): the named test TestUnwiredSurfacesHaveNoProductionCaller does not exist yet. Running the proof now through proof-check.sh gives verdict=VACUOUS (not a bare RED) -- go test -run on a non-existent test name prints "ok ... [no tests to run]" and exits 0, but proof-check.sh's vacuous-proof guard (84b76d5e) correctly catches it: `proof-check: verdict=VACUOUS class=test exit=0 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=3`. This is the expected/correct pre-task state -- note it precisely as VACUOUS, not RED, when reporting.
+  _Proof: bash scripts/proof-check.sh 'go test -race -run TestUnwiredSurfacesHaveNoProductionCaller ./internal/relay ./internal/invite ./client'_
+- [ ] HANDOVER-REGISTER · HANDOVER-REGISTER: KNOWN_ISSUES.md, the known-defect register — docs, P1
+  Audience: both -- maintainer for the causes, operator for the blast radius.
+  
+  Priority P1 justification: there is no known-defect register at all, and the defects are only visible as Spec Server tasks behind cloud credentials that live outside the repo. A human who clones this cannot discover that a boundary-exact WAL truncation reissues sequence numbers, or that the roster-brick DoS is unmitigated because INVITE-GATE never landed. Handing over undisclosed known data-loss and availability defects is the most serious form of the repo lying.
+  
+  Definition of done: CURATED, HARD-CAPPED AT 20 ENTRIES, symptom-first. Each entry: what a user or operator would OBSERVE, blast radius, class (data-loss / security / availability / functionality), current mitigation or workaround, owning Spec task public_id. Must include at minimum:
+  - Seq-floor migration guard blind at record-boundary-exact truncation (22/22 boundaries measured, 13 reissued end-to-end); real fix blocked on 9fd58deb. Cross-reference 2a38cdec, which owns the doc correction -- do not duplicate its text.
+  - Roster-brick DoS, gated on INVITE-GATE.
+  - Enrolment is not invite-gated (InviteRequired: false); /v1/enroll is on the unauthenticated allow-list.
+  - Server presents no client-cert requirement (NoClientCert); CertBindings declared but never written.
+  - Enrol idempotency is in-memory only -- a retry straddling a restart mints a second agent id. /v1/session/begin and /v1/session/complete take no idempotency key.
+  - Recipient signature verification is absent (three independent causes).
+  - POST /v1/broadcast and agent-busctl broadcast return 501.
+  - The relay/federation plane is unwired.
+  - Upgrade discards message history (record v1 -> v2, no migration, breaks both ways).
+  - Idempotency-Key header vs JSON body-field divergence (internal/idem/key.go:8-12 vs every live route; idem.FromRequest is dead code).
+  - The backlog's own reliability -- see HANDOVER-BACKLOG-RECONCILE (filed, off critical path).
+  
+  Depends on: HANDOVER-WIRED (HARD), HANDOVER-MAP-DOC (SOFT -- the map's NOT-ENFORCED rows are the register's security entries).
+  
+  Parallel-safe: YES (new file).
+  
+  Model: OPUS -- ranking blast radius and deciding what a symptom looks like from outside is judgment.
+  
+  Size: three-quarters of a day.
+  
+  RED verification observed (2026-08-08): KNOWN_ISSUES.md does not exist -- trivially RED, file absent. The -le 20 clause makes the curation constraint mechanical rather than aspirational; confirmed the pinned strings ("record-boundary-exact truncation", "9fd58deb") do not occur in any tracked non-SPEC.md file, so scoping to KNOWN_ISSUES.md needs no tightening.
+  _Proof: bash scripts/proof-check.sh 'test -s KNOWN_ISSUES.md && test "$(grep -c "^### " KNOWN_ISSUES.md)" -le 20 && grep -n "record-boundary-exact truncation" KNOWN_ISSUES.md && grep -n "9fd58deb" KNOWN_ISSUES.md && grep -n "INVITE-GATE" KNOWN_ISSUES.md'_
+- [ ] HANDOVER-DECISIONS-INDEX · HANDOVER-DECISIONS-INDEX: generated table of contents for DECISIONS.md — tooling, P2
+  Audience: maintainer. Priority P2 (structural).
+  
+  Justification: 4,338 lines of append-only sections from a dozen agents; the single most valuable maintainer artefact and currently unnavigable. NO HISTORY REWRITE -- several entries are dated corrections of earlier entries, and that sequence is itself information.
+  
+  Definition of done: scripts/gen-decisions-index.sh emits DECISIONS-INDEX.md from DECISIONS.md's `^## ` headings (date, topic, line number). Nothing in DECISIONS.md changes.
+  
+  Depends on: none. Parallel-safe: YES (reads DECISIONS.md, writes only new files -- safe even while other agents append to it, though the index must be regenerated after they do).
+  
+  Model: sonnet. Size: two hours.
+  
+  RED verification observed (2026-08-08): scripts/gen-decisions-index.sh and DECISIONS-INDEX.md do not exist -- trivially RED, files absent.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/gen-decisions-index.sh > /tmp/di.md && diff -q /tmp/di.md DECISIONS-INDEX.md'_
+- [ ] HANDOVER-FRONTDOOR · HANDOVER-FRONTDOOR: CLAUDE.md tells a human where to start instead of dropping them into an agent protocol — docs, P2
+  Audience: maintainer.
+  
+  Priority P2 justification: README says of CLAUDE.md "read this first", and CLAUDE.md is 461 lines of agent operating procedure. That is a navigational defect, not a false statement -- hence P2, not P1.
+  
+  Definition of done: a short block at the top of CLAUDE.md: "If you are a human, start here" -> README.md -> RUNBOOK.md -> INVARIANTS.md -> KNOWN_ISSUES.md -> CONTRIBUTING.md, with one line each on what it answers. No other change to CLAUDE.md.
+  
+  Depends on: all five linked docs existing. Parallel-safe: YES (nothing else in this epic touches CLAUDE.md) -- but it is the epic's natural last task.
+  
+  Model: sonnet. Size: 30 minutes.
+  
+  RED verification observed (2026-08-08): confirmed via a REAL check (not file-absence): `head -20 CLAUDE.md | grep -n "If you are a human"` and the KNOWN_ISSUES.md companion grep both currently produce no output (exit 1) -- the head -20 bound is what stops it matching incidentally anywhere in 461 lines.
+  _Proof: bash scripts/proof-check.sh 'head -20 CLAUDE.md | grep -n "If you are a human" && head -20 CLAUDE.md | grep -n "KNOWN_ISSUES.md"'_
+- [ ] HANDOVER-RUNBOOK-DOC · HANDOVER-RUNBOOK-DOC: RUNBOOK.md narrates exactly what the smoke script does — docs, P1
+  Audience: operator.
+  
+  Priority P1 (same justification as HANDOVER-RUNBOOK-SMOKE; this is the half a human reads).
+  
+  Definition of done: every command in RUNBOOK.md is copied from the smoke script's actual invocations, not written from memory. Includes a PROMINENT SCOPE STATEMENT: loopback evaluation only -- this bus must not be placed on a real interface until INVITE-GATE and MTLS-CLIENTAUTH land (with the KNOWN_ISSUES.md entries linked). Includes teardown and the `docker compose down -v` data-destruction warning.
+  
+  OPERATOR SCOPE LIMITATION (user decision, must appear here and in RUNBOOK.md itself): the operator half of the HANDOVER epic is scoped to LOOPBACK EVALUATION ONLY. A genuine operator handover is a separate future epic, gated on INVITE-GATE + MTLS-CLIENTAUTH.
+  
+  Depends on: HANDOVER-RUNBOOK-SMOKE, HANDOVER-REGISTER. Parallel-safe: YES (new file) once the smoke script exists.
+  
+  Model: sonnet. Size: three hours.
+  
+  RED verification observed (2026-08-08): RUNBOOK.md does not exist and scripts/handover-smoke.sh does not exist -- trivially RED, both files absent (compounding).
+  _Proof: bash scripts/proof-check.sh 'bash scripts/handover-smoke.sh && grep -n "loopback evaluation only" RUNBOOK.md && grep -n -- "--bus-fingerprint" RUNBOOK.md && grep -n "INVITE-GATE" RUNBOOK.md'_
+- [ ] HANDOVER-MAP-DOC · HANDOVER-MAP-DOC: INVARIANTS.md -- each of the 11 invariants, its real status at HEAD, and the evidence — docs, P1
+  Audience: maintainer.
+  
+  Priority P1 justification: CLAUDE.md's design contract reads as a description of the system. It is a description of the INTENT. Invariant 3 (invite-only) is NOT ENFORCED -- internal/httpapi/discovery.go:263 advertises InviteRequired: false. Invariant 11 (mutual TLS) is HALF enforced -- cmd/agent-bus/tlslisten.go:109 sets ClientAuth: tls.NoClientCert and a test pins it there. Invariant 10 is partial (enrol idempotency is an in-memory map; session begin/complete take no key at all). A maintainer who trusts CLAUDE.md will build on guarantees that do not exist. That is the epic's core problem in its purest form.
+  
+  Definition of done: one row per invariant (and per named sub-clause where they diverge, e.g. 3a enrolment vs 3b session signing), each carrying: status in {ENFORCED, PARTIAL, NOT ENFORCED}, the NAMED TEST that proves the status, a file:line anchor, and for anything not ENFORCED the owning Spec task public_id. Header stamped with the commit sha it was measured at. Must record the two nuances recon surfaced, because losing them re-creates false alarms: the WAL index floor triggers on !sealedClean() (not on damage -- it is NOT blind), and cmd/agent-bus/seqfloorrestart_test.go:198-217 only t.Logf's a reissue and labels itself a KNOWN GAP.
+  
+  SPLIT POINT (task is at the one-day size limit -- FLAG). If the implementer runs long, split sequentially (same file, so the two passes are NOT parallel):
+    1. Invariants 1, 2, 4, 5, 6 (id authority + durability plane).
+    2. Invariants 3, 7, 8, 9, 10, 11 (auth, client, crypto, idempotency, transport).
+  
+  Depends on: HANDOVER-WIRED (HARD -- the NOT-ENFORCED rows cite its enumeration), HANDOVER-CHECK (SOFT -- supplies the sha and the honest suite status).
+  
+  Model: OPUS. This is a correctness judgment across auth, durability and id authority; a wrong row here poisons everything downstream.
+  
+  Size: at the one-day limit -- FLAG (see split point above).
+  
+  UPDATED 2026-08-08 (spec-keeper, filing the CONTEXT epic): the file this task targets is NO LONGER
+  absent. A separate, ungated change (reviewed 2026-08-08, CHANGES-REQUESTED on that change but not on
+  this task) split CLAUDE.md's invariants section out into INVARIANTS.md (a single 220-line file, rule
+  + reasoning together), then added the 11 `### Invariant N -- <title>` headings this task's proof
+  requires. INVARIANTS.md is ONE file, not a new one this task creates from scratch: it already carries
+  the CONTRACT + REASONING; this task's job is to add per-invariant STATUS/EVIDENCE blocks UNDER the
+  existing headings, not to create a new document.
+  
+  RE-OBSERVED PROOF STATE (2026-08-08, replaces the "file absent" RED evidence above, which is now
+  STALE and must not be quoted as current): `test -s INVARIANTS.md` PASSES (18,577 B). `grep -c
+  "^### Invariant " INVARIANTS.md` now returns 11, so `test 11 -le "$(grep -c ...)"` PASSES -- the
+  heading half of the proof is satisfied and was previously broken (measured at 0 headings). The
+  evidence half is STILL RED, genuinely: `grep -n "NOT ENFORCED" INVARIANTS.md`, `grep -n
+  "tls.NoClientCert" INVARIANTS.md` and `grep -n "InviteRequired: false" INVARIANTS.md` all currently
+  return NO MATCHES -- the per-invariant status rows this task exists to write have not been added yet.
+  So the task's real remaining work is exactly its original definition-of-done (the STATUS/EVIDENCE
+  rows), not file creation.
+  
+  "Parallel-safe: YES (new file, no contention)" is now FALSE and is REMOVED as a claim. INVARIANTS.md
+  is a live, shared file with reviewer findings already recorded against its current content (see the
+  kind=response note above, which itself recommends this same "add headings, not a new file" resolution
+  this update records as decided). Sequence this task's own edits against
+  CONTEXT-PLANE-TOC (which indexes INVARIANTS.md's headings once they carry real content) --
+  do not run those two concurrently against this file. Depends-on set is otherwise unchanged.
+  _Proof: bash scripts/proof-check.sh 'test -s INVARIANTS.md && test 11 -le "$(grep -c "^### Invariant " INVARIANTS.md)" && grep -n "NOT ENFORCED" INVARIANTS.md && grep -n "tls.NoClientCert" INVARIANTS.md && grep -n "InviteRequired: false" INVARIANTS.md'_
+- [ ] HANDOVER-DECISIONS-READINGLIST · HANDOVER-DECISIONS-READINGLIST: "the decisions that explain this design, in order" — docs, P2
+  Audience: maintainer. Priority P2.
+  
+  Justification: an index of 100+ headings is navigable but not COMPREHENSIBLE. A curated ~12-entry reading path is what actually transfers the design.
+  
+  Definition of done: a `## Start here` section at the top of DECISIONS-INDEX.md, ~12 entries in reading order with one line each on what question it answers. Explicitly notes where a later dated entry corrects an earlier one, AT INDEX LEVEL ONLY -- the entries themselves are untouched. The generator (gen-decisions-index.sh) is extended to validate that every anchor named in the reading list resolves to a real `## ` heading in DECISIONS.md, so the list cannot silently rot.
+  
+  Depends on: HANDOVER-DECISIONS-INDEX. Parallel-safe: NO against it (same file/script).
+  
+  Model: OPUS -- choosing which twelve of a hundred decisions explain the system is exactly the judgment being handed over.
+  
+  Size: half a day.
+  
+  RED verification observed (2026-08-08): DECISIONS-INDEX.md and the --validate-readinglist flag do not exist -- trivially RED, file/flag absent.
+  _Proof: bash scripts/proof-check.sh 'grep -n "^## Start here" DECISIONS-INDEX.md && bash scripts/gen-decisions-index.sh --validate-readinglist'_
+- [ ] HANDOVER-MAP-CHECK · HANDOVER-MAP-CHECK: make the invariant map executable, not prose — tooling, P2
+  Audience: maintainer.
+  
+  Priority P2 (structural -- the map is already useful without it; this is what stops it rotting).
+  
+  Definition of done: scripts/check-invariant-map.sh parses INVARIANTS.md, extracts each row's named test, and runs it -- failing if a named test DOES NOT EXIST (the vacuous--run case 84b76d5e already taught this repo to detect) or fails. Wired into scripts/check.sh.
+  
+  Depends on: HANDOVER-MAP-DOC, HANDOVER-CHECK. Parallel-safe: YES against everything except those two.
+  
+  Model: sonnet (mechanical). Size: half a day.
+  
+  RED verification observed (2026-08-08): scripts/check-invariant-map.sh does not exist -- trivially RED, file absent.
+  _Proof: bash scripts/proof-check.sh 'bash scripts/check-invariant-map.sh'_
+- [ ] HANDOVER-DOCMAP · HANDOVER-DOCMAP: say which of the tracked documents is authoritative, which is generated, and which is a frozen snapshot — docs, P2
+  Audience: both.
+  
+  Priority P2 (structural/navigational).
+  
+  Justification: 13+ tracked top-level .md files, ~19,400 lines. A human cannot tell that SPEC.md (3,671 lines) is generated and unhand-editable, that AGENT_LOG.md (3,451 lines) is a journal, or that CRYPTO_DEEPDIVE.md and ID2_WIRING_DEEPDIVE.md are point-in-time investigations that were never maintained and may now assert false things.
+  
+  Definition of done: README's "More docs" section becomes a table with AUDIENCE and STATUS in {authoritative, generated -- do not edit, frozen snapshot -- measured at <sha>, journal -- append-only}; every tracked top-level .md appears. Each frozen-snapshot document gains a one-line banner at its top naming the sha it was measured at and stating it is not maintained.
+  
+  Depends on: HANDOVER-README (same file). Parallel-safe: NO against README work; YES against everything else.
+  
+  Model: sonnet. Size: two hours.
+  
+  RED verification observed (2026-08-08): confirmed via a REAL check (not file-absence): the proof loop currently exits 1 at "MISSING: CRYPTO_DEEPDIVE.md" -- README.md's "More docs" list does not name every tracked .md file, and CRYPTO_DEEPDIVE.md's head has no "not maintained" banner.
+  _Proof: bash scripts/proof-check.sh 'for f in $(git ls-files "*.md" | grep -v "^\.claude/"); do grep -qF "$f" README.md || { echo "MISSING: $f"; exit 1; }; done; head -5 CRYPTO_DEEPDIVE.md | grep -qi "not maintained"'_
+
 ### EPIC ID — Server-authoritative id minting
 
-- [x] ID-2-WIRING-SEAL-FU-NAMESUFFIXES · ID-2-WIRING-SEAL-FU-NAMESUFFIXES: NameSuffixes has the identical inert-floor-guard defect, unfixed — ids, P0
-  `ID-2-WIRING-SEAL` fixed `internal/ids.Sequence` but deliberately left `internal/ids.NameSuffixes` (agentmint.go) alone as out of scope. `NameSuffixes.RaiseFloor` carries the SAME inert guard -- `if last != 0 && atLeast <= last` at agentmint.go:~298 -- which fires only once a suffix has been issued, so during the window in which the per-name floors are actually derived, every value including a far-too-low one is accepted silently. Its own doc comment already admits this in the same words `Sequence`'s used to ("during the window where the floor is actually derived ... RaiseFloor is therefore a check on a caller that keeps computing floors after it has started serving"), and `go vet` cannot flag a dropped `RaiseFloor` error (proven in ID2_WIRING_DEEPDIVE.md sec 3.4).
+- [ ] None · Unify the atomic temp+rename+fsync file writer duplicated between ids.writeBusIDFile and ids.atomicWriteFile — id, P2, msg-fu-suffixfloor-followup
+  Deliberately not done inside MSG-FU-SUFFIXFLOOR (public_id 94159d93-fe87-4c3e-b938-86fe7068c787) under CLAUDE.md's no-unrequested-refactor rule; reviewer explicitly endorsed leaving them separate for that task's scope but flagged the duplication as worth its own follow-up. Two byte-identical copies of a durability-critical sequence (temp file create, write, fsync file, rename, fsync dir) now exist in internal/ids -- internal/ids/busid.go's writeBusIDFile and internal/ids/suffixstore.go's atomicWriteFile. If either changes, both must. Unify into one shared helper.
+  _Proof: go build ./internal/ids/... && go test -race ./internal/ids/..._
+- [ ] None · Amortise the agent-suffixes write: reserve a block of suffixes per name instead of one file rewrite per enrolment — id, P1, msg-fu-suffixfloor-followup
+  Flagged by the security gate on MSG-FU-SUFFIXFLOOR (public_id 94159d93-fe87-4c3e-b938-86fe7068c787). Today DurableNameSuffixes.NextSuffix rewrites the WHOLE floor map (O(distinct names ever seen)) and fsyncs twice per issued suffix. The map never shrinks by design (a departed name's counter must never be reset). While the roster cap bounds distinct names this is tolerable, but the moment a leave/revocation path frees roster slots, enrol-leave churn makes cumulative I/O quadratic from unauthenticated ~100-byte requests. Fix: persist a RESERVED high-water block (e.g. floor+N) and issue from memory within it; the gaps that leaves are already declared correct by point 4 of the ids.NameSuffixes doc.
+  _Proof: go test -race -run TestDurableNameSuffixes ./internal/ids -v_
+- [ ] None · MSG-FU-SUFFIXFLOOR-FU-ENROLRECORDS: fold ENROLMENT records into the legacy-dir suffix backfill now that AUTH-3 has landed — id, P2
+  Flagged by the security gate as a HAND-OFF HAZARD on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), and now live: AUTH-3 (durable roster, commit ece714f) landed immediately before the suffix wiring (commit 6985d2c).
   
-  This is arguably WORSE than the message-sequence case, and agentmint.go's own doc says why: "re-minting an agent id is worse than re-minting a message id because the agent id is the routing and authorization subject." A reissued agent id means two agents sharing one routing/authorization identity.
+  WHAT IS PINNED TODAY. cmd/agent-bus/suffixfloors.go's walAgentIDFloors folds the SENDER and RECIPIENTS of store.RecordKind records ONLY. Enrolment records (kind=agent) are deliberately EXCLUDED, and cmd/agent-bus/suffixfloors_test.go pins that with the subtest 'records of another kind are skipped'. That exclusion was RIGHT when it was written: enrolment was memory-only, so on every dir the shipped binary had produced the enrolment-record set was EMPTY while message records were the entire population -- which is exactly why internal/auth/floors.go's doc forbids auth.EnrolmentSuffixesInWAL as a floor SOURCE.
   
-  The fix is the same shape as ID-2-WIRING-SEAL -- a `Seal()` gate, born unsealed on BOTH `NewNameSuffixes` and `ResumeNameSuffixes`, `NextSuffix` refusing with `ErrFloorUnproven` until sealed, `RaiseFloor` refusing with `ErrFloorSealed` after -- but the per-name shape needs a design call this task must make explicitly: is the seal GLOBAL (one seal for the whole map, which is what a single startup derivation pass implies) or PER-NAME (a name's floor is sealed when that name's derivation completes)? Global is almost certainly right, because names are discovered by the same single replay pass and a per-name seal would let an unknown-at-startup name mint from an unproven floor of 0 -- but say so deliberately rather than by default. Reuse the existing `ErrFloorUnproven` / `ErrFloorSealed` sentinels; do not add parallel ones.
+  WHY IT IS NOW WORTH REVISITING. With durable enrolment, kind=agent records DO carry agent ids, and the pin means a legacy backfill cannot see them. The exposure is currently NARROW and is not a live bug: any binary built from this tree has BOTH changes, and the first start against any dir writes the agent-suffixes file, after which the backfill never runs again. The only dir that could be affected is one written by a build taken BETWEEN ece714f and 6985d2c, which is not a released artifact.
   
-  Also update `internal/ids/doc.go`'s `agentmint.go` bullet, which ID-2-WIRING-SEAL deliberately left describing the unfixed state, and add the `NameSuffixes` rows wherever ID-2-WIRING-SEAL-FU-CONTRACTS lands the `Sequence` ones.
+  DO. Fold enrolment records into the backfill as defence in depth -- either by extending walAgentIDFloors to recognise auth.RecordKind (its record.go is now committed, so the dependency is stable) or by cross-checking with auth.EnrolmentSuffixesInWAL, which that function's own doc explicitly sanctions as a CROSS-CHECK even though it forbids it as a sole source. Folding it can only RAISE a floor, and raising is always safe. Update the pinning subtest and say in the comment why the exclusion existed, so the history is not lost.
   
-  Note the interaction with AUTH-3 (restoring the per-name suffix floors from replay): that task is the CALLER that must derive the floors and call `Seal()`, so these two want to be sequenced together.
+  SEE ALSO 6f4c17ef-220c-465f-b8d8-a0f04aac1905 (streaming scan): if both land, do the enrolment fold in the same single streaming pass rather than adding a second full read.
   
-  proof_cmd is VACUOUS TODAY BY CONSTRUCTION -- the named test `TestNameSuffixesRefusesToIssueFromAnUnsealedFloor` does not exist; writing it is the point. This task must NOT be completed on a VACUOUS `scripts/proof-check.sh` verdict; it must report PASS with tests_run > 0.
-  ---
+  ACCEPTANCE. A test that a legacy dir whose ONLY agent-id evidence is an enrolment record does not re-mint that name; go test -race ./cmd/agent-bus green.
+- [ ] None · MSG-FU-SUFFIXFLOOR-FU-ROSTERASSERT: assert a freshly-minted agent-suffix is not already in the roster -- the roster backstop against forge-low is accidental, not designed — auth, P1, follow-up, id-authority, security
+  FINDING (independent security agent, reproduced with a working exploit, confirmed against the tree). agent-suffixes (cmd/agent-bus/suffixfloors.go / internal/ids) is UNKEYED -- no legacy path needed, the live format is already keyless. Rewinding it to an older value with a valid recomputed digest is accepted SILENTLY, no rewind warning: openSuffixAllocator cross-checks the persisted floors against the WAL only when the floors file is ABSENT (suffixfloors.go:143-169; the files own comment names the omission at line 166: a floors file that EXISTS but has been rewound to an older version ... is not detected today).
   
-  ## AMENDMENT 2026-08-03 (spec-keeper, following reviewer finding P1-b: CHANGES-REQUESTED)
+  THE REPORTERS OWN THESIS WAS THEN REFUTED, AND THAT IS THE FINDING. Rewinding and re-enrolling a fully-rostered name (e.g. worker-2) does NOT reuse the id: the bus tries to reissue it, and auth.ErrDuplicateAgentID (internal/auth/errors.go:88, roster.go:252, walroster.go:231) rejects it. The floor then self-heals upward. So forge-low against a rostered name costs only a couple of burned suffixes, not id reuse.
   
-  The reviewer flagged that the shipped code and the original description above now disagree IN
-  WRITING: the original text (point 5, "born unsealed on BOTH `NewNameSuffixes` and
-  `ResumeNameSuffixes`") is SUPERSEDED by what follows. The original text stays above, unedited, as a
-  record of what was originally asked; this section is the authoritative correction.
+  THE PRECISELY-BOUNDED RESIDUAL: reuse is reachable only for a suffix that was BURNED but is NOT in the roster -- exactly the set the floor exists to protect and the roster structurally cannot cover:
+  (a) a dangling/aborted enrol prepare -- number fsynced, crash before commit. internal/auth/crash_test.go:TestAuthCrashInjectionTornPrepare demonstrates worker-7 issued and reported as worker:1 after a SIGKILL, i.e. a suffix can be durably burned with no committed roster entry. Note this case is NOT fixed by 6f4c17ef (MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN)s planned every-start WAL cross-check as currently scoped: that derivation folds committed store.RecordKind (and, per 477b8eeb, committed auth enrolment) records only. ID-2-WIRING-OBSERVER (c31f6999-da4e-400d-ab55-178b82e2a42e, still todo) is the task that would expose dangling/aborted prepares to any observer during replay at all -- until it lands, no WAL-derived floor, however often it is recomputed, can see this class of burned suffix.
+  (b) once AUTH-4 (a853261d-2829-4101-906d-31a8a81eb59f, POST /v1/leave) lands, a departed agent -- the roster removes the entry on leave by design, so a rewound floor plus re-enrol binds a fresh keypair to an id a previous holder used, with no roster entry left to object.
   
-  **1. What actually shipped, and why it is the correct call, not a bug.** `ResumeNameSuffixes` is
-  born UNSEALED and must have `Seal()` called on it before anything is issued -- that half of the
-  original ask is unchanged. `NewNameSuffixes` is born SEALED. It is the FRESH-BUS constructor: an
-  empty-disk bus has no suffixes to derive a floor from, so calling `NewNameSuffixes()` at all IS the
-  empty-disk claim, carried by the constructor's name rather than by a separate `Seal()` call the
-  fresh-bus caller would have no meaningful floor to seal against.
+  For either case: a rewound floor reissues the suffix, the roster has nothing to compare against, and enrol SUCCEEDS -- a new keypair silently inherits an id with prior history.
   
-  **2. Why the deviation from the shipped `Sequence` template was taken.** `Sequence` (fixed by
-  `ID-2-WIRING-SEAL`) has ZERO production call sites, so making `NewSequence` born-unsealed cost
-  nothing live. `NameSuffixes` is different: it is wired into the LIVE enrolment path.
-  `cmd/agent-bus/main.go:327` builds `ids.NewNameSuffixes()` on every server start, and every
-  enrolment mints an agent id through it; `internal/auth` and `internal/httpapi`'s test suites also
-  construct through it. Making `NewNameSuffixes` born-unsealed with no compensating change would have
-  made it refuse EVERY enrolment on a running bus the moment this task landed -- and fixing the actual
-  caller at `cmd/agent-bus/main.go:327` to construct via `ResumeNameSuffixes` plus a real per-name
-  floor derivation was explicitly OUTSIDE this task's file boundary (internal/ids only, one task, mid
-  a parallel wave -- see status_note). The born-sealed `NewNameSuffixes` is the choice that keeps the
-  live path working without touching `cmd/`, `internal/auth`, or `internal/httpapi`.
+  THE LOAD-BEARING ASK, in the reporters own wording: the roster backstop is protecting you by accident of ordering, not by design intent stated at the floor. A defence nobody knows is load-bearing is one refactor from removal, and the plausible refactor is named: an idempotent re-enrol that overwrites the pubkey, which somebody will reasonably reach for (it is the natural fix for the ErrDuplicateAgentID case above under retry-safety expectations) and would silently convert a contained forge-low into full id reuse.
   
-  **3. The residual hole, recorded honestly.** A caller that attempts a per-name floor derivation,
-  has that derivation FAIL, and then falls back to calling `NewNameSuffixes()` mints every name from 1,
-  silently -- exactly as before this gate existed. Security's ruling (kind=response, 2026-08-03): this
-  is NOT attacker-reachable today (no client input selects which constructor a caller uses), and it is
-  strictly net-positive versus the status quo ante -- before this task, NEITHER constructor was gated;
-  after it, the resume path, which is the only one that will ever carry a real derivation, is gated,
-  and the fresh path can no longer silently absorb a late/partial derivation the way an ungated
-  `NewNameSuffixes` used to. Reviewer's sharper point, which belongs in the record rather than only in
-  a review note: `cmd/agent-bus/main.go` performs NO per-name derivation at all today -- it just calls
-  `ids.NewNameSuffixes()` -- so the residual hole described above is not a hypothetical edge case, it
-  is the DEFAULT behaviour of the bus today. Closing it is not optional hardening; it is finishing the
-  job. That is exactly what `MSG-FU-SUFFIXFLOOR` (cross-linked below) is for.
+  DO. Add a NAMED assertion at the enrol path, independent of and in addition to any WAL-derived floor cross-check: a freshly minted suffix must not already be present in the roster BEFORE it is treated as fresh -- if it is, the floor was rewound (or narrower than reality): refuse the enrol and log LOUDLY at ERROR naming the name/suffix/expected-vs-found. This converts todays accidental 500 (ErrDuplicateAgentID, which only fires because Put happens to check) into a NAMED, tested detection that survives a future idempotent-re-enrol refactor.
   
-  **4. Both gates' verdicts on the shipped 5-file diff** (`internal/ids/{agentmint.go,sequence.go,
-  doc.go,agentmint_test.go,sequence_test.go}`): reviewer returned **CHANGES-REQUESTED** -- documentation
-  plus this spec amendment only, explicitly NO behavioural/code change requested, no P0 findings.
-  Security returned **PASS-WITH-NOTES** -- no P0 and no P1 open.
+  ALSO NOTE (lower priority, same root cause): forge-HIGH on agent-suffixes bricks enrolment for that ONE name only (the floor jumps ahead, so every mint for that name is starved), not the whole bus -- smaller blast radius than the wal-index-floor / message-seq-floor findings, but the same unkeyed root and the same remedy family (bound the accepted value; see be447589-6583-4d5c-a9d4-ec9d9fef0f1c and 259b7033-2191-423f-bb7b-cff8c6b59dc1, the sibling floor-bound tasks).
   
-  **5. Cross-reference.** The residual hole named in point 3 is closed by P0 task
-  `MSG-FU-SUFFIXFLOOR`, public_id `94159d93-fe87-4c3e-b938-86fe7068c787` ("resume per-name agent-id
-  suffix counters from disk (agent ids are now durable)"). See that task's acceptance criteria, appended
-  2026-08-03 as a `kind=request` note.
-  _Proof: git show b7701cb:internal/ids/doc.go | grep -q 'different stages of that wiring'_
-- [x] ID-1 · ID-1: Bus id minting + persistence — id, P0
-  On first start with an empty data-dir, generate a bus id (opaque random/ULID-style string), persist it to a file in data-dir, and load the SAME id on every subsequent restart rather than regenerating. Exposed via GET /v1/info. This is the root of invariant 2's `<bus-id>.<agent-id>` namespacing.
-  _Proof: go test -race ./internal/ids/_
+  SCOPE: internal/ids, internal/auth, cmd/agent-bus/suffixfloors.go. Coordinate with the live MSG-FU-SUFFIXFLOOR-* family (6f4c17ef streaming scan, 477b8eeb enrolment-record fold, e5fa08ba docs, d5ed5ccc unseal) -- this is a NEW, narrower assertion that is correct even before any of those land, and remains valuable defense-in-depth after they do.
+  
+  ACCEPTANCE. A test: mint an agent, durably burn its suffix via a torn/aborted prepare (or a committed-then-left entry once AUTH-4 exists) so the roster has no entry for it, rewind/replace the agent-suffixes floors file to a value at-or-below that suffix with a valid checksum, attempt to enrol the same name -- the enrol MUST be refused with a named, ERROR-logged reason, not silently reissue the suffix. go test -race ./internal/ids ./internal/auth ./cmd/agent-bus green.
 - [ ] ID-4 · ID-4: Id-counter recovery property test — id, P1
   Cross-cutting test (depends on the WAL replay task): enrol several agents and send several messages, kill the process, restart, and assert every counter (sequence, per-name agent suffix) resumes strictly above its last-issued value -- table-driven across several kill points.
   _Proof: go test -race -run TestIDCounterRecovery ./internal/ids_
-- [x] ID-3 · ID-3: Agent id minting `<bus-id>.<name>-<n>` — id, P0
-  STATUS CORRECTION 2026-08-02 (spec-keeper) -- NOT COMPLETABLE YET, AND THE REASON IS NOT THE CODE.
+- [~] None · MSG-FU-SUFFIXFLOOR: resume per-name agent-id suffix counters from disk (agent ids are now durable) — id, P0, in progress
+  Found by the security gate during the MSG/POLL wave (2026-08-02). cmd/agent-bus/main.go builds ids.NewNameSuffixes() -- a FRESH counter every start -- justified by the comment 'nothing in this path writes an agent id to disk'. THAT PREMISE IS NOW FALSE: store.Record persists sender and recipients as fully-qualified agent ids, hub.publish writes them through the WAL, hub.Apply replays them, and the WAL never compacts. So after a restart the suffix counter restarts at 1 and anyone who enrols the name 'alpha' is minted the id the previous alpha held (invariant 1 broken). CONFIDENTIALITY IS ALREADY CLOSED by the enrolment epoch shipped in the same wave (store.Message.VisibleTo refuses any message sent before the reader enrolled -- proved on a live server: a re-enrolled beta-1 reads 0 of the previous holder's DMs while the message is still in the store), and the reuse is logged at ERROR by hub.NoteEnrolment. WHAT REMAINS is identity continuity: a new keypair holding an id with a prior history, whose future messages are attributed to it. FIX: derive a per-name suffix floor from the highest suffix EVER WRITTEN TO DISK -- parse every sender and recipient seen during replay through ids.ParseAgentID and keep the max per name -- and seed ids.ResumeNameSuffixes with it before the listener binds. internal/hub already collects exactly these ids in Apply (see Hub.recovered), so the derivation belongs there and main passes it to the minter. ALSO correct the now-false justification comment at cmd/agent-bus/main.go:312-317: it is what will make the next reader believe this is safe. AUTH-3 (durable roster) is the complete fix; this is the half that does not depend on it.
+  ---
   
-  The CODE IS IN `main` and its proof PASSES. But the MANDATED reviewer and security gates NEVER RAN,
-  and there is no justification for the skip in AGENT_LOG.md. Completing it now would repeat exactly
-  the failure DUR-10 exists to record: production code reaching `main` with no gate.
+  ## ACCEPTANCE CRITERIA ADDED 2026-08-03 (spec-keeper, dictated by security)
   
-  VERIFIED FIRST-HAND THIS PASS (commands quoted, nothing taken on the task's word):
-  - `git log --oneline -- internal/ids/agentid.go internal/ids/agentmint.go` -> ONE commit, 10dd7f4
-    "Agent id minting <bus-id>.<name>-<n> (ID-3)": internal/ids/agentid.go +239, agentid_test.go +391,
-    agentmint.go +389, doc.go +14/-2. `git status --porcelain` is EMPTY -- nothing left uncommitted.
-  - `scripts/proof-check.sh 'go test -race -run TestAgentIDMinting ./internal/ids'` ->
-    verdict=PASS class=test exit=0 tests_run=80 top_level=9 skipped=0 failed=0 empty_pkgs=0.
-    NOT vacuous; 9 top-level TestAgentIDMinting* tests exist in internal/ids/agentid_test.go.
-  - Task journal: `main` posted kind=request; spec-keeper posted report+model; implementer posted
-    report+model. THERE IS NO kind=response FROM reviewer AND NONE FROM security, and no
-    reviewer/test-engineer/security note of any kind. `grep -n 'ID-3' AGENT_LOG.md` -> NO MATCHES, so
-    the skip is not justified there either. The likely cause is the session-token kill recorded in
-    this task's own first spec-keeper note; the dispatched chain did not survive to its gates.
+  Security's PASS-WITH-NOTES verdict on `ID-2-WIRING-SEAL-FU-NAMESUFFIXES` (public_id
+  `1c207a62-e904-4988-84c2-f4b69712ee35`) named these as MUST-CLOSE-BEFORE-ENROLMENT-IS-DURABLE
+  conditions for THIS task:
   
-  REMAINING SCOPE OF THIS TASK -- pay the gate debt on ALREADY-COMMITTED code (10dd7f4). No rewrite.
-  1. REVIEWER GATE on internal/ids/agentid.go, agentmint.go and doc.go as committed at 10dd7f4.
-     Focus: is the `<bus-id>.<name>-<n>` grammar unambiguous under every input the parser accepts
-     (invariant 2 -- the '.' separator is what makes cross-bus routing parseable); is the per-name
-     counter genuinely durable and monotonic across restart (invariant 1 -- ids are never reused,
-     including across restarts); is the suffix spelling pinned to the sequence spelling so the two
-     cannot drift.
-  2. SECURITY GATE. The short name is UNTRUSTED CLIENT INPUT that ends up inside a routing identifier.
-     Focus: id spoofing / separator injection (can a crafted name make one agent's id parse as
-     another's, or as a bus-qualified id it does not own), length bounds and the oversized-id
-     non-echo path, and any Unicode/normalisation trick that makes two distinct names collide.
-  3. AGENT_LOG.md entry for ID-3 (there is none), recording the outcome and the fact that the gates
-     ran after the commit rather than before it.
-  4. If either gate finds a defect, fix it in a SEPARATE follow-up commit -- do not amend 10dd7f4.
+  (a) `cmd/agent-bus/main.go` constructs the allocator via `ids.ResumeNameSuffixes` (or `RaiseFloor`
+      folded over the replay stream) and calls `Seal()` exactly ONCE with the error CHECKED.
+  (b) A derivation that cannot complete is a FATAL startup error -- explicitly NEVER a fallback to
+      `ids.NewNameSuffixes()`, which is the residual hole this task exists to close by name.
+  (c) Once `main.go` no longer calls `ids.NewNameSuffixes()`, flip `NewNameSuffixes` to born-unsealed
+      to restore parity with `Sequence`, or delete it.
+  (d) Cheap interim guard worth adding: a test asserting no production package outside `cmd/` calls
+      `ids.NewNameSuffixes`.
   
-  COMPLETION BAR: this task may be completed once both gates have posted kind=response (plus
-  kind=report + kind=model) and AGENT_LOG.md carries an ID-3 entry. commit_sha will be 10dd7f4 plus
-  any follow-up sha. The proof_cmd below is already validated PASS and does not need to change.
-  
-  --- ORIGINAL DESCRIPTION (delivered by 10dd7f4) ---
-  Server mints the fully-qualified agent id at enrolment: client submits a desired short name, server appends a durable per-name counter suffix (-1, -2, ...) so a reused name never collides with a previous holder, and prefixes the bus id. Client never chooses its own id (invariant 1).
-  
-  SCOPE NOTE carried forward: CODE-ONLY, like ID-2. No enrolment wiring -- AUTH-1 owns that and is
-  in flight separately. Nothing in production calls the minting code yet.
-  _Proof: go test -race ./internal/ids_
-- [x] ID-2-WIRING-SCHEMA · ID-2-WIRING-SCHEMA: DECIDE and record where the message sequence high-water mark lives on disk (blocks the floor derivation) — durability, P0
-  SPLIT OUT OF ID-2-WIRING (838677e6). This is a DECISION task -- docs only, no code -- and it is the thing actually blocking the floor derivation. See ID2_WIRING_DEEPDIVE.md sec 3.5, 4.2 and 4.4 (committed 2f89fc1) for the ranked options and the disproof test.
-  
-  THE PROBLEM. ids.Resume(floor) needs the highest sequence EVER WRITTEN TO DISK -- committed, aborted AND dangling. Today the sequence lives inside the caller-written PREPARE body (wal.Entry.Body), the WAL deliberately does not interpret Body, wal.Replay hands its callback COMMITTED entries only, and Recovered exposes no message-sequence high-water mark (Recovered.NextIndex is the WAL RECORD index, a different counter). So there is no way to derive the floor without first deciding WHERE the number lives.
-  
-  THE DECISION (record it in DECISIONS.md, dated, appended -- the file is contended, add a new section rather than editing lines):
-    Option A' -- the WAL offers every PREPARE to an observer during the EXISTING replay pass; the sequence stays in the caller's body and the ids/msg layer decodes it. No on-disk format change; also removes the third startup scan before it is ever added (see task 2a961fcc).
-    Option B  -- promote the sequence to a WAL-level field (Entry.Seq / preparePayload.Seq, Recovered.HighestSequence). This IS an on-disk format change and therefore REQUIRES a reservation from the `ondisk-format-version` namespace (NEVER pick the number) plus a downgrade note.
-  Record the chosen option, the rejected ones, and the sec-4.4 disproof test.
-  
-  ORDERING WARNING: the CRC32C -> HMAC-SHA256 MAC task is ALSO an on-disk format change and has ALREADY reserved ondisk-format-version=2. If this task chooses Option B it must reserve its OWN value; format changes are ORDERED and two agents must never share one version number.
-  
-  BLOCKS: ID-2-WIRING (838677e6) and ID-2-WIRING-OBSERVER.
-  
-  PROOF. `grep -q 'message sequence high-water mark' DECISIONS.md` -- verdict=FAIL class=file-assertion exit=1 TODAY, which is correct and non-vacuous: it fails precisely because the decision is unrecorded, and flips to PASS when it is written. The chosen wording must therefore contain that exact phrase.
-  _Proof: grep -q '^## .* The message sequence high-water mark lives in the WAL message body, read via a replay-time PREPARE observer (ID-2-WIRING-SCHEMA)$' DECISIONS.md_
-- [-] None · ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed history — id, P0
-  RE-SCOPED 2026-08-02 (spec-keeper) AFTER THE DEEP-DIVE. This task is now T4 of the deep-dive's own breakdown -- 'derive, prove and SEAL the sequence floor in main' -- and it is BLOCKED, not in progress.
-  
-  WHY. The deep-diver (dispatched as DESIGN INVESTIGATION ONLY) produced ID2_WIRING_DEEPDIVE.md, committed at 2f89fc1, and its verdict is: THE PREMISE IS CONFIRMED BUT THE TASK AS ORIGINALLY FILED CANNOT BE IMPLEMENTED YET, AND IS NOT EXPLOITABLE TODAY. The sequence number lives in the caller-written PREPARE body, no message-body schema exists, and nothing in production mints a sequence at all -- so there is no code path to harden. Implementing as specced would either invent the MSG-epic body schema or change the prepare payload format, and the backlog settles neither. It becomes a genuine P0 the instant the first MSG write path lands.
-  
-  VERIFIED FIRST-HAND BY SPEC-KEEPER before re-scoping: `git log --oneline -- ID2_WIRING_DEEPDIVE.md` -> 2f89fc1 ("ID2_WIRING_DEEPDIVE.md: the task as filed cannot be implemented yet"), and `git status --porcelain` is EMPTY -- so the INVESTIGATION is committed and NO production code was written, exactly as dispatched. The task's own code deliverable is therefore NOT delivered, which is why this is blocked rather than done.
-  
-  IT ALSO HAD NO proof_cmd AT ALL, which under the 2026-08-02 process decision ("a missing proof_cmd blocks completion, at least as hard as a vacuous one") made it uncompletable by definition. One is now recorded -- see PROOF below.
-  
-  THE WORK WAS SPLIT. Three sibling tasks now carry the separable parts; this task is the last of the four and depends on the other three:
-    ID-2-WIRING-SEAL     P0 -- Sequence refuses to issue from an unsealed floor. internal/ids only. NO dependencies; startable NOW.
-    ID-2-WIRING-SCHEMA   P0 -- DECIDE and record where the sequence high-water mark lives on disk. Docs only. THIS IS THE BLOCKER.
-    ID-2-WIRING-OBSERVER P0 -- wal offers every prepare (incl. dangling) to an observer in the existing replay pass. Depends on SCHEMA choosing Option A'.
-  
-  REMAINING SCOPE OF THIS TASK (T4). In cmd/agent-bus/main.go, after wal.Open, fold the observer over EVERY prepare, construct ids.Resume(floor), RaiseFloor from any other source, then Seal() -- and return a NON-NIL ERROR from run() on ANY failure: the scan errored, a message prepare's body had no seq or a zero seq, RaiseFloor returned non-nil, or Seal() returned non-nil. Log the derived floor at INFO beside the existing "write-ahead log opened" line.
-  
-  THE LANDMINE THIS TASK MUST COVER: a scan that FAILED must not be indistinguishable from an EMPTY log. Floor 0 from a failed derivation must refuse to start, not resume as a fresh bus. Note this is a NON-DAMAGE error (a derivation we cannot prove), so it stays FATAL and is NOT touched by the 2026-08-02 always-restart decision, which sanctions discarding DAMAGED RECORDS -- not guessing at an id floor. Reissuing a burned id is silent corruption of the audit trail, not a discarded message.
-  
-  --- ORIGINAL DESCRIPTION (still accurate as the statement of the hazard) ---
-  ids.Resume(highestOnDisk) requires the highest sequence EVER WRITTEN TO DISK -- committed, aborted AND dangling. The obvious wiring produces exactly the value that is forbidden: wal.Replay(path, fn) hands fn COMMITTED entries only, and wal.Recovered exposes no message-sequence high-water mark at all (Recovered.NextIndex is the WAL RECORD index, a different counter that also advances for commits and aborts). Concrete break: allocate seq 100, write the PREPARE, fsync it, crash before the COMMIT. 100 is burned and an audit record for it may exist, but replay never surfaces it, the floor comes back 99, and the next send is minted as <bus-id>-100 -- two different messages sharing one id in the append-only audit trail, and any dedup keyed on message id conflates them (invariants 1 and 10). An attacker able to induce crashes in the prepare->commit window chooses what lands on the reissued id.
-  
-  Cross-reference: ID-2 (a3a5edc4-0a34-4691-b1a6-c1206218ac65, completed CODE-ONLY). internal/ids/sequence.go's doc comment already spells all of this out.
-  
-  PROOF. `go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-bus` -- VACUOUS TODAY BY CONSTRUCTION (the test does not exist; it is this task's to write, modelled on cmd/agent-bus/wal_startup_test.go). MUST NOT BE COMPLETED ON A VACUOUS VERDICT: scripts/proof-check.sh must report PASS with tests_run > 0.
-  _Proof: go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-bus_
-- [x] ID-2-WIRING-SEAL · ID-2-WIRING-SEAL: Sequence refuses to issue from an UNSEALED floor (the only half implementable today) — ids, P0
-  SPLIT OUT OF ID-2-WIRING (838677e6) on the deep-diver's recommendation -- see ID2_WIRING_DEEPDIVE.md sec 4.1 and sec 5/T1, committed at 2f89fc1. This is the ONLY half of ID-2-WIRING that can start immediately: it touches internal/ids ONLY and depends on nothing.
-  
-  THE DEFECT. internal/ids/sequence.go's RaiseFloor guard is INERT AT STARTUP. It only fires once something has been issued (last != 0), so in exactly the window where the floor is derived, every value -- including one far too low -- is accepted silently. Worse (deep-dive sec 3.4, verified first-hand there): `go vet` CANNOT be made to catch a bare `s.RaiseFloor(x)` that drops the error, so the mistake is invisible to the toolchain.
-  
-  REQUIRED.
-  - Add Seal(), ErrFloorUnproven and ErrFloorSealed to internal/ids/sequence.go.
-  - Next() returns (0, ErrFloorUnproven) until Seal() has been called. RaiseFloor returns ErrFloorSealed after.
-  - BOTH constructors are born UNSEALED (New and Resume) -- a fresh bus must seal explicitly too, so 'floor 0 because the log was empty' and 'floor 0 because derivation failed' can never be confused.
-  - Update sequence.go's doc comment ('When it may be called') and the 5 existing tests.
-  - Update CONTRACTS.md.
-  
-  NOT IN SCOPE: anything in cmd/agent-bus, anything in internal/wal, and the floor DERIVATION itself (that is ID-2-WIRING, which stays blocked on ID-2-WIRING-SCHEMA).
-  
-  PROOF. `go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids`. VACUOUS TODAY BY CONSTRUCTION -- the named test does not exist yet, which is the point: it is the test this task must write. The deep-diver ran the equivalent test against a scratch prototype and recorded verdict=PASS class=test exit=0 tests_run=5 top_level=1, so the command is executable and non-vacuous the moment the test is written. DO NOT COMPLETE THIS TASK ON A VACUOUS VERDICT; scripts/proof-check.sh must report PASS with tests_run > 0.
-  _Proof: go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids_
+  See `ID-2-WIRING-SEAL-FU-NAMESUFFIXES` notes for the full security/reviewer context this closes the
+  residual gap in.
+  _Proof: go test -race -run TestAgentIDSuffixesResumeAcrossRestart ./internal/ids ./internal/hub_
 - [ ] ID-2-WIRING-SEAL-FU-CONTRACTS · ID-2-WIRING-SEAL-FU-CONTRACTS: land the Sequence seal contract rows that the file-boundary deferred — docs, P1
   Deliberately incurred, tracked debt. `ID-2-WIRING-SEAL` (public_id 8c9b6489-abb1-444e-9eeb-3ff87646f632) shipped `Seal()`, `ErrFloorUnproven` and `ErrFloorSealed` on `internal/ids.Sequence`, and its own description said "Update CONTRACTS.md" -- but CONTRACTS.md was being split into per-plane files by a concurrent agent in the same loop (`CONTRACTS-SPLIT`, 360a2679-b5dc-4b17-863f-fb4462764e6d) and admits ONE writer per loop, so the feature-runner was explicitly barred from touching it. No contract row was written. This task lands them.
   
@@ -2409,9 +2283,37 @@
   
   proof_cmd is RED today: verified zero matches for `ErrFloorUnproven` anywhere in the repo's CONTRACTS files. The glob `CONTRACTS*.md` is deliberate so the proof survives the CONTRACTS split into per-plane files.
   _Proof: grep -q 'ErrFloorUnproven' CONTRACTS*.md_
-- [x] ID-2 · ID-2: Monotonic sequence allocator (drives message ids) — id, P0
-  A durable, strictly monotonic sequence counter (internal/ids) that the WAL commit path advances -- every allocated sequence number is durable before it is handed out. Message ids are `<bus-id>-<seq>`. The counter never re-issues a sequence number: on replay it resumes strictly ABOVE the highest sequence ever written to disk, whether that record reached commit or was only a discarded prepare. Under normal operation (every prepare commits) the committed sequence stream is contiguous; a crash between prepare-fsync and commit-fsync burns one number and leaves a gap in the committed stream -- that gap is expected and correct, not a bug, because reusing the burned number would let two different messages share the same `<bus-id>-<seq>` message id, and the audit log (a superset of committed history) would then contain both under that one id. Counter state is restored by the WAL replay task so a restart never re-issues a previously-issued sequence number.
-  _Proof: go test -race ./internal/ids_
+- [ ] None · Question whether a peer belongs on the legitimate floor-source list at all (ids.RaiseFloor) — ids, P2
+  Filed per security recommendation on ID-2-WIRING-SEAL-FU-NAMESUFFIXES (public_id
+  1c207a62-e904-4988-84c2-f4b69712ee35), explicitly NOT part of that task.
+  
+  Both `internal/ids/agentmint.go` (~:474-477) and `internal/ids/sequence.go` (:194, :343-344) list
+  "a peer" as a legitimate source for assembling a floor claim passed to RaiseFloor. Security's
+  judgement: a peer has NO basis for knowledge about THIS bus's own per-name suffix or sequence
+  high-water mark -- that is derivable only from this bus's own disk -- and under invariants 1 and 2
+  (server-authoritative ids; ids are never client-supplied identities to be trusted) a remote claim
+  about our own namespace should not be a floor source at all.
+  
+  SEVERITY NOTE, recorded so it is not read as a lesser hazard than the whole-bus Sequence case: a
+  per-NAME exhaustion is repeatable per name, so a peer able to reach RaiseFloor exhausts the WHOLE
+  enrollable name space one call at a time, converging on the same outcome as the whole-bus Sequence
+  exhaustion case at O(names) cost. It is not a smaller version of that hazard, just a slower one.
+  
+  WHAT NOT TO DO: security recommends AGAINST an in-code bound inside RaiseFloor itself -- RaiseFloor
+  must stay able to accept a genuinely high LOCALLY-derived floor (that is its entire legitimate job),
+  so a bound inside it is the wrong layer and would plant a policy number in the wrong place.
+  
+  THE FIX is one of:
+    (1) remove "a peer" from both source lists (agentmint.go and sequence.go), or
+    (2) if a real relay/peer-enrol requirement emerges later, bound the peer-supplied claim at the
+        PEER-INPUT layer, validated against the locally-derived maximum plus configured headroom,
+        before it ever reaches RaiseFloor.
+  
+  NOT URGENT: there is no peer/relay code yet and no production caller of either RaiseFloor today.
+  File against the relay/peer-enrol work when that lands; do not block on it now.
+- [ ] None · The hub id-reuse detector is narrower than its log line implies (broadcast-only agents leave no trace) — hub, P2, msg-fu-suffixfloor-followup
+  Reported by the MSG-FU-SUFFIXFLOOR runner (public_id 94159d93-fe87-4c3e-b938-86fe7068c787), who did not own this file so filed rather than fixed. internal/hub/roster.go:65-88 fires only when the reused id is in h.recovered, and internal/hub/hub.go:497-499 populates that set ONLY from store.Message.Sender and .Recipients. An agent that enrolled, never sent a message, and was only ever a BROADCAST recipient (broadcasts are stored as a flag, not an expanded recipient list) leaves no trace, so its id can be reused with NO error logged at all. The detector is a partial backstop and must not be relied on as a safety net for invariant 1 (server-authoritative, never-reused ids). Fix should ensure the recovered/seen-id set also captures enrolment events themselves, not just message sender/recipient references.
+  _Proof: go test -race -run TestHubIDReuse ./internal/hub_
 - [ ] ID-2-WIRING-OBSERVER · ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an observer during the existing replay pass — durability, P0
   SPLIT OUT OF ID-2-WIRING (838677e6). See ID2_WIRING_DEEPDIVE.md sec 5/T3 (committed 2f89fc1).
   
@@ -2442,21 +2344,94 @@
   
   Priority kept at P0 because AUTH-3 is P0/in_progress and blocked on an honest suffix-floor back-fill; whoever picks this up should coordinate with AUTH-3's owner rather than duplicate the WAL-side change.
   _Proof: go test -race -run TestWALReplayObservesEveryPrepare ./internal/wal && go test -race ./internal/wal_
+- [ ] None · MSG-FU-SUFFIXFLOOR-FU-UNSEAL: make ids.NewNameSuffixes born-unsealed (or delete it) now that cmd/ no longer calls it — id, P1
+  Acceptance criteria (c) and (d) of MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787), dictated by the security gate as MUST-CLOSE-BEFORE-ENROLMENT-IS-DURABLE. They live in internal/ids, which was outside the wiring task's file-ownership boundary, and the task that previously carried them (2db4a36f) is SUPERSEDED, so nothing else holds them.
+  
+  (c) ids.NewNameSuffixes (internal/ids/agentmint.go:339) is born SEALED, and its doc justifies that solely by 'a LIVE PRODUCTION CALLER: cmd/agent-bus/main.go builds ids.NewNameSuffixes() on every start'. THAT CALLER IS GONE -- verified: there are currently ZERO production callers of ids.NewNameSuffixes anywhere in the tree. So flip it to born-UNSEALED for parity with NewSequence (so even the empty case has to say out loud that it is empty), or delete it outright. Born-sealed with no caller is a loaded footgun: the next startup path that reaches for the obvious-looking constructor gets a silently sealed, all-zero floor map.
+  
+  (d) Add a guard that no PRODUCTION package calls ids.NewNameSuffixes. cmd/agent-bus/suffixfloors_test.go:TestNoFreshSuffixCounterInCmd already does this for package main, by parsing the AST (not grepping, so doc comments naming the constructor do not trip it) and resolving the ids import name so an alias or dot-import cannot evade it. Generalise that to the whole module, or place the equivalent in internal/ids.
+  
+  PROOF. go test -race ./internal/ids ./cmd/... green; the new guard fails when a call is reintroduced (prove the RED).
 
 ### EPIC IDEM — Duplicate detection and idempotency (invariant 10)
 
+- [ ] None · RELAY-2-FU-IDEM-ROSTEROP: internal/idem has no OpRosterSync, so roster pushes borrow OpPeerEnrol — idem, P2
+  internal/idem/scope.go's Operation set is CLOSED and validated (OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay). A roster push is its own mutating operation but has no constant, so relay.RosterUpdateFingerprint uses OpPeerEnrol as the nearest correct neighbour. Consequence, bounded but real: a peer that reuses ONE key across a peer-enrol AND a roster push lands both in the same scope, so the second is adjudicated a violation -- a peer bug either way, but diagnosed as the wrong bug. Fix: add OpRosterSync, add it to MutatingOperations and valid(), then switch RosterUpdateFingerprint. Adding it was outside RELAY-2's file boundary.
 - [ ] IDEM-17-FU-CROSSAGENT · Crash-injection coverage for cross-agent applied-key isolation across recovery — test, P2
   No crash test proves the applied-key scope's CROSS-AGENT isolation survives recovery. The scope is the (agent, op, key) tuple, and IDEM-17 now pins the cross-OP half across a restart (TestIdemCrashInjectionRestartBroadcastRetryIsAnsweredOnce), but the cross-AGENT half is covered only IN MEMORY (internal/idem/idem_test.go, store_test.go). Needed: after a crash and restart, agent B replaying agent A's key must be applied as NEW, must not be answered with A's result, and must not be reported as a key-reuse violation -- i.e. no cross-agent oracle. Raised by the security gate as P2-4, which it explicitly confirmed still stands open after re-verification.
   _Proof: TBD by implementer -- e.g. go test -race -count=1 -run TestIdemCrashInjectionRestartCrossAgentKeyIsolation ./internal/idem/_
-- [-] IDEM-7 · IDEM-7: Exactly-once application on the relay path -- dedupe on the ORIGIN's identity, complementing (never replacing) RELAY-3 loop prevention — relay, P2
-  GATED on IDEM-2; lands with RELAY-2/RELAY-3. WHY THIS IS WHERE IDEMPOTENCY EARNS ITS KEEP (invariant 10, verbatim): "a cyclic peer topology plus at-least-once delivery means duplicates are not an edge case but the normal steady state." A bus with two peers that both peer with a third receives the same message twice as a matter of routine, not as a failure. (1) DEDUPE ON THE ORIGIN'S IDENTITY, NOT THE FORWARDING PEER'S: two different peers legitimately forward the SAME origin message, so keying on the sending peer's own idempotency key would treat them as two messages. The dedupe identity must be the origin bus's message identity -- which per invariant 2 is already globally unambiguous because it is namespaced by bus id -- carried unchanged across every hop. (2) IT MUST NOT BE FORGEABLE BY AN INTERMEDIATE: interacts directly with SIGN-7. If a lying peer can rewrite the dedupe identity, it can split one message into two deliveries (duplicate injection) or collide two messages into one (suppression). Prefer an identity that is inside, or verifiably derived from, SIGN-1's signed bytes, and say explicitly what an intermediate CAN still do -- the traversed bus path is metadata outside the signature (SIGN-7), so loop prevention is an availability mechanism, not a security one. (3) COMPLEMENT, NEVER SUBSTITUTE: RELAY-3's traversed-bus-path check stops a message CIRCULATING; this stops it being APPLIED twice. Neither replaces the other -- a message can arrive twice by two loop-free paths, and a buggy or malicious peer can strip the path. Do not let an implementer delete one because the other exists; state the argument in the code comment and in PROTOCOL.md. (4) The far bus mints its OWN local sequence for its own recipients (SIGN-7), so 'applied once' means one local delivery and one local sequence, not the origin's numbers. (5) RELAY-4's retry/backoff is the duplicate SOURCE this defends against, so test them together: a peer that acks late and retries must not produce a second delivery, including across a restart of the receiving bus.
-  _Proof: go test -race -run TestRelayAppliesOnce ./internal/relay -- a cyclic 3-bus topology delivers one message once_
-- [-] IDEM-2 · IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the effect, rebuilt by WAL replay — durability, P1
-  GATED on IDEM-1. Invariant 10 says the server's memory of applied keys "survives restart (it is part of the recovered state, not an in-memory cache)" -- this task is that guarantee. THE ONE THING THAT MAKES IT CORRECT: the applied-key record MUST be committed in the SAME two-phase (prepare -> commit -> fsync) transaction as the effect it records. If the message commits and the key record does not, a crash in that window plus a client retry produces a DUPLICATE -- precisely the bug idempotency exists to prevent, and it would be invisible in normal testing because the window is small. Do not implement it as a separate write, and do not order it 'after' the effect. (2) STORE THE RESULT, NOT JUST THE KEY: a retry must return the ORIGINAL response (message id, sequence, timestamp), so the record holds the (caller, operation, key) tuple, the payload fingerprint from IDEM-1, the minted result, and the commit time. A key with no stored result cannot satisfy IDEM-4. (3) RESERVE the on-disk record-type number via POST /api/v1/projects/agent-bus/reservations {"namespace":"record-type"} -- never hand-pick it; that is the classic parallel-agent collision, and DUR-1's framing already has neighbours. Bump the on-disk format version the same way if the framing changes. (4) RECOVERY: replay on start rebuilds the applied-key map alongside the rest of the serving state (invariant 5: memory is the serving copy, disk is the truth); recovery must yield a state that is a prefix of accepted history, so a key whose effect was not committed must NOT appear as applied. (5) CRASH-INJECTION TEST IS MANDATORY per CLAUDE.md: kill between prepare and commit, and between commit and ack, then assert what a post-restart retry does. 'The code looks right' is not evidence for a durability claim.
-  _Proof: go test -race -run TestAppliedKeyDurability ./internal/store ./internal/wal -- includes a crash-injection case_
-- [-] IDEM-6 · IDEM-6: Idempotent enrol, leave, and peer-enrol — auth, P2
-  GATED on IDEM-1/IDEM-2. Invariant 10 covers EVERY mutating operation, not just messaging. ENROL is the interesting one: a retried enrolment must return the SAME server-minted agent id and the SAME credential -- it must not mint a second agent. Ids are never reused (invariant 1), so a double-applied enrolment burns an id and leaves a phantom agent in the roster that nothing will ever collect, and the client ends up holding a credential for an identity its peers were never told about. It is also the operation with NO authenticated caller yet, so it uses the alternative key scope IDEM-1 settled (the presented enrolment key, or bus-wide) -- implement exactly that, and make sure the scope cannot be abused by an unauthenticated caller to squat or probe keys. RE-ENROLMENT WITH A DIFFERENT PUBLIC KEY under the same idempotency key is a different-payload violation (IDEM-5), not a retry -- important, because it is also how an attacker would try to take over an identity. LEAVE (AUTH-4): naturally idempotent, but must return success rather than an error on a second call, and must not double-apply revocation side effects (key_epoch bumps in CRYPTO-4 -- a second bump would needlessly invalidate freshly-issued bundles). PEER-ENROL (RELAY-1): two buses enrolling each other concurrently, and a peer retrying after a timeout, must converge on ONE peering, not two half-configured ones. All three persist their applied-key records through IDEM-2's store so they survive restart, and all three keep working after roster recovery (AUTH-3).
-  _Proof: go test -race -run TestIdempotentEnrol ./internal/auth ./internal/httpapi_
+- [ ] None · Give the hub a sentinel for a reservation spent by a DIFFERENT agent — hub, P2
+  Discovered while narrowing invariant 10's disconnect (see task 372b5072-2396-4e2a-8a80-398d5d006894, "Narrow invariant 10's disconnect to the third-party replay path"). `POST /v1/send` answers 409 "no matching sequence reservation" for TWO different actors and only one is hostile:
+    - a third party presenting ANOTHER agent's (message_id, seq) under a key it never minted -- hostile;
+    - the same agent re-presenting its OWN already-spent reservation under a fresh key -- a confused-but-honest client.
+  Both surface as `hub.ErrUnknownMint` from the `h.mints[{agent,op,key}]` miss in internal/hub/hub.go. internal/httpapi cannot tell them apart: the miss carries no ownership information, the hub keeps no message-id -> minting-agent index, and internal/store has no lookup by message id. So the hostile case is currently rejected but NOT disconnected, which is the deliberate fail-safe choice (never disconnect an ambiguous case).
+  
+  Fix: add a secondary index in internal/hub from message id to the holding agent, and raise a DISTINCT sentinel (e.g. `hub.ErrForeignMint`) when the presented (message_id, seq) matches an OUTSTANDING reservation held by an agent other than the authenticated caller. internal/httpapi then disconnects on that sentinel only.
+  
+  Known limitation to design for: this catches theft of an OUTSTANDING reservation only. A reservation is deleted from the mint table once spent, so a stolen SPENT id would still be `ErrUnknownMint` and still indistinguishable. Decide explicitly whether that residual gap is acceptable or needs a separate mechanism.
+  
+  Test to replace when this lands: `TestCrossMintIsIndistinguishableFromAnHonestSpentReservation` in internal/httpapi/disconnect_socket_test.go currently ASSERTS the ambiguity (that the theft and the honest client get byte-identical responses). It must become a disconnect assertion.
+- [ ] None · Five more agent-facing files still assert invariant 10's removed per-connection disconnect (2026-08-08 narrowing) -- messages.go:1175 already covered by IDEM-14-FU-CLIENTTEXT — docs, P2, doc-only, invariant-10, spec-defect, stale-security-prose
+  1c6c540 ("Aim invariant 10's disconnect at the replayer, not at the confused client",
+  2026-08-08) narrowed the disconnect to third-party replay ONLY: same-agent idempotency-key
+  reuse with a different payload is now reject-and-log, no disconnect, on both /v1/send and
+  /v1/enroll. The commit's own message names six agent-facing files that still assert the
+  OLD, now-false behaviour ("...disconnects the client" unconditionally on key reuse) and
+  notes "no code branches on any of them -- which is why the suite stays green over stale
+  security prose."
+  
+  Of those six, ONE already has a covering task: client/messages.go:1175 (the Remedy string
+  on annotateIdempotencyConflict) is tracked by IDEM-14-FU-CLIENTTEXT
+  (30a9e4f6-4ca7-48f1-8fc9-684e177de2f4, still todo). Do not duplicate that scope.
+  
+  THE FIVE REMAINING, verified present at HEAD (0dbb025) by direct read, 2026-08-08:
+  
+  1. AGENT_PROTOCOL.md:631-636 -- "Same key + different payload = a protocol violation. The
+     bus answers 409 and disconnects..." States the disconnect as unconditional for ANY
+     key-reuse-with-different-payload, on both send/broadcast and enrol. Needs: split into
+     the two real cases (enrol/send key-reuse = reject+log, no disconnect; third-party
+     replay = disconnect) or drop the disconnect claim from this generic paragraph entirely
+     since it is not the replay case.
+  
+  2. CONTRACTS-CLI.md:814 and :836 -- both read "...because the bus's answer to that is a 409
+     and a disconnection" / "The bus answers 409 and disconnects". :814 is the more
+     important one: it is the STATED RATIONALE for agent-busctl's local exit-2 refusal on
+     same-key-different-name enrolment (refusing locally "because" the server would
+     disconnect). That rationale is now factually wrong -- the server no longer disconnects
+     on this path -- even though the local-refusal BEHAVIOUR itself may still be sound for
+     other reasons (saving a round trip, giving a clearer local error). Needs the rationale
+     corrected; the behaviour is a separate question for whoever owns CONTRACTS-CLI.md next.
+  
+  3. client/messages.go:188 (doc comment on SendOptions.IdempotencyKey) -- "...earns a 409
+     AND a disconnection." Same file as the already-covered :1175, but a DIFFERENT location
+     (a struct-field doc comment, not the Remedy string), so it is NOT inside
+     IDEM-14-FU-CLIENTTEXT's stated scope (which names only messages.go:1175). Also
+     client/messages.go:1141-1148, the doc comment on annotateIdempotencyConflict itself
+     ("...it answers 409 with Connection: close and DISCONNECTS"). Both need the same
+     split as AGENT_PROTOCOL.md above.
+  
+  4. client/store.go:192 and :344 -- inline comments ("...the bus punishes with a
+     disconnect", "...and earning a disconnect") in the enrolment-idempotency bookkeeping
+     logic. Comment-only; needs updating to match the narrowed behaviour.
+  
+  5. internal/auth/errors.go:36 -- ErrIdempotencyKeyReused's doc comment: "The HTTP layer
+     answers 409, logs it at warn level and DISCONNECTS the offending client." This is the
+     server-side sentinel error whose own doc comment now contradicts internal/httpapi's
+     actual behaviour (writeAuthError no longer disconnects on this path per 1c6c540) --
+     the most load-bearing of the five, since a future maintainer reading the error
+     definition itself would reasonably trust it over scattered client-side prose.
+  
+  No code branches on any of these five (confirmed by 1c6c540's own gate work), so this is
+  comment/doc text only -- P2, not a live behavioural bug. Filed as its own task because the
+  sweep touches five unrelated files across two components (client SDK docs, server error
+  docs, two contract docs) and IDEM-14-FU-CLIENTTEXT's scope is pinned to one specific
+  string in messages.go and should not silently grow to cover it.
+  
+  Cross-reference: 3e542d14 (internal/relay/doc.go, filed alongside this) is the sixth
+  location from a DIFFERENT angle -- a specification defect in unbuilt relay code rather
+  than stale agent-facing prose -- and is tracked separately because its fix requires
+  naming an open design question, not just correcting a claim.
+  _Proof: bash -c 'set -e; ! grep -n "disconnects\|DISCONNECT" AGENT_PROTOCOL.md | grep -q "631\|632\|633\|634\|635\|636"; ! sed -n "808,840p" CONTRACTS-CLI.md | grep -qi "and a disconnection\|and disconnects"; ! sed -n "185,195p;1135,1150p" client/messages.go | grep -qi disconnect; ! grep -n "disconnect" client/store.go | grep -q "192\|344"; ! sed -n "30,42p" internal/auth/errors.go | grep -qi disconnect' # each of the five must no longer assert an unconditional disconnect on key-reuse; RED today (all five currently match)_
 - [ ] IDEM-12 · IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence, no second audit record — core, P1
   GATED on IDEM-10, IDEM-11, MSG-2 (POST /v1/broadcast) and MSG-3 (POST /v1/send). Wire the idempotency key into both routes: on a request whose (agent, key) already has an applied-key record, look it up (IDEM-11) BEFORE doing any normal send work. THE CARVE-OUT THAT MUST NOT BE COLLAPSED (state this in the code comments and the task's own tests, not just in this description): same key + SAME payload is a LEGITIMATE RETRY -- the ack was probably lost in flight. Return the ORIGINAL message id and sequence number verbatim, allocate NO new sequence (invariant 1: sequences are server-minted and never duplicated for one logical operation), write NO second record to the append-only audit log (invariant 6 -- a retry must not create a phantom second entry for what is, from the audit trail's point of view, one logical send), do NOT return an error, and do NOT disconnect the client. This is the entire point of idempotency: punishing a well-behaved retrying client breaks exactly the client doing the right thing. ONLY same key + DIFFERENT payload is a violation, and that path is IDEM-14's job, not this task's -- this task implements the happy path only. 'Same payload' comparison MUST be exact/content-addressed (e.g. compare a hash of the canonical request body), not fuzzily approximated. This task's own narrow test must show: a same-key-same-payload retry of both /v1/send and /v1/broadcast returns identical id+sequence on the second call, and the audit log gains no second entry for it. Broader exactly-once coverage (retry storms, concurrency) lives in IDEM-16/IDEM-17, not here.
   
@@ -2466,9 +2441,12 @@
   The fair-share divisor counts distinct agents holding >= 1 applied key, so an identity costs ONE durable send. Measured by the security gate against the real predicate: 654 identities holding 51 keys each drives the share to 100; 2048 identities to 31; 32768 identities to a share of 1, at which point every honest agent holding a single key is refused until it ages out (up to the 50h10m22s window). Total cost ~32768 fsynced sends versus the 65536 the pre-fix attack needed -- i.e. roughly half the write cost for an equivalent denial. The change still strictly improves the single-identity case, which is why this is a follow-up and not a blocker.
   
   ROOT FIX is authenticated enrolment (INVITE-GATE): enrolment is unauthenticated today (/v1/enroll is on unauthenticatedRoutes, internal/httpapi/authmw.go). A floor under the share is a possible mitigation but does not remove the root cause. Re-assess once INVITE-GATE lands rather than fixing independently.
-- [-] IDEM-1 · IDEM-1: The idempotency-key contract -- format, transport, scope, and which operations require one — core, P1
-  Implements the wire half of CLAUDE.md invariant 10 ("duplicate detection and idempotency, everywhere"), recorded in DECISIONS.md via commit bfe391c. FIRST TASK OF THE EPIC -- everything else depends on this contract, so land it before any dedupe logic. SPECIFY AND ENFORCE: (1) TRANSPORT -- one canonical way to carry the key (an `Idempotency-Key` request header is the conventional choice; if it goes in the body instead, say why and be consistent). One place, never two. (2) WHICH OPERATIONS -- every MUTATING operation: enrol, send, broadcast, leave, peer-enrol, and relay ingest. Read-only routes (/v1/agents, /v1/wait, /v1/messages, /healthz, /v1/info) do NOT take one. (3) MISSING KEY IS AN ERROR (4xx), never a server-generated substitute: silently minting a key per attempt would make every retry look new and quietly defeat the entire epic. (4) VALIDATION -- opaque to the server, but bounded: a documented max length (e.g. 128 bytes) and a restricted charset, rejected with a clear error otherwise. Invariant 1 applies with full force: the key is CLIENT-supplied, so it is input to VALIDATE and never an identity to trust -- it must NEVER become, seed, or be derivable into a message id, an agent id, or a sequence number, all of which stay server-minted. (5) SCOPE -- the dedupe identity is the tuple (authenticated caller's fully-qualified <bus-id>.<agent-id>, operation, key), NOT the bare key. Per-caller scoping is required for two reasons: two agents independently choosing "1" must not collide, and without it one agent can burn another's keys and suppress their real messages -- a trivial griefing attack. CALL OUT THE AWKWARD CASE: enrolment has no authenticated caller yet, so its key needs a different scope (the presented enrolment key, or bus-wide) -- decide it here, and hand IDEM-6 the answer. (6) PAYLOAD FINGERPRINT -- define the canonical hash of the request payload that is stored with the key, because invariant 10 turns on distinguishing same-key-same-payload (legitimate retry) from same-key-different-payload (protocol violation). Specify exactly which bytes are hashed, the same way SIGN-1 pins its signed bytes; an ambiguous fingerprint makes the distinction unreliable in both directions. Use crypto/sha256 (stdlib). Document all of it in PROTOCOL.md/CONTRACTS.md via IDEM-9.
-  _Proof: go test -race -run TestIdempotencyKeyContract ./internal/httpapi_
+- [ ] None · IDEM-11-FU-THROUGHPUT: sustained ceiling roughly halves to ~0.36 ops/s and nothing surfaces IdempotencyStats to an operator — performance, P2
+  Performance note from the IDEM-11 gates, 2026-08-03. Not a blocker; the durability cost is deliberate (invariant 4 -- nothing acked before durable, never traded for latency).
+  
+  Two follow-ups: (1) the sustained throughput ceiling roughly halves to ~0.36 ops/s with the applied-key record sharing the prepare's fsync -- this deserves an explicit operator-facing line in the docs rather than being discovered under load; (2) IDEM-11 added hub.IdempotencyStats() idem.Stats but nothing exposes it, so an operator cannot see how close the 65536 cap is to filling until it 503s. CORE-5 (metrics/observability) should surface it. That matters more given IDEM-11-FU-FAIRSHARE: without visibility, table exhaustion is indistinguishable from a general outage.
+  
+  Also latent, P2 within this task: idem.MaxResultBytes=512 vs store.MaxRecipients=64 -- only 0-1 recipients can reach publish today, so the bound is unreachable, but it becomes reachable the moment multi-recipient sends land.
 - [~] IDEM-18 · IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_PROTOCOL.md / PROTOCOL.md / CONTRACTS.md — agentif, P1, in progress
   GATED on IDEM-10 (key contract) and IDEM-12 (idempotent send/broadcast). Filed 2026-08-02 as the one gap left after merging two concurrently-filed IDEM epics (see the IDEM epic note): IDEM-10..17 cover the server side thoroughly and say nothing about the agent-facing side, which invariant 7 makes non-optional -- agents never hand-write HTTP, so the idempotency key is the WRAPPER's responsibility, not the calling agent's. THE SINGLE MOST LIKELY WAY THIS EPIC SHIPS BROKEN: a wrapper that generates a FRESH key on every attempt. Every retry then looks like a brand-new operation, the server dedupes nothing, duplicates flow exactly as before -- and every server-side test in IDEM-16/IDEM-17 keeps passing, because none of them exercise the wrapper. DELIVER: (1) each mutating wrapper (bus-enrol, bus-send, bus-broadcast, bus-leave, bus-peer) generates ONE key per logical operation, holds it for the whole retry loop, and reuses it verbatim on every attempt. (2) Key generation is real randomness -- no PIDs, no timestamps, no counters that reset across restarts, all of which collide in exactly the multi-process, post-crash situations this epic exists for. (3) A test that FORCES a retry (first attempt killed or refused) and asserts exactly ONE message resulted -- run through scripts/bus-*.sh against a running throwaway bus with its own data dir under /tmp, never hand-written curl: if the wrapper doesn't retry idempotently, the feature doesn't work. (4) AGENT_PROTOCOL.md: agents call the wrapper and do NOT craft keys themselves; what a replayed-ack response means; and that after an IDEM-14 disconnect, reconnecting and retrying with the SAME key is CORRECT, while reusing a key for different content is a protocol violation that will disconnect them again. (5) PROTOCOL.md: the key's transport, the per-agent scope tuple, the payload fingerprint, and -- stated honestly -- IDEM-11's retention window as the BOUNDARY of the guarantee: duplicates are suppressed within the window, and a retry arriving after its key is evicted is applied as a new operation. The system does not provide unconditional exactly-once and the docs must not imply it does. (6) CONTRACTS.md: the header/field, every new error code, the record type IDEM-11 reserved, and any flag/env var bounding retention.
   _Proof: go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/... && grep -qi idempotency AGENT_PROTOCOL.md && grep -qi idempotency CONTRACTS-CLI.md && grep -qi idempotency PROTOCOL.md_
@@ -2489,9 +2467,6 @@
   
   --- CONTRADICTION RAISED BY THE MERGE (2026-08-02), MUST BE RESOLVED BY WHOEVER IMPLEMENTS THIS TASK: the paragraph above says a retry arriving after its key's window expired MUST FAIL CLOSED (rejected as unrecognized/expired), while withdrawn IDEM-3 and the surviving IDEM-18 doc task both state the honest guarantee as 'duplicates are suppressed within the retention window' -- i.e. a retry arriving after eviction IS applied as a NEW operation and produces a second effect. Both cannot ship. THE MECHANISM PROBLEM THAT DECIDES IT: keys are opaque client-supplied strings (IDEM-10), so a server that has evicted a key CANNOT distinguish it from a key it has never seen -- and every legitimate first attempt is a key it has never seen. Fail-closed is therefore only implementable if this task ALSO specifies a mechanism that makes expiry detectable (e.g. a retained eviction watermark plus a verifiable mint-time carried with the key); designing that mechanism is in scope here, assuming it is not. So: either (i) specify that mechanism and keep fail-closed, or (ii) adopt the bounded-window statement and document the boundary honestly. Record the choice and its rationale in DECISIONS.md, and make IDEM-18's PROTOCOL.md wording and IDEM-16's past-the-window test match it -- both of those currently assume (ii).
   _Proof: go test -race -run TestIdemCrash ./internal/hub/_
-- [-] IDEM-5 · IDEM-5: Same key + DIFFERENT payload is a protocol violation -- reject, log, and disconnect the offending client — security, P1
-  GATED on IDEM-1 (payload fingerprint) and IDEM-2 (stored fingerprint). This is the case the user's instruction targeted: a client reusing an idempotency key for DIFFERENT content is either a serious bug or an attack -- it is trying to make the server believe new content was already-acked content, or to suppress a message by pre-burning its key. REJECT it with a distinct, unambiguous error code (not the generic validation error -- an operator must be able to grep for this), LOG it at a level a human actually sees, with the caller identity, the operation, the key and both fingerprints, and DISCONNECT the offending client. DEFINE 'DISCONNECT' CONCRETELY, because on an HTTP server it is not obvious: at minimum close the connection without keep-alive reuse. DECIDE AND JUSTIFY THE BLAST RADIUS -- does it also invalidate the token / revoke enrolment (AUTH-4), or only drop the connection? The user asked for a disconnect; the choice between 'drop the TCP connection' and 'evict the agent' is a real security/availability trade-off and belongs in DECISIONS.md, not in an implementer's head. THE LINE THAT MUST NOT BE CROSSED: this path must NEVER fire for same-key-same-payload (IDEM-4). Getting that backwards turns a correctness feature into an outage for well-behaved clients, so both directions get their own named test. INTERACTIONS: (a) a disconnected long-poll client (POLL-1) will reconnect immediately -- make sure the rejection is sticky enough not to become a self-inflicted reconnect storm, or is cheap enough not to matter; say which. (b) Replay of an already-accepted SIGNED message by a peer or third party is the related-but-distinct case in invariant 10 -- it is rejected and disconnects the sender too, but its freshness check is SIGN-4's sequence+cursor, not the fingerprint; keep the two paths distinct and cross-reference them rather than merging them.
-  _Proof: go test -race -run TestKeyReuseDifferentPayloadDisconnects ./internal/httpapi_
 - [ ] IDEM-17-FU-PLACEMENT · Decide crash-suite package placement: internal/idem vs internal/hub — test, P2
   IDEM-17's crash-injection suite drives internal/hub but lives in internal/idem as an external test package (package idem_test), purely because the authoring agent's file-ownership boundary was internal/idem/** and internal/hub/** belonged to another live agent. Consequence: it has zero references to package idem, so `go test ./internal/hub/` does not run it and coverage is attributed to the wrong package. Decide deliberately whether to relocate it next to internal/hub/idem_crash_test.go or to keep it and record the placement as intentional. Note the two files are complementary, not duplicates: hub's indexes crash points by DURABLE WAL STATE, idem's by position in the CLIENT'S RETRY WINDOW.
   _Proof: TBD by implementer -- either a relocation diff that still passes go test -race ./internal/hub/... ./internal/idem/..., or a doc.go note recording the placement decision as intentional_
@@ -2500,39 +2475,27 @@
   
   --- FOLDED IN FROM THE WITHDRAWN DUPLICATE EPIC (IDEM-6, superseded 2026-08-02), reconciliation pass 2. This content was unique to the withdrawn set and is now in THIS task's scope, not merely offered as a note: (a) WHY A DOUBLE-APPLIED ENROL IS WORSE THAN A DUPLICATE MESSAGE: ids are never reused (invariant 1), so minting a second agent burns an id permanently and leaves a PHANTOM agent in the roster that nothing will ever collect, while the client ends up holding a credential for an identity its peers were never told about. (b) THE UNAUTHENTICATED SCOPE: enrol has no authenticated caller yet, so it uses the alternative key scope IDEM-10 settles (the presented enrolment public key, or bus-wide) -- implement exactly that, and ensure it cannot be used by an unauthenticated caller to squat or probe another party's keys. (c) RE-ENROLMENT WITH A DIFFERENT PUBLIC KEY under the same idempotency key is a different-payload VIOLATION (IDEM-14), not a retry -- important, because that is precisely how an attacker would attempt an identity takeover. (d) LEAVE MUST NOT DOUBLE-APPLY ITS SIDE EFFECTS: return success (not an error) on a second call, and do not repeat revocation side effects -- notably CRYPTO-4's key_epoch bump, where a second bump needlessly invalidates freshly-issued bundles. (e) PEER-ENROL MUST CONVERGE: two buses enrolling each other concurrently, and a peer retrying after a timeout, must end up with ONE peering, not two half-configured ones. (f) All three operations persist their applied-key records through IDEM-11's store so they survive restart, and all three must still behave after roster recovery (AUTH-3). PRIORITY NOTE: kept at P1 (the withdrawn counterpart was P2); the merge preserves the STRONGER priority of the two batches, never the weaker.
   _Proof: go test -race -run TestIdempotentEnrol ./internal/auth/... ./internal/relay/..._
+- [ ] None · IDEM-11-FU-HUBAPPLY: hub.Apply returns early for non-message Entry.Kind, so IDEM-13/14/15 cannot fold their own Entry.Idem — durability, P2
+  Noted by the IDEM-11 agent 2026-08-03 as a structural blocker for the rest of the epic, not a defect in shipped behaviour.
+  
+  hub.Apply returns early for any Entry.Kind that is not a message, so a prepare carrying an Entry.Idem record for a NON-message operation (enrol, leave, peer-enrol) is never folded into the applied-key store during replay. IDEM-13 (idempotent enrol/leave/peer-enrol) and IDEM-14 (the violation path) therefore cannot work until Apply is extended to route by Kind and fold Idem for every kind that carries one.
+  
+  Whoever takes IDEM-13 should expect to do this first, or it should be split out ahead of them. Flagging it now so it is not rediscovered as a surprise mid-task.
 - [ ] IDEM-15 · IDEM-15: Relay duplicate suppression via idempotency keys — relay, P2
   GATED on IDEM-10, IDEM-11, RELAY-2 (message relay across peers) and RELAY-3 (loop prevention via traversed-bus path). Relay is where idempotency earns its keep: a cyclic peer topology combined with at-least-once delivery (invariant 4's guarantee, extended across the relay plane) means a relayed message can legitimately arrive at a bus by two different paths, or be resent by a peer retrying after a lost ack -- duplicates are the NORMAL steady state here, not an edge case. Apply the same applied-key check IDEM-12 uses to inbound relayed messages: a relayed message carries (or is assigned, at the originating bus) an idempotency key, and a receiving bus that has already applied that key suppresses the duplicate exactly as a duplicate direct send is suppressed -- no second delivery to local agents, no second audit record. STATE THIS EXPLICITLY, because RELAY-3 alone reads as sufficient and it is NOT: RELAY-3's traversed-bus-path loop prevention COMPLEMENTS this and is NEVER a substitute for it. RELAY-3 stops a message from being re-relayed back through a bus it has already visited (a topology-shape defence); it does nothing about a message that legitimately reaches the same bus via two DIFFERENT paths that never revisit any bus, which only idempotency catches. A relay implementation with RELAY-3 but without this task will silently double-deliver in exactly that topology. Priority is P2, matching the RELAY epic's own priority band, since it cannot land before RELAY-2/RELAY-3 exist. Test alongside RELAY-5's crash/loop integration test in IDEM-17, not as a replacement for it.
   
   --- FOLDED IN FROM THE WITHDRAWN DUPLICATE EPIC (IDEM-7, superseded 2026-08-02), reconciliation pass 2. This content was unique to the withdrawn set and is now in THIS task's scope, not merely offered as a note: (a) DEDUPE ON THE ORIGIN'S IDENTITY, NOT THE FORWARDING PEER'S. Two different peers legitimately forward the SAME origin message; keying suppression on the sending peer's own idempotency key treats those as two distinct messages and delivers both. The dedupe identity must be the ORIGIN bus's message identity -- already globally unambiguous per invariant 2 because it is <bus-id>-namespaced -- carried UNCHANGED across every hop. This is the single most important sentence in this task and it was absent before the merge. (b) IT MUST NOT BE FORGEABLE BY AN INTERMEDIATE (see SIGN-7): if a lying peer can rewrite the dedupe identity, it can split one message into two deliveries (duplicate injection) or collide two distinct messages into one (silent suppression). Prefer an identity that is inside, or verifiably derived from, SIGN-1's signed bytes -- and state explicitly what an intermediate CAN still do: the traversed-bus path is metadata OUTSIDE the signature, so RELAY-3's loop prevention is an availability mechanism, not a security one. (c) 'APPLIED ONCE' MEANS ONCE LOCALLY: the receiving bus mints its OWN local delivery sequence for its own recipients (SIGN-7), so the assertion is one local delivery and one local sequence consumed -- not that the origin's numbers are reused. (d) RELAY-4's RETRY/BACKOFF IS THE DUPLICATE SOURCE this defends against, so test them together: a peer that acks late and retries must not produce a second delivery, INCLUDING across a restart of the receiving bus -- which is where the durability of the relay-side applied-key record (IDEM-11) is actually exercised. (e) Put the complement-never-substitute argument in the CODE COMMENT and in PROTOCOL.md, not only in this task, so a later implementer does not delete one defence because the other exists. CROSS-REFERENCE: SIGN-7 point (5) now points at THIS task (it referenced the withdrawn IDEM-7 until the merge).
   _Proof: go test -race -run TestRelayIdempotentSuppression ./internal/relay/..._
-- [-] IDEM-9 · IDEM-9: Wrappers generate the key ONCE and reuse it on retry, + AGENT_PROTOCOL.md / PROTOCOL.md / CONTRACTS.md — agentif, P1
-  GATED on IDEM-1/IDEM-4. Invariant 7: agents never hand-write HTTP, so the idempotency key is the wrappers' job, not the agent's. THE SINGLE MOST LIKELY WAY THIS EPIC SHIPS BROKEN: a wrapper that generates a FRESH key on every attempt. Every retry then looks like a new operation, the server dedupes nothing, and the whole epic is dead weight while every test that only exercises the server keeps passing. So: each scripts/bus-*.sh mutating wrapper (bus-enrol, bus-send, bus-broadcast, bus-leave, bus-peer) generates ONE key per logical operation, holds it for the entire retry loop, and reuses it verbatim on every attempt -- and there is a test that FORCES a retry (kill/refuse the first attempt) and asserts one message resulted. Key generation must be a real random id (no PIDs, no timestamps, no counters that reset -- all of which collide across restarts and processes). DOCUMENT: AGENT_PROTOCOL.md -- agents call the wrapper and do NOT craft keys themselves; what a replayed-ack response means; what a disconnect means and that reconnecting with the SAME key is correct while reusing it for different content is a protocol violation that will disconnect them again. PROTOCOL.md -- the header, the scope tuple, the payload fingerprint, and IDEM-3's retention window stated honestly as the boundary of the guarantee. CONTRACTS.md -- the header, every new error code, the record type IDEM-2 reserved, and any new flag/env var for the retention bound. Verify through the wrappers against a running throwaway bus with its own data dir under /tmp, not hand-written curl -- if the wrapper doesn't retry idempotently, the feature doesn't work.
-  _Proof: scripts/bus-send.sh forced to retry against a running throwaway bus produces exactly ONE message; grep -q 'Idempotency-Key' AGENT_PROTOCOL.md CONTRACTS.md_
 - [ ] IDEM-14 · IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs as security, and disconnects — core, P1
   GATED on IDEM-10, IDEM-11, and at least one of IDEM-12/IDEM-13 landing first (the happy path must exist before the violation path can be distinguished from it). Implements invariant 10's violation clause: when a client reuses an (agent, key) pair the applied-key store (IDEM-11) already has a record for, but the NEW request's payload does NOT match the original, the server must (1) REJECT the request, (2) log it as a SECURITY event -- not a routine 4xx; same severity class as an auth failure, discoverable the way the security agent expects to find things -- and (3) DISCONNECT the offending client. THE CARVE-OUT THAT MUST NOT BE COLLAPSED (restate it here explicitly, do not assume the reader has IDEM-12's copy in front of them): this path fires ONLY for same-key-DIFFERENT-payload. Same-key-SAME-payload is IDEM-12/IDEM-13's legitimate-retry path and must NEVER reach this code -- an implementation that disconnects on every duplicate key regardless of payload is WRONG and will disconnect well-behaved retrying clients, precisely the bug invariant 10's text calls out by name. TWO DECISIONS THIS TASK MUST PIN DOWN and record in DECISIONS.md, because CLAUDE.md's invariant 10 text leaves them open: (a) the EXACT HTTP status code returned for the rejected request (409 Conflict is the natural fit for 'conflicts with a prior request under this key' -- pick and justify one, don't reuse a generic 400); (b) whether 'disconnect' means merely dropping the current connection/long-poll (the agent can reconnect and retry with a fresh key) or FULL CREDENTIAL REVOCATION requiring re-enrolment (the agent's AUTH-1 token is invalidated, same blast radius as AUTH-4's leave path) -- these have very different consequences and the choice must be deliberate, not whichever was easiest to wire up. Also applies conceptually to 'replay of an already-accepted signed message' per invariant 10's third bullet -- SIGN-4/SIGN-5 own the signature-replay detection mechanics; this task's reject/log/disconnect plumbing is the natural place that behaviour hooks into, so cross-reference SIGN-4 rather than building a second, divergent disconnect path.
   
   --- FOLDED IN FROM THE WITHDRAWN DUPLICATE EPIC (IDEM-5, superseded 2026-08-02), reconciliation pass 2. This content was unique to the withdrawn set and is now in THIS task's scope, not merely offered as a note: (a) DEFINE 'DISCONNECT' CONCRETELY -- on an HTTP server it is not self-evident: at minimum, close the connection without keep-alive reuse. That is the MECHANICS, a separate axis from the blast-radius decision this task already carries (drop the connection vs revoke the credential); both must be written down. (b) THE ERROR MUST BE GREPPABLE: a distinct code, not the generic validation error, plus a log line an operator actually sees carrying the caller identity, the operation, the key, and BOTH payload fingerprints (the stored one and the offending one). (c) DO NOT CREATE A SELF-INFLICTED RECONNECT STORM: a disconnected long-poll client (POLL-1) reconnects immediately, so the rejection must be either sticky enough to stop the loop or cheap enough not to matter -- say which. (d) KEEP THE SIGNED-REPLAY PATH DISTINCT: replay of an already-accepted SIGNED message also rejects and disconnects, but its freshness check is SIGN-4's sequence+cursor, NOT the payload fingerprint. Reuse this task's reject/log/disconnect plumbing, but do not merge the two detectors into one path -- cross-reference them instead. (e) BOTH DIRECTIONS GET THEIR OWN NAMED TEST: it fires on same-key-different-payload, and it provably does NOT fire on same-key-same-payload. Getting that backwards turns a correctness feature into an outage for exactly the well-behaved clients that retry correctly.
   _Proof: go test -race -run TestIdempotencyViolation ./internal/..._
-- [x] IDEM-10 · IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent — core, P1
-  Define the idempotency key carried on every mutating request per invariant 10 (CLAUDE.md, 2026-08-02): enrol, send, broadcast, leave, peer-enrol, relay. The key is CLIENT-SUPPLIED and therefore UNTRUSTED input per invariant 1 -- validate it, never trust it. Pick and document an EXACT byte length cap (e.g. <=128 bytes) and an EXACT charset restriction (e.g. printable ASCII or a documented allow-list), and reject any request whose key field would trigger unbounded allocation (over-cap keys are rejected before the rest of the body is read, the same fail-fast discipline AUTH-6 established for the mux). Keys MUST be scoped PER-AGENT: the applied-key lookup this task feeds (IDEM-11) is keyed by (agent id, idempotency key), NEVER by key alone. State explicitly why this matters: without per-agent scoping, one agent could either collide with another agent's key space (corrupting its retry bookkeeping) or PROBE another agent's key space -- 'does key X already exist for some agent?' becomes an oracle leaking information about another agent's traffic, the same class of cross-agent leak invariant 2's <bus-id>.<agent-id> namespacing exists to prevent elsewhere. Deliverable: a written spec (CONTRACTS.md and/or PROTOCOL.md) naming the wire field name, the length cap, the charset, and the per-agent scoping rule, PLUS validation code shared by every mutating handler so the rule cannot be implemented inconsistently route-by-route (a single validateIdempotencyKey(agentID, key) helper, not five copies). BLOCKS IDEM-11 through IDEM-15, which all consume this key shape. No dependency on DUR-3.
-  
-  --- FOLDED IN FROM THE WITHDRAWN DUPLICATE EPIC (IDEM-1, superseded 2026-08-02), reconciliation pass 2. This content was unique to the withdrawn set and is now in THIS task's scope, not merely offered as a note: (a) TRANSPORT -- pick ONE canonical carrier for the key and use it everywhere; an `Idempotency-Key` request HEADER is the conventional choice, and if it goes in the body instead, say why. One place, never two: a key that can arrive by two routes is a key that will eventually disagree with itself. (b) A MISSING KEY ON A MUTATING ROUTE IS AN ERROR (4xx) and the server MUST NOT mint a substitute per attempt -- silently generating one makes every retry look like a new operation and defeats this entire epic while every server-side test keeps passing. (c) READ-ONLY ROUTES DO NOT TAKE ONE -- name them (/v1/agents, /v1/wait, /v1/messages, /healthz, /v1/info) so the rule is exhaustive in both directions rather than only listing what does require a key. (d) INVARIANT 1, STATED EXPLICITLY: the key is client-supplied input to VALIDATE, and it must NEVER become, seed, or be derivable into a message id, an agent id, or a sequence number -- all of those stay server-minted. (e) THE SCOPE TUPLE SHOULD ALSO CARRY THE OPERATION: the withdrawn task scoped dedupe by (fully-qualified <bus-id>.<agent-id>, OPERATION, key) rather than (agent, key). Decide which and record why -- without the operation component, one agent reusing a key across two different routes collides with itself. (f) ENROLMENT IS THE AWKWARD CASE AND IS SETTLED HERE, not deferred to IDEM-13: enrol has no authenticated caller yet, so its dedupe scope must be something else (the presented enrolment public key, or bus-wide). Decide it in this task, hand IDEM-13 the answer, and make sure the chosen scope cannot be used by an UNAUTHENTICATED caller to squat or probe keys. (g) DEFINE THE PAYLOAD FINGERPRINT HERE: the canonical hash (crypto/sha256, stdlib) that IDEM-11 stores next to the key, pinning EXACTLY which bytes are hashed, the same way SIGN-1 pins its signed bytes. IDEM-12's legitimate-retry path and IDEM-14's violation path both turn on same-payload-vs-different-payload, so an ambiguous fingerprint makes that distinction unreliable in BOTH directions -- it belongs in this contract task, not re-invented per route. Documentation of all of the above lands via IDEM-18 (the agent-facing wrapper + docs task filed by the merge).
-  _Proof: go test -race -run TestIdempotencyKey ./internal/... && test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"_
 - [ ] IDEM-16 · IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reuse-different-payload disconnect — test, P1
   GATED on IDEM-12, IDEM-13, IDEM-14. Functional/concurrency coverage proving invariant 10's guarantees under `-race` (CLAUDE.md: concurrency here is the product, a data race is a P0). Required, each as its OWN named test so a future regression names exactly which property broke: (1) RETRY STORM -- fire N (e.g. 50) requests sharing one (agent, key, payload) and assert exactly ONE effect resulted: one sequence allocated, one audit record written, all N responses are byte-identical to the original result, and none of the N connections was disconnected. (2) CONCURRENT RACE -- run under `go test -race`, launching the identical-payload retries genuinely concurrently (goroutines released via a barrier, not serialized one after another) so the applied-key check-then-write path's OWN race safety is exercised, not just its logic in isolation; a naive check-then-insert without a lock/CAS looks correct read serially but double-applies under real concurrency, and this test must be able to catch that. (3) KEY-REUSE-DIFFERENT-PAYLOAD -- reuse an (agent, key) with a different payload and assert IDEM-14's full behaviour: rejection with the pinned status code, the security-event log entry, and the disconnect (whichever form IDEM-14 decided). STATE THE CARVE-OUT EXPLICITLY in the test names/comments so a future reader cannot miscopy the storm test's assertions into the disconnect test or vice versa. Exercise via the actual HTTP routes (send/broadcast at minimum; enrol/leave/peer-enrol if IDEM-13 landed first), not by calling internal functions directly, so this proves the wire behaviour the AGENTIF wrappers actually depend on. Kept separate from IDEM-17's crash-injection test the same way DUR's functional tests are kept separate from DUR-6.
   
   --- FOLDED IN FROM THE WITHDRAWN DUPLICATE EPIC (IDEM-8, superseded 2026-08-02), reconciliation pass 2. This content was unique to the withdrawn set and is now in THIS task's scope, not merely offered as a note: (a) ASSERT EXACTLY ONE OF EVERYTHING, NOT MERELY 'NO ERROR': one WAL record, one append-only audit entry (invariant 6), one delivery to the recipient, one sequence consumed. A test that only inspects the response body passes against an implementation that quietly writes two durable records. (b) ADD A RETRIED-BROADCAST CASE: each recipient receives it exactly once, including a recipient whose first-attempt delivery failed. (c) ADD A POST-VIOLATION INTEGRITY CASE: after IDEM-14 rejects and disconnects a key-reuse-with-different-payload attempt, the ORIGINAL message is still intact, still in history, and still deliverable -- a violation must not damage the operation it collided with. (d) ADD A PAST-THE-RETENTION-WINDOW CASE asserting IDEM-11's DOCUMENTED behaviour explicitly, so the honest boundary of the guarantee is pinned by a test rather than left to the reader. NOTE that IDEM-11 currently carries an unresolved contradiction about what that behaviour is (fail-closed vs applied-as-a-new-operation); write this test against whatever DECISIONS.md records, and do NOT write it against whichever one the implementation happens to do.
   _Proof: go test -race -run 'TestIdemRetryStorm|TestIdemConcurrentRace|TestIdemViolationDisconnect' ./internal/..._
-- [-] IDEM-8 · IDEM-8: Proof suite -- a retried send produces exactly one message, including across a crash and under concurrency — durability, P1
-  GATED on IDEM-2/IDEM-4/IDEM-5 (may be written in parallel against them). Invariant 10 is a correctness claim, and a correctness claim without a test that would FAIL if it were violated is a slogan. Every scenario asserts EXACTLY ONE of everything -- one WAL record, one audit-log entry, one delivery to the recipient, one sequence consumed -- not merely 'no error'. REQUIRED SCENARIOS, each its own named test so a regression names the property that broke: (1) SIMPLE RETRY -- send, ack lost, resend with the same key and payload: one message, and the second response is byte-identical to the first. (2) CRASH BETWEEN EFFECT AND ACK -- crash-injection per CLAUDE.md: kill the server after the message commits but before the client sees the ack, restart, replay, then retry with the same key: still one message. THIS IS THE TEST THAT PROVES IDEM-2's same-transaction claim; without it that claim is unverified. (3) CRASH BETWEEN PREPARE AND COMMIT -- retry after restart produces exactly one message and recovery is a prefix of accepted history (invariant 5). (4) CONCURRENT DUPLICATES -- N goroutines fire the same key simultaneously under -race: one message, N identical responses, no data race. (5) KEY REUSE WITH DIFFERENT PAYLOAD -- rejected and disconnected (IDEM-5), and, importantly, the ORIGINAL message is still intact and deliverable afterwards. (6) PAST THE RETENTION WINDOW -- assert IDEM-3's documented behaviour explicitly, so the honest boundary of the guarantee is pinned by a test rather than left to the reader. (7) BROADCAST -- a retried broadcast delivers to each recipient exactly once. Table-driven where it helps; keep the narrowest check runnable in seconds.
-  _Proof: go test -race -run TestExactlyOnce ./internal/... -- one subtest per scenario, each asserting exactly one durable record_
-- [-] IDEM-4 · IDEM-4: Idempotent send and broadcast -- a legitimate retry returns the ORIGINAL result and produces no second message — msg, P1
-  GATED on IDEM-1/IDEM-2. The core behaviour, on the paths that matter most (MSG-2 broadcast, MSG-3 send). SAME KEY + SAME PAYLOAD IS A LEGITIMATE RETRY -- the ack was probably lost in flight. Return the ORIGINAL result verbatim: the same message id, the same sequence, the same 2xx status. Do NOT re-apply, do NOT mint a new id or sequence, do NOT return an error or a 409, and do NOT disconnect. Invariant 10 is explicit that punishing this case would break exactly the clients doing the right thing; the disconnect rule belongs to IDEM-5's different-payload case and must not leak into this one. MARK THE RESPONSE so a caller can tell a replayed ack from a fresh one (a response field or header) -- useful for debugging and for the wrapper's logging, but the body must otherwise be identical. THE SUBTLE CASE, which is where implementations usually break: TWO CONCURRENT IN-FLIGHT REQUESTS WITH THE SAME KEY -- the client retried before the first ack landed, so the first operation is committed-in-progress and there is no stored result yet. A naive check-then-act double-applies. Handle it with a single-flight reservation on the key inside the same critical section that mints the sequence: the second caller either blocks and returns the first's result, or gets an explicitly retriable 'in progress' response -- pick one, document it, and TEST IT UNDER -race, since concurrency is this project's product. BROADCAST SPECIFICS: dedupe on the broadcast OPERATION, not per-recipient delivery -- a retried broadcast must not fan out a second time to anyone, including recipients whose delivery failed the first time. Interacts with SIGN-6: a message rejected for a missing/invalid signature was never applied, so its key is NOT recorded as applied and a corrected resend under the same key is a new operation, not a retry -- state this.
-  _Proof: go test -race -run TestRetriedSendReturnsOriginal ./internal/httpapi ./internal/store_
-- [-] IDEM-3 · IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of what happens past the window — durability, P1
-  GATED on IDEM-2. An applied-key store that never forgets grows without bound and eventually is the process's memory footprint and the WAL's replay time; one that forgets carelessly resurrects duplicates. This task bounds it and STATES THE RESULTING GUARANTEE HONESTLY. DELIVER: (1) the retention policy -- a time window, a count cap, or both; whichever is chosen, the bound must be provable and testable, not aspirational. (2) THE WINDOW MUST EXCEED THE MAXIMUM CLIENT RETRY HORIZON, or the guarantee is a lie in exactly the case that matters: a peer reconnecting after a long outage (RELAY-4's backoff ceiling) and a long-poll client resuming after a network partition are the realistic worst cases -- derive the number from them, do not pick a round one. (3) EVICTION MUST BE CONSISTENT ACROSS MEMORY AND DISK: evicting in memory while the record survives on disk (or the reverse) makes behaviour depend on whether a restart happened since, which is the worst kind of intermittent bug. State how eviction interacts with DUR-7 (snapshot/compaction) -- a snapshot must not silently reinstate evicted keys, nor drop live ones. (4) SAY PLAINLY IN PROTOCOL.md what happens to a retry that arrives AFTER its key is evicted: it is applied as a NEW operation and produces a second message. That is the true guarantee -- 'duplicates are suppressed within the retention window' -- and it must be documented as such rather than described as unconditional exactly-once, which the system does not and cannot provide. (5) Expose the current applied-key count/oldest-key age wherever CORE-5's inspect/metrics endpoint lands, so the bound is observable in production rather than assumed.
-  _Proof: go test -race -run TestDedupeWindowBound ./internal/store_
-
 ### EPIC INVITE — Invite-only enrolment
 
 - [ ] INVITE-GATE · INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption and the roster write commit TOGETHER — auth, P0
@@ -2540,28 +2503,29 @@
   
   This is the epic's crux and the root fix for the pre-auth attack family. internal/httpapi/auth.go:122 handleEnroll and internal/auth/service.go:276 Service.Enrol gain the gate. THE CORRECTNESS CRUX: single-use consumption and the enrolment effect must land in the SAME two-phase transaction, or a crash between them either burns an invite with no agent or enrols an agent without spending the invite. SECOND CRUX (invariant 10): a legitimate retry carrying the same idempotency_key and the same payload must return the ORIGINAL result and must NOT consume the invite a second time; same key with a DIFFERENT payload stays a 409 + Connection: close. Must update CONTRACTS-HTTP.md -- in particular the "Known gaps" bullet at CONTRACTS-HTTP.md:172-186 which currently states enrolment is unauthenticated, and the POST /v1/enroll route rows at CONTRACTS-HTTP.md:14-17. BREAKING WIRE CHANGE -- escalated to the user; do not land before ENROL-SHAPE. RESIDUAL RISK TO DOCUMENT IN THE SAME TASK: until MTLS-LISTENER lands, the invite secret crosses the wire in CLEARTEXT; exposure is bounded only by the -listen 127.0.0.1:8080 loopback default, and the bus must not be exposed on a non-loopback interface until mTLS ships.
   _Proof: go test -race -run 'TestEnrolRequiresInvite|TestEnrolConsumesInviteAtomically|TestEnrolRetryDoesNotReconsumeInvite' ./internal/auth ./internal/httpapi && grep -q 'invite' CONTRACTS-HTTP.md_
-- [x] INVITE-MINT · INVITE-MINT: an operator mints a single-use, expiring invite -- the server is authoritative on the invite id and secret — auth, P0
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-STORE | BLOCKS: INVITE-GATE
+- [ ] INVITE-CLIENT · INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -- invariant 7's delivery vehicle is the CLI subcommand, NOT a bus-enrol.sh — agentif, P1
+  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE, CLI-1 (0495d133), CLI-2 (39318208) | BLOCKS: none
   
-  invariant 1 -- the invite secret and invite id are minted by the server from crypto/rand; a client-supplied value is never accepted as either. The invite must NOT let a redeemer choose or influence its future agent id. The MINTING SURFACE question is SETTLED (DECISIONS.md, section "E4 -- The first invite is minted server-side", dated 2026-08-02): a server-side subcommand writing to the data dir. Authority is filesystem access, the same model as wal-mac.key, and nothing new is exposed on the wire -- bootstrap introduces no new network-reachable privilege. The minting surface is therefore a SERVER-BINARY SUBCOMMAND on cmd/agent-bus (not an HTTP route). The proof clause grep -qi 'invite' CONTRACTS-CLI.md is already correctly targeted for this answer and needs no retarget.
-  _Proof: go test -race -run 'TestInviteMintIsServerAuthoritative|TestInviteMintRejectsClientSuppliedSecret' ./internal/invite && go test -race -run 'TestInviteMintSubcommand|TestInviteMintBusAddressRules|TestInviteMintBusIDFileNameMatchesIDsPackage' ./cmd/agent-bus && grep -qF 'agent-bus invite mint' CONTRACTS-CLI.md_
-- [x] INVITE-STORE · INVITE-STORE: durable single-use invite record (mint/lookup/consume/expire), recovered by WAL replay, with a crash-injection test — auth, P0
-  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: ENROL-SHAPE | BLOCKS: INVITE-MINT, INVITE-GATE, INVITE-REVOKE
+  DECIDED AND RECORDED HERE so it is not re-litigated -- invite redemption reaches an agent as a flag on the existing CLI identity subcommand (agent-bus-cli enrol --invite <blob>), NOT as a new scripts/bus-*.sh wrapper. This is consistent with the 2026-08-02 amendment to invariant 7 (DECISIONS.md:605-637, "The Go CLI replaces the shell wrappers"), with CLI-2 (39318208) which absorbed enrolment, and with AGENTIF-2 (15e4509c) which is already superseded. DEPENDS ON CLI-1 (0495d133) and CLI-2 (39318208) -- neither exists yet; there is no client package and no second cmd binary today. CONTRADICTION TO RESOLVE BEFORE STARTING (flagged by the planner, who was boundary-blocked from editing CLI-*): CLI-2's recorded proof_cmd enrols with no invite and over http://, so it is invalidated by BOTH this task and MTLS-LISTENER.
+  _Proof: go test -race -run TestClientEnrolWithInvite ./client/... && grep -qi 'invite' AGENT_PROTOCOL.md && grep -qi 'invite' CONTRACTS-AGENT.md_
+- [ ] INVITE-HARDEN · INVITE-HARDEN: constant-time invite-secret comparison and ONE indistinguishable failure response for unknown/expired/revoked/already-consumed — security, P1
+  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE | BLOCKS: none
   
-  New internal/invite package behind an injected interface, following the existing auth.Roster pattern (internal/auth/roster.go:39-67). Durability is REQUIRED, not optional: if single-use state is in memory only, a restart makes every spent invite redeemable again. Uses the existing two-phase path -- wal.Log.Begin/Txn.Commit (internal/wal/log.go:367, :436) with Entry.Kind = "invite". Entry.Kind is a free-form application discriminator (internal/wal/log.go:78-79), NOT a numbered frame type, so NO record-type reservation is needed and internal/wal/format.go's Type enum is not touched. Record must carry the client-cert fingerprint field DEFINED BUT UNUSED from day one, per ENROL-SHAPE, so MTLS-BIND adds a check rather than a schema change. Per CLAUDE.md, durability code requires a crash-injection test. Note DUR-12 (cbc9ab0c, in flight) changes WAL record framing to an HMAC MAC -- that is below Entry.Kind and does not conflict; do not touch DUR-12.
-  _Proof: go test -race -run 'TestInviteStoreRecovery|TestInviteSingleUseSurvivesCrash|TestInviteExpiredIsNotRedeemable' ./internal/invite && grep -qi 'invite record' CONTRACTS-ONDISK.md_
+  Mirrors the existing deliberate indistinguishability of the 401 and 404 surfaces (CONTRACTS-HTTP.md:19, :235-239) -- distinguishing the four invite failure modes is an enumeration oracle. Comparison uses stdlib crypto/subtle.ConstantTimeCompare. INVARIANT 9: do not hand-roll a comparison, a hash, or a token format; if any part of this looks like inventing a scheme, stop and escalate.
+  _Proof: go test -race -run 'TestInviteRedeemFailuresIndistinguishable|TestInviteSecretComparedInConstantTime' ./internal/httpapi ./internal/invite_
+- [ ] INVITE-REVOKE · INVITE-REVOKE: durably revoke an un-redeemed invite, and state what revocation does to an agent that already redeemed one — auth, P1
+  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-STORE, INVITE-GATE | BLOCKS: none
+  
+  Revocation must survive restart (same durable store as INVITE-STORE). BLOCKED ON THE ESCALATED DECISION: does revoking an invite cascade to the agent that already redeemed it and kill its live sessions (requires AUTH-4 leave/revocation, a853261d), or is an invite simply spent at redemption so revocation only affects un-redeemed invites? Whichever the user picks, this task must state it explicitly in CONTRACTS-HTTP.md -- silence here is the failure mode.
+  _Proof: go test -race -run 'TestInviteRevokedCannotBeRedeemed|TestInviteRevocationSurvivesRestart' ./internal/invite && grep -qi 'revocation' CONTRACTS-HTTP.md_
+- [ ] INVITE-PEERGUARD · INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate the routes and assert it — security, P1
+  EPIC: 0b43393e-556b-409a-938a-846be2fb4a75 | DEPENDS ON: INVITE-GATE | BLOCKS: RELAY-1 (9bc9d6c4), MTLS-RELAYGUARD
+  
+  The user's decision says redemption is the only route onto the bus INCLUDING for peer buses. internal/relay/ is a 9-line doc.go stub today (internal/relay/doc.go:8) and no peer route exists, so the landable increment now is the GUARD, not the feature: a test that walks (*Server).Routes() (internal/httpapi/server.go, the same enumeration TestEveryRouteRequiresAuth uses) and the five-entry allow-list (internal/httpapi/authmw.go:57-63) and fails if any peer/federation/relay-enrolment path is reachable without invite redemption. RELAY-1 (9bc9d6c4) must satisfy this guard rather than route around it; record that as an acceptance criterion in this task's own description (the planner was not permitted to edit RELAY-1).
+  _Proof: go test -race -run 'TestNoUnauthenticatedPeerEnrolRoute|TestAllowListIsExactlyTheFiveKnownPaths' ./internal/httpapi && grep -qi 'peer' CONTRACTS-HTTP.md_
 
 ### EPIC MSG — Messaging surface
 
-- [x] MSG-4 · MSG-4: Cursor semantics + GET /v1/messages history — messaging, P1
-  Define an opaque cursor (wraps a per-agent-visible sequence position, not a raw offset a client could forge into another agent's stream) with encode/decode/validate, and implement the paginated history endpoint using it -- this is the SAME cursor type the long-poll wait endpoint consumes.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [x] MSG-3 · MSG-3: POST /v1/send -- direct message — messaging, P1
-  Targeted single-recipient send to a fully-qualified agent id; 404 on unknown recipient. Same durable write path as broadcast, delivered only to that agent's history/wait stream.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [x] MSG-2 · MSG-2: POST /v1/broadcast — messaging, P1
-  Any enrolled agent posts a message visible to the whole roster. Goes through the two-phase write path and the audit log before the 200 is returned; assigns a message id via the sequence allocator.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
 - [ ] None · Acceptance criterion for the first durable-write HTTP handler (MSG-2/MSG-3): wal.ErrClosed/wal.ErrPoisoned must 5xx and MUST NOT acknowledge — httpapi, P1
   internal/wal.ErrClosed (format.go:156, "reported by Append and Sync after Close") and wal.ErrPoisoned both propagate all the way up through Log.Write/Begin/Commit (log.go:343-351, :388-392, :446) as ordinary Go errors -- correctly, at the wal layer: nothing there is ever swallowed. But VERIFIED THIS PASS: no HTTP handler exists yet that calls DurableLog.Write at all. The DurableLog interface was wired onto httpapi.Server by DUR-9 (internal/httpapi/server.go:34-38, "Write is the whole of invariant 4 as a handler needs it") and durable_test.go proves the wiring end to end with a fakeDurable, but grep confirms `.Durable().Write(` / `s.durable.Write(` has zero call sites anywhere in internal/httpapi -- the only two live routes are /healthz and /v1/info, neither of which writes anything durable. The first real write handler is POST /v1/send (MSG-3) and POST /v1/broadcast (MSG-2), both still `todo`.
   
@@ -2571,15 +2535,45 @@
   
   proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- no reference to wal.ErrClosed or wal.ErrPoisoned exists anywhere in internal/httpapi yet, because no handler calls Write. This grep is a necessary-but-not-sufficient floor (a real handler MUST reference these sentinels to branch on them); the actual proof once MSG-2/MSG-3 land is the negative-path handler test described above, not this grep alone.
   _Proof: grep -rq "wal.ErrClosed\|wal.ErrPoisoned" internal/httpapi/*.go_
-- [x] MSG-5 · MSG-5: Messaging durability integration test — messaging, P1
-  Crash-injection test for the messaging path specifically: simulate a crash mid-broadcast and mid-DM at each write-path stage, restart, and assert a message is either fully present (in history, in the audit log, and delivered to any waiter that should have seen it) or fully absent -- never partially visible. SCOPE NOTE (added for invariant 10 / the IDEM epic): this task proves single-write atomicity -- one accepted send/broadcast is never torn into a partial state by a crash. It deliberately does NOT cover the retry-across-the-crash-boundary case (client resends the identical idempotency-keyed request after an ambiguous/lost ack and must still get exactly ONE effect, not a second message) -- that is IDEM-17's job (durable applied-key store crash-injection test) and IDEM-12's happy-path job (idempotent send/broadcast), gated on IDEM-11. Do not fold idempotency-key retry logic into this test's harness; keep it about torn-vs-whole for a single logical write, and let IDEM-17 own exactly-once-under-retry.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [x] MSG-1 · MSG-1: GET /v1/agents -- roster listing — messaging, P1
-  Authenticated endpoint returning the current enrolled-agent roster as fully-qualified `<bus-id>.<agent-id>` entries (name, id, enrolled-at). Read path only, no durability concerns beyond the already-recovered roster.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-
 ### EPIC MTLS — Mutual TLS with self-signed certs, no CA
 
+- [ ] None · CONTRACTS-CLI.md client export table is missing the three symbols MTLS-EXPIRY added — docs, P2
+  CONTRACTS-CLI.md (~line 748/847, the client-package export table) already enumerates ErrBusFingerprintMismatch, ErrBusPresentedNoCertificate and BusFingerprintError, but not ErrBusCertificateExpired, ErrBusCertificateUnusable or BusCertificateExpiredError. Deferred deliberately: that file was granted to a CONCURRENT agent during MTLS-EXPIRY, so editing it would have collided. Both the reviewer and security gates raised it.
+- [~] MTLS-CLIENTCERT · MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certificate (0600) and presents it on every connection — agentif, P1, in progress
+  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN, CLI-1 (0495d133) | BLOCKS: MTLS-PIN
+  
+  Client-side half of the mutual handshake, in the importable client/ package (NOT under internal/ -- CLI-1's non-negotiable). Key stored 0600 in the user's config dir, never in the repo, no interactive prompt, no TTY-dependent input. Stdlib crypto/tls + crypto/x509 only. DEPENDS ON CLI-1 (0495d133) -- no client package exists today.
+  
+  === AUDIT 2026-08-08 (spec-keeper): PARTIALLY SHIPPED -- the split, explicitly ===
+  MET (in main at 9418a48, an ancestor of HEAD efde70c): client/clientcert.go (802 lines),
+  cmd/agent-busctl/clientcert.go registering the `client-cert` subcommand, and BOTH tests the
+  proof_cmd names -- TestClientGeneratesClientCert and TestClientTLSKeyIs0600 -- exist at HEAD in
+  client/clientcert_test.go. The proof_cmd is USABLE.
+  NOT MET -- the documentation half that invariant 7 requires IN THE SAME TASK, and it is worse than
+  merely absent:
+    (a) AGENT_PROTOCOL.md at HEAD contains ZERO occurrences of "client-cert", "clientcert" or "client
+        certificate". The `agent-busctl client-cert` subcommand is undocumented for agents.
+    (b) CONTRACTS-CLI.md at HEAD also names the subcommand ZERO times, and its seven MTLS-CLIENTCERT
+        mentions are FORWARD REFERENCES asserting the OPPOSITE of HEAD -- line 988: "the **client
+        certificate** half of mutual TLS is still to come (`MTLS-CLIENTCERT`)"; line 999:
+        "certificate** still has no home, and `MTLS-CLIENTCERT` gives it one"; line 37: "before
+        `MTLS-CLIENTCERT` teaches the client to present one". That is doc drift asserting UNSHIPPED
+        what shipped at 9418a48.
+  The earlier status_note ("neither is written yet") was half right and is now stale in the other
+  direction: CONTRACTS-CLI.md HAS text about this task, and that text is WRONG. Fixing (b) is a
+  correction, not an addition.
+  _Proof: go test -race -run 'TestClientGeneratesClientCert|TestClientTLSKeyIs0600' ./client/..._
+- [~] None · Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI expiry claim — security, P1, in progress
+  Two P1 security-gate findings already in main at commit 9f2878a (they reached main via a pathspec-less `git commit --amend` while the code was gated CHANGES-REQUESTED).
+  
+  P1-1: scripts/bus-serve.sh derived the paste-ready --bus-fingerprint value by grepping bus_cert_fingerprint= out of the mutable log file and taking tail -1. A local attacker who can write that log (e.g. pre-creating /tmp/agent-bus/) makes the operator pin the ATTACKER's certificate -- the exact MITM that "no trust-on-first-use" exists to prevent. Fix: derive the fingerprint from $CERT_FILE (the authoritative self-signed leaf) and delete the log-scrape path entirely.
+  
+  P1-1b (same file, pre-existing): read_pid did not validate the pidfile contents, so -1 could reach `kill -TERM -1` (signals every process the user owns). Fix: accept only a plain positive decimal.
+  
+  P1-2: CONTRACTS-CLI.md asserted client-side certificate expiry is NOT checked and that MTLS-EXPIRY is "in flight, not in main", citing a proof that `git show HEAD:client/pin.go` matches no NotAfter/ErrBusCertificateExpired/ParseCertificate. It matches all three at HEAD -- MTLS-EXPIRY landed in 9f2878a. Fix: rewrite the paragraph to state what is true at HEAD.
+  
+  Files: scripts/bus-serve.sh, CONTRACTS-CLI.md (+ AGENT_LOG.md append).
+  _Proof: bash scripts/proof-check.sh 'bash /tmp/claude-1000/-mnt-sdb4-mike-mike-source-agent-bus/b828c013-a5a5-4da0-b21c-d56d21066f9e/scratchpad/fp-proof.sh' -- a live run of scripts/bus-serve.sh start against a real bus with an attacker-planted bus_cert_fingerprint= line in the log, asserting the printed fingerprint equals the sha256 of the DER in $DATA_DIR/bus-tls.crt and NOT the planted value._
 - [ ] MTLS-PIN-FU-MIRRORSYNC · MTLS-PIN-FU-MIRRORSYNC: an agreement test that client.BusFingerprint and internal/buscert.Fingerprint cannot silently diverge — security, P2
   Raised by the reviewer gate on MTLS-PIN (2026-08-07). client/pin.go duplicates internal/buscert/fingerprint.go's construction -- sha256 over the leaf's DER, lowercase hex, one spelling -- because client/ may not import internal/ (invariant 7, client/doc.go). The two agree TODAY (the reviewer verified line by line), but NOTHING MECHANICALLY KEEPS THEM AGREEING. This is the same duplication class as client/canonical.go vs internal/signing.
   
@@ -2599,15 +2593,9 @@
   
   **THE PART MOST LIKELY TO BE QUIETLY OMITTED -- the user called this out by name. DO NOT fold it into MTLS-BIND and do not complete either task on the other's tests.** CLAUDE.md invariant 11 and DECISIONS.md:1139-1144: mTLS does NOT replace the session token; BOTH are required and they must be CROSS-CHECKED. mTLS proves which key holder is on the connection; the session token is the revocable, time-bounded application credential. Three call sites, all of which must be covered: (1) (*Server).authMiddleware (internal/httpapi/authmw.go:241, which calls s.auth.Authenticate at :277 and attaches the auth.Principal at :299) must compare the connection's peer-cert fingerprint against the fingerprint bound to principal.AgentID; (2) POST /v1/session/begin (internal/httpapi/auth.go:172) takes an agent_id from an unauthenticated body -- a begin naming agent X over agent Y's certificate must be refused; (3) POST /v1/session/complete (auth.go:211) re-reads the roster entry at internal/auth/session.go:344. NOTE httpapi.Options.Auth is the CONCRETE *auth.Service (internal/httpapi/server.go:108), not an interface, so this needs either a new method (e.g. AuthenticateBound(token, fingerprint)) or a new interface seam. A mismatch is a protocol violation, not a routine 401 -- log it as security. Also record in this task that AUTH-2-FU-POLLEXPIRY (03d7ca66) must re-evaluate the cross-check mid-poll, not only at request entry.
   _Proof: go test -race -run 'TestSessionTokenRejectedOnForeignClientCert|TestSessionBeginRejectedOnForeignClientCert|TestSessionCompleteRejectedOnForeignClientCert' ./internal/httpapi ./internal/auth && grep -qi 'cross-check' CONTRACTS-HTTP.md_
-- [~] None · MTLS-EXPIRY: the client never checks the pinned bus certificate validity period -- the 365-day lifetime is unenforced — security, P1, in progress
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7
-  
-  client/pin.go verifies sha256-of-DER only (verifyPinnedBusCertificate, pinVerifier, pinnedTLSConfig which sets InsecureSkipVerify: true), and disabling the default chain check disables NotBefore/NotAfter along with it. The MTLS-PIN security gate demonstrated empirically that a certificate whose NotAfter is a day in the past is pinned, accepted, and enrolled against. DECISIONS.md chose the 365-day bus certificate lifetime explicitly as a leak-containment bound, so today that bound is pure decoration -- nothing on the client enforces it.
-  
-  This was folded into MTLS-VERIFY (9dab7303) only as a status_note, but MTLS-VERIFY currently DEPENDS ON MTLS-LISTENER while MTLS-LISTENER is GATED ON MTLS-VERIFY -- a genuine circular dependency (see MTLS-LISTENER status_note). Splitting the pure client-side expiry check out of MTLS-VERIFY breaks that cycle, because the expiry check needs no running TLS bus -- it is a unit-testable property of client/pin.go alone (construct an expired/not-yet-valid self-signed cert in-memory, matching pin, assert rejection).
-  
-  FILE CONFLICT, sequencing requirement: this lands in client/pin.go, which MTLS-ROTATE owns this pass (dispatched 2026-08-07). Must be sequenced AFTER MTLS-ROTATE, not run in parallel with it.
-  _Proof: go test -race -run 'TestExpiredBusCertificateIsRejectedDespiteMatchingPin|TestNotYetValidBusCertificateIsRejected' ./client/..._
+- [ ] None · No regression guard exists for the bus-fingerprint trust-anchor fix — test, P1
+  cmd/agent-bus/busservewrapper_test.go:133 asserts only strings.Contains(out, "fingerprint "), so a return to the log-scrape would NOT be caught by anything in the repo. Add an assertion to that existing live-wrapper test: plant an attacker bus_cert_fingerprint=<64 hex> line in the log while bus-serve.sh start runs, and assert the printed fingerprint AND the paste-ready enrol line both equal sha256(DER) of $DATA_DIR/bus-tls.crt (i.e. buscert.FingerprintOf), not the planted value. A working standalone version of exactly this proof exists at /tmp/claude-1000/-mnt-sdb4-mike-mike-source-agent-bus/b828c013-a5a5-4da0-b21c-d56d21066f9e/scratchpad/fp-proof.sh (RED at 9f2878a, GREEN after the fix) and should be ported into the Go test. File: cmd/agent-bus/busservewrapper_test.go. It was outside parent task 10e93262-8e34-4738-b435-bfe23d880057's file-ownership boundary.
+  _Proof: go test -count=1 -race -run TestLiveBusServeWrapperOverTLS ./cmd/agent-bus_
 - [ ] MTLS-PIN-FU-SCHEMEGUARD · MTLS-PIN-FU-SCHEMEGUARD: a direct test for client.transportSecurity, whose unknown-scheme default arm is currently unguarded — security, P3
   Raised by the reviewer gate on MTLS-PIN (2026-08-07), non-blocking. client/transport.go's transportSecurity() decides whether a transport may be built at all: it refuses https with no pinned fingerprint (no trust-on-first-use) and refuses http WITH a pin (no certificate to check). A `default:` arm was added during the security gate so an unrecognised URL scheme fails CLOSED rather than open.
   
@@ -2622,6 +2610,67 @@
   
   BLOCKED ON USER DECISION. DECISIONS.md:1131-1147 settles "self-signed, mutual, no CA, bound at enrolment" but leaves these open, and every one of them is load-bearing: (1) how a client learns the bus's cert fingerprint BEFORE its first connection -- the planner recommends the invite blob carry bus-id + address + bus-cert fingerprint + invite secret, which removes the TOFU window entirely and is what makes the two epics genuinely compose, versus plain TOFU-on-first-connect; (2) certificate validity period and what happens when an agent's client cert EXPIRES (re-enrol with a fresh invite, or a re-bind route); (3) bus-key rotation, which invalidates every client's pin -- accepted "operator must re-pin" event, or must the bus serve two certs during a rollover; (4) whether a plaintext escape hatch exists for tests or local dev (invariant 11 says no); (5) whether the cert/key are always self-generated or may be operator-supplied via flags. INVARIANT 9 IS ABSOLUTE: stdlib crypto/tls + crypto/x509, standard fingerprint = SHA-256 over the certificate DER. No hand-rolled fingerprint scheme, cert format, nonce or key exchange -- if a sub-task looks like it needs one, it is mis-specced; stop and escalate.
   _Proof: grep -q 'MTLS-DESIGN' DECISIONS.md && grep -q 'InsecureSkipVerify' DECISIONS.md && grep -qi 'rotation' DECISIONS.md && grep -qi 'fingerprint' DECISIONS.md_
+- [ ] None · No behavioural test asserts that a resumed TLS handshake still re-verifies the pinned bus certificate -- only a shape guard holds it — tests, P2
+  MTLS-EXPIRY established that crypto/tls does NOT call VerifyPeerCertificate on a RESUMED handshake (handshake_client.go:423 / handshake_client_tls13.go:421, under "Resumptions currently do not reverify certificates"). The security gate reproduced the consequence over live TLS 1.2: with a ClientSessionCache attached, the second connection resumed and was ACCEPTED while the server served a completely unpinned certificate. That is now prevented by TestPinnedSkipIsAlwaysPairedWithAPinCheck, which rejects ClientSessionCache in the pinned tls.Config literal and by assignment -- but that guard is SHAPE-ONLY (an AST walk). There is no behavioural test that a resumed connection actually re-verifies. Exposure today is zero (no cache anywhere in-tree, and every silent spelling now fails the guard), which is why both gates rated this informational and non-blocking. Worth adding: a live-TLS test with session tickets enabled that asserts a RESUMED connection still refuses an unpinned certificate. Raised by the reviewer gate.
+- [ ] None · MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own remedy mints a new id, contradicting DECISIONS.md E3 — client, P0, field-evidence, migration, tls
+  Field evidence (2026-08-07), from a real external agent in another repo that migrated across
+  tonight's plaintext->TLS switch live:
+  
+  ```
+  $ agent-busctl pin add 68e8...7b14
+  agent-busctl: pin: identity ...mic-array-1 enrolled against http://127.0.0.1:18080, which is a
+    plaintext URL and presents no certificate
+    try: ... enrol against its https URL with `agent-busctl enrol --bus <https-url> ...`
+  ```
+  
+  Every identity enrolled BEFORE the TLS switch is now in a dead end. The agent id still works, but
+  only if `--bus https://...` AND `--bus-fingerprint` are passed on EVERY invocation, forever -- there
+  is no way to persist either onto an http-enrolled identity (identities.json has no bus_fingerprints
+  recorded for it, because none existed at enrolment time). `pin add` refuses outright, and its own
+  printed remedy is to re-enrol -- which mints a NEW agent id (invariant 1: ids are never reused) and
+  abandons the old one, with no continuity path.
+  
+  That is the exact outcome DECISIONS.md's E3 entry (line ~1224, "Rotation serves TWO certificates
+  during rollover") says must never be the only route: "Rotation must never require every client to
+  re-enrol -- that would make routine key hygiene indistinguishable from a security incident." The
+  2026-08-07 re-bind decision (DECISIONS.md ~line 2503) restates the same principle for the CLIENT's
+  own cert and explicitly enumerates two situations -- (1) cert approaching NotAfter with a still-valid
+  session token -> re-bind route (not yet built, see MTLS re-bind route task, public_id 7a197025), and
+  (2) cert already lapsed with no prior renewal -> re-enrol is accepted as the correct, deliberate
+  answer, new id and all.
+  
+  THIS FINDING IS A THIRD, DISTINCT SITUATION NOT COVERED BY EITHER: an identity that was enrolled
+  entirely over plaintext HTTP, before mTLS/TLS existed at all, and therefore never had ANY client
+  certificate or bus-fingerprint pin recorded -- there is nothing here to "renew" (situation 1) and the
+  identity's AUTH keypair has NOT lapsed (situation 2 does not apply either; the agent id and its
+  Ed25519 AUTH key are still valid and working). `pin add`'s job (per CONTRACTS-ONDISK/CONTRACTS-CLI and
+  client/pinset.go) is narrower still: it only lets an identity that ALREADY has a recorded bus
+  fingerprint recover from a dropped accept-set (MTLS-ROTATE's MaxBusPins=2 evict path) -- it has no
+  notion of bootstrapping a FIRST bus-fingerprint pin onto an identity from a pre-TLS era, nor of
+  provisioning that identity's first client certificate for mTLS (MTLS-CLIENTCERT/MTLS-BIND, which as
+  scoped only cover the FIRST binding for a brand-new enrolment, not a retrofit onto an existing id).
+  
+  Cross-reference and disambiguation (do this explicitly in the implementation task):
+  - MTLS re-bind route (7a197025, todo, NEEDS USER RATIFICATION) = renews an EXISTING client cert for an
+    identity that already has one, authenticated by its still-valid session token. Does NOT help here --
+    there is no existing client cert to renew, and the whole problem is bootstrapping the first one plus
+    the first bus-fingerprint pin.
+  - MTLS-BIND (b6378bda, todo) = binds a client-cert fingerprint to a server-minted agent id at FIRST
+    enrolment (new agent, new invite). Does NOT help here either -- it is scoped to brand-new agents, not
+    retrofitting a pre-TLS agent id that must be preserved.
+  - This finding needs its OWN task: a migration/bootstrap path that lets a pre-TLS (http-enrolled)
+    identity, still holding a working AUTH key and a live session, acquire (a) a first client
+    certificate and (b) a first pinned bus fingerprint, and bind both to its EXISTING, unchanged agent
+    id -- without spending a fresh invite and without minting a new id. If no such path can be made safe
+    (e.g. because binding a first client cert to an existing id needs the same anti-spoofing care as
+    MTLS-BIND's invite-authorised first binding), the alternative is to say so explicitly and fix `pin
+    add`'s error text so it stops recommending an action (re-enrol) that the project's own decisions say
+    must not be the only route -- right now the tool's own advice contradicts DECISIONS.md.
+  
+  Rated P0: it is a migration dead-end affecting 100% of pre-TLS identities the moment TLS is required,
+  it contradicts a recorded decision (E3) at the exact moment that decision is supposed to be protecting
+  users, and the CLI's own printed remedy makes the outcome worse, not better.
+  _Proof: go test -race -run TestPinAdd_PreTLSMigration ./client/... (test to be written: enrol an identity against a plaintext bus, flip that data dir to TLS-only, assert `pin add`/an equivalent migration path lets the SAME agent id acquire a first client cert and bus-fingerprint pin without re-enrolling). Until written, the CURRENT dead-end is reproducible manually exactly as quoted in this task's description via agent-busctl against a bus flipped from http to https mid-lifetime._
 - [ ] None · CONTRACTS-ONDISK.md: document the client-side identities.json format and the bus_fingerprints pin set — documentation, P2
   Residual noted by the MTLS-ROTATE feature-runner and confirmed by spec-keeper (2026-08-07): CONTRACTS-ONDISK.md does not describe the client-side `identities.json` store at all (grepped for `identities.json` and `bus_fingerprints`, zero hits). It is the wrong absence to leave silent now: identities.json carries a real, growing on-disk contract --
     - the Credential/Identity record shape (agent id, bus id, name, BusURL, private/messaging key seeds, idempotency key, and now BusFingerprints []string);
@@ -2634,20 +2683,56 @@
   
   Boundary: CONTRACTS-ONDISK.md only. Verify every field/claim against the current client/store.go and client/pinset.go before writing (do not transcribe CONTRACTS-CLI.md uncritically -- confirm it still matches code, since CONTRACTS-CLI.md itself has needed correction mid-task before).
   _Proof: grep -qi 'identities.json' CONTRACTS-ONDISK.md && grep -qi 'bus_fingerprints' CONTRACTS-ONDISK.md_
-- [x] MTLS-PIN · MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change -- never InsecureSkipVerify, and no flag that silently disables verification — security, P0
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BUSCERT, MTLS-CLIENTCERT, CLI-1 (0495d133) | BLOCKS: MTLS-VERIFY
+- [ ] None · MTLS re-bind route: an agent renews its client certificate against its EXISTING agent id, without spending an invite — security, P1, needs-user-ratification
+  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN (39dcdcff), MTLS-BIND | NEEDS USER RATIFICATION
   
-  CLAUDE.md invariant 11: never disable certificate verification to make something work, and never ship a flag that does it silently -- a bus that looks secure and is not is worse than no TLS. Verification via tls.Config.VerifyPeerCertificate against the pinned SHA-256-of-DER; a changed fingerprint is a hard failure whose error names the remedy. Where the pin comes from is settled by MTLS-DESIGN (planner recommends: carried in the invite blob, which removes the TOFU window). "The trusted path must be the easy path" -- enrol against a fresh bus must work without hand-editing a trust store. DEPENDS ON MTLS-BUSCERT, MTLS-CLIENTCERT, CLI-1.
-  _Proof: go test -race -run 'TestClientPinsBusFingerprintAtEnrol|TestClientRefusesChangedBusFingerprint|TestClientHasNoInsecureVerificationFlag|TestNoInsecureSkipVerifyAnywhere' ./client/... && grep -q -- '--bus-fingerprint' CONTRACTS-CLI.md && grep -q -- '--bus-fingerprint' AGENT_PROTOCOL.md_
-- [x] MTLS-BUSCERT · MTLS-BUSCERT: generate/load the bus's self-signed certificate + private key in the data dir (0600), fatal if unusable — security, P0
-  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN | BLOCKS: MTLS-LISTENER, MTLS-PIN
+  MTLS-DESIGN decided (DECISIONS.md, 2026-08-07 entry) that an agent whose client cert is approaching NotAfter, while still holding a valid session token, calls a NEW re-bind route authenticated by that session token to bind the NEW cert fingerprint to its EXISTING, unchanged agent id -- no invite spent, no new identity minted. The rationale is E3's rule that routine key hygiene must not be indistinguishable from a security incident.
   
-  New internal/buscert package. Copy the precedent that already exists for a fatal-on-missing-key startup secret: the WAL MAC key (internal/wal/mackey.go:34, mode 0600, decided fatal in DECISIONS.md:1093-1098). Loads AFTER the data-dir lock (cmd/agent-bus/main.go:176) and before the listener (main.go:375); note TestRunRefusesALockedDataDir pins that a lock-refused start touches nothing but bus.lock (main.go:210-217), so the cert step must not run before the lock. Fingerprint is sha256.Sum256(cert.Raw) rendered hex -- the standard construction, not an invention. ESCALATED: this introduces a second long-lived secret in the data dir.
-  _Proof: go test -race -run 'TestBusCertGeneratedOnFirstStart|TestBusCertKeyIs0600|TestBusCertFingerprintIsSHA256OfDER' ./internal/buscert && grep -qi 'bus certificate' CONTRACTS-ONDISK.md_
+  THIS ADDS A NEW ROUTE TO THE AUTHENTICATED SURFACE AND WAS DECIDED BY A SUB-AGENT, NOT BY THE USER -- it is RECORDED but NOT RATIFIED, and must not be implemented until the user confirms it.
+  
+  Deliberately NOT folded into MTLS-BIND, which covers only the FIRST binding at enrolment.
+  
+  Interaction with AUTH-1-FU-POPKEY (6e3083b0): the re-bind must prove possession of the existing AUTH key, never of the TLS key alone, since the TLS key is exactly what is being replaced.
+- [ ] MTLS-RELAYGUARD · MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance criterion plus a guard test — security, P2
+  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-CLIENTAUTH, INVITE-PEERGUARD | BLOCKS: RELAY-1 (9bc9d6c4), RELAY-2 (654140d7)
+  
+  Every relay hop is both a certificate-verifying TLS client and a TLS server, and invariant 2's <bus-id>.<agent-id> addressing plus traversed-bus-path loop prevention must keep working over it. internal/relay/ is a stub (internal/relay/doc.go:8), so the landable increment now is the guard and the acceptance criterion; RELAY-1 (9bc9d6c4) and RELAY-2 (654140d7) must satisfy it (the planner was not permitted to edit those tasks). Pairs with INVITE-PEERGUARD: a peer bus needs BOTH an invite and mutual TLS.
+  _Proof: go test -race -run 'TestRelayDialerRequiresMutualTLS|TestRelayListenerRequiresClientCert' ./internal/relay_
+- [ ] MTLS-LISTENER-FU-CLIENTHTTP · MTLS-LISTENER-FU-CLIENTHTTP: client/config.go still allows unpinned http:// to loopback, and its own comment says to delete that case when the TLS listener ships — security, P2
+  From the MTLS-LISTENER security gate (L3), flagged as out of the runner's boundary and provisional. client/config.go:326-344's case "http": permits unpinned plaintext to any loopback host, carrying the comment // DELETE THIS CASE ENTIRELY when the TLS listener ships. The TLS listener has now shipped. Harmless against this bus (the 400 stops it), but it leaves the CLI with a code path requiring no pin, reachable through any loopback forward (ssh -L, docker publish 127.0.0.1:...). Decide deliberately: delete the case, or keep it and rewrite the comment to say why it survived. Coordinate with whoever owns client/ -- MTLS-EXPIRY was in flight there on 2026-08-07.
+  _Proof: go test -race -run 'TestParseBusURL|TestTransportSecurity' ./client_
+- [~] MTLS-VERIFY · MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is TLS-only and mutually authenticated (committed is not running) — security, P1, in progress
+  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-LISTENER, MTLS-CLIENTAUTH, MTLS-PIN | BLOCKS: none
+  
+  Paired committed-vs-running verification per CLAUDE.md. scripts/bus-serve.sh:54 sets HEALTH_URL="http://${LISTEN}/healthz" and curls it at :80 and :161; that is the only surviving bus-*.sh wrapper (AGENTIF-1, done) and it BREAKS the moment MTLS-LISTENER lands, taking every other task's server-startup proof with it. Live assertions required: a plaintext client is refused; a TLS client with NO client certificate is refused; a TLS client with a client certificate and the correct pin reaches /healthz. ALSO FLAG (planner was boundary-blocked from editing them): DEPLOY-1 (fa0c5a4e) and DEPLOY-2 (14f8ec3b) both assume a plaintext listener, and a Compose healthcheck cannot curl plaintext against a TLS-only bus.
+  
+  === AUDIT 2026-08-08 (spec-keeper): PARTIALLY SHIPPED -- the split, explicitly ===
+  MET (in main at 9f2878a, an ancestor of HEAD efde70c):
+    - The plaintext health-probe defect is FIXED. scripts/bus-serve.sh:107 at HEAD reads
+      HEALTH_URL="https://${PROBE_ADDR}/healthz" and line 113 curls it with --cacert "$CERT_FILE".
+      The proof_cmd's second clause (! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh) PASSES at
+      HEAD.
+    - TestLiveBusServeWrapperOverTLS exists at HEAD in cmd/agent-bus/busservewrapper_test.go, so the
+      proof_cmd's first clause is NON-VACUOUS.
+  NOT MET -- the "mutually authenticated" half named in this task's own title, and it cannot be met
+  today. The required live assertion "a TLS client with NO client certificate is refused" is FALSE by
+  construction: cmd/agent-bus/tlslisten.go:109 at HEAD pins `ClientAuth: tls.NoClientCert`
+  DELIBERATELY (its comment at lines 26-31 says moving it is MTLS-CLIENTAUTH's job, and
+  MTLS-CLIENTAUTH may not precede MTLS-CLIENTCERT). MTLS-CLIENTAUTH has NOT shipped, so a TLS client
+  presenting no client certificate is currently ACCEPTED.
+  KEEP OPEN until MTLS-CLIENTAUTH lands, then run the three live assertions together. Do NOT close on
+  the two clauses that currently pass -- the title's "mutually authenticated" claim would be false,
+  which is exactly the committed-vs-running trap this task was filed to prevent.
+  _Proof: go test -race -run 'TestLiveBusServeWrapperOverTLS' ./cmd/agent-bus && ! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh_
+- [ ] MTLS-ROTATE-FU-SERVERSIDE · MTLS-ROTATE-FU-SERVERSIDE: the bus serves ONE certificate, so DECISIONS.md E3's two-certificate rollover is only half built — security, P1
+  Raised by the documentation pass on MTLS-LISTENER. MTLS-ROTATE (29cdafc) built the CLIENT half -- a client pins an accept-SET of up to two fingerprints. The SERVER half does not exist: cmd/agent-bus/tlslisten.go puts exactly one tls.Certificate in tls.Config.Certificates, and internal/buscert states it has "no rotation machinery yet". Invariant 11 requires certificate rotation to serve TWO certificates during rollover so clients can re-pin without downtime, and requires that rotation never force every client to re-enrol. Until this lands, a rotation is still an outage.
+  _Proof: go test -race -run 'TestBusTLSConfig' ./cmd/agent-bus_
 - [ ] MTLS-BIND · MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED agent id -- the invite is what authorises the binding — security, P0
   EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-CLIENTAUTH, ENROL-SHAPE, INVITE-GATE | BLOCKS: MTLS-CROSSCHECK, AUTH-3 (d53e3b21)
   
   DECISIONS.md:1146 -- the invite authorises binding a new client certificate to a new agent id; the two happen together, not as two independent gates either of which alone would suffice. Populates the fingerprint field that INVITE-STORE and ENROL-SHAPE reserved, on auth.RosterEntry (internal/auth/roster.go:16-37). INVARIANT 1: the certificate supplies a fingerprint and NOTHING else -- it must not influence the agent id, the name, or the suffix, which are minted by ids.AgentIDMinter.Mint (internal/ids/agentmint.go:360). auth.Roster.Put already refuses a duplicate AgentID rather than overwriting (internal/auth/roster.go:105-107); the same refuse-never-overwrite rule must apply to a fingerprint already bound to a different agent. ORDERING: land before AUTH-3 (d53e3b21, durable roster) or AUTH-3 encodes a durable record that immediately needs migrating.
+  
+  FORBIDDEN IMPLEMENTATION (security-testing finding, 2026-08-07): the binding here must stay an EXACT-MATCH comparison of the presented certificate's fingerprint (SHA-256 over the DER) against the fingerprint stored on auth.RosterEntry -- never chain verification against an x509.CertPool built from enrolled agents' certificates. client/clientcert.go (~line 550-620) explains why the client-cert template deliberately has IsCA:false and no KeyUsageCertSign: with those set, a CertPool entry would be a TRUSTED ROOT and any agent could mint a certificate for any name that chains to itself and validates, becoming a CA for the whole bus. This binding step is exactly the mechanism that makes chain verification unnecessary -- do not reach for a CertPool 'for consistency' with anything else in the codebase. See also MTLS-RELAYGUARD-FU-BUSCERTPOOL (c873482f) for the same trap on the bus's own dual-usage (ServerAuth + ClientAuth) certificate.
   _Proof: go test -race -run 'TestEnrolBindsClientCertFingerprint|TestEnrolRejectsAlreadyBoundFingerprint|TestClientCertCannotInfluenceAgentID' ./internal/auth ./internal/httpapi && grep -qi 'fingerprint' CONTRACTS-HTTP.md_
 - [ ] None · parseBusURL does not canonicalise redundant path slashes/segments, so a differently-spelled retry misses its own idempotency scope key (invariant 10) — security, P1
   Raised by the MTLS-ROTATE security gate (2026-08-07, final kind=response item 6), on the INVARIANT 10 angle rather than the pin angle -- verified independently before filing.
@@ -2667,72 +2752,236 @@
   
   Minimal fix (security gate's suggestion, not yet implemented): in parseBusURL, collapse repeated slashes and resolve `.`/`..` path segments (e.g. via path.Clean on u.Path, taking care to restore a leading `/` and to still map an all-slash/empty result to "") before the existing TrimSuffix, so all four spellings above collapse to one canonical value.
   _Proof: go test -race -run 'TestParseBusURLCanonicalisesRedundantPathSegments' ./client/..._
-- [x] MTLS-ROTATE · MTLS-ROTATE: a client accepts a SET of pinned bus certificates so a rotation does not force every agent to re-enrol — security, P1
-  Raised by the security gate on MTLS-PIN (2026-08-07), MED-2. GATES MTLS-LISTENER: do not ship the TLS listener before this.
+- [ ] MTLS-LISTENER-FU-TLS13 · MTLS-LISTENER-FU-TLS13: raise both ends of the TLS floor to 1.3 and drop the reachable CBC-SHA1 suites — security, P2
+  From the MTLS-LISTENER security gate (L2). The server floors at TLS 1.2 to match client/pin.go's pinnedTLSConfig, which is correct today. The gate traced Go 1.19.4's cipherSuitesPreferenceOrder against the Ed25519 leaf and bounded the reachable 1.2 suite set to AES-GCM-{128,256}, ChaCha20-Poly1305 and ECDHE_ECDSA_AES_{128,256}_CBC_SHA. Every reachable suite is ECDHE so forward secrecy holds, Go's server ignores client preference, and the negotiation is signed so there is no downgrade attack -- the gate explicitly did NOT ask for this to change now. Raising BOTH ends to 1.3 removes CBC entirely. Blocked on confirming no non-Go consumer needs 1.2 (an operator's curl --cacert against /healthz is one such consumer).
+  _Proof: go test -race -run 'TestBusTLSConfig' ./cmd/agent-bus && grep -n 'VersionTLS13' cmd/agent-bus/tlslisten.go client/pin.go_
+- [ ] None · MTLS-RELAYGUARD-FU-BUSCERTPOOL: relay client-cert verification must not build a CertPool of bus/agent certificates -- IsCA/CertSign trap has a larger blast radius for the dual-usage bus certificate — security, P1
+  Follow-up from an independent security-testing agent finding on client/clientcert.go (uncommitted at time of report, since landed with IsCA:false and an extensive comment at ~line 550-620 explaining why). That fix and its comment already cover the single-agent-certificate case for MTLS-CLIENTAUTH/MTLS-BIND: do NOT build an x509.CertPool of agent certificates for verification, because IsCA:true + KeyUsageCertSign would make every agent a trusted root able to mint a certificate for any name that chains to itself and validates. Binding must stay fingerprint-based (SHA-256 over DER, exact match), never a pool+Verify.
   
-  MTLS-PIN stores ONE bus certificate fingerprint per identity (client.Identity.BusFingerprint), and the only recovery from a changed certificate is `agent-busctl logout` + re-enrol. That directly contradicts recorded decision E3 in DECISIONS.md: the bus serves TWO certificates during rollover 'so no client is ever forced to re-enrol on routine rotation'.
+  What is NOT yet covered anywhere: the BUS's own certificate (internal/buscert/buscert.go:636) carries BOTH x509.ExtKeyUsageServerAuth and x509.ExtKeyUsageClientAuth, because a bus both listens for clients and dials peer buses during relay using the SAME certificate. Any future pool-based verification scheme (which this task and MTLS-CLIENTAUTH/MTLS-BIND both already say to avoid, but a relay implementer may reach for independently) would additionally have to reason about a BUS certificate arriving on a client-auth connection during peer relay -- same trap, larger blast radius, since a compromised or malicious peer bus cert would then be a trusted root for the whole mesh rather than one agent's identity. Nobody owns this today; MTLS-RELAYGUARD (8192c3c7) is the landable increment for relay mutual auth and should carry an explicit acceptance note: relay client-cert verification is fingerprint-based like MTLS-BIND, not CertPool-based, and the guard test should assert no code path builds x509.CertPool from enrolled/peer certificates. Add this note to MTLS-RELAYGUARD's description via spec-keeper edit, or reference this task from it, before an implementer picks it up.
+  _Proof: grep -rn "x509.CertPool" internal/relay internal/httpapi 2>/dev/null | grep -qi "agent\|peer\|bus" && echo FOUND_POOL_USAGE_REVIEW_NEEDED || echo NO_POOL_USAGE_
+- [ ] None · Client-certificate expiry is not enforced anywhere: RequireAnyClientCert does no chain verification, so NotAfter is never checked — security, P1
+  EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN (39dcdcff) | RELATED: MTLS-CROSSCHECK (2b2af075)
   
-  It is harmless today because no bus serves TLS and rotation has no implementation. It stops being harmless the moment MTLS-LISTENER ships: the first routine rotation wedges every enrolled agent at once, and a wedged fleet is precisely the pressure under which somebody argues for letting --bus-fingerprint override the stored pin. MTLS-PIN deliberately refuses that override (DECISIONS.md 2026-08-07 §4) because it converts a DETECTED certificate substitution into an accepted one. So the pressure must be removed by making rotation work, not by weakening the check.
+  tls.RequireAnyClientCert requires a client certificate but performs NO verification, so Go's stdlib TLS handshake does not check the presented client cert's NotBefore/NotAfter. MTLS-DESIGN has now set a 365-day validity policy, but nothing enforces it -- the policy is real and the enforcement path is absent.
   
-  Shape of the fix: the stored identity holds a SET of accepted fingerprints, not one. A pin enters the set ONLY by explicit deliberate operator action (a new invite, or an explicit re-pin command) -- NEVER learned from a handshake, which would be trust-on-first-use by another name. Retiring an old pin must also be explicit. Consider what `whoami` shows when more than one is pinned.
-  _Proof: go test -race -run 'TestClientAcceptsEitherPinnedCertificateDuringRotation|TestPinIsNeverLearnedFromAHandshake' ./client/..._
+  Whoever implements MTLS-CROSSCHECK (2b2af075) must EITHER (a) read the presented cert's NotAfter at the application layer after the handshake and reject a connection past it, mirroring the session-token expiry check, OR (b) explicitly decide expiry is advisory and the session-token/revocation layer is the sole enforcement -- and record which in DECISIONS.md.
 - [ ] MTLS-CLIENTAUTH · MTLS-CLIENTAUTH: require a client certificate on every connection WITHOUT a CA -- RequireAnyClientCert plus application-layer policy, never InsecureSkipVerify — security, P0
   EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-DESIGN, MTLS-LISTENER | BLOCKS: MTLS-BIND, MTLS-CROSSCHECK, MTLS-VERIFY, MTLS-RELAYGUARD
   
   THE LOAD-BEARING SUBTLETY, stated here so it is not discovered by accident. With no CA, tls.RequireAndVerifyClientCert is unusable -- it would need ClientCAs and would reject every client. So the handshake must use tls.RequireAnyClientCert and authorise NOTHING at handshake time; the policy decision moves to the application layer via VerifyConnection/VerifyPeerCertificate plus a middleware. That produces a deliberate asymmetry: the enrolment route MUST accept a cert it has never seen (accepting it is how binding happens), while every other route requires a cert already bound to an agent. internal/httpapi has zero transport knowledge today, so the peer cert must be plumbed from r.TLS through a middleware using the existing ctxKey pattern (internal/httpapi/middleware.go:31, authmw.go:86; next free value is 2). Also ship a permanent guard test that no InsecureSkipVerify exists on any reachable path.
+  
+  FORBIDDEN IMPLEMENTATION (security-testing finding, 2026-08-07): do NOT verify client certificates by collecting enrolled agents' certificates into one x509.CertPool and calling Verify against it. client/clientcert.go (~line 550-620) documents why in detail: the certificate template deliberately omits IsCA and KeyUsageCertSign for exactly this reason -- with those fields set, a CertPool entry is a TRUSTED ROOT, so any agent could mint a certificate for any name that chains to itself and validates, becoming a CA for the whole bus. Verification here must be fingerprint-based (SHA-256 over the DER, exact match against the fingerprint MTLS-BIND binds at enrolment), never chain/pool verification. See also MTLS-RELAYGUARD-FU-BUSCERTPOOL (c873482f) for the larger-blast-radius version: the bus's own certificate carries both ServerAuth and ClientAuth, so a pool-based scheme would also have to reason about a bus cert arriving on a client-auth connection during relay.
   _Proof: go test -race -run 'TestHandshakeRequiresClientCert|TestUnknownClientCertReachesEnrolOnly|TestNoInsecureSkipVerifyAnywhere' ./internal/httpapi ./cmd/agent-bus_
+- [ ] None · Config.HTTPClient lets an embedder bypass certificate pinning entirely — client, P2
+  client/config.go (~line 148) -- Client.doer returns an embedder-supplied cfg.HTTPClient before newHTTPClient is reached, so an embedder that sets it gets NO pinning, NO expiry check and no TLS policy from this package. Pre-existing and currently documented rather than prevented; flagged twice by the security gate during MTLS-EXPIRY and explicitly left out of scope. Decide whether to keep it (documented, with the risk stated at the field) or to constrain it -- e.g. requiring the caller to opt in explicitly, or validating the supplied transport's TLS config.
+- [ ] None · guard_test.go callback arms accept a nil-valued func variable, so VerifyConnection/VerifyPeerCertificate can be silently nil — tests, P2
+  client/guard_test.go's TestPinnedSkipIsAlwaysPairedWithAPinCheck resolves only the LITERAL identifier nil when checking VerifyPeerCertificate and VerifyConnection. Both gates verified independently that a package-level var nilConnVerifier func(tls.ConnectionState) error wired in as VerifyConnection alongside a cache PASSES the guard, and crypto/tls skips a nil func value exactly as it skips a literal nil. Same for a constructor returning a nil callback.
+  
+  BOTH GATES DECLINED TO BLOCK, and the disagreement between them is the substance of this task, so record it rather than resolving it here:
+  - SECURITY proposed accepting only *ast.FuncLit or *ast.CallExpr and erroring on a bare *ast.Ident, mirroring the stricter InsecureSkipVerify arm (which errors on any unevaluable expression).
+  - REVIEWER argued AGAINST tightening, because the only stricter rule it could see would reject VerifyConnection: c.verifyConn (the likeliest spelling of a legitimate remedy), and "a guard that rejects its own prescribed fix" is a defect this branch already had once and had to be fixed for.
+  
+  Note these two proposals are not obviously compatible: a method value like c.verifyConn is an *ast.SelectorExpr, which is neither a FuncLit/CallExpr nor a bare Ident, so security's rule needs a decision about SelectorExpr before it can be implemented. Reaching the hole requires a deliberately-declared nil func var rather than the slip that a literal nil is. The general principle both gates agreed on: a guard is only as good as its false-positive behaviour, since one that fails correct work is one the next agent deletes.
+- [ ] None · client/doc.go package documentation does not mention that the pinned certificate's validity window is now enforced — docs, P2
+  client/doc.go's "Transport, and the pinned bus certificate" section describes the pin but predates MTLS-EXPIRY, so it does not say the validity window is checked. Not updated because client/doc.go was outside MTLS-EXPIRY's file-ownership boundary.
 
-### EPIC POLL — HTTP long-poll wait endpoint
+### EPIC PROCESS — How agents coordinate + backlog integrity (does not ship in the binary)
 
-- [x] POLL-1 · POLL-1: GET /v1/wait -- long-poll endpoint — poll, P1
-  Agent calls with its last-seen cursor; if messages exist beyond it, respond immediately; otherwise park the request until a new message arrives OR a configurable timeout elapses, at which point return 200 with an empty batch (not an error) and the same cursor.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [x] POLL-3 · POLL-3: Poll concurrency test suite (goroutine leak + thundering herd) — poll, P1
-  Two properties under -race: (1) a client disconnect mid-wait releases the parked goroutine promptly -- no leak, asserted via goroutine-count before/after; (2) thundering herd -- many agents parked on the same bus, one new broadcast wakes every eligible waiter exactly once, no duplicate or missed delivery.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
-- [x] POLL-2 · POLL-2: Wake-on-new-message wiring — poll, P1
-  The hub notifies every parked waiter whose cursor is behind a newly committed message -- wiring between the two-phase commit path and the waiter registry, so wake-up happens only after the write is durable, never before.
-  _Proof: n/a - bookkeeping correction only, see original proof_cmd_
+- [ ] None · Spec Server /export (both format=markdown and format=json) silently drops the commits[] array that /complete correctly persists -- SPEC.md and format=json readers see no commit_sha/test_summary even though the server holds it — tooling, P2
+  CORRECTION TO THE ORIGINAL BRIEF (verified 2026-08-07 by spec-keeper before filing, per instructions): the claim "the Spec Server does not persist commit_sha or test_summary at all" is FALSE. It IS persisted. What is actually broken is narrower: the `/export` endpoint (both `format=markdown`, which is what generates SPEC.md, and `format=json`) silently DROPS the commit record, even though the server holds it and two other surfaces expose it correctly.
+  
+  REPRODUCTION (ran against the live cloud server, project agent-bus, task MTLS-PIN / public_id 8c46dc93-16d0-4eea-8ad3-ac51136551e2, completed with commit_sha=61e6067):
+  
+  1. Direct single-task GET DOES carry the commit:
+     `bash scripts/spec-cloud.sh -s /api/v1/projects/agent-bus/tasks/8c46dc93-16d0-4eea-8ad3-ac51136551e2`
+     -> top-level field `"commits": [{"created_at":"2026-08-07T18:56:39.469539+00:00","repo":null,"sha":"61e6067","test_summary":"proof-check.sh verdict=PASS ..."}]` is present and correct.
+  
+  2. The task LIST endpoint also carries it:
+     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/tasks?status=done&limit=500"`
+     -> every returned task object includes the same `commits` array (verified: of 64 tasks with status=done, 64/64 -- ALL of them -- have a non-empty `commits` array; 0 are missing it at the source-of-truth level). So the blast radius the original brief worried about ("every task ever completed ... has an unverifiable completion claim") does not exist: nothing has been lost.
+  
+  3. The `completed` event also carries it independently:
+     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/events?task=8c46dc93-16d0-4eea-8ad3-ac51136551e2&event_type=completed&limit=5"`
+     -> `payload` = `{"commit_sha":"61e6067","proof_cmd":"...","test_summary":"proof-check.sh verdict=PASS ..."}`. Same values, third independent surface.
+  
+  4. THE ACTUAL BUG -- the export endpoint, both formats, drops the field entirely:
+     `bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/export?format=json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sorted(d['tasks'][0].keys()))"`
+     -> `['completed_at', 'component', 'created_at', 'description', 'epic_key', 'key', 'position', 'priority', 'proof_cmd', 'public_id', 'section', 'status', 'status_note', 'tags', 'title', 'updated_at']` -- no `commits`, no `commit_sha`, no `test_summary`. Confirmed the same for the markdown export consumed into SPEC.md: `grep -n '61e6067' SPEC.md` returns nothing; the only occurrence of the literal string "commit_sha" anywhere in SPEC.md (`grep -c commit_sha SPEC.md` = 1) is free prose inside an unrelated task's description ("commit_sha will be 10dd7f4 plus ..."), not a rendered field.
+  
+  DOES /complete ERROR OR SILENTLY ACCEPT? Neither in the sense the brief feared -- it accepts and CORRECTLY PERSISTS commit_sha/test_summary (see reproduction 1-3 above; 64/64 done tasks have it). There is no silent-drop at the /complete or GET layer. The silent drop is specifically in /export's task-serialisation, which uses a narrower field projection than the GET/list endpoints.
+  
+  WHY THIS STILL MATTERS: SPEC.md is the human/mirror-reading surface (CLAUDE.md: "SPEC.md is a GENERATED MIRROR ... treat it as read-only history that other agents/tools (and humans) can skim"). Anyone who trusts the mirror for "what commit closed this task" sees nothing, even though the server has the answer -- the same *class* of defect as e109c867 (PATCH rejecting `key`): documented workflow and actual server contract disagreeing, just at the export layer rather than at /complete itself. It is P2, not P0/P1, precisely because reproduction 1-3 show no data has actually been lost -- it is a visibility gap in the mirror, not a durability gap in the store.
+  
+  INTERIM MITIGATION (already standard practice, now written down rather than left to habit): spec-keeper continues to record commit_sha/test_summary redundantly in a `kind=report` note on the task at completion time, in addition to the `commit` API field -- e.g. "Completed with commit_sha=<sha>." This is now belt-and-braces (the primary record survives fine in `commits[]`), but keep doing it because it is the only copy that reaches SPEC.md today, and because free-text notes are more visible to a human skimming the mirror's linked task detail than a field the export layer currently discards.
+  
+  FIX (out of scope for this bookkeeping task, left for an implementer): have the export serialiser (both format=json and the markdown renderer that produces SPEC.md) include each task's `commits` array, or at minimum the latest entry's `sha`/`test_summary`, alongside the existing fields.
+  
+  CROSS-REFERENCE: e109c867 (PATCH rejecting `key`) -- same class, workflow/contract mismatch discovered by direct empirical testing rather than by trusting the docs.
+  _Proof: bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/tasks/8c46dc93-16d0-4eea-8ad3-ac51136551e2" | python3 -c "import json,sys; t=json.load(sys.stdin); assert t.get('commits'), 'expected commits on direct GET'" && bash scripts/spec-cloud.sh -s "/api/v1/projects/agent-bus/export?format=json" | python3 -c "import json,sys; d=json.load(sys.stdin); mt=[t for t in d['tasks'] if t.get('public_id')=='8c46dc93-16d0-4eea-8ad3-ac51136551e2'][0]; assert 'commits' not in mt, 'export now includes commits -- bug fixed, flip this task'" && echo EXPORT_DROPS_COMMITS_BUG_CONFIRMED_
+- [ ] None · Correct stale wave label AUTH-7 to its real task identity across code and docs — process, P2
+  The label "AUTH-7" is referenced in roughly 12 Go comments and in CONTRACTS-ONDISK.md, but NO task with that key exists in the backlog -- the work those comments describe is actually tracked as MSG-FU-ROSTERSOURCE (public_id fa26036c). This is a stale/incorrect cross-reference: anyone grepping the backlog for AUTH-7 finds nothing, and anyone reading the code comments is pointed at a task identity that was never real (or superseded and never corrected). Acceptance: every Go code comment and every doc (including CONTRACTS-ONDISK.md) naming AUTH-7 is corrected to reference MSG-FU-ROSTERSOURCE (fa26036c) instead, so the code/doc trail and the backlog agree.
+- [ ] None · Audit stored proof_cmds for the subtest-skip vacuous shape (parent-PASS/hidden-child-SKIP), catalogue any affected DONE tasks — process, P2
+  Follow-up to cea09b96-72db-40f1-84b4-c2e227eae1cf (the tool fix: proof-check.sh's plain-text counter is column-0-anchored, so indented subtest '--- SKIP:' lines are invisible, letting a parent-PASS/all-children-SKIP test certify PASS instead of VACUOUS). That task fixes the TOOL. This task is about the DAMAGE: some already-`done` tasks' recorded proof_cmd may rest on exactly this shape, meaning the stored evidence for 'done' is weaker than the record implies.
+  
+  Not hypothetical: in a randomly-selected batch of four tasks closed on 2026-08-08, three had wrong or non-existent proof commands (see PROCESS epic history, e.g. fc8cd234, a9a433dd).
+  
+  DELIVERABLE: a list of tasks whose stored proof_cmd is vacuous under the corrected (post-cea09b96) rule -- NOT a re-opening of those tasks, and NOT a requirement to fix them. Record the list in a new dated section of AGENT_LOG.md headed exactly 'PROOF_CMD SUBTEST-SKIP AUDIT', naming every task_id examined and its verdict.
+  
+  PRELIMINARY PASS already run (2026-08-08, spec-keeper, scoped and reported here so the next agent does not re-derive it from scratch):
+    - Of 92 currently-`done` tasks with a non-null proof_cmd, 54 contain a `go test ... -run` invocation.
+    - Of those 54, 39 have the SPECIFIC risk shape (tests_run > top_level, i.e. subtests exist, AND top-level skipped==0, i.e. any subtest skip would currently be invisible per the cea09b96 bug).
+    - Re-ran all 39 with `go test -v` DIRECTLY (not nested through proof-check.sh -- nesting hits the known PROOF-CHECK-FU-RECURSION defect, task 69eb6f56, and corrupts results; confirmed this the hard way: an initial pass that nested proof-check.sh inside itself falsely reported ID-2-WIRING-SEAL's proof (8c9b6489) as FAILING with 5 failures, which evaporated to a clean PASS the moment the same proof_cmd was run WITHOUT nesting -- do not repeat that mistake) and grepped the raw verbose output for indented ('    --- SKIP:') lines.
+    - RESULT: zero indented SKIP lines found across all 39 -- none of the currently-done tasks in this sample are resting on a hidden-skip false pass today.
+    - One indented FAIL was observed once, transiently, under -race in 39318208 (CLI-2)'s TestEnrolFailedComposesRemedyAndStampsKey subtest; on immediate re-run it passed cleanly. This is NOT an instance of the cea09b96 defect -- unlike a subtest SKIP, a subtest FAIL DOES propagate to the parent's own --- result line and to the process exit code in Go's testing package, so proof-check.sh's existing 'RC != 0 => FAIL' check already catches it regardless of the indentation-counting bug. Flagging as pre-existing test flakiness for whoever owns internal/client's CLI enrol tests, not as a proof-tooling defect.
+  
+  REMAINING SCOPE for whoever takes this: the other ~38 done tasks with a non-null proof_cmd that do NOT contain `go test -run` (doc/grep-shaped proofs, wrapper-shaped proofs, etc.) are OUT of this specific bug's blast radius by construction (no go test subtests) and do not need re-auditing under THIS rule -- but confirm that assumption rather than assuming it. Also worth re-running the 39-task sweep again AFTER cea09b96 lands, since the fixed tool may report the -json code path differently or reveal something the manual grep missed. Post the full per-task verdict list to AGENT_LOG.md under the heading below, and to this task's own notes.
+  
+  proof_cmd confirmed RED on 2026-08-08 (heading does not exist yet, phrase absent from AGENT_LOG.md): grep -q 'PROOF_CMD SUBTEST-SKIP AUDIT' AGENT_LOG.md -> exit 1.
+  _Proof: grep -q 'PROOF_CMD SUBTEST-SKIP AUDIT' AGENT_LOG.md_
+- [ ] None · Triage dispatched two concurrent agents with overlapping ownership of CONTRACTS-CLI.md — process, P2
+  Self-reported defect, 2026-08-07: triage (main) dispatched INVITE-MINT and MTLS-ROTATE concurrently, and both agents' tasks required editing CONTRACTS-CLI.md. This is a triage error, not an agent error -- caught only because the INVITE-MINT agent inspected its own diff before staging.
+  
+  What happened: the shared worktree means a single `git add CONTRACTS-CLI.md` stages whatever ANY agent has written to that file, not just the calling task's hunks. INVITE-MINT's `git add` swept in MTLS-ROTATE's concurrent edits -- the file's working-tree diff was +274/-32 across 11 hunks, and only ONE +134 hunk (the invite section) belonged to INVITE-MINT; the other nine belonged to MTLS-ROTATE (--bus-fingerprint, `busctl pin`, the accept-set, identities.json). The INVITE-MINT agent caught this by diffing its own change before commit and correctly unstaged the file rather than committing another task's work under its own commit message and task id -- but nothing in the process forces that check; it depended on the individual agent noticing.
+  
+  CLAUDE.md already documents the mechanical half of this failure mode: `git add <paths>` does not scope a later commit (a bare `git commit` after a broad add takes the whole index), and the newer rule (commit d7ebc2b) records that a pathspec-scoped commit takes the WORKTREE at commit time, not the index at add time -- so even a careful `git commit -- CONTRACTS-CLI.md` would have picked up MTLS-ROTATE's uncommitted worktree changes to that same file, not just what INVITE-MINT staged. A shared doc file being edited by two concurrent agents is therefore doubly dangerous: both the index-sweep failure mode AND the worktree-at-commit-time failure mode apply to it simultaneously, and neither is guarded by any mechanism -- only by an agent choosing to diff-inspect before staging.
+  
+  Recommendation: triage should treat every CONTRACTS-*.md plane file (CONTRACTS-CLI.md, CONTRACTS-HTTP.md, CONTRACTS-ONDISK.md, CONTRACTS-AGENT.md) as a single-owner resource per triage pass, exactly like DECISIONS.md and AGENT_LOG.md already are per CLAUDE.md's 'Parallel-agent coordination' section -- i.e. do not dispatch two concurrently-running agents whose tasks both touch the same CONTRACTS-*.md file; sequence them instead, or route both doc edits through a single agent/pass.
+  _Proof: grep -n 'CONTRACTS-\*\.md plane file as a single-owner resource' CLAUDE.md_
+- [ ] None · Spec Server: PATCH /tasks/{id} rejects the key field outright (422 Unknown field) -- a keyless task can never acquire one in place — tooling, P2
+  Observed 2026-08-07 while bookkeeping the agent-bus backlog. CLI-1-FU-BINARYNAME (public_id 6a1eb5fa-5cfe-4808-a47d-224092f69c14) was created with key: null, and CLAUDE.md / task descriptions across this project cite it by the title-embedded name "CLI-1-FU-BINARYNAME" as if it were a real key -- it is not; it has no key at all.
+  
+  CORRECTION TO THE ORIGINAL DISPATCH BRIEF, recorded here rather than silently fixed: the brief that raised this described the bug as "PATCH silently ignores key". Empirically that is NOT what happens -- confirmed live against the running server, 2026-08-07. PATCH /tasks/{id} with a body containing "key":"..." returns HTTP 422 {"errors":{"json":{"key":["Unknown field."]}}}. The request is REJECTED, not silently accepted-and-dropped. The observable consequence is the same either way -- a keyless task can never acquire a key post-creation through the documented PATCH surface -- but the mechanism is a loud validation error, not a silent no-op, and the earlier characterisation should not be repeated.
+  
+  CONSEQUENCE: key is accepted only at creation time (POST .../tasks {"key":"...", ...}) per AGENTS_API.md's 'Create a task' example. There is no documented way to add or change a key on an existing task via the single-task PATCH endpoint. Our own docs and task descriptions routinely cite tasks by key (e.g. "BLOCKS: INVITE-GATE", "DEPENDS ON: MTLS-BUSCERT"); a keyless task silently breaks that convention for anyone or anything resolving by key.
+  
+  WORKAROUND on record: an export/import round-trip. GET /projects/{slug}/export?format=json returns every task including keyless ones with stable public_id; import is documented as idempotent on public_id (POST /projects/{slug}/import), so editing the key field in the exported JSON before re-importing should update it in place -- not verified end-to-end in this pass, flagged for whoever picks this up to confirm import actually treats key as updatable where PATCH does not.
+  
+  REPRODUCTION (run 2026-08-07, task subsequently cancelled -- public_id e36661b0-687e-465e-b72f-e33245088e38):
+    1. POST /projects/agent-bus/tasks {"title":"probe"}  (no key field) -> 201, public_id=P, key=null
+    2. PATCH /projects/agent-bus/tasks/{P} {"key":"PROBE-1"} -> 422 {"errors":{"json":{"key":["Unknown field."]}}}
+    3. GET /projects/agent-bus/tasks/{P} -> key is still null, confirming (2) was rejected outright, not applied
+  
+  Fix: either add key to PATCH's accepted schema (uniqueness-checked, same as at creation), or -- if key is deliberately immutable-after-creation by design -- say so explicitly in AGENTS_API.md's PATCH section so the export/import workaround is the documented path rather than something an agent has to discover by trial and error.
+  _Proof: PID=$(bash scripts/spec-cloud.sh -s -X POST "$B/projects/agent-bus/tasks" -H "Content-Type: application/json" -d '{"title":"keypatch-probe"}' | jq -r .public_id) && bash scripts/spec-cloud.sh -s -X PATCH "$B/projects/agent-bus/tasks/$PID" -H "Content-Type: application/json" -d '{"key":"KEYPATCH-PROBE-1"}' >/dev/null 2>&1; bash scripts/spec-cloud.sh -s "$B/projects/agent-bus/tasks/$PID" | jq -r .key | grep -q KEYPATCH-PROBE-1_
+- [ ] None · Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 + DUR-4-FU-* + ID-2-WIRING + PROOF-CHECK-FU-RECURSION), and require proof_cmd at completion time — process, P2
+  Verified via the Spec Server export this session: 20 of the 137 tasks in the agent-bus project have `proof_cmd == null` (the count given in the brief was correct). Of those 20, 6 are in a terminal state that will never be completed (5 RATCHET-* tasks: d86aaa65, be658b02, 58fd8bc3, e376433d, 9a404c64 -- all `superseded`; and ZZ-LOCKTEST e091e451 -- `cancelled`), so they arguably do not need a backfilled proof_cmd at all, only a decision that they are exempt. The remaining 14 are live/actionable and genuinely need one:
+  
+    CLI-1 (0495d133), CLI-2 (39318208), CLI-3 (6e70abe5), CLI-4 (137465b9), CLI-5 (86dea094),
+    CLI-6 (47001cb4), CLI-7 (e600bde6), CLI-8 (ae4caacc), CLI-9 (93973755),
+    ID-2-WIRING (838677e6, currently in_progress -- an owning agent should backfill this one directly rather than have it done for them),
+    DUR-4-FU-DOCS (0b6d5c11), DUR-4-FU-DECISIONS (180f11f8), DUR-4-FU-TOOLING (26c2ce16),
+    PROOF-CHECK-FU-RECURSION (69eb6f56).
+  
+  DONE means: every one of the 14 actionable tasks above gets a real, non-vacuous proof_cmd (validated with `bash scripts/proof-check.sh '<cmd>'` before it is saved, exactly as this pass did for its own new tasks) -- for the CLI-* tasks that is naturally deferred until each CLI-N's shape is decided (a `scripts/bus-*.sh`-style invocation or a `go build ./cmd/agent-bus-cli && ...` smoke test, per whichever the implementer lands), and for the terminal 6 either a proof_cmd of `true` with a status_note explaining why, or spec-keeper leaves them proof-less on record as an accepted exemption for non-actionable tasks -- either is fine as long as it is a DECISION, not an omission.
+  
+  POLICY RECOMMENDATION (the actual point of filing this): a missing proof_cmd should block flipping a task to `done` at LEAST as hard as a VACUOUS one does. Today scripts/proof-check.sh classifies and grades whatever proof_cmd IS supplied, but nothing stops `complete` from succeeding when proof_cmd was never set in the first place -- which is a strictly WORSE version of the vacuous-pass problem this project already fixed once (task 84b76d5e, "a `-run` pattern that matches no test must FAIL, not pass vacuously"): at least a vacuous `-run` pattern names something checkable in principle; a null proof_cmd names nothing at all. Recommend: (1) completing a task should require running `bash scripts/proof-check.sh '<cmd>'` and quoting its verdict in test_summary, not just asserting things worked; (2) the Spec Server's `complete` endpoint (or a spec-keeper-side check ahead of calling it) should refuse a task with proof_cmd unset UNLESS an explicit skip reason is recorded (mirroring how AGENT_LOG.md already carries explicit skip justifications for the reviewer/security chain).
+  
+  proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- 14 actionable tasks currently have proof_cmd unset; the count will read 0 once every one of them is backfilled or explicitly exempted. (Scoped to non-terminal tasks: cancelled/superseded tasks are excluded from the count on purpose, per the exemption discussion above.)
+  _Proof: test "$(bash scripts/spec-cloud.sh -s '/api/v1/projects/agent-bus/tasks?limit=500' | jq '[.[] | select(.proof_cmd == null and (.status != "cancelled" and .status != "superseded"))] | length')" = "0"_
 
 ### EPIC RATCHET — Ratchet crypto: adopt, do not invent
 
-- [-] RATCHET-4 · RATCHET-4: Broadcast fan-out under pairwise ratchets — crypto, P1
-  A double ratchet is inherently 1:1, but MSG-2 broadcasts to the whole roster. Evaluate the real options -- N pairwise ratchet sends, a sender-key/group-messaging construction, or a per-message symmetric key wrapped per recipient -- with cost, forward-secrecy and complexity for each. Sender-key schemes are a KNOWN sharp edge: getting one wrong silently loses PFS. Recommend, and say explicitly what an implementer must NOT improvise.
-- [-] RATCHET-8 · RATCHET-8: Record the decision, then gate the CRYPTO epic on it — crypto, P1
-  Turn the deep dive's recommendation into a dated DECISIONS.md entry (library, version, what we implement, what we explicitly never implement, the fan-out approach, the state-durability rule), update CRYPTO-1/2 to reference it rather than re-deciding, and confirm with spec-keeper that no CRYPTO implementation task starts before this lands. The point of the gate is that the expensive, dangerous work is not begun on an assumption.
-- [x] RATCHET-7 · RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed25519 vs a libsodium binding) — security, P1
-  RESCOPED 2026-08-02 (sign-only). This is the LAST undecided crypto question in the epic and it GATES the implementation of SIGN-1/SIGN-2/CRYPTO-10, all of which currently name Go's crypto/ed25519 as the presumptive answer -- this task confirms or overrides that, once, in writing. DECISIONS.md deliberately left it open: "whether to use stdlib crypto/ed25519 or a cgo libsodium binding is left to the implementing task; both satisfy invariant 9". DECIDE BETWEEN EXACTLY TWO OPTIONS -- do not open a wider search, and under invariant 9 do not consider any option that involves implementing a primitive ourselves: (a) Go stdlib crypto/ed25519 -- zero new modules, no cgo, works on the box's go1.19.4, is the RFC 8032 reference-implementation lineage upstreamed into the stdlib, and is a high-level Sign/Verify API (exactly the 'wraps as much of the problem as possible' invariant 9 asks for); its supply chain IS the Go toolchain, so the review becomes 'how is the builder image's Go version pinned and how do we learn about Go security releases' (ties to DEPLOY-1). (b) a cgo libsodium binding -- matches the user's word 'libsodium' literally, but adds a C library to the runtime image, cgo to the build, and a binding maintainer to the trust chain. REVIEW BOTH ON: provenance and who can push a release, release signing / checksum verification, transitive dependency footprint, cgo and native build requirements against the multi-stage Docker image (DEPLOY-1's minimal runtime -- a cgo binary is not static and will not run on a scratch/distroless base without care), CVE history, and our exposure if it is abandoned. DELIVERABLES: the choice, the exact pinned version, how we learn about advisories (name the mechanism -- e.g. govulncheck in the DEPLOY-5 container check, GitHub advisory watch), and a dated DECISIONS.md entry containing all of it. Invariant 8 requires a justification for any third-party dependency; a crypto dependency requires this stronger form. NOTE the honest asymmetry when weighing: 'it is what the user said' is a reason to take libsodium seriously, but the user's controlling requirement was standard, audited, high-level sign/verify -- not a specific vendor -- so either option satisfies the instruction as long as the reasoning is recorded.
-  _Proof: grep -q 'RATCHET-7' DECISIONS.md && grep -q '2026-08-02 .* Ed25519 is Go stdlib' DECISIONS.md && test "$(go list -m all)" = 'github.com/dodgymike/agent-bus'_
 - [ ] RATCHET-2 · RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it does not — crypto, P1
   RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify; encryption later"): this is no longer a ratchet/PFS threat model, it is the threat model for a SIGN-ONLY design. Write down the adversary before further work lands. Who is the attacker -- a compromised bus, a compromised relay peer bus, a network observer, another enrolled agent, someone who later obtains the disk? WHAT SIGNING BUYS: message AUTHENTICITY (this body really was produced by the holder of this messaging private key) and INTEGRITY (this body was not modified in transit), verified by the RECIPIENT -- so a compromised or malicious bus cannot forge a message purporting to be from an agent it does not control, even though the bus relays every message. This is the whole security value of keeping the AUTH keypair (CRYPTO-1/AUTH-1, authenticates to the bus) and the MESSAGING keypair (CRYPTO-3, authenticates to peers) separate -- state that explicitly. WHAT SIGNING DOES NOT BUY, STATE THIS PLAINLY AND WITHOUT HEDGING: NO CONFIDENTIALITY. Without encryption, the bus and any relay peer on a multi-bus path (RELAY-2/3) CAN and WILL read every message body, in cleartext, always. This is now an ACCEPTED property of the system per direct user instruction, not an oversight to be apologized for -- but it must be legible to every future reader of PROTOCOL.md, not discovered by surprise. NO forward secrecy (a compromised messaging private key lets an attacker forge NEW messages as that agent going forward, and there is no ratchet to bound the blast radius -- key rotation via key_epoch, CRYPTO-4, is the only mitigation). NO replay defence from the signature alone (covered separately by SIGN-4's sequence+cursor -- reference it, do not re-derive it here). State plainly which threats are OUT of scope for this rescoped epic (traffic analysis / metadata exposure, a fully compromised endpoint agent, a malicious bus dropping/reordering/duplicating messages -- signing does not stop any of these, only forging content undetected). Without this document the sign/verify choice is unfalsifiable and 'we signed it' becomes a slogan rather than a security property.
   _Proof: grep -rqi 'no confidentiality' THREAT_MODEL.md PROTOCOL.md_
-- [-] RATCHET-3 · RATCHET-3: Do we need full Signal semantics? -- the cheaper-alternative check — crypto, P1
-  Deliberate devil's advocate against the whole epic, so the decision is made on merit. Full X3DH + double ratchet buys asynchronous session setup, PFS, and post-compromise recovery. Agent-bus may not need all three. Compare against simpler, well-audited options (static keypairs + NaCl box, or an AEAD with scheduled rekeying) on security delivered per unit of complexity, and against the fact that complexity ITSELF is a security risk here. Recommend. It is entirely legitimate for this task to conclude the full ratchet is warranted -- but the case must be made, not assumed.
-- [-] RATCHET-1 · RATCHET-1: DEEP DIVE -- how to get a double ratchet WITHOUT writing our own crypto — crypto, P3
-  THE GATING TASK. Produce RATCHET_DEEPDIVE.md. Governing constraint, stated up front and never relaxed: we do not implement primitives, X3DH, or the ratchet ourselves. Rolling your own is the single highest-risk thing this project could do -- the failure mode is silent (it still encrypts, it still decrypts, it is simply broken), and no ordinary test suite detects it. REQUIRED CONTENT: (1) an explicit survey of the ACTUAL options for Go -- official libsignal (Rust) via cgo/FFI, maintained pure-Go double-ratchet implementations, age/NaCl-style alternatives, and the honest question of whether full Signal semantics are needed at all versus a simpler audited AEAD scheme with periodic rekeying; (2) for EACH option: maintenance status, audit history, API misuse-resistance, licence, cgo/build implications for the Docker image, and what it does NOT give us; (3) a clear recommendation with the runner-up and the conditions under which we would switch; (4) what we would still have to write ourselves under each option -- session storage, key lifecycle, fan-out -- since that glue is where implementations usually fail even with a good library; (5) an explicit list of things we will NEVER hand-roll. NO CODE. The output is evidence and a recommendation for the user to accept.
-- [-] RATCHET-5 · RATCHET-5: Ratchet state durability vs invariants 4/5 -- the key-reuse trap — crypto, P1
-  Ratchet state is mutable and MUST NOT be replayed: rewinding it can cause key/nonce reuse, which is catastrophic and total for AEAD confidentiality. This collides head-on with invariant 5 (rebuild memory by replaying the durable store). Determine the safe pattern -- ratchet state as a durably-checkpointed side-store that is never rewound by WAL replay, monotonic counters that only advance, and what recovery does when state is lost or ambiguous (fail closed and force a new session, never guess). This must be settled BEFORE any ratchet code is written.
 - [ ] RATCHET-6 · RATCHET-6: RFC 8032 Ed25519 known-answer tests wired into the sign/verify implementation — crypto, P1
   RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify; encryption later"): the construction under test is now Ed25519 (crypto/ed25519, Go stdlib), not a Double Ratchet. MANDATORY, not nice-to-have, per invariant 9 (never write your own crypto -- confirming correct USE of an audited primitive is exactly the discipline invariant 9 demands, since a verifier that accepts everything passes every positive test ever written and 'it round-trips with itself' is not evidence). RFC 8032 publishes canonical Ed25519 test vectors (seed/public key/message/expected signature tuples, including the well-known empty-message and edge-case vectors used across every conformant implementation). Wire a representative set of these into the test suite for whatever function/subcommand SIGN-1/SIGN-2/CRYPTO-10 end up calling crypto/ed25519 through, asserting BYTE-EXACT expected signatures (not just 'it verifies its own output' -- a self-consistent but non-conformant implementation would pass that trivially and still be wrong). This proves our INTEGRATION calls the stdlib correctly (right key format, right message bytes, right signature encoding), not merely that it compiles. Note Go's crypto/ed25519 is itself the reference implementation lineage (adiantum team / Adam Langley's Go ed25519, upstreamed) so a mismatch here would indicate a bug in OUR canonicalisation/wiring (SIGN-1), not in the library.
   _Proof: go test -race -run TestEd25519RFC8032Vectors ./internal/..._
 
 ### EPIC RELAY — Bus-to-bus federation
 
-- [ ] RELAY-4 · RELAY-4: Peer-down retry/backoff — relay, P2
-  If a peer is unreachable, relay to it retries with backoff on a background path rather than blocking the local sender's response -- a slow/dead peer must never make a local broadcast/DM slow or fail.
-  _Proof: go test -race -run TestPeerRetryBackoff ./internal/relay_
-- [x] RELAY-2 · RELAY-2: Message relay + ongoing roster sync across peers — relay, P2
-  A broadcast/DM whose target is (or might be, for broadcast) on a peer bus is forwarded to that peer using the fully-qualified agent id; roster changes (new enrolment, leave) are pushed to peers incrementally after the initial exchange so routing tables stay current.
-  _Proof: go test -race -run TestMessageRelay ./internal/relay_
-- [x] RELAY-1 · RELAY-1: Peer enrolment + initial agent-list exchange — relay, P2
-  A bus-to-bus handshake (POST /v1/peer/enroll or similar) where two buses mutually authenticate and exchange bus ids plus their current rosters, so each learns the other's fully-qualified agent ids for routing (invariant 2).
-  _Proof: go test -race -run TestPeerEnrollment ./internal/relay_
-- [x] RELAY-3 · RELAY-3: Loop prevention via traversed-bus path — relay, P2
-  Every relayed message carries the list of bus ids it has already traversed; a bus that sees itself in that list drops the message instead of re-relaying it -- required the moment peer topology has a cycle.
-  _Proof: go test -race -run TestRelayLoopPrevention ./internal/relay_
-- [ ] RELAY-5 · RELAY-5: Relay crash/loop integration test — relay, P2
-  Multi-bus (3+) topology test with a cycle in the peer graph: send a broadcast, simulate a crash on one bus mid-relay, restart it, and assert every agent across the topology sees the message exactly once -- no loop, no duplicate, no loss. SCOPE NOTE (added for invariant 10 / the IDEM epic): a topology with only a CYCLE mostly exercises RELAY-3's traversed-bus-path loop prevention, which is a different mechanism from IDEM-15's key-based duplicate suppression. Per invariant 10, loop prevention COMPLEMENTS idempotency and is never a substitute for it, so this test's topology MUST also include a diamond/two-disjoint-path shape (the message reaches one bus via two different peers, neither path revisiting a bus it already traversed) -- RELAY-3 does nothing for that case, and only IDEM-15's applied-key check catches the resulting duplicate. Assert exactly-once delivery is achieved via IDEM-15's suppression for the disjoint-path case and via RELAY-3 for the cyclic-path case, and that removing either mechanism (test it with a build tag or a stub) breaks its respective case -- so the test proves the two defences are genuinely both required, not just both present. Gated on RELAY-3, IDEM-15.
-  _Proof: go test -race -run TestRelayCrashLoopIntegration ./internal/relay_
+- [ ] None · RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy — relay, P1
+  internal/relay/forward.go's per-peer queues are in-memory. A message accepted by Enqueue is lost if the process crashes with a non-empty queue, and dropped (counted in Stats().Dropped.Full, logged at Warn) when a peer stays down long enough to fill its queue. There is no retry. RELAY-4 owns retry/backoff; this task owns the DURABLE outbox they need to be meaningful. Until both land, cross-bus delivery is BEST EFFORT and no doc may claim otherwise (already stated in internal/relay/doc.go and forward.go).
+- [~] None · internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-with-different-payload, contradicting invariant 10 as narrowed 2026-08-08 — relay, P2, in progress, doc-only, invariant-10, spec-defect
+  internal/relay/doc.go:246-250 (comment on RelayHandler, section "RELAY-2 and RELAY-3") reads:
+  
+    One more handoff MTLS-RELAYGUARD owns: invariant 10 requires that an
+    idempotency key reused with a DIFFERENT payload is rejected, logged AND THE
+    OFFENDING PEER DISCONNECTED. RelayHandler does the first two (409 plus a log
+    line that says so); it cannot close a connection it does not own. The gate
+    task must wire the disconnect.
+  
+  This is now WRONG on the object-level fact, not just stale wording. Invariant 10 was
+  narrowed 2026-08-08 (code: commit 1c6c540, "Aim invariant 10's disconnect at the
+  replayer, not at the confused client"; contract: commit 0dbb025, CLAUDE.md). Same
+  idempotency key + DIFFERENT payload is reject-and-log ONLY -- it no longer disconnects,
+  on EITHER /v1/send or /v1/enroll, because the key is scoped to the caller's own agent
+  and reusing it is evidence of a confused client, not an attacker. The ONE case that
+  still disconnects is third-party replay of an already-accepted signed message
+  (sender-mismatch on checkSignedMint), which relay ingest has not built a path to yet.
+  
+  WHY THIS IS WORSE THAN A STALE COMMENT, NOT JUST STALE. Relay ingest (RelayHandler)
+  is not yet built (the whole surface is gated behind INVITE-PEERGUARD f5d91dbe and
+  MTLS-RELAYGUARD 8192c3c7 and "NOT REGISTERED ON ANY MUX"). When someone DOES build it,
+  a peer bus legitimately presents a sender that is not the connection's principal, for MANY
+  AGENTS AT ONCE on one relay connection -- a peer relays traffic on behalf of its whole
+  local roster over one link. An implementer who inherits doc.go's literal instruction
+  ("the gate task must wire the disconnect" on key-reuse) would either (a) wire a
+  same-payload-reuse disconnect that invariant 10 no longer wants at all, or worse,
+  (b) generalize the ALREADY-CORRECT third-party-replay disconnect to fire at the
+  connection level on this multi-tenant link, dropping EVERY agent behind that peer bus
+  simultaneously over one agent's buggy or malicious traffic. That is the exact
+  "abuse defence aimed at the wrong party" defect this project has hit four times
+  before (see 1c6c540's own commit message), one scale up: instead of disconnecting one
+  confused client, it would disconnect an entire federated bus's worth of agents.
+  
+  THE TEST TO APPLY, per invariant 10 as narrowed (CLAUDE.md, and 0dbb025's own wording):
+  before wiring ANY disconnect, ask (1) can a merely BUGGY client reach this line, and
+  (2) does this connection carry only ONE principal's traffic? For relay ingest the
+  answer to (2) is NO -- one relay connection multiplexes an entire peer bus's roster --
+  which is precisely why a connection-level disconnect is the wrong mechanism here even
+  for the one case (third-party replay) that legitimately disconnects a single agent
+  elsewhere in the codebase. doc.go's own "Loop prevention is AVAILABILITY, never
+  security" section (lines 252-262) already reasons correctly in this direction for a
+  DIFFERENT mechanism (loop suppression); the idempotency paragraph two sections above it
+  does not yet carry the same care.
+  
+  SCOPE: internal/relay/doc.go is a comment-only file (no registered handlers -- see the
+  file's own "NOT REGISTERED ON ANY MUX" banner), so this is a documentation/specification
+  fix, not a behavior change: rewrite lines 246-250 to state what invariant 10 actually
+  requires post-narrowing (reject+log only for key-reuse-with-different-payload; the
+  disconnect, if relay ever needs one, belongs to third-party replay of an accepted
+  signed message, and even that needs a scoping decision for a multi-principal
+  connection that plain per-socket disconnect does not answer). Do not invent that
+  scoping decision here -- name it as an open question for whoever builds RelayHandler
+  for real (MTLS-RELAYGUARD / RELAY-2), since a connection-level primitive is very
+  plausibly the wrong tool for a multi-tenant relay link and the actual mechanism
+  (e.g. per-origin-agent rejection without dropping the transport) needs its own design.
+  
+  Rated P2: this is a specification defect in CODE THAT DOES NOT RUN YET (RelayHandler is
+  gated off any mux), not a live vulnerability -- do not inflate it. It earns urgency from
+  being read-and-trusted by whoever builds relay ingest next, not from being exploitable
+  today.
+  
+  Cross-reference: 1c6c540's own commit message flags this exact file/lines as
+  "unreconciled" ("internal/relay/doc.go already specifies OFFENDING PEER DISCONNECTED...
+  the relay ingest path must reconcile with this narrowing rather than inherit it").
+  This task is that reconciliation, filed rather than left as a commit-message footnote.
+  _Proof: go test -race -run TestPackageDocDoesNotReviveTheWithdrawnDisconnect ./internal/relay_
+- [ ] None · Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link — relay, P2
+  Lift the OPEN QUESTION out of internal/relay/doc.go (section "Key reuse is REJECT-AND-LOG") and into the backlog, so it is not inherited by accident from a package comment. Invariant 10 as narrowed 2026-08-08 keeps exactly one disconnect -- third-party replay of an accepted signed message -- but a relay connection MULTIPLEXES AN ENTIRE PEER BUS'S ROSTER, so sender != the connection's principal is the NORMAL correct shape and a per-socket disconnect would drop every agent behind that peer over one agent's traffic. Per-origin-agent rejection without dropping the transport, per-peer rate limiting, and peer-level de-peering are all plausible and have different blast radii. Deliver the DECISION with its rationale in DECISIONS.md before any disconnect is wired onto a relay surface. Gated on MTLS-RELAYGUARD (8192c3c7).
+  _Proof: grep -n "multi-principal relay link" DECISIONS.md_
+- [ ] None · RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can permanently exhaust an agent name — relay, P1
+  Found by the security gate on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787). LATENT ONLY BECAUSE RELAY IS UNWIRED -- nothing outside internal/relay imports it today.
+  
+  CHAIN. cmd/agent-bus/suffixfloors.go derives per-name agent-id suffix floors from the SENDER and RECIPIENTS of durable store message records, and it is safe to do so because those fields are SERVER-DERIVED: internal/hub/hub.go:678 requires every recipient to be Enrolled on this bus before anything is written. internal/relay/message.go:519-530 validates recipient SHAPE ONLY.
+  
+  EXPLOIT once relay is served. A hostile (or merely buggy) peer relays a message naming the local recipient '<local-bus>.alpha-18446744073709551615'. It reaches the durable log. On the next start that dir's backfill folds it into alpha's floor, ids.RaiseFloor applies NO upper bound, and the name 'alpha' is EXHAUSTED (ids.ErrSuffixExhausted) for that bus PERMANENTLY, across every future restart. That is denial of one agent NAME, forever, from a remote party. ids.NameSuffixes.RaiseFloor's own doc names this shape in as many words: 'Validate and BOUND a peer's claim BEFORE it reaches RaiseFloor.'
+  
+  DO. Roster-check local-bus recipients in the relay ingress path before the durable write, exactly as hub.publish does. Note the sender vector is already closed (ValidatePeerBusID plus the sender-bus check), so this is specifically about RECIPIENTS.
+  
+  PROOF. A test that a relayed message naming an unenrolled local recipient is REFUSED before anything is written, and that the suffix floor for that name is unchanged after a restart.
+- [ ] None · RELAY-2-FU-LOOPTEST-FLAKE: Unreproduced single failure of TestMessageRelay's loop subtest — relay, P2
+  During RELAY-2/3 the test-engineer observed ONE failure of TestMessageRelay/a_loop_is_200_with_a_dropped_reason,_never_an_error_status on the tree BEFORE any of its edits, and could not capture the failing assertion. Not reproduced in ~3,500 subsequent executions (~2,900 by the test-engineer including 8-way parallel load and cold-testcache runs, ~600 by feature-runner at -count=200). The only non-deterministic path in that subtest is doRelay's t.Fatalf("request: %v", err) on a transient httptest connection error, which would be HARNESS FRAGILITY rather than a product defect -- but that is a hypothesis, not a diagnosis. Task: either reproduce it, or make doRelay distinguish a transport error from an assertion failure so the next occurrence is self-diagnosing.
+- [ ] None · RELAY-2-FU-FORWARDER-REAP: Forwarder never reclaims a departed peer's queue or goroutine — relay, P2
+  internal/relay/forward.go creates one bounded channel plus one goroutine per peer on first enqueue and never removes either; there is no counterpart to Registry.RemovePeer. Peer churn or a flapping topology leaks a DefaultQueueDepth-slot channel and a goroutine per bus id ever routed to. Bounded in practice by the peer set, unbounded in principle.
+- [ ] None · Relay forwarder's PeerBaseURL callback: give Registry a concurrency-safe accessor and state the contract — relay, P1
+  RELAY-4 closed a 24h revocation hole by re-resolving the peer address on EVERY attempt (internal/relay/forward.go attempt()), so de-peering takes effect on the next attempt. That fix is only as good as the callback the wiring site supplies, and today there is NO Registry.PeerBaseURL method -- the only primitive is Registry.Peers(), which snapshots every peer. ForwarderOptions.PeerBaseURL also does not say "safe for concurrent use" the way ClientConfig.LocalRoster does, and it is now called from every peer worker goroutine. A wiring site that caches or snapshots silently re-freezes the address and REOPENS the hole. Deliver: a concurrency-safe Registry.PeerBaseURL(busID) (string, bool), the documented contract on the option, and a test that a RemovePeer is observed by an in-flight retry. Raised by the security gate 2026-08-08.
+  _Proof: go test -race -run TestRegistryPeerBaseURLObservesRemovePeer ./internal/relay_
+- [ ] None · Durable relay outbox: cross-bus delivery is best-effort and every drop path loses the message — relay, P1
+  Pre-existing and honestly documented in internal/relay/forward.go's Forwarder doc, but never filed. The per-peer outbound queue is IN-MEMORY: a crash with a non-empty queue loses it, and Dropped.Full, Dropped.Expired and (new) Dropped.Yielded are all silent data loss. RELAY-4 added retry, NOT durability -- retry cannot help a crash because the queue it retries from is the process's own memory. Until this lands, no doc or product claim may describe cross-bus delivery as reliable. Note the constraint any design inherits: the total retry horizon must stay inside idem.PeerOutageBudget (24h), enforced in NewForwarder.
+  _Proof: go test -race -run TestRelayOutboxSurvivesCrash ./internal/relay_
 
 ### EPIC SIGN — SIGN: message authenticity & integrity (Ed25519 sign/verify, no encryption yet)
 
@@ -2744,11 +2993,24 @@
 - [ ] SIGN-4 · SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor — crypto, P1
   GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: a validly-signed message can be replayed VERBATIM by anyone who saw it once (including a malicious bus), and Ed25519 verification of a replayed message succeeds every time because nothing about the signature changes. Do not let an implementer assume signing solves this -- it does not, and the SIGN epic description says so explicitly. This task specifies and implements the defence: the bus mints a monotonic sequence number per recipient (or per conversation -- decide and document which, consistent with invariant 1: ids/sequences are server-minted, never client-supplied) INSIDE SIGN-1's signed bytes, and the recipient maintains a durable delivery cursor (highest sequence accepted so far, per sender or per conversation) that MUST only advance, never rewind (same shape as the durable-store invariants 4/5: the cursor is part of the recipient's serving state, rebuilt by replay on restart). A message whose sequence is <= the cursor is rejected as a replay BEFORE the body is handed to the calling agent, even if its signature verifies. State plainly what this does and does not cover: it defeats verbatim replay of a message already delivered; it does NOT provide encryption or hide metadata (accepted per RATCHET-2's rescope). Tests: replaying the exact same signed envelope after successful delivery is rejected; out-of-order delivery within a reasonable window is handled sanely (define the policy -- reject strictly increasing-only, or allow a bounded reorder window, and say why); a cursor is durable across a recipient-side restart (crash-injection style test per CLAUDE.md's durability discipline, since this is exactly invariant-4/5 territory even though it lives on the recipient side, not the bus's WAL).
   _Proof: go test -race -run TestReplayRejectedByCursor ./internal/..._
-- [x] SIGN-1 · SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) — crypto, P1
-  RESCOPE (supersedes the Signal/ratchet direction, user instruction 2026-08-02: "ok, let's keep it simple and just use standard message auth/integrity using libsodium. encryption can come later"). GOVERNED BY INVARIANT 9 (never write your own crypto; always use a well-known, standard, audited library that wraps as much of the problem as possible -- this OVERRIDES invariant 8 where they conflict). This task specifies the EXACT bytes a sender signs and a recipient verifies -- the sharp edge of the whole epic: if sender and verifier serialise differently, verification fails intermittently or, worse, a field outside the signed bytes becomes silently forgeable. Deliverable: a written spec (in PROTOCOL.md or a dedicated section) plus a canonicalize() function pinned by test vectors, naming EXACTLY which fields are covered and in what order/encoding -- at minimum: message id (server-minted), sequence (server-minted, monotonic), fully-qualified sender id (<bus-id>.<agent-id>), fully-qualified recipient id(s) (sorted, for determinism), timestamp, and the message body. State explicitly which fields are server-minted vs sender-supplied, since a server-minted field being outside the signed bytes would let a malicious bus reorder/misattribute messages undetected -- so the id and sequence MUST be inside the signed bytes even though the sender does not choose them (the sender signs the server's assignment as part of the accept flow, OR the design places signing before minting and the signature covers only sender-known fields with the id/seq bound separately by the durable record -- DECIDE and document which, do not leave it ambiguous). We do NOT invent a signing construction: canonical bytes are handed to the library's Sign/Verify API (Go stdlib crypto/ed25519 -- crypto/ed25519.Sign / crypto/ed25519.Verify, the audited, high-level, misuse-resistant sign/verify API for RFC 8032 Ed25519) and NOTHING else -- no custom padding, no hand-rolled length framing beyond a documented fixed field order, no bespoke hashing construction assembled ourselves. Include a table of the exact byte layout (fixed-order concatenation with length-prefixed variable fields, or a documented canonical JSON form -- pick ONE, deterministic, and say why) and a handful of worked test vectors (input struct -> exact signed bytes -> hex) that SIGN-2/SIGN-5 and CRYPTO-10 depend on. BLOCKS every other SIGN task and the CRYPTO-3/4/10 rescopes' implementation.
+- [ ] None · SEC: ed25519.Verify panics on wrong-size public key -- remote DoS across AUTH-1/CRYPTO-10/SIGN-2 call sites — security, P1
+  Cross-cutting security gap surfaced by RATCHET-7 and VERIFIED FIRST-HAND by backlog-triage by reading this box's own stdlib source at crypto/ed25519/ed25519.go (Go 1.19 GOROOT): ed25519.Verify PANICS -- it does not return false -- when len(publicKey) != ed25519.PublicKeySize. This is a remote DoS trap because it is ASYMMETRIC with malformed-signature handling: a bad/tampered signature safely returns false, but a wrong-size (or nil) public key crashes the process. A call site that validates the signature but not the key length therefore looks correct in review and is remotely crashable in production.
   
-  CONSTRAINT ADDED 2026-08-02 (RATCHET-7 fallout): Ed25519 signs the message itself, never a digest -- crypto/ed25519's Sign/Verify API rejects pre-hashed input for Ed25519 (there is no PureEdDSA-over-a-hash mode exposed; feeding it a hash instead of the message is a misuse of the API, not a supported shortcut). Because DUR-5 defines an audit-log content hash and SIGN-2 defines the signature, and the two are specced in separate epics, they will drift apart unless pinned together here: SIGN-1's canonicalize() output -- the exact canonical byte sequence -- MUST be the single shared input that (a) SIGN-2 passes to ed25519.Sign/ed25519.Verify UNHASHED, and (b) DUR-5 hashes for its audit-log content hash. Do not let DUR-5 hash a differently-serialised or differently-ordered view of the same logical message; if DUR-5's audit record needs additional fields beyond what SIGN-1 signs, those extra fields must be clearly out-of-band from (not silently substituted for) the canonical signed bytes. State this explicitly in the PROTOCOL.md deliverable and cross-reference DUR-5 by name so the two epics do not drift.
-  _Proof: go test -race -run TestCanonicalize ./internal/..._
+  This matters immediately because at least three call sites accept or load attacker-influenceable public keys and will call ed25519.Verify on them:
+  - AUTH-1 (POST /v1/enroll): the public key is client-supplied at enrolment -- untrusted input by definition (invariant 1: a client-supplied value is input to be validated, never an identity to be trusted).
+  - CRYPTO-10 (`agent-bus verify` + wrapper validate-before-accept): verifies contact-list/sender public keys, including keys reloaded from the on-disk roster after a restart.
+  - SIGN-2 (sign on the send path) and any downstream recipient-side verification against a sender's messaging public key.
+  
+  SCOPE OF THIS TASK: own the fix and its verification ACROSS all of the above call sites (do not let each task independently reinvent the guard -- provide or point to one shared, tested helper, e.g. a `safeVerify(pub, msg, sig []byte) bool` that length-checks before delegating to ed25519.Verify) plus any other Verify call site discovered during implementation, including ed25519.PublicKey values loaded from the roster on disk after a restart (DUR/recovery path).
+  
+  ACCEPTANCE CRITERIA:
+  1. Every ed25519.Verify call site in the codebase length-checks the public key against ed25519.PublicKeySize before calling Verify, and returns/propagates a normal validation error on mismatch -- never a panic.
+  2. A shared helper exists (not copy-pasted per-call-site logic) so future call sites get the guard by construction.
+  3. Each affected call site (AUTH-1's enrolment path, CRYPTO-10's verify subcommand, SIGN-2's send/verify path, and the roster-reload-from-disk path) carries a negative test that feeds a wrong-size public key AND a nil/empty public key, asserting a clean rejection with no panic/crash (run with -race per project convention for anything touching concurrent paths).
+  4. Documented in CONTRACTS.md or DECISIONS.md as a standing invariant so it is not silently reintroduced by a later call site.
+  
+  This task should land alongside (or ahead of) AUTH-1/CRYPTO-10/SIGN-2's implementation since it is a prerequisite acceptance criterion on each of them, but is filed separately because it is a security trap spanning multiple call sites, not a single-task scope.
+  _Proof: go test -race -run TestSafeVerify ./... ; go test -race -run TestEnroll_MalformedPublicKey ./internal/auth ; go test -race -run TestVerify_MalformedPublicKey ./internal/... -- all pass with no panic on wrong-size/nil public keys_
 - [ ] SIGN-5 · SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must — crypto, P1
   GATED on SIGN-1/SIGN-2 and CRYPTO-10's verify implementation existing (may run in parallel with CRYPTO-10 against a stub). MANDATORY, not nice-to-have, per invariant 9: broken or misused crypto fails SILENTLY -- it still 'verifies', and provides none of the protection it appears to. 'Our tests pass' is never evidence for a crypto change; a verifier that accepts everything passes every positive test ever written. This task exists specifically to make that failure mode impossible to ship undetected. Required cases, EACH proven REJECTED with a distinct assertion (not just 'an error occurred' -- assert the specific failure path fired): (1) TAMPERED BODY -- flip one byte of the signed body, signature must fail; (2) SWAPPED SENDER -- a validly-signed message re-labelled as if from a different sender must fail (proves the sender id is inside the signed bytes per SIGN-1, not just alongside them); (3) REPLAYED MESSAGE -- re-deliver an already-accepted signed envelope verbatim, must be rejected by SIGN-4's cursor even though the signature itself verifies; (4) WRONG KEY -- verify against a public key that is NOT the signer's (e.g. a different enrolled agent's real key), must fail; (5) TRUNCATED SIGNATURE -- a short/malformed signature byte string must be rejected cleanly (no panic, no out-of-bounds read -- crypto/ed25519.Verify is documented to handle this safely, confirm it and pin the confirmation in a test) . Add any other rejection case the implementation surfaces (e.g. corrupted/garbage public key bytes). Every case must have its own named test, not be folded into one assertion, so a future regression names exactly which property broke.
   _Proof: go test -race -run TestVerifyRejects ./internal/... -- one subtest per rejection case, each asserting non-zero exit / verify-failure, none asserting success_
@@ -2757,6 +3019,24 @@
   _Proof: scripts/bus-enrol.sh against a running throwaway bus creates a 0600 private key, registers the public half, and a SECOND run neither overwrites it nor silently re-keys ; go test -race -run TestKeyfilePerms ./internal/..._
 - [~] SIGN-7 · SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus can neither forge nor strip a signature — crypto, P1, in progress
   GATED on SIGN-1; implementation lands with RELAY-2/RELAY-3. RAISED TO P1 DESPITE THE RELAY EPIC BEING P2 BECAUSE IT CHANGES A SIGN-1 DECISION: SIGN-1 must not be completed until the question below is answered, or the canonical format will have to be redesigned after code depends on it. THE COLLISION: SIGN-1 wants the server-minted message id and sequence INSIDE the signed bytes (so a malicious bus cannot reorder or misattribute messages undetected). But those are minted by the ORIGIN bus, while the receiving bus needs its own local sequence for its own recipients' cursors (SIGN-4) and, per invariant 1, does not accept ids minted by a client -- and a peer bus IS a client from its perspective. If the far bus re-mints and substitutes, EVERY relayed signature fails at the far end; if it adopts the origin's numbers wholesale, it has ceded id authority to a peer. RESOLVE IT EXPLICITLY. The likely answer -- state it or a better one, and make SIGN-1 match: the signed bytes carry the ORIGIN's fully-qualified sender id and the ORIGIN's message id, which per invariant 2 are already bus-namespaced and therefore globally unambiguous and not the far bus's to mint, while the receiving bus mints its own LOCAL delivery sequence OUTSIDE the signed bytes and binds it in its durable record. (2) NO FORGERY: an intermediate bus cannot forge a message because it does not hold the sender's messaging private key -- but ONLY if the recipient verifies against a key it trusts. CROSS-BUS KEY TRUST IS AN OPEN HOLE: CRYPTO-4's bundle is attested by the LOCAL bus, so bus B attesting a key for bus A's agent means bus B can simply lie and substitute its own key. Decide and document: relay A's attestation intact (bundle signed by A's bus key) and pin A's BUS key at peering time, or TOFU the agent's messaging key at first contact and alarm on change, or both. Without this, cross-bus signatures verify against whatever the nearest bus says, which is worth nothing. (3) NO STRIPPING: SIGN-6's mandatory-signature ingest rule applies to the relay ingest path EXACTLY as it applies to /v1/send. A relayed message arriving with no signature, or with a re-signed one, is rejected -- an unauthenticated downgrade must not be reachable through a peer. (4) NO MUTATION: the relay forwards the signed bytes verbatim. Any normalisation on the path (re-encoding JSON, reordering keys, trimming whitespace, re-framing the body) breaks verification at the far end -- which is a strong argument for SIGN-1 choosing a length-prefixed binary canonical form, or for the relay carrying the exact signed byte string as an opaque blob. Say which. (5) Complements RELAY-3 (traversed-bus-path loop prevention) and IDEM-15 (relay duplicate suppression -- exactly-once APPLICATION on the relay path; this gloss pointed at IDEM-7 until the 2026-08-02 duplicate-epic merge superseded IDEM-1..9 and folded IDEM-7's origin-identity dedupe and non-forgeability content into IDEM-15): the bus path is metadata OUTSIDE the signature and grows on every hop, so it can never be inside the signed bytes -- state that explicitly, since it means the path is unauthenticated and a lying peer can rewrite it (loop prevention is availability, not security). TESTS: signed on A, verifies for a recipient on B; strip the signature in transit -> rejected at B's ingest; mutate one byte of a signed field in transit -> the recipient's verification fails and the body is never delivered; the far bus's local sequence differs from the origin's without breaking verification.
+  
+  === AUDIT 2026-08-08 (spec-keeper): PARTIALLY SHIPPED -- the split, explicitly ===
+  MET (in main): the signed-envelope preservation code and its tests landed at commit 7b383cf
+  ("SIGN-7: relay preserves the signed envelope, by RE-DERIVATION not a blob"), verified an ancestor
+  of HEAD efde70c. internal/relay/signed_test.go carries nine TestSign7* tests, including
+  SignedOnAVerifiesForARecipientOnB, StrippedSignatureIsRejectedAtIngest,
+  MutatedFieldNeverReachesDelivery, LocalDeliverySequenceIsOutsideTheSignedBytes and
+  ForwardIsVerbatimAcrossTwoHops. The old status_note "CODE-COMPLETE, awaiting the orchestrator's
+  commit" is STALE: it IS committed.
+  NOT MET: the proof_cmd's second clause -- "a message signed on bus A verifies unmodified for a
+  recipient on bus B using the DEPLOY-3 two-bus Compose profile". At HEAD nothing outside
+  internal/relay imports internal/relay (the only cross-package mentions are comments at
+  cmd/agent-bus/suffixfloors.go:84 and internal/httpapi/messages.go:97), so the surface is registered
+  on no mux and no running bus can exhibit this. Gated behind INVITE-PEERGUARD (f5d91dbe, todo) and
+  MTLS-RELAYGUARD (8192c3c7, todo).
+  PROOF_CMD IS VACUOUS ON ITS FIRST CLAUSE TOO: TestRelayPreservesSignature does not exist anywhere at
+  HEAD. Retarget to `go test -race -run TestSign7 ./internal/relay` before anyone attempts to close
+  this, and keep the live cross-bus clause as the thing that holds it open.
   _Proof: go test -race -run TestRelayPreservesSignature ./internal/relay ; a message signed on bus A verifies unmodified for a recipient on bus B using the DEPLOY-3 two-bus Compose profile_
 - [ ] SIGN-6 · SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of missing/malformed/unverifiable signatures — crypto, P1
   GATED on SIGN-1 (canonical bytes) and SIGN-2 (signing on send). SIGN-1..5 specify how to sign and how to verify; NOTHING yet specifies what the bus does with a message that is not signed, or what a recipient does with one that fails to verify. That gap is not cosmetic: if either side treats "no signature" as "unsigned but fine", an attacker strips the signature and the entire epic is theatre. THIS TASK CLOSES IT. (1) THE SIGNATURE FIELD IS REQUIRED, NOT OPTIONAL. There is no unsigned message type, no allow_unsigned flag, no --insecure escape hatch, no legacy path; if one is ever argued for it needs its own dated DECISIONS.md entry. (2) INGEST POLICY on POST /v1/send and /v1/broadcast (MSG-2/MSG-3): the bus does NOT verify authenticity -- it must not be trusted to police messages on behalf of senders it does not control (SIGN-2), and the trust decisions live with the recipient (CRYPTO-4 TOFU pins) -- but it DOES enforce, and reject 4xx on failure: signature present; signature exactly 64 bytes (Ed25519); the claimed sender equals the AUTHENTICATED caller (invariants 1 and 2 -- a client-asserted identity is input to validate, never an identity to trust, so no caller may inject a message attributed to another agent no matter how well-formed the signature looks). (3) A REJECTED MESSAGE MUST LEAVE NO TRACE: no WAL record, no audit-log entry beyond a rejection event, no delivery, no ack -- the mirror image of invariant 4. DECIDE AND DOCUMENT whether a rejected send consumes a sequence number: if it does, recipients see gaps and SIGN-4's cursor must tolerate them; if it does not, sequence minting must happen after validation. Pick one, say why, make SIGN-4 consistent. (4) RECEIVE PATH: GET /v1/wait and GET /v1/messages return the signature with every message so the recipient can verify (CRYPTO-10). Verification failure is FAIL-CLOSED -- the body is NEVER handed to the calling agent -- and LOUD: log message id, sender, and which check failed; never swallow it. (5) THE POISON-MESSAGE WEDGE, the subtle one: if a message that fails verification also blocks the recipient's cursor from advancing, one bad message wedges that agent FOREVER and a malicious bus gets a trivial denial of service. Recommended policy to specify and test: the cursor advances past the unverifiable message (it was durably delivered and cannot be un-sent), the body is discarded rather than delivered, and the event is recorded so the failure is visible. Whatever is chosen, prove the poller cannot be wedged. (6) Interacts with invariant 10 (IDEM epic): a rejection must not turn into a client retry loop that produces duplicates -- a rejection is terminal for that idempotency key, not a transient error. TESTS: unsigned send rejected with no durable record; 64-byte-length check (63 and 65 bytes both rejected); sender-mismatch rejected; relay ingest is subject to the SAME check (see SIGN-7 -- a relay path that skips it is the obvious backdoor); a recipient handed one unverifiable message still makes progress on the next good one.
@@ -2765,3 +3045,107 @@
   GATED on SIGN-1/SIGN-2. Replaces the encryption-specific scope of superseded CRYPTO-8 (broadcast fan-out under authenticated encryption / Sender Keys) and superseded RATCHET-4 (broadcast fan-out under pairwise ratchets) -- neither ratchets nor per-recipient encryption apply anymore, but the underlying risk they both flagged is REAL and still applies to a signature-only design: MSG-2 broadcasts to N agents as N separate deliveries, and without an extra check a malicious SENDER could put DIFFERENT content in each recipient's copy under the same broadcast id, and no individual recipient could tell (each copy's own per-message signature verifies fine in isolation). Fix: the sender additionally signs (invariant 9 -- crypto/ed25519.Sign, no custom construction) a digest over (broadcast_id, hash-of-body, the SORTED set of recipient fully-qualified ids), included in every recipient's envelope alongside the per-message signature from SIGN-2. A recipient who wants the 'everyone got the same broadcast' guarantee can compare this digest against other recipients' copies (e.g. via bus-trace tooling or by agents comparing out of band); document that comparison, don't just produce the digest and leave it unused. Use a standard, audited hash for hash-of-body (crypto/sha256, stdlib) -- not a bespoke construction. Tests: every recipient's digest for one broadcast is identical; a tampered per-recipient body still fails SIGN-2's per-message signature; a forged/mismatched digest is rejected. ADDED 2026-08-02 (invariant 7, epic-completion pass): the broadcast wrapper ships IN THIS TASK -- scripts/bus-broadcast.sh (AGENTIF-4) must produce both signatures via the `agent-bus sign` subcommand SIGN-2 adds, and AGENT_PROTOCOL.md must document the recipient-set digest and how two recipients compare it. A digest that no wrapper emits and no agent can check is not a defence. Verify through scripts/bus-broadcast.sh against a running throwaway bus, not hand-written curl.
   _Proof: go test -race -run TestBroadcastDigestSignature ./internal/..._
 
+### EPIC TOOLING — The repo's own build & verification tooling (scripts/, .gitignore, dev env)
+
+- [ ] None · proof-check.sh cannot tell "executed" from "asserted" -- adopt a zero-probe guard convention — tooling, P1
+  scripts/proof-check.sh classifies a proof PASS / FAIL / VACUOUS / UNVERIFIABLE, and it correctly catches the classic vacuity of `go test -run TestThatDoesNotExist ./pkg` (prints `ok ... [no tests to run]` and EXITS 0). But it only verifies tests EXECUTED -- not that they ASSERTED anything. Observed in this project (AGENT_LOG.md, 2026-08-02 AUTH-2 entry): TestEveryRouteRequiresAuth's headline loop passed with ZERO children -- every registered route was on the allow-list, so `continue` fired every iteration and the body never ran. The existing `len(routes)==0` guard did not catch it because the slice was non-empty; it was the FILTERED set that was empty. The test ran, exited 0, and proved nothing.
+  
+  Proposed fix is a CONVENTION, not full mutation testing (out of proportion here): a test that loops over cases must count the probes it actually asserted (a `probed` counter) and `t.Fatalf` when that count is zero -- with the guard placed AFTER any filtering, since filtering is exactly what silently empties the set. Where zero is a legitimate expected outcome on the current build (as with TestEveryRouteRequiresAuth today, where every route IS on the allow-list), the convention must allow a documented exception (t.Logf with a named companion test that keeps the real assertion alive, per the existing pattern in internal/httpapi/authmw_internal_test.go's TestEveryRouteRequiresAuthOnASyntheticRoute) -- but that exception must be an explicit, reviewed choice, not silent.
+  
+  Scope:
+  (a) Document the convention in CLAUDE.md's "Verify" section under a heading/phrase containing "zero-probe convention", including the AFTER-filtering placement rule and the documented-exception carve-out.
+  (b) Survey the repo for enumeration-shaped tests (loops with a filter/continue) and apply the convention -- audit internal/httpapi/authmw_test.go and internal/httpapi/authmw_internal_test.go (both already have partial `probed` counters -- confirm/align them with the finished convention) plus any other loop-shaped test found elsewhere in the tree.
+  (c) Decide, and record in DECISIONS.md under a section containing the phrase "zero-probe convention", whether proof-check.sh itself can detect the zero-probe case mechanically (e.g. via -v output inspection for `probed`/counter patterns) or whether the hand-written convention is the whole answer for now. Either way, write down the reasoning.
+  
+  Cross-reference: CLAUDE.md's "Verify" section already warns that grep-based doc proofs are the MORE dangerous vacuous family, because a loose pattern can match an unrelated line -- not hypothetical: task c27f9439's proof passed over a still-broken CONTRACTS.md:51 by matching an unrelated line in README.md. A doc proof must pin the SPECIFIC line/phrase it claims to prove and must be CONFIRMED RED before the fix -- a proof never observed failing is not evidence it CAN fail.
+  
+  proof_cmd was confirmed RED on 2026-08-02 (before this task's work) via:
+    bash scripts/proof-check.sh "grep -A2 'zero-probe convention' CLAUDE.md | grep -q 'AFTER any filtering' && grep -q 'zero-probe convention' DECISIONS.md"
+  Verdict: FAIL (class=file-assertion, exit=1) -- neither CLAUDE.md nor DECISIONS.md yet contains the phrase, confirming the proof is not vacuous-by-accident (it can and does fail today).
+  
+  Coordination note: CLAUDE.md and DECISIONS.md are shared files -- confirm no other agent is mid-edit on them before touching (per CLAUDE.md's parallel-agent-coordination rule: only one agent at a time, prefer adding a new dated section over editing existing lines). At time of filing (2026-08-02) a parallel loop had an agent editing CLAUDE.md/CONTRACTS.md/SPEC.md; do not clobber that work -- re-read the file immediately before editing.
+  _Proof: bash scripts/proof-check.sh "grep -A2 'zero-probe convention' CLAUDE.md | grep -q 'AFTER any filtering' && grep -q 'zero-probe convention' DECISIONS.md"_
+- [ ] None · ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known, wrapper script not yet written) — process, P3
+  Found 2026-08-02 while proving DEPLOY-2-FU-CONTAINERNAME. EVERY docker invocation from an agent shell fails, not just compose:
+  
+    $ docker ps
+    cannot create user data directory: /home/mike/snap/docker/3505: Not a directory
+  
+  ROOT CAUSE (verified independently by triage, not just claimed by the sub-agent): /home/mike is a SYMLINK to /mnt/sdb4/mike/mike (ls -ld /home/mike -> lrwxrwxrwx root root 19 Jul 25 20:22). The docker snap's confinement does not resolve through that symlink, so it cannot create its per-user data dir. Reproduced with the sandbox disabled and with HOME overridden -- it is a snap-confinement/environment defect, entirely unrelated to agent-bus.
+  
+  CONSEQUENCE: any task whose proof_cmd shells out to docker or docker compose can only ever return UNVERIFIABLE from an agent. That includes DEPLOY-2's patched project-isolated proof (docker compose -p agentbus-proof up -d --build), DEPLOY-2-FU-CONTAINERNAME's own proof, and DEPLOY-3 -- which is the ONLY planned path to end-to-end RELAY verification. So this environment defect, not any code defect, is what currently blocks proving the container story.
+  
+  NEEDS THE USER (environment change, outside an agent's remit): e.g. install docker from the apt/official repo instead of snap, or give the docker snap a real non-symlinked HOME, or run compose proofs manually and paste the transcript. Agents must NOT attempt to reconfigure snap or docker themselves.
+  
+  Until this is fixed, treat every docker-based proof_cmd as UNVERIFIABLE and say so rather than recording a pass.
+- [ ] None · PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes when a proof_cmd nests another proof-check.sh invocation of a go-test command — tooling, P2
+  Discovered 2026-08-02 during bookkeeping verification of the Proof-command guard task (84b76d5e). Composing `bash scripts/proof-check.sh --quiet "<a command that itself calls bash scripts/proof-check.sh --quiet 'go test ...'">` causes runaway recursive shim processes: the outer invocation's PATH-prepended go-shim directory persists into the nested bash -c subshell, so the inner proof-check.sh installs its OWN shim ahead of the outer one, the inner go test call resolves to a shim that itself re-invokes go test, and this recurses/forks until killed. Observed live: dozens of `/tmp/proof-check.*/bin/go test ...` and `tee -a .../gotest.log` processes accumulating; had to pkill -9 -f proof-check to recover. No repo file was touched, no lasting damage, but on a shared box this is a resource-exhaustion foot-gun for any agent that tries to write a self-checking or meta proof_cmd. Suggested direction (not investigated in depth): proof-check.sh should strip its own shim dir(s) from PATH before invoking a nested shell, or refuse/detect recursive invocation via a marker env var (e.g. if PROOF_CHECK_ACTIVE is already set, run the proof verbatim without installing a second shim). Reproduce: bash scripts/proof-check.sh --quiet 'bash scripts/proof-check.sh --quiet "go test -run TestNoSuchTest ./internal/wal"' (kill it within a few seconds, do not let it run to completion).
+  _Proof: timeout 60 bash scripts/proof-check.sh 'bash scripts/proof-check.sh "true"'; test $? -ne 124_
+- [ ] DISCOVERY-DOC-FU-GITIGNORE · DISCOVERY-DOC-FU-GITIGNORE: stale untracked busctl binary at repo root is not gitignored — repo-hygiene, P2
+  Found independently by BOTH the reviewer and security gates during DISCOVERY-DOC. A 7.6 MB ELF executable named busctl sits untracked at the repo root, left behind by the cmd/busctl -> cmd/agent-busctl rename. .gitignore lists /agent-bus and /agent-busctl but NOT /busctl, so git check-ignore busctl reports it is NOT ignored and any git add -A would commit a binary into the repo. Given this project's documented history of index-sweeping commits mixing several agents' work, this is a live hazard. Fix: delete the artefact and add /busctl to .gitignore (or drop the entry deliberately if the old name is considered gone for good). Outside DISCOVERY-DOC's ownership boundary, so flagged not fixed.
+- [ ] None · Conjunction-masking vacuous-proof family: filtered-clause proof_cmds hidden by an unfiltered && clause report PASS on a zero-match filter — tooling, P1
+  THIRD vacuous-proof family, distinct from (1) a proof naming a test that does not exist, and (2) a negative-only grep satisfiable by deletion. This one is the most deceptive: proof_cmd of the shape go test -run '<filter>' ./pkg && go test ./pkg reports PASS with a LARGE tests_run even when the -run filter matches ZERO tests, because the second, UNFILTERED clause runs the whole package and its exit code carries the overall verdict. Unlike the first two families this fails LOUD-LOOKING: hundreds of genuinely passing tests mask a filter that matched nothing.
+  
+  AUDIT (2026-08-02, main/orchestrator): scanned the full backlog for proof_cmd containing both -run and && where the SECOND clause is an unfiltered go test on the same/related package (i.e. genuinely of this shape, as opposed to the many proof_cmds that chain two DIFFERENT -run-filtered clauses, or a -run clause with a grep/CLI check -- those are fine). Exactly THREE tasks have this shape, all P0:
+    - 8c9b6489-abb1-444e-9eeb-3ff87646f632 (ID-2-WIRING-SEAL) -- status done. proof_cmd: go test -race -run TestSequenceRefusesToIssueFromAnUnsealedFloor ./internal/ids && go test -race ./internal/ids
+    - cbc9ab0c-3b34-48d0-acd8-5eabd4dc4a02 (DUR-12) -- status done. proof_cmd: go test -race -run 'TestWALFrameMACRejectsAlteredPayload|...' ./internal/wal && go test -race ./internal/wal
+    - c31f6999-da4e-400d-ab55-178b82e2a42e (ID-2-WIRING-OBSERVER) -- status todo. proof_cmd: go test -race -run TestWALReplayObservesEveryPrepare ./internal/wal && go test -race ./internal/wal
+  
+  The two DONE ones are NOT false passes: each was verified separately by the completing agent running and reporting the FILTERED clause alone (recorded tests_run=15 and tests_run=19 respectively in their completion test_summary/notes), so no already-completed work is in doubt. The risk is entirely FORWARD-LOOKING.
+  
+  THE LIVE EXPOSURE is c31f6999 (ID-2-WIRING-OBSERVER), still todo. Ran its proof_cmd verbatim through proof-check.sh on 2026-08-02: the filtered clause (TestWALReplayObservesEveryPrepare, a test that does not exist yet) reports 'no tests to run', but the unfiltered second clause runs the whole internal/wal package and the tool reports verdict=PASS tests_run=245 top_level=74 -- i.e. today, BEFORE any fix, this task could be closed on a proof that never ran the test it claims to add. (There IS a warning line about an empty package in proof-check.sh output, but the overall verdict is still PASS, which is the masking defect.)
+  
+  SCOPE for whoever takes this:
+    (a) Fix c31f6999's proof_cmd so the filtered clause is verified ALONE (e.g. the DUR-3-style pattern: test $(go test -run X -v ./pkg 2>&1 | grep -c RUN) -gt 0 && go test -run X ./pkg -- both clauses filtered, so a zero-match filter fails the count check before the second clause can mask it).
+    (b) Add this family to CLAUDE.md's 'Verify' section, alongside the existing two vacuous-proof warnings (test-that-does-not-exist; negative-only grep). NOTE: CLAUDE.md is a contended shared file -- coordinate the edit, prefer adding a new bullet rather than rewriting the section.
+    (c) RECOMMENDED FIX (2026-08-02, main/orchestrator, reproduced directly -- see kind=report note for the full repro transcript): proof-check.sh ALREADY COMPUTES the right signal. Running c31f6999's live proof_cmd through it shows the filtered clause alone prints 'ok ... [no tests to run]', and proof-check.sh's own output includes both a human-readable warning ("READ THIS LINE before completing: if the test THIS task claims to add is in one of those packages, the proof did not exercise it") and a machine field `empty_pkgs=1` -- yet the final line still reads `verdict=PASS`. The defect is NOT detection (empty_pkgs is computed correctly); it is that this signal does not affect the verdict. CLAUDE.md tells every agent to quote the verdict specifically, so the one field the protocol trusts is exactly the field that lies, while the accurate signal sits one line away in a field nobody is told to read.
+        THE FIX: make `empty_pkgs > 0` DOWNGRADE the verdict (to VACUOUS, or a new PARTIAL/UNVERIFIABLE value) instead of merely printing a warning -- a one-line conditional in a script that already computes the input, not a redesign. This automatically also closes vacuous-proof family (1) (a -run naming a nonexistent test), since that too yields empty_pkgs>0 -- one conditional covers two of the three families. Family (3) here (negative-only greps satisfiable by deletion) is a separate proof-authoring-convention problem and is NOT fixed by this.
+        Refusing a proof_cmd containing && outright is now the FALLBACK option, not the leading one: conjunctions are a reasonable way to express "the named test passes AND the package stays green," and banning them outright would push authors toward worse proofs instead of fixing the real defect (a verdict that contradicts evidence the tool already gathered). Only consider the narrower "refuse a -run-filtered clause followed by an unfiltered same-package go test without an explicit non-empty-match check" rule if the empty_pkgs>0 downgrade proves insufficient in practice.
+  
+  PROOF_CMD for use of this scoping is confirmed RED (verdict=FAIL) via: bash scripts/proof-check.sh "grep -qi 'conjunction' CLAUDE.md && grep -q 'refuse' scripts/proof-check.sh" -> verdict=FAIL class=wrapper,file-assertion exit=1 (neither CLAUDE.md nor proof-check.sh yet mention this family -- confirmed BEFORE the fix, as required).
+  
+  
+  ---
+  FOURTH VACUOUS-PROOF FAMILY (2026-08-02, main/orchestrator): a PRE-SATISFIED CLAUSE. This task's OWN original proof_cmd -- `grep -qi 'conjunction' CLAUDE.md && grep -q 'refuse' scripts/proof-check.sh` -- was defective in exactly this new way: `grep -c 'refuse' scripts/proof-check.sh` returns 2 TODAY, before any fix, so that clause contributed zero verification (proof-check.sh already says 'refuse' twice, in unrelated prose about the decision NOT to refuse outright). The whole conjunction was held RED only by the other clause -- and it was pinned to the now-demoted 'refuse &&' fallback wording rather than the current leading fix (empty_pkgs>0 downgrade), so a correct implementation may never even add the word 'refuse'. A clause that is already true before the work starts makes a proof LOOK more rigorous (two checks!) while one of the checks verifies nothing. This is distinct from family (1) (a -run naming a nonexistent test), family (2) (a negative-only grep satisfiable by deletion), and family (3) (conjunction masking, this task's main subject): always verify EACH clause of a compound proof independently -- confirm it is actually RED on today's tree -- before combining them, and watch for clauses that can mask each other.
+  
+  REPLACEMENT proof_cmd (2026-08-02, main/orchestrator), verified clause-by-clause before combining:
+    new proof_cmd: ! bash scripts/proof-check.sh 'go test -run TestDefinitelyDoesNotExistAnywhere ./internal/wal && go test ./internal/wal' | grep -q 'verdict=PASS' && grep -q 'empty_pkgs' CLAUDE.md
+    - clause 1 (behavioural, not lexical): runs family (3)'s exact defect shape (`go test -run <nonexistent> ./internal/wal && go test ./internal/wal`) through scripts/proof-check.sh and asserts its verdict is NOT PASS. Verified RED today in isolation: the inner command currently reports `verdict=PASS class=test exit=0 tests_run=245 top_level=74 skipped=2 failed=0 empty_pkgs=1` (the -run filter matches zero tests, empty_pkgs=1, yet the unfiltered second clause still carries the verdict to PASS), so the negated grep for 'verdict=PASS' currently fails (exit 1) -- correctly RED, because the tool has not yet been fixed to downgrade on empty_pkgs>0.
+    - clause 2 (documentation): pinned to the specific string 'empty_pkgs' -- the field name the recommended fix must act on -- rather than the loose word 'conjunction' used before. Verified absent from CLAUDE.md today: `grep -c 'empty_pkgs' CLAUDE.md` returns 0.
+    - both clauses verified independently RED before combining (per the trap this task itself documents: clauses that can mask each other). Combined command verified RED directly in bash (`bash -c "$CMD"`, exit 1) and, separately, run itself through `scripts/proof-check.sh "$CMD"`, which reports: `proof-check: verdict=FAIL class=wrapper,file-assertion exit=1 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0` -- confirmed RED, reproduced twice for stability.
+  _Proof: ! bash scripts/proof-check.sh 'go test -run TestDefinitelyDoesNotExistAnywhere ./internal/wal && go test ./internal/wal' | grep -q 'verdict=PASS' && grep -q 'empty_pkgs' CLAUDE.md_
+- [ ] None · proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/all-children-SKIP certifies PASS instead of VACUOUS — tooling, P1
+  proof-check.sh is the tool CLAUDE.md mandates specifically to stop a proof that runs nothing from being certified as passing. It has a blind spot of exactly that shape.
+  
+  In the plain-text (non -json) code path (scripts/proof-check.sh, around the PASSED/FAILED/SKIPPED counters), the counters are computed with column-0-anchored patterns:
+    PASSED=$(grep -cE '^--- PASS:' "$GOTEST_LOG")
+    FAILED=$(grep -cE '^--- FAIL:' "$GOTEST_LOG")
+    SKIPPED=$(grep -cE '^--- SKIP:' "$GOTEST_LOG")
+  Go indents subtest result lines with leading whitespace (e.g. '    --- SKIP: Test/Subtest'), so these patterns only ever match TOP-LEVEL result lines. A test whose parent PASSes while every one of its table-driven/t.Run children SKIPs is therefore counted as PASSED=1, SKIPPED=0, and sails through the existing 'PASSED==0 && SKIPPED>0 => VACUOUS' guard untouched, because that guard also only sees the parent.
+  
+  Note there IS a second, JSON code path (go test -json Action:pass/skip with a Test field) that counts subtests correctly regardless of nesting, because JSON events aren't indentation-sensitive. The bug is specific to the plain-text (-v, not -json) branch, which is what every proof_cmd in this repo actually uses.
+  
+  MEASURED LIVE (2026-08-08), RED before any fix:
+    $ bash scripts/proof-check.sh "go test -run TestEnrolmentEpoch ./internal/hub"
+    proof-check: verdict=PASS class=test exit=0 tests_run=4 top_level=1 skipped=0 failed=0
+  while the verbose output underneath shows:
+    --- PASS: TestEnrolmentEpoch (0.18s)
+        --- SKIP: TestEnrolmentEpoch/HistoryRefusesTrafficThatPredatesTheReader
+        --- SKIP: TestEnrolmentEpoch/AParkedPollIsNotWokenByTrafficThatPredatesTheReader
+        --- SKIP: TestEnrolmentEpoch/AReusedAgentIDAfterARestartInheritsNoTraffic
+  TestEnrolmentEpoch guards the P0 enrolment-epoch security fix from the 2026-08-02 audit and currently asserts nothing; a task closed on that exact proof_cmd would be certified PASS.
+  
+  Distinct from the other tracked vacuous-proof families: (1) a -run pattern matching zero tests (task 84b76d5e, fixed), (2) negative-only greps satisfiable by deletion, (3) conjunction-masking where an unfiltered && clause carries the verdict (task a9a433dd, open), (4) a pre-satisfied clause in a compound proof. This is a FIFTH family: correctly-shaped single-clause proofs where the counting itself under-reports skips because of indentation, not shell composition.
+  
+  SCOPE (definition of done -- the TOOL's report, not making TestEnrolmentEpoch itself pass, which is SIGN-3/gated work):
+    (a) Count subtest PASS/FAIL/SKIP lines regardless of indentation in the plain-text path -- e.g. match on the trailing '--- (PASS|FAIL|SKIP):' token rather than anchoring '^' to a literal '-', or switch the shim to always request -json output (which does not have this defect) and drop the plain-text counting path entirely if that is simpler and does not regress the human-readable proof output CLAUDE.md relies on.
+    (b) Specifically classify the parent-PASS/all-children-SKIP shape as VACUOUS: a test where every child subtest skipped but the parent itself reports PASS (because t.Run failures/skips don't fail the parent unless the parent itself calls Fail/Skip) must not read as an unqualified pass.
+    (c) Add a regression case to whatever test suite covers proof-check.sh itself (or a scripted fixture under scripts/ if none exists) asserting this exact TestEnrolmentEpoch-shaped log is classified VACUOUS.
+    (d) Note the finding in CLAUDE.md's 'Verify' section alongside the other vacuous-proof families, and in DECISIONS.md if the fix changes counting semantics materially.
+  
+  RELATED / DO NOT DUPLICATE: SIGN-3 (f2daa6bc-53ee-4788-935c-ab73693c5e75) is the reason TestEnrolmentEpoch and a large cascade of tests are currently skipped -- TestBroadcastSend, TestMessageHistoryCurser, TestWaiterWakeup, TestPollConcurrency, TestLongPollWait, TestAppliedKeyStoreSurvivesRestart, TestMessagingCrashRecovery and more (42 SKIP results were observed in a full verbose run), all gated behind SIGN-3 landing. This task is NOT about closing SIGN-3 or making those tests pass -- it is about proof-check.sh correctly reporting the vacuity while they remain skipped.
+  
+  proof_cmd confirmed RED on 2026-08-08 (before any fix):
+    bash scripts/proof-check.sh "go test -run TestEnrolmentEpoch ./internal/hub" | grep -q 'verdict=VACUOUS'
+    -> exit 1 (grep found no match; live verdict was 'verdict=PASS ... skipped=0', confirming the tool does NOT today classify this as vacuous).
+  _Proof: bash scripts/proof-check.sh "go test -run TestEnrolmentEpoch ./internal/hub" | grep -q 'verdict=VACUOUS'_

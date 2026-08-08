@@ -51,7 +51,7 @@ Set a base var for brevity: `B=/api/v1`.
   `GET $B/projects/agent-bus/tasks/<id>` (one task). Claim stamps the `owner` field.
 - Use `If-Match: "v<version>"` on edits when you read-then-write, so a concurrent change yields 412
   instead of a lost update; on 412, re-read and retry.
-- **Regenerate the SPEC.md mirror after mutations** so humans and mirror-readers see current state: `bash scripts/spec-cloud.sh -s $B/projects/agent-bus/export > SPEC.md`. This is the only SPEC.md write
+- **Regenerate the SPEC.md mirror after mutations** so humans and mirror-readers see current state: `bash scripts/gen-spec-mirror.sh` (open tasks only; `--all` includes closed). Never regenerate with a bare `spec-cloud.sh … export > SPEC.md` — that restores the 39% of closed tasks the mirror deliberately omits, and on a failed fetch it silently overwrites SPEC.md with an error page. This is the only SPEC.md write
   you make in normal (server-up) operation. Optionally dry-run first:
   `bash scripts/spec-cloud.sh -s -X POST $B/projects/agent-bus/export/diff --data-binary @SPEC.md -H 'Content-Type: text/markdown'`.
 - Never edit source code. Never run application tests (that's test-engineer).
