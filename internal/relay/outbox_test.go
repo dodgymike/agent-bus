@@ -151,6 +151,32 @@ type obNullDurable struct {
 	err     error
 }
 
+// obBlockingDurable holds writes after announcing that they reached the
+// durable boundary. Tests use it to inspect capacity reservations while the
+// writes are still absent from the in-memory table.
+type obBlockingDurable struct {
+	entered chan struct{}
+	release chan struct{}
+	count   atomic.Uint64
+	once    sync.Once
+}
+
+func (d *obBlockingDurable) unblock() { d.once.Do(func() { close(d.release) }) }
+
+func newOBBlockingDurable(writes int) *obBlockingDurable {
+	return &obBlockingDurable{
+		entered: make(chan struct{}, writes),
+		release: make(chan struct{}),
+	}
+}
+
+func (d *obBlockingDurable) Write(e wal.Entry) (wal.Committed, error) {
+	d.entered <- struct{}{}
+	<-d.release
+	idx := d.count.Add(2)
+	return wal.Committed{PrepareIndex: idx - 1, CommitIndex: idx, Entry: e}, nil
+}
+
 func (d *obNullDurable) Write(e wal.Entry) (wal.Committed, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -309,6 +335,10 @@ func TestOutboxCapacityIsDerivedFromTheQueuesItMakesDurable(t *testing.T) {
 	if MaxOutboxJobIDLen != MaxPeerBusIDLen+1+ids.MaxMessageIDLen {
 		t.Errorf("MaxOutboxJobIDLen = %d, want %d: the bound must be derived from the two halves DeriveJobID concatenates",
 			MaxOutboxJobIDLen, MaxPeerBusIDLen+1+ids.MaxMessageIDLen)
+	}
+	ob, _, _, _ := obNewOutbox(t, nil)
+	if ob.maxPendingPerPeer != DefaultQueueDepth {
+		t.Errorf("default per-peer pending limit = %d, want DefaultQueueDepth %d", ob.maxPendingPerPeer, DefaultQueueDepth)
 	}
 }
 
@@ -956,7 +986,10 @@ func TestOutboxApplySkipsForeignKinds(t *testing.T) {
 // simply a log longer than the current cap — replays straight past it.
 func TestOutboxCapacityIsEnforcedOnTheReplayPath(t *testing.T) {
 	const maxJobs = 2
-	ob, _, _, sink := obNewOutbox(t, func(o *OutboxOptions) { o.MaxJobs = maxJobs })
+	ob, _, _, sink := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = maxJobs // isolate the global replay bound in this test
+	})
 	enq := newOBClock().Now()
 
 	var overflow string
@@ -992,6 +1025,181 @@ func TestOutboxCapacityIsEnforcedOnTheReplayPath(t *testing.T) {
 	}
 }
 
+// TestOutboxCapacityCountsPendingWorkNotTombstones is the regression for the
+// 24-hour throughput ceiling. A settlement releases pending capacity, while its
+// tombstone remains retained for the full anti-resurrection window.
+func TestOutboxCapacityCountsPendingWorkNotTombstones(t *testing.T) {
+	const maxJobs = 4
+	const cycles = 3 * maxJobs
+	ob, d, _, _ := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = maxJobs
+	})
+
+	settled := make([]string, 0, cycles)
+	for i := 0; i < cycles; i++ {
+		r, err := ob.Enqueue(obJob(t, uint64(700+i)))
+		if err != nil {
+			t.Fatalf("cycle %d Enqueue: %v; settled tombstones must not turn a pending-work bound into a throughput-per-retention-window ceiling", i, err)
+		}
+		if _, err := ob.Settle(r.JobID, OutboxDelivered, ""); err != nil {
+			t.Fatalf("cycle %d Settle: %v", i, err)
+		}
+		settled = append(settled, r.JobID)
+	}
+	if got := ob.Len(); got != cycles {
+		t.Fatalf("retained records = %d, want %d tombstones; releasing pending capacity must not retire idempotency evidence early", got, cycles)
+	}
+	for _, jobID := range settled {
+		if r, ok := ob.Lookup(jobID); !ok || !r.State.Terminal() {
+			t.Fatalf("settled job %s lost its tombstone: %+v, %v", jobID, r, ok)
+		}
+	}
+	if got := d.count(); got != 2*cycles {
+		t.Fatalf("durable writes = %d, want %d enqueue+settle records", got, 2*cycles)
+	}
+
+	for i := 0; i < maxJobs; i++ {
+		if _, err := ob.Enqueue(obJob(t, uint64(800+i))); err != nil {
+			t.Fatalf("pending enqueue %d: %v", i, err)
+		}
+	}
+	if _, err := ob.Enqueue(obJob(t, 899)); !errors.Is(err, ErrOutboxCapacity) {
+		t.Fatalf("enqueue beyond %d simultaneously pending jobs gave %v, want ErrOutboxCapacity", maxJobs, err)
+	}
+}
+
+// TestOutboxCapacityIsFairPerPeer proves that one dead or hostile peer cannot
+// consume the global pending-work budget and prevent another peer's first job.
+func TestOutboxCapacityIsFairPerPeer(t *testing.T) {
+	const maxJobs = 4
+	const perPeer = 2
+	const otherPeer = "bus-outbox-peer-two"
+	ob, _, _, _ := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = perPeer
+	})
+
+	for i := 0; i < perPeer; i++ {
+		if _, err := ob.Enqueue(obJob(t, uint64(900+i))); err != nil {
+			t.Fatalf("first peer enqueue %d: %v", i, err)
+		}
+	}
+	if _, err := ob.Enqueue(obJob(t, 999)); !errors.Is(err, ErrOutboxCapacity) {
+		t.Fatalf("first peer exceeded its share with err %v, want ErrOutboxCapacity", err)
+	}
+
+	job := obJob(t, 1000)
+	job.PeerBusID = otherPeer
+	if _, err := ob.Enqueue(job); err != nil {
+		t.Fatalf("another peer's first enqueue was denied after one peer filled its share: %v", err)
+	}
+
+}
+
+// TestOutboxReplayPreservesPreQuotaSinglePeerBacklog is the upgrade-compatibility
+// regression for adding MaxPendingPerPeer. An older build could durably
+// acknowledge MaxJobs records for one peer. Replay must preserve all of them:
+// the new quota constrains live admission, not already-acknowledged history.
+// The global MaxJobs bound still applies and is pinned separately by
+// TestOutboxCapacityIsEnforcedOnTheReplayPath.
+func TestOutboxReplayPreservesPreQuotaSinglePeerBacklog(t *testing.T) {
+	const maxJobs = 4
+	const perPeer = 2
+	replayed, _, clk, sink := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = perPeer
+	})
+
+	for i := uint64(0); i < maxJobs; i++ {
+		msgID := obMessageID(t, 1100+i)
+		r := OutboxRecord{
+			JobID: DeriveJobID(obPeerBus, msgID), PeerBusID: obPeerBus, OriginMessageID: msgID,
+			Size: 11, ContentSHA256: obHash, EnqueuedAt: clk.Now(), State: OutboxPending,
+		}
+		body, err := r.Encode()
+		if err != nil {
+			t.Fatalf("Encode replay record: %v", err)
+		}
+		if err := replayed.Apply(wal.Committed{PrepareIndex: i*2 + 1, CommitIndex: i*2 + 2, Entry: wal.Entry{Kind: OutboxRecordKind, Body: body}}); err != nil {
+			t.Fatalf("Apply replay record: %v", err)
+		}
+	}
+
+	if got := len(replayed.Pending()); got != maxJobs {
+		t.Fatalf("replayed pending jobs = %d, want all %d records acknowledged before the per-peer quota existed", got, maxJobs)
+	}
+	if strings.Contains(sink.String(), "DISCARDING an outbox record") {
+		t.Fatalf("replay discarded acknowledged pre-quota records:\n%s", sink.String())
+	}
+}
+
+// TestOutboxCapacityReservationsAreFairPerPeer pins the live-write
+// window: work for one peer that is blocked in the durable write counts against
+// that peer's share, but does not consume the share reserved for another peer.
+func TestOutboxCapacityReservationsAreFairPerPeer(t *testing.T) {
+	const (
+		maxJobs  = 4
+		perPeer  = 2
+		attempts = 6
+	)
+	d := newOBBlockingDurable(maxJobs)
+	t.Cleanup(d.unblock)
+	ob, err := NewOutbox(OutboxOptions{
+		BusID:             obLocalBus,
+		Durable:           d,
+		Now:               newOBClock().Now,
+		MaxJobs:           maxJobs,
+		MaxPendingPerPeer: perPeer,
+		RetryHorizon:      time.Hour,
+		SettledRetention:  time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+
+	results := make(chan error, attempts+1)
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		job := obJob(t, uint64(1200+i))
+		go func() {
+			<-start
+			_, err := ob.Enqueue(job)
+			results <- err
+		}()
+	}
+	close(start)
+
+	// Exactly perPeer same-peer calls may cross into the durable write. The
+	// others must be refused while those writes remain blocked.
+	for i := 0; i < perPeer; i++ {
+		<-d.entered
+	}
+	for i := 0; i < attempts-perPeer; i++ {
+		if err := <-results; !errors.Is(err, ErrOutboxCapacity) {
+			t.Fatalf("same-peer overflow enqueue returned %v, want ErrOutboxCapacity", err)
+		}
+	}
+
+	other := obJob(t, 1300)
+	other.PeerBusID = "bus-outbox-peer-two"
+	go func() {
+		_, err := ob.Enqueue(other)
+		results <- err
+	}()
+	<-d.entered // reaching Write proves the other peer retained capacity
+
+	d.unblock()
+	for i := 0; i < perPeer+1; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("reserved enqueue returned %v after the durable write was released", err)
+		}
+	}
+	if got := ob.Pending(); len(got) != perPeer+1 {
+		t.Fatalf("pending jobs = %d, want %d admitted reservations", len(got), perPeer+1)
+	}
+}
+
 // TestOutboxConcurrentEnqueuesNeverExceedTheCap proves the capacity RESERVATION,
 // which is the part of the bound that is easy to get subtly wrong.
 //
@@ -1008,7 +1216,10 @@ func TestOutboxCapacityIsEnforcedOnTheReplayPath(t *testing.T) {
 func TestOutboxConcurrentEnqueuesNeverExceedTheCap(t *testing.T) {
 	const maxJobs = 8
 	const attempts = 4 * maxJobs
-	ob, d, _, sink := obNewOutbox(t, func(o *OutboxOptions) { o.MaxJobs = maxJobs })
+	ob, d, _, sink := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = maxJobs // isolate the global reservation in this test
+	})
 
 	jobs := make([]OutboxJob, attempts)
 	for i := range jobs {
@@ -1822,7 +2033,10 @@ func TestOutboxAStaleSiblingCannotOutliveASettlement(t *testing.T) {
 // job is admitted into the freed slot.
 func TestOutboxASettlementIsNeverDiscardedForCapacity(t *testing.T) {
 	const maxJobs = 4
-	ob, _, clk, sink := obNewOutbox(t, func(o *OutboxOptions) { o.MaxJobs = maxJobs })
+	ob, _, clk, sink := obNewOutbox(t, func(o *OutboxOptions) {
+		o.MaxJobs = maxJobs
+		o.MaxPendingPerPeer = maxJobs // fill the global bound with one peer
+	})
 	base := clk.Now()
 
 	apply := func(t *testing.T, r OutboxRecord, idx uint64) {
@@ -1862,7 +2076,9 @@ func TestOutboxASettlementIsNeverDiscardedForCapacity(t *testing.T) {
 	if !ok || r.State != OutboxDelivered {
 		t.Fatalf("the settlement was DISCARDED for capacity (%+v, %v). A tombstone is the record that stops a delivered message being sent again; drop it and a later pending record for the same job resurrects the job", r, ok)
 	}
-	sink.mustContain(t, "the capacity overshoot", "admitting an outbox SETTLEMENT past the capacity limit", jobID)
+	if strings.Contains(sink.String(), "DISCARDING an outbox record") {
+		t.Fatalf("the settlement produced a discard while pending capacity was full; tombstones do not consume pending capacity:\n%s", sink.String())
+	}
 
 	// A PENDING record at capacity is still refused — the exemption is for
 	// tombstones only, or the cap would mean nothing.
@@ -1920,7 +2136,10 @@ func TestOutboxNoSettledJobIsEverPendingAfterReplay(t *testing.T) {
 					seq++
 					name := fmt.Sprintf("spread=%s/clock=%s/cap=%d/fill=%d", spread, at, maxJobs, fillers)
 					t.Run(name, func(t *testing.T) {
-						ob, _, clk, _ := obNewOutbox(t, func(o *OutboxOptions) { o.MaxJobs = maxJobs })
+						ob, _, clk, _ := obNewOutbox(t, func(o *OutboxOptions) {
+							o.MaxJobs = maxJobs
+							o.MaxPendingPerPeer = maxJobs // this sweep varies global pressure, not peer fairness
+						})
 						msgID := obMessageID(t, seq)
 						jobID := DeriveJobID(obPeerBus, msgID)
 

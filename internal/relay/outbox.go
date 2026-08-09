@@ -104,35 +104,13 @@ const outboxJobIDSep = "|"
 // than chosen, so it cannot drift away from what DeriveJobID can produce.
 const MaxOutboxJobIDLen = MaxPeerBusIDLen + len(outboxJobIDSep) + ids.MaxMessageIDLen
 
-// MaxOutboxJobs is the hard cap on retained outbox records.
+// MaxOutboxJobs is the hard cap on pending outbox jobs.
 //
 // The value is MaxPeers (64) x DefaultQueueDepth (256): the in-memory queue
-// capacity the Forwarder already has.
-//
-// # READ THIS BEFORE SIZING ANYTHING AGAINST IT — IT IS A THROUGHPUT CEILING
-//
-// This comment used to say the outbox "remembers exactly as much as the
-// volatile queues could hold and not one job more", i.e. that the number bounds
-// work IN FLIGHT. That is wrong, and both review gates caught it. The table
-// retains a settled record as a TOMBSTONE for OutboxSettledRetention (24h) and
-// the admission check counts every retained record, tombstones included. So the
-// real bound is:
-//
-//	at most MaxOutboxJobs jobs may be ENQUEUED PER RETENTION WINDOW
-//
-// — 16,384 relayed messages per 24 hours, about 0.19/s, across all peers
-// combined. After that Enqueue returns ErrOutboxCapacity with NOTHING in flight,
-// and keeps returning it until the oldest tombstones retire. Measured, not
-// inferred: at maxJobs=8, eight enqueue-then-deliver cycles exhaust it.
-//
-// It is still a correct MEMORY bound — a record is routing metadata, a few
-// hundred bytes with no body, so the table is a handful of megabytes, and the
-// terminal-record exemption below can roughly double that. It is NOT a
-// defensible throughput bound, and RELAY-19 hits this ceiling on its first busy
-// day. Re-deriving it (or splitting the cap so pending jobs and tombstones are
-// bounded separately) belongs to the task that wires the forwarder and knows the
-// target rate; what this task owes is that the number is not described as
-// something it is not.
+// capacity the Forwarder already has. Settled records are tombstones rather
+// than work in flight and do not consume this capacity: refusing or retiring
+// one early can resurrect an already-delivered message. They remain bounded by
+// OutboxSettledRetention instead.
 const MaxOutboxJobs = MaxPeers * DefaultQueueDepth
 
 // OutboxRetryHorizon is how long a PENDING job may sit before it is beyond
@@ -850,16 +828,14 @@ type OutboxOptions struct {
 	// means time.Now.
 	Now func() time.Time
 
-	// MaxJobs is the hard cap on retained records. 0 means MaxOutboxJobs.
-	//
-	// IT MUST NOT BE LOWERED ACROSS RESTARTS, and it bounds THROUGHPUT PER
-	// RETENTION WINDOW rather than work in flight — read MaxOutboxJobs before
-	// choosing a value, because both of those are easy to get wrong from the
-	// name alone. Lowering it means a log written under the old value can replay
-	// more exempt settlement records than the new value allows (settlements are
-	// exempt from the cap so a tombstone is never discarded; see upsertLocked),
-	// so the table can start well above the limit until those records retire.
+	// MaxJobs is the hard cap on pending jobs across all peers. 0 means
+	// MaxOutboxJobs. Settled tombstones do not consume this capacity.
 	MaxJobs int
+	// MaxPendingPerPeer is the hard cap on pending jobs for one destination
+	// peer, including concurrent enqueues still being fsynced. 0 derives an
+	// equal share of MaxJobs across MaxPeers (at least one). The default is
+	// DefaultQueueDepth.
+	MaxPendingPerPeer int
 	// RetryHorizon is the pending-job age horizon. 0 means OutboxRetryHorizon.
 	RetryHorizon time.Duration
 	// SettledRetention is the tombstone window. 0 means OutboxSettledRetention.
@@ -899,16 +875,21 @@ type Outbox struct {
 	// exported entry point sweeps first, and sweeping mutates.
 	mu sync.Mutex
 
-	busID            string
-	durable          OutboxDurableLog
-	log              *logging.Logger
-	now              func() time.Time
-	maxJobs          int
-	retryHorizon     time.Duration
-	settledRetention time.Duration
+	busID             string
+	durable           OutboxDurableLog
+	log               *logging.Logger
+	now               func() time.Time
+	maxJobs           int
+	maxPendingPerPeer int
+	retryHorizon      time.Duration
+	settledRetention  time.Duration
 
 	// jobs is the table, keyed by job id.
 	jobs map[string]OutboxRecord
+	// pendingJobs and pendingByPeer count only work still owed. Tombstones stay
+	// in jobs for idempotency but never consume pending capacity.
+	pendingJobs   int
+	pendingByPeer map[string]int
 
 	// pendingWrites counts enqueues that have passed the capacity check but
 	// whose record is not yet in the table (they are mid-fsync). It is counted
@@ -917,6 +898,9 @@ type Outbox struct {
 	// a slot — a record that is already durable must never be refused by the
 	// in-memory bound.
 	pendingWrites int
+	// pendingWritesByPeer makes the per-peer quota a reservation too: a slow
+	// fsync cannot let concurrent enqueues for one peer race past its share.
+	pendingWritesByPeer map[string]int
 
 	// inflight holds at most ONE lifecycle transition per job, so two concurrent
 	// settles cannot both build a terminal record from the same pending one.
@@ -929,15 +913,18 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 		return nil, fmt.Errorf("relay: outbox needs this bus's own id, so a job addressed to ourselves can be refused: %w", err)
 	}
 	ob := &Outbox{
-		busID:            o.BusID,
-		durable:          o.Durable,
-		log:              o.Logger,
-		now:              o.Now,
-		maxJobs:          o.MaxJobs,
-		retryHorizon:     o.RetryHorizon,
-		settledRetention: o.SettledRetention,
-		jobs:             make(map[string]OutboxRecord),
-		inflight:         make(map[string]struct{}),
+		busID:               o.BusID,
+		durable:             o.Durable,
+		log:                 o.Logger,
+		now:                 o.Now,
+		maxJobs:             o.MaxJobs,
+		maxPendingPerPeer:   o.MaxPendingPerPeer,
+		retryHorizon:        o.RetryHorizon,
+		settledRetention:    o.SettledRetention,
+		jobs:                make(map[string]OutboxRecord),
+		pendingByPeer:       make(map[string]int),
+		pendingWritesByPeer: make(map[string]int),
+		inflight:            make(map[string]struct{}),
 	}
 	if ob.log == nil {
 		// The same nil-logger convention NewForwarder uses, rather than a nil
@@ -950,6 +937,15 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 	}
 	if ob.maxJobs <= 0 {
 		ob.maxJobs = MaxOutboxJobs
+	}
+	if ob.maxPendingPerPeer <= 0 {
+		ob.maxPendingPerPeer = ob.maxJobs / MaxPeers
+		if ob.maxPendingPerPeer == 0 {
+			ob.maxPendingPerPeer = 1
+		}
+	}
+	if ob.maxPendingPerPeer > ob.maxJobs {
+		return nil, fmt.Errorf("relay: outbox MaxPendingPerPeer (%d) exceeds MaxJobs (%d); one peer's share cannot exceed the global pending-work bound", ob.maxPendingPerPeer, ob.maxJobs)
 	}
 	if ob.retryHorizon <= 0 {
 		ob.retryHorizon = OutboxRetryHorizon
@@ -1091,15 +1087,23 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 		ob.mu.Unlock()
 		return OutboxRecord{}, fmt.Errorf("%w: job %s", ErrOutboxInFlight, canon.JobID)
 	}
-	if ob.len()+ob.pendingWrites >= ob.maxJobs {
-		held, writing := ob.len(), ob.pendingWrites
+	if ob.pendingJobs+ob.pendingWrites >= ob.maxJobs {
+		held, writing := ob.pendingJobs, ob.pendingWrites
 		ob.mu.Unlock()
-		return OutboxRecord{}, fmt.Errorf("%w: %d jobs are retained and %d more are being written, against a limit of %d; this message is NOT queued for %s and will not be relayed. Nothing is evicted to make room, because an evicted job is a message silently never delivered",
+		return OutboxRecord{}, fmt.Errorf("%w: %d jobs are pending and %d more are being written, against a global pending-work limit of %d; this message is NOT queued for %s and will not be relayed. Nothing is evicted to make room, because an evicted job is a message silently never delivered",
 			ErrOutboxCapacity, held, writing, ob.maxJobs, canon.PeerBusID)
+	}
+	peerHeld := ob.pendingByPeer[canon.PeerBusID]
+	peerWriting := ob.pendingWritesByPeer[canon.PeerBusID]
+	if peerHeld+peerWriting >= ob.maxPendingPerPeer {
+		ob.mu.Unlock()
+		return OutboxRecord{}, fmt.Errorf("%w: peer %s has %d jobs pending and %d more being written, against its pending-work limit of %d; this message is NOT queued. Another peer's capacity remains available",
+			ErrOutboxCapacity, canon.PeerBusID, peerHeld, peerWriting, ob.maxPendingPerPeer)
 	}
 	// The slot AND the job id are reserved across the fsync, so neither the
 	// bound nor a concurrent enqueue of the same job can be raced.
 	ob.pendingWrites++
+	ob.pendingWritesByPeer[canon.PeerBusID]++
 	ob.inflight[canon.JobID] = struct{}{}
 	ob.mu.Unlock()
 
@@ -1112,6 +1116,10 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 	defer func() {
 		ob.mu.Lock()
 		ob.pendingWrites--
+		ob.pendingWritesByPeer[canon.PeerBusID]--
+		if ob.pendingWritesByPeer[canon.PeerBusID] == 0 {
+			delete(ob.pendingWritesByPeer, canon.PeerBusID)
+		}
 		delete(ob.inflight, canon.JobID)
 		ob.mu.Unlock()
 	}()
@@ -1177,20 +1185,10 @@ func (ob *Outbox) Settle(jobID string, state OutboxState, reason string) (Outbox
 		return OutboxRecord{}, fmt.Errorf("%w: job %s", ErrOutboxInFlight, jobID)
 	}
 	ob.inflight[jobID] = struct{}{}
-	// A SLOT IS RESERVED HERE TOO, for the same reason Enqueue reserves one.
-	// Settle normally UPDATES an existing entry and needs no slot — but if the
-	// job is swept during the fsync (its horizon passes) the fold takes the
-	// INSERT path, and a concurrent Enqueue that grabbed the freed slot would
-	// make the cap refuse a record that is already on stable storage. That is
-	// harmless for correctness (nothing is left pending, and replay reconstructs
-	// it) but it emits "an outbox record is DURABLE but was refused" at ERROR on
-	// a healthy path, and that line has to stay meaningful.
-	ob.pendingWrites++
 	ob.mu.Unlock()
 
 	defer func() {
 		ob.mu.Lock()
-		ob.pendingWrites--
 		delete(ob.inflight, jobID)
 		ob.mu.Unlock()
 	}()
@@ -1281,13 +1279,34 @@ func (ob *Outbox) Len() int {
 // len is the unswept count. The caller must hold mu.
 func (ob *Outbox) len() int { return len(ob.jobs) }
 
-// put and del are the ONLY mutations of the table, so there is one place to look
-// when asking what can enter or leave it — and one place to hook if the cap ever
-// needs to distinguish pending records from tombstones (see MaxOutboxJobs).
+// put and del are the ONLY mutations of the table, so pending capacity cannot
+// drift from the serving copy when a job settles, is swept, or is replayed.
 // The caller must hold mu.
-func (ob *Outbox) put(id string, r OutboxRecord) { ob.jobs[id] = r }
+func (ob *Outbox) put(id string, r OutboxRecord) {
+	if old, ok := ob.jobs[id]; ok && old.State == OutboxPending {
+		ob.removePending(old.PeerBusID)
+	}
+	ob.jobs[id] = r
+	if r.State == OutboxPending {
+		ob.pendingJobs++
+		ob.pendingByPeer[r.PeerBusID]++
+	}
+}
 
-func (ob *Outbox) del(id string) { delete(ob.jobs, id) }
+func (ob *Outbox) del(id string) {
+	if old, ok := ob.jobs[id]; ok && old.State == OutboxPending {
+		ob.removePending(old.PeerBusID)
+	}
+	delete(ob.jobs, id)
+}
+
+func (ob *Outbox) removePending(peerBusID string) {
+	ob.pendingJobs--
+	ob.pendingByPeer[peerBusID]--
+	if ob.pendingByPeer[peerBusID] == 0 {
+		delete(ob.pendingByPeer, peerBusID)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Replay
@@ -1472,16 +1491,16 @@ func (ob *Outbox) upsertLocked(r OutboxRecord, now time.Time, source string) err
 	// anchor, and a future SettledAt only makes the tombstone live LONGER.
 	//
 	// STATE THE COST HONESTLY, BECAUSE IT IS BIGGER THAN IT FIRST LOOKS. It is
-	// not "one slot until the clock catches up": it is ONE SLOT PER JOB SETTLED
-	// WHILE THE CLOCK WAS FAST, it SURVIVES RESTART (a terminal record has no
-	// skew guard on replay either, deliberately), and nothing bounds how far
-	// ahead SettledAt may sit — a clock a week fast pins those slots for a week
-	// after it is corrected, and at the cap Enqueue starts returning
-	// ErrOutboxCapacity and messages stop being relayed.
+	// one retained TOMBSTONE per job settled while the clock was fast, it
+	// survives restart (a terminal record has no skew guard on replay either,
+	// deliberately), and nothing bounds how far ahead SettledAt may sit — a
+	// clock a week fast retains those records for a week after it is corrected.
+	// Tombstones no longer consume pending capacity, so this is a memory cost,
+	// not a relay-throughput outage.
 	//
-	// It is still the right trade: that is a bounded, self-healing AVAILABILITY
-	// loss on a mis-set clock, against a PERMANENT duplicate delivery. Neither
-	// timestamp is reachable by a peer, so it is not remotely triggerable.
+	// It is still the right trade: that is a self-healing memory increase on a
+	// mis-set clock, against a PERMANENT duplicate delivery. Neither timestamp
+	// is reachable by a peer, so it is not remotely triggerable.
 	// Bounding it properly means clamping the RETIREMENT ANCHOR at admission
 	// rather than discarding the record, which is a behaviour change with its
 	// own memory-versus-disk question and belongs to RELAY-19, not here.
@@ -1540,46 +1559,36 @@ func (ob *Outbox) upsertLocked(r OutboxRecord, now time.Time, source string) err
 	}
 
 	if !ok {
-		// THE CAP IS ENFORCED ON EVERY PATH, INCLUDING REPLAY: it is a MEMORY
-		// bound, and a bound one path could exceed is not a bound. A live
-		// Enqueue cannot be refused here because it reserved its slot in
-		// pendingWrites before writing.
+		// GLOBAL PENDING CAPACITY IS ENFORCED ON EVERY PATH, INCLUDING REPLAY: a
+		// memory bound one path could exceed is not a bound. A live Enqueue cannot
+		// be refused here because it reserved its global slot before writing.
 		//
-		// A TERMINAL RECORD IS EXEMPT, AND THAT IS THE SECOND HALF OF THE SAME
-		// P0. Refusing a tombstone for want of a slot is refusing the one record
+		// The PER-PEER quota is deliberately NOT enforced here. It is a live
+		// admission/fairness policy, not a recovery limit: builds predating that
+		// policy could acknowledge up to MaxJobs pending records for one peer.
+		// Discarding those durable records after an upgrade would turn a new
+		// fairness setting into acknowledged message loss. Replay therefore admits
+		// that legacy backlog up to the unchanged global memory bound; new live
+		// enqueues for the peer remain refused until it drains below its quota.
+		//
+		// A TERMINAL RECORD DOES NOT CONSUME PENDING CAPACITY. Refusing a
+		// tombstone for want of a slot is refusing the one record
 		// that prevents a duplicate delivery: the settlement is dropped, and a
-		// later pending record for that job — which the cap will happily admit
-		// once a neighbour ages out — resurrects it. Reachable in strict commit
+		// later pending record for that job resurrects it. Reachable in strict commit
 		// order at default settings, because a job enqueued at T and settled at
 		// T+23h58m has its PENDING record expire before its tombstone retires,
-		// putting the tombstone on this insert path with no sibling to protect
-		// it.
+		// putting the tombstone on this insert path with no sibling to protect it.
 		//
-		// What that costs: the table can exceed maxJobs by the number of
-		// settlements that arrive while it is full, and every such record is
-		// swept on schedule. The live path bounds itself, because Enqueue counts
-		// tombstones too, so a running bus cannot record more settlements in one
-		// retention window than the cap allows. REPLAY HAS NO SUCH BOUND: a log
-		// written under a LARGER MaxJobs, or a shorter SettledRetention, can
-		// admit that older configuration's worth of exempt tombstones. MaxJobs
-		// must therefore not be lowered across restarts — see OutboxOptions.
+		// Tombstones are therefore time-bounded, not count-bounded. That is an
+		// honest memory cost under high throughput, but imposing a count bound
+		// would make delivery correctness depend on traffic rate. The outbox
+		// stores routing metadata only, never message bodies, and every tombstone
+		// retires after SettledRetention.
 		//
-		// NOT claimed: that this is out of a peer's reach. An earlier version of
-		// this comment said job ids "come from our own forwarder", which is only
-		// half true — DeriveJobID's second component is the ORIGIN MESSAGE ID,
-		// and on a multi-hop path that value arrives from a peer
-		// (message.go sets it from the relay envelope). The bound here is the
-		// capacity-and-retention accounting above, not provenance.
-		//
-		// The alternative is a duplicate delivery, which invariant 10 ranks worse
-		// than memory. The overshoot is logged so an operator is never surprised.
-		if ob.len() >= ob.maxJobs {
-			if !r.State.Terminal() {
-				return fmt.Errorf("%w: %d jobs are retained, the limit; this record is DISCARDED, which loses the job entirely", ErrOutboxCapacity, ob.maxJobs)
+		if r.State == OutboxPending {
+			if ob.pendingJobs >= ob.maxJobs {
+				return fmt.Errorf("%w: %d jobs are pending, the global pending-work limit; this record is DISCARDED, which loses the job entirely", ErrOutboxCapacity, ob.maxJobs)
 			}
-			ob.log.Warn("admitting an outbox SETTLEMENT past the capacity limit; a tombstone is what stops a delivered message being sent again, so it outranks the memory bound. The table is over its limit until these records are retired",
-				"job_id", r.JobID, "state", r.State.String(), "source", source,
-				"retained", ob.len(), "limit", ob.maxJobs)
 		}
 		ob.put(r.JobID, r)
 		return nil

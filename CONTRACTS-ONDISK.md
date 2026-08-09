@@ -1291,8 +1291,56 @@ Asserted by `go test -race -run TestPeerRetryBackoffHorizonStaysInsideTheOutageB
 
 **Not yet reachable.** `internal/relay` is NOT registered on any mux (`TestHandshakeHandlerIsNotWiredIntoAnyMux`)
 — it is gated behind INVITE-PEERGUARD and MTLS-RELAYGUARD, so none of this is live/observable from a
-running bus yet. The outbound queue this retry logic drains is still IN-MEMORY with no durable
-outbox, so cross-bus delivery remains BEST EFFORT, not reliable, even once wired.
+running bus yet. The forwarder's queue is still in memory, but RELAY-15 added the durable outbox
+described below; composition with the forwarder remains RELAY-19. Until that wiring lands,
+cross-bus delivery remains BEST EFFORT from a running server even though the durable mechanism now
+exists as a library.
+
+## The durable relay outbox record and capacity contract (RELAY-15, corrected by RELAY-15-FU-CAPACITY-FAIRNESS, 2026-08-08)
+
+`internal/relay/outbox.go` stores every relay-delivery lifecycle transition as a complete
+`wal.Entry{Kind: "outbox"}` record. `"outbox"` is the free-form application discriminator inside a
+normal prepare/commit transaction, not a new numbered WAL frame type, so it required neither a
+`record-type` reservation nor an `ondisk-format-version` bump. The JSON record is strict and
+self-contained routing metadata: `job_id`, `peer_bus`, `origin_message_id`, `size`,
+`content_sha256`, `enqueued_at`, and `state`; terminal records also carry `settled_at`, and an
+`abandoned` record carries `reason`. It never carries the message body. `job_id` must equal
+`peer_bus + "|" + origin_message_id`; decode re-derives that value and refuses disagreement.
+
+The lifecycle is monotonic: `pending` may become `delivered` or `abandoned`, and no terminal record
+may become pending again. Settlement writes the whole post-transition record through the same
+prepare→fsync→commit→fsync path as enqueue. A terminal record is a retained TOMBSTONE: it is the
+evidence that prevents an older pending sibling from resurrecting a message that was already
+delivered or deliberately abandoned. Tombstones remain through `OutboxSettledRetention`; they are
+never evicted early merely to admit new work.
+
+**Capacity counts PENDING WORK ONLY.** `MaxJobs` (default `MaxOutboxJobs`, 16,384) is the global
+limit on pending jobs, not on all retained records and not on throughput per retention window.
+Settling a job immediately releases its pending slot while its tombstone stays retained. Therefore
+retained tombstones consume NO pending capacity; their bound is time (`OutboxSettledRetention`), not
+the pending-job count.
+
+Live admission also enforces `MaxPendingPerPeer`. Its default is an equal share of `MaxJobs` across
+`MaxPeers` (at least one; `DefaultQueueDepth` under the defaults), and it may not exceed `MaxJobs`.
+Both limits include reservations for enqueues currently inside the durable write: the global
+`pendingWrites` counter and per-peer `pendingWritesByPeer` counter are incremented before fsync and
+released only after the write returns. A slow fsync therefore cannot let concurrent calls race past
+either bound, and one dead or hostile peer cannot consume the capacity left available to another.
+
+**Replay preserves acknowledged history before applying live fairness.** The global pending bound
+still applies during replay. The per-peer quota deliberately does not: a pre-upgrade build could
+have durably acknowledged up to `MaxJobs` pending jobs for one peer, and discarding that over-share
+after upgrade would convert a new fairness policy into acknowledged message loss. Replay admits all
+of that peer's pending records up to the unchanged global bound; new live enqueues for the peer are
+then refused until its backlog drains below `MaxPendingPerPeer`. Terminal records are replayed as
+tombstones without consuming pending capacity, because refusing a settlement can resurrect an
+already-settled job.
+
+Pending jobs older than `OutboxRetryHorizon` and tombstones older than
+`OutboxSettledRetention` are swept. Every discarded invalid or expired pending record is logged
+loudly and specifically; recovery continues, as invariant 6 requires. This is a durable library
+contract today, not yet the running server's delivery guarantee: RELAY-19 must compose the outbox
+with the forwarder and rebuild the relay envelope from the separately durable message body.
 
 ## Two durable peer-configuration records: ROUTES and TRUST PINS (RELAY-10, added 2026-08-08)
 
