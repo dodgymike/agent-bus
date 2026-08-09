@@ -131,7 +131,7 @@ func replay(path string, c codec, fn func(Committed) error) (Recovered, error) {
 	// file header to be positioned after.
 	empty := Recovered{Path: path, NextIndex: 1}
 
-	f, err := os.Open(path)
+	f, err := openRegularRead(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return empty, nil

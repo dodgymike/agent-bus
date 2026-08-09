@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,10 +43,15 @@ type Log struct {
 	// SEPARATE file in the same data directory, under the same MAC key, holding
 	// metadata and routing info only and never a message body. It is non-nil for
 	// every Log built by Open. See audit.go.
-	audit   *Writer
-	applier Applier
-	logger  *logging.Logger
-	now     func() time.Time
+	audit       *Writer
+	applier     Applier
+	checkpoints *MultiApplier
+	dir         string
+	codec       codec
+	generation  uint64
+	lastCommit  uint64
+	logger      *logging.Logger
+	now         func() time.Time
 
 	// recovered is what the replay at Open found. It is immutable after Open.
 	recovered Recovered
@@ -177,6 +181,9 @@ type LogOptions struct {
 	// applied nowhere -- useful for tests and for a server that only wants the
 	// durable record.
 	Applier Applier
+	// Checkpoints supplies deterministic kind routing and snapshot participants.
+	// When set it is the Applier; specifying both is rejected.
+	Checkpoints *MultiApplier
 	// Logger receives divergence and lifecycle events. It may be nil.
 	Logger *logging.Logger
 	// Now supplies the prepare-record timestamp. It defaults to time.Now.
@@ -253,6 +260,12 @@ func Open(opts LogOptions) (*Log, error) {
 	if opts.Dir == "" {
 		return nil, errors.New("wal: open log: Dir is empty")
 	}
+	if opts.Applier != nil && opts.Checkpoints != nil {
+		return nil, errors.New("wal: specify either Applier or Checkpoints, not both")
+	}
+	if opts.Checkpoints != nil {
+		opts.Applier = opts.Checkpoints
+	}
 	if err := os.MkdirAll(opts.Dir, dirMode); err != nil {
 		return nil, fmt.Errorf("wal: create data directory %s: %w", opts.Dir, err)
 	}
@@ -260,7 +273,11 @@ func Open(opts LogOptions) (*Log, error) {
 	if now == nil {
 		now = time.Now
 	}
-	path := filepath.Join(opts.Dir, WALFileName)
+	selection, err := selectCheckpoint(opts.Dir, opts.Checkpoints, opts.Logger)
+	if err != nil {
+		return nil, err
+	}
+	path := selection.path
 
 	// DOES THIS DATA DIRECTORY ALREADY HAVE A MAC KEY? Probed here, read-only,
 	// before recovery can create one, and used for exactly one judgement further
@@ -340,9 +357,18 @@ func Open(opts LogOptions) (*Log, error) {
 		}
 	}
 
-	c, err := resolveCodec(path, KindWAL, opts.Logger)
-	if err != nil {
-		return nil, err
+	var c codec
+	if selection.generation != 0 {
+		key, keyErr := loadMACKey(macKeyPath(opts.Dir))
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		c = codec{version: FormatVersion, key: key, context: append([]byte(nil), selection.tailContext...)}
+	} else {
+		c, err = resolveCodec(path, KindWAL, opts.Logger)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	repair, err := repairLog(path, KindWAL, c, opts.Logger)
@@ -424,15 +450,25 @@ func Open(opts LogOptions) (*Log, error) {
 			"why", "this data directory had no MAC key when it was opened, so recovery minted a new one and nothing the previous identity wrote can verify under it. The floor's numbers are still used, but ONLY TO RAISE the start index, and its `sealed` bit has been discarded. If this key was not meant to be lost, STOP THE BUS AND RESTORE IT: an unverified floor is no better protection than no floor at all")
 	}
 
-	var apply func(Committed) error
-	if opts.Applier != nil {
-		apply = opts.Applier.Apply
+	lastCommit := selection.highWater
+	apply := func(c Committed) error {
+		if selection.generation != 0 && c.CommitIndex <= selection.highWater {
+			return fmt.Errorf("wal: checkpoint tail commit index %d is not above authenticated high-water %d", c.CommitIndex, selection.highWater)
+		}
+		lastCommit = c.CommitIndex
+		if opts.Applier != nil {
+			return opts.Applier.Apply(c)
+		}
+		return nil
 	}
 	rec, err := replay(path, c, apply)
 	if err != nil {
 		return nil, err // replay already names the path and the offset
 	}
 	rec.Repaired = repair
+	if selection.nextIndex > rec.NextIndex {
+		rec.NextIndex = selection.nextIndex
+	}
 
 	w, err := openWriter(path, KindWAL, c)
 	if err != nil {
@@ -451,6 +487,9 @@ func Open(opts LogOptions) (*Log, error) {
 	// then both append at the same offsets, which destroys the log. Excluding a
 	// second process needs a real lock on the data directory (an flock held for
 	// the Log's lifetime) and is a follow-up, not something this check does.
+	if selection.generation != 0 && w.NextIndex() < rec.NextIndex {
+		w.next = rec.NextIndex
+	}
 	if w.NextIndex() != rec.NextIndex || (rec.EndOffset != 0 && w.Size() != rec.EndOffset) {
 		wErr := w.Close()
 		return nil, fmt.Errorf("wal: open log %s: the file changed between replay and open: replay ended at index %d offset %d, the writer sees index %d offset %d; another process may be writing to this data directory (close: %v)",
@@ -692,7 +731,7 @@ func Open(opts LogOptions) (*Log, error) {
 	}
 	rec.AuditRepaired = auditRepair
 
-	return &Log{w: w, audit: auditW, applier: opts.Applier, logger: opts.Logger, now: now, recovered: rec}, nil
+	return &Log{w: w, audit: auditW, applier: opts.Applier, checkpoints: opts.Checkpoints, dir: opts.Dir, codec: c, generation: selection.generation, lastCommit: lastCommit, logger: opts.Logger, now: now, recovered: rec}, nil
 }
 
 // maxDanglingLogged bounds how many discarded prepares Open names individually.
@@ -787,6 +826,9 @@ func (l *Log) Begin(e Entry) (*Txn, error) {
 	// leaves the WAL byte-for-byte unchanged and does not stall other writers.
 	if e.Kind == "" {
 		return nil, fmt.Errorf("wal: prepare in %s: %w", l.Path(), ErrInvalidKind)
+	}
+	if l.checkpoints != nil && !l.checkpoints.owns(e.Kind) {
+		return nil, fmt.Errorf("wal: prepare in %s: entry kind %q has no registered checkpoint participant", l.Path(), e.Kind)
 	}
 	body, err := canonicalBody(e.Body)
 	if err != nil {
@@ -962,6 +1004,7 @@ func (t *Txn) Commit() (Committed, error) {
 	// --- the entry is accepted history from this line onwards ---
 
 	c := Committed{PrepareIndex: t.prepareIndex, CommitIndex: rec.Index, Entry: t.entry}
+	l.lastCommit = rec.Index
 	if l.applier != nil {
 		if err := l.applier.Apply(c); err != nil {
 			l.diverged = &divergedError{

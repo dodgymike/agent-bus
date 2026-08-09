@@ -4429,3 +4429,28 @@ reachability between non-adjacent buses.
     routes (in practice: more buses than the operator is willing to edit config for by hand), or two
     buses that are not directly peered need to route through an intermediary neither operator
     configured explicitly.
+
+## 2026-08-09 — Shared-WAL authenticated checkpoint generations
+
+The WAL, rather than relay or any individual application projection, owns checkpoint generation
+publication, authentication, recovery selection, and kind routing. All registered projections are
+snapshotted at one committed shared-log high-water mark; the only post-checkpoint durable stream is
+the generation's bounded WAL tail. This keeps one globally ordered WAL history and avoids a
+relay-only side store with a second recovery history and trust root. Checkpoint format
+version 7 is independently reserved from the WAL frame version. Participant-set changes require an
+explicit migration because recovery rejects missing, extra, duplicate, or differently-owned kinds.
+
+`CURRENT` is an atomic publication hint, not recovery authority. Recovery scans immutable
+generations newest-first and selects one complete authenticated unit; it never mixes snapshots and
+tails across generations, and it never falls back to stale legacy `bus.wal` after any published
+generation exists. Invalid newest material is rejected as a whole, persistently malformed or
+interrupted material is quarantined loudly where safe, and an older complete generation is the
+fallback. The durable record-index floor remains authoritative across that fallback, so rejected
+later history can disappear from served state without making its indexes reusable.
+
+Each generation receives a random `tail_id` authenticated by its manifest and used as domain
+separation for every tail-frame MAC; a second MAC binds the tail header to the generation and shared
+high-water. These bindings prevent a valid tail from being transplanted between generations. The
+candidate scan stays read-only; only the selected tail enters the ordinary WAL repair path, keeping
+discard evidence visible through `Recovered().Repaired` and operator logs. Legacy generation zero
+remains supported until the first checkpoint, including the existing v1-to-v2 WAL migration.

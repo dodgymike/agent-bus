@@ -17,7 +17,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | namespace | reserved values | meaning |
 | --- | --- | --- |
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
-| `ondisk-format-version` | `1` (legacy, read-only), `2` (current), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`), `6` (`peer-withdrawal-floor`, `internal/relay/peerstore.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below). `6` is the durable PEER WITHDRAWAL floor file's format (RELAY-34, reserved 2026-08-08 — see the `peer-withdrawal-floor` subsection below) |
+| `ondisk-format-version` | `1` (legacy, read-only), `2` (current WAL frames), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`), `6` (`peer-withdrawal-floor`, `internal/relay/peerstore.go`), `7` (authenticated WAL checkpoint generations, `internal/wal/checkpoint.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below). `6` is the durable PEER WITHDRAWAL floor file's format (RELAY-34, reserved 2026-08-08 — see the `peer-withdrawal-floor` subsection below). `7` is the authenticated checkpoint-generation directory/manifest/snapshot format described below; its tail still uses WAL frame version 2. |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -1839,3 +1839,64 @@ respective fixes disabled.
 CLI flag, env var, `AGENT_PROTOCOL.md` entry or wrapper** comes with this. No existing data directory
 gains a `peer-withdrawal-floor` file until something writes a withdrawal through a `PeerStore` built
 with a `Dir`.
+
+## WAL checkpoint generations (format version 7)
+
+`internal/wal` may compact the shared application WAL into immutable directories under
+`wal-generations/gen-<20-digit-generation>/`. Each generation contains an
+HMAC-SHA256-authenticated `manifest.json`, one separately authenticated and length-bounded
+`<participant>.snapshot` per exactly registered participant, and a version-2 `tail.wal`. All
+authentication uses the data directory's existing `wal-mac.key`; application participants never
+receive that key. Checkpoint format version 7 was reserved through the Spec Server and is distinct
+from the WAL frame version.
+
+The manifest authenticates its domain, format version, generation number, one shared committed
+`high_water`, `next_index`, the fixed tail filename, a fresh random 32-byte `tail_id`, a tail-header
+MAC, and the sorted exact participant names/kinds/files/lengths/digests. Every snapshot envelope
+independently authenticates the same generation and high-water plus its participant name, owned
+kinds, and payload. A snapshot payload is capped at 64 MiB; its envelope and manifest are read with
+fixed bounds, and checkpoint paths must be regular files/directories rather than symlinks, FIFOs or
+devices.
+
+`tail_id` is also the domain-separation context in every frame MAC written to that generation's
+tail. The separately authenticated tail-header MAC binds the tail header to the manifest's
+generation and high-water. Consequently, copying a valid tail from another generation fails
+authentication even when all copied commit indexes happen to be above the receiving generation's
+high-water. Recovery additionally rejects a candidate whose tail contains any commit at or below
+its authenticated snapshot boundary.
+
+Every participant snapshot is taken while the shared `Log.mu` is held, at the same `lastCommit`
+high-water. Participant names and kind ownership are sorted and must exactly match the registry at
+recovery; missing, extra, duplicate, or differently owned kinds are rejected. A live write whose
+kind has no registered participant is refused. Recovery verifies the complete manifest, participant
+set, every snapshot, and the generation-bound tail before calling any `Restore`; it never combines
+a snapshot from one generation with another generation's tail. It then restores all participants at
+that common high-water and replays only commits above it from the selected tail, preserving the
+shared WAL's global commit order across participants. `next_index` and the independent durable WAL
+index floor ensure fallback never reuses an index burned in a later rejected generation.
+
+Publication writes and fsyncs every snapshot, the empty successor tail and the manifest; fsyncs the
+temporary generation directory; renames it to its immutable generation name; fsyncs
+`wal-generations`; then atomically replaces `CURRENT` and fsyncs the parent again. Any ambiguous
+failure after the generation rename poisons the live log until restart rather than allowing writes
+through an uncertain hand-off. Older complete generations remain as whole-generation fallback.
+
+**`CURRENT` is only a publication hint, never authority.** Recovery scans published generations
+newest-first and selects the newest wholly authenticated generation even when `CURRENT` is missing,
+corrupt, or valid-but-stale. A rejected generation is never partially restored: recovery logs the
+rejection and tries an older complete generation. Persistent malformed generation material and
+interrupted `.tmp` publications are renamed to `.orphan`, parent-fsynced and logged loudly where
+safe. Once any published generation exists, failure to authenticate any generation is fatal; the
+stale pre-checkpoint `bus.wal` is never silently resurrected.
+
+Generation verification is read-only. Damage inside the selected tail is handled only by the normal
+WAL salvage/repair pass after selection, exactly once; the resulting truncation or rewrite remains
+visible through `Log.Recovered().Repaired` and the existing loud, specific repair log. The tail is
+bounded operationally by the last checkpoint: a new checkpoint snapshots all state through the
+shared high-water and starts an empty successor tail, so later recovery replays only post-checkpoint
+records rather than the whole historical WAL.
+
+With no published checkpoint generation, `bus.wal` is explicit legacy generation zero. Existing v1
+CRC32C WALs still take the established authenticated migration to WAL frame version 2 before their
+first checkpoint; v2 `bus.wal` is replayed normally. The first explicit `Checkpoint` publishes
+generation one, after which recovery uses authenticated generations and their bounded tails.

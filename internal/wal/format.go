@@ -95,6 +95,12 @@ type codec struct {
 	// It is never logged, never put in an error message, and never compared
 	// with anything.
 	key []byte
+	// context domain-separates one checkpoint generation's tail from every
+	// other WAL authenticated by the same data-directory key. It is empty for
+	// ordinary WAL/audit files. For checkpoint tails it is a fresh random value
+	// authenticated by the generation manifest; including it in every file and
+	// frame MAC makes byte-for-byte tail substitution fail authentication.
+	context []byte
 }
 
 // isV1 reports whether c reads and writes the legacy CRC32C layout.
@@ -147,6 +153,10 @@ func (c codec) mac(covered, payload []byte) []byte {
 		panic("wal: internal error: MAC requested without a key")
 	}
 	m := hmac.New(sha256.New, c.key)
+	if len(c.context) != 0 {
+		m.Write([]byte("agent-bus/wal-checkpoint-tail/v1\x00"))
+		m.Write(c.context)
+	}
 	m.Write(covered)
 	m.Write(payload)
 	return m.Sum(nil)

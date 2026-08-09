@@ -374,6 +374,18 @@ func (w *Writer) Sync() error {
 // A seal failure is folded into the returned error exactly as a failed sync is,
 // so a caller that only checks Close still learns the floor is suspect.
 func (w *Writer) Close() error {
+	return w.close(true)
+}
+
+// closeForHandoff closes a WAL segment after ownership of its durable index
+// floor has moved to a successor segment. It deliberately does not seal the
+// shared floor: the Log is still live and a crash must continue to look like
+// an unclean run until the successor itself is closed.
+func (w *Writer) closeForHandoff() error {
+	return w.close(false)
+}
+
+func (w *Writer) close(sealFloor bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
@@ -387,7 +399,7 @@ func (w *Writer) Close() error {
 			first = w.poison(fmt.Errorf("wal: fsync %s on close: %w", w.path, err))
 		}
 	}
-	if first == nil && w.floor != nil {
+	if first == nil && sealFloor && w.floor != nil {
 		// w.next-1 is the highest index actually written; w.next is 1 and this is
 		// 0 when nothing was appended, which seal treats as "raise nothing".
 		if err := w.floor.seal(w.next - 1); err != nil {
