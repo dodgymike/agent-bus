@@ -151,6 +151,285 @@ type obNullDurable struct {
 	err     error
 }
 
+type obCheckpointDurable struct {
+	obNullDurable
+	checkpointErr error
+	checkpoints   int
+	snapshot      func() ([]byte, error)
+	published     []byte
+	snapshotted   chan struct{}
+	release       chan struct{}
+	writeEntered  chan struct{}
+	writeRelease  chan struct{}
+}
+
+func (d *obCheckpointDurable) Write(e wal.Entry) (wal.Committed, error) {
+	if d.writeEntered != nil {
+		close(d.writeEntered)
+		<-d.writeRelease
+	}
+	return d.obNullDurable.Write(e)
+}
+
+func (d *obCheckpointDurable) Checkpoint() error {
+	d.checkpoints++
+	if d.snapshot != nil {
+		body, err := d.snapshot()
+		if err != nil {
+			return err
+		}
+		d.published = append([]byte(nil), body...)
+	}
+	if d.snapshotted != nil {
+		close(d.snapshotted)
+		<-d.release
+	}
+	return d.checkpointErr
+}
+
+// TestOutboxCheckpointedTombstoneBoundAcceptance is the task-level aggregate.
+// Deeper WAL publication/fallback cases live in outbox_checkpoint_test.go; this
+// aggregate keeps the production participant, admission and success-only
+// reclamation contract non-vacuous in the long-standing outbox suite.
+func TestOutboxCheckpointedTombstoneBoundAcceptance(t *testing.T) {
+	t.Run("deterministic snapshot restore refuses stale pending", func(t *testing.T) {
+		ob, _, clk, _ := obNewOutbox(t, nil)
+		pending, err := ob.Enqueue(obJob(t, 91001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pendingBody, err := pending.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = ob.Settle(pending.JobID, OutboxDelivered, ""); err != nil {
+			t.Fatal(err)
+		}
+		one, err := ob.Snapshot(42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		two, err := ob.Snapshot(42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(one, two) {
+			t.Fatal("snapshot is not deterministic")
+		}
+
+		restored, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: &obNullDurable{}, Now: clk.Now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restored.Name() != "relay-outbox" || len(restored.Kinds()) != 1 || restored.Kinds()[0] != OutboxRecordKind {
+			t.Fatalf("participant identity = %q/%v", restored.Name(), restored.Kinds())
+		}
+		if err = restored.Restore(one, 42); err != nil {
+			t.Fatal(err)
+		}
+		if err = restored.Apply(wal.Committed{PrepareIndex: 43, CommitIndex: 44, Entry: wal.Entry{Kind: OutboxRecordKind, Body: pendingBody}}); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := restored.Lookup(pending.JobID)
+		if !ok || got.State != OutboxDelivered {
+			t.Fatalf("stale pending resurrected terminal: %+v, %v", got, ok)
+		}
+	})
+
+	t.Run("retained capacity and checkpoint reclamation", func(t *testing.T) {
+		d := &obCheckpointDurable{}
+		clk := newOBClock()
+		ob, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: d, Now: clk.Now,
+			MaxJobs: 4, MaxPendingPerPeer: 4, MaxRetainedJobs: 1,
+			MaxRetainedBytes: MaxOutboxRetainedBytes, MaxRetainedPerPeer: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.snapshot = func() ([]byte, error) { return ob.Snapshot(42) }
+		first, err := ob.Enqueue(obJob(t, 92001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = ob.Settle(first.JobID, OutboxAbandoned, strings.Repeat("\x00", MaxOutboxReasonLen)); err != nil {
+			t.Fatalf("settlement was capacity-refused: %v", err)
+		}
+		if _, err = ob.Enqueue(obJob(t, 92002)); !errors.Is(err, ErrOutboxCapacity) {
+			t.Fatalf("growth at retained limit = %v", err)
+		}
+		clk.Advance(OutboxSettledRetention + time.Minute)
+		d.checkpointErr = errors.New("injected checkpoint failure")
+		if err = ob.Checkpoint(); err == nil {
+			t.Fatal("checkpoint failure was hidden")
+		}
+		if ob.Len() != 1 {
+			t.Fatal("failed checkpoint reclaimed the tombstone")
+		}
+		d.checkpointErr = nil
+		if err = ob.Checkpoint(); err != nil {
+			t.Fatal(err)
+		}
+		if ob.Len() != 0 {
+			t.Fatal("successful checkpoint did not reclaim omitted tombstone")
+		}
+		if _, err = ob.Enqueue(obJob(t, 92002)); err != nil {
+			t.Fatalf("capacity was not released after checkpoint: %v", err)
+		}
+	})
+
+	t.Run("expired pending is immediately nonforwarding", func(t *testing.T) {
+		d := &obCheckpointDurable{}
+		clk := newOBClock()
+		ob, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: d, Now: clk.Now, RetryHorizon: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.snapshot = func() ([]byte, error) { return ob.Snapshot(51) }
+		pending, err := ob.Enqueue(obJob(t, 93001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(time.Hour + time.Second)
+		if got := ob.Pending(); len(got) != 0 {
+			t.Fatalf("expired work remained forwardable: %+v", got)
+		}
+		if got, ok := ob.Lookup(pending.JobID); ok {
+			t.Fatalf("expired work remained lookup-visible: %+v", got)
+		}
+		if ob.Len() != 1 {
+			t.Fatal("expired pending record was reclaimed before checkpoint publication")
+		}
+	})
+
+	t.Run("publication reclaims only its immutable generation", func(t *testing.T) {
+		d := &obCheckpointDurable{snapshotted: make(chan struct{}), release: make(chan struct{})}
+		clk := newOBClock()
+		ob, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: d, Now: clk.Now,
+			RetryHorizon: 2 * time.Hour, MaxRetainedJobs: 2, MaxRetainedPerPeer: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.snapshot = func() ([]byte, error) { return ob.Snapshot(61) }
+		first, err := ob.Enqueue(obJob(t, 94001))
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(time.Hour)
+		second, err := ob.Enqueue(obJob(t, 94002))
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(time.Hour + time.Second) // first expired; second still live at snapshot
+		done := make(chan error, 1)
+		go func() { done <- ob.Checkpoint() }()
+		<-d.snapshotted
+		clk.Advance(time.Hour) // second expires only after its record was included
+		if got, ok := ob.Lookup(second.JobID); ok {
+			t.Fatalf("post-snapshot expired record remained visible: %+v", got)
+		}
+		close(d.release)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := ob.jobs[first.JobID]; ok {
+			t.Fatal("snapshot-omitted generation member was not reclaimed")
+		}
+		if _, ok := ob.jobs[second.JobID]; !ok {
+			t.Fatal("record expired after snapshot was reclaimed by the older generation")
+		}
+
+		restartedDurable := &obCheckpointDurable{}
+		restarted, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: restartedDurable, Now: clk.Now,
+			RetryHorizon: 2 * time.Hour, MaxRetainedJobs: 2, MaxRetainedPerPeer: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = restarted.Restore(d.published, 61); err != nil {
+			t.Fatal(err)
+		}
+		if ob.Len() != restarted.Len() {
+			t.Fatalf("live/restart retained state diverged: live=%d restart=%d", ob.Len(), restarted.Len())
+		}
+		if _, ok := restarted.Lookup(second.JobID); ok {
+			t.Fatal("restart made post-snapshot expired pending work forwardable")
+		}
+	})
+
+	t.Run("publication cannot reclaim a concurrent terminal tail", func(t *testing.T) {
+		d := &obCheckpointDurable{snapshotted: make(chan struct{}), release: make(chan struct{})}
+		clk := newOBClock()
+		ob, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: d, Now: clk.Now,
+			RetryHorizon: time.Hour, MaxRetainedJobs: 1, MaxRetainedPerPeer: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.snapshot = func() ([]byte, error) { return ob.Snapshot(2) }
+		pending, err := ob.Enqueue(obJob(t, 95001))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d.writeEntered = make(chan struct{})
+		d.writeRelease = make(chan struct{})
+		settled := make(chan error, 1)
+		go func() {
+			_, settleErr := ob.Settle(pending.JobID, OutboxDelivered, "")
+			settled <- settleErr
+		}()
+		<-d.writeEntered
+		clk.Advance(time.Hour + time.Second)
+
+		checkpointed := make(chan error, 1)
+		go func() { checkpointed <- ob.Checkpoint() }()
+		<-d.snapshotted
+		close(d.writeRelease)
+		if err = <-settled; err != nil {
+			t.Fatal(err)
+		}
+		close(d.release)
+		if err = <-checkpointed; err != nil {
+			t.Fatal(err)
+		}
+
+		live, ok := ob.Lookup(pending.JobID)
+		if !ok || live.State != OutboxDelivered {
+			t.Fatalf("checkpoint cleanup reclaimed concurrent terminal: %+v, %v", live, ok)
+		}
+		liveBody, err := live.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ob.reservationBytes[pending.JobID]; got != len(liveBody) {
+			t.Fatalf("live terminal reservation = %d, want canonical %d", got, len(liveBody))
+		}
+
+		d.mu.Lock()
+		tail := d.entries[len(d.entries)-1]
+		d.mu.Unlock()
+		restarted, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: &obNullDurable{}, Now: clk.Now,
+			RetryHorizon: time.Hour, MaxRetainedJobs: 1, MaxRetainedPerPeer: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = restarted.Restore(d.published, 2); err != nil {
+			t.Fatal(err)
+		}
+		if err = restarted.Apply(wal.Committed{PrepareIndex: 2, CommitIndex: 3, Entry: tail}); err != nil {
+			t.Fatal(err)
+		}
+		if ob.retainedJobs != restarted.retainedJobs || ob.retainedBytes != restarted.retainedBytes ||
+			ob.reservationBytes[pending.JobID] != restarted.reservationBytes[pending.JobID] {
+			t.Fatalf("live/restart accounting diverged: live=%d/%d/%d restart=%d/%d/%d",
+				ob.retainedJobs, ob.retainedBytes, ob.reservationBytes[pending.JobID],
+				restarted.retainedJobs, restarted.retainedBytes, restarted.reservationBytes[pending.JobID])
+		}
+		for name, current := range map[string]*Outbox{"live": ob, "restart": restarted} {
+			if _, err = current.Settle(pending.JobID, OutboxAbandoned, "contradiction"); !errors.Is(err, ErrOutboxSettled) {
+				t.Fatalf("%s same-id contradictory settle = %v, want ErrOutboxSettled", name, err)
+			}
+		}
+	})
+}
+
 // obBlockingDurable holds writes after announcing that they reached the
 // durable boundary. Tests use it to inspect capacity reservations while the
 // writes are still absent from the in-memory table.
@@ -980,10 +1259,9 @@ func TestOutboxApplySkipsForeignKinds(t *testing.T) {
 // The two bounds, ON THE REPLAY PATH
 // ---------------------------------------------------------------------------
 
-// TestOutboxCapacityIsEnforcedOnTheReplayPath is the bound that matters most,
-// and the one that is easiest to get wrong: a cap applied only when a job is
-// ENQUEUED is not a cap, because a log written by a build with a larger cap — or
-// simply a log longer than the current cap — replays straight past it.
+// TestOutboxCapacityIsEnforcedOnTheReplayPath pins upgrade debt: recovery must
+// retain acknowledged history even when an older build exceeded today's cap,
+// then refuse growth until it drains.
 func TestOutboxCapacityIsEnforcedOnTheReplayPath(t *testing.T) {
 	const maxJobs = 2
 	ob, _, _, sink := obNewOutbox(t, func(o *OutboxOptions) {
@@ -1010,13 +1288,13 @@ func TestOutboxCapacityIsEnforcedOnTheReplayPath(t *testing.T) {
 			t.Fatalf("Apply returned %v, want nil: a non-nil error from recovery makes Open fail, and invariant 6 settled that recovery ALWAYS reaches a running server", err)
 		}
 	}
-	if got := ob.Len(); got != maxJobs {
-		t.Fatalf("the outbox holds %d records after replaying %d, want the cap of %d: a bound one path can exceed is not a bound", got, maxJobs+3, maxJobs)
+	if got := ob.Len(); got != maxJobs+3 {
+		t.Fatalf("the outbox holds %d records after replaying %d, want all acknowledged legacy records retained", got, maxJobs+3)
 	}
-	if _, ok := ob.Lookup(overflow); ok {
-		t.Fatalf("job %s got in past the cap", overflow)
+	if _, ok := ob.Lookup(overflow); !ok {
+		t.Fatalf("legacy job %s was discarded merely to satisfy a newer capacity", overflow)
 	}
-	sink.mustContain(t, "a capacity discard on replay", "DISCARDING an outbox record", "at capacity")
+	sink.mustContain(t, "capacity debt on replay", "capacity debt", "acknowledged state is kept")
 
 	// The live path is bounded by the same number, and refuses rather than
 	// silently overwriting.

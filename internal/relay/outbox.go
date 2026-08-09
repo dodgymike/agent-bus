@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -112,6 +113,15 @@ const MaxOutboxJobIDLen = MaxPeerBusIDLen + len(outboxJobIDSep) + ids.MaxMessage
 // one early can resurrect an already-delivered message. They remain bounded by
 // OutboxSettledRetention instead.
 const MaxOutboxJobs = MaxPeers * DefaultQueueDepth
+
+// MaxOutboxRetainedJobs bounds all retained lifecycle records, including the
+// terminal tombstones which prevent an acknowledged delivery being replayed.
+const MaxOutboxRetainedJobs = MaxOutboxJobs
+
+// MaxOutboxRetainedBytes is the default canonical-record budget.  The factor
+// is deliberately conservative; admission computes the exact worst lifecycle
+// encoding for each job rather than charging this average.
+const MaxOutboxRetainedBytes = MaxOutboxRetainedJobs * 2048
 
 // OutboxRetryHorizon is how long a PENDING job may sit before it is beyond
 // saving.
@@ -806,6 +816,8 @@ type OutboxDurableLog interface {
 	Write(wal.Entry) (wal.Committed, error)
 }
 
+type outboxCheckpointer interface{ Checkpoint() error }
+
 // OutboxOptions configures NewOutbox. Every zero value means "the derived
 // default", so a caller with no opinion gets the derivation rather than an
 // accidental zero window.
@@ -836,6 +848,14 @@ type OutboxOptions struct {
 	// equal share of MaxJobs across MaxPeers (at least one). The default is
 	// DefaultQueueDepth.
 	MaxPendingPerPeer int
+	// MaxRetainedJobs and MaxRetainedBytes bound pending records plus terminal
+	// tombstones. Admission reserves the worst canonical lifecycle encoding so
+	// Settle never needs to perform (and can never fail) a capacity check.
+	MaxRetainedJobs  int
+	MaxRetainedBytes int
+	// MaxRetainedPerPeer is the fair per-destination share of retained records.
+	// Zero derives an equal share of MaxRetainedJobs across MaxPeers.
+	MaxRetainedPerPeer int
 	// RetryHorizon is the pending-job age horizon. 0 means OutboxRetryHorizon.
 	RetryHorizon time.Duration
 	// SettledRetention is the tombstone window. 0 means OutboxSettledRetention.
@@ -874,15 +894,22 @@ type Outbox struct {
 	// mu guards every field below. A plain Mutex rather than an RWMutex: every
 	// exported entry point sweeps first, and sweeping mutates.
 	mu sync.Mutex
+	// checkpointMu serializes publication candidates. Snapshot records the exact
+	// generation-scoped omissions and terminal encodings that Checkpoint may act
+	// on after publication; later sweeps cannot enlarge that immutable set.
+	checkpointMu sync.Mutex
 
-	busID             string
-	durable           OutboxDurableLog
-	log               *logging.Logger
-	now               func() time.Time
-	maxJobs           int
-	maxPendingPerPeer int
-	retryHorizon      time.Duration
-	settledRetention  time.Duration
+	busID              string
+	durable            OutboxDurableLog
+	log                *logging.Logger
+	now                func() time.Time
+	maxJobs            int
+	maxPendingPerPeer  int
+	maxRetainedJobs    int
+	maxRetainedBytes   int
+	maxRetainedPerPeer int
+	retryHorizon       time.Duration
+	settledRetention   time.Duration
 
 	// jobs is the table, keyed by job id.
 	jobs map[string]OutboxRecord
@@ -902,6 +929,23 @@ type Outbox struct {
 	// fsync cannot let concurrent enqueues for one peer race past its share.
 	pendingWritesByPeer map[string]int
 
+	// retained* includes records in the serving table and reservations whose
+	// enqueue is mid-fsync. reservationBytes deliberately remains the enqueue's
+	// worst lifecycle size after settlement; only a successful checkpoint may
+	// rebase/reclaim it.
+	retainedJobs         int
+	retainedBytes        int
+	retainedByPeer       map[string]int
+	reservationBytes     map[string]int
+	retainedWriteJobs    int
+	retainedWriteBytes   int
+	retainedWritesByPeer map[string]int
+	// expired records are omitted from the next snapshot but remain charged and
+	// present until checkpoint publication succeeds.
+	expired             map[string]struct{}
+	checkpointCandidate *outboxCheckpointCandidate
+	restoredHighWater   uint64
+
 	// inflight holds at most ONE lifecycle transition per job, so two concurrent
 	// settles cannot both build a terminal record from the same pending one.
 	inflight map[string]struct{}
@@ -913,18 +957,25 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 		return nil, fmt.Errorf("relay: outbox needs this bus's own id, so a job addressed to ourselves can be refused: %w", err)
 	}
 	ob := &Outbox{
-		busID:               o.BusID,
-		durable:             o.Durable,
-		log:                 o.Logger,
-		now:                 o.Now,
-		maxJobs:             o.MaxJobs,
-		maxPendingPerPeer:   o.MaxPendingPerPeer,
-		retryHorizon:        o.RetryHorizon,
-		settledRetention:    o.SettledRetention,
-		jobs:                make(map[string]OutboxRecord),
-		pendingByPeer:       make(map[string]int),
-		pendingWritesByPeer: make(map[string]int),
-		inflight:            make(map[string]struct{}),
+		busID:                o.BusID,
+		durable:              o.Durable,
+		log:                  o.Logger,
+		now:                  o.Now,
+		maxJobs:              o.MaxJobs,
+		maxPendingPerPeer:    o.MaxPendingPerPeer,
+		maxRetainedJobs:      o.MaxRetainedJobs,
+		maxRetainedBytes:     o.MaxRetainedBytes,
+		maxRetainedPerPeer:   o.MaxRetainedPerPeer,
+		retryHorizon:         o.RetryHorizon,
+		settledRetention:     o.SettledRetention,
+		jobs:                 make(map[string]OutboxRecord),
+		pendingByPeer:        make(map[string]int),
+		pendingWritesByPeer:  make(map[string]int),
+		retainedByPeer:       make(map[string]int),
+		reservationBytes:     make(map[string]int),
+		retainedWritesByPeer: make(map[string]int),
+		expired:              make(map[string]struct{}),
+		inflight:             make(map[string]struct{}),
 	}
 	if ob.log == nil {
 		// The same nil-logger convention NewForwarder uses, rather than a nil
@@ -946,6 +997,21 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 	}
 	if ob.maxPendingPerPeer > ob.maxJobs {
 		return nil, fmt.Errorf("relay: outbox MaxPendingPerPeer (%d) exceeds MaxJobs (%d); one peer's share cannot exceed the global pending-work bound", ob.maxPendingPerPeer, ob.maxJobs)
+	}
+	if ob.maxRetainedJobs <= 0 {
+		ob.maxRetainedJobs = MaxOutboxRetainedJobs
+	}
+	if ob.maxRetainedBytes <= 0 {
+		ob.maxRetainedBytes = MaxOutboxRetainedBytes
+	}
+	if ob.maxRetainedPerPeer <= 0 {
+		ob.maxRetainedPerPeer = ob.maxRetainedJobs / MaxPeers
+		if ob.maxRetainedPerPeer == 0 {
+			ob.maxRetainedPerPeer = 1
+		}
+	}
+	if ob.maxRetainedPerPeer > ob.maxRetainedJobs {
+		return nil, fmt.Errorf("relay: outbox MaxRetainedPerPeer (%d) exceeds MaxRetainedJobs (%d)", ob.maxRetainedPerPeer, ob.maxRetainedJobs)
 	}
 	if ob.retryHorizon <= 0 {
 		ob.retryHorizon = OutboxRetryHorizon
@@ -1054,6 +1120,10 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 	if err != nil {
 		return OutboxRecord{}, err
 	}
+	reservation, err := outboxLifecycleReservation(canon)
+	if err != nil {
+		return OutboxRecord{}, err
+	}
 
 	ob.mu.Lock()
 	ob.sweepLocked(now)
@@ -1100,10 +1170,27 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 		return OutboxRecord{}, fmt.Errorf("%w: peer %s has %d jobs pending and %d more being written, against its pending-work limit of %d; this message is NOT queued. Another peer's capacity remains available",
 			ErrOutboxCapacity, canon.PeerBusID, peerHeld, peerWriting, ob.maxPendingPerPeer)
 	}
+	if ob.retainedJobs+ob.retainedWriteJobs >= ob.maxRetainedJobs ||
+		ob.retainedBytes+ob.retainedWriteBytes+reservation > ob.maxRetainedBytes {
+		heldJobs, heldBytes := ob.retainedJobs+ob.retainedWriteJobs, ob.retainedBytes+ob.retainedWriteBytes
+		ob.mu.Unlock()
+		return OutboxRecord{}, fmt.Errorf("%w: retained lifecycle capacity is %d jobs/%d bytes against limits %d/%d; this message is NOT queued and no tombstone is evicted",
+			ErrOutboxCapacity, heldJobs, heldBytes, ob.maxRetainedJobs, ob.maxRetainedBytes)
+	}
+	if ob.retainedByPeer[canon.PeerBusID]+ob.retainedWritesByPeer[canon.PeerBusID] >= ob.maxRetainedPerPeer {
+		held := ob.retainedByPeer[canon.PeerBusID] + ob.retainedWritesByPeer[canon.PeerBusID]
+		ob.mu.Unlock()
+		return OutboxRecord{}, fmt.Errorf("%w: peer %s retains %d lifecycle records against its fair limit of %d",
+			ErrOutboxCapacity, canon.PeerBusID, held, ob.maxRetainedPerPeer)
+	}
 	// The slot AND the job id are reserved across the fsync, so neither the
 	// bound nor a concurrent enqueue of the same job can be raced.
 	ob.pendingWrites++
 	ob.pendingWritesByPeer[canon.PeerBusID]++
+	ob.retainedWriteJobs++
+	ob.retainedWriteBytes += reservation
+	ob.retainedWritesByPeer[canon.PeerBusID]++
+	ob.reservationBytes[canon.JobID] = reservation
 	ob.inflight[canon.JobID] = struct{}{}
 	ob.mu.Unlock()
 
@@ -1119,6 +1206,15 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 		ob.pendingWritesByPeer[canon.PeerBusID]--
 		if ob.pendingWritesByPeer[canon.PeerBusID] == 0 {
 			delete(ob.pendingWritesByPeer, canon.PeerBusID)
+		}
+		ob.retainedWriteJobs--
+		ob.retainedWriteBytes -= reservation
+		ob.retainedWritesByPeer[canon.PeerBusID]--
+		if ob.retainedWritesByPeer[canon.PeerBusID] == 0 {
+			delete(ob.retainedWritesByPeer, canon.PeerBusID)
+		}
+		if _, ok := ob.jobs[canon.JobID]; !ok {
+			delete(ob.reservationBytes, canon.JobID)
 		}
 		delete(ob.inflight, canon.JobID)
 		ob.mu.Unlock()
@@ -1239,6 +1335,9 @@ func (ob *Outbox) Lookup(jobID string) (OutboxRecord, bool) {
 	defer ob.mu.Unlock()
 	ob.sweepLocked(ob.now())
 	r, ok := ob.jobs[jobID]
+	if _, expired := ob.expired[jobID]; expired {
+		return OutboxRecord{}, false
+	}
 	return r, ok
 }
 
@@ -1254,7 +1353,10 @@ func (ob *Outbox) Pending() []OutboxRecord {
 	defer ob.mu.Unlock()
 	ob.sweepLocked(ob.now())
 	out := make([]OutboxRecord, 0, len(ob.jobs))
-	for _, r := range ob.jobs {
+	for id, r := range ob.jobs {
+		if _, expired := ob.expired[id]; expired {
+			continue
+		}
 		if r.State == OutboxPending {
 			out = append(out, r)
 		}
@@ -1283,10 +1385,38 @@ func (ob *Outbox) len() int { return len(ob.jobs) }
 // drift from the serving copy when a job settles, is swept, or is replayed.
 // The caller must hold mu.
 func (ob *Outbox) put(id string, r OutboxRecord) {
-	if old, ok := ob.jobs[id]; ok && old.State == OutboxPending {
+	old, existed := ob.jobs[id]
+	if existed && old.State == OutboxPending {
 		ob.removePending(old.PeerBusID)
 	}
+	if !existed {
+		reserved := ob.reservationBytes[id]
+		if reserved == 0 {
+			var err error
+			if r.State == OutboxPending {
+				reserved, err = outboxLifecycleReservation(r)
+			} else {
+				var body json.RawMessage
+				body, err = r.Encode()
+				reserved = len(body)
+			}
+			if err != nil {
+				ob.log.Error("could not account a valid outbox record", "job_id", id, "err", err)
+				reserved = wal.MaxPayloadSize
+			}
+			ob.reservationBytes[id] = reserved
+		}
+		ob.retainedJobs++
+		ob.retainedBytes += reserved
+		ob.retainedByPeer[r.PeerBusID]++
+	}
 	ob.jobs[id] = r
+	if existed && old.State == OutboxPending && r.State.Terminal() {
+		// Settlement starts a fresh tombstone retention window. A pending record
+		// previously marked for checkpoint omission must not cause this newer,
+		// correctness-critical terminal state to be omitted at the same high-water.
+		delete(ob.expired, id)
+	}
 	if r.State == OutboxPending {
 		ob.pendingJobs++
 		ob.pendingByPeer[r.PeerBusID]++
@@ -1294,10 +1424,20 @@ func (ob *Outbox) put(id string, r OutboxRecord) {
 }
 
 func (ob *Outbox) del(id string) {
-	if old, ok := ob.jobs[id]; ok && old.State == OutboxPending {
-		ob.removePending(old.PeerBusID)
+	if old, ok := ob.jobs[id]; ok {
+		if old.State == OutboxPending {
+			ob.removePending(old.PeerBusID)
+		}
+		ob.retainedJobs--
+		ob.retainedBytes -= ob.reservationBytes[id]
+		ob.retainedByPeer[old.PeerBusID]--
+		if ob.retainedByPeer[old.PeerBusID] == 0 {
+			delete(ob.retainedByPeer, old.PeerBusID)
+		}
 	}
 	delete(ob.jobs, id)
+	delete(ob.reservationBytes, id)
+	delete(ob.expired, id)
 }
 
 func (ob *Outbox) removePending(peerBusID string) {
@@ -1350,10 +1490,15 @@ func (ob *Outbox) Apply(c wal.Committed) error {
 	}
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
+	if c.CommitIndex <= ob.restoredHighWater {
+		return nil
+	}
 	if err := ob.upsertLocked(rec, ob.now(), "replay"); err != nil {
 		ob.log.Error("DISCARDING an outbox record that could not be applied; the job keeps the state already in memory",
 			"prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex,
 			"job_id", rec.JobID, "peer_bus", rec.PeerBusID, "state", rec.State.String(), "err", err)
+	} else {
+		ob.logCapacityDebtLocked("replay")
 	}
 	return nil
 }
@@ -1585,11 +1730,9 @@ func (ob *Outbox) upsertLocked(r OutboxRecord, now time.Time, source string) err
 		// stores routing metadata only, never message bodies, and every tombstone
 		// retires after SettledRetention.
 		//
-		if r.State == OutboxPending {
-			if ob.pendingJobs >= ob.maxJobs {
-				return fmt.Errorf("%w: %d jobs are pending, the global pending-work limit; this record is DISCARDED, which loses the job entirely", ErrOutboxCapacity, ob.maxJobs)
-			}
-		}
+		// Recovery never discards acknowledged state merely because a newer
+		// binary configured a smaller capacity. put records the exact overage as
+		// debt; Enqueue admits no growth until all applicable limits clear.
 		ob.put(r.JobID, r)
 		return nil
 	}
@@ -1772,7 +1915,11 @@ func (ob *Outbox) upsertLocked(r OutboxRecord, now time.Time, source string) err
 //
 // The caller must hold mu.
 func (ob *Outbox) sweepLocked(now time.Time) {
+	_, checkpointed := ob.durable.(outboxCheckpointer)
 	for id, r := range ob.jobs {
+		if _, already := ob.expired[id]; already {
+			continue
+		}
 		switch {
 		case r.FutureDated(now, OutboxClockSkewAllowance):
 			// The live-table half of the admission guard. Without it a record
@@ -1781,26 +1928,272 @@ func (ob *Outbox) sweepLocked(now time.Time) {
 			// horizon never fires and the forwarder would retry past
 			// idem.PeerOutageBudget, where the peer has forgotten the applied
 			// key and takes the retry as a NEW message (invariant 10).
-			ob.del(id)
+			if checkpointed {
+				ob.expired[id] = struct{}{}
+			} else {
+				ob.del(id)
+			}
 			ob.log.Warn("DROPPING an outbox job stamped further ahead of the clock than the skew allowance; the clock moved backwards under it, and a future-dated job can never age out. This message will never reach the peer",
 				"job_id", r.JobID, "peer_bus", r.PeerBusID, "origin_message_id", r.OriginMessageID,
 				"enqueued_at", r.EnqueuedAt.UTC().Format(time.RFC3339Nano),
 				"clock", now.UTC().Format(time.RFC3339Nano),
 				"allowance", OutboxClockSkewAllowance.String())
 		case r.Expired(now, ob.retryHorizon):
-			ob.del(id)
+			if checkpointed {
+				ob.expired[id] = struct{}{}
+			} else {
+				ob.del(id)
+			}
 			ob.log.Warn("DROPPING an outbox job that has passed the retry horizon; this message will never reach the peer",
 				"job_id", r.JobID, "peer_bus", r.PeerBusID, "origin_message_id", r.OriginMessageID,
 				"enqueued_at", r.EnqueuedAt.UTC().Format(time.RFC3339Nano),
 				"age", now.Sub(r.EnqueuedAt).Truncate(time.Second).String(),
 				"horizon", ob.retryHorizon.String())
 		case r.Retired(now, ob.settledRetention):
-			ob.del(id)
+			if checkpointed {
+				ob.expired[id] = struct{}{}
+			} else {
+				ob.del(id)
+			}
 			ob.log.Debug("retiring a settled outbox record past its tombstone window",
 				"job_id", r.JobID, "state", r.State.String(),
 				"settled_at", r.SettledAt.UTC().Format(time.RFC3339Nano))
 		}
 	}
+}
+
+// Name, Kinds, Snapshot and Restore implement wal.CheckpointParticipant.
+func (ob *Outbox) Name() string    { return "relay-outbox" }
+func (ob *Outbox) Kinds() []string { return []string{OutboxRecordKind} }
+
+const outboxCheckpointVersion = 1
+
+type outboxCheckpointSnapshot struct {
+	Version   int               `json:"version"`
+	HighWater uint64            `json:"high_water"`
+	Records   []json.RawMessage `json:"records"`
+}
+
+type outboxCheckpointCandidate struct {
+	omittedBodies  map[string][]byte
+	terminalBodies map[string][]byte
+}
+
+func (ob *Outbox) Snapshot(highWater uint64) ([]byte, error) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.sweepLocked(ob.now())
+	ids := make([]string, 0, len(ob.jobs))
+	for id := range ob.jobs {
+		if _, omit := ob.expired[id]; !omit {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	s := outboxCheckpointSnapshot{Version: outboxCheckpointVersion, HighWater: highWater, Records: make([]json.RawMessage, 0, len(ids))}
+	candidate := &outboxCheckpointCandidate{
+		omittedBodies:  make(map[string][]byte, len(ob.expired)),
+		terminalBodies: make(map[string][]byte),
+	}
+	for id := range ob.expired {
+		body, err := ob.jobs[id].Encode()
+		if err != nil {
+			return nil, fmt.Errorf("relay: snapshot omitted outbox job %s: %w", id, err)
+		}
+		candidate.omittedBodies[id] = append([]byte(nil), body...)
+	}
+	for _, id := range ids {
+		body, err := ob.jobs[id].Encode()
+		if err != nil {
+			return nil, fmt.Errorf("relay: snapshot outbox job %s: %w", id, err)
+		}
+		s.Records = append(s.Records, body)
+		if ob.jobs[id].State.Terminal() {
+			candidate.terminalBodies[id] = append([]byte(nil), body...)
+		}
+	}
+	body, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	ob.checkpointCandidate = candidate
+	return body, nil
+}
+
+func (ob *Outbox) Restore(snapshot []byte, highWater uint64) error {
+	var s outboxCheckpointSnapshot
+	dec := json.NewDecoder(bytes.NewReader(snapshot))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&s); err != nil {
+		return fmt.Errorf("relay: decode outbox checkpoint: %w", err)
+	}
+	var extra interface{}
+	if err := dec.Decode(&extra); err != io.EOF {
+		return errors.New("relay: outbox checkpoint has trailing JSON values")
+	}
+	if s.Version != outboxCheckpointVersion || s.HighWater != highWater {
+		return fmt.Errorf("relay: outbox checkpoint version/high-water mismatch: version=%d high_water=%d supplied=%d", s.Version, s.HighWater, highWater)
+	}
+	records := make([]OutboxRecord, 0, len(s.Records))
+	seen := make(map[string]struct{}, len(s.Records))
+	last := ""
+	for i, raw := range s.Records {
+		r, err := DecodeOutboxRecord(raw)
+		if err != nil {
+			return fmt.Errorf("relay: decode outbox checkpoint record %d: %w", i, err)
+		}
+		canonical, err := r.Encode()
+		if err != nil || !bytes.Equal(canonical, raw) {
+			return fmt.Errorf("relay: outbox checkpoint record %d is not canonical", i)
+		}
+		if _, duplicate := seen[r.JobID]; duplicate {
+			return fmt.Errorf("relay: duplicate outbox checkpoint job %s", r.JobID)
+		}
+		if last != "" && r.JobID < last {
+			return fmt.Errorf("relay: outbox checkpoint records are not JobID-sorted")
+		}
+		seen[r.JobID] = struct{}{}
+		last = r.JobID
+		records = append(records, r)
+	}
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	if len(ob.inflight) != 0 || ob.pendingWrites != 0 {
+		return errors.New("relay: cannot restore outbox checkpoint into an active outbox")
+	}
+	ob.jobs = make(map[string]OutboxRecord, len(records))
+	ob.pendingJobs = 0
+	ob.pendingByPeer = make(map[string]int)
+	ob.retainedJobs = 0
+	ob.retainedBytes = 0
+	ob.retainedByPeer = make(map[string]int)
+	ob.reservationBytes = make(map[string]int)
+	ob.expired = make(map[string]struct{})
+	for _, r := range records {
+		ob.put(r.JobID, r)
+	}
+	ob.restoredHighWater = highWater
+	ob.logCapacityDebtLocked("restore")
+	return nil
+}
+
+// Checkpoint publishes the snapshot and only then reclaims records omitted for
+// retention. Any failure, including a poisoned/ambiguous WAL handoff, leaves
+// the serving table and all reservations intact.
+func (ob *Outbox) Checkpoint() error {
+	cp, ok := ob.durable.(outboxCheckpointer)
+	if !ok {
+		return errors.New("relay: outbox durable log does not support checkpoints")
+	}
+	ob.checkpointMu.Lock()
+	defer ob.checkpointMu.Unlock()
+	ob.mu.Lock()
+	ob.checkpointCandidate = nil
+	ob.mu.Unlock()
+	if err := cp.Checkpoint(); err != nil {
+		ob.mu.Lock()
+		ob.checkpointCandidate = nil
+		ob.mu.Unlock()
+		return err
+	}
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	candidate := ob.checkpointCandidate
+	ob.checkpointCandidate = nil
+	if candidate == nil {
+		return errors.New("relay: checkpoint publication completed without an outbox snapshot candidate")
+	}
+	for id, omittedBody := range candidate.omittedBodies {
+		r, ok := ob.jobs[id]
+		_, stillExpired := ob.expired[id]
+		if !ok {
+			continue
+		}
+		body, err := r.Encode()
+		if err == nil && stillExpired && bytes.Equal(body, omittedBody) {
+			ob.del(id)
+			continue
+		}
+		// A lifecycle transition committed into the new WAL tail while the
+		// checkpoint was publishing. The snapshot omitted an older incarnation,
+		// so cleanup must retain this one for parity with tail replay.
+		delete(ob.expired, id)
+		ob.rebaseTerminalLocked(id, r, body, err)
+	}
+	// The published snapshot makes each surviving terminal record the complete
+	// durable lifecycle fact, so its earlier worst-case settle reservation can
+	// now be rebased to the exact canonical bytes. Never do this before success:
+	// an older generation may still recover the pending record and require the
+	// full reserved settlement budget in its tail.
+	for id, publishedBody := range candidate.terminalBodies {
+		r, ok := ob.jobs[id]
+		if !ok || !r.State.Terminal() {
+			continue
+		}
+		body, err := r.Encode()
+		if err != nil || !bytes.Equal(body, publishedBody) {
+			continue // validated serving records make this unreachable
+		}
+		ob.rebaseTerminalLocked(id, r, body, err)
+	}
+	return nil
+}
+
+func (ob *Outbox) rebaseTerminalLocked(id string, r OutboxRecord, body []byte, err error) {
+	if err != nil || !r.State.Terminal() {
+		return
+	}
+	old := ob.reservationBytes[id]
+	ob.reservationBytes[id] = len(body)
+	ob.retainedBytes += len(body) - old
+}
+
+func (ob *Outbox) logCapacityDebtLocked(source string) {
+	if ob.pendingJobs <= ob.maxJobs && ob.retainedJobs <= ob.maxRetainedJobs && ob.retainedBytes <= ob.maxRetainedBytes {
+		debt := false
+		for _, n := range ob.retainedByPeer {
+			if n > ob.maxRetainedPerPeer {
+				debt = true
+				break
+			}
+		}
+		if !debt {
+			return
+		}
+	}
+	ob.log.Warn("outbox recovered retained-capacity debt; acknowledged state is kept and new growth is blocked until a successful retention checkpoint drains it",
+		"source", source, "pending_jobs", ob.pendingJobs, "max_pending_jobs", ob.maxJobs,
+		"retained_jobs", ob.retainedJobs, "max_retained_jobs", ob.maxRetainedJobs,
+		"retained_bytes", ob.retainedBytes, "max_retained_bytes", ob.maxRetainedBytes)
+}
+
+func outboxLifecycleReservation(r OutboxRecord) (int, error) {
+	pending, err := r.Encode()
+	if err != nil {
+		return 0, err
+	}
+	max := len(pending)
+	for _, state := range []OutboxState{OutboxDelivered, OutboxAbandoned} {
+		t := r
+		t.State = state
+		t.SettledAt = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+		if t.SettledAt.Before(t.EnqueuedAt) {
+			t.SettledAt = t.EnqueuedAt
+		}
+		if state == OutboxAbandoned {
+			t.Reason = strings.Repeat("\x00", MaxOutboxReasonLen)
+		} else {
+			t.Reason = ""
+		}
+		body, e := t.Encode()
+		if e != nil {
+			return 0, e
+		}
+		if len(body) > max {
+			max = len(body)
+		}
+	}
+	return max, nil
 }
 
 // canonicalOutboxRecord round-trips a record through its own encoder so the

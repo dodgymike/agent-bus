@@ -4454,3 +4454,25 @@ high-water. These bindings prevent a valid tail from being transplanted between 
 candidate scan stays read-only; only the selected tail enters the ordinary WAL repair path, keeping
 discard evidence visible through `Recovered().Repaired` and operator logs. Legacy generation zero
 remains supported until the first checkpoint, including the existing v1-to-v2 WAL migration.
+
+## 2026-08-09 — Relay outbox retention is reclaimed only by a successful checkpoint
+
+The `relay-outbox` checkpoint participant owns the `outbox` kind and emits deterministic snapshot
+version 1: one shared high-water plus unique, job-id-sorted canonical records. Retention expiry
+makes a record non-serving immediately, but does not delete or uncharge it before publication. The
+snapshot records the exact canonical identity of its omissions, and only a successful checkpoint
+may reclaim records that are still expired and byte-identical to that immutable candidate. This
+generation-scoped identity check prevents a checkpoint from deleting a concurrent settlement or a
+record that expired after its snapshot.
+
+Retained lifecycle capacity is separate from pending-work capacity and is bounded by global record
+count, canonical-byte budget, and per-peer count. Enqueue reserves all three across fsync and charges
+the worst canonical pending/delivered/abandoned form for the job. That deliberately makes settlement
+capacity-unconditional: after enqueue is acknowledged, writing the larger terminal form never
+depends on finding a new slot. A successful checkpoint may rebase an unchanged terminal record to
+its exact published length; failure reclaims or rebases nothing.
+
+Replay and snapshot restore admit acknowledged state even when it exceeds today's limits. The
+overage is explicit legacy capacity debt: it is logged, retained, and blocks applicable new growth
+until successful checkpoint reclamation clears it. Capacity configuration is prospective admission
+policy, not a retrospective data-loss mechanism.

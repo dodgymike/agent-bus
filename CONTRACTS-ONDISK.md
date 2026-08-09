@@ -1314,11 +1314,12 @@ evidence that prevents an older pending sibling from resurrecting a message that
 delivered or deliberately abandoned. Tombstones remain through `OutboxSettledRetention`; they are
 never evicted early merely to admit new work.
 
-**Capacity counts PENDING WORK ONLY.** `MaxJobs` (default `MaxOutboxJobs`, 16,384) is the global
-limit on pending jobs, not on all retained records and not on throughput per retention window.
-Settling a job immediately releases its pending slot while its tombstone stays retained. Therefore
-retained tombstones consume NO pending capacity; their bound is time (`OutboxSettledRetention`), not
-the pending-job count.
+**Pending and retained capacity are separate.** `MaxJobs` (default `MaxOutboxJobs`, 16,384) is the
+global pending-work limit. Settling a job immediately releases that pending slot. The complete
+lifecycle table — pending records plus terminal tombstones — is independently bounded by
+`MaxRetainedJobs` (default `MaxOutboxRetainedJobs`, 16,384) and `MaxRetainedBytes` (default
+`MaxOutboxRetainedBytes`, 32 MiB). Tombstones consume retained count and byte capacity even though
+they consume no pending capacity; they are never evicted merely to admit new work.
 
 Live admission also enforces `MaxPendingPerPeer`. Its default is an equal share of `MaxJobs` across
 `MaxPeers` (at least one; `DefaultQueueDepth` under the defaults), and it may not exceed `MaxJobs`.
@@ -1327,20 +1328,51 @@ Both limits include reservations for enqueues currently inside the durable write
 released only after the write returns. A slow fsync therefore cannot let concurrent calls race past
 either bound, and one dead or hostile peer cannot consume the capacity left available to another.
 
-**Replay preserves acknowledged history before applying live fairness.** The global pending bound
-still applies during replay. The per-peer quota deliberately does not: a pre-upgrade build could
-have durably acknowledged up to `MaxJobs` pending jobs for one peer, and discarding that over-share
-after upgrade would convert a new fairness policy into acknowledged message loss. Replay admits all
-of that peer's pending records up to the unchanged global bound; new live enqueues for the peer are
-then refused until its backlog drains below `MaxPendingPerPeer`. Terminal records are replayed as
-tombstones without consuming pending capacity, because refusing a settlement can resurrect an
-already-settled job.
+Live admission also reserves retained capacity before fsync: one retained-record slot, one
+`MaxRetainedPerPeer` slot for the destination, and the exact worst canonical encoding among the
+pending, delivered, and maximum-reason abandoned forms. Those reservations include concurrent
+enqueues still being written. This worst-lifecycle byte charge is deliberately kept after
+settlement, so `Settle` never performs a capacity check and can never be refused merely because the
+terminal encoding is larger than the pending encoding. Settlement remains conditional on the
+normal identity/state validation and durable write succeeding, but not on spare capacity.
+
+**Replay and snapshot restore preserve acknowledged legacy debt.** Neither path discards an
+otherwise-valid record merely because an older build or older configuration admitted more pending,
+retained-count, retained-byte, or per-peer state than today's limits. The complete acknowledged
+state is restored, the overage is logged loudly as retained-capacity debt, and live `Enqueue`
+refuses further applicable growth until the debt drains. A newer capacity setting is admission
+policy, never retroactive permission to lose durable history.
 
 Pending jobs older than `OutboxRetryHorizon` and tombstones older than
-`OutboxSettledRetention` are swept. Every discarded invalid or expired pending record is logged
-loudly and specifically; recovery continues, as invariant 6 requires. This is a durable library
-contract today, not yet the running server's delivery guarantee: RELAY-19 must compose the outbox
-with the forwarder and rebuild the relay envelope from the separately durable message body.
+`OutboxSettledRetention` stop being visible through `Pending` and `Lookup` immediately. With a
+checkpoint-capable durable log they remain present and fully charged until a checkpoint that omits
+them publishes successfully; a failed or ambiguous checkpoint reclaims nothing. Every invalid or
+expired pending record is logged loudly and specifically, and recovery continues as invariant 6
+requires.
+
+### `relay-outbox` checkpoint participant snapshot version 1
+
+`Outbox` is the `wal.CheckpointParticipant` named `relay-outbox` and owns exactly the `outbox` kind.
+Its participant payload is strict JSON with `version: 1`, the WAL-supplied `high_water`, and a
+`records` array. Records are sorted by `job_id`, unique, and embedded as their exact canonical
+`OutboxRecord` JSON. Restore rejects an unknown snapshot field, trailing JSON, a version or
+high-water mismatch, duplicate or out-of-order job ids, an invalid record, or bytes that decode but
+are not the record's canonical encoding. After Restore, `Apply` ignores commits at or below the
+restored high-water and folds only that generation's tail.
+
+Snapshot marks an immutable, generation-scoped cleanup candidate. It records the canonical bytes
+of every expired record omitted from that snapshot and every included terminal record. Only after
+the underlying WAL checkpoint returns success may the outbox reclaim an omitted record, and then
+only if the record is still expired and its current canonical bytes are IDENTICAL to the candidate.
+If it settled or otherwise changed while publication was in flight, cleanup retains it for parity
+with tail replay. Records that expire only after the snapshot are likewise outside that
+generation's cleanup set.
+
+Successful publication may also rebase an included terminal record's conservative
+worst-lifecycle byte reservation to its exact canonical terminal length, again only when its bytes
+still match the published candidate. Failure performs neither deletion nor rebasing. This
+success-only, canonical-identity guard is what makes live retained accounting converge with
+snapshot-plus-tail recovery without letting an older checkpoint reclaim a newer lifecycle fact.
 
 ## Two durable peer-configuration records: ROUTES and TRUST PINS (RELAY-10, added 2026-08-08)
 
