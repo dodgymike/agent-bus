@@ -113,13 +113,23 @@ func TestOutboxCheckpointCleanupIgnoresASettlementThatRacesPublication(t *testin
 		t.Fatalf("RED: job %s survived Checkpoint's cleanup but its state is %s, not %s — the settlement was partially lost", job.JobID, got.State, OutboxDelivered)
 	}
 
-	// --- Live/restart parity: replaying the exact durable history a real WAL
-	// would hold (the enqueue, then the settlement) into a fresh outbox must
-	// reach the SAME state Checkpoint's cleanup just left live in. If the
-	// live table above lost the settlement, replay reconstructing it anyway
-	// is the divergence itself, not a second bug — restart would "fix" what
-	// cleanup broke, which is exactly the live/restart accounting mismatch
-	// the task's v7 gate note names.
+	// --- Live/restart parity: replaying the durable history a real WAL
+	// generation-bounded restart would actually walk. A real selected
+	// generation's replay tail begins strictly AFTER the generation's own
+	// high-water (wal/log.go's `c.CommitIndex <= selection.highWater` skip),
+	// and the omitted enqueue record is excluded from the published snapshot
+	// too (Snapshot never includes an ob.expired-marked job in s.Records) — so
+	// a real recovery NEVER sees the pre-checkpoint enqueue at all, in the
+	// snapshot or in the tail. Modeling that by calling Apply on every durable
+	// entry and trusting Apply's own CommitIndex<=restoredHighWater skip to
+	// filter it out tests something adjacent, not the real shape of recovery:
+	// it would still pass even if a real generation's tail selection were
+	// broken, because the guard exercised is Apply's internal one, not the
+	// tail-truncation recovery actually performs. So the replay here supplies
+	// ONLY the post-checkpoint tail (commit indices strictly greater than the
+	// checkpoint's own high-water) — proving Restore's rebuilt table plus
+	// JUST that bounded tail correctly reconstruct the live terminal state,
+	// exactly as a real generation-bounded restart would receive it.
 	restarted, err := NewOutbox(OutboxOptions{BusID: obLocalBus, Durable: &obNullDurable{}, Now: clk.Now,
 		RetryHorizon: time.Hour, MaxRetainedJobs: 8, MaxRetainedPerPeer: 8})
 	if err != nil {
@@ -128,11 +138,20 @@ func TestOutboxCheckpointCleanupIgnoresASettlementThatRacesPublication(t *testin
 	if err = restarted.Restore(d.published, enqueueHighWater); err != nil {
 		t.Fatal(err)
 	}
+	tailApplied := 0
 	for i, e := range d.entries {
 		idx := uint64(i + 1)
-		if err = restarted.Apply(wal.Committed{PrepareIndex: idx, CommitIndex: idx + 1, Entry: e}); err != nil {
+		commitIndex := idx + 1
+		if commitIndex <= enqueueHighWater {
+			continue // below the checkpoint's high-water: a real tail never includes this
+		}
+		if err = restarted.Apply(wal.Committed{PrepareIndex: idx, CommitIndex: commitIndex, Entry: e}); err != nil {
 			t.Fatal(err)
 		}
+		tailApplied++
+	}
+	if tailApplied != 1 {
+		t.Fatalf("post-checkpoint tail replayed %d entries, want exactly 1 (only the settlement; the enqueue is bounded away by the checkpoint's high-water)", tailApplied)
 	}
 	restartedGot, restartedOK := restarted.Lookup(job.JobID)
 	if restartedOK != ok || (restartedOK && ok && restartedGot.State != got.State) {
