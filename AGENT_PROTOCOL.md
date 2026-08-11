@@ -49,6 +49,37 @@ Put the resulting binary wherever your shell can find it. Everything below assum
 as `agent-busctl`; substitute the full path otherwise. `agent-busctl` never needs the server to be built or
 running except for commands that talk to the bus (everything except `--help`).
 
+## The agent-facing wrapper: `tools/agentbus-tool`
+
+Added 2026-08-11 with `AGENTBUS.md` (`tools/agentbus-tool` is registered in the agent-facing
+surface — see `CONTRACTS-AGENT.md` "### `tools/agentbus-tool` — the agent-facing wrapper over
+`cmd/agent-busctl`"). `agentbus-tool` is the thin, non-interactive shell wrapper an agent invokes
+instead of hand-writing a raw HTTP call (invariant 7). It wraps the compiled `cmd/agent-busctl` and
+never reads or prints key material.
+
+```bash
+tools/agentbus-tool details                 # the standard "who am I" bootstrap check
+tools/agentbus-tool details --verify        # also perform a real session handshake
+tools/agentbus-tool details --json          # machine-readable identity info
+tools/agentbus-tool <any agent-busctl cmd>  # every other capability, passed through unchanged
+tools/agentbus-tool help
+```
+
+- `details` shows the selected identity's agent info via `agentbusctl whoami --all` (agent id, bus
+  id, bus URL, name, selection). `--verify` additionally runs `whoami --verify` — the only way to
+  tell a stored credential the bus still honours from one it has forgotten. `--json` emits
+  `whoami --all --json` (or `whoami --verify --json` with `--verify`), produced entirely by
+  `agentbusctl`, never by the script splicing JSON.
+- Every other `agent-busctl` subcommand (agents, send, watch, enrol, whoami, use, logout, pin, …) is
+  passed through unchanged, with global flags (`--bus`, `--bus-fingerprint`, `--identity`, `--as`,
+  `--timeout`) collected and forwarded.
+- The `agent-busctl` binary resolves in order: `AGENT_BUSCTL`, this repo's `bin/agentbusctl` (or
+  `bin/agent-busctl`), then `agent-busctl` on `PATH`. Put `/agent-bus/bin` and `/agent-bus/tools` on
+  your `PATH` (or set `AGENT_BUSCTL`) so `agentbus-tool` is a plain command.
+- Exit codes: `details` exits `0` when shown/verified, otherwise forwards the underlying
+  `agent-busctl` exit code unchanged (2 usage, 3 no identity, 4 auth, 5 network, 6 server,
+  7 rejected, 8 nothing to report). `help` exits 0; passthrough returns the command's own code.
+
 ## Server lifecycle: `scripts/bus-serve.sh`
 
 Starts, stops, and reports the status of a **local** agent-bus server. This is the only sanctioned

@@ -28,6 +28,35 @@ scripts/` lists six), and only one of them is agent-facing:
 | `scripts/gen-spec-mirror.sh` | no | Regenerates the backlog mirror: `SPEC.md` (epic index) **and** the `SPEC/` tree. The ONLY supported way to write either. |
 | `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Deliberately describes the surface as it SHOULD be, so it fails loudly at the first unavailable step. |
 
+### `tools/agentbus-tool` — the agent-facing wrapper over `cmd/agent-busctl` (added 2026-08-11)
+
+`tools/agentbus-tool` is the thin, non-interactive shell wrapper an agent actually invokes day to
+day to talk to a bus. It is **agent-facing** (a bus capability wrapper, not a repo/process tool), and
+it is the entry point an agent uses for the standard "who am I" bootstrap check and for every
+`agent-busctl` capability — it never hand-writes HTTP, satisfying invariant 7 through the compiled
+`cmd/agent-busctl` underneath.
+
+- `tools/agentbus-tool details [--verify] [--json]` — the standard "who am I" check. Shows the
+  selected identity's agent info (agent id, bus id, bus URL, name, selection) via
+  `agentbusctl whoami --all`; `--verify` also performs a real session handshake against the bus
+  (`whoami --verify`); `--json` emits the machine-readable forms (`whoami --all --json`, or
+  `whoami --verify --json` with `--verify`), produced entirely by `agentbusctl` — never by splicing
+  JSON in the script.
+- `tools/agentbus-tool <any agent-busctl command> [args...]` — every other `agent-busctl`
+  subcommand is passed through unchanged, with global flags (`--bus`, `--bus-fingerprint`,
+  `--identity`, `--as`, `--timeout`) collected and forwarded. `help`/`--help`/`-h` print usage.
+
+The `agent-busctl` binary is resolved, in order: the `AGENT_BUSCTL` env var, this repo's
+`bin/agentbusctl` (or `bin/agent-busctl`), then `agent-busctl` on `PATH`. Identities and accept-sets
+are fetched through `agent-busctl`, which redacts seeds by construction — **the tool never reads or
+prints key material**, and adds no path that could surface a private key.
+
+Exit codes: `details` exits `0` when shown (or verified); otherwise it forwards the underlying
+`agent-busctl` exit code unchanged (2 usage, 3 no identity, 4 auth, 5 network, 6 server,
+7 rejected, 8 nothing to report). `help` always exits 0. Passthrough commands return the
+`agent-busctl` command's own exit code. Full usage: see the script header and `AGENT_PROTOCOL.md`
+("Getting the binary" / the CLI sections it links).
+
 ### `scripts/bus-serve.sh` — the health probe is now https, and verified (`MTLS-LISTENER`/`MTLS-VERIFY`, 2026-08-07)
 
 The bus serves TLS and ONLY TLS (invariant 11 — see `CONTRACTS-HTTP.md`'s "## Transport" and
