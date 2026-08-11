@@ -1,13 +1,35 @@
 # Agent Bus
 
 > This mirror lists OPEN tasks only (todo, in progress, blocked, deferred).
-> 137 closed tasks are omitted; the Spec Server holds them in full.
+> 152 closed tasks are omitted; the Spec Server holds them in full.
 > Regenerate with `bash scripts/gen-spec-mirror.sh` (`--all` to include closed).
 
 > Checkbox legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` superseded/cancelled.
 
 ## Backlog
 
+- [ ] None · RELAY-13-FU-KEYGEN: 3 error-message remedy strings name the nonexistent agent-busctl keygen subcommand — cli, P2, error-message, keygen, sign-8
+  Three shipped error-message remedy strings tell the caller to run `agent-busctl keygen`, which does not exist (no keygen.go, no dispatch entry anywhere in cmd/agent-busctl) -- a remedy that cannot be followed. Confirmed by direct grep across the module (2026-08-08), Go source only, excluding test files and doc mentions:
+  
+  1. client/store.go:271 -- Credential.MessagingPrivateKey, "no messaging key yet" -> "run `agent-busctl keygen` to mint one, then hand the printed public key to your peers". This site is inside RELAY-13s client-half file boundary (client/store.go) but was NOT touched by that diff -- pre-existing, a different code path than the new damagedMessagingSeedRemedy const RELAY-13 added nearby.
+  2. client/keyring.go:181 -- outside RELAY-13s boundary.
+  3. client/client.go:477 -- outside RELAY-13s boundary (comment at :464 references the same nonexistent command but is prose, not a runtime error string).
+  
+  AGENT_PROTOCOL.md:552-554 already documents this gap accurately ("Some error messages tell you to run agent-busctl keygen; that command does not exist") and CONTRACTS-AGENT.md:70-73 and CONTRACTS-CLI.md:474-477 do too -- those are NOT defects, they are honest disclosure, and should stay as-is or be updated in step with whichever fix lands here.
+  
+  The real fix is SIGN-8 (71ef73d5-5625-44bb-959c-17b364200f4b, todo, P1, epic unclear -- title starts with SIGN-8), which is the task that adds the `agent-bus keygen` subcommand itself; landing it makes all three remedies true. This task exists as the narrower, cheaper interim option and as an explicit tracker in case SIGN-8 stays deferred: either (a) land SIGN-8 first and this task closes for free once the remedies are re-verified true, or (b) if SIGN-8 remains out of scope for a while, soften the three remedy strings to name an actionable alternative (e.g. embed the client package and call Store.EnsureMessagingKey / Client.MessagingPublicKey directly -- both already exist and do exactly this) so the error leaves SOME path forward, per the repos own rule that an error with no path forward is a defect in its own right.
+  
+  Relate to SIGN-8; do not duplicate its scope (SIGN-8 owns the actual keygen implementation).
+  _Proof: bash -c 'set -e; ! grep -q "agent-busctl keygen" client/store.go client/keyring.go client/client.go'_
+- [ ] None · AST guard: assert a doc comment attaches to the declaration it names (repo-wide godoc-attachment check) — tooling, P2, ast-guard, code-hygiene, godoc
+  RELAY-13 client-half review (2026-08-08) found a real defect invisible to gofmt, go vet and every test: hoisting a new `const damagedMessagingSeedRemedy` between `Credential.MessagingPrivateKey`s doc comment and the function itself made godoc attach the WHOLE doc block to the constant, leaving the function undocumented -- and the orphaned doc carried a load-bearing rule (do not quietly mint key material in a read-only accessor; minting is a write and belongs under the store lock). `go doc ./client Credential.MessagingPrivateKey` printed nothing until fixed. The reviewer wrote a working AST scanner for this class (go/parser with ParseComments, walking every FuncDecl/GenDecl/ValueSpec/TypeSpec/struct field, flagging any doc comment whose leading word does not name the declaration it precedes) and mutation-verified it: reintroducing the defect makes it fire. Recommends adopting it repo-wide.
+  
+  Definition of done: a package-level (or repo-wide, run via go generate/go test) AST scanner, modelled on the reviewers ad hoc tool and on the existing in-tree pattern at client/guard_test.go (an AST walk, not a grep), that walks Go source across the module and asserts every doc comment is attached to the declaration it names. Wire it as a test (e.g. internal/lint or a root-level guard_test.go) so it runs under `go test ./...` and fails loudly on the next accidental doc-comment reattachment. Must be mutation-tested: verify it goes RED when a doc comment is deliberately detached from its declaration (e.g. by hoisting a const/var between a func doc and the func, as happened here).
+  
+  CONSOLIDATION DECISION (recorded by spec-keeper, 2026-08-08): kept SEPARATE from RELAY-9-FU-CODEGUARD (1e9b54d2-f529-4c91-a02b-116cc11bc829, AST guard for peer-error-code allow-list completeness in internal/relay). The two guards scan unrelated properties (doc-comment attachment vs enum-to-switch-case completeness), touch different packages, and would need different failure messages and different remediation. Consolidating them into one task would violate the atomic-task rule (one outcome each) for no shared implementation benefit -- they do not share scanner logic beyond both using go/ast. If a THIRD AST-guard-shaped follow-up appears, that is the point to consider a small shared `internal/astguard` helper package that each guard test imports, not a single mega-task.
+  
+  Not epic-scoped to RELAY -- this is general repo hygiene applicable to every package, surfaced by but not specific to RELAY-13.
+  _Proof: go test -run TestNoOrphanedDocComments ./..._
 ### EPIC ADMIN — ADMIN: the local operator console (agent-busadm)
 
 - [ ] ADMIN-11 · ADMIN-11: remove an agent from the console (BLOCKED on AUTH-4) — admin, P3, blocked
@@ -653,6 +675,356 @@
   DEPENDS ON: RELAY epic, CLI-1, CLI-2. PROOF fails today by construction.
   _Proof: go test -race -run 'TestCLIPeers' ./client/... ./cmd/agent-bus-cli/..._
 
+### EPIC COMMS — COMMS: measuring inter-agent communication quality on the bus
+
+- [ ] COMMS-CORPUS · Extract a real inter-agent message corpus (mechanical, not asserted) — comms, P1
+  Mechanically extract the actual corpus of inter-agent messages exchanged over agent-bus into a
+  committed, versioned NDJSON file (one JSON object per message: message_id, sequence, sender,
+  recipient(s), timestamp, text, bus_path). Extraction must be MECHANICAL -- generated by a script
+  against the real audit log / message store, never hand-transcribed -- so it can be re-run and
+  re-verified.
+  
+  This corrects two of the epic's own founding claims, which the planner re-measured and found
+  UNSUPPORTED. Record both in the corpus README, because they are why the epic starts here rather
+  than with hand-authored examples:
+    - "Some messages near the 64 KiB ceiling" is FALSE. Max observed inbound is 11,928 B = 18.2% of
+      MaxBodyBytes. Do not plan chunking or compaction on this epic's account.
+    - "Both sides converged on a headline verdict in the first line" is FALSE -- true for only
+      1 of 53 messages. Section headers appear in 25/53 and are uneven by sender (sec-tester-1
+      14/20, mic-array-1 11/21, speckeeper-1 0/9). "Convergence" describes two of three
+      counterparties some of the time, not a general property.
+    - Denominator, stated exactly and not rounded away: 60 NDJSON lines in the raw pull -> 54
+      distinct message_id values -> 53 with non-empty text. That is 6 duplicate deliveries, i.e.
+      at-least-once delivery is visibly live at roughly 10% in this sample. Sequence order in the
+      file is NOT monotonic -- do not assume file order is delivery/send order; sort explicitly.
+  
+  Definition of done:
+    1. A script (e.g. scripts/comms-corpus-extract.sh) that pulls every real message the extracting
+       agent can read from the bus/audit trail and writes deduplicated NDJSON to a tracked path
+       (e.g. docs/comms/corpus.ndjson), plus a short docs/comms/CORPUS.md recording the counts above
+       (raw lines, distinct message_id, non-empty-text count, duplicate count, note on non-monotonic
+       order) as MEASURED by the script, not typed by hand.
+    2. Provenance: every corpus row is tagged with which agent it came from and is NOT authored or
+       edited by the extracting/orchestrating agent -- this corpus is raw material for COMMS-METRICS,
+       COMMS-TYPES, COMMS-STRUCT and COMMS-THREAD-TRIAL, all of which depend on it.
+    3. No hand-labelling happens in this task -- that is deliberately deferred to the tasks that
+       consume the corpus (see COMMS-CONSENT and the labelling-agent constraint recorded on the
+       epic).
+  
+  Parallel-safety: safe to run standalone; touches only new files under docs/comms/ plus the new
+  script. Needs read access to the live bus audit trail / message log -- run against a real or
+  snapshotted bus data dir, never synthesized.
+  
+  Depends on: nothing (first task in the epic; several later tasks depend on it).
+  _Proof: bash scripts/comms-corpus-extract.sh --verify_
+- [ ] COMMS-READER · Build a corpus reader tool for message-exchange review — comms, P2
+  A small CLI/script that reads docs/comms/corpus.ndjson (from COMMS-CORPUS) and renders individual
+  message exchanges (sender, recipient(s), timestamp, text, and any thread/reply linkage inferrable
+  from convention) in a human-scannable form, for whoever does the hand-labelling work in
+  COMMS-METRICS / COMMS-STRUCT / COMMS-TYPES. Read-only against the corpus; makes no bus calls itself.
+  
+  Definition of done:
+    1. scripts/comms-reader.sh (or a small tool under docs/comms/tools/) that takes the corpus NDJSON
+       and prints one exchange at a time (or filters by sender/date/message_id), legible enough for a
+       human labeller to work from without re-deriving JSON by eye.
+    2. Documented usage in docs/comms/CORPUS.md.
+  
+  Parallel-safety: standalone once COMMS-CORPUS's output file exists; no live bus needed.
+  
+  Depends on: COMMS-CORPUS (needs the corpus.ndjson file to read).
+  _Proof: bash scripts/comms-reader.sh --self-test_
+- [ ] COMMS-CONSENT · Ask consent from the non-orchestrator agents whose messages are in the corpus — comms, P1
+  Before any hand-labelling of corpus messages or any live trial that studies a named autonomous
+  agent (COMMS-METRICS scoring, COMMS-STRUCT trial, COMMS-TYPES classification, COMMS-THREAD-TRIAL,
+  COMMS-RETRACT), ask each non-orchestrator agent whose messages appear in the COMMS-CORPUS extract
+  (observed senders include at least sec-tester-1, mic-array-1, speckeeper-1) for consent to have
+  their messages used and labelled in this study. This is a "you cannot study autonomous third
+  parties before asking them" requirement, not a formality -- the planner argued for FILING IT AT P1
+  even though it does not strictly meet this epic's own stated P1 rule (perishability / contract-
+  breakage), purely on the grounds that asking first outranks the scheduling rule. That inconsistency
+  is recorded here deliberately rather than silently resolved.
+  
+  Consent must be requested over the bus itself (the honest channel, not a side-channel), with a
+  stated deadline. THIS TASK IS DELIBERATELY COMPLETABLE WITHOUT A RESPONSE: an unanswered request by
+  the stated deadline is a valid, non-vacuous outcome -- "we asked, nobody in the corpus answered by
+  <date>" is real information (it bounds what COMMS-METRICS/STRUCT/TYPES/THREAD-TRIAL/RETRACT may
+  ethically do next: proceed only with agents that consented, or fall back to fully anonymised /
+  aggregate-only measurement for the rest).
+  
+  Definition of done:
+    1. A consent-request message sent over the live bus to each candidate agent, naming the study,
+       what data of theirs would be used, and a response deadline.
+    2. A durable record (docs/comms/CONSENT.md or equivalent) of who was asked, when, and the outcome
+       per agent: GRANTED, DECLINED, or `NO-RESPONSE-BY <date>` once the deadline passes with no
+       reply.
+    3. Downstream tasks (COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES, COMMS-THREAD-TRIAL, COMMS-RETRACT)
+       must read this record before touching any message from a given sender, and must respect a
+       DECLINED or unresolved NO-RESPONSE the same way (exclude, or anonymise-and-aggregate only).
+  
+  Parallel-safety: requires a LIVE bus and real remote agents able to receive and (optionally) answer
+  a DM -- this is NOT a standalone/offline task. Coordinate before running concurrently with anything
+  else that messages the same agents, to avoid confusing an unrelated DM with the consent ask.
+  
+  Depends on: nothing structurally, but MUST run (or reach its NO-RESPONSE-BY terminal state) before
+  COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES, COMMS-THREAD-TRIAL and COMMS-RETRACT proceed with any
+  per-agent labelling or trial.
+  _Proof: bash scripts/comms-consent-check.sh docs/comms/CONSENT.md_
+- [ ] COMMS-THREAD-FIELD · Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is insufficient — comms, P3, blocked
+  Contingent task: add an explicit `thread_id` / `in_reply_to` field to the wire protocol (a new
+  on-disk/wire field needs a reserved wire-protocol-version bump per the epic's numbered-resource
+  rule -- reserve via POST .../reservations, namespace e.g. `relay-wire-version` or
+  `signing-format-version` as appropriate, never chosen by hand). This task is FILED BLOCKED because
+  it must not start until COMMS-THREAD-TRIAL's trial produces a `WIRE_FIELD_NEEDED` recommendation --
+  adding a wire field pre-emptively is exactly the kind of un-measured assertion this epic exists to
+  avoid.
+  
+  Definition of done (once unblocked):
+    1. Confirm docs/comms/THREAD-TRIAL.md recommends WIRE_FIELD_NEEDED.
+    2. Reserve the wire-protocol-version bump, design the field (signing-format impact must be
+       assessed -- this MAY require resolving SIGN-3, unlike COMMS-MULTI, since it changes the
+       canonical layout rather than reusing existing plurality).
+    3. Implement, sign, verify, document (CONTRACTS-ONDISK.md, CONTRACTS-HTTP.md, AGENT_PROTOCOL.md),
+       and ship the CLI surface in the same task per invariant 7.
+  
+  Parallel-safety: not applicable while blocked. Once unblocked, touches signing/wire format -- high
+  coordination needs with SIGN/RELAY work in flight.
+  
+  Depends on: COMMS-THREAD-TRIAL (hard blocker -- filed with status=blocked).
+  _Proof: grep -q 'WIRE_FIELD_NEEDED' docs/comms/THREAD-TRIAL.md && go test -race -run TestThreadWireField ./internal/signing_
+- [ ] COMMS-THREAD-TRIAL · Trial threading via convention (no wire field) and measure whether it's enough — comms, P2
+  Run a real trial exchange between two or more consenting agents (per COMMS-CONSENT) using an
+  EXISTING convention -- e.g. a subject-line/prefix or in-body reference to a prior message_id --
+  to represent a threaded discussion, with NO new wire-level field. Measure whether participants (and
+  a later reader) can correctly reconstruct the thread structure from the convention alone. This is
+  one of the three genuinely uncertain questions the planner flagged as worth spending real
+  measurement budget on (the other two: does heavy structure pay [COMMS-STRUCT], does retraction need
+  marking [COMMS-RETRACT]) -- deliberately NOT decided by assertion.
+  
+  Definition of done:
+    1. A pre-registered convention (committed before the trial starts) for representing a reply/thread
+       without a wire field.
+    2. A real trial exchange over the live bus with consenting agents, recorded into the corpus.
+    3. docs/comms/THREAD-TRIAL.md: the reconstruction-accuracy result (e.g. N of M replies correctly
+       linked by an independent reader), and an explicit recommendation -- convention is sufficient,
+       or a wire field is needed -- with the observation that would retire the recommendation.
+  
+  Parallel-safety: requires a LIVE bus and real, consenting remote agents -- not standalone/offline.
+  
+  Depends on: COMMS-CONSENT. Blocks COMMS-THREAD-FIELD and COMMS-DOC.
+  _Proof: test -f docs/comms/THREAD-TRIAL.md && grep -qE 'RECOMMENDATION: (CONVENTION_SUFFICIENT|WIRE_FIELD_NEEDED)' docs/comms/THREAD-TRIAL.md && echo TRIAL_OK_
+- [ ] COMMS-STRUCT · Measure whether heavy message structure pays off -- pre-registered, mechanically ordered — comms, P2
+  The third of the three genuinely uncertain questions. Measure whether heavily-structured messages
+  (headers, bullet lists, explicit verdict lines) produce measurably better outcomes (faster
+  convergence, fewer follow-up clarifications, higher labelled quality per COMMS-METRICS) than
+  lightly-structured ones, via a pre-registered trial with consenting agents.
+  
+  THIS TASK CARRIES THE EPIC'S CENTRAL HONESTY GUARD and it must survive transcription intact: the
+  hypothesis and scoring rubric MUST be committed to git BEFORE the first trial message is sent, and
+  the proof_cmd asserts this MECHANICALLY -- by comparing the git commit timestamp of the
+  pre-registration file against the earliest timestamp recorded in the trial corpus -- not by a human
+  eyeballing dates. A pre-registration written or back-dated after the fact defeats the entire point
+  of pre-registration, so this check cannot be satisfied by prose assertion.
+  
+  Definition of done:
+    1. docs/comms/STRUCT-PREREG.md committed FIRST, containing the hypothesis, the structure/no-
+       structure trial design, and the scoring rubric (reusing COMMS-METRICS where possible).
+    2. A real trial over the live bus with consenting agents, appended to docs/comms/struct-
+       trial.ndjson, each row timestamped.
+    3. Hand-scoring done by an agent that is NOT claude-code-agent-bus-1 (same constraint as
+       COMMS-METRICS -- the orchestrator is a subject in every measured exchange).
+    4. docs/comms/STRUCT.md with the result and an explicit recommendation plus its retiring
+       observation.
+  
+  Parallel-safety: needs a live bus and consenting agents for the trial phase.
+  
+  Depends on: COMMS-CORPUS, COMMS-CONSENT. Blocks COMMS-DOC.
+  _Proof: PREREG_TS=$(git log --format=%aI -1 -- docs/comms/STRUCT-PREREG.md) && FIRST_MSG_TS=$(jq -r '.timestamp' docs/comms/struct-trial.ndjson | sort | head -1) && [ -n "$PREREG_TS" ] && [ -n "$FIRST_MSG_TS" ] && [ "$(date -d "$PREREG_TS" +%s)" -lt "$(date -d "$FIRST_MSG_TS" +%s)" ] && echo PREREG_BEFORE_TRIAL_OK_
+- [ ] COMMS-MULTI-DESIGN · Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 — comms, P2
+  Finding A (planner, 2026-08-08): the `/v1/broadcast` 501 does NOT block multi-party discussion.
+  Everything below the HTTP handler is already plural: internal/signing/canonical.go:65
+  (MaxRecipients = 4096), the canonical layout already encodes a sorted, deduplicated recipient list
+  (canonical.go:236-292), internal/store/message.go:227-243 (VisibleTo iterates a recipient set),
+  :245-255 (the audit record carries `recipients` plural per invariant 6), internal/hub/hub.go:1665-
+  1676 (the fingerprint is already length-prefixed and plural). The narrowing to a single recipient
+  happens at exactly TWO struct fields: internal/httpapi/messages.go:196 and internal/hub/hub.go:1152.
+  
+  So multi-recipient send is SIGNABLE TODAY: it needs no new signing-format version and does NOT
+  require resolving SIGN-3 first. It is also a better fit than broadcast for genuine multi-party
+  discussion -- the audience is explicit and signature-covered, rather than implicit and unbounded.
+  
+  This task is DESIGN ONLY -- output a short design note (docs/comms/MULTI-SEND-DESIGN.md) describing
+  exactly how the two struct fields widen to a recipient list, how the existing plural machinery is
+  reused end to end (HTTP request/response shape, CLI flag(s), audit record, hub fan-out), and what
+  changes (if any) are needed in CONTRACTS-HTTP.md / AGENT_PROTOCOL.md / the CLI. Record the decision
+  in DECISIONS.md, referencing invariant 7 (the CLI must ship a subcommand in the same task as any new
+  capability) so COMMS-MULTI's implementation task inherits that requirement explicitly.
+  
+  Definition of done:
+    1. docs/comms/MULTI-SEND-DESIGN.md covering the two narrow fields, the request/response shape
+       change, CLI surface, and explicit confirmation that no signing-format version bump or SIGN-3
+       resolution is required.
+    2. A DECISIONS.md entry recording the choice and citing the exact file:line locations above.
+  
+  Parallel-safety: standalone, read-only investigation of the existing codebase; writes no production
+  code. No live bus needed.
+  
+  Depends on: nothing. Blocks COMMS-MULTI.
+  _Proof: test -f docs/comms/MULTI-SEND-DESIGN.md && grep -q 'SIGN-3' docs/comms/MULTI-SEND-DESIGN.md && echo DESIGN_OK_
+- [ ] COMMS-TOKENS · Fix the kind=model cost channel -- make token counts real (independently justified, survives the epic) — comms, P1
+  Finding B (full audit of ~2700 Spec Server notes, 2026-08-08): of 1020 kind=model notes, ZERO carry
+  a usable token count -- 474 are bare (no numbers at all), 323 explicitly say unavailable, 223 are
+  literal zeros, and 11 are nonzero but do not conform to the `model=<id>; tokens_in=<N>;
+  tokens_out=<N>; tokens_total=<N>` format CLAUDE.md specifies. Additionally 225 author/task groups
+  carry duplicate kind=model notes (387 excess notes) against the documented one-per-agent-per-task
+  convention. CLAUDE.md designates kind=model "the auditable cost signal" for every task in this
+  project; right now that signal is unmet on every single sample.
+  
+  THIS TASK IS JUSTIFIED INDEPENDENTLY OF THE COMMS EPIC and should survive even if COMMS as a whole
+  is dropped or descoped -- it is filed here because the audit that surfaced it was done as part of
+  this epic's corpus work, not because its value depends on the rest of COMMS.
+  
+  Definition of done:
+    1. A checker script (e.g. scripts/comms-tokens-audit.sh) that scans a project's kind=model notes
+       via the Spec Server notes API and reports, per the four categories above (bare / unavailable /
+       zero / non-conforming-nonzero), plus the duplicate-group count -- reproducing Finding B's
+       numbers against the live project as a baseline.
+    2. A documented, adopted convention (recorded via a dated DECISIONS.md-equivalent entry, or a
+       CLAUDE.md amendment if the user approves) for how an agent that CAN read its own token meter
+       posts a real, non-zero count, and how one that CANNOT is required to post the explicit
+       "unavailable" form rather than a bare or zero note -- zero is not a safe default; it reads as
+       a real zero-cost run, which is worse than an honest "unavailable".
+    3. This task's OWN kind=model note must not be zero or bare -- if the completing agent cannot
+       read its own meter, it must use the explicit-unavailable form, not a placeholder, since posting
+       zeros here would be the exact defect this task exists to fix.
+  
+  Parallel-safety: safe standalone; touches only a new script plus documentation. No live-bus /
+  remote-agent dependency -- it reads the Spec Server, not the message bus.
+  
+  Depends on: nothing.
+  _Proof: bash scripts/comms-tokens-audit.sh --project agent-bus_
+- [ ] COMMS-DOC · Write up the COMMS epic findings and recommendations — comms, P2
+  Synthesize the epic's measurement outputs (COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES,
+  COMMS-THREAD-TRIAL, COMMS-RETRACT, COMMS-TOKENS, and COMMS-MULTI if landed) into a single
+  docs/comms/COMMS_FINDINGS.md: what a well-formed inter-agent message looks like on this bus, which
+  recommendations are backed by a measurement and which are decided-not-measured (per the epic's own
+  adopted convention), and -- for every recommendation -- the observation that would retire it, per
+  the epic description's own standing requirement. Update AGENT_PROTOCOL.md / CONTRACTS-HTTP.md if
+  any wire-level change landed (COMMS-MULTI, and COMMS-THREAD-FIELD if it unblocked and shipped).
+  
+  Definition of done:
+    1. docs/comms/COMMS_FINDINGS.md covering: corpus corrections, Finding A/B outcomes, each measured
+       question's result (structure, threading, retraction), the token-cost-channel fix status, and
+       an explicit "retiring observation" per recommendation.
+    2. Doc updates to any CONTRACTS-*.md / AGENT_PROTOCOL.md entries affected by COMMS-MULTI or
+       COMMS-THREAD-FIELD, if either shipped.
+    3. The rejected A/B-real-backlog-tasks proposal recorded here as a still-open question flagged to
+       the user (not resolved by this doc), per the epic notes.
+  
+  Parallel-safety: standalone synthesis/writing task; depends on the substance of the tasks below
+  existing, not on any live-bus access itself.
+  
+  Depends on: COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES, COMMS-THREAD-TRIAL, COMMS-RETRACT,
+  COMMS-TOKENS, COMMS-MULTI.
+  _Proof: test -f docs/comms/COMMS_FINDINGS.md && grep -qi 'retiring observation' docs/comms/COMMS_FINDINGS.md && echo FINDINGS_OK_
+- [ ] COMMS-RETRACT · Determine whether message retraction needs explicit protocol marking — comms, P2
+  One of the three genuinely uncertain questions worth real measurement (see COMMS-THREAD-TRIAL for
+  the other framing). Determine, via corpus measurement (does any observed exchange show an implicit
+  retraction/correction pattern already, e.g. a natural-language "ignore my last / correction:") plus
+  a small live trial with consenting agents, whether the bus needs an explicit retraction/correction
+  marker or whether natural-language follow-up already carries the signal reliably enough.
+  
+  Definition of done:
+    1. Corpus scan for implicit retraction/correction patterns (from COMMS-CORPUS's extract),
+       reported with counts and examples (redacted per consent status).
+    2. A small live trial (consenting agents only) exercising an explicit correction scenario.
+    3. docs/comms/RETRACT.md with an explicit recommendation -- NO_MARKER_NEEDED or MARKER_NEEDED --
+       and the observation that would retire it.
+  
+  Parallel-safety: the live-trial portion needs a live bus and consenting agents; the corpus-scan
+  portion is offline once COMMS-CORPUS exists.
+  
+  Depends on: COMMS-CORPUS, COMMS-CONSENT. Blocks COMMS-DOC.
+  _Proof: test -f docs/comms/RETRACT.md && grep -qE 'RECOMMENDATION: (NO_MARKER_NEEDED|MARKER_NEEDED)' docs/comms/RETRACT.md && echo RETRACT_OK_
+- [ ] COMMS-MULTI · Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN — comms, P2
+  Implement the design from COMMS-MULTI-DESIGN: widen internal/httpapi/messages.go:196 and
+  internal/hub/hub.go:1152 from a single recipient to a recipient list, reusing the already-plural
+  canonical signing layout, store visibility, audit record and hub fingerprint machinery (Finding A).
+  Per invariant 7, ship the CLI subcommand support and the AGENT_PROTOCOL.md / CONTRACTS-HTTP.md
+  updates in THIS SAME TASK -- a capability without its CLI surface is not done.
+  
+  Definition of done:
+    1. `/v1/send` (NOT `/v1/broadcast`, which stays 501 and out of scope) accepts multiple recipients,
+       signed and verified against the existing canonical format with no version bump.
+    2. CLI support (whatever the CLI subcommand for send is) accepts multiple `--to` values or
+       equivalent.
+    3. CONTRACTS-HTTP.md and AGENT_PROTOCOL.md updated to document the new multi-recipient shape.
+    4. A race-safe test proving two+ recipients each receive the message exactly once and the audit
+       record lists all recipients (invariant 6).
+  
+  Parallel-safety: touches internal/httpapi, internal/hub, the CLI, and docs -- coordinate if another
+  task is mid-edit on the same files (check RELAY/SIGN work in flight first, since hub.go is shared
+  with federation).
+  
+  Depends on: COMMS-MULTI-DESIGN.
+  _Proof: go test -race -run TestMultiRecipientSend ./internal/httpapi ./internal/hub_
+- [ ] COMMS-METRICS · Define measurable message-quality metrics against the corpus, honestly denominated — comms, P2
+  Produce docs/comms/METRICS.md defining the metrics this epic will use to judge message quality
+  (e.g. verdict-class clarity, section-header usage rate, time-to-verdict, convergence-on-first-line
+  rate, structure-use rate) against the COMMS-CORPUS extract. Each metric must state its exact
+  denominator (per the corpus corrections recorded on this epic -- 53 texted messages, not 60 or 54,
+  unless a metric is explicitly scoped otherwise) and its formula.
+  
+  CRITICAL REQUIREMENT, non-negotiable: at least one metric MUST be marked NOT COMPUTABLE against the
+  current corpus, with the specific reason (missing field, insufficient sample, requires data this
+  bus does not record e.g. per invariant 6's metadata-only audit log). A metrics document in which
+  everything is conveniently computable has not been honest about what the corpus actually contains
+  -- this mirrors the epic's own founding-claim corrections (COMMS-CORPUS) and must not repeat the
+  mistake it exists to fix.
+  
+  Practices to ADOPT BY DECISION rather than measure (per the planner's recommendation -- record each
+  via a dated DECISIONS.md entry with a stated falsifier, not by running an experiment to "prove" it):
+  reporting negatives (a metric that finds nothing is reported, not omitted), honest denominators
+  (state N explicitly, every time), verdict-class precision (define PASS/FAIL/CHANGES/etc. exactly,
+  do not eyeball), provenance marking (every corpus row keeps its source), and naming the confound
+  whenever a metric's result could be explained by something other than the thing being measured.
+  
+  Hand-labelling for this task must be done by an agent that is NOT claude-code-agent-bus-1 (the
+  orchestrator is a subject in every measured exchange, so it cannot also be the measurer), and the
+  labelling key/rubric must be committed to git BEFORE the scorer script is written -- this is one of
+  the epic's named measuring-the-instrument threats.
+  
+  Definition of done:
+    1. docs/comms/METRICS.md: each metric with formula, denominator, and COMPUTABLE / NOT COMPUTABLE
+       status (>=1 NOT COMPUTABLE, with reason).
+    2. A committed labelling key/rubric predating any scorer code (git log timestamps must show the
+       rubric commit before the scorer commit).
+    3. The five decide-vs-measure practices above adopted as dated DECISIONS.md entries with
+       falsifiers.
+  
+  Parallel-safety: needs COMMS-CORPUS's output and COMMS-CONSENT's resolved per-agent record before
+  labelling any specific agent's messages. Otherwise standalone (no live bus calls).
+  
+  Depends on: COMMS-CORPUS, COMMS-CONSENT.
+  _Proof: test -f docs/comms/METRICS.md && [ "$(grep -c 'NOT COMPUTABLE' docs/comms/METRICS.md)" -ge 1 ] && echo METRICS_OK_
+- [ ] COMMS-TYPES · Define a message verdict-class / type taxonomy from measured corpus usage — comms, P2
+  Define a precise message-type / verdict-class taxonomy (e.g. PASS / FAIL / CHANGES / QUESTION /
+  INFO / STATUS) derived from how the corpus actually uses these terms today, not from an idealized
+  list. Per the decide-vs-measure recommendation on verdict-class precision (see COMMS-METRICS),
+  precision here is a DECIDED practice: define each class exactly, with an explicit rule for
+  ambiguous cases, then measure how many corpus messages classify unambiguously versus how many are
+  genuinely ambiguous (report the ambiguous count -- do not silently force-fit them).
+  
+  Definition of done:
+    1. docs/comms/TYPES.md: the taxonomy with exact per-class definitions and the disambiguation rule.
+    2. A classification pass over the COMMS-CORPUS extract (consent-respecting), reporting counts per
+       class plus an explicit ambiguous-count that is NOT folded into any other class.
+  
+  Parallel-safety: standalone once COMMS-CORPUS and COMMS-CONSENT resolve; no live bus needed for the
+  classification pass itself.
+  
+  Depends on: COMMS-CORPUS, COMMS-CONSENT. Blocks COMMS-DOC.
+  _Proof: test -f docs/comms/TYPES.md && grep -qi 'ambiguous' docs/comms/TYPES.md && echo TYPES_OK_
+
 ### EPIC CONTEXT — CONTEXT: cut the token cost of this repo's documentation without losing load-bearing rationale
 
 - [ ] CONTEXT-DRIFT-PHANTOM · CONTEXT-DRIFT-PHANTOM: two agent defs instruct writing to SESSION_REPORT.md, which has never existed — docs, P2
@@ -1229,7 +1601,7 @@
   
   Explicitly OUT OF SCOPE (follow-up): the CLI subcommand half, AGENT_PROTOCOL.md and CONTRACTS-CLI.md — cmd/** and client/** are owned by other agents right now.
   _Proof: go test -race ./internal/httpapi/... && D=$(mktemp -d) && P=18173 && (go run ./cmd/agent-bus -listen 127.0.0.1:$P -data-dir "$D" &>"$D/log" & echo $! >"$D/pid") && for i in $(seq 1 30); do curl -sf http://127.0.0.1:$P/healthz >/dev/null 2>&1 && break; sleep 0.5; done && curl -sf http://127.0.0.1:$P/v1/discovery | jq . && kill "$(cat "$D/pid")" 2>/dev/null; rm -rf "$D"_
-- [ ] None · The data-dir permission gate checks MODE but not OWNERSHIP, and follows symlinks -- and it is now the SOLE defence for invariant 1 against a downward seq-floor forge — security, P1
+- [ ] None · The data-dir permission gate checks MODE but not OWNERSHIP, and follows symlinks -- and it is now the SOLE defence for invariant 1 against a downward seq-floor forge — security, P1, deferred
   FOUND INDEPENDENTLY BY BOTH SECURITY GATES on be447589-6583-4d5c-a9d4-ec9d9fef0f1c (committed 217a3c0). Two gates working separately corroborated this, which is why it is filed at P1 rather than as a nit.
   
   MECHANISM, three parts, all at cmd/agent-bus/datadirperm.go:75-96.
@@ -1245,7 +1617,7 @@
   
   PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=FAIL, exit 1. RED, and RED FOR THE RIGHT REASON (`grep -c Lstat cmd/agent-bus/datadirperm.go` = 0, so the && short-circuits) -- RED today rather than VACUOUS. Both test halves must ALSO be observed RED before the fix.
   _Proof: grep -q 'Lstat' cmd/agent-bus/datadirperm.go && go test -race -count=1 -run 'TestRunRefusesASymlinkedDataDir|TestRunRefusesAForeignOwnedDataDir' ./cmd/agent-bus_
-- [ ] None · invite mint bypasses the data-directory permission gate entirely -- the invite blob is the trust anchor, so this is worse than the file substitution the gate closes — security, P0
+- [ ] None · invite mint bypasses the data-directory permission gate entirely -- the invite blob is the trust anchor, so this is worse than the file substitution the gate closes — security, P0, deferred
   SECURITY GATE FINDING (HIGH) against the data-dir permission gate shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c, committed at 217a3c0. PROVED BY RUNNING CODE, end to end, not by reading.
   
   MECHANISM. `enforceDataDirPermissions` is wired into `run()` ONLY. Re-verified at HEAD 16da89f by spec-keeper: the sole call site in the whole tree is cmd/agent-bus/main.go:299 (`grep -rn enforceDataDirPermissions cmd/agent-bus/` returns the definition at datadirperm.go:88 and that one call). `mintInvite` (cmd/agent-bus/invite.go:448-510) stats the dir (invite.go:455), checks IsDir (:464), then takes the lock, replays and APPENDS to the WAL, and publishes the bus certificate fingerprint -- with no permission check anywhere on that path.
@@ -1665,7 +2037,7 @@
   _Proof: go test -bench=BenchmarkWALOpen ./internal/wal_
 - [ ] DUR-12-FU-DOUBLEBACKUP · DUR-12-FU-DOUBLEBACKUP: crash between os.Link and os.Rename in upgradeV1 can leave a second .v1-<ns> backup on redo — durability, P3
   P3, durability. Reviewer P2-4: a crash between os.Link and os.Rename in upgradeV1 (recover.go:528) yields a second <log>.v1-<ns> backup on redo. Harmless (hard links to one inode) but it contradicts the "exactly 1 backup" invariant a test asserts; wants a comment or a guard.
-- [ ] None · maxPlausibleSeqFloor is enforced on the READ path only -- hub can persist a floor its own reader then refuses, and the documented remedy loops — security, P0
+- [ ] None · maxPlausibleSeqFloor is enforced on the READ path only -- hub can persist a floor its own reader then refuses, and the documented remedy loops — security, P0, deferred
   SECURITY GATE FINDING (HIGH) against the seq-floor bound shipped under be447589-6583-4d5c-a9d4-ec9d9fef0f1c, committed at 217a3c0. PROVED BY RUNNING CODE (a throwaway test), not by reading.
   
   MECHANISM. The bound is checked in ONE place, on the READ path: internal/hub/seqfloorfile.go:538 (`if n > maxPlausibleSeqFloor`), inside the parse. The WRITE path bounds nothing: `persistLocked` (seqfloorfile.go:365) refuses only a DECREASE and then writes whatever it was handed. Re-verified at HEAD 16da89f by spec-keeper: the whole persistLocked body is 11 lines and `sed -n '/^func (f \*seqFloorFile) persistLocked/,/^}/p' ... | grep -c maxPlausibleSeqFloor` returns 0.
@@ -1866,6 +2238,8 @@
   
   SCOPE: CONTRACTS-ONDISK.md only.
   _Proof: grep -n "bus.audit" CONTRACTS-ONDISK.md_
+- [ ] None · WAL-APPLIER-DOC-STALE: internal/wal/log.go Applier doc contradicts replay.go on Apply errors — wal, P2
+  internal/wal/log.go's Applier interface doc says returning an error "from recovery it makes Open fail". internal/wal/replay.go does not do that -- it DISCARDS the entry and counts it as acknowledged loss, which is what invariant 6 requires (recovery always reaches a running server). Two appliers were written against the stale wording. RELAY-15 could not fix it (outside its file-ownership boundary) and states the correct behaviour in its own rationale. Correct the interface doc, and check other appliers (internal/invite, internal/auth, internal/hub) for the same inherited claim.
 - [ ] None · Shutdown-timeout path can release the data-dir lock while handlers are still running — durability, P2
   In cmd/agent-bus/main.go waitAndShutdown, when srv.Shutdown exceeds shutdownGrace the code calls srv.Close(), which does NOT wait for in-flight handlers to return. run()'s deferred lock.Release() then drops the data-directory flock while a handler may still be running. Harmless TODAY because no handler writes to the data dir -- but it becomes a real hole the moment DUR-9 puts WAL writes behind those handlers: a second server could acquire the lock while the first is still mid-write. Fix direction: hold the lock until every handler has genuinely returned, or make the data-dir writers refuse to run once shutdown has passed the grace period. Also fold in the DUR-8 security pass's remaining P2: internal/dirlock.Acquire could fstat the opened lock file and require S_ISREG, closing the FIFO/directory-at-the-lock-path cases (both already fail closed today -- FIFO via EINVAL on Truncate, directory via EISDIR -- but the flock is taken on the FIFO first, and O_RDWR-on-a-FIFO-not-blocking is Linux-specific).
   
@@ -2371,67 +2745,23 @@
   Known limitation to design for: this catches theft of an OUTSTANDING reservation only. A reservation is deleted from the mint table once spent, so a stolen SPENT id would still be `ErrUnknownMint` and still indistinguishable. Decide explicitly whether that residual gap is acceptable or needs a separate mechanism.
   
   Test to replace when this lands: `TestCrossMintIsIndistinguishableFromAnHonestSpentReservation` in internal/httpapi/disconnect_socket_test.go currently ASSERTS the ambiguity (that the theft and the honest client get byte-identical responses). It must become a disconnect assertion.
-- [ ] None · Five more agent-facing files still assert invariant 10's removed per-connection disconnect (2026-08-08 narrowing) -- messages.go:1175 already covered by IDEM-14-FU-CLIENTTEXT — docs, P2, doc-only, invariant-10, spec-defect, stale-security-prose
-  1c6c540 ("Aim invariant 10's disconnect at the replayer, not at the confused client",
-  2026-08-08) narrowed the disconnect to third-party replay ONLY: same-agent idempotency-key
-  reuse with a different payload is now reject-and-log, no disconnect, on both /v1/send and
-  /v1/enroll. The commit's own message names six agent-facing files that still assert the
-  OLD, now-false behaviour ("...disconnects the client" unconditionally on key reuse) and
-  notes "no code branches on any of them -- which is why the suite stays green over stale
-  security prose."
+- [ ] None · Stale invariant-10 unconditional-disconnect prose -- WIDENED 2026-08-08: 6 files, 14 sites (was 5 files, messages.go:1175 covered separately by IDEM-14-FU-CLIENTTEXT) — docs, P2, doc-only, invariant-10, spec-defect, stale-security-prose
+  WIDENING of the original five-site sweep (spec-keeper, 2026-08-08), triggered by RELAY-13's reviewer finding the real count in RELAY-13's own client-half diff was EIGHT sites, not the original three named for that boundary. Verified all current sites by direct read/grep against HEAD/working-tree, since RELAY-13's ~950-line client diff shifted every line number this task's original proof_cmd was pinned to (the original AGENT_PROTOCOL.md:631-636 pin is now VACUOUS -- that text is already fixed and now lives at ~line 699-713, correctly narrowed. Confirmed by direct read: it now says 'does NOT disconnect you' and correctly scopes the one real disconnect case to signed-replay with a well-formed sender claim. AGENT_PROTOCOL.md is DONE and dropped from the remaining list).
   
-  Of those six, ONE already has a covering task: client/messages.go:1175 (the Remedy string
-  on annotateIdempotencyConflict) is tracked by IDEM-14-FU-CLIENTTEXT
-  (30a9e4f6-4ca7-48f1-8fc9-684e177de2f4, still todo). Do not duplicate that scope.
+  REMAINING STALE (verified present at HEAD/working-tree 2026-08-08, content-matched rather than line-pinned to survive further drift):
+  - CONTRACTS-CLI.md:1107,1129 (line-shifted from the original :814/:836; same content -- 'and a disconnection' / 'and disconnects').
+  - client/messages.go:202,595,602 (line-shifted from the original :188/:1141-1148 region; NOTE the :1141-1148 region itself is now split -- part of it, around current :1283/:1317-1326, IS already correctly fixed by IDEM-14-FU-CLIENTTEXT and says 'does NOT disconnect'; do not re-break that half).
+  - internal/auth/errors.go -- 'DISCONNECTS the offending client' on ErrIdempotencyKeyReused's doc comment, unchanged from the original finding.
+  - client/store.go -- the two ORIGINALLY tracked sites (content-identical to the old :192/:344, now at :202/:380) PLUS TWO NEW instances introduced by RELAY-13's own diff: :371 ('a protocol violation that gets the client DISCONNECTED', on pendingEnrolment's type doc) and :1349 ('the bus answers 409 and DISCONNECTS', on ClaimEnrolment's doc, both discovered because RELAY-13 added ~950 lines to this file).
+  - client/enrol.go (WHOLE FILE NEW TO THIS TASK -- did not exist as a tracked site before, since RELAY-13's client half is what added the messaging-key plumbing to it): :192 ('the bus's refusal comes with a disconnection'), :291 ('is exactly the violation that earns a disconnect'), :584 ('a protocol violation that DISCONNECTS the client (invariant 10)'). NOTE :537 in the same file is ALREADY correct ('does NOT disconnect') -- do not touch it.
+  - cmd/agent-busctl/enrol.go:90 (WHOLE FILE NEW TO THIS TASK) -- 'the bus treats that as a protocol violation and disconnects the client'.
   
-  THE FIVE REMAINING, verified present at HEAD (0dbb025) by direct read, 2026-08-08:
+  proof_cmd rewritten to check each of the 14 remaining stale phrases by CONTENT rather than line number, specifically to avoid the vacuous-on-drift failure mode this task's own reviewer already caught once on the AGENT_PROTOCOL.md segment. Confirmed RED today: all 14 phrase-checks fail (script exits 1) before any fix.
   
-  1. AGENT_PROTOCOL.md:631-636 -- "Same key + different payload = a protocol violation. The
-     bus answers 409 and disconnects..." States the disconnect as unconditional for ANY
-     key-reuse-with-different-payload, on both send/broadcast and enrol. Needs: split into
-     the two real cases (enrol/send key-reuse = reject+log, no disconnect; third-party
-     replay = disconnect) or drop the disconnect claim from this generic paragraph entirely
-     since it is not the replay case.
+  Cross-reference: 3e542d14 (internal/relay/doc.go) remains the sixth original location, from a different angle, tracked separately -- unaffected by this widening.
   
-  2. CONTRACTS-CLI.md:814 and :836 -- both read "...because the bus's answer to that is a 409
-     and a disconnection" / "The bus answers 409 and disconnects". :814 is the more
-     important one: it is the STATED RATIONALE for agent-busctl's local exit-2 refusal on
-     same-key-different-name enrolment (refusing locally "because" the server would
-     disconnect). That rationale is now factually wrong -- the server no longer disconnects
-     on this path -- even though the local-refusal BEHAVIOUR itself may still be sound for
-     other reasons (saving a round trip, giving a clearer local error). Needs the rationale
-     corrected; the behaviour is a separate question for whoever owns CONTRACTS-CLI.md next.
-  
-  3. client/messages.go:188 (doc comment on SendOptions.IdempotencyKey) -- "...earns a 409
-     AND a disconnection." Same file as the already-covered :1175, but a DIFFERENT location
-     (a struct-field doc comment, not the Remedy string), so it is NOT inside
-     IDEM-14-FU-CLIENTTEXT's stated scope (which names only messages.go:1175). Also
-     client/messages.go:1141-1148, the doc comment on annotateIdempotencyConflict itself
-     ("...it answers 409 with Connection: close and DISCONNECTS"). Both need the same
-     split as AGENT_PROTOCOL.md above.
-  
-  4. client/store.go:192 and :344 -- inline comments ("...the bus punishes with a
-     disconnect", "...and earning a disconnect") in the enrolment-idempotency bookkeeping
-     logic. Comment-only; needs updating to match the narrowed behaviour.
-  
-  5. internal/auth/errors.go:36 -- ErrIdempotencyKeyReused's doc comment: "The HTTP layer
-     answers 409, logs it at warn level and DISCONNECTS the offending client." This is the
-     server-side sentinel error whose own doc comment now contradicts internal/httpapi's
-     actual behaviour (writeAuthError no longer disconnects on this path per 1c6c540) --
-     the most load-bearing of the five, since a future maintainer reading the error
-     definition itself would reasonably trust it over scattered client-side prose.
-  
-  No code branches on any of these five (confirmed by 1c6c540's own gate work), so this is
-  comment/doc text only -- P2, not a live behavioural bug. Filed as its own task because the
-  sweep touches five unrelated files across two components (client SDK docs, server error
-  docs, two contract docs) and IDEM-14-FU-CLIENTTEXT's scope is pinned to one specific
-  string in messages.go and should not silently grow to cover it.
-  
-  Cross-reference: 3e542d14 (internal/relay/doc.go, filed alongside this) is the sixth
-  location from a DIFFERENT angle -- a specification defect in unbuilt relay code rather
-  than stale agent-facing prose -- and is tracked separately because its fix requires
-  naming an open design question, not just correcting a claim.
-  _Proof: bash -c 'set -e; ! grep -n "disconnects\|DISCONNECT" AGENT_PROTOCOL.md | grep -q "631\|632\|633\|634\|635\|636"; ! sed -n "808,840p" CONTRACTS-CLI.md | grep -qi "and a disconnection\|and disconnects"; ! sed -n "185,195p;1135,1150p" client/messages.go | grep -qi disconnect; ! grep -n "disconnect" client/store.go | grep -q "192\|344"; ! sed -n "30,42p" internal/auth/errors.go | grep -qi disconnect' # each of the five must no longer assert an unconditional disconnect on key-reuse; RED today (all five currently match)_
+  IDEM-14-FU-CLIENTTEXT (30a9e4f6) remains scoped to exactly client/messages.go's Remedy string (now the fixed :1283 region) -- still do not duplicate that scope; the messages.go sites THIS task now names (:202, :595, :602) are different lines with different content.
+  _Proof: bash -c '! grep -qF "and a disconnection" CONTRACTS-CLI.md && ! grep -qF "and disconnects" CONTRACTS-CLI.md && ! grep -qF "earns a 409 AND a disconnection" client/messages.go && ! grep -qF "protocol violation that disconnects the client" client/messages.go && ! grep -qF "answer to it is a disconnection" client/messages.go && ! grep -qF "DISCONNECTS the offending client" internal/auth/errors.go && ! grep -qF "bus punishes with a disconnect" client/store.go && ! grep -qF "and earning a disconnect" client/store.go && ! grep -qF "client DISCONNECTED" client/store.go && ! grep -qF "bus answers 409 and DISCONNECTS" client/store.go && ! grep -qF "refusal comes with a disconnection" client/enrol.go && ! grep -qF "violation that earns a disconnect" client/enrol.go && ! grep -qF "DISCONNECTS the client (invariant 10)" client/enrol.go && ! grep -qF "disconnects the client" cmd/agent-busctl/enrol.go'_
 - [ ] IDEM-12 · IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence, no second audit record — core, P1
   GATED on IDEM-10, IDEM-11, MSG-2 (POST /v1/broadcast) and MSG-3 (POST /v1/send). Wire the idempotency key into both routes: on a request whose (agent, key) already has an applied-key record, look it up (IDEM-11) BEFORE doing any normal send work. THE CARVE-OUT THAT MUST NOT BE COLLAPSED (state this in the code comments and the task's own tests, not just in this description): same key + SAME payload is a LEGITIMATE RETRY -- the ack was probably lost in flight. Return the ORIGINAL message id and sequence number verbatim, allocate NO new sequence (invariant 1: sequences are server-minted and never duplicated for one logical operation), write NO second record to the append-only audit log (invariant 6 -- a retry must not create a phantom second entry for what is, from the audit trail's point of view, one logical send), do NOT return an error, and do NOT disconnect the client. This is the entire point of idempotency: punishing a well-behaved retrying client breaks exactly the client doing the right thing. ONLY same key + DIFFERENT payload is a violation, and that path is IDEM-14's job, not this task's -- this task implements the happy path only. 'Same payload' comparison MUST be exact/content-addressed (e.g. compare a hash of the canonical request body), not fuzzily approximated. This task's own narrow test must show: a same-key-same-payload retry of both /v1/send and /v1/broadcast returns identical id+sequence on the second call, and the audit log gains no second entry for it. Broader exactly-once coverage (retry storms, concurrency) lives in IDEM-16/IDEM-17, not here.
   
@@ -2891,8 +3221,173 @@
 
 ### EPIC RELAY — Bus-to-bus federation
 
+- [ ] RELAY-34 · RELAY-34: Revocation fails OPEN on a WAL discard -- a revoked pinned bus signing key can come back — relay, P1, blocks-relay-17, durability, security
+  Found by the security gate during RELAY-10 review (round-3 addendum, finding F2). PeerStore.BusTrustRecord carries the COMPLETE post-transition state on every entry (not a delta), so a discard of the withdrawal (tombstone) record silently REINSTATES the previous generation -- and for the trust table, the previous generation is a pinned bus signing key the operator deliberately REVOKED.
+  
+  Reproduced end to end against a real wal.Log: PutTrust(bus,key) then RemoveTrust(bus), both acknowledged, PinnedKeys correctly nil. Truncate 8 bytes off the tail of bus.wal -- a torn tail -- reopen: PinnedKeys returns the REVOKED key, active, 1 key pinned. This is reachable through a SUPPORTED path, not an exotic one: invariant 6 (CLAUDE.md) requires recovery to survive exactly this kind of tail damage by discarding and starting anyway, never refusing to boot. Realistic triggers: bit-rot, a torn write, a VM/filesystem snapshot rollback (which un-revokes every pin revoked since the snapshot).
+  
+  Not reachable today -- PeerStore is constructed nowhere outside internal/relay (RELAY-10 shipped code-complete, unwired). It becomes live the moment RELAY-17 (CrossBusTrust) or RELAY-24 (composition root) wires PeerStore in, since RELAY-17 builds its cross-bus trust anchor directly on this record.
+  
+  Closing it needs a mechanism the current record design does not have -- this is not a small fix. Candidates raised by the security gate (none applied, read-only gate): (a) refuse to boot -- or at minimum ERROR loudly -- at startup when wal Recovered.DiscardCount > 0 AND the trust table holds any active pins, so an operator is told to re-verify revocations by hand; (b) a durable per-bus REVOCATION FLOOR, independent of the tombstone record itself, that a lost tombstone cannot roll back (structurally the same fix class as RELAY-10s sequence-rewind and swept-tombstone-resurrection defects, but for the specific case where the record that must survive loss is a revocation).
+  
+  Also: the shipped text (peerstore.go and the matching CONTRACTS-ONDISK.md bullet) claims a discard is fail-closed in the direction that matters and can never install a key this bus did not already hold -- true of Apply() in isolation, false of the system: a discard cannot INSTALL a key, but it CAN fail to REMOVE one, which for a revocation mechanism is exactly the direction that matters. That sentence needs correcting alongside the fix (or immediately, as a documentation-only change, if the mechanism fix lands later).
+  
+  RELATE TO RELAY-17: the keystone builds its cross-bus trust anchor on this record: its implementer must know which half is sound (routing) and which is not yet (revocation) before consuming PinnedKeys(). A security re-verification of RELAY-10 is running as of 2026-08-08T17:2x and will say precisely what that half is -- post its conclusion as a note on RELAY-17 once it lands, and do not treat RELAY-10 as safe to build on for revocation until this task closes.
+  _Proof: go test -race -run TestPeerStoreTrustSurvivesATornWALTail ./internal/relay_
+- [ ] RELAY-12 · RELAY-12: agent-bus peer add|list|remove — cli, P0, vacuous-today
+  FEDERATION phase, wave 2. Deps: RELAY-10 (durable peer records).
+  
+  Offline under the dirlock, mirroring invite.go. `--route-for <busID>` installs the static
+  next-hop route that makes A->B->C possible. CONTRACTS-CLI.md + AGENT_PROTOCOL.md updated in the
+  SAME task (invariant 7 -- a feature without its subcommand+doc is not done).
+  
+  Owns cmd/agent-bus/peer.go + its test, main.go (wave-2 exclusive), CONTRACTS-CLI.md,
+  AGENT_PROTOCOL.md.
+  _Proof: go test -race -run TestPeerAddListRemove ./cmd/agent-bus_
+- [ ] RELAY-9 · RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes — relay, P2, vacuous-today
+  FEDERATION phase, wave 1 (F4). model=sonnet.
+  Owns internal/relay/client.go, internal/relay/peercodes_test.go (new).
+  
+  client.go:296-308's allow-list omits CodeUnsigned, CodeBadSignature, CodeUnpeeredBus
+  (handshake.go:66-68) -- which our own RelayHandler emits (relayhttp.go:311-321). Result today:
+  "unrecognised error code" instead of a legible failure. Makes every later wave debuggable.
+  _Proof: go test -race -run TestPeerErrorCodeAdmitsSignatureCodes ./internal/relay_
+- [ ] RELAY-11 · RELAY-11: store/hub can record a MULTI-HOP bus path — hub, P1, vacuous-today
+  FEDERATION phase, wave 1 (F6).
+  Owns internal/store/message.go, internal/hub/hub.go, internal/hub/audit.go,
+  internal/hub/buspath_test.go (new).
+  
+  Invariant 6's audit trail is the whole reason a relay hop is auditable, and today it is
+  unwritable: AuditRecord.BusPath exists and is validated (internal/wal/audit.go:177-181), but
+  store.NewMessage hard-codes BusPath: []string{busID} (store/message.go:355) and no hub API accepts
+  a path. Thread a path parameter to store.NewMessage; hub.publish accepts a caller-supplied path for
+  ingested relayed messages and defaults to []string{busID} for local sends; the audit record carries
+  the full path.
+  
+  NOTE FOR WAVE 2: RELAY-16 (egress admission) also owns hub.go -- it is wave 2, this is wave 1, so
+  there is no overlap. Do not start RELAY-16's work here.
+  _Proof: go test -race -run TestAuditRecordsMultiHopBusPath ./internal/hub_
+- [~] RELAY-6 · RELAY-6: Record the FEDERATION deployment assumptions — docs, P0, in progress
+  FEDERATION phase, wave 1 (F1). Owns DECISIONS.md EXCLUSIVELY this wave.
+  
+  Target topology: laptop(A) <-> internet(B) <-> this machine(C), B is a RELAY HOP. All links
+  are SSH tunnels; no bus ever listens publicly; the user is sole operator.
+  
+  New dated "## 2026-08-08 -- FEDERATION" section in DECISIONS.md. Each ruling needs *what is
+  given up* and *what would reverse it*:
+  (a) Every bus-to-bus link is an SSH tunnel; no bus listens publicly; operator runs all machines.
+  (b) INVITE-GATE (05a5216d) does not block this epic -- with no reachable /v1/enroll the pre-auth
+      attacker it exists to stop does not exist. Peer enrolment is operator-driven now; invite
+      redemption is later hardening. Reversal trigger, stated mechanically: any bus bound to a
+      non-loopback interface, or a tunnel endpoint shared with a non-operator. Given up: single-use
+      /expiring/revocable peer admission, redemption audit.
+  (c) Peer routes still authenticate a PEER principal -- that is FUNCTIONALITY: roster updates must
+      be bound to the connection (internal/relay/doc.go:154-158), and the last bus-path hop must be
+      checkable against the sender (doc.go:172-175).
+  (d) Local-attacker scenarios are out of scope by operator ruling.
+  (e) Peer configuration is an offline `agent-bus peer` subcommand under the dirlock, following the
+      `invite mint` / D6 precedent. No new online admin route, no new privilege tier. Given up:
+      online re-peering -- a topology change needs a restart.
+  (f) Static next-hop routing, not a routing protocol. Given up: topology discovery; a fourth bus
+      needs an operator route entry. Right trade for a fixed three-node line.
+  
+  Standing rules for the whole epic (apply to every RELAY-6..26 task): ownership inside
+  internal/relay is per-FILE (new tests in a NEW test file named for the task, never appended to
+  relay_test.go/registry_test.go); do not edit DECISIONS.md/AGENT_LOG.md unless the task says so
+  this wave; a proof naming a not-yet-written test is VACUOUS not FAIL; judge gofmt by EMPTY OUTPUT
+  only; run the mandated reviewer AND security gates; invariant 9 is absolute (crypto/ed25519
+  Sign/Verify only -- stop and escalate on anything more).
+  
+  Verified RED: `grep -c 'SSH tunnel\|ssh-tunnel' DECISIONS.md` -> 0.
+  _Proof: grep -n 'every bus-to-bus link is an SSH tunnel' DECISIONS.md && grep -n 'INVITE-GATE does not block the FEDERATION epic' DECISIONS.md_
+- [ ] RELAY-25 · RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test — relay, P0, epic-deliverable, vacuous-today
+  FEDERATION phase, wave 5. Deps: RELAY-24 (composition root).
+  
+  scripts/fed-smoke.sh: three buses on 127.0.0.1:9101/9102/9103, data dirs
+  /tmp/fed-smoke-{a,b,c} (NEVER the tracked data/ dir). Peers A<->B and B<->C via `agent-bus peer
+  add`, with A carrying `--route-for busC`. An agent on A sends to an agent on C; C receives it
+  EXACTLY ONCE; the audit log on each hop shows the bus path, and C's audit entry shows all three
+  hops (A, B, C).
+  
+  The script header MUST state what loopback does NOT prove: tunnel bring-up/flap, NAT/keepalive,
+  latency vs RetryHorizonCeiling, pinning through a tunnel. A follow-up task covers a real
+  three-host run over actual SSH tunnels; the loopback smoke does not substitute for it.
+  _Proof: bash scripts/fed-smoke.sh_
+- [ ] RELAY-11-FU-BUSID-ECHO · ids.ValidateBusID echoes an oversized bus id with %q and no length guard — internal/ids, P2
+  Raised by the security gate on RELAY-11 (2026-08-08). internal/store/message.go:426-429 calls ids.ValidateBusID on an UNTRUSTED hop with no prior length guard, and ids/busid.go:26 echoes the full id back with %q in its error -- unlike ids.ParseAgentID (agentid.go:155) and internal/relay/path.go:135, which both refuse to echo an oversized value. Unreachable today (no client-reachable caller supplies a bus path yet; bounded to 256KiB by relay.MaxRelayBytes once relay ingest lands, and relay.CheckIncomingPath guards it first). Minimal fix: add a len(b) > 64 check before ValidateBusID in the hop-validation loop and do not echo the id back when it is oversized.
+  _Proof: go test -race -run TestValidateBusIDRefusesOversizedEcho ./internal/ids_
+- [ ] RELAY-36 · RELAY-36: internal/relay/client.go peerURL accepts a path -- tighten to bare-origin, touches every caller — relay, P2, hardening
+  Found during RELAY-10 review. PeerStore.validateBareHTTPSOrigin (peerstore.go) enforces bare-origin (scheme + host [+ port], no path/query/fragment/userinfo/opaque) LOCALLY on durably-stored peer base_url values -- but internal/relay/client.go peerURL, the function that actually DIALS a peer, does not enforce the same constraint: it accepts an arbitrary path component (e.g. https://h.example/some/path or https://h.example:9443/../../x both encode and dial). PeerStore's own validation is strictly MORE restrictive than what the dial path will later accept, so no durable value violates the dial contract today -- but the dial-side function itself is the wrong place to be permissive, since any future caller of peerURL that is NOT gated by PeerStore's validation inherits the gap.
+  
+  Fix (not applied here): in peerURL, add a check equivalent to u.Path == "" || u.Path == "/" (and reject ForceQuery, matching the fix already applied to validateBareHTTPSOrigin during RELAY-10). NOT done as part of RELAY-10 because peerURL is called from every relay dial site (client.go, forward.go, and their tests) and tightening it is therefore a cross-cutting change outside RELAY-10's file boundary (peerstore.go / peerstore_test.go / CONTRACTS-ONDISK.md only).
+  _Proof: go test -race -run TestPeerURLRejectsAPath ./internal/relay_
+- [ ] None · RELAY-9-FU-CODEGUARD: AST guard asserting every peer error code constant has a handler case — relay, P2
+  internal/relay/client.go's peerErrorCode carries an allow-list of recognised peer error codes, synced BY HAND against the Code* constants declared in internal/relay/handshake.go. RELAY-9 added three that were missing (CodeUnsigned, CodeBadSignature, CodeUnpeeredBus) -- codes our OWN handlers emit -- which until then surfaced to operators as "unrecognised error code".
+  
+  Both the reviewer and the security gate on RELAY-9 independently recommended a guard against this drift. It was correctly NOT folded into RELAY-9 itself -- RELAY-9's definition of done was the three codes plus tests (delivered exactly, see internal/relay/peercodes_test.go).
+  
+  Definition of done: a test that walks handshake.go's declared Code* constants via go/ast and asserts each appears as a case in client.go's peerErrorCode, failing loudly when a new constant is added without a handler. Model it on the existing in-tree pattern at client/guard_test.go (an AST walk, not a grep -- this repo has already been bitten by grep-based guards passing on incidental matches).
+  
+  Priority note: this is drift prevention, not a live defect -- the allow-list is correct today. It becomes materially more valuable as the FEDERATION epic proceeds: RELAY-17 and RELAY-20 will add ingest paths that emit new error codes, and each is a fresh opportunity for the hand-sync to fall behind.
+  
+  Related to RELAY-9 (public_id 06f5e347-fc8f-45d4-a65d-2af08340dd63), the task that surfaced this gap.
+  _Proof: go test -run TestPeerErrorCodeHandlesAllDeclaredCodes ./internal/relay/..._
+- [ ] RELAY-16 · RELAY-16: Egress admission: /v1/send accepts a routable remote recipient — hub, P1, vacuous-today
+  FEDERATION phase, wave 2. Deps: RELAY-11 (multi-hop bus path).
+  
+  /v1/send accepts a routable remote recipient via a RemoteRouter seam on the hub (nil => today's
+  behaviour exactly, so this is additive not a behavior change for the non-federated case).
+  
+  The roster check for LOCAL recipients stays BEFORE the durable write -- that is cca64afd's
+  precondition; relate it (do not duplicate): "RELAY precondition: roster-check LOCAL recipients
+  before the durable write, or a peer can permanently exhaust an agent name."​
+  _Proof: go test -race -run TestSendAdmitsRemoteRecipientViaRemoteRouter ./internal/hub_
+- [~] RELAY-8 · RELAY-8: Registry.PeerBaseURL accessor + concurrency contract — relay, P1, in progress, vacuous-today
+  FEDERATION phase, wave 1 (F3). model=sonnet.
+  Owns internal/relay/registry.go, registry_test.go, and the doc comment at
+  internal/relay/forward.go:199-202 (COMMENT ONLY -- no other task owns forward.go this wave).
+  
+  The Registry's own accesses ARE lock-protected (registry.go:298-304, :561-565). The defect is that
+  no accessor exists, so every wiring site hand-writes a closure that Enqueue (forward.go:602) and
+  each worker (forward.go:856) call concurrently -- and ForwarderOptions.PeerBaseURL's doc never says
+  "safe for concurrent use" the way its two siblings do. Add Registry.PeerBaseURL(busID) (string, bool)
+  under RLock; state the contract; test that a RemovePeer is observed by an in-flight retry.
+  
+  NEAR-DUPLICATE FLAGGED BY SPEC-KEEPER 2026-08-08: task ef6c4645 ("Relay forwarder's PeerBaseURL
+  callback: give Registry a concurrency-safe accessor and state the contract", filed by the security
+  gate) describes the SAME defect with the SAME proof_cmd. Not merged (outside this pass's explicit
+  merge instruction) -- related instead; whoever picks this up should resolve the two into one before
+  implementing, most likely by superseding ef6c4645 into this numbered task.
+  _Proof: go test -race -run TestRegistryPeerBaseURLObservesRemovePeer ./internal/relay_
+- [ ] RELAY-23 · RELAY-23: Relay wire protocol version — relay, P1, vacuous-today
+  FEDERATION phase, wave 4. Deps: RELAY-17 (CrossBusTrust/envelope), RELAY-20 (peer routes).
+  
+  Uses the relay-wire-version reservation namespace (freshly reserved 2026-08-08, unseeded -- first
+  call returns 1). MUST NOT reuse the "version" JSON key: RosterUpdate.Version is the roster epoch,
+  and two meanings on one key is how a peer applies an epoch as a format number.
+  _Proof: go test -race -run TestRelayEnvelopeCarriesDistinctWireVersionKey ./internal/relay_
 - [ ] None · RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy — relay, P1
-  internal/relay/forward.go's per-peer queues are in-memory. A message accepted by Enqueue is lost if the process crashes with a non-empty queue, and dropped (counted in Stats().Dropped.Full, logged at Warn) when a peer stays down long enough to fill its queue. There is no retry. RELAY-4 owns retry/backoff; this task owns the DURABLE outbox they need to be meaningful. Until both land, cross-bus delivery is BEST EFFORT and no doc may claim otherwise (already stated in internal/relay/doc.go and forward.go).
+  internal/relay/forward.go's per-peer queues are in-memory. A message accepted by Enqueue is lost if the process crashes with a non-empty queue, and dropped (counted in Stats().Dropped.Full, logged at Warn) when a peer stays down long enough to fill its queue. There is no retry-across-crash path. RELAY-4 owns retry/backoff; this task owns the DURABLE outbox they need to be meaningful. Until both land, cross-bus delivery is BEST EFFORT and no doc may claim otherwise (already stated in internal/relay/doc.go and forward.go).
+  
+  Merged 2026-08-08 (spec-keeper) from duplicate fec942b4 (superseded into this, the earlier-filed task): Dropped.Full, Dropped.Expired and Dropped.Yielded are ALL silent data loss paths this task must close. Constraint any design inherits: the total retry horizon must stay inside idem.PeerOutageBudget (24h), enforced in NewForwarder -- do not exceed it when sizing outbox replay/backoff.
+  _Proof: go test -race -run TestRelayOutboxSurvivesCrash ./internal/relay_
+- [ ] RELAY-19 · RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) — relay, P1, vacuous-today
+  FEDERATION phase, wave 3. Deps: RELAY-8 (Registry.PeerBaseURL accessor), RELAY-15 (outbox
+  record + replay, part 1).
+  
+  Part 2 of 2: the Forwarder itself now writes and settles durable outbox records (RELAY-15 built
+  the record/replay machinery; this task wires the Forwarder to use it on the write and settle
+  paths).
+  _Proof: go test -race -run TestForwarderSettlesOutboxRecords ./internal/relay_
+- [ ] RELAY-35 · RELAY-35: PeerStore composition-root precondition -- replay MUST run before the first write, and the package cannot enforce it — relay, P2, durability
+  Found during RELAY-10 review. PeerStore.config_seq (the bus-wide monotonic high-water mark that the whole record design relies on -- see RELAY-10) rebuilds ONLY from records the store's Apply() sees during wal replay. NewPeerStore/PeerStoreOptions.Durable takes a *wal.Log directly rather than owning the replay itself, so nothing stops a caller from constructing a PeerStore, skipping replay, and calling Put/PutTrust immediately: config_seq starts at 0 and mints seq=1 against a log that may already hold 1..N -- reintroducing RELAY-10's P0 sequence-rewind defect via the wiring path rather than the record-store internals.
+  
+  The peerstore package CANNOT enforce this itself -- it is documented today only as a caller precondition on PeerStoreOptions.Durable (a doc comment). RELAY-24 (composition root: wire federation into cmd/agent-bus/main.go) is exactly the place this precondition becomes load-bearing and exactly the place most likely to get it wrong under time pressure, since it is one call among many in server startup.
+  
+  Scope for RELAY-24's implementer: design out the footgun rather than trusting the doc comment -- options include (a) the constructor owns the replay itself (PeerStore.Open(path) rather than NewPeerStore(existingLog)), or (b) an internal replayed latch that Put/PutTrust/Remove/RemoveTrust check and refuse before, with a clear error naming the precondition. Either way, main.go's startup sequence must be ordered: open the WAL for the peer store, replay it fully into the store, THEN accept the first mutating call -- and a test in the RELAY-24 wiring package should assert that ordering, not just eyeball it.
+  
+  Flagged now, filed against RELAY-24 rather than left only in a doc comment, per CLAUDE.md's rule that an unenforceable precondition on the composition root needs to be visible on the wiring task.
+  _Proof: go test -race -run TestFederationStartupReplaysPeerStoreBeforeFirstWrite ./cmd/agent-bus_
 - [~] None · internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-with-different-payload, contradicting invariant 10 as narrowed 2026-08-08 — relay, P2, in progress, doc-only, invariant-10, spec-defect
   internal/relay/doc.go:246-250 (comment on RelayHandler, section "RELAY-2 and RELAY-3") reads:
   
@@ -2959,9 +3454,184 @@
   the relay ingest path must reconcile with this narrowing rather than inherit it").
   This task is that reconciliation, filed rather than left as a commit-message footnote.
   _Proof: go test -race -run TestPackageDocDoesNotReviveTheWithdrawnDisconnect ./internal/relay_
-- [ ] None · Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link — relay, P2
+- [ ] None · Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link — relay, P1
   Lift the OPEN QUESTION out of internal/relay/doc.go (section "Key reuse is REJECT-AND-LOG") and into the backlog, so it is not inherited by accident from a package comment. Invariant 10 as narrowed 2026-08-08 keeps exactly one disconnect -- third-party replay of an accepted signed message -- but a relay connection MULTIPLEXES AN ENTIRE PEER BUS'S ROSTER, so sender != the connection's principal is the NORMAL correct shape and a per-socket disconnect would drop every agent behind that peer over one agent's traffic. Per-origin-agent rejection without dropping the transport, per-peer rate limiting, and peer-level de-peering are all plausible and have different blast radii. Deliver the DECISION with its rationale in DECISIONS.md before any disconnect is wired onto a relay surface. Gated on MTLS-RELAYGUARD (8192c3c7).
+  
+  Raised P2->P1 2026-08-08 (spec-keeper, FEDERATION phase): the RELAY-20/21 ingest handler cannot be written without this answer, and the default it would otherwise silently inherit (messages.go:656 disconnect) drops every agent behind a peer bus. Consumed by RELAY-22, which owns DECISIONS.md in its wave and depends on RELAY-17 -- do not duplicate this task, relate.
   _Proof: grep -n "multi-principal relay link" DECISIONS.md_
+- [ ] RELAY-38 · RELAY-38: signed-relay-ingest comments and docs are silent on the CodeInvalidRelay path RELAY-27 added — relay, P2
+  internal/relay/handshake.go:47-66 and internal/relay/message.go:44-53 still describe signed relay ingest as emitting THREE codes (CodeUnsigned/CodeBadSignature/CodeUnpeeredBus). Since RELAY-27 (commit 06e3cc5), the same ingest path can also answer CodeInvalidRelay (400) via attributionError mapping attest.ErrInvalid -> ErrInvalidRelay. The in-code comments were not updated and now undercount the codes the path can emit.
+  
+  PROTOCOL.md:960-969 and CONTRACTS.md:280 remain ACCURATE as written but are SILENT on the new attest->relay mapping: they document the original three-code table without a row or note for the attest.ErrInvalid->invalid_relay case now reachable from signed relay ingest specifically (as distinct from CodeInvalidRelay's original roster/relay-validation meaning at message.go).
+  
+  FLAG AS WANTING AN OWNER BEFORE RELAY-17 LANDS: RELAY-17 (CrossBusTrust implementation + attestation travels in the relay envelope) is P0 and its implementer will read exactly these comments as the current contract for the signed-ingest error surface; stale comments at the exact seam RELAY-17 extends is how the next drift gets introduced.
+  
+  Fix: update the comment blocks at handshake.go and message.go to mention the CodeInvalidRelay path (and its source, attest.ErrInvalid), and add a row/note to PROTOCOL.md's signature-error table (960-969) and CONTRACTS.md's status-mapping table (273-282) documenting the attest.ErrInvalid -> CodeInvalidRelay(400) mapping for the signed-ingest path.
+  
+  Filed from RELAY-27 follow-ups (RELAY-27 commit 06e3cc5).
+  _Proof: grep -A20 'Signed relay ingest' internal/relay/handshake.go | grep -q CodeInvalidRelay && grep -n attest.ErrInvalid PROTOCOL.md CONTRACTS.md | grep -qi invalid_relay && echo DOCS_UPDATED_
+- [ ] None · RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per-peer fair — relay, P1
+  MaxOutboxJobs (= MaxPeers 64 x DefaultQueueDepth 256 = 16,384) reads as an in-flight bound but is not one. internal/relay/outbox.go's admission check counts every RETAINED record, and a settled record is kept as a tombstone for OutboxSettledRetention (24h). So the real bound is at most 16,384 enqueues PER 24-HOUR WINDOW -- about 0.19/s across ALL peers combined -- after which Enqueue returns ErrOutboxCapacity with nothing in flight. Measured: at maxJobs=8, eight enqueue-then-deliver cycles exhaust it. RELAY-19 hits this on its first busy day.
+  
+  The security gate ruled the deferral acceptable but the SCOPE wrong: the cap is GLOBAL, the origin-message-id half of the job id is PEER-SUPPLIED on a multi-hop path (message.go sets it from the relay envelope), and relay ingress has no rate limit -- so ONE peer can consume the whole budget and halt relay for every other peer. This task must therefore deliver PER-PEER fairness, not merely a bigger constant. Options noted by both gates: split the cap so pending jobs and tombstones are bounded separately, and/or a per-peer sub-quota.
+  
+  RELAY-15 documented the true bound in MaxOutboxJobs's comment rather than re-deriving it, because the right value depends on a target rate that task did not know.
+  
+  BLOCKS RELAY-19: this task must land before RELAY-19 ships since RELAY-19 exercises this ceiling on its first busy day.
+  _Proof: go test -race -run TestOutboxCapacity ./internal/relay_
+- [ ] None · RELAY-13-FU-MSGKEYPOP: no proof-of-possession of the messaging private key at enrolment, and the field is write-once with no update route — auth, P2, accepted-gap, key-rotation, messaging-key, proof-of-possession
+  RELAY-13 (97f3f1b4-8575-4f63-9196-96bfbc049510) registers an agents messaging PUBLIC key at enrolment but never asks for proof that the enroller holds the matching PRIVATE key -- security raised this as a P2 twice (initial audit and re-verification) and it was deliberately accepted, not fixed, in that task. Two distinct gaps, both real, neither a P0/P1 (impact bounded -- see below), both DOCUMENTED IN CODE without overclaiming per the RELAY-13 gates:
+  
+  1. NO PROOF OF POSSESSION. Any enroller may register ANY 32-byte value as `messaging_public_key`, including a key it does not hold the private half of. Impact is bounded: trust is keyed agent-id -> key (client/keyring.go:174) and attest.Verify check 1 binds AgentID, so this does not enable forging ANOTHER agents signature -- the exposure is misattribution/false-attestation-binding for the enrolling agent itself, not third-party forgery. Verified NOT covered by AUTH-1-FU-POPKEY (6e3083b0-c113-4b26-9dd6-025825671ceb, todo) -- that task is explicitly scoped to the ENROLLING/AUTH key (signature over name||public_key||idempotency_key), confirmed by direct read of its description; it does not mention the messaging key at all. The RELAY-13 reviewer independently queried the Spec Server (limit=1000, 414 tasks) and found no task covers this.
+  
+  2. NO UPDATE ROUTE. auth.RosterEntry.MessagingPublicKey is write-once: MemoryRoster.Put and WALRoster.Put both return ErrDuplicateAgentID on an existing agent id, and Mint always allocates a fresh id, so an agent that enrolled before it had a messaging key (or whose seed becomes damaged, see client/store.go:256 damagedMessagingSeedRemedy) can only fix this by re-enrolling under a NEW agent id, spending a fresh invite and losing continuity of identity with its peers roster/trust entries.
+  
+  Definition of done for a first slice: decide and record in DECISIONS.md whether (a) enrolment should require a signature over the messaging public key using the messaging private key itself (a self-signed binding -- cheap, closes gap 1 without a second round trip) and/or a rotation route bounded by session auth (closes gap 2), or (b) these are explicitly deferred to CRYPTO-4 (key-distribution endpoint -- server-attested messaging key bundles, 13f3947e, todo) as the natural place key lifecycle lands. Either way this task is DONE when the decision is recorded and, if implementation is chosen, the code + tests land; if deferred, this task closes as a design decision with CRYPTO-4 cited as the tracking task and this ones id cross-referenced there.
+  
+  Relate to: RELAY-13 (97f3f1b4), AUTH-1-FU-POPKEY (6e3083b0, different key), CRYPTO-4 (13f3947e, key-distribution/lifecycle).
+  _Proof: grep -n "RELAY-13-FU-MSGKEYPOP" DECISIONS.md_
+- [ ] RELAY-39 · RELAY-39: AST guard pinning TestErrorCodeIsStable's premise -- every sentinel relayhttp.go tests before ErrorCode is also an ErrorCode() arm — relay, P2
+  internal/relay/peer_test.go:164 TestErrorCodeIsStable is a hand-written table asserting ErrorCode(err) for a fixed list of wrapped sentinels. RELAY-27's severance guard (internal/relay/signed.go, ErrorCode(err) != CodeInternal) depends on an UNVERIFIED premise: that every sentinel internal/relay/relayhttp.go tests via errors.Is BEFORE calling ErrorCode is also covered by an arm inside ErrorCode() itself (peer.go:350). If a future relayhttp.go change adds an errors.Is check for a new sentinel without giving ErrorCode() a matching arm, that sentinel silently falls to the CodeInternal default -- which is exactly the class of drift RELAY-27's severance guard is built to survive, so the guard's own correctness rests on this staying true, untested.
+  
+  Definition of done: an AST-based (not grep) guard test that walks relayhttp.go's errors.Is(...) call sites (or a package-scoped list they consult) and asserts each named sentinel has a corresponding case in peer.go's ErrorCode() switch, modelled on the existing in-tree AST-guard pattern at client/guard_test.go -- an actual go/ast walk, not string matching, per this repo's standing lesson that grep-based guards pass on incidental matches.
+  
+  RELATION TO RELAY-9-FU-CODEGUARD (public_id 1e9b54d2-f529-4c91-a02b-116cc11bc829): same drift CLASS (hand-synced tables in the relay error-code plane going stale) but a DIFFERENT DIRECTION and different files. RELAY-9-FU-CODEGUARD guards handshake.go's declared Code* constants against client.go's peerErrorCode allow-list (the CLIENT side recognising a peer-emitted code). This task guards relayhttp.go's tested sentinels against peer.go's ErrorCode() switch (the SERVER side mapping a sentinel to a code). DECISION: kept as a SEPARATE task rather than widening RELAY-9-FU-CODEGUARD, because the two guards check different function pairs in different files with independently satisfiable definitions of done -- folding them together would blur an otherwise atomic, independently completable increment for each. A cross-reference note was posted on both tasks.
+  
+  Filed from RELAY-27 follow-ups (RELAY-27 commit 06e3cc5).
+  _Proof: go test -race -run TestErrorCodeGuardCoversRelayHTTPSentinels ./internal/relay_
+- [ ] RELAY-15 · RELAY-15: Durable outbox record + replay (part 1 of 2) — relay, P1, vacuous-today
+  FEDERATION phase, wave 2. Consumes the merged outbox task 2309e7ed
+  (RELAY-2-FU-DURABLE-OUTBOX, canonical after 2026-08-08 merge with the duplicate fec942b4) --
+  relate, do not duplicate.
+  
+  Part 1 of 2: record and replay only. The Forwarder itself is UNTOUCHED this task (RELAY-19 is
+  part 2: forwarder writes and settles outbox records). Constraint inherited from 2309e7ed: total
+  retry horizon must stay inside idem.PeerOutageBudget (24h).
+  _Proof: go test -race -run TestOutboxRecordAndReplay ./internal/relay_
+- [ ] RELAY-20 · RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal — httpapi, P0, critical-path, vacuous-today
+  FEDERATION phase, wave 3. Deps: RELAY-17 (CrossBusTrust), RELAY-18 (import guard replaced).
+  
+  Do NOT add peer paths to unauthenticatedRoutes -- that would create the ungated federation path
+  the guard forbids. Routes register only when registry AND trust are both non-nil (nil => 404,
+  NEVER a registered-503).
+  _Proof: go test -race -run TestPeerRoutesRegisterOnlyWithRegistryAndTrust ./internal/httpapi_
+- [ ] RELAY-37 · RELAY-37: peerstore.go:690 unparseable-URL error breaks the file's own elidePeerText(64) discipline — relay, P3, low, security-finding
+  Found by the security gate's RELAY-10 round-4 re-verification (2026-08-08). LOW severity, bounded, not a blocker on RELAY-10.
+  
+  internal/relay/peerstore.go:690 -- validateBareHTTPSOrigin's unparseable-URL branch:
+  
+      return fmt.Errorf("%w: the peer base URL is unparseable: %v", ErrInvalidPeerRecord, err)
+  
+  `err` is url.Parse's full *url.Error, which embeds the WHOLE base_url string -- and this fires on
+  the DECODE path, where those bytes come off a (possibly damaged) log record, not from a live
+  operator input. Measured: a 400-byte control-char base_url produces a 1738-byte error string.
+  
+  It is bounded (base_url is length-checked to 512 bytes before this point), so this cannot grow
+  without bound -- hence LOW, not MEDIUM. But it is the one call site in this file that breaks its
+  own elidePeerText(64) discipline: every other decode-path error in peerstore.go truncates
+  untrusted text before including it (see :240, :431, :609, :693, :730), and this one does not.
+  
+  Minimal fix, either is acceptable:
+    - report len(base) instead of the parsed value, or
+    - wrap the offending text through elidePeerText before inclusion (matching every sibling call
+      site in this file).
+  
+  P3. Not urgent, but cheap, and worth closing opportunistically alongside RELAY-17 or RELAY-24 when
+  someone is next in this file, so the file's own stated discipline stops having an exception.
+  _Proof: go test -race -run TestValidateBareHTTPSOriginUnparseableErrorIsBounded ./internal/relay_
+- [ ] None · RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -- BLOCKS marking RELAY-13 done — docs, P1, blocks-done, doc-defect, relay-13
+  RELAY-13 (97f3f1b4-8575-4f63-9196-96bfbc049510) now registers the messaging public key at enrolment (server half committed at 61a59eb; client half staged, pending integrator commit). Four sites still assert or omit the OLD (pre-RELAY-13) behaviour, all confirmed by direct read at HEAD/working-tree 2026-08-08, all outside the implementing agents five-file boundary per both gates verdicts:
+  
+  1. AGENT_PROTOCOL.md:549 -- "Nobody can fetch your messaging public key from the bus. It is not registered at enrolment..." FALSE since 61a59eb. This is the AGENT-FACING contract, so it misleads the audience most likely to act on it (an agent deciding whether it can rely on out-of-band key exchange).
+  2. CONTRACTS-CLI.md:1070 -- the MESSAGING key row says Minted "on first use, lazily, under the store lock (Store.EnsureMessagingKey)". FALSE for every new enrolment (the key is now minted and sent at enrol time); still true only for legacy/pre-RELAY-13 credentials resuming EnsureMessagingKey. Needs both cases stated.
+  3. client/client.go:434 -- MessagingPublicKey doc comment: "no messaging key is registered at enrolment and CRYPTO-4 ... does not exist". FALSE (first clause); CRYPTO-4 not existing is still true.
+  4. CONTRACTS-CLI.md -- the identities.json field table (~912/922) documents messaging_key_seed for the ON-DISK record, but the table does not document the WIRE field the client now sends (messaging_public_key) or the pending records new messaging_key_seed bookkeeping field distinctly from the promoted credential field. Cross-check against internal/httpapi/auth.go and client/enrol.go (EnrolRequest.MessagingPublicKey, pendingEnrolment.MessagingKeySeed) and add/confirm coverage.
+  
+  A task is not complete until its documentation is true (CLAUDE.md). Per the orchestrators explicit instruction, this BLOCKS marking RELAY-13 done -- do not flip RELAY-13 to done until all four are fixed and re-verified.
+  
+  Related: RELAY-13 (97f3f1b4-8575-4f63-9196-96bfbc049510).
+  _Proof: bash -c 'set -e; ! grep -n "not registered at enrolment" AGENT_PROTOCOL.md; ! grep -n "on first use, lazily" CONTRACTS-CLI.md | grep -qi messaging; ! grep -n "no messaging key is registered at enrolment" client/client.go; grep -q messaging_public_key CONTRACTS-CLI.md' # each false/missing claim must be gone; RED today (all four match/are missing)_
+- [ ] None · RELAY-16-FU-RETRY404: retry of an already-committed send can 404 if the recipient stopped being addressable — hub, P2, idempotency, vacuous-today
+  Pre-existing (reproducible before RELAY-16 for a departed LOCAL recipient at 518e71b), WIDENED by RELAY-16 because peer advertisement can churn faster than local enrolment. The admissibility loop (roster check, then routeRemote) runs BEFORE idem.Lookup (internal/hub/hub.go: admissibility loop ~1274-1308, idem.Lookup at 1335). So a legitimate retry of an already-applied send -- same idempotency key, same payload, ack probably lost in flight -- is refused with ErrUnknownRecipient instead of replaying the original Result, if the recipient (local departure, or a remote id whose peer stopped advertising it) is no longer addressable at retry time. That breaks invariant 10s core promise: same key + same payload must return the original result, not a fresh error.
+  
+  THE FIX DIRECTION MUST BE RECORDED, because the obvious one is wrong: do NOT move the roster check below idem.Lookup, and do NOT move it after the durable write. cca64afd fences the roster check FIRST and BEFORE the write deliberately -- a local id admitted by anything other than the roster is a permanent id-space injury (relay ingest naming `<local-bus>.alpha-18446744073709551615` would push that names suffix floor to the top and exhaust "alpha" across every future restart; see cmd/agent-bus/suffixfloors.go). The correct shape is: answer a KNOWN idempotency key (retry or violation) BEFORE consulting admissibility at all, so a retry short-circuits ahead of the roster/router check rather than requiring the check to pass again. Relates to IDEM-12 (idempotent send/broadcast, general ordering: lookup BEFORE normal send work) -- this task is the concrete manifestation surfaced by RELAY-16s admission seam, not a duplicate of IDEM-12s general implementation task.
+  
+  State verified before filing: no test exists for this behavior in internal/hub today (grep for Retry+Departed/Recipient in *_test.go: no match) -- VACUOUS (test absent), not RED.
+  _Proof: go test -race -run TestRetryOfCommittedSendSucceedsEvenIfRecipientNoLongerAddressable ./internal/hub_
+- [ ] RELAY-17 · RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope — relay, P0, critical-path, vacuous-today
+  FEDERATION phase, wave 2. THE EPIC'S KEYSTONE.
+  
+  Deps: RELAY-7 (trust deep-dive), RELAY-10 (durable peer records), RELAY-14 (attest package), AND
+  SIGN-7 (aeb90793) must RELEASE internal/relay/message.go and signed.go first -- filed as a real
+  blocking relation (SIGN-7 blocks RELAY-17), not just text, since SIGN-7 is in_progress and owns
+  those files right now.
+  
+  Signature verification is a HARD UNAVOIDABLE DEPENDENCY, not optional hardening:
+  relay.ValidateRelayRequest takes CrossBusTrust as a REQUIRED parameter and nil is a refusal, so
+  every relayed message is ErrUnpeeredBus/403 by construction until a trust chain exists. RELAY-7/
+  13/14/17 are therefore ~40% of the epic and on the critical path.
+  
+  ~1 day of work; natural split point: (a) interface + envelope field + relay-side verification,
+  (b) peer-store-backed implementation.
+  _Proof: go test -race -run TestCrossBusTrustVerifiesAttestedEnvelope ./internal/relay_
+- [ ] RELAY-30 · RELAY-30: pin the attest.Canonicalize / internal/signing encoder-deviation condition with an owner — relay, P2
+  attest.Canonicalize currently implements its own length-prefixed encoder rather than delegating to internal/signing. Both the reviewer and security gates on RELAY-14 called that acceptable ONLY on a condition: doc.go states the deviation MUST become a delegation if signing.CanonicalizeAttestation ever lands. That condition currently has no owner/task, so it is prose with no enforcement. This task: if/when someone adds a general canonicalizer to internal/signing, it MUST either (a) reuse katCanonicalHex (the byte string transcribed from FEDERATION_TRUST_DEEPDIVE.md 4.3, already pinned in internal/attest/canonical_test.go) as its own known-answer test, or (b) attest.Canonicalize must be changed to delegate to it -- either way pinned by a BYTE-EQUALITY test between the two encoders (or between the new encoder and the existing KAT) so the two paths cannot silently drift apart. No code change needed until internal/signing grows that generalized encoder; this task exists so the obligation has a tracked owner.
+  _Proof: go test -race -run TestSigningCanonicalizeAttestationMatchesAttestKAT ./internal/signing_
+- [ ] None · RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists — relay, P1, sequencing, vacuous-today
+  RELAY-16 added hub.Options.RemoteRouter, an admission-time seam (internal/hub/roster.go, RemoteRouter interface, doc comment "# THE SEQUENCING CONSTRAINT — DO NOT INJECT A ROUTER EARLY", roster.go:97-104). Injecting a live RemoteRouter into a running hub BEFORE the durable outbox exists converts an honest 404 into accepted-and-never-delivered: the message is admitted, durably written, and then has nowhere to go. This is a real risk, not a theoretical one -- the seam deliberately DISCARDS the peer id the router returns (internal/hub/hub.go:1295, `if _, ok := h.routeRemote(r); ok { continue }`), so admission ("can I route this?") and egress ("can I deliver this?") consult router/outbox state INDEPENDENTLY. There is no single place today where both questions are answered together.
+  
+  Recorded so review, not just prose, catches a violation. Constraint: no code path may construct a non-nil RemoteRouter and pass it into hub.Options until RELAY-19 (Forwarder writes and settles durable outbox records, part 2 of the durable-outbox pair started by RELAY-15) is done and the forwarder is wired to actually carry an admitted message onward. The composition root (RELAY-24, cmd/agent-bus/main.go + relaywiring.go) is the most likely place a RemoteRouter gets constructed and injected -- a direct blocking relation RELAY-19 -> RELAY-24 has been added for that reason -- but this task is the review-visible checklist item for WHICHEVER task ends up doing the wiring, in case it is not RELAY-24.
+  
+  Acceptance: whoever wires a RemoteRouter must, in the same task, either (a) demonstrate the forwarder/outbox path a routed-true answer can reach is durable end-to-end (RELAY-19 done, wired, and tested), or (b) not wire the router yet and instead file/keep this constraint open. A reviewer checking this task off is confirming (a).
+  _Proof: go test -race -run TestRelayWiringNeverConstructsRemoteRouterBeforeDurableOutbox ./cmd/agent-bus_
+- [ ] None · RELAY-25-FU-REALHOST: Real three-host SSH-tunnel federation run -- loopback smoke does not prove it — relay, P2
+  RELAY-25s scripts/fed-smoke.sh runs three buses on 127.0.0.1 and proves the protocol/wiring is correct, but its own header must say what it does NOT prove: SSH tunnel bring-up/flap, NAT/keepalive behaviour, latency versus RetryHorizonCeiling, and certificate pinning actually traversing a tunnel rather than localhost. This follow-up is the real run: three actual hosts (or three VMs/containers standing in for hosts), real SSH tunnels per the FEDERATION deployment assumptions (RELAY-6, DECISIONS.md), A -> B -> C with B as a relay hop, verifying delivery exactly once and the full bus path in the audit log end to end over the tunnels rather than loopback. NOT on the epics critical path -- the loopback smoke (RELAY-25) is the epic deliverable; this is the harder proof that follows it.
+  _Proof: bash scripts/fed-smoke-realhost.sh_
+- [ ] None · RELAY-2-FU-BROADCAST-FANOUT: Forwarder.targets fans broadcasts out to peers that always 400 them — relay, P3
+  Forwarder.targets (internal/relay/forward.go:641) fans every LOCAL broadcast out to every peer, but a correct peer implementation always answers 400 to a relayed broadcast it cannot legally accept today (no CrossBusTrust chain, no RemoteRouter seam). Not urgent -- wasted round-trips against a 400, no data-loss or correctness risk -- but worth trimming once RELAY-16/17/20/21 land, since a peer bus will then be a real destination and this fan-out logic needs re-examining anyway. Discovered during the FEDERATION phase filing pass 2026-08-08, filed rather than left as a comment.
+  _Proof: go test -race -run TestForwarderDoesNotFanBroadcastsToPeersThatWillReject ./internal/relay_
+- [ ] None · RELAY-15-FU-JOBID-CASE: Normalise bus-id case at the outbox enqueue boundary — relay, P2
+  DeriveJobID (internal/relay/outbox.go) is CASE-SENSITIVE while the rest of the system treats bus ids case-insensitively -- registry.go keys peers on strings.ToLower, path.go folds every hop for loop prevention, ValidatePeerBusID compares with EqualFold, and minted bus ids are lowercase by construction. Two case-variant spellings are ONE bus everywhere else but would mint TWO job ids here and deliver the message twice.
+  
+  The fix is NOT to fold inside DeriveJobID: validate re-derives the job id from the record's STORED PeerBusID, so folding there makes every mixed-case record fail its own integrity check and be discarded as "names one job and describes another" -- a self-inflicted relay-hop loss. Normalise at the ENQUEUE BOUNDARY, before the record is built. That is a decision about the canonical spelling of a durable field, which is why RELAY-15 did not make it unilaterally. Cheapest to do BEFORE any outbox record exists on disk.
+- [ ] RELAY-13 · RELAY-13: Enrolment registers the agent's messaging public key — auth, P0, vacuous-today
+  FEDERATION phase, wave 2. Consumes existing CRYPTO-3 (dd1066af) -- do not duplicate, relate.
+  
+  auth.RosterEntry.MessagingPublicKey is defined and validated but never populated
+  (auth/service.go:360).
+  
+  Owns internal/httpapi/auth.go, internal/auth/service.go, client/enrol.go,
+  cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test.go.
+  _Proof: go test -race -run TestEnrolRegistersMessagingPublicKey ./internal/httpapi_
+- [ ] RELAY-11-FU-INGEST-LOOPGUARD · Relay ingest MUST route through relay.CheckIncomingPath before hub.publish, or a 64-hop loop becomes a permanent audit record — relay, P2
+  Raised by the security gate on RELAY-11 (2026-08-08). Duplicate-hop / loop detection today lives ONLY in relay.ValidateBusPath (case-insensitive); neither store.NewMessageWithBusPath nor store.Decode rejects a repeated hop -- this is a documented, deliberate deferral in store/message.go (see its "What is deliberately NOT checked here" comment). The requirement this creates lands on the relay INGEST task: ingest must route the caller-supplied bus path through relay.CheckIncomingPath and must not call hub.publish with a raw peer path, or a malicious/looping peer can write a 64-hop cycle into the append-only audit trail permanently. Worth pinning with a test on RELAY-21 (AcceptRelay callback: roster-check before durable write, re-forward on OutcomeNew), which is the task that wires ingest to hub.publish.
+  _Proof: go test -race -run TestAcceptRelayRefusesPathNotCheckedForLoop ./internal/relay_
+- [ ] RELAY-31 · RELAY-31: CONTRACTS-ONDISK.md / DECISIONS.md / AGENT_LOG.md entries for internal/attest — docs, P2
+  Documentation for RELAY-14 (internal/attest: bus-signed agent-key attestations) was never written -- outside RELAY-14s own file boundary. Needed: CONTRACTS-ONDISK.md record of the reserved signing-format-version = 2 value and the agent-bus/bus-attest/2 context string (reserved_by feature-runner-RELAY-14, 2026-08-08, from the signing-format-version reservation namespace, NOT chosen); DECISIONS.md dated entry recording the package, the encoder-deviation-with-owner decision (see RELAY-30), and the four binding checks from FEDERATION_TRUST_DEEPDIVE.md 4.2; AGENT_LOG.md entry for the work. Note explicitly: invariant 7s CLI-subcommand-in-the-same-task obligation does NOT bite yet for this task -- no agent-facing surface moved, nothing imports internal/attest yet (code-only, per RELAY-14s own report).
+  _Proof: grep -n "signing-format-version = 2" CONTRACTS-ONDISK.md_
+- [ ] RELAY-22 · RELAY-22: Choose and wire the multi-principal relay abuse-control primitive — relay, P1, vacuous-today
+  FEDERATION phase, wave 3. Deps: RELAY-17 (CrossBusTrust).
+  
+  Owns DECISIONS.md in its wave (the only other task besides RELAY-6 permitted to touch it this
+  epic). Consumes existing task 48223968 ("Choose the abuse-control primitive for a MULTI-PRINCIPAL
+  relay link", raised P2->P1 2026-08-08 as part of this filing pass) -- do not duplicate, relate.
+  The ingest handler (RELAY-20/21) cannot be written correctly without this answer: the default it
+  would otherwise silently inherit (messages.go:656 disconnect) drops every agent behind a peer bus
+  over one agent's traffic. Deliver the actual mechanism (per-origin-agent rejection without
+  dropping the transport / per-peer rate limiting / peer-level de-peering) and wire it, in addition
+  to 48223968's DECISIONS.md entry.
+  _Proof: go test -race -run TestMultiPrincipalAbusePrimitiveEnforced ./internal/relay_
+- [ ] RELAY-29 · RELAY-29: revocation across a non-adjacent link is unsolved — relay, P2
+  From FEDERATION_TRUST_DEEPDIVE.md 4.4: bus C has no channel to bus A, so a compromised A-agent key stays live alongside its replacement for the whole NotAfter window -- there is no way for C to learn of an early revocation short of the attestation expiring naturally. Related to RELAY-28 (MaxAttestationLifetime) -- they are the same exposure viewed from two directions: RELAY-28 bounds how long the window can be, this task is about whether the window can be closed early at all. Needs design work (a revocation list distributed hop-by-hop? shorter-lived attestations with mandatory re-attestation? out-of-band peer notification?) before implementation -- do not start coding without a design decision recorded in DECISIONS.md.
+  _Proof: none -- design task, blocked on a DECISIONS.md entry before any code proof applies_
+- [ ] RELAY-32 · RELAY-32: add json: tags to internal/attest.Attestation before it goes on the wire — relay, P3
+  internal/attest.Attestation currently has no json: tags. FEDERATION_TRUST_DEEPDIVE.md 4.2 specifies wire field names for the attestation. Whichever task first puts an Attestation on the wire (most likely RELAY-17, which threads the attestation through the relay envelope) should add json: tags matching the documented field names and reuse this struct directly rather than forking a second wire-shaped struct that can drift from it. Flagged by the RELAY-14 reviewer gate (F5, P3).
+  _Proof: grep -n "json:" internal/attest/attest.go_
+- [ ] None · RELAY-16-FU-RECOVEREDPRUNE: Hub.recovered is never pruned of foreign ids its only consumer discards — hub, P3, informational, vacuous-today
+  Informational / low priority, per securitys note on RELAY-16s re-audit. h.recovered is harvested unfiltered from every sender and recipient in the replayed log (internal/hub/hub.go:993-995), including foreign (remote-bus) ids now made durable by RELAY-16s admission seam. Its ONLY consumer, noteRecoveredIdentities (internal/hub/roster.go:304-361), already filters foreign ids out at read time (added alongside RELAY-16 to stop the invariant-1 id-reuse detector false-firing on remote recipients). So the retention in h.recovered itself is pure waste once a router is ever wired and used: one map entry (~150B) per distinct foreign id ever addressed, forever, for a value nothing reads.
+  
+  Harvest-side filtering (skip non-local ids at hub.go:993-995 the same way noteRecoveredIdentities filters them at roster.go) would avoid the retention entirely. NOT urgent: WAL bytes dominate memory/disk cost by a wide margin, so this only matters if a WAL-growth budget is ever set for h.recovered specifically, which nothing does today. File low and revisit then.
+  _Proof: go test -race -run TestHubRecoveredIsPrunedOfForeignIdsOnHarvest ./internal/hub_
 - [ ] None · RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can permanently exhaust an agent name — relay, P1
   Found by the security gate on MSG-FU-SUFFIXFLOOR (94159d93-fe87-4c3e-b938-86fe7068c787). LATENT ONLY BECAUSE RELAY IS UNWIRED -- nothing outside internal/relay imports it today.
   
@@ -2972,17 +3642,65 @@
   DO. Roster-check local-bus recipients in the relay ingress path before the durable write, exactly as hub.publish does. Note the sender vector is already closed (ValidatePeerBusID plus the sender-bus check), so this is specifically about RECIPIENTS.
   
   PROOF. A test that a relayed message naming an unenrolled local recipient is REFUSED before anything is written, and that the suffix floor for that name is unchanged after a restart.
+- [ ] RELAY-26 · RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off — core, P1, vacuous-today
+  FEDERATION phase, wave 5. NOT on the critical path (does not block RELAY-25).
+  
+  Refuse to start if -listen is bound to a non-loopback address while peer records exist and
+  invite-gating is off -- turns the SSH-tunnel assumption (RELAY-6) into an ENFORCED precondition
+  rather than a comment. Proposed by the planner and accepted by the orchestrator 2026-08-08.
+  _Proof: go test -race -run TestStartupRefusesNonLoopbackListenWithPeersAndInviteGateOff ./cmd/agent-bus_
+- [ ] None · RELAY-15-FU-SWEEP-TOMBSTONE: Horizon-swept outbox jobs leave no durable abandonment record — relay, P2
+  Outbox.sweepLocked drops a pending job past OutboxRetryHorizon from memory and logs it at WARN, but writes NO durable 'abandoned' record -- it cannot, because it runs with mu held and this package never writes durably under the lock. Consequences: (a) the WAL shows an enqueue with no settlement beside it, so the durable trail carries an unresolved job; (b) after the drop the same job id is Enqueue-able again with a FRESH horizon anchor, which is the horizon extension the pending-vs-pending rule refuses elsewhere. The same applies to a job dropped by the FutureDated guard.
+  
+  Fix: write the abandonment from a caller OUTSIDE the lock (Settle already does exactly that). RELAY-19 must additionally not re-enqueue a job it has seen dropped past the horizon.
+  _Proof: go test -race -run TestOutboxAgeHorizonIsEnforcedOnTheReplayPath ./internal/relay_
+- [ ] RELAY-28 · RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify — relay, P1
+  internal/attest.Verify currently trusts NotAfter entirely at the minters discretion -- an attestation minted valid until year 292278994 is accepted (demonstrated by the RELAY-14 security gate, finding P2-3). With revocation across a non-adjacent link unsolved (see RELAY-29), expiry is currently the ONLY bound on a compromised agent key. DoD explicitly requires DERIVING the ceiling, not choosing an arbitrary number -- FEDERATION_TRUST_DEEPDIVE.md treats an unjustified constant as its own defect class (same reasoning as reserved-not-chosen resource numbers). State in the task/commit what the derived value is grounded in (e.g. the clock-skew allowance already in internal/buscert, an existing session/cert rotation cadence, or another already-decided lifetime elsewhere in the system -- do not invent a fresh one). Implement as an exported MaxAttestationLifetime enforced inside Verify (NotAfter - IssuedAt > MaxAttestationLifetime is refused), with a test pinning both the derived value and the boundary.
+  _Proof: go test -race -run TestVerifyRejectsAttestationExceedingMaxLifetime ./internal/attest_
 - [ ] None · RELAY-2-FU-LOOPTEST-FLAKE: Unreproduced single failure of TestMessageRelay's loop subtest — relay, P2
   During RELAY-2/3 the test-engineer observed ONE failure of TestMessageRelay/a_loop_is_200_with_a_dropped_reason,_never_an_error_status on the tree BEFORE any of its edits, and could not capture the failing assertion. Not reproduced in ~3,500 subsequent executions (~2,900 by the test-engineer including 8-way parallel load and cold-testcache runs, ~600 by feature-runner at -count=200). The only non-deterministic path in that subtest is doRelay's t.Fatalf("request: %v", err) on a transient httptest connection error, which would be HARNESS FRAGILITY rather than a product defect -- but that is a hypothesis, not a diagnosis. Task: either reproduce it, or make doRelay distinguish a transport error from an assertion failure so the next occurrence is self-diagnosing.
+- [ ] RELAY-24 · RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go — cli, P0, critical-path, vacuous-today
+  FEDERATION phase, wave 4. Deps: RELAY-12 (peer subcommand), RELAY-20 (peer routes mounted),
+  RELAY-21 (AcceptRelay callback).
+  
+  The composition root in cmd/agent-bus/main.go + new relaywiring.go: loads peer records, builds
+  CrossBusTrust, constructs the Forwarder/Registry, and registers the /v1/peer/* routes only when
+  both are non-nil, per RELAY-20's contract.
+  _Proof: go build ./... && go test -race -run TestRelayWiringComposesRoutesWhenPeersConfigured ./cmd/agent-bus_
+- [ ] RELAY-27-FU-EXPIRED · RELAY-27-FU-EXPIRED: attest.ErrExpired and attest.ErrNoClock still answer a peer bad_signature — relay, P2
+  Known gap left explicitly by RELAY-27 (commit 06e3cc5): attributionError.relaySentinelForTrustError maps attest.ErrUnpinned->ErrUnpeeredBus(403) and attest.ErrInvalid->ErrInvalidRelay(400), but attest.ErrExpired and attest.ErrNoClock fall through the default arm to ErrNoSignerKey/bad_signature(403), same as genuine forgery. Both are wrong in the SAME direction: expiry is usually an HONEST queued message that got stale in flight, not an attack, so answering bad_signature tells the peer to stop retrying when the right answer is retriable; and ErrNoClock is OUR OWN wiring fault (no clock configured for verification) reported to the peer as if it were their non-retriable problem.
+  
+  Fix requires: (1) a NEW wire code, RESERVED via POST .../reservations (a namespace for relay wire codes -- do not choose a string by eyeballing existing Code* constants in internal/relay/handshake.go), distinguishing at minimum expiry (retriable) from a local clock-wiring fault (5xx-shaped, not a peer fault at all); (2) a handler arm in internal/relay/handshake.go declaring the new Code* constant(s) with the existing block's documentation style (HTTP status + retriability); (3) an arm in internal/relay/signed.go relaySentinelForTrustError mapping attest.ErrExpired and attest.ErrNoClock to the new sentinel(s) (NOT both to the same one -- ErrNoClock is local wiring, ErrExpired is peer-observable staleness); (4) an allow-list arm in internal/relay/client.go peerErrorCode (RELAY-9's pattern) so the new code is recognised rather than falling through as unrecognised; (5) regression tests asserting errors.Is for both sentinels through the real VerifyRelayed path, the new ErrorCode()/HTTP status, and that the response is classified RETRIABLE for expiry (PeerRefusedError.Retriable per client.go:78) and appropriately for the clock-fault case.
+  
+  Outside RELAY-27's boundary, which is why it was not reached there -- filed as its own atomic follow-up per the RELAY-27 implementer's own note (see RELAY-27 commit 06e3cc5 message).
+  _Proof: go test -race -run TestExpiredAndNoClockAreDistinctFromForgery ./internal/relay_
 - [ ] None · RELAY-2-FU-FORWARDER-REAP: Forwarder never reclaims a departed peer's queue or goroutine — relay, P2
   internal/relay/forward.go creates one bounded channel plus one goroutine per peer on first enqueue and never removes either; there is no counterpart to Registry.RemovePeer. Peer churn or a flapping topology leaks a DefaultQueueDepth-slot channel and a goroutine per bus id ever routed to. Bounded in practice by the peer set, unbounded in principle.
-- [ ] None · Relay forwarder's PeerBaseURL callback: give Registry a concurrency-safe accessor and state the contract — relay, P1
-  RELAY-4 closed a 24h revocation hole by re-resolving the peer address on EVERY attempt (internal/relay/forward.go attempt()), so de-peering takes effect on the next attempt. That fix is only as good as the callback the wiring site supplies, and today there is NO Registry.PeerBaseURL method -- the only primitive is Registry.Peers(), which snapshots every peer. ForwarderOptions.PeerBaseURL also does not say "safe for concurrent use" the way ClientConfig.LocalRoster does, and it is now called from every peer worker goroutine. A wiring site that caches or snapshots silently re-freezes the address and REOPENS the hole. Deliver: a concurrency-safe Registry.PeerBaseURL(busID) (string, bool), the documented contract on the option, and a test that a RemovePeer is observed by an in-flight retry. Raised by the security gate 2026-08-08.
-  _Proof: go test -race -run TestRegistryPeerBaseURLObservesRemovePeer ./internal/relay_
-- [ ] None · Durable relay outbox: cross-bus delivery is best-effort and every drop path loses the message — relay, P1
-  Pre-existing and honestly documented in internal/relay/forward.go's Forwarder doc, but never filed. The per-peer outbound queue is IN-MEMORY: a crash with a non-empty queue loses it, and Dropped.Full, Dropped.Expired and (new) Dropped.Yielded are all silent data loss. RELAY-4 added retry, NOT durability -- retry cannot help a crash because the queue it retries from is the process's own memory. Until this lands, no doc or product claim may describe cross-bus delivery as reliable. Note the constraint any design inherits: the total retry horizon must stay inside idem.PeerOutageBudget (24h), enforced in NewForwarder.
-  _Proof: go test -race -run TestRelayOutboxSurvivesCrash ./internal/relay_
-
+- [ ] RELAY-21 · RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeNew — relay, P0, critical-path, vacuous-today
+  FEDERATION phase, wave 3. Deps: RELAY-20 (peer routes mounted).
+  
+  The AcceptRelay callback: roster-check local recipients BEFORE the durable write, then re-forward
+  ONLY on OutcomeNew. Consumes cca64afd (do not duplicate, relate): "RELAY precondition: roster-check
+  LOCAL recipients before the durable write, or a peer can permanently exhaust an agent name."​
+  _Proof: go test -race -run TestAcceptRelayChecksRosterBeforeDurableWrite ./internal/relay_
+- [ ] None · RELAY-33: attest.go:371 quotes want.OriginBus unbounded (%q, 64 KiB -> 262,329-byte refusal string) -- and the hand-copied-slice snapshot pattern has no owner-doc guard — relay, P2
+  internal/attest/attest.go:371 quotes want.OriginBus with %q WITHOUT the length bound that F2 (RELAY-14 security gate) added to want.FQAgentID at the sibling comparison. Measured: a 64 KiB want.OriginBus produces a 262,329-byte refusal string (NUL expands roughly four-fold under %q). Not live today -- nothing calls attest.Verify yet (RELAY-17 is the wiring task) and relay.ValidateRelayRequest check 3 already bounds m.OriginBus before it would reach here -- but it contradicts the packages own stated rationale for bounding the OTHER two-sided comparison (want.FQAgentID vs a.AgentID at attest.go:310, fixed under F2), since the OriginBus compare at attest.go:371 is the packages other two-sided comparison and was left unbounded.
+  
+  Minimal fix: apply ids.ValidateBusID(want.OriginBus) beside the existing bound near attest.go:323 (mirroring the F2 fix pattern), or stop echoing want.OriginBus verbatim in the refusal message.
+  
+  LATENT HAZARD to close in the same task: Verify snapshot is `checked := a` plus two HAND-WRITTEN slice copies (for the two slice-typed fields today). A third slice field added to Attestation later would silently alias the live backing array again -- the exact TOCTOU class already found and fixed once (P2-1 in the RELAY-14 gate). Add a one-line comment on the Attestation struct (or beside the snapshot code) stating that every slice-typed field must be explicitly copied here, so the next author who adds one is warned rather than relying on rediscovery.
+  
+  Filed from the RELAY-14 security RE-VERIFICATION (2026-08-08), a new finding not in the original gate report.
+  _Proof: go test -race -run TestVerifyBoundsOriginBusBeforeQuote ./internal/attest_
+- [ ] RELAY-18 · RELAY-18: Retire the relay import guard deliberately, replaced by a narrower one — relay, P0, vacuous-today
+  FEDERATION phase, wave 2. Deps: RELAY-6 (FEDERATION deployment assumptions in DECISIONS.md).
+  
+  TestHandshakeHandlerIsNotWiredIntoAnyMux (guards_test.go:44) fails if any file outside
+  internal/relay imports it. The blanket ban is REPLACED, not deleted, by a narrower guard:
+  importable only by internal/httpapi and cmd/agent-bus, and the ingress handler constructible only
+  with a non-nil CrossBusTrust. TestPackageDocDoesNotReviveTheWithdrawnDisconnect stays UNTOUCHED --
+  this task does not touch invariant-10 disconnect semantics.
+  _Proof: go test -race -run TestRelayImportGuardAllowsHttpapiAndMain ./internal/relay_
 ### EPIC SIGN — SIGN: message authenticity & integrity (Ed25519 sign/verify, no encryption yet)
 
 - [ ] SIGN-2 · SIGN-2: Sign on the send path (Ed25519 detached signature travels with the message) — crypto, P1
@@ -3081,6 +3799,17 @@
 - [ ] None · PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes when a proof_cmd nests another proof-check.sh invocation of a go-test command — tooling, P2
   Discovered 2026-08-02 during bookkeeping verification of the Proof-command guard task (84b76d5e). Composing `bash scripts/proof-check.sh --quiet "<a command that itself calls bash scripts/proof-check.sh --quiet 'go test ...'">` causes runaway recursive shim processes: the outer invocation's PATH-prepended go-shim directory persists into the nested bash -c subshell, so the inner proof-check.sh installs its OWN shim ahead of the outer one, the inner go test call resolves to a shim that itself re-invokes go test, and this recurses/forks until killed. Observed live: dozens of `/tmp/proof-check.*/bin/go test ...` and `tee -a .../gotest.log` processes accumulating; had to pkill -9 -f proof-check to recover. No repo file was touched, no lasting damage, but on a shared box this is a resource-exhaustion foot-gun for any agent that tries to write a self-checking or meta proof_cmd. Suggested direction (not investigated in depth): proof-check.sh should strip its own shim dir(s) from PATH before invoking a nested shell, or refuse/detect recursive invocation via a marker env var (e.g. if PROOF_CHECK_ACTIVE is already set, run the proof verbatim without installing a second shim). Reproduce: bash scripts/proof-check.sh --quiet 'bash scripts/proof-check.sh --quiet "go test -run TestNoSuchTest ./internal/wal"' (kill it within a few seconds, do not let it run to completion).
   _Proof: timeout 60 bash scripts/proof-check.sh 'bash scripts/proof-check.sh "true"'; test $? -ne 124_
+- [ ] None · proof-check.sh runs the proof against its OWN script directory repo root, not the callers cwd -- silently defeats git-archive-overlay isolation testing — tooling, P1
+  scripts/proof-check.sh:156-157 computes REPO_ROOT from SCRIPT_DIR (dirname of the script itself) and then, at the actual execution site (lines 508/510), does `( cd "$REPO_ROOT" && bash -c "$CMD" )` unconditionally -- it NEVER runs in the caller's own working directory. It also prints `running (cwd ${REPO_ROOT})...` which looks like a statement of fact but is really an announcement that the caller's cwd was silently discarded.
+  
+  CONSEQUENCE: the standard isolation technique this project uses to prove a change consumes nothing from other agents' uncommitted work is `git archive HEAD | tar -x -C <tmpdir>` into a clean overlay, then invoking proof-check.sh BY ABSOLUTE PATH against that overlay. Because the script always resolves back to its own repo (the live working tree), that invocation silently computes the verdict against the LIVE tree instead -- including every other agent's uncommitted changes -- and there is NO signal that this happened. An integrator committing RELAY-27 caught this by accident (had to copy the script into the overlay and re-run scoped correctly) -- same result that time, but only because they noticed. Most invocations would not notice.
+  
+  CONFIRMED RED (not VACUOUS), reproduced live 2026-08-08: created an overlay via `git archive HEAD | tar -x -C $OVERLAY`, wrote a marker file that exists ONLY in the overlay ($OVERLAY/MARKER.txt), cd'd into the overlay, then ran `bash /abs/path/to/scripts/proof-check.sh 'test -f ./MARKER.txt'`. Expected (if isolation held): PASS, since the file genuinely exists relative to the caller's cwd. Actual: `proof-check: running (cwd /mnt/sdb4/mike/mike/source/agent-bus)...` followed by `verdict=FAIL class=file-assertion exit=1` -- it silently substituted the live repo root for the overlay and the assertion failed there instead. The verdict is wrong AND there is no warning that the substitution occurred.
+  
+  RELATED, not duplicate: this is the SECOND defect found in this tool, after cea09b96 (subtest SKIP/PASS lines invisible to the plain-text counter, so a parent-PASS/all-children-SKIP certifies PASS instead of VACUOUS). Both defects share the same failure shape: the tool CLAUDE.md mandates specifically to make evidence trustworthy has produced a confidently wrong verdict, silently. Filed as a sibling task under the same TOOLING epic rather than a new umbrella parent -- this backlog already tracks proof-check.sh defects as discrete atomic tasks (PROOF-CHECK-FU-RECURSION, the zero-probe-guard-convention task, and cea09b96), so a new parent would mean retrofitting three live tasks rather than following the established pattern. A `relates` link to cea09b96 records the kinship without merging scope.
+  
+  DEFINITION OF DONE: (1) proof-check.sh either runs the proof in the CALLER'S cwd (the natural fix -- drop the `cd "$REPO_ROOT"` at the execution site, or make it conditional on being invoked with a relative path / no override), OR refuses loudly (distinct exit code / UNVERIFIABLE-class message) when it detects it is being invoked against a different repo root than the caller's cwd -- either is acceptable, but silent substitution is not. (2) A guard test demonstrates the isolation case concretely: same proof command, two trees (a real overlay via git archive, not a mock), two DIFFERENT verdicts -- i.e. a command that is genuinely true relative to the overlay and genuinely false (or absent) relative to the live repo, or vice versa, and the script's reported verdict tracks the overlay once fixed. (3) The `running (cwd ...)` line, once fixed, must report the directory the command ACTUALLY ran in, not a resolved repo root that may differ from where the caller invoked it.
+  _Proof: REPO=$(pwd); T=$(mktemp -d); git archive HEAD | tar -x -C "$T"; echo only-in-overlay > "$T/ISO_MARKER.txt"; V=$(cd "$T" && bash "$REPO/scripts/proof-check.sh" "test -f ./ISO_MARKER.txt" 2>&1 | grep -o "verdict=[A-Z]*"); rm -rf "$T"; test "$V" = "verdict=PASS"_
 - [ ] DISCOVERY-DOC-FU-GITIGNORE · DISCOVERY-DOC-FU-GITIGNORE: stale untracked busctl binary at repo root is not gitignored — repo-hygiene, P2
   Found independently by BOTH the reviewer and security gates during DISCOVERY-DOC. A 7.6 MB ELF executable named busctl sits untracked at the repo root, left behind by the cmd/busctl -> cmd/agent-busctl rename. .gitignore lists /agent-bus and /agent-busctl but NOT /busctl, so git check-ignore busctl reports it is NOT ignored and any git add -A would commit a binary into the repo. Given this project's documented history of index-sweeping commits mixing several agents' work, this is a live hazard. Fix: delete the artefact and add /busctl to .gitignore (or drop the entry deliberately if the old name is considered gone for good). Outside DISCOVERY-DOC's ownership boundary, so flagged not fixed.
 - [ ] None · Conjunction-masking vacuous-proof family: filtered-clause proof_cmds hidden by an unfiltered && clause report PASS on a zero-match filter — tooling, P1

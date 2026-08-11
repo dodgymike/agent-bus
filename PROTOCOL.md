@@ -192,9 +192,11 @@ when all three are absent, and that start says so once, loudly, at `warn`:
 level=warn msg="bus certificate and signing key GENERATED: …" data_dir=… cert=…/bus-tls.crt fingerprint=<64 hex> not_after=<RFC3339>
 ```
 
-Generating the material is all this does. **The listener is still plaintext HTTP** — serving TLS is a
-separate task (`MTLS-LISTENER`) that must not land before clients can speak it — which is why the
-`server started` line reports `tls=false` alongside `bus_cert_fingerprint`.
+Generating the material is separate from serving it: this step only produces the certificate and
+keys on disk. The listener that presents this certificate on every handshake is TLS-only (invariant
+11) — there is no plaintext listener and no fallback — and the `server started` line reports `tls=true`
+plus `tls_min_version` and `client_auth` alongside `bus_cert_fingerprint`, derived from the config the
+listener actually serves rather than restated as a separate claim.
 
 **Back up all THREE secrets, plus the log.** `wal-mac.key` + the log alone is not a backup of this
 bus: restore it without `bus-tls.key` and no client that pinned the certificate can connect; restore

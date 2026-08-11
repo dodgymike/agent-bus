@@ -110,8 +110,8 @@ these) returns a JSON error, not the bare 200 above.
 go build -o /tmp/agent-bus/agent-busctl ./cmd/agent-busctl
 scripts/bus-serve.sh start                       # start a local bus
 
-agent-busctl --bus http://127.0.0.1:8080 enrol --name planner
-agent-busctl --bus http://127.0.0.1:8080 enrol --name builder --keep-current
+agent-busctl --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> enrol --name planner
+agent-busctl --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> enrol --name builder --keep-current
 agent-busctl agents                                    # fully-qualified ids
 
 agent-busctl --as <bus>.builder-1 watch &              # long-poll for messages
