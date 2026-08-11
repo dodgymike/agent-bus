@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# tools/agentbus-tool — the agent-facing helper over agent-busctl.
+#
+# WHY THIS EXISTS
+# ---------------
+# AGENTBUS.md and AGENT_PROTOCOL.md state the one rule an agent must never break:
+#   "An agent should never hand-write an HTTP call against this bus."
+# Every capability ships as an agent-busctl subcommand; driving the bus by hand
+# is how a bearer credential or a direction to the wrong port leaks. agentbus-tool
+# is the thin, non-interactive wrapper an agent actually invokes day to day:
+#
+#   - `details` — the standard "who am I" bootstrap check. It shows the selected
+#     identity's agent info (agent id, bus id, bus url, name, pinned fingerprint,
+#     whether it is the stored selection) and, when asked, performs a real session
+#     handshake (`--verify`) so an agent can confirm the bus still honours its
+#     credential before it spends work it can only report back over that link.
+#   - every other agent-busctl command is passed through unchanged, so an agent
+#     gets the full CLI surface without learning a second flag set.
+#
+# It NEVER reads or prints key material. Identities and accept-sets are fetched
+# through agent-busctl, which redacts seeds by construction; this script adds no
+# path that could surface a private key.
+#
+# USAGE
+# -----
+#   agentbus-tool [<global flags>] details [--verify] [--json]
+#   agentbus-tool [<global flags>] <any agent-busctl command> [args...]
+#   agentbus-tool help | --help | -h
+#
+# Global flags (forwarded verbatim to agent-busctl; see CONTRACTS-CLI.md):
+#   --bus <url> | AGENT_BUS_URL
+#   --bus-fingerprint <hex> | AGENT_BUS_FINGERPRINT
+#   --identity <dir> | AGENT_BUS_IDENTITY
+#   --as <agent-id> | AGENT_BUS_AGENT_ID
+#   --timeout <dur> | AGENT_BUS_TIMEOUT
+#
+# `details` also accepts its own flags:
+#   --verify        perform a real session handshake against the bus (network)
+#   --json          emit one JSON object on stdout instead of the human table
+#
+# The agent-busctl binary is resolved, in order: the AGENT_BUSCTL env var, this
+# repo's bin/agentbusctl (or bin/agent-busctl), then agent-busctl on PATH.
+#
+# EXIT CODES
+# ----------
+#   details:  0 shown (or verified); otherwise the underlying agent-busctl exit
+#             code, unchanged (2 usage, 3 no identity, 4 auth, 5 network, 6 server,
+#             7 rejected, 8 nothing to report). help always exits 0.
+#   passthrough: the agent-busctl command's own exit code.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Resolve the agent-busctl binary.
+# ---------------------------------------------------------------------------
+resolve_agentbusctl() {
+  if [[ -n "${AGENT_BUSCTL:-}" ]]; then
+    if [[ -x "${AGENT_BUSCTL}" ]]; then
+      printf '%s\n' "${AGENT_BUSCTL}"
+      return
+    fi
+    echo "agentbus-tool: AGENT_BUSCTL is set but not executable: ${AGENT_BUSCTL}" >&2
+    exit 1
+  fi
+
+  local dir
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+
+  for cand in "$dir/bin/agentbusctl" "$dir/bin/agent-busctl"; do
+    if [[ -x "$cand" ]]; then
+      printf '%s\n' "$cand"
+      return
+    fi
+  done
+
+  if command -v agent-busctl >/dev/null 2>&1; then
+    printf '%s\n' "$(command -v agent-busctl)"
+    return
+  fi
+
+  echo "agentbus-tool: could not find an agent-busctl binary (AGENT_BUSCTL, ./bin/agentbusctl, or PATH)" >&2
+  echo "agentbus-tool: build it with: make agentbusctl   (or: go build -o bin/agentbusctl ./cmd/agent-busctl)" >&2
+  exit 3
+}
+
+AGENTBUSCTL="$(resolve_agentbusctl)"
+
+# ---------------------------------------------------------------------------
+# Help.
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+usage: agentbus-tool [globals] details [--verify] [--json]
+       agentbus-tool [globals] <agent-busctl command> [args...]
+       agentbus-tool help | --help | -h
+
+The agent-facing wrapper over agent-busctl (see AGENTBUS.md / AGENT_PROTOCOL.md).
+
+Subcommands:
+  details [--verify] [--json]   show the selected identity's agent info; with
+                                --verify, also perform a real session handshake.
+  help | --help | -h            show this help
+  <anything else>               passed through unchanged to agent-busctl
+                                (agents, send, watch, enrol, whoami, use, logout,
+                                pin, broadcast, client-cert, ...)
+
+Global flags (forwarded to agent-busctl):
+  --bus <url>          AGENT_BUS_URL          base URL of the bus
+  --bus-fingerprint    AGENT_BUS_FINGERPRINT  64 lowercase hex bus cert pin
+  --identity <dir>     AGENT_BUS_IDENTITY     credential store directory
+  --as <agent-id>      AGENT_BUS_AGENT_ID     act as this stored identity, single cmd
+  --timeout <dur>      AGENT_BUS_TIMEOUT      per-operation timeout
+
+Env: AGENT_BUSCTL overrides the resolved agent-busctl binary path.
+
+JSON forms of `details` (produced entirely by agent-busctl, never spliced here):
+  details --json            -> whoami --all --json: {current_agent_id, identities[], ok}
+  details --json --verify   -> whoami --verify --json: the single identity object,
+                               complete with the verified {session:{...}}
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+  usage
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Collect global flags so `details` can forward them, and so the human table
+# reflects any --as/--identity override. Everything after the globals is the
+# subcommand.
+# ---------------------------------------------------------------------------
+globals=()
+
+while (( $# > 0 )); do
+  case "$1" in
+    --bus|--bus-fingerprint|--identity|--as|--timeout)
+      if (( $# < 2 )); then
+        echo "agentbus-tool: flag $1 requires a value" >&2
+        exit 2
+      fi
+      globals+=("$1" "$2")
+      shift 2
+      ;;
+    --bus=*|--bus-fingerprint=*|--identity=*|--as=*|--timeout=*)
+      globals+=("$1")
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# details — the standard "who am I" check.
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "details" ]]; then
+  shift
+  verify=0
+  json=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --verify) verify=1; shift ;;
+      --json)   json=1;  shift ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo "agentbus-tool: unknown details flag: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ "$json" == "1" ]]; then
+    # One JSON object on stdout, produced entirely by agent-busctl -- never
+    # assembled here by splicing JSON strings (that is how a URL or public key
+    # with a '/' would break a text replacement).
+    #   --verify    -> whoami --verify --json: the single identity object,
+    #                  complete with the {session:{...}} object.
+    #   (no verify) -> whoami --all --json: {current_agent_id, identities[], ok}.
+    if [[ "$verify" == "1" ]]; then
+      "${AGENTBUSCTL}" "${globals[@]}" whoami --verify --json
+    else
+      "${AGENTBUSCTL}" "${globals[@]}" whoami --all --json
+    fi
+    exit 0
+  fi
+
+  # Human output: the identity table, then an optional verification line.
+  "${AGENTBUSCTL}" "${globals[@]}" whoami --all || exit $?
+
+  if [[ "$verify" == "1" ]]; then
+    echo
+    echo "-- session --"
+    # A failed handshake keeps its own exit code (5 network, 4 auth, 3 no id).
+    "${AGENTBUSCTL}" "${globals[@]}" whoami --verify || exit $?
+  fi
+
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Anything else is passed straight through to agent-busctl.
+# ---------------------------------------------------------------------------
+exec "${AGENTBUSCTL}" "${globals[@]}" "$@"
