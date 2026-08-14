@@ -155,6 +155,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
+# CALLER_CWD is the physical working directory of the process that invoked
+# this script (captured before any `cd`), regardless of where the script
+# itself lives. Relative-command resolution and the actual proof execution
+# MUST happen relative to CALLER_CWD, not REPO_ROOT/SCRIPT_DIR — otherwise
+# invoking proof-check.sh by absolute path from another tree silently runs
+# the proof against this repo instead of the caller's tree.
+CALLER_CWD="$(pwd -P)"
 PROJECT_SLUG="${PROOF_CHECK_PROJECT:-agent-bus}"
 
 EXIT_PASS=0
@@ -289,7 +296,7 @@ resolvable() {
   local tok="$1"
   [[ -z "$tok" ]] && return 0
   if [[ "$tok" == */* ]]; then
-    [[ -x "${REPO_ROOT}/${tok}" || -x "$tok" ]]
+    [[ -x "${CALLER_CWD}/${tok}" || -x "$tok" ]]
     return
   fi
   type -t "$tok" >/dev/null 2>&1
@@ -503,11 +510,11 @@ fi
 # the single verdict line, so a proof cannot print a forged
 # `proof-check: verdict=PASS ...` that a caller doing `... | grep -m1 verdict=`
 # would read instead of ours.
-say "running (cwd ${REPO_ROOT})..."
+say "running (cwd ${CALLER_CWD})..."
 if (( QUIET )); then
-  ( cd "$REPO_ROOT" && bash -c "$CMD" ) >/dev/null 2>&1
+  ( cd "$CALLER_CWD" && bash -c "$CMD" ) >/dev/null 2>&1
 else
-  ( cd "$REPO_ROOT" && bash -c "$CMD" ) >&2
+  ( cd "$CALLER_CWD" && bash -c "$CMD" ) >&2
 fi
 RC=$?
 

@@ -155,8 +155,9 @@ mode that gets guards switched off. The trap being closed is *zero tests anywher
 opts into the stricter rule per-proof.
 
 **Trust boundary.** A `proof_cmd` is executable input: the script runs it verbatim, with your
-privileges and your full environment, in the repo root. With `--task` the string comes from the Spec
-Server, so anyone who can edit that backlog can choose a command that runs on your machine. Use
+privileges and your full environment, in the invoking process's captured working directory. With
+`--task` the string comes from the Spec Server, so anyone who can edit that backlog can choose a
+command that runs on your machine. Use
 `--classify` to inspect statically without executing. The echoed `proof:` line has non-printable
 bytes replaced with `?`, so ANSI escapes cannot repaint it to hide what will run.
 
