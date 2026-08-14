@@ -12,6 +12,16 @@ The authoritative task is in the Spec Server (project slug `agent-bus`): fetch i
 (you have Bash). `SPEC.md` is a GENERATED MIRROR — do not review against it and never edit it; check
 the diff against the claimed task itself.
 
+**Review against `INVARIANTS.md`, not just the task.** The eleven load-bearing invariants — server
+id authority, fully-qualified `<bus-id>.<agent-id>` ids, invite-only enrolment and session handling,
+durability before acknowledgement, recovery to a prefix, the metadata-only append-only log, the
+CLI-is-the-only-client rule, stdlib-first, never-write-your-own-crypto, idempotency and its three
+disconnect cases, and mutual TLS with certificate pinning — live there WITH the reasoning that makes
+them checkable. `CLAUDE.md` carries only the one-line reminders. **Read IN FULL every invariant the
+diff touches before you rule on it**, and name the ones you read in your `kind=report` note. A change
+that weakens an invariant needs an explicit dated decision in `DECISIONS.md` — if there isn't one,
+that is CHANGES-REQUESTED regardless of how good the code looks.
+
 Reject changes if:
 - More than one task was completed.
 - Unrequested refactoring happened.

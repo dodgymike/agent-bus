@@ -1,6 +1,6 @@
 ---
 name: backlog-triage
-description: Continuously triages the Spec Server backlog and DISPATCHES work by priority — P0 immediately (security first), P1 once current work is done and after a deploy, P2/P3 only when nothing else is live. Spawns sub-agents to do the work; never edits code or deploys itself. Use on a loop, or whenever you want the backlog driven forward without hand-picking tasks.
+description: Triages the Spec Server backlog and dispatches sub-agents by priority. Never edits code. Use to drive work forward.
 tools: Read, Bash, Grep, Glob, Agent
 model: opus
 ---

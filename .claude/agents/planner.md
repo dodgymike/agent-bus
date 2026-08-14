@@ -1,6 +1,6 @@
 ---
 name: planner
-description: Breaks large requests into an atomic, ordered implementation plan that fits the Spec Server task workflow. Use before implementation when a request spans multiple tasks.
+description: Breaks a large request into an atomic, ordered plan of Spec Server tasks. Use when a request spans several tasks.
 tools: Read, Bash, Grep, Glob, Agent
 model: sonnet
 ---

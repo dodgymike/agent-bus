@@ -1,6 +1,6 @@
 ---
 name: architecture-reviewer
-description: Reviews SYSTEM ARCHITECTURE — component boundaries, data flow, coupling/cohesion, the durability plane (WAL + two-phase commit + snapshot), the routing/relay plane, failure modes, and scalability. Read-only; returns a component/data-flow map + P0/P1/P2 findings with file:line and top risks/opportunities. Use for architecture reviews and before large structural changes.
+description: Reviews system architecture: boundaries, data flow, durability and relay planes. Use before large structural changes.
 tools: Read, Bash, Grep, Glob, Agent
 model: opus
 ---

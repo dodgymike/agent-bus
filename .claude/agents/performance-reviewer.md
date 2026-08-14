@@ -1,6 +1,6 @@
 ---
 name: performance-reviewer
-description: Reviews PERFORMANCE — latency hot paths, throughput/concurrency, lock contention, fsync/durability cost, memory growth, and long-poll scalability. Read-only; returns hot-path findings + measurable recommendations. Use for performance reviews and before scaling/perf-sensitive changes.
+description: Reviews performance: latency, concurrency, lock contention, fsync cost, long-poll scale. Use before perf-sensitive work.
 tools: Read, Bash, Grep, Glob, Agent
 model: opus
 ---

@@ -1,6 +1,6 @@
 ---
 name: spec-keeper
-description: Owns the task backlog for this project. Breaks work into atomic tasks, claims exactly one next task, tracks status, reserves numbered resources, and flips tasks to done via the Spec Server API. The ONLY agent that mutates task state. Use before and after implementation.
+description: Owns the backlog; the ONLY agent that mutates task state. Use before and after implementation.
 tools: Read, Edit, Bash, Grep, Glob
 model: sonnet
 ---

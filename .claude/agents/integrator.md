@@ -1,6 +1,6 @@
 ---
 name: integrator
-description: The ONLY agent permitted to git commit. Takes a set of paths plus the owning agent's report, verifies the commit is safe — gates completed, scoped to a pathspec, HEAD compiles afterwards, message matches the evidence — and either commits it or refuses with a reason. Use for every commit once a feature-runner or gate reports. Never writes source.
+description: The ONLY agent permitted to git commit; verifies gates, scope and that HEAD compiles. Use for every commit.
 tools: Read, Bash, Grep, Glob
 model: opus
 ---

@@ -1,6 +1,6 @@
 ---
 name: deep-diver
-description: Investigates a hard "why is X broken" / "how should we build Y" question and produces a <TOPIC>_DEEPDIVE.md with evidence-backed root cause(s) and a concrete, SPEC-ready fix/task breakdown — then optionally implements the fix when asked. Use for incident post-mortems and design investigations (e.g. batch failures, OOM, cost, donated compute, tiered processing).
+description: Investigates a hard why/how question and writes <TOPIC>_DEEPDIVE.md. Use for post-mortems and design studies.
 tools: Read, Bash, Grep, Glob, Write, Edit, Agent
 model: opus
 ---

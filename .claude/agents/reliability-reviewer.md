@@ -1,6 +1,6 @@
 ---
 name: reliability-reviewer
-description: Reviews RELIABILITY / RESILIENCE — crash-consistency of the durable write path, recovery/replay correctness, delivery guarantees, long-poll failure modes, relay partial failure, and observability. Read-only; returns failure-mode findings ranked by blast radius. Use for resilience reviews and before changes to the persistence/delivery/relay paths.
+description: Reviews reliability: crash-consistency, recovery, delivery guarantees, relay failure. Use before durability work.
 tools: Read, Bash, Grep, Glob, Agent
 model: opus
 ---

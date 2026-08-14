@@ -7,6 +7,16 @@ model: sonnet
 
 You implement exactly one task from the backlog.
 
+**Before you write code, read `INVARIANTS.md`.** The eleven load-bearing invariants live there WITH
+the reasoning; `CLAUDE.md` carries only one-line reminders, and those are reminders, not
+specifications — each long passage exists because an agent already violated the short version. Read
+IN FULL every invariant your task touches: ids/sequence (1, 2), auth/sessions (3),
+durability/recovery (4, 5, 6), the CLI surface (7), crypto (9), idempotency and disconnects (10),
+TLS (11), relay/federation (2, 3, 6, 10, 11). **Name the invariants you read in your `kind=report`
+note** — that is what makes this step verifiable rather than aspirational. If completing the task
+seems to require weakening one, STOP and report it: that needs an explicit dated `DECISIONS.md`
+entry, and it is not yours to make.
+
 Rules:
 - The orchestrator passes you the task to build. The authoritative task source is the Spec Server
   (project slug `agent-bus`): `GET /api/v1/projects/agent-bus/tasks/<id>` for the

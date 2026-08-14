@@ -106,6 +106,8 @@ scripts/spec-cloud.sh authed curl shim for the Spec Server (task state)
 scripts/gen-spec-mirror.sh regenerates SPEC.md — the ONLY supported way to write it
 INVARIANTS.md         the 11 invariants WITH their reasoning — read the relevant one IN FULL
                       before working on that plane; CLAUDE.md carries only the one-line rules
+.claude/ORCHESTRATION.md  which sub-agent to pick, which model to pass, the review panel — read
+                      before spawning anything; deliberately NOT injected per spawn
 AGENT_PROTOCOL.md     agent-facing instructions: enrol, list, wait, send, relay
 PROTOCOL.md           the wire protocol + on-disk format (human/maintainer facing)
 CONTRACTS.md          INDEX only (split 2026-08-02) — see CONTRACTS-*.md for the actual surface:
@@ -179,6 +181,26 @@ hand-written `curl` and **never** through a `scripts/bus-*.sh` wrapper — those
 if the capability has no subcommand yet, that is the missing half of the task, not a reason to reach
 for `curl`.
 
+**Verify in a clean overlay of HEAD, not in your working tree — and run the OVERLAY's `proof-check.sh`,
+not the live one.** A working tree that builds proves nothing about what is COMMITTED: a definition
+you consume may be sitting uncommitted beside you, so a consumer can land before its definition and
+break `main`. That has happened here. Extract HEAD, copy in ONLY the files you own, `cd` in, and run
+the check from there:
+
+```
+T=$(mktemp -d); git archive HEAD | tar -x -C "$T"
+cp <the paths you own> "$T"/<same paths>     # ONLY your files — nothing else uncommitted
+(cd "$T" && go build ./... && bash scripts/proof-check.sh '<cmd>')
+```
+
+**Call `proof-check.sh` — and every path in your proof command — by a RELATIVE path from inside `$T`,
+never by an absolute path into the live worktree.** `git archive` already places `scripts/proof-check.sh`
+in the overlay, so there is nothing to copy: **do NOT `cp` the live script over it**, or the one file
+deciding PASS/FAIL becomes the only uncommitted code in the overlay. The point is that the verifier's
+logic comes from HEAD too. (Its *cwd* handling is no longer the hazard — `535876c` made it run proofs
+in the caller's cwd — but an absolute path still reaches a script that MAY be uncommitted, and any
+other absolute path in the proof reaches uncommitted files.)
+
 **`grep`-based proofs are the MORE dangerous family, and CLAUDE.md previously warned only about
 tests.** A doc proof like `grep -n '8080' README.md CONTRACTS.md | grep -qi localhost && echo DOCS_OK`
 passes on an INCIDENTAL match somewhere else in the file — in the real case, a pre-existing
@@ -190,20 +212,6 @@ A proof that was never observed failing is not evidence that it can fail.
 If a test fails, you are NOT done. Diagnose whether YOUR change caused it or it is pre-existing,
 name the exact failing test, and report the verdict. NEVER hand-wave "pre-existing failures" to
 declare success.
-
-## Model selection — ALWAYS pass a `model` when spawning a sub-agent
-
-Do NOT let sub-agents silently inherit the session model — choose per task and pass `model`
-explicitly:
-- **`sonnet` (exact id `claude-sonnet-5`)** — mechanical, well-scoped, pattern-driven, or
-  writing-heavy work: doc writing, test authoring, single-file implementations, shell wrappers,
-  SPEC/status bookkeeping (spec-keeper). **Default to Sonnet when a task is routine.**
-- **`opus` (exact id `claude-opus-5`)** — judgment, design, investigation, or correctness-critical
-  work: the durability/2PC design, recovery semantics, the relay/federation protocol, id authority,
-  auth, the security and reviewer gates, and anything where a wrong call is expensive.
-
-`feature-runner` is the volume driver and is single-model (opus) — OVERRIDE per task: pass
-`model: "sonnet"` for a mechanical feature, `model: "opus"` only for a design-/correctness-heavy one.
 
 ## Spec Server — task management (ALWAYS use spec-keeper)
 
@@ -340,30 +348,20 @@ For tasks that require permission multiple times, write a script and ask permiss
 
 ## Agent roster (`.claude/agents/`)
 
-- **planner** — breaks large requests into an atomic, ordered implementation plan.
-- **spec-keeper** — owns task state (drives the Spec Server API). The only agent that mutates it.
-- **implementer** — writes the code for exactly one task.
-- **test-engineer** — writes/improves automated tests and runs the narrowest check.
-- **reviewer** — correctness, style, maintainability, scope.
-- **security** — vulnerabilities, leaked secrets, authn/authz gaps, id spoofing.
-- **documentation** — README, `AGENT_PROTOCOL.md`, `PROTOCOL.md`, `CONTRACTS.md`, changelog.
-- **deep-diver** — root-cause investigation, writes `<TOPIC>_DEEPDIVE.md`.
-- **architecture-reviewer** — component boundaries, data flow, the durability and relay planes.
-- **performance-reviewer** — latency, throughput, lock contention, fsync cost, long-poll scale.
-- **reliability-reviewer** — crash-consistency, recovery, delivery guarantees, relay partial failure.
-- **backlog-triage** — decides what deserves doing now and dispatches sub-agents. Never edits code.
-- **feature-runner** — runs ONE task end-to-end through the mandated chain, code-only, parallel-safe.
-- **integrator** — the ONLY agent permitted to `git commit`. Verifies gates COMPLETED, that the
-  commit is pathspec-scoped, that HEAD compiles afterwards, and that the message matches the
-  evidence — then commits, or REFUSES with a reason. Added 2026-08-07 because every commit-time
-  failure in this repo was mechanical and repeated: ungated code shipped three times, four
-  index-sweeping mis-titled commits, and one `main` left un-compilable because a package was verified
-  against the working tree rather than HEAD.
+planner · spec-keeper · implementer · test-engineer · reviewer · security · documentation ·
+deep-diver · architecture-reviewer · performance-reviewer · reliability-reviewer · backlog-triage ·
+feature-runner · integrator.
 
-**Review panel (full-system review):** before a large change or as a periodic audit, convene
-architecture-reviewer + reliability-reviewer + performance-reviewer + security + test-engineer
-(+ reviewer for code-level). Run them READ-ONLY in parallel, each emitting findings to its own doc,
-then synthesize into a single prioritized P0/P1/P2 backlog. None of the reviewers edit code.
+**`integrator` is the ONLY agent permitted to `git commit`.** Everyone else writes source and stops;
+it verifies the gates are COMPLETED, the commit is pathspec-scoped and HEAD still compiles, then
+commits or REFUSES. This is the rule that keeps ungated code out of `main` — do not commit around it.
+
+**Before spawning ANY sub-agent, read `.claude/ORCHESTRATION.md`** — what each agent is for, how to
+pick a model, the review panel, and how to write a brief. It is not injected per-spawn; read it on
+demand.
+
+**ALWAYS pass `model` explicitly** — never let a sub-agent inherit the session model.
+`sonnet` = mechanical/well-scoped/writing-heavy; `opus` = judgment, design, or correctness-critical.
 
 For ANY code change the chain spec-keeper → implementer → reviewer → security is MANDATORY; skipping
 a step requires an explicit one-line justification in `AGENT_LOG.md`.

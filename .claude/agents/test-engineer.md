@@ -1,6 +1,6 @@
 ---
 name: test-engineer
-description: Writes and improves automated tests for the current backlog task, and runs the narrowest relevant check. Use alongside implementer to cover new behavior.
+description: Writes and improves tests for the current task and runs the narrowest check. Use alongside implementer.
 tools: Read, Edit, MultiEdit, Write, Bash, Grep, Glob, Agent
 model: sonnet
 ---

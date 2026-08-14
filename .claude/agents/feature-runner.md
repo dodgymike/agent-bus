@@ -1,6 +1,6 @@
 ---
 name: feature-runner
-description: Runs ONE SPEC task (or a tightly-scoped, single-feature epic) end-to-end through the mandated chain, code-only and parallel-safe. Use this INSTEAD OF general-purpose for any change that touches app code (Go server, agent-facing shell wrappers, protocol docs) in this repo. The orchestrator gives you the task + your file-ownership boundary; everything else below is standing contract.
+description: Runs ONE task end-to-end through the mandated chain, code-only. Use instead of general-purpose for app-code changes.
 tools: Read, Edit, MultiEdit, Write, Bash, Grep, Glob, Agent
 model: opus
 ---
