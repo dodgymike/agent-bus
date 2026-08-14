@@ -68,3 +68,43 @@ P0/P1/P2 backlog. None of the reviewers edit code.
 - Give every agent its **file-ownership boundary**. Boundaries have collided in this repo precisely
   because agents quietly reached one file further; widening a boundary in one message is far cheaper
   than untangling two agents' edits to the same file.
+
+## Writing a dispatch brief
+
+A brief carries only task-specific content. Every sub-agent already receives `CLAUDE.md` in full plus
+its own agent definition, so a restated standing rule buys nothing and is paid in OUTPUT tokens, once
+per dispatch, forever.
+
+**Do not restate what `CLAUDE.md` already carries** — verified present there on 2026-08-14: the
+`gofmt -l` empty-output rule, `proof-check.sh` and its VACUOUS verdict, the pathspec-commit trap and
+its worktree-not-index half, the mandated reviewer/security chain, and the integrator's exclusive
+commit authority. One escape hatch, and only one: never restate a standing rule **except when this
+task OVERRIDES it** — then say so, and say why.
+
+**Do state what only this dispatch knows:**
+
+- **The task's FULL `public_id` or key.** There is no prefix resolution server-side — a truncated id
+  404s, which cost four retries in one session.
+- The goal, in a sentence, and the proof command with the specific line it must pin.
+- **The file-ownership boundary, and who else is live in the tree.** The agent cannot see the other
+  spawns; only you can.
+- **Any correction to the task record**, which the agent otherwise inherits as true: a premise the
+  code refutes, a stored `proof_cmd` known to be broken, a neighbour's uncommitted edits in a file it
+  will touch.
+- Traps **specific to this task**. General ones are already in its context.
+
+Two asks that pay for themselves. **When the boundary cannot express the task, STOP and report — do
+not widen it**: seven agents did exactly that in one session and every refusal was correct, each
+having found the task record asserting what the code contradicted. And **post gate verdicts as notes
+on the task record**, not only in the report back to you — the integrator refuses commits whose gates
+exist solely in an agent's own account.
+
+A brief's whole skeleton:
+
+> `CONTEXT-DISPATCH-RULE` — write the `## Writing a dispatch brief` section its definition of done
+> requires. **Boundary: `.claude/ORCHESTRATION.md` only**; three other agents are live in Go files.
+> Trap: the stored `proof_cmd` calls `scripts/doc-check.sh`, which does not exist yet — build a
+> pinned grep proof and observe it RED first. Do NOT commit. Post `kind=report` + `kind=model`.
+
+Sized this way, briefs went from roughly 900 words to roughly 350 with nothing lost, because what was
+cut was already in the file the agent receives anyway.
