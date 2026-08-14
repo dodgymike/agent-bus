@@ -26,6 +26,18 @@
 //     opaque client-supplied keys.
 //   - PARKING long polls and releasing them on a new message, on the deadline,
 //     or when the client's context is done.
+//   - INGESTING a message relayed from a PEER BUS (IngestRelayed) down that
+//     SAME publish path — same durability, same applied-key adjudication, same
+//     wake-up. It is the only write entry whose sender is NOT one of this bus's
+//     own agents, and it inverts exactly the checks that fact makes wrong: the
+//     sender must NOT be ours (invariant 2 — a peer asserts ids only in its own
+//     namespace), the sequence is minted internally because a peer bus holds no
+//     reservation here, and the traversed bus path is recorded rather than
+//     defaulted to this bus. It returns the idempotency outcome UNCOLLAPSED,
+//     because the relay re-forwards on exactly one of the three (invariant 10).
+//     It is the durable half of relay.LocalIngest and nothing more: signature
+//     verification, loop detection and the onward hop belong to internal/relay,
+//     which this package does not import.
 //
 // # What it deliberately does not do
 //

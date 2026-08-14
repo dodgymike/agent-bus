@@ -4566,3 +4566,392 @@ nothing authorises on a client certificate, so it must close in the same task as
 `MTLS-BIND`/`MTLS-CROSSCHECK` — not after.
 
 <!-- ===== END 2026-08-14 MTLS-CLIENTAUTH ===== -->
+
+## 2026-08-14 — RELAY-45: an inbound peer TLS client certificate is bound to a bus principal on the EXISTING trust record, fingerprint-first, refused with 403 and no challenge, and never without a signing pin
+
+Four decisions, recorded together because each one only makes sense against the others. Code:
+`internal/relay/peerstore.go` (`BusTrustRecord.PeerClientTLSCertFingerprint`, `ParsePeerClientTLSFingerprint`,
+`PutTrust`, `InboundPeerPrincipal`) and `internal/httpapi/peerprincipal.go`
+(`Options.PeerPrincipals`, `RequirePeerPrincipal`). Spec Server `4be32336` (`RELAY-45`).
+
+### (a) The binding lives on the EXISTING `"bustrust"` record, not a new record kind
+
+A fifth `wal.Entry.Kind`, a fresh table and a fresh number reservation were the alternative, and it was
+rejected: `BusTrustRecord` is **already keyed by bus principal** (`bus_id`, exactly what this binding
+needs to be keyed by — see the INBOUND-vs-OUTBOUND table in `CONTRACTS-ONDISK.md`), and it **already
+has** the `RELAY-34` durable-withdrawal-floor revocation machinery a credential binding needs for free:
+`RemoveTrust` fsyncs a withdrawal floor outside the log before the tombstone is written, so a discarded
+WAL tail cannot resurrect a revoked binding. A new record kind would have had to rebuild that machinery
+from nothing, duplicating a mechanism that already exists for the reason this binding needs it. The
+cost is coupling — a trust record now carries two logically separate facts (a signing-key pin and a
+transport credential) — and decision (d) is the direct consequence of accepting that cost rather than
+hiding it.
+
+### (b) The lookup is FINGERPRINT-FIRST — narrowing, not confirming, the task's own design inference
+
+RELAY-45's filing carried an explicit **UNVERIFIED** design inference, offered for the implementer to
+confirm or correct rather than as a settled decision: by analogy with `next_hop_tls_cert_sha256`'s
+"address-first, outbound" rule, the inbound mirror "is very likely… CLAIMED-IDENTITY-FIRST, not
+fingerprint-first" — take a bus id claimed some other way, look up ITS bound fingerprint, and compare
+against what TLS presented, the same shape as the session-token/certificate cross-check.
+
+That inference does not hold here, and the reason has to travel with the conclusion or the next reader
+will re-derive the wrong caution from the right precedent. The outbound field is fingerprint-first-**forbidden**
+specifically because **one fingerprint legitimately sits on N records with N different `bus_id`s**
+(`-route-for` duplicates a next-hop pin across every destination reached through that hop) — the
+ambiguity is structural, by design, and cannot be removed. The inbound binding has no such structural
+ambiguity: `PutTrust` refuses at write time to bind one fingerprint to a second `bus_id`
+(`ErrPeerClientCertAlreadyBound`), so on a healthy table the mapping is a true function. Fingerprint-first
+is therefore sound here **only because uniqueness is enforced at write and ambiguity fails closed at
+read** (`InboundPeerPrincipal` returns `ErrAmbiguousInboundPeerCert` rather than picking one, if a
+hand-edited directory or a foreign binary ever produces two anyway) — it is sound BY ENFORCEMENT, not
+because the direction of the arrow changed. A "claimed-identity-first" design was not built: there is
+no protocol-level bus-id claim to cross-check against on this connection in the first place, since the
+whole point of this task is establishing that identity from the certificate. Do not read this decision
+as "fingerprint-first is fine here" without the enforcement clause; carry the reason, not the
+conclusion — the same instruction the field's own doc comment repeats.
+
+### (c) 403, not 401, and no `Bearer` challenge
+
+A `401` must carry a `WWW-Authenticate` challenge (RFC 7235), and the only challenge this server speaks
+is `Bearer`. Sending it on a peer-route refusal would tell a refused peer bus exactly what this gate
+exists to keep it from doing: retry with a session token. That is the credential confusion invariant
+11's cross-check rule targets — a credential meant for one principal class accepted as though it
+authorised the other — and a `401 WWW-Authenticate: Bearer` response is an invitation to attempt
+exactly that. The TLS client certificate is chosen when the connection is established and cannot be
+supplied by retrying with a different header, so "forbidden for this connection" (`403`, no challenge)
+is the honest answer, not merely the safer-sounding one. All six refusal causes share one fixed body
+string for the enumeration-oracle reason `### Authentication` already states for session-token
+failures; the log line, never the response, names which one it was.
+
+### (d) An active trust record still requires at least one pinned signing key
+
+Not relaxed by this task, and not an oversight: `BusTrustRecord.validate` already refused an active
+record with zero `SigningKeys` before this field existed, and adding an optional transport binding does
+not create a path around that. The reasoning is decision (a)'s cost made concrete — a bus adjacent
+enough to open a TLS connection to us and be admitted as a peer is a bus whose relay-signed messages we
+must be able to verify; a transport binding with no signing pin would describe a peer this bus admits
+onto the wire and then cannot believe anything it says. A future record that wants a credential binding
+with no signing requirement at all is a different record, deliberately, not a relaxation of this one.
+
+### What this task does NOT establish, stated so nobody reads more into it than shipped
+
+No route is mounted (`RELAY-20`), no running server constructs a `*relay.PeerStore` for
+`Options.PeerPrincipals` to be wired to (`RELAY-24`), and no CLI flag writes this field — `agent-bus
+peer add` lives in `cmd/agent-bus/peer.go`, untouched here. This is a durable record shape and an HTTP
+middleware, both tested in isolation; nothing in this task makes either operator-reachable.
+
+## 2026-08-14 — CLI-11: `key export-public` ships on the SERVER binary, against a task record and a deliverable that both said `agent-busctl`
+
+**Decision.** `agent-bus key export-public -data-dir <dir> [-json]` is a subcommand on the **server**
+binary (`cmd/agent-bus/key.go`), not on `cmd/agent-busctl`. Recorded because **every written artefact
+said otherwise**, so without this entry the natural reading of the backlog is that the implementation
+went to the wrong place, and someone will helpfully "fix" it back.
+
+### What said `agent-busctl`
+
+- The Spec Server task `CLI-11` (`bf966c07-5f99-4fe6-bb23-52868ed04c33`) described "a compiled
+  **agent-busctl** operator subcommand".
+- Its recorded `proof_cmd` built `./cmd/agent-busctl` and invoked `./agent-busctl key export-public`.
+- `scripts/fed-smoke.sh`, the RELAY-25 deliverable, called `"$CTL" key export-public --data-dir … --json`
+  where `CTL` is the `agent-busctl` binary.
+- `CLI-11` sits in the `CLI-*` epic, every other member of which (`CLI-1`…`CLI-10`) is an
+  `agent-busctl` subcommand.
+
+That is four independent artefacts agreeing, which is exactly why the placement was escalated to the
+owner rather than decided by the implementer.
+
+### Why the server binary won anyway
+
+**The authority this command needs is FILESYSTEM ACCESS to the data directory, not a network
+privilege.** That is the same ruling as E4 (invite minting) and FEDERATION (e) (peer configuration),
+and it puts `key export-public` in the company it belongs to: `invite mint`, `peer add|list|remove`
+and `healthcheck` are all subcommands on the server binary for this reason. Three concrete facts
+settled it:
+
+1. **`agent-busctl` is a pure HTTP client.** No non-test file in `cmd/agent-busctl` imports anything
+   under `internal/` — the imports are `github.com/dodgymike/agent-bus/client` and nothing else. It has
+   **no data-directory concept and no `dirlock` plumbing at all**; every one of its subcommands is
+   defined against a bus URL and a credential store.
+2. **This command reads local key material under the data directory's EXCLUSIVE lock.** It opens
+   `bus-signing.key` through `internal/buscert` and takes `internal/dirlock`. Teaching the network
+   client to do that is not plumbing — it is giving the client filesystem authority and a lock it has
+   never held, to satisfy a spelling.
+3. **`fed-smoke.sh` was inconsistent with itself, and that was the tell.** It already routed every
+   other data-directory operation to the server binary — `mint_invite` and both `add_route` and
+   `add_trust` run `"$server" …` — and sent only this one command to `"$CTL"`. The odd one out was the
+   spelling, not the architecture.
+
+### What this does NOT mean, stated because invariant 7 is easy to over-read
+
+Invariant 7 says the compiled Go CLI is THE client and that nobody hand-writes HTTP. It does **not**
+say every capability lands on `agent-busctl`. The dividing line, now four commands deep, is:
+
+- **`agent-busctl`** — anything an AGENT does, over the network, with a credential: enrol, send,
+  broadcast, watch, agents, pin, whoami.
+- **`agent-bus <subcommand>`** — anything an OPERATOR does, offline, with filesystem access to a data
+  directory: `invite mint`, `peer add|list|remove`, `healthcheck`, and now `key export-public`.
+
+Invariant 7's real requirement — that a capability ship with a compiled subcommand and its
+`AGENT_PROTOCOL.md` entry in the same task, and never as a hand-written `curl` or a `scripts/bus-*.sh`
+wrapper — is satisfied either way, and was satisfied here.
+
+### Consequences, all landed
+
+`scripts/fed-smoke.sh` was corrected by codex-1 in `1bc778a` and now calls
+`"$server" key export-public --data-dir "$data_dir" --json` against each stopped, seeded bus, which is
+exactly this command's shape. `CLI-11`'s `proof_cmd` was corrected by spec-keeper — the recorded one
+also named a test that was never written, and would have exported from a data directory holding no key
+material, which `buscert.LoadOrCreate` would have satisfied **by minting a fresh bus identity**.
+
+### The cost, and what would reverse this
+
+The cost is that an operator wanting the pin must be on the bus host with the bus **stopped**, because
+the command takes the exclusive lock. `healthcheck` shows a no-lock read-only subcommand is possible,
+so a future task could relax this — but not by moving the command to `agent-busctl`, which would still
+need the data directory. **This decision would only be reversed if `agent-busctl` acquired legitimate
+data-directory access for some other reason**; until then, a change that moves this command to the
+client binary is reintroducing the mistake this entry exists to prevent.
+
+<!-- ===== END 2026-08-14 CLI-11 ===== -->
+
+## 2026-08-14 — INVITE-GATE: invite redemption is genuinely LIVE; the gate stays OFF; five decisions and a corrected residual risk (`documentation`)
+
+**Context.** `internal/auth/inviteenrol.go` (composite record), `internal/invite/store.go`
+(`Store.Begin`/`Consume`/`Commit`/`Abort`), `internal/httpapi/auth.go` (`handleEnroll`'s
+`invite_id`/`invite_secret` handling) and `internal/httpapi/discovery.go` (`invite_accepted`) shipped
+together. This entry records five decisions and corrects one now-stale risk statement rather than
+leaving them implicit in code comments.
+
+### (a) Why consumption and enrolment share ONE `wal.Entry`, not two writes
+
+A `wal.Entry` is exactly one transaction (one prepare-fsync, one commit-fsync). Writing the invite
+consumption record and the roster enrolment record as two SEPARATE entries — even back to back — opens
+a crash window between them: a process killed after the first commits and before the second would leave
+either an agent enrolled against an invite the log still calls open (redeemable a second time — the one
+outcome single-use exists to prevent), or an invite marked spent with no agent to show for it. Composing
+both halves into one entry (`internal/auth/inviteenrol.go`'s `EncodeEnrolWithInvite`/
+`DecodeEnrolWithInvite`) closes that window structurally: there is no instant at which one half is
+durable and the other is not. `internal/invite/store.go`'s own standalone `Store.Redeem` — which DOES
+write its own, separate transaction — is explicitly documented as NOT to be used by this path for
+exactly this reason, and is retained only because the invite package must be provable in isolation
+before anything composes it.
+
+### (b) Why a new free-form `Entry.Kind` (`"agent+invite"`), and NOT a reserved record-type number
+
+`wal.Entry.Kind` is a free-form application-level discriminator inside the PREPARE payload; the
+NUMBERED namespace the Spec Server reserves (`record-type`, `ondisk-format-version`) belongs to
+`internal/wal/format.go`'s framing types (`TypePrepare`, `TypeCommit`, …), which this change does not
+touch. `"agent"`, `"invite"` and `"seqfloor"` already established the precedent of adding a new `Kind`
+value with no reservation; `"agent+invite"` follows it. Recorded explicitly, again, because this is the
+second time in this file's history someone has had to write down "no, don't reserve a number for this"
+— the first is `internal/invite/doc.go` section 3, which makes the identical argument for
+`invite.RecordKind`.
+
+### (c) Why this ships WITHOUT flipping the gate, naming the lockout risk and its follow-up
+
+Requiring an invite on every enrolment (invariant 3's stated end state, `InviteRequired: true`) is
+DELIBERATELY NOT done here. Two concrete blockers, either one sufficient on its own:
+
+1. **The CLI cannot send an invite yet.** `client/enrol.go`'s `Enrol` refuses `opts.Invite != ""`
+   locally with `KindUsage` (exit 2) — verified in this build, not merely asserted — so flipping the
+   gate today would make `agent-busctl enrol` unable to enrol AT ALL against a bus that required one.
+   That capability is task `INVITE-CLIENT`, filed and not yet started.
+2. **Nine agents are live on a bus that would be locked out.** This project's own bus (the one these
+   agents coordinate through) has real enrolled identities today. Flipping `InviteRequired` to `true`
+   without every one of them holding a valid invite would not add a security control — it would cut off
+   working agents from a bus they are already using, mid-task, with no CLI path back on.
+
+The mechanism (redemption, atomicity, durability) is complete and tested; the POLICY flip is a separate,
+later decision with its own blast radius, and shipping the two together would have forced this task to
+either ship a broken CLI story or delay redemption behind a CLI task it does not depend on. `GET
+/v1/discovery`'s `invite_required: false` and `cmd/agent-bus`'s startup log line both say this plainly
+so nobody infers the gate is on from the mechanism existing.
+
+### (d) Why `invite_accepted` is a SEPARATE field from `invite_required`
+
+They answer different questions and collapsing them would make one of the two answers a lie by omission.
+`invite_required` says whether an enrolment MUST carry an invite — `false`, and will stay `false` until
+(c) above is separately decided. `invite_accepted` says whether an invite PRESENTED to `POST /v1/enroll`
+is genuinely redeemed rather than ignored or answered `501` — `true` on every `cmd/agent-bus` build
+today, because every one wires an invite store. A single boolean could not distinguish "invites work if
+you send one, but none is required" from either "invites are mandatory" or "invites do nothing here";
+this build is the first of those three, and only two fields can say so without a client discovering the
+truth only by spending a single-use secret to find out.
+
+### (e) Residual risk, corrected for what is actually true TODAY
+
+The Spec Server's own stored description of this task says: *"until MTLS-LISTENER lands the invite
+secret crosses the wire in CLEARTEXT."* **That sentence is STALE and must not be repeated as current.**
+MTLS-LISTENER landed 2026-08-07 (see that dated entry above): the listener is `https`-only, wrapped in
+`tls.NewListener` before it ever accepts a connection, and there is no plaintext fallback — invariant 11
+is enforced here, and a plaintext request never reaches `/v1/enroll` at all (`net/http` writes a bare
+400 onto the raw socket before any route is consulted). `invite_secret` therefore travels encrypted on
+the wire in every build shipped today, not in cleartext.
+
+**What actually remains is narrower, and it is a TRANSPORT-TRUST gap, not a plaintext one.** TLS on this
+listener is still ONE-WAY IN EFFECT: `ClientAuth` is `tls.RequestClientCert`
+(`cmd/agent-bus/tlslisten.go:152`), which REQUESTS a client certificate and accepts the handshake
+whether or not one is presented, and never verifies one against anything — so the server proves
+itself to the client and never the reverse. (Stated with the real constant: an earlier draft of this
+paragraph said `tls.NoClientCert`, which named the right RISK with the wrong MECHANISM. The
+distinction matters to anyone auditing this line later, because `RequestClientCert` means a
+certificate may well be sitting in `r.TLS.PeerCertificates` — unvalidated, and trusted by nothing on
+the enrolment path. Reading it as authentication is exactly the mistake this correction exists to
+prevent.) The
+session token, and now the invite secret, remain the only things proving who is on the other end. And
+the certificate itself is self-signed, with NO certificate authority and deliberately NO
+trust-on-first-use (`MTLS-PIN`): a caller that does not PIN the bus's certificate fingerprint from its
+invite blob before connecting has verified nothing about who it is talking to. Concretely: an ACTIVE
+on-path attacker who can terminate TLS with a certificate of its own — not a passive observer, who gets
+nothing — can read `invite_secret` in full, on the very first request an unpinned client makes,
+including one fetching `GET /v1/discovery` to learn how to enrol. `GET /v1/discovery`'s own
+`limitations[0]` already states this exact gap for the session token; it now applies equally to the
+invite secret, and this entry is the record that the risk moved rather than closed.
+
+<!-- ===== END 2026-08-14 INVITE-GATE ===== -->
+
+<!-- ===== BEGIN 2026-08-14 RELAY-24-BLOCKER-HUBINGEST: relayed audit content hash ===== -->
+
+## 2026-08-14 — RELAY-24-BLOCKER-HUBINGEST: the relayed audit content hash is taken under the ORIGIN's assignment. This REVERSES a recorded position, and the reversal is stated first
+
+### What this reverses, quoted, before anything else
+
+The 2026-08-08 (c) amendment to Decision 4 — the SIGN-3 broadcast entry above — says this, and it
+names the exact file this change makes substitute:
+
+> So `internal/hub/audit.go` refuses rather than substituting a value. **Any value chosen there would
+> settle SIGN-3 by accident** — in a file nobody would think to read when they came to settle it
+> properly — and would then be written into an **append-only trail that cannot be edited afterwards**.
+
+`internal/hub/audit.go` now DOES substitute a value on one path: for a message ingested from a peer
+bus, the audit record's `content_sha256` is computed under the ORIGIN bus's message id and sequence
+rather than the local record's. That is a reversal of the sentence above as a general rule, and it is
+recorded here rather than in a code comment because a position taken in a dated entry cannot be
+retired by a comment in the file it constrains. The 2026-08-08 (c) entry stays exactly as written.
+
+### The fact that forces it
+
+A relayed message's LOCAL record carries a message id THIS bus minted — a bus never adopts a peer's id
+(invariant 1) — and a sender belonging to the ORIGIN bus (invariant 2). `signing.Canonicalize` refuses
+that pair unconditionally: the origin binding in `internal/signing/canonical.go` compares the sender's
+bus half against the bus that minted the id, EXACTLY and with no case fold, on the ground that a
+message is signed by an agent of the bus that minted its id. A relayed record therefore has **no
+canonical bytes of its own and cannot be given any**.
+
+The bytes that DO exist are the origin's: the exact byte string the origin agent signed, which
+`(relay.RelayedMessage).CanonicalBytes()` (`internal/relay/signed.go`) re-derives from the field
+values this bus will route, deliver, attribute and log. The audit hash is taken over those. Exactly
+two fields are substituted — the message id and the sequence — because they are exactly the two this
+bus re-minted; the sender, the recipients, the sender's timestamp and the body are already the
+origin's on both sides.
+
+### Why this is not a second rule, and why PROTOCOL.md §8.6 is unchanged
+
+§8.6's rule is *hash the bytes the signature covers*. That rule is unchanged and is not narrowed. What
+is new is only the observation that, for a message signed on another bus, the bytes the signature
+covers are the origin's — so applying the rule unchanged **requires** the origin's assignment.
+`PROTOCOL.md` §8.6.1 states this normatively and says so in its first line.
+
+It is also NOT the substitution §8.6's closing paragraph forbids. That paragraph governs the
+out-of-band fields it names — the traversed bus path, the local delivery sequence, the byte size —
+which are additional columns of the audit record and are never folded into the canonical bytes nor put
+in their place. Neither happens here: the value is still SHA-256 over a canonical byte string produced
+by `signing.Canonicalize`. (The reviewer gate explicitly RETRACTED that paragraph as the grounding for
+this task, as imprecise, and it is recorded as retracted so nobody re-cites it.)
+
+### Why the reversal is correct here, and why it does NOT reopen the broadcast question
+
+The relayed case is the **opposite** of the broadcast case, on the one axis the 2026-08-08 (c) entry
+turned on — whether correct bytes exist:
+
+| | Relayed message | Broadcast |
+|---|---|---|
+| Do canonical bytes exist? | **YES** — the origin's, over which the origin agent's signature was made | **NO** — `Canonicalize` rejects an empty recipient set, and a broadcast is stored as a FLAG, not an expanded roster |
+| Who computed them? | `(relay.RelayedMessage).CanonicalBytes()`, already, before the hub was asked to record anything | nobody; any value would be one we invented |
+| Were they checked against a signature? | **YES** — `internal/relay/message.go` step 13, inside `ValidateRelayRequest`, verifies before it returns a `RelayedMessage` at all | there is no signature over a relayed broadcast and none can exist |
+| Would a value settle SIGN-3? | No — SIGN-3 asks what a BROADCAST's signed audience is; a relayed message has an explicit recipient set | **Yes, by accident** — which is the whole reason for refusing |
+
+The 2026-08-08 (c) position was never "never substitute"; it was "never INVENT a value, least of all in
+an append-only trail, least of all in a file nobody would think to read." Selecting bytes that already
+exist, were already computed, and were already verified against a signature is not inventing one. The
+broadcast path is untouched and **still fails closed**: `hub.Broadcast` still refuses on
+`signing.ErrInvalid`, and the ~31 broadcast tests are still SKIPPED rather than rewritten, for the
+reasons the 2026-08-08 (c) entry gives at length. SIGN-3 still owns the question and this entry does
+not answer any part of it.
+
+### The one structural guarantee that keeps the two apart
+
+The substitution is gated on the message being RELAYED — a single boolean on the internal publish
+request — and **not** on the origin fields being populated. A LOCAL send that reaches the write path
+carrying an origin assignment is refused as an internal error rather than honoured
+(`internal/hub/hub.go`). Deriving the behaviour from the field alone would have meant a future local
+caller that set it, for any reason, silently moved a local send's audit hash onto an id of its own
+choosing. This is what makes "the relayed case is the exception" a property of the code rather than a
+claim in this file.
+
+### What a READER of the trail must know
+
+A relayed record's content hash does **not** reproduce from that record's own `message_id` and `seq`.
+It DOES reproduce from the ORIGIN's pair, and that pair is durably recorded: `IngestRelayed` passes the
+origin message id as the idempotency key, so it is the message record's `idempotency_key`
+(`store.Message.IdempotencyKey`, durable, `json:"idempotency_key"`), and the origin sequence parses out
+of it. The MESSAGE log therefore carries everything needed.
+
+**The AUDIT log alone does not** — `wal.AuditRecord` carries neither the origin message id nor the
+sender's claimed timestamp. That is not a new limitation and not one this change introduces: it is
+equally true of a LOCAL record, whose hash also needs the sender's timestamp from the message log.
+Re-deriving any content hash from this trail has always required both files.
+
+### The discriminator is the SENDER's bus half, and NEVER the bus path
+
+A multi-hop bus path does NOT imply a relayed record, and anything that assumes it does will
+misclassify records. `internal/hub/buspath_test.go`'s `TestAuditRecordsMultiHopBusPath` publishes a
+three-hop path — `[busa, busb, testbus]` — with a LOCAL sender (`testbus.alice-1`), and that record's
+hash IS locally reproducible from its own assignment. The structural test is whether the sender's bus
+half is this bus's, which is exactly the condition `IngestRelayed` enforces and the condition the
+substitution is gated on. This is stated because the bus path is the intuitive discriminator, the test
+proving it wrong already exists, and a future fsck or trail-reading tool is where the mistake would
+land.
+
+### What remains forbidden, and the tests that catch it
+
+Hashing the BARE BODY — `store.ContentHash(body)` — remains forbidden for a relayed record exactly as
+for a local one. It fingerprints content while proving nothing about who sent it, to whom, or in what
+order, and it decouples the audit record from the signature. It is also invisible to every structural
+check: it is 64 lowercase hex characters too, so `wal.AuditRecord.validate` cannot reject it,
+`DecodeAudit` cannot, and no assertion on shape ever will. The substitution has the same property.
+Three value-pinning tests are the entire defence, and each rebuilds the expected digest independently
+rather than by calling the producer, so a producer that changed what it hashes fails them instead of
+moving them:
+
+- `TestSendWritesItsAuditRecord` (`internal/hub/audit_roundtrip_test.go`) — the LOCAL digest by value,
+  plus an explicit assertion that it is not the bare-body hash.
+- `TestIngestRelayedAuditHashIsTakenUnderTheOriginAssignment`
+  (`internal/hub/relayingest_relay24blocker_test.go`) — the ORIGIN digest by value, that it is not the
+  bare-body hash, and that `signing.CanonicalDigest` REFUSES the local-id/foreign-sender pair, so the
+  local derivation is asserted impossible rather than merely unused.
+- `TestLocalSendAuditPayloadIsUnchanged` (`internal/hub/buspath_test.go`) — a whole-record golden
+  payload, so a local send's trail entry cannot move by a byte.
+
+### The residual, named rather than implied
+
+`internal/hub` does NOT verify the origin signature and must not: verification needs the origin bus's
+attested key and belongs to `internal/relay`, which does it at step 13 of `ValidateRelayRequest`
+before any `RelayedMessage` is returned. On the wired ingress chain the bytes are therefore verified
+before the hub sees the message. But `hub.IngestRelayed` is EXPORTED and `relay.Acceptor.Accept`
+carries no `VerifyRelayed` call of its own, so nothing structurally enforces that a future caller did
+the verification — the hub checks only the signature's LENGTH. That gap is filed as
+`HUB-FU-INGEST-SIGNATURE-GUARD` (P3), which proposes the same AST-guard shape
+`internal/relay/guards_test.go` already uses for `CrossBusTrust`. It is named here so this entry cannot
+be read as claiming a guarantee the code does not yet enforce.
+
+### What would reverse THIS decision
+
+Only SIGN-3 landing a canonical audience for a broadcast, which would remove the asymmetry the table
+above rests on and would let the broadcast path stop failing closed on its own terms. Nothing in this
+entry may be cited to choose a broadcast content hash before then, and nothing in it licenses
+substituting a value on any path where the correct bytes do not already exist and have not already
+been verified.
+
+<!-- ===== END 2026-08-14 RELAY-24-BLOCKER-HUBINGEST: relayed audit content hash ===== -->

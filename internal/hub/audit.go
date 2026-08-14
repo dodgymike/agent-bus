@@ -50,8 +50,49 @@ import (
 // The prepare index is NOT set here. wal stamps it from the transaction, so
 // that the one field tying an audit record to a WAL entry cannot be chosen by
 // the caller (invariant 1).
-func auditRecordFor(m store.Message) (*wal.AuditRecord, error) {
-	hash, err := auditContentHash(m)
+// signedAs names the (message id, sequence) pair the CONTENT HASH must be
+// computed under, when that is NOT the pair the local record carries.
+//
+// # It is non-zero for exactly one thing: a message ingested from a peer bus
+//
+// A relayed message's local record carries an id THIS bus minted (invariant 1 —
+// a bus never adopts a peer's id) and a sender belonging to the ORIGIN bus
+// (invariant 2). signing.Canonicalize REFUSES that pair, deliberately and by
+// design: "a message is signed by an agent of the bus that minted its id". So a
+// relayed record has NO canonical bytes of its own and cannot have any.
+//
+// The bytes that DO exist are the origin's — the exact bytes the origin agent
+// signed and that internal/relay verified before handing the message over
+// (relay.RelayedMessage.CanonicalBytes builds precisely this). Hashing those is
+// what keeps auditContentHash's documented promise: the hash covers the bytes
+// the stored signature covers, which is what lets the trail prove authorship
+// without holding the content. Hashing anything else would leave a relayed
+// record's hash covering bytes NOBODY ever signed.
+//
+// # WHAT A READER OF THE TRAIL MUST KNOW, stated carefully
+//
+// For a relayed record the content hash is over the ORIGIN's canonical bytes, so
+// it does NOT reproduce from that record's own message id and sequence. It is
+// still reproducible: the origin message id is durably recorded as the message
+// record's idempotency_key (IngestRelayed passes it as the key), and the origin
+// sequence parses out of it, so the message log carries everything needed. The
+// AUDIT log alone does not — wal.AuditRecord carries neither the origin id nor
+// the sender's timestamp — but that limitation is not new and is equally true of
+// a local record.
+//
+// DO NOT USE THE BUS PATH TO TELL THE TWO APART. A multi-hop path does NOT imply
+// a relayed record: hub's own buspath_test publishes a 3-hop path with a LOCAL
+// sender, and that record's hash IS locally reproducible. The structural
+// discriminator is the SENDER: a record whose sender's bus half is not this bus's
+// is one whose hash was taken under the origin's assignment. That is exactly the
+// condition IngestRelayed enforces and publish gates the substitution on.
+type signedAs struct {
+	messageID string
+	seq       uint64
+}
+
+func auditRecordFor(m store.Message, signed signedAs) (*wal.AuditRecord, error) {
+	hash, err := auditContentHash(m, signed)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +156,23 @@ func auditRecordFor(m store.Message) (*wal.AuditRecord, error) {
 // characters, so wal.AuditRecord.validate cannot tell them apart, DecodeAudit
 // cannot, and no assertion on shape ever will. The only defence is this comment
 // and the test that pins the digest to signing.CanonicalDigest by value.
-func auditContentHash(m store.Message) (string, error) {
-	digest, err := signing.CanonicalDigest(m.SigningMessage())
+//
+// # THE RELAYED CASE
+//
+// See signedAs. When it is set, the digest is taken over the ORIGIN's canonical
+// bytes rather than the local record's — which is not a second definition of the
+// hash but the SAME one ("the bytes the signature covers") applied to a message
+// whose signature was made on another bus. Only the id and the sequence are
+// substituted; the sender, the recipients, the sender's timestamp and the body
+// are already the origin's on both sides, so the two derivations differ in
+// exactly the two fields this bus re-minted.
+func auditContentHash(m store.Message, signed signedAs) (string, error) {
+	sm := m.SigningMessage()
+	if signed.messageID != "" {
+		sm.MessageID = signed.messageID
+		sm.Sequence = signed.seq
+	}
+	digest, err := signing.CanonicalDigest(sm)
 	if err != nil {
 		// The one reachable case is a BROADCAST: signing.Canonicalize refuses an
 		// empty recipient set, and a broadcast is stored as a flag with no

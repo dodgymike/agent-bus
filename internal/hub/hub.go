@@ -1163,13 +1163,19 @@ type SendRequest struct {
 // every eligible waiter. It returns only once the message is committed and
 // fsynced (invariant 4).
 func (h *Hub) Broadcast(req BroadcastRequest) (Result, error) {
-	return h.publish(publishRequest{
+	// The idempotency OUTCOME is deliberately dropped here and NOT folded into
+	// Result. This route reports a retry through Result.Replayed, as it always
+	// has, and a violation through ErrIdempotencyKeyReused; the three-way split
+	// is carried uncollapsed only where a caller needs all three, which is the
+	// relay ingest (see IngestRelayed).
+	res, _, err := h.publish(publishRequest{
 		sender:     req.Sender,
 		broadcast:  true,
 		body:       req.Body,
 		key:        req.IdempotencyKey,
 		signedMint: req.SignedMint,
 	})
+	return res, err
 }
 
 // Send durably records a message addressed to one agent and wakes that agent's
@@ -1186,7 +1192,8 @@ func (h *Hub) Send(req SendRequest) (Result, error) {
 	if _, _, _, err := ids.ParseAgentID(req.To); err != nil {
 		return Result{}, fmt.Errorf("%w: %s", ErrInvalidRecipient, err)
 	}
-	return h.publish(publishRequest{
+	// See Broadcast for why the outcome is dropped on this route.
+	res, _, err := h.publish(publishRequest{
 		sender:     req.Sender,
 		broadcast:  false,
 		recipients: []string{req.To},
@@ -1194,6 +1201,7 @@ func (h *Hub) Send(req SendRequest) (Result, error) {
 		key:        req.IdempotencyKey,
 		signedMint: req.SignedMint,
 	})
+	return res, err
 }
 
 // publishRequest is the union of everything publish needs. It is a struct
@@ -1228,6 +1236,43 @@ type publishRequest struct {
 	// derives it from the authenticated peer connection and appends this bus
 	// itself. store.NewMessageWithBusPath re-validates every hop regardless.
 	busPath []string
+
+	// relayed marks a message INGESTED FROM A PEER BUS rather than sent by one
+	// of this bus's own clients. It is set ONLY by IngestRelayed, which is the
+	// one exported caller that may set it, and it changes exactly four things —
+	// each of them a rule that is WRONG for a relayed message rather than merely
+	// inconvenient:
+	//
+	//  1. the SENDER is required NOT to be ours (checkRelayedSender) instead of
+	//     being required to be on our roster. A relayed message's sender belongs
+	//     to the ORIGIN bus by construction (invariant 2), so the local roster
+	//     check would refuse every legitimate relay.
+	//  2. the RECIPIENT rule becomes checkRelayedRecipient: an id claiming OUR
+	//     namespace must be on our roster, and a foreign one is recorded without
+	//     asking whether anyone can route it — a message with no onward route is
+	//     still durably ours.
+	//  3. the operation is idem.OpRelay, so a relayed message can never share an
+	//     applied-key scope, or a fingerprint, with a local send.
+	//  4. the sequence is minted INTERNALLY (mintRelayedSeqLocked) rather than
+	//     consumed from a client reservation. A peer bus holds no mint on this
+	//     bus and can never obtain one.
+	//
+	// It changes NOTHING about the durability, the ordering or the idempotency
+	// of the write: there is one two-phase write path and this is not a second
+	// one (invariant 4).
+	relayed bool
+
+	// originMessageID and originSeq are the ORIGIN bus's assignment for a
+	// relayed message: the id its own bus minted, and the sequence half of it.
+	// Set only when relayed is set, and validated by IngestRelayed before it
+	// gets here.
+	//
+	// They are NOT this message's identity — the local record's id is the one
+	// this bus minted (invariant 1). They exist for ONE thing: the audit
+	// record's content hash, which must cover the bytes the stored signature
+	// actually covers. See signedAs in audit.go, which is the whole argument.
+	originMessageID string
+	originSeq       uint64
 }
 
 // publish is the ONE durable write path for a message. Broadcast and Send
@@ -1255,23 +1300,70 @@ type publishRequest struct {
 // in-memory mint table safe: a legitimate retry is answered from the applied-key
 // table and never reaches the mint lookup at all, so the fact that the
 // reservation was consumed — or lost to a restart — is invisible to it.
-func (h *Hub) publish(req publishRequest) (Result, error) {
+//
+// # THE RELAY INGEST SHARES THIS FUNCTION, and that is a requirement
+//
+// A message arriving from a peer bus (req.relayed — see IngestRelayed) takes
+// EXACTLY this path: the same applied-key adjudication, the same single
+// two-phase write, the same wake-up, in the same order under the same lock. A
+// second durable write path for relayed traffic would be a second answer to
+// "have I applied this?", which is the thing invariants 4 and 10 both forbid;
+// what req.relayed changes is documented on the field itself and is confined to
+// four clearly-marked branches below.
+//
+// # THE SECOND RETURN VALUE
+//
+// The idempotency OUTCOME is returned UNCOLLAPSED — new, retry, violation — and
+// it is MEANINGFUL ONLY WHEN THE ERROR IS NIL, with one deliberate exception:
+// the violation is reported as idem.OutcomeViolation AND as
+// ErrIdempotencyKeyReused, so a caller may classify it either way. On every
+// other error path the value is idem.OutcomeNew because that is the zero value
+// and there is no "unknown" member to return — check the error FIRST. See
+// RelayedIngestResult.Outcome, which restates this for the exported surface.
+//
+// It is a distinct value rather than a field on Result because Result.Replayed
+// is a BOOLEAN and a boolean cannot carry three answers: a caller that
+// re-derived the outcome from it would report "new" for a violation, and "new"
+// is the answer the relay re-forwards on.
+func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 	sender, broadcast, recipients := req.sender, req.broadcast, req.recipients
 	body, key := req.body, req.key
 
 	if err := validateIdempotencyKey(key); err != nil {
-		return Result{}, err
+		return Result{}, idem.OutcomeNew, err
 	}
 	if len(body) == 0 {
-		return Result{}, fmt.Errorf("%w: a message body is required", ErrInvalidBody)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("%w: a message body is required", ErrInvalidBody)
 	}
 	if len(body) > store.MaxBodyBytes {
-		return Result{}, fmt.Errorf("%w: %d bytes, the limit is %d", ErrInvalidBody, len(body), store.MaxBodyBytes)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("%w: %d bytes, the limit is %d", ErrInvalidBody, len(body), store.MaxBodyBytes)
 	}
-	if !h.Enrolled(sender) {
-		return Result{}, fmt.Errorf("%w: %q", ErrUnknownSender, sender)
+	// THE SENDER GATE, AND ITS INVERSION FOR A RELAYED MESSAGE.
+	//
+	// A local send's sender must be on THIS bus's roster. A relayed message's
+	// sender must NOT be ours — it belongs to the origin bus by construction
+	// (invariant 2), so applying the roster rule to it would refuse every
+	// legitimate relay, and applying NO rule would let a peer assert an id in our
+	// namespace, which is the permanent id-space injury cca64afd names. The two
+	// rules are exclusive alternatives, never both and never neither.
+	if req.relayed {
+		if err := h.checkRelayedSender(sender); err != nil {
+			return Result{}, idem.OutcomeNew, err
+		}
+	} else if !h.Enrolled(sender) {
+		return Result{}, idem.OutcomeNew, fmt.Errorf("%w: %q", ErrUnknownSender, sender)
 	}
 	for _, r := range recipients {
+		if req.relayed {
+			// A RELAYED MESSAGE'S RECIPIENTS ARE ADJUDICATED DIFFERENTLY, and the
+			// roster is still asked FIRST and BEFORE the durable write — see
+			// checkRelayedRecipient for the two rules and why an unroutable
+			// foreign recipient is accepted here while the local path refuses it.
+			if err := h.checkRelayedRecipient(r); err != nil {
+				return Result{}, idem.OutcomeNew, err
+			}
+			continue
+		}
 		// THE ROSTER IS ASKED FIRST, AND BEFORE THE DURABLE WRITE. Both halves of
 		// that sentence are requirements, not style.
 		//
@@ -1298,27 +1390,36 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		if h.router == nil {
 			// Byte-identical to the pre-RELAY-16 message: a bus with no router
 			// must not report federation it does not have.
-			return Result{}, fmt.Errorf("%w: %q is not enrolled on this bus", ErrUnknownRecipient, r)
+			return Result{}, idem.OutcomeNew, fmt.Errorf("%w: %q is not enrolled on this bus", ErrUnknownRecipient, r)
 		}
 		// A federated bus can say more, and should: "unknown" here means BOTH
 		// authorities were asked and neither holds the recipient. The honest 404
 		// is the feature — a routable-looking id that no peer advertises must not
 		// be accepted and then silently dropped.
-		return Result{}, fmt.Errorf("%w: %q is not enrolled on this bus and no peer bus advertises it", ErrUnknownRecipient, r)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("%w: %q is not enrolled on this bus and no peer bus advertises it", ErrUnknownRecipient, r)
 	}
 
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 
 	if h.poisoned != nil {
-		return Result{}, h.poisoned
+		return Result{}, idem.OutcomeNew, h.poisoned
 	}
 	if h.durable == nil {
-		return Result{}, ErrNotDurable
+		return Result{}, idem.OutcomeNew, ErrNotDurable
 	}
 
 	op := idem.OpSend
-	if broadcast {
+	switch {
+	case req.relayed:
+		// idem.OpRelay, and it is DOMAIN SEPARATION rather than labelling: the op
+		// is part of the applied-key scope AND of the fingerprint, so a relayed
+		// message can never share a scope with — or be mistaken for a retry of —
+		// a local send under the same key. It is also the scope
+		// relay.RelayedMessage.Scope() names, which is what makes the same message
+		// arriving by two disjoint routes resolve to ONE key.
+		op = idem.OpRelay
+	case broadcast:
 		op = idem.OpBroadcast
 	}
 	// The scope is the (agent, operation, key) tuple, never the key alone: one
@@ -1329,7 +1430,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// sender was authenticated before it reached this function.
 	sc, err := idem.NewAgentScope(sender, op, key)
 	if err != nil {
-		return Result{}, fmt.Errorf("hub: building the idempotency scope for %s: %w", op, err)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: building the idempotency scope for %s: %w", op, err)
 	}
 	fp := publishFingerprint(op, recipients, body)
 	prev, outcome := h.idem.Lookup(sc, fp)
@@ -1339,7 +1440,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		// NEITHER payload is echoed into the error: the caller already knows
 		// what it sent, and the other one belongs to a message it may have no
 		// business seeing quoted back.
-		return Result{}, fmt.Errorf("%w: key %q was applied for message %s", ErrIdempotencyKeyReused, key, storedMessageID(prev))
+		return Result{}, idem.OutcomeViolation, fmt.Errorf("%w: key %q was applied for message %s", ErrIdempotencyKeyReused, key, storedMessageID(prev))
 	case idem.OutcomeRetry:
 		// A legitimate retry: the ack was probably lost in flight. Return the
 		// ORIGINAL result, re-apply nothing, error nothing, disconnect nobody.
@@ -1348,10 +1449,10 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 			// The stored result is unreadable, so the original answer cannot be
 			// returned. Failing is the only honest option: re-applying would be
 			// the double-apply invariant 10 forbids.
-			return Result{}, fmt.Errorf("hub: replaying the original result for idempotency key %q: %w", key, err)
+			return Result{}, idem.OutcomeNew, fmt.Errorf("hub: replaying the original result for idempotency key %q: %w", key, err)
 		}
 		out.Replayed = true
-		return out, nil
+		return out, idem.OutcomeRetry, nil
 	}
 
 	// ADMISSION. Admit expires first, so a table of keys already past the
@@ -1374,59 +1475,100 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		// "the bus is full" about a table that is not full and mislead the
 		// operator into looking at the bus instead of at one client.
 		if errors.Is(err, idem.ErrAgentQuota) {
-			return Result{}, newAgentQuotaError("agent %q is at its per-agent share of the applied-key table, which the bus is holding in reserve so no other agent is starved of its own first key; nothing is evicted to make room, because evicting a key turns the next retry of it into a second message: %s", sender, err)
+			return Result{}, idem.OutcomeNew, newAgentQuotaError("agent %q is at its per-agent share of the applied-key table, which the bus is holding in reserve so no other agent is starved of its own first key; nothing is evicted to make room, because evicting a key turns the next retry of it into a second message: %s", sender, err)
 		}
-		return Result{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, h.idemMaxEntries)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("%w: %d idempotency keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second message", ErrCapacity, h.idemMaxEntries)
 	}
 
-	// CONSUME THE RESERVATION. Nothing is allocated here: the sequence was
-	// allocated, and DURABLY BURNED, by Hub.Mint (invariant 1 — the server is
-	// authoritative on every id, and SIGN-1 chose to hand that id out early so
-	// the SENDER can sign it).
+	// THE SEQUENCE. Two ways in, ONE rule: the server is authoritative on every
+	// id and never reuses one, including across restarts (invariant 1).
 	//
-	// The mint is LOOKED UP but not yet deleted. It is spent only once the
-	// message it names is durable, further down: a send refused between here and
-	// the write — at admission, at encoding, at the durable write itself — must
-	// leave the client holding a reservation it can retry with the SAME
-	// signature, because re-minting would give it a different id to sign and the
-	// signature it already computed would be worthless.
-	// EXPIRE FIRST, and only here on this path — after the retry check above, so
-	// a legitimate retry answered from the applied-key table never depends on the
-	// TTL, and before the lookup below, so an expired reservation is NOT
-	// spendable.
-	//
-	// This call was MISSING until 2026-08-07 while mint.go claimed expiry "runs on
-	// EVERY mint and EVERY send", which made MintTTL a promise the bus did not
-	// keep: an hour-old reservation still spent fine, Mint.ExpiresAt was returned
-	// to clients as a fact and was not one, and a hoarding agent's slots were
-	// released only if it came back to MINT again — never by sending. The comment
-	// was fixed to match the code rather than the other way round in an earlier
-	// draft; that was the wrong direction. Honouring a reservation past the expiry
-	// this bus PUBLISHED is not "being generous", it is making a documented bound
-	// unobservable and untestable, and a bound nobody can observe is one that
-	// silently stops holding.
-	//
-	// Expiring here costs a client nothing it was promised: the answer is
-	// ErrUnknownMint, which is documented as ROUTINE and whose remedy — re-mint
-	// under the SAME key, re-sign, re-send — cannot double-apply (see that
-	// sentinel). The number stays burned either way.
-	h.expireMintsLocked(h.now())
+	// A LOCAL SEND consumes the reservation this bus minted for the key, because
+	// SIGN-1 hands the number out early so the sender can SIGN it. A RELAYED
+	// MESSAGE has no reservation and can never have one — a peer bus does not
+	// enrol here, cannot call Mint, and must not be able to choose a number in
+	// our namespace — so this bus mints the number itself, at the moment it takes
+	// responsibility for the message. Both routes burn the number durably before
+	// it is used; see mintRelayedSeqLocked.
+	var (
+		seq      uint64
+		mintedID string
+		mk       mintKey
+	)
+	if req.relayed {
+		// The relayed sequence is allocated HERE, under writeMu, AFTER the
+		// applied-key adjudication above — so a duplicate arriving by a second
+		// route is answered from the table and burns no number at all — and
+		// AFTER admission, so a bus at its bound burns none either.
+		//
+		// A failure between here and the durable write leaves the number burned
+		// and a GAP in the sequence. That is CORRECT and is not damage to repair
+		// (internal/ids/sequence.go): a gap is the safe direction, a reissue is
+		// not.
+		if req.signedMint.MessageID != "" || req.signedMint.Seq != 0 {
+			// FAIL CLOSED on a caller that presented a reservation on the one path
+			// that has none to spend. SignedMint rides along here for its
+			// TIMESTAMP and SIGNATURE only (see IngestRelayed); an id or a sequence
+			// in it would be a client-chosen id being carried towards a durable
+			// record, which invariant 1 forbids outright. Nothing sets it today —
+			// this is the check that keeps that true.
+			return Result{}, idem.OutcomeNew, fmt.Errorf("%w: a relayed ingest presented a message id or sequence, but a peer bus holds no reservation on this bus and this bus mints the number itself (invariant 1)", ErrMintMismatch)
+		}
+		var err error
+		if seq, mintedID, err = h.mintRelayedSeqLocked(); err != nil {
+			return Result{}, idem.OutcomeNew, err
+		}
+	} else {
+		// CONSUME THE RESERVATION. Nothing is allocated here: the sequence was
+		// allocated, and DURABLY BURNED, by Hub.Mint (invariant 1 — the server is
+		// authoritative on every id, and SIGN-1 chose to hand that id out early so
+		// the SENDER can sign it).
+		//
+		// The mint is LOOKED UP but not yet deleted. It is spent only once the
+		// message it names is durable, further down: a send refused between here and
+		// the write — at admission, at encoding, at the durable write itself — must
+		// leave the client holding a reservation it can retry with the SAME
+		// signature, because re-minting would give it a different id to sign and the
+		// signature it already computed would be worthless.
+		// EXPIRE FIRST, and only here on this path — after the retry check above, so
+		// a legitimate retry answered from the applied-key table never depends on the
+		// TTL, and before the lookup below, so an expired reservation is NOT
+		// spendable.
+		//
+		// This call was MISSING until 2026-08-07 while mint.go claimed expiry "runs on
+		// EVERY mint and EVERY send", which made MintTTL a promise the bus did not
+		// keep: an hour-old reservation still spent fine, Mint.ExpiresAt was returned
+		// to clients as a fact and was not one, and a hoarding agent's slots were
+		// released only if it came back to MINT again — never by sending. The comment
+		// was fixed to match the code rather than the other way round in an earlier
+		// draft; that was the wrong direction. Honouring a reservation past the expiry
+		// this bus PUBLISHED is not "being generous", it is making a documented bound
+		// unobservable and untestable, and a bound nobody can observe is one that
+		// silently stops holding.
+		//
+		// Expiring here costs a client nothing it was promised: the answer is
+		// ErrUnknownMint, which is documented as ROUTINE and whose remedy — re-mint
+		// under the SAME key, re-sign, re-send — cannot double-apply (see that
+		// sentinel). The number stays burned either way.
+		h.expireMintsLocked(h.now())
 
-	mk := mintKey{agent: sender, op: op, key: key}
-	mint, ok := h.mints[mk]
-	if !ok {
-		// Routine, not a fault: a restart or an expiry. See ErrUnknownMint for
-		// why re-minting under the same key is safe and cannot double-apply.
-		return Result{}, fmt.Errorf("%w: agent %q has no reservation for this %s key; re-mint under the same idempotency key, re-sign the fresh assignment and re-send", ErrUnknownMint, sender, op)
+		mk = mintKey{agent: sender, op: op, key: key}
+		mint, ok := h.mints[mk]
+		if !ok {
+			// Routine, not a fault: a restart or an expiry. See ErrUnknownMint for
+			// why re-minting under the same key is safe and cannot double-apply.
+			return Result{}, idem.OutcomeNew, fmt.Errorf("%w: agent %q has no reservation for this %s key; re-mint under the same idempotency key, re-sign the fresh assignment and re-send", ErrUnknownMint, sender, op)
+		}
+		if mint.seq != req.signedMint.Seq || mint.messageID != req.signedMint.MessageID {
+			// The client presented an assignment this bus did not give it. The
+			// presented values are NOT echoed — they are attacker-choosable strings
+			// headed for a log line — and the MINTED ones are, because those are the
+			// bus's own and are what the client should have signed.
+			return Result{}, idem.OutcomeNew, fmt.Errorf("%w: agent %q was minted %s (sequence %d) for this %s key", ErrMintMismatch, sender, mint.messageID, mint.seq, op)
+		}
+		seq = mint.seq
+		mintedID = mint.messageID
 	}
-	if mint.seq != req.signedMint.Seq || mint.messageID != req.signedMint.MessageID {
-		// The client presented an assignment this bus did not give it. The
-		// presented values are NOT echoed — they are attacker-choosable strings
-		// headed for a log line — and the MINTED ones are, because those are the
-		// bus's own and are what the client should have signed.
-		return Result{}, fmt.Errorf("%w: agent %q was minted %s (sequence %d) for this %s key", ErrMintMismatch, sender, mint.messageID, mint.seq, op)
-	}
-	seq := mint.seq
 
 	// The id-authority assertion, re-made on the write path. It was already made
 	// at mint time; it is made again here because the two are separated by a
@@ -1439,8 +1581,8 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// could only fire once the message was already on disk and could not be
 	// unwritten. This one needs nothing from the write, so a violation costs
 	// NOTHING durable.
-	if err := h.assertSeqFloorLocked(string(op), mint.messageID, seq); err != nil {
-		return Result{}, err
+	if err := h.assertSeqFloorLocked(string(op), mintedID, seq); err != nil {
+		return Result{}, idem.OutcomeNew, err
 	}
 
 	// THE BUS PATH (RELAY-11). A relayed message carries the hops it travelled;
@@ -1452,15 +1594,23 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// which nothing downstream could ever tell from a genuine local send.
 	busPath := req.busPath
 	if len(busPath) == 0 {
+		if req.relayed {
+			// THE FAILURE THE PARAGRAPH ABOVE NAMES, MADE UNREACHABLE rather than
+			// merely warned about. IngestRelayed builds the path and refuses an
+			// empty one, so arriving here with none is an internal fault — and the
+			// alternative is silently recording a peer's message as having
+			// originated on this bus, which nothing downstream could ever detect.
+			return Result{}, idem.OutcomeNew, fmt.Errorf("%w: a relayed message reached the durable write path carrying no bus path; defaulting it to this bus would record a provenance claim nobody made", ErrInvalidBusPath)
+		}
 		busPath = store.LocalBusPath(h.busID)
 	}
 	m, err := store.NewMessageWithBusPath(h.busID, sender, broadcast, recipients, seq, h.now().UTC(), body, key, req.signedMint.TimestampUnixMilli, req.signedMint.Signature, busPath)
 	if err != nil {
-		return Result{}, err
+		return Result{}, idem.OutcomeNew, err
 	}
 	payload, err := m.Encode()
 	if err != nil {
-		return Result{}, err
+		return Result{}, idem.OutcomeNew, err
 	}
 
 	// THE APPLIED-KEY RECORD, built and validated BEFORE the durable write.
@@ -1475,7 +1625,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// when the message is already durable.
 	storedResult, err := encodeStoredResult(m.ID, m.Seq, m.Recipients, m.SentAt)
 	if err != nil {
-		return Result{}, fmt.Errorf("hub: encoding the applied-key result for message %s: %w", m.ID, err)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: encoding the applied-key result for message %s: %w", m.ID, err)
 	}
 	idemRecord := idem.Record{
 		Agent:       sender,
@@ -1488,7 +1638,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	}
 	encodedIdem, err := idemRecord.Encode()
 	if err != nil {
-		return Result{}, fmt.Errorf("hub: encoding the applied-key record for message %s: %w", m.ID, err)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: encoding the applied-key record for message %s: %w", m.ID, err)
 	}
 
 	// THE AUDIT RECORD, built and validated BEFORE the durable write, for the
@@ -1499,9 +1649,27 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// It is built HERE, from the message, and not inside the wal.Entry literal
 	// below, so that the error names the message it belongs to. See audit.go —
 	// in particular, do not "simplify" the content hash to m.ContentSHA256.
-	auditRec, err := auditRecordFor(m)
+	//
+	// A RELAYED MESSAGE IS HASHED UNDER THE ORIGIN'S ASSIGNMENT, because its
+	// local record — our id, their sender — has no canonical bytes at all and
+	// cannot be given any. signedAs carries that substitution and explains it;
+	// for a local send it is the zero value and nothing changes.
+	//
+	// THE SUBSTITUTION IS GATED ON req.relayed, NOT merely on the field being
+	// set. auditContentHash honours any non-empty messageID it is given, so
+	// deriving the value straight from req.originMessageID would mean a future
+	// local caller that set that field — for any reason — silently moved a LOCAL
+	// send's audit hash onto an id of its own choosing. Fail closed on the ONE
+	// bit that decides it.
+	signed := signedAs{}
+	if req.relayed {
+		signed = signedAs{messageID: req.originMessageID, seq: req.originSeq}
+	} else if req.originMessageID != "" || req.originSeq != 0 {
+		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: internal: a LOCAL send carried an origin message assignment; the audit content hash of a local send is computed over its own canonical bytes and must never be moved onto another id")
+	}
+	auditRec, err := auditRecordFor(m, signed)
 	if err != nil {
-		return Result{}, err
+		return Result{}, idem.OutcomeNew, err
 	}
 
 	// THE DURABLE WRITE. Nothing below this line may run before it returns, and
@@ -1534,7 +1702,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 		Idem:  encodedIdem,
 		Audit: auditRec,
 	}); err != nil {
-		return Result{}, fmt.Errorf("hub: durably recording message %s: %w", m.ID, err)
+		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: durably recording message %s: %w", m.ID, err)
 	}
 
 	// THE RESERVATION IS SPENT, and only now. The message is durable, so the
@@ -1545,8 +1713,15 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 	// Everything below this line is already-durable state being reflected into
 	// memory, and every failure below POISONS rather than returning, so there is
 	// no path on which the mint is deleted for a message that did not land.
-	delete(h.mints, mk)
-	h.decMintCountLocked(sender)
+	//
+	// A RELAYED MESSAGE HAS NOTHING TO SPEND: its number was minted internally
+	// above and never existed as a reservation, so mk is the zero mintKey and
+	// deleting it would evict whatever a local agent happens to hold under the
+	// empty (agent, op, key) tuple. Skipped, not "harmlessly" applied.
+	if !req.relayed {
+		delete(h.mints, mk)
+		h.decMintCountLocked(sender)
+	}
 
 	// # WHERE THE OLD POISON CHECK WENT — read this before adding one back here
 	//
@@ -1581,7 +1756,7 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 			"seq", m.Seq,
 			"err", err,
 		)
-		return Result{}, h.poisoned
+		return Result{}, idem.OutcomeNew, h.poisoned
 	}
 
 	result := Result{
@@ -1609,14 +1784,14 @@ func (h *Hub) publish(req publishRequest) (Result, error) {
 			"seq", m.Seq,
 			"err", err,
 		)
-		return Result{}, h.poisoned
+		return Result{}, idem.OutcomeNew, h.poisoned
 	}
 
 	// LAST, and only here: the message is durable and it is in the serving
 	// copy, so a waiter woken now cannot observe something a crash would take
 	// back (POLL-2).
 	h.notify(m)
-	return result, nil
+	return result, idem.OutcomeNew, nil
 }
 
 // IdempotencyStats reports the observable state of the applied-key table: how

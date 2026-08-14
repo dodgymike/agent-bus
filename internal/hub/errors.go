@@ -24,6 +24,39 @@ var (
 	// know. The HTTP layer answers 404.
 	ErrUnknownRecipient = errors.New("hub: unknown recipient")
 
+	// ErrRelayedSender reports the sender of a RELAYED message that is either
+	// malformed or claims THIS bus's namespace.
+	//
+	// It is ErrUnknownSender's inverse and is a distinct sentinel because it is a
+	// distinct fact: a local send is refused for a sender we do NOT hold, and a
+	// relayed one for a sender we WOULD hold. Collapsing the two would make a
+	// peer asserting an id in our namespace — the permanent id-space injury
+	// cca64afd names — indistinguishable in a log from one of our own agents
+	// having left the roster. See Hub.checkRelayedSender.
+	ErrRelayedSender = errors.New("hub: a relayed message's sender must be a well-formed fully-qualified id belonging to another bus")
+
+	// ErrInvalidRelayedMessage reports a relayed message whose SHAPE this bus
+	// cannot record: an unusable origin timestamp, or a signature that is not the
+	// right length. Both are refused BEFORE the write path mints a sequence, so a
+	// malformed relay costs this bus nothing durable — see validateRelayedShape.
+	ErrInvalidRelayedMessage = errors.New("hub: the relayed message cannot be recorded in the shape it arrived in")
+
+	// ErrInvalidBusPath reports the traversed-bus path of a relayed message that
+	// is empty, malformed, or too long to record once this bus's hop is
+	// appended. The path is the ONLY provenance a relayed record carries and it
+	// is written into an append-only trail, so it is refused rather than
+	// repaired. See Hub.relayedBusPath.
+	ErrInvalidBusPath = errors.New("hub: invalid relayed bus path")
+
+	// ErrBusPathLoop reports a relayed message whose arriving path ALREADY names
+	// this bus. It is separate from ErrInvalidBusPath because it is a routing
+	// condition rather than a malformed input: the path is well-formed and the
+	// message has simply been here before, which a caller may want to count and
+	// report differently. relay.CheckIncomingPath is the authority; this is the
+	// same refusal at the moment the durable record is built, so appending our
+	// hop can never fabricate a second visit.
+	ErrBusPathLoop = errors.New("hub: the relayed bus path already contains this bus")
+
 	// ErrInvalidBody reports a message body that is missing or over
 	// store.MaxBodyBytes.
 	ErrInvalidBody = errors.New("hub: invalid message body")

@@ -194,7 +194,9 @@ func TestAuditRecordsMultiHopBusPath(t *testing.T) {
 	// to rewrite the provenance of a message that is already durable.
 	given := append([]string(nil), wantPath...)
 
-	res, err := h.publish(publishRequest{
+	// The idempotency OUTCOME is not what this test is about; publish returns it
+	// uncollapsed for the relay ingest (see Hub.IngestRelayed).
+	res, _, err := h.publish(publishRequest{
 		sender:     sender,
 		broadcast:  false,
 		recipients: []string{to},
@@ -371,7 +373,7 @@ func TestPublishRefusesABusPathThatDoesNotEndAtThisBus(t *testing.T) {
 		// A key an idempotency key may actually be: [A-Za-z0-9._-] only, so the
 		// case name (which has spaces) cannot be used as one.
 		key := fmt.Sprintf("k-refused-%d", i)
-		_, err := h.publish(publishRequest{
+		_, _, err := h.publish(publishRequest{
 			sender:     sender,
 			broadcast:  false,
 			recipients: []string{to},

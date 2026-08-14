@@ -732,6 +732,79 @@ the traversed bus path, the local delivery sequence, the byte size — they are 
 out-of-band columns of the audit record; they are never folded into the canonical bytes and never
 substituted for them.
 
+#### 8.6.1 The RELAYED case: the same rule, applied to bytes signed on ANOTHER bus (RELAY-24-BLOCKER-HUBINGEST, 2026-08-14)
+
+**Nothing in §8.6 changes.** The rule is still *hash the bytes the signature covers*, and what follows
+is that rule applied to a message whose signature was made on a different bus. It is not a second rule
+and it does not supersede the one above. It is written down because the bytes the rule selects are not
+the local record's, and a reader who assumes they are will fail to reproduce a relayed record's hash
+and conclude the trail is wrong.
+
+**A relayed record has no canonical bytes of its own, and cannot be given any.** The local record of a
+relayed message carries a message id THIS bus minted — a bus never adopts a peer's id (invariant 1) —
+and a sender belonging to the ORIGIN bus (invariant 2). `Canonicalize` refuses that pair
+unconditionally: the origin binding of §8.3 compares the sender's bus half against the bus that minted
+the id, EXACTLY and with no fold, because a message is signed by an agent of the bus that minted its
+id. So there is no local derivation to prefer over the origin's. It is not merely unused — it is
+impossible, and `internal/signing` will not produce it.
+
+**The content hash is therefore computed over the ORIGIN's canonical bytes.** Exactly two fields are
+substituted — the message id and the sequence — because they are exactly the two this bus re-minted;
+the sender, the recipients, the sender's timestamp and the body are already the origin's on both
+sides. The result is byte-identical to what `(relay.RelayedMessage).CanonicalBytes()` builds, which is
+the same byte string the origin agent signed and the same one the relay ingress re-derived and checked
+the signature against before this bus recorded anything. Hashing anything else would leave a relayed
+record's hash covering bytes NOBODY ever signed.
+
+**The substitution is gated on the message being RELAYED, not on the origin fields being present.**
+A local send that arrives at the write path carrying an origin assignment is refused as an internal
+error rather than honoured. Deriving the behaviour from the field alone would mean any future local
+caller that populated it — for any reason — had silently moved a local send's audit hash onto an id of
+its own choosing.
+
+**This is NOT the substitution the paragraph above forbids.** That paragraph governs the out-of-band
+fields it names — the traversed bus path, the local delivery sequence, the byte size — which are
+additional columns of the audit record, are never folded into the canonical bytes, and never stand in
+place of them. Neither happens here. The hash is still SHA-256 over a canonical byte string produced
+by `Canonicalize`; the only question this subsection answers is which server assignment that byte
+string was produced under, and the answer is the one the signature was made under.
+
+**What a READER of the trail must know, stated carefully.** For a relayed record the content hash does
+**not** reproduce from that record's own `message_id` and `seq`. It DOES reproduce from the ORIGIN's
+pair, and that pair is durably recorded: the origin message id is the message record's
+`idempotency_key`, and the origin sequence parses out of it. The MESSAGE log therefore carries
+everything needed to re-derive the hash. **The AUDIT log alone does not** — the audit record carries
+neither the origin message id nor the sender's claimed timestamp — but that limitation is not new and
+is equally true of a local record, whose hash also needs the sender's timestamp from the message log.
+Reproducing any content hash from this trail has always required both files.
+
+**The discriminator is the SENDER's bus half, and NEVER the bus path.** A multi-hop path does not imply
+a relayed record: `internal/hub/buspath_test.go` publishes a three-hop path
+(`[busa, busb, testbus]`) with a LOCAL sender, and that record's hash IS locally reproducible from its
+own assignment. The structural test is whether the sender's bus half is this bus's. A future reader,
+tool or fsck that keys on the path length will misclassify exactly those records.
+
+**This is not a precedent for inventing a hash where the correct bytes do not exist.** The relayed case
+is the OPPOSITE of the broadcast case, and the difference is the whole justification. For a relayed
+message the correct bytes EXIST, are already computed by `(relay.RelayedMessage).CanonicalBytes()`,
+and were already verified against a signature before the hub was asked to record anything — the
+substitution selects bytes that are already there. For a broadcast under signing format v1 there are
+no such bytes at all: `Canonicalize` rejects an empty recipient set and a broadcast is stored as a
+FLAG rather than an expanded roster, so any value chosen would be one this project invented. The
+broadcast path accordingly still **fails closed**, SIGN-3 still owns the question of what a
+broadcast's signed audience IS, and nothing in this subsection answers it.
+
+**Hashing the bare body remains FORBIDDEN, for a relayed record exactly as for a local one.**
+`store.ContentHash(body)` is also 64 lowercase hex characters, so no framing check, no decoder and no
+assertion on shape can tell the two apart. Three value-pinning tests are the only defence and each
+rebuilds the expected digest independently rather than by calling the producer:
+`TestSendWritesItsAuditRecord` (`internal/hub/audit_roundtrip_test.go`),
+`TestIngestRelayedAuditHashIsTakenUnderTheOriginAssignment`
+(`internal/hub/relayingest_relay24blocker_test.go`), which additionally asserts that the LOCAL
+derivation is refused outright, and `TestLocalSendAuditPayloadIsUnchanged`
+(`internal/hub/buspath_test.go`), whose whole-record golden fails if a local send's trail entry moves
+by a byte.
+
 ### 8.7 Test vectors are a published artefact
 
 `internal/signing/testdata/canonical_vectors.json` holds, for each vector, the input message, the
