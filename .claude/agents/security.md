@@ -27,9 +27,11 @@ TLS, no plaintext listener, and
 hardening — it silently disables pinning and every positive test still passes.**
 
 **Those state what MUST be true, not what IS true today** — several are only partly enforced
-(notably 3, 7, 10 and 11: enrolment is not yet invite-gated, the server does not request a client
-certificate, recipients cannot verify message signatures). Never pass a change because an invariant
-says a control exists; verify the control in the CODE, and report the gap where it does not.
+(notably 3, 7, 10 and 11: enrolment is not yet invite-gated, the server REQUESTS but never REQUIRES a
+client certificate — `tls.RequestClientCert` since `a97f854`, and one that IS presented is
+chain-verified against nothing and authenticates nobody — recipients cannot verify message
+signatures). Never pass a change because an invariant says a control exists; verify the control in
+the CODE, and report the gap where it does not.
 
 Check for:
 - Hardcoded secrets, API keys, tokens, private keys, or credentials (including in scripts, logs, and committed config).

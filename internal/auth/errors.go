@@ -32,8 +32,20 @@ var (
 
 	// ErrIdempotencyKeyReused reports the SAME idempotency key presented with a
 	// DIFFERENT payload. Per invariant 10 this is a protocol violation, not a
-	// retry: the client is either seriously broken or hostile. The HTTP layer
-	// answers 409, logs it at warn level and DISCONNECTS the offending client.
+	// retry. The HTTP layer answers 409 and logs it at warn level — and KEEPS
+	// THE CONNECTION.
+	//
+	// THIS DOC SAID "DISCONNECTS THE OFFENDING CLIENT" UNTIL THE INVARIANT WAS
+	// NARROWED ON 2026-08-08 (by user decision, after the behaviour was measured
+	// at the raw socket). Do not reinstate it. An idempotency key is scoped to
+	// the caller's OWN agent, so reuse is overwhelmingly a client that lost track
+	// of its keys rather than an attacker; dropping the socket destroys every
+	// other request pipelined on it, including that client's parked long-poll,
+	// which lands an abuse defence on the party most likely to be honest. A
+	// merely BUGGY client reaches this line easily — the first of the two
+	// questions invariant 10 demands before ANY disconnect is added. See
+	// httpapi.disconnect for the one case that still does disconnect: replay of
+	// an already-accepted SIGNED message, which is a different error entirely.
 	//
 	// Note what this is not: same key + same payload is a legitimate retry of a
 	// call whose acknowledgement was probably lost, and returns the original

@@ -254,8 +254,9 @@ func TestInviteMintSubcommand(t *testing.T) {
 		if code != exitInviteOK {
 			t.Fatalf("exit = %d: %s %s", code, stdout, stderr)
 		}
-		// Invariant 11: TLS is the required transport, and until MTLS-LISTENER
-		// lands the fingerprint in this blob pins nothing. An operator must not
+		// Invariant 11: TLS is the required transport. MTLS-LISTENER landed
+		// 2026-08-07, but an ADVERTISED http bus address still bypasses the TLS
+		// listener, so the fingerprint in this blob pins nothing. An operator must not
 		// have to infer that.
 		if !strings.Contains(stderr, "CLEARTEXT") {
 			t.Errorf("no cleartext warning on stderr for an http bus address:\n%s", stderr)

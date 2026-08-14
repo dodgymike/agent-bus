@@ -197,7 +197,7 @@ raw Go error):
 | Malformed envelope | 400 | `CodeInvalidRequest` / other `ErrorCode(err)` | |
 | **Loop drop (relay only)** | **200** | `{"accepted":false,"dropped_reason":"loop"}` | **NOT an error status.** A loop is the expected steady state of a cyclic topology and is nobody's fault; a 5xx would make RELAY-4's future retry/backoff re-deliver forever the one thing that can never be accepted, and a 4xx would blame a sender that cannot know our federation graph. See `relayhttp.go`'s `ServeHTTP` doc for the full three-part argument. |
 | **Duplicate (relay only)** | 200 | `{"accepted":true,"duplicate":true,"message_id":"<original>"}` | invariant 10: return the original result, re-apply nothing, disconnect nobody |
-| **Idempotency VIOLATION (relay and roster)** | **409** | `CodeIdempotencyViolation` | same key, different payload. The handler logs that the peer SHOULD be disconnected per invariant 10 but cannot do so itself — it does not own the connection. `MTLS-RELAYGUARD` (`8192c3c7`) must wire the disconnect when it gates this handler onto a listener. |
+| **Idempotency VIOLATION (relay and roster)** | **409** | `CodeIdempotencyViolation` | same key, different payload. Rejected and logged, and **NOBODY IS DISCONNECTED** — invariant 10 as narrowed 2026-08-08. **The 409 plus the log line is the COMPLETE remedy and no gate task owes more:** this row previously said the peer SHOULD be disconnected and instructed `MTLS-RELAYGUARD` (`8192c3c7`) to wire it up. **That instruction is WITHDRAWN and must not be reinstated** (`internal/relay/relayhttp.go`'s `ErrIdempotencyViolation` doc) — a relay connection multiplexes every agent behind that peer, so dropping it over one caller's key bookkeeping punishes all of them. |
 | Stale roster update (roster only) | 409 | `CodeStaleRoster` | version not strictly greater than the one already applied — the update is well-formed, it just lost a race or the peer regressed its counter; recovery is a re-handshake |
 | Unknown peer (roster only) | 403 | `CodeUnknownPeer` | a roster update may never CREATE a peer — accepted as a residual, this 403-vs-409 split is itself a peer-enumeration oracle until the gate authenticates the caller (see `doc.go`) |
 | Callback failure, otherwise | 503 | `CodeUnavailable` | "not now", so a peer knows retrying is correct |
@@ -262,7 +262,8 @@ Every other `RelayRequest` field is unchanged. The relay **fingerprint** (`relay
 folds the recipient list **sorted** rather than in wire order, because `signing.Canonicalize` sorts —
 so the fingerprint's notion of "the same payload" matches the signature's; an order-sensitive
 fingerprint made a mere re-ordering of a validly signed recipient array an `idem.OutcomeViolation`,
-which invariant 10 answers by disconnecting the sender. It still excludes `bus_path` and still
+which invariant 10 answers by rejecting and logging it (**not** by disconnecting the sender —
+narrowed 2026-08-08). It still excludes `bus_path` and still
 excludes the signature itself. See `PROTOCOL.md` §8.5 and §10.
 
 **New Go-level construction requirement (not a wire surface):** `relay.RelayConfig.Trust` — a

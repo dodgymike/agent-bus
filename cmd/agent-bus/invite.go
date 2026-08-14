@@ -271,17 +271,21 @@ func runInviteMint(args []string, stdout, stderr io.Writer) int {
 		Label:     minted.Label,
 	}
 	if strings.HasPrefix(busURL, "http://") {
-		// Invariant 11: TLS is the required transport. The listener is not TLS yet
-		// (MTLS-LISTENER), so an http bus address is the honest thing to put in a
-		// blob TODAY — but the fingerprint is unusable until the bus serves https,
-		// and a reader must not assume the pin is protecting this invite.
+		// Invariant 11: TLS is the required transport, and the LISTENER is TLS —
+		// MTLS-LISTENER landed 2026-08-07 and the server now refuses to start
+		// without usable key material. What is http here is the ADVERTISED bus
+		// address, which an operator can still mis-configure independently of what
+		// the listener serves. A redemption sent to that address does not reach
+		// the TLS listener, so the secret crosses in cleartext and the fingerprint
+		// in this blob pins nothing; a reader must not assume the pin is
+		// protecting this invite.
 		//
 		// SIGNALLED IN BAND AS WELL AS ON STDERR. A stderr-only warning is
 		// invisible to invariant 7's second audience — an agent shelling out with
 		// --json and stderr discarded would receive a blob whose fingerprint pins
 		// nothing, with nothing to branch on. TransportInsecure is that branch.
 		blob.TransportInsecure = true
-		lg.Warn("this invite names an http:// bus address, so the invite secret will cross the wire IN CLEARTEXT when it is redeemed, and the certificate fingerprint pins nothing until the bus serves https (MTLS-LISTENER). Bounded only by the loopback default: do NOT expose this bus on a non-loopback interface until mTLS lands",
+		lg.Warn("this invite names an http:// bus address, so the invite secret will cross the wire IN CLEARTEXT when it is redeemed, and the certificate fingerprint pins nothing. The listener itself serves https and only https; it is this ADVERTISED address that is plaintext, so re-mint the invite against the https address. Bounded only by the loopback default: do NOT expose this bus on a non-loopback interface with a plaintext advertised address",
 			"bus_address", busURL, "invite_id", minted.ID)
 	}
 	if asJSON {
@@ -343,8 +347,9 @@ type inviteBlob struct {
 
 	// TransportInsecure is true when BusAddress is plaintext http, meaning the
 	// invite secret will cross the wire IN CLEARTEXT at redemption and
-	// BusCertFingerprint pins NOTHING (invariant 11; the TLS listener is
-	// MTLS-LISTENER and has not landed). It is emitted in band precisely so an
+	// BusCertFingerprint pins NOTHING (invariant 11). The TLS listener landed at
+	// MTLS-LISTENER, 2026-08-07 — this flag is about the ADVERTISED address being
+	// plaintext, not the listener. It is emitted in band precisely so an
 	// agent consuming --json with stderr discarded can still tell — a warning it
 	// cannot see is a warning that does not exist. Omitted when false, so a
 	// secure invite carries no field and the flag is only ever present as a

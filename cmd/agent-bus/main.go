@@ -96,12 +96,15 @@ const (
 	// re-handshaking TLS on every poll. That is a real cost on this bus: every
 	// connection is TLS and there is no plaintext listener (invariant 11).
 	//
-	// Deliberately NOT justified by mutual TLS. ClientAuth is still
-	// tls.NoClientCert (cmd/agent-bus/tlslisten.go) -- MTLS-CLIENTAUTH has not
-	// landed -- so a comment resting on client certificates would assert an
-	// authentication property this server does not yet have, in a place a later
-	// auditor would trust. When client auth does land the handshake gets more
-	// expensive, which strengthens this value rather than changing it.
+	// Deliberately NOT justified by mutual TLS. ClientAuth is
+	// tls.RequestClientCert (cmd/agent-bus/tlslisten.go, MTLS-CLIENTAUTH,
+	// a97f854): a certificate is REQUESTED and never REQUIRED, and one that IS
+	// presented authenticates nobody by itself -- admitClientCertificate does no
+	// chain verification and resolves no principal. So a comment resting on
+	// client certificates would still assert an authentication property this
+	// server does not have, in a place a later auditor would trust. Requiring
+	// one would make the handshake more expensive, which would strengthen this
+	// value rather than change it.
 	//
 	// What this does NOT bound: an ACTIVE attacker. A client that sends a
 	// trivial request more often than every 120s refreshes the timer for ever,
@@ -866,8 +869,10 @@ func run(cfg Config) error {
 	// marker of the cutover this change forces on every existing deployment.
 	//
 	// client_auth is reported alongside it so the summary cannot be read as
-	// "mutual TLS is on". It is not, deliberately -- requiring a client
-	// certificate is MTLS-CLIENTAUTH and must not precede MTLS-CLIENTCERT.
+	// "mutual TLS is on". It is not: MTLS-CLIENTAUTH (a97f854) moved this field
+	// from "none" to "requested", and "requested" means a certificate is asked
+	// for, never required, and authenticates nobody on its own. REQUIRING one is
+	// a later task, and it must not precede a client that can present one.
 	//
 	// tls_min_version and client_auth are DERIVED FROM tlsCfg, not written as
 	// literals beside it. The reviewer gate found the literal form: with it,

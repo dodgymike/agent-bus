@@ -79,11 +79,14 @@
 //     wholesale, so a certificate put there is silently dropped on every real
 //     connection.
 //
-// The bus does NOT ask for a client certificate yet (MTLS-CLIENTAUTH is the
-// task that starts asking), so the presenting half is offered and ignored
-// today. That order is deliberate and must not be reversed: a bus that requires
-// a client certificate before any client can present one locks out every
-// enrolled agent.
+// The bus ASKS for a client certificate but never requires one
+// (MTLS-CLIENTAUTH, a97f854, `ClientAuth: tls.RequestClientCert`), so the
+// presenting half is offered and — since the bus chain-verifies nothing and
+// resolves no principal from it — still authenticates nobody today. That order
+// is deliberate and must not be reversed: a bus that REQUIRES a client
+// certificate before any client can present one locks out every enrolled agent,
+// which is why asking landed after this file and requiring has not landed at
+// all.
 //
 // The rule to know: an https bus whose certificate fingerprint this client has
 // not been told IN ADVANCE is REFUSED. There is no trust-on-first-use, not as a

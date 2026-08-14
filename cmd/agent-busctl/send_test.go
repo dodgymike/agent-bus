@@ -21,9 +21,11 @@ import (
 // Generating a fresh key per attempt turns the retry that idempotency exists to
 // make safe into a SECOND MESSAGE. Invariant 10's whole distinction rests on
 // this: same key + same payload is a legitimate retry the bus answers from its
-// applied-key table; same key + different payload is a protocol violation that
-// gets the client disconnected. A client that varies EITHER half across the
-// attempts of one logical send has broken one of those two.
+// applied-key table; same key + different payload is a protocol violation the
+// bus rejects with a 409 and logs, KEEPING the connection (narrowed 2026-08-08
+// — it disconnected until then, and must not again). A client that varies
+// EITHER half across the attempts of one logical send has broken one of those
+// two, and the send simply does not happen.
 //
 // So the assertion is not "a key was sent" but "every attempt sent the SAME
 // key, in the SAME payload, byte for byte".
@@ -90,7 +92,7 @@ func TestCLISendReusesIdempotencyKeyOnRetry(t *testing.T) {
 			t.Fatalf("attempt %d used idempotency key %q, want %q — a key minted per attempt makes a retry a SECOND message", i, key, firstKey)
 		}
 		if string(raw) != string(first) {
-			t.Fatalf("attempt %d sent a DIFFERENT payload:\n  attempt 0: %s\n  attempt %d: %s\nsame key + different payload is a protocol violation that disconnects the client", i, first, i, raw)
+			t.Fatalf("attempt %d sent a DIFFERENT payload:\n  attempt 0: %s\n  attempt %d: %s\nsame key + different payload is a protocol violation the bus rejects with a 409 and logs, so this send would never be applied", i, first, i, raw)
 		}
 	}
 

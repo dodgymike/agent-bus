@@ -27,18 +27,20 @@ import (
 // the one the invite named. This file is the presenting half — it mints, keeps
 // and offers the certificate the BUS will one day check.
 //
-// "One day" is the important word. The bus serves TLS with client certificates
-// NOT REQUESTED today (MTLS-CLIENTAUTH is the task that starts asking). This
-// lands first, and deliberately: the server-side requirement must never arrive
-// before the client can satisfy it. A bus that demands a client certificate
-// before any client can present one locks out every agent already enrolled,
-// which is the same failure this project has already shipped once — signatures
-// were required on send before the client could produce them, and every send
-// returned exit 7. So the order is: capability, then enforcement.
+// "One day" is the important word. The bus now REQUESTS a client certificate
+// and never REQUIRES one (MTLS-CLIENTAUTH, a97f854, `tls.RequestClientCert`),
+// and it chain-verifies nothing and resolves no principal from what it gets.
+// This file landed first, and deliberately: the server-side requirement must
+// never arrive before the client can satisfy it. A bus that demands a client
+// certificate before any client can present one locks out every agent already
+// enrolled, which is the same failure this project has already shipped once —
+// signatures were required on send before the client could produce them, and
+// every send returned exit 7. So the order is: capability, then asking, then
+// enforcement — and enforcement has NOT happened.
 //
-// The consequence is that this certificate is, for now, offered and ignored.
-// That is the intended state, and it is why nothing here fails when the bus
-// does not ask.
+// The consequence is that this certificate is, for now, offered and read but
+// not authenticated. That is the intended state, and it is why nothing here
+// fails whether the bus asks or not.
 //
 // # What it is NOT
 //
@@ -150,9 +152,9 @@ type ClientCertificate struct {
 
 	// cert is what crypto/tls is handed. Unexported: the private key inside it
 	// is the one thing this package must not casually hand out, and no caller
-	// outside this package has needed it. MTLS-CLIENTAUTH may export an
-	// accessor if a genuine embedder case appears; adding one later is cheap,
-	// un-exporting a key is not.
+	// outside this package has needed it. A later task may export an accessor if
+	// a genuine embedder case appears; adding one later is cheap, un-exporting a
+	// key is not.
 	cert tls.Certificate
 }
 
@@ -651,8 +653,10 @@ func mintClientCertificate(now time.Time) (certPEM, keyPEM []byte, err error) {
 	// containing itself. The local reasoning was correct. The DOWNSTREAM
 	// consequence was not, and the security gate caught it before it shipped.
 	//
-	// The hazard is in what those two fields would AUTHORISE once the bus
-	// starts verifying client certificates (MTLS-CLIENTAUTH / MTLS-BIND). The
+	// The hazard is in what those two fields would AUTHORISE once the bus starts
+	// VERIFYING client certificates — which it still does not do. MTLS-CLIENTAUTH
+	// (a97f854) only made the bus ASK for one, and MTLS-BIND records the
+	// fingerprint it was handed; neither chain-verifies anything. The
 	// obvious generalisation of the single-certificate trick above is "collect
 	// every enrolled agent's certificate into one x509.CertPool and Verify
 	// against it" — and it would look like consistency, not like a mistake. But
@@ -793,9 +797,9 @@ func newClientCertSerial() (*big.Int, error) {
 // this provider is only built once material has been loaded.
 func clientCertificateProvider(cert *tls.Certificate) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	if cert == nil {
-		// Left unset, which is exactly "present no client certificate". The bus
-		// does not ask for one today, so this is not a failure path — it is the
-		// plaintext-loopback branch, where there is no handshake at all.
+		// Left unset, which is exactly "present no client certificate". This is
+		// not a failure path: it is the plaintext-loopback branch, where there is
+		// no handshake at all, so what the bus asks for never arises.
 		return nil
 	}
 	return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return cert, nil }

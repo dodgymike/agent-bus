@@ -199,7 +199,8 @@ type SendOptions struct {
 	// Supply one only to RETRY a specific earlier send, with a BYTE-IDENTICAL
 	// body. Same key + same payload is a legitimate retry and is answered from
 	// the bus's applied-key table; same key + DIFFERENT payload is a protocol
-	// violation that earns a 409 AND a disconnection.
+	// violation that earns a 409, which the bus rejects and logs WITHOUT
+	// disconnecting (invariant 10, narrowed 2026-08-08).
 	IdempotencyKey string
 }
 
@@ -592,15 +593,19 @@ type broadcastRequestBody struct {
 // table, and writes exactly one message. If the key were minted per attempt, a
 // retry after a lost acknowledgement would be a SECOND message; if the payload
 // varied between attempts it would be "same key + different payload", which is
-// a protocol violation that disconnects the client.
+// a protocol violation the bus rejects and logs — WITHOUT disconnecting the
+// client (invariant 10, narrowed 2026-08-08).
 //
 // That is also why the request is marked retryable at all. A POST is not safe
 // to repeat in general; it is safe here precisely because it carries the key.
 //
 // A 409 — the key reused with different content — is surfaced as its own loud
 // KindRejected error rather than the transport's generic wording, because the
-// bus's answer to it is a disconnection and the caller needs to know it must
-// use a fresh key rather than keep retrying.
+// send did NOT happen and no amount of retrying that key will make it happen:
+// the caller needs to know it must use a fresh key rather than keep retrying.
+// It is loud for that reason and NOT because the bus hangs up; see
+// SendResult's KindRejected note and messages.go's disconnect() for the single
+// case that does hang up, which is signed-message replay, not key reuse.
 func (c *Client) Send(ctx context.Context, opts SendOptions) (SendResult, error) {
 	const op = "send"
 

@@ -17,9 +17,10 @@ These are the load-bearing invariants, stated as rules. Every change is measured
 change that weakens one needs an explicit decision recorded in `DECISIONS.md`.
 
 > **These state what MUST be true, not what IS true today.** Several are only partly enforced in
-> code: enrolment is NOT yet invite-gated (`InviteRequired: false`), the server does NOT request a
-> client certificate (`ClientAuth: tls.NoClientCert`), recipients CANNOT verify message signatures,
-> and enrol idempotency is in-memory only. Do not build on a guarantee without checking it holds.
+> code: enrolment is NOT yet invite-gated (`InviteRequired: false`), the server REQUESTS but never
+> REQUIRES a client certificate (`ClientAuth: tls.RequestClientCert`, `a97f854` — one that IS
+> presented authenticates nobody by itself), recipients CANNOT verify message signatures, and enrol
+> idempotency is in-memory only. Do not build on a guarantee without checking it holds.
 
 **The REASONING lives in `INVARIANTS.md`, and you must read the relevant entry IN FULL before working
 on that plane.** The lines below are reminders, not specifications — each one is a summary of several

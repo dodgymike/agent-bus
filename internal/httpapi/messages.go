@@ -94,9 +94,11 @@ const pollRetryAfterSeconds = "5"
 //     When the relay ingest path lands it will NOT: a peer bus legitimately
 //     presents a `sender` that is not the connection's principal, on a
 //     connection multiplexing many agents, so dropping it would punish every
-//     agent behind that peer. internal/relay/doc.go already specifies
-//     "OFFENDING PEER DISCONNECTED" and will need reconciling with this
-//     narrowing rather than inheriting it.
+//     agent behind that peer. internal/relay/doc.go USED to specify "OFFENDING
+//     PEER DISCONNECTED"; it no longer does, and internal/relay/relayhttp.go
+//     now records that the 409 plus the log line is the COMPLETE remedy and
+//     that the withdrawn disconnect must not be reinstated. Nothing there is
+//     left to inherit — keep it that way.
 //
 // The 409 from hub.ErrUnknownMint is the case that proves question 1 — it is
 // reached both by a caller presenting a stranger's reservation and by a caller

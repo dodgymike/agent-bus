@@ -34,10 +34,12 @@
 # exposure, it does not replace TLS", and a bus deliberately exposed on a real
 # interface needs BOTH. What has actually changed is the RESIDUAL risk of
 # widening it: an on-path observer can no longer read a session token, but
-# there is still no client-certificate requirement (MTLS-CLIENTAUTH is not
-# shipped -- the client cannot yet present one, MTLS-CLIENTCERT), so anything
-# that can reach the port can still attempt enrolment. That is the remaining
-# reason not to widen this bind here.
+# there is still no client-certificate REQUIREMENT. MTLS-CLIENTAUTH shipped
+# 2026-08-14 (a97f854) and only made the listener ASK -- ClientAuth is
+# tls.RequestClientCert, a certificate is requested and never required, and one
+# that IS presented is chain-verified against nothing and authenticates nobody.
+# So anything that can reach the port can still attempt enrolment. That is the
+# remaining reason not to widen this bind here.
 #
 # CONSEQUENCE, STATED PLAINLY: as shipped, no other container and no host
 # process can talk to this bus. That is the price of the constraint, not an

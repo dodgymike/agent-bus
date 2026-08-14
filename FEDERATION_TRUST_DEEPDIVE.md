@@ -116,26 +116,43 @@ BUS SIGNING KEY, SO NO PIN CAN EVER BE ESTABLISHED". The first clause is still t
 
 ### 2.2 Nothing populates an agent's messaging public key — so no bus can attest anything
 
-`internal/auth/roster.go:101-113`:
+> **SUPERSEDED 2026-08-14 — THIS BLOCKER IS CLOSED. The finding below was accurate on 2026-08-08 and
+> is retained as the reasoning that motivated the attestation design; do not act on it as a current
+> statement of the code.** `RELAY-13` now populates `MessagingPublicKey` from the enrolment request,
+> and `internal/auth/roster.go` says so in place: *"NO LONGER RESERVED: RELAY-13 populates it, from
+> the enrolment request. It remains OPTIONAL — an enrolment that sends no messaging key is accepted
+> and stores none."* All three of the fields reserved by `ENROL-SHAPE` are now written, none needed a
+> migration, and none is reserved any more: `MessagingPublicKey` by `RELAY-13`, `InviteID` by
+> `INVITE-GATE`, `CertBindings` by `MTLS-BIND` (2026-08-14) — see `internal/auth/doc.go` and
+> `internal/auth/roster.go`. **What remains true:** the key is OPTIONAL, so an empty value is an
+> ordinary record rather than a damaged one, and any attestation path must handle "this agent
+> registered no messaging key" rather than assuming one is present.
+
+The finding as recorded on 2026-08-08 — `internal/auth/roster.go`, then at lines 101-113, **since
+rewritten**:
 
 ```go
 	// MessagingPublicKey is the agent's second Ed25519 key, for message
 	// signing.
 	//
-	// RESERVED: NOTHING POPULATES IT YET. The SIGN epic (SIGN/CRYPTO-3) is the
-	// task that will. Until then it is always empty, and Decode therefore
-	// validates it only when it is present — empty IS the reserved state, not a
-	// malformed key.
+	// RESERVED: NOTHING POPULATED IT YET at the time of this deep dive. The SIGN
+	// epic (SIGN/CRYPTO-3) was named as the task that would. Until then it was
+	// always empty, and Decode therefore validated it only when present — empty
+	// WAS the reserved state, not a malformed key.
 	MessagingPublicKey ed25519.PublicKey
 ```
 
-`internal/auth/service.go:360` confirms it at the enrolment site: "MessagingPublicKey, InviteID and
-CertBindings are left ZERO." `internal/auth/roster.go:307-319` validates it only when non-empty.
+`internal/auth/service.go` then confirmed it at the enrolment site: "MessagingPublicKey, InviteID and
+CertBindings are left ZERO." (That sentence is also gone; `internal/auth/roster.go` now records that
+the bet paid off and all three are written.) `internal/auth/roster.go:307-319` validates it only when
+non-empty — **still true**.
 
-**This is a hard blocker on RELAY-14 that the wave-1 plan does not name.** Bus A cannot attest
-`A.writer-7 → <key>` because A does not know `A.writer-7`'s messaging key. The attestation
-mechanism designed below is correct and implementable, and it will attest nothing until enrolment
-carries the messaging key. See §6, task T1.
+**This WAS a hard blocker on RELAY-14 that the wave-1 plan did not name** (closed by `RELAY-13`, as
+above). Bus A could not attest
+`A.writer-7 → <key>` because A did not know `A.writer-7`'s messaging key. The attestation
+mechanism designed below is correct and implementable, and it attested nothing until enrolment
+carried the messaging key — which `RELAY-13` now makes it do, for every agent that supplies one. See
+§6, task T1.
 
 ### 2.3 The RECIPIENT's trust root is not the bus, and never was
 

@@ -373,8 +373,10 @@ func (c *Client) doer(u *url.URL, pins BusPinSet) (HTTPDoer, error) {
 	//
 	// A failure here STOPS the request. It does not fall back to connecting
 	// without a certificate: today that would appear to work, because the bus
-	// does not ask for one, and would become a lockout the day it does — a
-	// failure that arrives months after the change that caused it.
+	// REQUESTS a certificate without ever REQUIRING one (tls.RequestClientCert,
+	// a97f854), so a connection presenting none still completes the handshake.
+	// It would become a lockout the day the bus requires one — a failure that
+	// arrives months after the change that caused it.
 	var clientCert *tls.Certificate
 	if !pins.IsEmpty() {
 		cc, err := c.clientCertificate()

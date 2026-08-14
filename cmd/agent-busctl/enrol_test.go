@@ -133,9 +133,10 @@ func TestCLIEnrolEndToEnd(t *testing.T) {
 
 	// The enrolment above completed over a REAL TLS handshake with the REAL
 	// bus, so by now the client must have minted its own certificate and
-	// offered it (MTLS-CLIENTCERT). The bus does not ask for one yet — that is
-	// MTLS-CLIENTAUTH — and this assertion is the proof that not-asking is
-	// still a working enrolment rather than a broken one.
+	// offered it (MTLS-CLIENTCERT). The bus REQUESTS one and never requires it
+	// (MTLS-CLIENTAUTH, a97f854, tls.RequestClientCert), so enrolment must
+	// succeed whether or not the certificate is presented or accepted — this
+	// assertion is the proof that the client minted and stored it regardless.
 	clientKey := filepath.Join(identityDir, client.ClientTLSDirName, client.ClientKeyFileName)
 	keyInfo, err := os.Stat(clientKey)
 	if err != nil {

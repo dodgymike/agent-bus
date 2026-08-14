@@ -373,7 +373,8 @@ func parseBusURL(raw string) (*url.URL, error) {
 	// If "https://BUS:443" and "https://bus" were different scopes, a retry
 	// spelled the other way would miss its own pending record, generate a
 	// fresh key pair and re-send the same idempotency key with a different
-	// payload: 409 and a disconnect, caused entirely by capitalisation.
+	// payload: a 409 the bus rejects and logs (it does NOT disconnect; narrowed
+	// 2026-08-08), caused entirely by capitalisation.
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = canonicalHost(u.Scheme, u.Host)
 	u.Path = strings.TrimSuffix(u.Path, "/")

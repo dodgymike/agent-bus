@@ -610,9 +610,12 @@ func TestClientCertFailsClosed(t *testing.T) {
 // TestClientPresentsItsCertificate is the end-to-end proof over a LIVE
 // handshake, in both directions that matter.
 //
-// The second subtest is the one that guards the deployment order: the bus
-// TODAY does not ask for a client certificate, and this change must not break
-// it. The first is what MTLS-CLIENTAUTH will turn on.
+// The second subtest is the one that guards the deployment order, and its bus
+// is now a HISTORICAL fixture: the real bus asks for a client certificate as of
+// MTLS-CLIENTAUTH (a97f854, tls.RequestClientCert), but a bus that does NOT ask
+// must still work, because that is every deployment older than that commit.
+// The first subtest is the shape MTLS-CLIENTAUTH turned on — note it uses
+// RequireAnyClientCert, which the real listener deliberately does NOT.
 func TestClientPresentsItsCertificate(t *testing.T) {
 	okBody := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -681,7 +684,7 @@ func TestClientPresentsItsCertificate(t *testing.T) {
 			t.Fatalf("New: %v", err)
 		}
 		if _, err := c.Enrol(context.Background(), EnrolOptions{Name: "planner", Save: true}); err != nil {
-			t.Fatalf("enrolling against a bus that does NOT ask for a client certificate — which is every bus today — failed: %v", err)
+			t.Fatalf("enrolling against a bus that does NOT ask for a client certificate — every bus older than a97f854 — failed: %v", err)
 		}
 		der, seen := bus.presented()
 		if !seen {

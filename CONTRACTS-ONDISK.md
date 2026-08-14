@@ -1685,7 +1685,7 @@ tombstone carrying a pin is refused: it has given up its address, so the pin nam
 there — and an address plus the credential to trust it is exactly the shape a resurrection wants.
 `PeerStore.Remove` therefore drops the pin with the route. The converse is **not** enforced: an
 active route may legitimately have no pin (that is every record written before this field existed,
-and the state until `MTLS-CLIENTAUTH` puts a certificate on the connection at all).
+and every peer whose certificate this bus has not been told to expect).
 
 **Re-pinning is a real write.** `PeerStore.Put`'s no-op predicate compares the **pin as well as the
 address**, because a peer rotating its certificate does not move: comparing only `base_url` would
