@@ -123,6 +123,7 @@ keys** it pins — is configured with a subcommand on the **server** binary:
 
 ```
 agent-bus peer add    -data-dir <dir> -bus-id <busID> [-url <https origin>]
+                      [-tls-fingerprint <64 lowercase hex>]
                       [-signing-key <base64> ...] [-route-for <busID> ...] [-json]
 agent-bus peer list   [-data-dir <dir>] [-json]
 agent-bus peer remove -data-dir <dir> -bus-id <busID> (-route | -trust | -route -trust) [-json]
@@ -134,7 +135,8 @@ not an HTTP route and why no agent-facing credential can reach it (`DECISIONS.md
 FEDERATION (e): no online admin route, no new privilege tier). It is documented here so that when an
 operator says "the buses are peered", you know what that did and what it did not.
 
-What it configures, in the two independent halves that matter to you:
+What it configures, in the two independent halves that matter to you (plus an optional pin riding on
+the route, below):
 
 - a **route** (`-url`) — where traffic for a bus is sent. `-route-for busC` adds a **static next-hop**
   route, which is how `busA → busB → busC` works when A and C never peer directly. Static means
@@ -142,6 +144,15 @@ What it configures, in the two independent halves that matter to you:
 - **trust** (`-signing-key`) — the bus signing keys pinned for a bus, which is what verifies a message
   that **originated** on a bus you are not adjacent to. A bus can be trusted without being routable
   and routable without being trusted; neither flag implies the other.
+- an optional **TLS pin on that route** (`-tls-fingerprint`, `797c538`, `RELAY-41`) — the certificate
+  the bus at `-url` (the **next hop**) presents, as 64 lowercase hex. It is keyed to the **address**,
+  never to the record's own bus id: `peer add -bus-id busB -url X -tls-fingerprint fpB -route-for
+  busC` writes `fpB` — busB's certificate, the next hop's — onto **both** the busB and busC route
+  records, so the busC record legitimately carries busB's fingerprint alongside `bus_id: busC`. It
+  pins an **outbound server** certificate only; it is **not** a source of inbound peer identity, and
+  nothing yet verifies a live connection against it (`RELAY-20`/`RELAY-24` land that). Omitting the
+  flag on an already-pinned hop, or passing it an empty value, is **refused before any write** rather
+  than silently erasing the pin — full semantics in `CONTRACTS-CLI.md`/`CONTRACTS-ONDISK.md`.
 
 **Nothing about your own workflow changes, and no federated traffic flows yet.** Remote agents are
 still named `<bus-id>.<agent-id>` (invariant 2) — that is what makes a cross-bus id unambiguous — but

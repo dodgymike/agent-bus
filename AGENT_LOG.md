@@ -3566,3 +3566,25 @@ and the CLI subcommands are untouched: no agent-facing surface moved, because a 
 client behaves identically.
 
 <!-- ===== END 2026-08-14 feature-runner: MTLS-CLIENTAUTH ===== -->
+
+## 2026-08-14 — Backfill: three unlogged commits (`documentation`)
+
+Three commits landed without an `AGENT_LOG.md` entry because the change sat outside the authoring
+agent's boundary. One entry each, per `CLAUDE.md` step 10.
+
+- **`5a4f885`** — per-spawn context trim: agent roster and model-selection rationale relocated to
+  `.claude/ORCHESTRATION.md`; 14 agent `description:` fields trimmed. **`documentation` was NOT run**
+  because the change *is* documentation — authored then reviewed by reviewer and security, both PASS —
+  so a separate documentation pass would have reviewed itself; that justification previously lived
+  only in the commit message.
+- **`dc29d46`** — added `scripts/fed-smoke.sh`, a three-bus federation smoke test that deliberately
+  **cannot pass yet**: it fails loudly at the first unavailable dependency (`CLI-11`,
+  `INVITE-CLIENT`/`INVITE-GATE`, `CLI-6`, then `RELAY-20`/`RELAY-21`/`RELAY-24`), rather than passing
+  vacuously or hanging.
+- **`797c538`** — RELAY-41: `PeerRecord` gains an optional `next_hop_tls_cert_sha256`, set by
+  `agent-bus peer add -tls-fingerprint`; keyed to `-url` (the next hop), **never** to the record's own
+  `bus_id` — see `CONTRACTS-ONDISK.md` "keyed to the ADDRESS, never to the bus id". Configuration
+  only: nothing yet verifies a live connection against the pin. Reviewer PASS and security PASS after
+  re-runs; two fail-silent-unpinned P1s (an omitted pin erasing an existing one; a rotation leaving
+  sibling `-route-for` records on the old certificate) were fixed as pre-write refusals rather than
+  filed as follow-ups.
