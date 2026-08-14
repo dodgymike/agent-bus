@@ -91,8 +91,9 @@
 // follow-ups; see the note under gap 6 for exactly how a wiring site writes them
 // and why an explicit parameter would be better than the context.
 //
-// RELAY-20 HAS MOUNTED THE ROUTES, AND THE RULING IT LANDED UNDER IS NOT YET
-// WRITTEN DOWN. Both halves of that sentence are load-bearing; read the second.
+// RELAY-20 HAS MOUNTED THE ROUTES, AND THE RULING IT LANDED UNDER IS NOW
+// WRITTEN DOWN — it was not, until 0adf263. Both halves of that sentence are
+// load-bearing; read the second.
 //
 // What landed (2026-08-14): the three peer routes are served, behind an
 // authenticated adjacent-bus principal, at internal/httpapi/peermount.go — now
@@ -109,22 +110,34 @@
 // dial out. It authenticates the wrong direction to gate this mount, so making
 // it a precondition would have been a category error rather than caution.
 //
-// # THE OUTSTANDING DEBT, STATED PLAINLY RATHER THAN ASSUMED CLOSED
+// # THE DEBT THAT WAS OUTSTANDING HERE IS NOW DISCHARGED, AND HOW MATTERS
 //
-// DECISIONS.md ruling (c) — 2026-08-08, FEDERATION (RELAY-6), landed at 77d2b73
-// — STILL NAMES THE OLD GATE, and its "given up" clause still reads "nothing;
-// this ruling authorises no shortcut; the handler stays unregistered until both
-// gating tasks land". THAT TEXT HAS NOT BEEN AMENDED. RELAY-6 (0f7275b9) owns
-// DECISIONS.md and the amendment is its work, not this file's — a package
-// comment cannot amend a recorded decision, and an earlier draft of THIS
-// paragraph asserted the amendment had happened, which would have put a false
-// dated claim in main. Both review gates caught it; it is written this way so
-// nobody reinstates it.
+// The 2026-08-08 ruling (c) — FEDERATION (RELAY-6), landed at 77d2b73 — named
+// the old gate, and its "given up" clause read "nothing; this ruling authorises
+// no shortcut; the handler stays unregistered until both gating tasks land".
+// THAT ORIGINAL TEXT STILL READS EXACTLY THAT WAY AND ALWAYS WILL: DECISIONS.md
+// is append-only, so a superseded ruling is corrected by a later dated section,
+// never by an edit in place. Reading the 2026-08-08 section alone therefore
+// tells you the OLD gate; it is not the current one.
 //
-// So until RELAY-6 lands that amendment, the code and the recorded ruling
-// DISAGREE, and the ruling is the authority. Anyone reconciling them should
-// amend DECISIONS.md — never soften this comment, and never delete the mount to
-// match the stale text.
+// The amendment landed at 0adf263 as "2026-08-14 — FEDERATION (RELAY-6),
+// AMENDMENT: ruling (c) is un-gated from the wrong direction, and two premises
+// are corrected" (DECISIONS.md:4959-5317 at 88a5ade, delimited by a matched
+// BEGIN/END fence pair — search the heading, not the line numbers, which have
+// already drifted twice on this ruling). It restates (c) as (c-AMENDED) and
+// records the MTLS-CLIENTAUTH + RELAY-45 substitution this file describes; its
+// own "COROLLARY OUTSIDE THIS FILE — now discharged" paragraph names this
+// package comment as the debt it settles. So the code and the recorded ruling
+// now AGREE.
+//
+// What did NOT change, because the amendment says so in terms: the 2026-08-08
+// security gate is not overturned, and its requirement — no peer route is
+// mounted without an authenticated peer identity — is carried forward unchanged
+// and unweakened. Only the MECHANISM named as the gate moved. An earlier draft
+// of the paragraph above asserted an amendment that had not yet happened, which
+// would have put a false dated claim in main; both review gates caught it. The
+// remedy for a future disagreement is the same as it was — amend DECISIONS.md,
+// never soften this comment, and never delete the mount to match stale text.
 //
 // WHAT INVITE-PEERGUARD (f5d91dbe) STILL OWNS EITHER WAY: the peering material
 // itself (item 8 below), and the fact that the inbound binding is installed by an
@@ -144,8 +157,10 @@
 // RELAY-17's to do, since it owns the seam that closes it.
 //
 // The authority is DECISIONS.md, 2026-08-08, "FEDERATION (RELAY-6): deployment
-// assumptions and what they defer", landed at 77d2b73. Three of its rulings bear
-// directly on serving these handlers:
+// assumptions and what they defer", landed at 77d2b73, AS AMENDED by the
+// 2026-08-14 RELAY-6 amendment (0adf263), which restates (c) as (c-AMENDED) and
+// (b) as (b-CLARIFIED). Read both sections; the later one wins where they
+// differ. Three of the rulings bear directly on serving these handlers:
 //
 //   - (a) every bus-to-bus link is an SSH tunnel and no bus process ever listens
 //     publicly; one operator holds both ends of every tunnel.
@@ -159,15 +174,20 @@
 //     the tunnel authenticates the MACHINE and not the bus process, and a bus
 //     listening on loopback cannot tell tunnelled traffic from local traffic.
 //   - (c) peer-principal authentication is NOT part of that deferral. It is a
-//     forward precondition, and the ruling AS LANDED AND AS IT STILL READS names
+//     forward precondition. AS ORIGINALLY LANDED the ruling named
 //     INVITE-PEERGUARD (f5d91dbe) and MTLS-RELAYGUARD (8192c3c7) as the tasks
-//     that close it. RELAY-20 mounted under MTLS-CLIENTAUTH + RELAY-45 instead,
-//     on the direction argument above; that substitution is REAL but is NOT YET
-//     RECORDED in DECISIONS.md, and RELAY-6 owes the amendment. What holds
-//     regardless: a mount that authenticates no peer principal is outside the
-//     ruling whatever the topology looks like, and the way to change that is to
-//     amend DECISIONS.md — never to soften this comment. The mount that landed
-//     authenticates one.
+//     that close it; RELAY-20 mounted under MTLS-CLIENTAUTH + RELAY-45 instead,
+//     on the direction argument above. That substitution is REAL and is now
+//     RECORDED, as (c-AMENDED) in the 2026-08-14 RELAY-6 amendment (0adf263) —
+//     so read (c) and (c-AMENDED) together, and treat the amended text as the
+//     authority. The amendment also records the RELAY-41 chain that a draft
+//     proposed as half the gate as REFUTED rather than adopted: that pin is an
+//     OUTBOUND, address-keyed fingerprint, and inverting it would resolve one
+//     peer's inbound connection to another peer's bus id. What holds regardless
+//     and is unweakened by the amendment: a mount that authenticates no peer
+//     principal is outside the ruling whatever the topology looks like, and the
+//     way to change that is to amend DECISIONS.md — never to soften this
+//     comment. The mount that landed authenticates one.
 //
 // Two of the gaps listed below are the FUNCTIONALITY half of (c), and neither is
 // closed here: roster updates are not bound to the authenticated connection

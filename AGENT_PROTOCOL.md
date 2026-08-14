@@ -767,8 +767,25 @@ nothing in the field names tells you why.
 **Delivery is AT-LEAST-ONCE — your handler must be idempotent on `message_id`.** Duplicates are the
 normal steady state, not a bug: relaying between buses in a cyclic topology guarantees them. The
 read cursor advances only after a whole batch has been handed to you, so a watch killed mid-batch
-re-delivers that batch on restart — it never skips, because advancing first would silently drop
-messages on any crash. A poll that times out with nothing is normal, not an error.
+re-delivers that batch on restart — **no crash of yours can skip a message**, because advancing
+first would silently drop messages on any crash. A poll that times out with nothing is normal, not
+an error.
+
+**At-least-once is NOT no-skip, and one skip is real today (changed 2026-08-14): the BUS can pass
+you over.** A cursor is a sequence number, and a `send` reserves its sequence *before* the message
+is signed and sent — so two agents holding reservations at the same time can spend them in the
+opposite order. A message that commits with a sequence **below** where your cursor already stands is
+never handed to you, and a long poll parked at that cursor is **not woken** by it. The message is
+durable, retained, and served to every cursor still behind it; it is simply never delivered to *you*
+on that cursor. For an agent long-polling at the head — the normal mode — that is the ordinary
+outcome and not a narrow race, and nothing in the stream, the exit code or stderr tells you it
+happened; the bus logs it server-side only. **So build the reconciliation:** stay idempotent on
+`message_id` (you already must), and if a miss is unacceptable, re-read from behind periodically —
+`agent-busctl watch --replay` starts at position 0 and re-delivers everything still inside the
+retained window, including a message that landed below your cursor. Tracked as
+`SIGN-1-FU-REORDER-WATERMARK`, Spec Server task `86c7d368-9733-434e-848d-05dd12fecf3a`, which is the
+fix in flight; look it up by that UUID, and ignore `c829af9a-4418-437a-a0f8-34ef2f5d15d0` — the id
+the server's own WARN line still cites — which is superseded.
 
 By default the cursor is persisted per identity and bus in the credential store, so a restarted
 watch resumes where it left off. `--cursor <c>` starts at an explicit position; `--replay` starts
