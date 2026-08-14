@@ -117,6 +117,7 @@ EXIT CODES
   2 bad usage                     fatal 503: it cannot durably accept messages)
   3 no usable identity          7 the bus refused the request
   4 credential rejected         8 a bounded watch delivered nothing
+  9 the bus has no route for this request: it is older than this client
 `,
 		run: runWatch,
 	}

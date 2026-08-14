@@ -700,9 +700,12 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		save  bool
-		build func() error
+		name string
+		save bool
+		// resumed marks the key material as belonging to an EARLIER attempt,
+		// which is what forbids dropping it (INVITE-CLIENT-FU-PENDINGINVITE).
+		resumed bool
+		build   func() error
 		// wantKind is the Kind after enrolFailed. Closed vocabulary, same
 		// reasoning as the writeFailed table.
 		wantKind  Kind
@@ -780,6 +783,27 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 			wantRemedyUnchanged: true,
 			wantPendingDropped:  true,
 		},
+		{
+			// The same permanent refusal, on a RESUMED attempt. The key
+			// material belongs to an earlier request that may already have been
+			// applied, so a refusal of THIS one is not evidence about it and
+			// must not delete it.
+			name: "a RESUMED attempt keeps its key material even on a permanent refusal",
+			save: true, resumed: true,
+			build: func() error {
+				return fromStatus("enrol", http.StatusConflict, "", "idempotency key already used with a different payload")
+			},
+			wantKind:  KindRejected,
+			wantFatal: false,
+			wantRemedyKeeps: []string{
+				"use a fresh key for new content",
+			},
+			wantRemedyAdds: []string{
+				"--idempotency-key " + idemKey,
+				"is KEPT and NOT dropped",
+			},
+			wantPendingDropped: false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -808,7 +832,7 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 			}
 			beforeRemedy := before.Remedy
 
-			got := c.enrolFailed("enrol", idemKey, busURL, EnrolOptions{Save: tc.save}, built)
+			got := c.enrolFailed("enrol", idemKey, busURL, EnrolOptions{Save: tc.save}, tc.resumed, built)
 
 			var e *Error
 			if !errors.As(got, &e) {

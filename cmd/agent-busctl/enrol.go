@@ -115,9 +115,21 @@ RETRIES — WHAT TO DO WHEN AN ENROLMENT DOES NOT ANSWER
   and replays its original answer instead of enrolling a second agent.
   "replayed" in the output says that is what happened.
 
-  Do NOT reuse a key for a different name or a different bus. The bus treats
-  that as a protocol violation and disconnects the client, so agent-busctl refuses
-  it locally first.
+  RESUME WITH THE SAME INVITE. The bus's idempotency fingerprint covers the
+  invite id, so a resume that presents a DIFFERENT invite file — or none — is
+  a different payload, not a retry. agent-busctl refuses that here (exit 2)
+  and KEEPS the stored key material: it is the only copy of the first
+  attempt's private keys, and the bus may already hold their public halves.
+  agent-busctl whoami --all names the invite each unfinished enrolment
+  belongs to.
+
+  Do NOT reuse a key for a different NAME either: agent-busctl refuses that
+  locally too, because the bus treats it as a protocol violation — one it
+  rejects and logs rather than disconnecting over — and the round trip teaches
+  you nothing this refusal does not.
+
+  A key reused against a DIFFERENT BUS is not refused, and is not a violation:
+  keys are remembered per bus, so that is simply a new enrolment there.
 
 EXIT CODES
   0 enrolled                    5 the bus is unreachable
@@ -125,25 +137,8 @@ EXIT CODES
   2 bad usage                   7 the bus refused the request
   3 the credential store is unusable, or the invite file cannot be used
   4 the bus rejected the credential, invite included
+  9 the bus has no route for this request: it is older than this client
 `,
-		// EXIT CODE 9 IS REACHABLE HERE AND IS DELIBERATELY NOT IN THE TABLE
-		// ABOVE. A 404 on /v1/enroll maps to client.KindVersionSkew ->
-		// client.ExitVersionSkew (9) — the bus is older than this client — so the
-		// table is genuinely incomplete, and both the reviewer and test-engineer
-		// gates said so during INVITE-CLIENT.
-		//
-		// It is left out because adding the row turns
-		// TestHelpExitCodeTablesAgreeWithClientExitCodes RED: that guard checks
-		// every documented code against a CLOSED SET built in
-		// cmd/agent-busctl/cli_test.go, and the set omits client.ExitVersionSkew.
-		// The defect is therefore in the GUARD, not in this table; it predates
-		// INVITE-CLIENT, and it affects EVERY subcommand's help rather than only
-		// this one, so fixing it here would be a one-command patch to a
-		// repo-wide problem.
-		//
-		// Task INVITE-CLIENT-FU-EXIT9 carries both halves: grow the closed set,
-		// then document 9 in every help block that can produce it. Do not add
-		// the row here before the set has grown, or the build goes red.
 		run: runEnrol,
 	}
 }

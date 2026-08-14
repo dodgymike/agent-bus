@@ -37,8 +37,10 @@ const idempotencyHelp = `IDEMPOTENCY — HOW TO RETRY SAFELY
   the output says "replayed" and the exit code is 0. This is the whole point:
   a client that lost the acknowledgement is meant to retry.
 
-  Same key + DIFFERENT content = a protocol violation. The bus answers 409 AND
-  DISCONNECTS. Retrying will not help; use a fresh key for new content.
+  Same key + DIFFERENT content = a protocol violation. The bus answers 409,
+  rejecting and logging it; it does NOT drop the connection (invariant 10,
+  narrowed 2026-08-08), so anything else you had in flight on it survives.
+  Retrying the same key will not help; use a fresh key for new content.
 
   A key is remembered only for as long as the message it produced is retained
   (1 day, or until 1 GiB of messages push it out). A "retry" that arrives after
@@ -117,6 +119,8 @@ EXIT CODES
   2 bad usage: no recipient, no body, two body sources, body too large
   3 no usable identity          7 the bus refused it (unknown recipient, or a
   4 credential rejected           409: this key was used with other content)
+  9 the bus has no route for the id reservation this send signs: it is older
+    than this client
 `,
 		run: runSend,
 	}
@@ -169,6 +173,7 @@ EXIT CODES
   2 bad usage: no body, two body sources, body too large
   3 no usable identity          7 the bus refused it (or a 409: this key was
   4 credential rejected           already used with different content)
+  9 the bus has no route for this request: it is older than this client
 `,
 		run: runBroadcast,
 	}

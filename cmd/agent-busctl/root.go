@@ -380,7 +380,8 @@ EXIT CODES
   1  internal error            6  the bus reported an error of its own
   2  usage error               7  the bus refused the request
   3  no usable identity        8  nothing to report
-  4  credential rejected
+  4  credential rejected       9  the bus has no route for this request:
+                                 it is older than this client
 
 NOTES
   No agent-busctl command is ever interactive. Credentials come from the store or

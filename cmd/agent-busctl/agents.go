@@ -52,7 +52,8 @@ EXIT CODES
   1 internal error              6 the bus reported an error of its own
   2 bad usage                   7 the bus refused the request
   3 no usable identity          8 the roster is empty
-  4 credential rejected
+  4 credential rejected         9 the bus has no route for this request:
+                                  it is older than this client
 
   8 is rare in practice: you are normally on the roster yourself, so an empty
   answer means the bus has forgotten your enrolment (it was rebuilt, or the

@@ -224,10 +224,13 @@ const idempotencyReplayedHeader = "Idempotency-Replayed"
 //     payload" — which the bus answers with a 409. Reusing the pending record
 //     is what makes the retry legitimate rather than an offence.
 //
-// When the same idempotency key is presented with different content, Enrol
-// refuses LOCALLY. It could send it and let the bus refuse, but the bus's
-// refusal comes with a disconnection, and there is no reason to spend that on
-// a mistake we can see from here.
+// When the same idempotency key is presented with different content — a
+// different name, or a different invite — Enrol refuses LOCALLY. It could send
+// it and let the bus refuse, but the bus's answer is a 409 that teaches the
+// caller nothing this refusal does not, and the round trip spends a redemption
+// attempt against a single-use invite. The bus does NOT disconnect for this
+// (invariant 10, narrowed 2026-08-08); the reason to refuse here is that the
+// mistake is visible from here and the local refusal drops nothing.
 func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, error) {
 	const op = "enrol"
 
@@ -306,6 +309,22 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			"cannot generate a messaging key pair: the system random source failed", "", err)
 	}
 
+	// The invite's two values, read out ONCE.
+	//
+	// The ID is read here, BEFORE the pending record is written, because it is
+	// part of what this attempt asserts and the record has to carry it — that
+	// is what lets ClaimEnrolment refuse a resume that presents a different
+	// invite, locally, before anything is sent (INVITE-CLIENT-FU-PENDINGINVITE).
+	// opts.Invite has already been validated by inviteEndpoint above.
+	//
+	// The SECRET goes in the request body and NOWHERE else: not in the pending
+	// record, not on argv, not in EnrolResult, not in an error, not in a log
+	// line.
+	inviteID, inviteSecret := "", ""
+	if opts.Invite != nil {
+		inviteID, inviteSecret = opts.Invite.InviteID, opts.Invite.InviteSecret
+	}
+
 	want := pendingEnrolment{
 		IdempotencyKey:   idemKey,
 		Name:             name,
@@ -313,8 +332,15 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		PublicKey:        pubB64,
 		PrivateKeySeed:   base64.StdEncoding.EncodeToString(seed),
 		MessagingKeySeed: base64.StdEncoding.EncodeToString(msgSeed),
+		InviteID:         inviteID,
 		CreatedAt:        c.now().UTC().Format(time.RFC3339Nano),
 	}
+
+	// resumed reports that the key material below belongs to an EARLIER attempt
+	// — one the bus may already have applied — rather than to the draws made a
+	// few lines above. It decides whether a refusal may drop that material; see
+	// enrolFailed.
+	resumed := false
 
 	effective := want
 	if opts.Save {
@@ -329,7 +355,7 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			// Already enrolled under this key. Answer from the store and send
 			// NOTHING: re-running a completed enrolment is the obvious human
 			// action, and going back to the bus with a fresh key pair under
-			// the old key is exactly the violation that earns a disconnect.
+			// the old key is exactly the violation it rejects and logs.
 			return EnrolResult{
 				Identity:       claim.Applied.Identity,
 				Replayed:       true,
@@ -339,6 +365,7 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			}, nil
 		}
 		effective = claim.Pending
+		resumed = claim.Resumed
 	}
 
 	seed, err = base64.StdEncoding.Strict().DecodeString(effective.PrivateKeySeed)
@@ -394,30 +421,20 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 	ctx, cancel := c.contextWithTimeout(ctx)
 	defer cancel()
 
-	// The invite's two values, read out ONCE and used only here.
-	//
-	// KNOWN GAP, deliberately not fixed here: pendingEnrolment does not record
+	// CLOSED (INVITE-CLIENT-FU-PENDINGINVITE): the pending record now carries
 	// the invite id, so resuming with --idempotency-key and a DIFFERENT invite
-	// file is not caught locally — it is caught by the BUS, which computes its
-	// idempotency fingerprint over (name, auth key, messaging key, invite_id)
-	// and answers 409 "already used with a different payload".
-	//
-	// "Later than it could be" UNDERSTATES what late costs here, and the earlier
-	// wording said only that. The 409 is KindRejected, which lands in
-	// enrolFailed's default branch and DROPS the pending record — so the key
-	// material of the ORIGINAL attempt is destroyed by a mistake made on the
-	// retry. If that first attempt had in fact been applied by the bus, the
-	// identity it minted is now unrecoverable: the bus holds a public key whose
-	// private half no longer exists anywhere, and no further retry of that
-	// idempotency key can produce it. Recording the invite id beside the key
-	// material would close it by refusing the mismatch locally, before anything
-	// is dropped. It is a follow-up task, not this one, and the behaviour is
-	// left exactly as it is until that task decides it.
-	inviteID, inviteSecret := "", ""
+	// file is refused by ClaimEnrolment above — locally, with no round trip and
+	// with the key material kept. It used to be caught only by the BUS, which
+	// fingerprints (name, auth key, messaging key, invite_id) and answers 409;
+	// that 409 is KindRejected, which landed in enrolFailed's default branch and
+	// DROPPED the pending record, destroying the only copy of the original
+	// attempt's private keys — an identity the bus may already have minted, and
+	// which no further retry could then produce. Two things now stand between
+	// that sequence and the key material: the local refusal, and enrolFailed's
+	// rule that a RESUMED attempt never drops.
 	var busOverride *url.URL
 	var pinsOverride BusPinSet
 	if opts.Invite != nil {
-		inviteID, inviteSecret = opts.Invite.InviteID, opts.Invite.InviteSecret
 		// Only on this path. Leaving the no-invite path to resolve its own
 		// endpoint inside do() keeps it byte-identical to what it was.
 		busOverride, pinsOverride = busURL, pins
@@ -454,7 +471,7 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		retryable: true,
 	})
 	if err != nil {
-		return EnrolResult{}, c.enrolFailed(op, idemKey, busURL.String(), opts, err)
+		return EnrolResult{}, c.enrolFailed(op, idemKey, busURL.String(), opts, resumed, err)
 	}
 	// The bus is authoritative on ids (invariant 1) — which makes them
 	// authoritative, not unvalidated. These values are STORED and reprinted by
@@ -621,6 +638,40 @@ func (c *Client) inviteEndpoint(op string, inv *Invite) (*url.URL, BusPinSet, er
 // the key material is kept and the caller is told the exact flag that resumes
 // it.
 //
+// # TWO conditions forbid the drop, and it takes both to be safe
+//
+// The drop is only sound for material this call MINTED and never sent. Two
+// separate things break that assumption, and an earlier draft of this fix had
+// only the first — the security gate reproduced the hole the second one closes.
+//
+//  1. `resumed`: the seeds belong to an EARLIER attempt, one interrupted after
+//     its request went out, which is the entire reason it is still on disk. The
+//     bus's answer to THIS request is not evidence about that one. A resume
+//     presenting a different invite is answered 409 because the server's
+//     fingerprint covers invite_id (INVITE-CLIENT-FU-PENDINGINVITE).
+//
+//  2. A 409 on a FRESH attempt. `resumed` means "the store already held a
+//     record", but the property that actually matters is "a request under this
+//     key has already reached the bus" — and those differ, because this request
+//     is sent with retryable: true. do() retries a KindNetwork failure up to
+//     RetryPolicy.Attempts times, so attempt 2 can land inside attempt 1's own
+//     [Begin, Commit) window and be answered 409 "another redemption of this
+//     invite is in flight" with resumed still FALSE. A 409 is the bus SAYING it
+//     already holds this key with other content, which is only possible if a
+//     request under it arrived; the local seeds may therefore be the private
+//     half of something already applied. So a 409 never drops, whoever minted
+//     the material. (INVITE-CLIENT-FU-INFLIGHT409 still owns the OTHER half of
+//     that bug: the remedy text tells the caller to use a fresh key, which
+//     against a single-use invite converts a transient failure into a
+//     permanently lost enrolment.)
+//
+// The trade is not close. Keeping a record that turns out to be dead costs one
+// 0600 store entry until prunePending expires it at pendingTTL; dropping one
+// that was live destroys a private key permanently and takes the agent id with
+// it. Everything else still drops: a 400, a 403 on a FRESH attempt, an unknown
+// route — refusals that will repeat identically and that no request under this
+// key could have survived.
+//
 // This now matches writeFailed's (messages.go) shape byte-for-byte, which was
 // the model it was always meant to converge on (45b2e17a / 799aea40 —
 // near-duplicate reports of the same three defects): the retry clause is
@@ -635,7 +686,7 @@ func (c *Client) inviteEndpoint(op string, inv *Invite) (*url.URL, BusPinSet, er
 // documents an empty key as meaning no key ever existed, which was false for
 // every failed enrol before this fix (`enrol --json`'s idempotency_key field
 // was silently empty where `send`'s was not).
-func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err error) error {
+func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, resumed bool, err error) error {
 	// errors.As, not a type assertion — see annotateSessionError. Stamped
 	// before the opts.Save branch below: the key was sent to the bus either
 	// way, and IdempotencyKeyOf(err) must answer it regardless of whether the
@@ -646,7 +697,11 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err 
 		// writeFailed does for a non-*Error. KindOf(err) would report
 		// KindInternal here too, so the switch below could never have matched
 		// KindNetwork/KindServer for this err anyway.
-		if opts.Save {
+		//
+		// !resumed for the reason in the doc comment: an unclassified failure is
+		// the LEAST evidence there is that an earlier attempt was not applied,
+		// so it is the last place that may delete that attempt's key material.
+		if opts.Save && !resumed {
 			_ = c.store.DropPending(idemKey, busURL)
 		}
 		return err
@@ -679,6 +734,24 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err 
 		}
 		return e
 	default:
+		// A 409 counts EVEN WHEN the material is this call's own: it means a
+		// request under this key already reached the bus, which an in-call
+		// retry can achieve without any pending record having pre-existed. See
+		// the doc comment.
+		if resumed || e.Status == http.StatusConflict {
+			// The seeds may be the private half of something the bus already
+			// applied, so this refusal is not evidence against them. Keep them
+			// — and SAY so with the key that reaches them, because material
+			// stored where nobody is told to look is stored, not recoverable.
+			clause := "the key material for --idempotency-key " + idemKey +
+				" is KEPT and NOT dropped: the bus may already hold its public halves, so it is the only thing that could ever recover that identity"
+			if base := strings.TrimRight(e.Remedy, "; "); base != "" {
+				e.Remedy = base + "; " + clause
+			} else {
+				e.Remedy = clause
+			}
+			return e
+		}
 		_ = c.store.DropPending(idemKey, busURL)
 		return e
 	}
@@ -709,9 +782,11 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err 
 // holding the day someone adds a second caller.
 //
 // The KindAuth classification is left alone: it is what routes this to the
-// default branch of enrolFailed, which DROPS the pending key material — correct,
-// because a refused invite will be refused identically forever, so resuming the
-// attempt has nothing to recover.
+// default branch of enrolFailed, which drops the pending key material of a
+// FRESH attempt — correct, because a refused invite will be refused identically
+// forever, so that attempt has nothing to recover. It does NOT drop a RESUMED
+// attempt's material: there the refusal is of the invite presented on the
+// RETRY, and it says nothing about whether the original request was applied.
 func annotateInviteRefusal(inv *Invite, e *Error) {
 	if inv == nil || e == nil || e.Status != http.StatusForbidden {
 		return
@@ -775,6 +850,39 @@ func idempotencyConflict(op, key, previousName, busURL string) *Error {
 		"use a fresh idempotency key for different content — reusing one with a different payload is a protocol violation that the bus rejects and logs (invariant 10)")
 }
 
+// inviteConflict is the LOCAL refusal of a resume that presents a DIFFERENT
+// invite from the one the stored key material was minted for.
+//
+// It is the same judgement idempotencyConflict makes about a different name,
+// and it is made for a sharper reason. The server's idempotency fingerprint
+// covers invite_id, so this is "same key + DIFFERENT payload" and the bus
+// answers 409 — but the client's handling of that 409 used to DROP the pending
+// record, destroying the only copy of the private keys of an attempt the bus
+// may already have applied (INVITE-CLIENT-FU-PENDINGINVITE). Refusing here
+// costs a round trip that could only ever fail, and it keeps the material.
+//
+// Both ids go through safeText. The stored one is ours, but the store is a file
+// on disk that could have been edited, and the presented one came out of an
+// invite blob — attacker-influenced text that is about to be printed to a
+// terminal. Neither SECRET appears: this function is not given one, which is
+// the point at which that guarantee is easiest to keep.
+func inviteConflict(op, key, storedInvite, presentedInvite, busURL string) *Error {
+	presented := "no invite at all"
+	if presentedInvite != "" {
+		presented = "invite " + safeText(presentedInvite, MaxInviteIDLen)
+	}
+	e := newError(KindUsage, op,
+		fmt.Sprintf("idempotency key %q is an in-flight enrolment at %s that redeems invite %s, but this attempt presents %s",
+			key, busURL, safeText(storedInvite, MaxInviteIDLen), presented),
+		"resume it with the invite it started with (--invite-file for invite "+safeText(storedInvite, MaxInviteIDLen)+
+			"), or start a NEW enrolment with a fresh idempotency key and a fresh invite. The bus fingerprints the invite id, so sending this would be the same key with a different payload — a protocol violation it rejects and logs (invariant 10). Nothing has been sent and the stored key material is KEPT: it is the only copy of that attempt's private keys, and the bus may already have recorded their public halves")
+	// The key is the caller's OWN and is the handle that resumes the attempt,
+	// so it is stamped: errors.go documents an empty one as meaning no key ever
+	// existed, which is false here.
+	e.IdempotencyKey = key
+	return e
+}
+
 // validateAgentName checks a requested name against the server's rule, with a
 // message that names the remedy.
 func validateAgentName(op, name string) error {
@@ -814,8 +922,10 @@ func validateIdempotencyKey(op, key string) error {
 // 16 bytes of crypto/rand, hex encoded: inside the server's [A-Za-z0-9._-]
 // alphabet and its 128-byte bound, and wide enough that two agents enrolling
 // at the same instant cannot collide — a collision would look to the bus like
-// the same key with a different payload, which is a protocol violation that
-// DISCONNECTS the client (invariant 10). That consequence is why this is
+// the same key with a different payload, which invariant 10 makes a protocol
+// violation: the bus rejects and logs it (it does NOT disconnect; narrowed
+// 2026-08-08), so the loser's enrolment fails outright and, worse, one of the
+// two agents' key material is the one at risk. That consequence is why this is
 // crypto/rand and not a timestamp.
 func newIdempotencyKey() (string, error) {
 	var buf [16]byte

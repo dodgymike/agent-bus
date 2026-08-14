@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -267,6 +271,190 @@ func leadingExitCode(text string) (int, string, bool) {
 
 func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
+// validExitCodes is the CLOSED SET of exit codes a help table may document: the
+// client.Exit* constants, named, so a failure can say which one a number is.
+//
+// It is a function rather than a literal inside the table test because a second
+// test checks the set itself against client/errors.go. Written out by hand and
+// not derived, deliberately: the compiler then checks each entry exists, and
+// TestExitCodeClosedSetCoversEveryClientExitConstant checks nothing is missing.
+// Deriving it from the source would make this test agree with any future
+// constant by construction, which is exactly the drift it exists to catch.
+//
+// client.ExitVersionSkew was MISSING here until INVITE-CLIENT-FU-EXIT9, and the
+// omission was not harmless: exit 9 is reachable (a 404 on a fixed route means
+// the bus is older than this client), so every help table that documented it
+// went red, and the tables therefore documented an incomplete contract that an
+// agent branching on the exit code could actually receive.
+func validExitCodes() map[int]string {
+	return map[int]string{
+		client.ExitOK:          "client.ExitOK",
+		client.ExitError:       "client.ExitError",
+		client.ExitUsage:       "client.ExitUsage",
+		client.ExitConfig:      "client.ExitConfig",
+		client.ExitAuth:        "client.ExitAuth",
+		client.ExitNetwork:     "client.ExitNetwork",
+		client.ExitServer:      "client.ExitServer",
+		client.ExitRejected:    "client.ExitRejected",
+		client.ExitEmpty:       "client.ExitEmpty",
+		client.ExitVersionSkew: "client.ExitVersionSkew",
+	}
+}
+
+// versionSkewCommands are the subcommands that can actually EXIT 9, and
+// therefore must document it.
+//
+// It is a hand-written list because reachability is a judgement about which
+// routes a command calls, and there is nothing in the help text to derive it
+// from. Each entry is checked against client/transport.go's ONE assignment of
+// KindVersionSkew — a 404 on any fixed route EXCEPT routeSend:
+//
+//	enrol      POST /v1/enroll
+//	agents     GET  /v1/agents
+//	watch      POST /v1/wait, GET /v1/messages
+//	send       POST /v1/mint — the id reservation it signs. NOT /v1/send,
+//	           whose 404 is a per-resource "unknown recipient" and is
+//	           deliberately carved out to KindRejected.
+//	broadcast  POST /v1/broadcast
+//
+// Deliberately ABSENT: whoami, whose only remote calls are the two session
+// routes, where client/session.go's annotateSessionError overrides a 404 to
+// KindAuth ("the bus does not know this agent"); and use/logout/pin/client-cert,
+// which make no HTTP call at all.
+var versionSkewCommands = []string{"enrol", "agents", "watch", "send", "broadcast"}
+
+// TestEveryVersionSkewCommandDocumentsExitNine is the OTHER direction of the
+// help-table check, and the reviewer gate proved it was missing: deleting the
+// exit-9 row from a single subcommand left both other guards GREEN.
+//
+// TestHelpExitCodeTablesAgreeWithClientExitCodes only checks that a documented
+// code is real and means what the row says. It cannot notice a code that is
+// reachable and documented NOWHERE — which is exactly the state
+// INVITE-CLIENT-FU-EXIT9 was filed about, and exactly the state this repo would
+// silently return to the first time someone tidied a table.
+func TestEveryVersionSkewCommandDocumentsExitNine(t *testing.T) {
+	byName := map[string]command{}
+	for _, c := range commands() {
+		byName[c.name] = c
+	}
+	for _, name := range versionSkewCommands {
+		c, ok := byName[name]
+		if !ok {
+			t.Errorf("versionSkewCommands names %q, which is not a subcommand; the list is stale and the check below is weaker than it looks", name)
+			continue
+		}
+		documented := false
+		for _, e := range parseExitCodeTable(t, c.name, c.help) {
+			if e.Code == client.ExitVersionSkew {
+				documented = true
+				break
+			}
+		}
+		if !documented {
+			t.Errorf("%s can exit %d (a 404 on a fixed route it calls: the bus is older than this client) but its EXIT CODES table does not document it.\n"+
+				"An undocumented exit code an agent can actually receive is a broken contract (invariant 7).", name, client.ExitVersionSkew)
+		}
+	}
+}
+
+// TestExitCodeClosedSetCoversEveryClientExitConstant is what keeps the closed
+// set CLOSED.
+//
+// Growing the set by hand fixes today's gap and does nothing about the next
+// one: a constant added to client/errors.go tomorrow would be just as reachable
+// and just as undocumentable, and the table test would keep passing while
+// rejecting the row that documents it. That is the exact shape of the bug this
+// task fixed, so the fix must not be a one-off edit.
+//
+// It reads the SOURCE rather than using reflection because Go constants are not
+// reflectable at run time: there is no way to enumerate a package's untyped int
+// constants from a test binary. Parsing is the only mechanism that sees a
+// constant nobody has referenced yet — which is precisely the one that would
+// otherwise slip through.
+func TestExitCodeClosedSetCoversEveryClientExitConstant(t *testing.T) {
+	source := clientExitConstants(t)
+	set := validExitCodes()
+
+	for code, name := range source {
+		got, ok := set[code]
+		if !ok {
+			t.Errorf("client/errors.go defines %s = %d, which validExitCodes() omits.\n"+
+				"An exit code an agent can RECEIVE must be documentable: add it to the closed set AND to the EXIT CODES table of every subcommand that can produce it. "+
+				"Leaving it out does not hide the code — it only makes the row that documents it fail (INVITE-CLIENT-FU-EXIT9).", name, code)
+			continue
+		}
+		if got != name {
+			t.Errorf("exit %d is %s in validExitCodes() but %s in client/errors.go", code, got, name)
+		}
+	}
+	for code, name := range set {
+		if _, ok := source[code]; !ok {
+			t.Errorf("validExitCodes() carries %s = %d, which client/errors.go no longer defines; a retired value must never be reused, so this set must not keep claiming it", name, code)
+		}
+	}
+}
+
+// clientExitConstants parses the client package and returns every exported
+// Exit* constant, by value.
+//
+// It parses the whole package directory rather than errors.go alone so that a
+// constant MOVED to another file is still seen — a guard that can be defeated
+// by moving a declaration is not a guard.
+func clientExitConstants(t *testing.T) map[int]string {
+	t.Helper()
+
+	const dir = "../../client"
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", dir, err)
+	}
+
+	out := map[int]string{}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, decl := range f.Decls {
+				gd, ok := decl.(*ast.GenDecl)
+				if !ok || gd.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range gd.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, ident := range vs.Names {
+						if !strings.HasPrefix(ident.Name, "Exit") || !ident.IsExported() {
+							continue
+						}
+						if i >= len(vs.Values) {
+							t.Fatalf("client.%s has no literal value (an iota form?); this guard reads literals, and a form it cannot read must not be allowed to pass silently", ident.Name)
+						}
+						lit, ok := vs.Values[i].(*ast.BasicLit)
+						if !ok || lit.Kind != token.INT {
+							t.Fatalf("client.%s is not an integer literal; this guard cannot verify it and must not pass it silently", ident.Name)
+						}
+						code, cerr := strconv.Atoi(lit.Value)
+						if cerr != nil {
+							t.Fatalf("client.%s = %q is not an integer: %v", ident.Name, lit.Value, cerr)
+						}
+						if prev, dup := out[code]; dup {
+							t.Errorf("client.%s and %s share exit code %d; an exit code is a contract and two meanings for one number is not one", ident.Name, prev, code)
+						}
+						out[code] = "client." + ident.Name
+					}
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no client.Exit* constants were found in %s; the parse found nothing and every check below would be vacuous", dir)
+	}
+	return out
+}
+
 // TestHelpExitCodeTablesAgreeWithClientExitCodes checks every subcommand's
 // documented exit-code table against the CLOSED set of codes client/errors.go
 // defines and against what each of those codes MEANS.
@@ -282,19 +470,7 @@ func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 // which is ExitServer. Where a description says one thing and sits under a
 // different number, this fails and names both.
 func TestHelpExitCodeTablesAgreeWithClientExitCodes(t *testing.T) {
-	// The closed set. A number documented outside it is either a typo or a code
-	// the client cannot produce; both mislead a script that branches on it.
-	valid := map[int]string{
-		client.ExitOK:       "client.ExitOK",
-		client.ExitError:    "client.ExitError",
-		client.ExitUsage:    "client.ExitUsage",
-		client.ExitConfig:   "client.ExitConfig",
-		client.ExitAuth:     "client.ExitAuth",
-		client.ExitNetwork:  "client.ExitNetwork",
-		client.ExitServer:   "client.ExitServer",
-		client.ExitRejected: "client.ExitRejected",
-		client.ExitEmpty:    "client.ExitEmpty",
-	}
+	valid := validExitCodes()
 
 	// Canonical meanings: a lower-cased phrase, and the ONE code it can belong
 	// to. A description matching no phrase is not an error — the wording of "0
@@ -324,9 +500,22 @@ func TestHelpExitCodeTablesAgreeWithClientExitCodes(t *testing.T) {
 		{"nothing to report", client.ExitEmpty},
 		{"delivered nothing", client.ExitEmpty},
 		{"empty", client.ExitEmpty},
+		// A 404 on a fixed route this client depends on: the bus never
+		// understood the request because it does not know the route exists.
+		// Deliberately NOT "refused", which is ExitRejected and is the opposite
+		// claim — the bus understood and said no (client/transport.go's 404
+		// split, and the routeSend carve-out inside it).
+		{"no route for", client.ExitVersionSkew},
+		{"older than this client", client.ExitVersionSkew},
 	}
 
-	cmds := commands()
+	// The ROOT usage text is checked too, and it is not in commands() — which
+	// is why nothing checked it: the security gate put a nonexistent exit code
+	// 17 in root.go's table and both guards stayed green. It documents the same
+	// contract for the same readers, so it is held to the same rule.
+	var rootHelp strings.Builder
+	writeRootHelp(&rootHelp)
+	cmds := append(commands(), command{name: "(root usage)", help: rootHelp.String()})
 	if len(cmds) == 0 {
 		t.Fatalf("commands() returned nothing; there is no help text to check")
 	}

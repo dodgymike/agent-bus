@@ -199,8 +199,9 @@ type Credential struct {
 	// enrol command is answered from here instead of going back to the bus.
 	// Without it, a repeat would generate a fresh key pair and present the old
 	// key with a new payload — which invariant 10 defines as a protocol
-	// violation and the bus punishes with a disconnect. Remembering the key is
-	// what makes the obvious human action (run it again) safe.
+	// violation: the bus REJECTS AND LOGS it (it does NOT disconnect; narrowed
+	// 2026-08-08), and the enrolment simply fails. Remembering the key is what
+	// makes the obvious human action (run it again) safe.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -367,9 +368,10 @@ func (s *Store) EnsureMessagingKey(ref string) (Credential, error) {
 // Persisting the seed FIRST closes that window, and it is what makes a RETRY
 // possible at all. Invariant 10 says a retry is "same key + SAME payload"; the
 // payload includes the public key, so retrying with a freshly generated key
-// pair is "same key + DIFFERENT payload" — a protocol violation that gets the
-// client DISCONNECTED. A client that cannot reproduce its original payload
-// cannot legitimately retry, which is exactly what this record stores.
+// pair is "same key + DIFFERENT payload" — a protocol violation the bus
+// rejects and logs (it does NOT disconnect; narrowed 2026-08-08). A client that
+// cannot reproduce its original payload cannot legitimately retry, which is
+// exactly what this record stores.
 type pendingEnrolment struct {
 	// IdempotencyKey is the key the enrolment was sent with; it is the record's
 	// identity.
@@ -377,7 +379,7 @@ type pendingEnrolment struct {
 
 	// Name and BusURL are the rest of the request, kept so a reuse of the same
 	// key with DIFFERENT content can be refused locally instead of being sent
-	// and earning a disconnect.
+	// and answered with a 409 the caller learns nothing from.
 	Name   string `json:"name"`
 	BusURL string `json:"bus_url"`
 
@@ -409,6 +411,30 @@ type pendingEnrolment struct {
 	// way — see the resume path there.
 	MessagingKeySeed string `json:"messaging_key_seed,omitempty"`
 
+	// InviteID is the invite this attempt redeemed, or "" when it presented
+	// none. The ID ONLY — the invite SECRET is a bearer credential and must
+	// never reach the disk (see enrolRequestBody.InviteSecret, which is the one
+	// place it is allowed to exist).
+	//
+	// It is here because the invite id is part of what the enrolment ASSERTS:
+	// the server's idempotency fingerprint covers (name, auth key, messaging
+	// key, invite_id), so resuming this key with a DIFFERENT invite is "same
+	// key + DIFFERENT payload" — invariant 10's protocol violation — and is
+	// answered 409. Without this field that mistake could only be caught by the
+	// BUS, and the client's handling of that refusal used to DESTROY the key
+	// material of an attempt the bus may already have applied. Recording the id
+	// is what lets ClaimEnrolment refuse it here, before anything is sent and
+	// before anything is dropped.
+	//
+	// omitempty, and an EMPTY value is AMBIGUOUS rather than merely absent: it
+	// is either a genuinely un-invited attempt or a record written before this
+	// field existed. ClaimEnrolment therefore refuses only a stored id that
+	// DISAGREES, never an absent one — refusing an absent one would strand the
+	// legitimate resume of an interrupted enrolment, which is the one thing
+	// this record exists for. Enrol.enrolFailed's keep-on-resume rule is what
+	// protects the ambiguous case.
+	InviteID string `json:"invite_id,omitempty"`
+
 	// CreatedAt is when the record was written, RFC3339. Used only for
 	// pruning; nothing depends on its accuracy.
 	CreatedAt string `json:"created_at"`
@@ -424,9 +450,14 @@ type pendingEnrolment struct {
 // enrolment rather than on first send — and, exactly as Credential.String's
 // comment warns, the redaction is enumerated rather than derived, so a new
 // secret field added above must be added here too.
+//
+// InviteID is PRINTED, not redacted: it is a NAME and not a credential (the
+// same judgement EnrolResult.InviteID makes), and it is what tells an operator
+// which single-use invite this in-flight attempt belongs to. The invite SECRET
+// is not a field of this struct at all, which is the stronger guarantee.
 func (p pendingEnrolment) String() string {
-	return fmt.Sprintf("pendingEnrolment{IdempotencyKey:%s Name:%s BusURL:%s PublicKey:%s PrivateKeySeed:[REDACTED] MessagingKeySeed:[REDACTED] CreatedAt:%s}",
-		p.IdempotencyKey, p.Name, p.BusURL, p.PublicKey, p.CreatedAt)
+	return fmt.Sprintf("pendingEnrolment{IdempotencyKey:%s Name:%s BusURL:%s PublicKey:%s PrivateKeySeed:[REDACTED] MessagingKeySeed:[REDACTED] InviteID:%s CreatedAt:%s}",
+		p.IdempotencyKey, p.Name, p.BusURL, p.PublicKey, p.InviteID, p.CreatedAt)
 }
 
 // pendingTTL is how long an unresolved enrolment's key material is kept.
@@ -1283,7 +1314,18 @@ type PendingEnrolment struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	Name           string `json:"name"`
 	BusURL         string `json:"bus_url"`
-	CreatedAt      string `json:"created_at"`
+
+	// InviteID is the invite this attempt redeems, or "" when it presented
+	// none. The ID only; the secret is not stored at all.
+	//
+	// Reported because the resume now DEPENDS on it: since
+	// INVITE-CLIENT-FU-PENDINGINVITE a resume that presents a different invite
+	// is refused locally, so "resume with --idempotency-key K" is only half an
+	// instruction for an invited attempt. Naming the invite is what keeps the
+	// record recoverable rather than merely listed.
+	InviteID string `json:"invite_id,omitempty"`
+
+	CreatedAt string `json:"created_at"`
 }
 
 // ListPending returns every in-flight enrolment, sorted by creation time, with
@@ -1299,6 +1341,7 @@ func (s *Store) ListPending() ([]PendingEnrolment, error) {
 			IdempotencyKey: p.IdempotencyKey,
 			Name:           p.Name,
 			BusURL:         p.BusURL,
+			InviteID:       p.InviteID,
 			CreatedAt:      p.CreatedAt,
 		})
 	}
@@ -1346,8 +1389,10 @@ type enrolClaim struct {
 // ending: two concurrent `enrol --idempotency-key K` both see nothing, both
 // generate a DIFFERENT key pair, and both POST key K with a different
 // public_key. That is "same key + different payload", which invariant 10
-// classifies as a protocol violation — the bus answers 409 and DISCONNECTS —
-// and one of the two private keys is overwritten and lost.
+// classifies as a protocol violation — the bus answers 409, rejecting and
+// logging it (it does NOT disconnect; narrowed 2026-08-08) — and one of the two
+// private keys is overwritten and lost. The lost key is the damage here, not
+// the socket.
 //
 // Insert-if-absent is what makes the loser correct rather than merely lucky:
 // it gets the winner's key material back and its request is byte-identical, so
@@ -1374,6 +1419,20 @@ func (s *Store) ClaimEnrolment(want pendingEnrolment, now time.Time) (enrolClaim
 			}
 			if p.Name != want.Name {
 				return idempotencyConflict("enrol", want.IdempotencyKey, p.Name, p.BusURL)
+			}
+			// The invite is part of the payload the bus fingerprints, so a
+			// resume presenting a different one is refused HERE — the same
+			// judgement the name check above makes, one field further, and for
+			// a sharper reason: this record is the ONLY copy of the attempt's
+			// two private key seeds, and sending the mismatch is what used to
+			// get them dropped on the 409 that came back.
+			//
+			// Only a stored id that DISAGREES. An empty stored id is ambiguous
+			// (see the field's comment) and must not be refused, or a legitimate
+			// resume of a record written before this field existed becomes a
+			// permanent failure with its key material stranded.
+			if p.InviteID != "" && p.InviteID != want.InviteID {
+				return inviteConflict("enrol", want.IdempotencyKey, p.InviteID, want.InviteID, p.BusURL)
 			}
 			claim.Pending = p
 			claim.Resumed = true

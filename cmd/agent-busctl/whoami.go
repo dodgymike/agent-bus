@@ -178,6 +178,29 @@ func runWhoamiAll(env *cliEnv, c *client.Client) error {
 			fmt.Fprintf(w, "\nunfinished enrolments — the bus may already have applied these:\n")
 			for _, p := range pending {
 				fmt.Fprintf(w, "  %s at %s, started %s\n", p.Name, p.BusURL, p.CreatedAt)
+				// An INVITED attempt must be resumed with the SAME invite: the
+				// bus fingerprints the invite id, so a different one is "same
+				// key + different payload" and is refused before it is sent
+				// (INVITE-CLIENT-FU-PENDINGINVITE). Printing the --bus form for
+				// one of those would be printing a command that now fails, so
+				// the invited case gets its own line — and the invite carries
+				// the address and the pin, which is why --bus disappears from
+				// it rather than being kept alongside.
+				if p.InviteID != "" {
+					// TerminalSafe for the same reason `enrol` uses it on the
+					// invite id it prints: this value came off DISK, and the
+					// store is a file. It was charset-checked by
+					// client.Invite.Validate before it was written, so this is
+					// the second of two independent checks — which is what a
+					// line that renders stored text to a terminal has to have,
+					// because a raw "\x1b[2K\r…" would erase this line and print
+					// a forged one in its place.
+					safeInvite := client.TerminalSafe(p.InviteID, false)
+					fmt.Fprintf(w, "    redeeming invite %s\n", safeInvite)
+					fmt.Fprintf(w, "    resume: agent-busctl enrol --invite-file <the file holding invite %s> --name %s --idempotency-key %s\n",
+						safeInvite, p.Name, p.IdempotencyKey)
+					continue
+				}
 				fmt.Fprintf(w, "    resume: agent-busctl enrol --bus %s --name %s --idempotency-key %s\n",
 					p.BusURL, p.Name, p.IdempotencyKey)
 			}

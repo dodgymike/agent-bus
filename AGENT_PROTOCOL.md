@@ -461,7 +461,12 @@ permissions, not a regular file, malformed JSON, or larger than 64 KiB), `4` **t
 invite** (403, `"kind":"auth"` — an invite is single-use, expiring and revocable, and the bus
 deliberately does not say which applies; retrying does not help), `5` bus unreachable **or presenting
 a certificate that is not any member of the pinned accept-set**, `6` bus reported its own error, `7`
-bus refused the request.
+bus refused the request, `9` the bus has no `/v1/enroll` route at all — it is older than this client.
+
+Also `2`: resuming an `--idempotency-key` with a **different** `--invite-file`, or with none, when the
+stored attempt redeemed an invite — see
+[Enrolment idempotency](#enrolment-idempotency-specifically). Nothing is sent and your key material
+is kept.
 
 ### `agent-busctl whoami [--all] [--verify]`
 
@@ -481,6 +486,10 @@ combined.
 
 `whoami --all` also lists any **pending** (interrupted) enrolments, each with the exact
 `agent-busctl enrol …` command that resumes it — see [Idempotency](#idempotency-and-retries-invariant-10).
+An enrolment that redeemed an invite is listed with `redeeming invite <id>`, and its resume line uses
+`--invite-file` rather than `--bus`, because it must be resumed with **that same invite** (the invite
+carries the address and the fingerprint too). `--json` reports the same id as `invite_id` on each
+`pending` entry (`omitempty` — the invite's **id**, never its secret).
 
 Exit codes: `0` ok, `2` bad usage, `3` no identity enrolled or selected, `4` bus rejected the
 credential (`--verify`), `5` bus unreachable (`--verify`), `8` nothing to report (`--all` on an
@@ -612,7 +621,8 @@ agent-busctl agents --json    # {"agents":[…],"count":N,"ok":true}
 Exit codes: `0` ok, `2` bad usage, `3` no usable identity, `4` credential rejected, `5` bus
 unreachable, `6` bus reported its own error, `7` bus refused the request, `8` the roster is empty
 (rare — the roster is durable since 2026-08-07, so an ordinary restart does **not** empty it; an
-empty roster means a genuinely new bus or a replaced data directory).
+empty roster means a genuinely new bus or a replaced data directory), `9` the bus has no `/v1/agents`
+route — it is older than this client.
 
 ## Sending: `agent-busctl send` (and `agent-busctl broadcast`, which is BROKEN)
 
@@ -733,7 +743,9 @@ Exit codes: `0` accepted and durable, `1` internal, `2` bad usage (no recipient/
 sources, body too large), `3` no usable identity, `4` credential rejected, `5` bus unreachable,
 `6` bus reported its own error — **including `agent-busctl broadcast`'s deliberate 501, see above** —
 `7` bus refused it (unknown recipient, a 409 idempotency-key conflict, or a 409 for a reservation the
-bus has forgotten across a restart — see below).
+bus has forgotten across a restart — see below), `9` the bus has no route for the id reservation a
+send signs (`/v1/mint`), or none for `/v1/broadcast` — it is older than this client. An unknown
+recipient is **not** `9`: that 404 is a refusal about one agent, and stays `7`.
 
 ## Watching: `agent-busctl watch`
 
@@ -831,7 +843,8 @@ underneath.
 Exit codes: `0` stopped cleanly, `1` internal, `2` bad usage, `3` no usable identity, `4` credential
 rejected, `5` bus unreachable, `6` bus reported its own error (including a fatal 503 — the bus's
 write path cannot durably accept messages), `7` bus refused the request, `8` a bounded watch
-delivered nothing.
+delivered nothing, `9` the bus has no `/v1/wait` or `/v1/messages` route — it is older than this
+client, and the watch stops rather than polling on.
 
 **A DAMAGED message now exits `6` and stops the watch (changed 2026-08-08).** Every message you are
 handed has had its body checked against the `size` and `content_sha256` the bus sent beside it; if
@@ -925,6 +938,19 @@ request. `agent-busctl whoami --all` lists every unfinished enrolment with the e
 command that resumes it, so a process killed before it printed anything still leaves a recoverable
 identity.
 
+**Resume with the SAME invite** (`INVITE-CLIENT-FU-PENDINGINVITE`, 2026-08-14). The bus fingerprints
+the invite id along with the name and keys, so resuming a key with a *different* `--invite-file` — or
+with none — is a different payload rather than a retry. `agent-busctl` refuses that locally (**exit
+`2`**, nothing sent) and **keeps your stored key material**: it is the only copy of that attempt's
+private keys, and the bus may already hold their public halves. `whoami --all` names the invite each
+unfinished enrolment belongs to, which is how you find the right file.
+
+The same rule is why a failed enrolment does not always throw the record away. A network error, a
+5xx, any failure on a **resumed** attempt, and any **409** now KEEP the pending record, and the
+remedy text names the `--idempotency-key` that reaches it. Only a fresh attempt refused on the merits
+(a `400`, a refused invite, an unknown route) drops it. Reusing a key for a different **name** is
+refused locally too, exit `2`.
+
 ### Replay of an already-accepted signed message
 
 This is a different guarantee from the idempotency key above, and it applies to the bus-to-bus
@@ -967,6 +993,10 @@ and a retired value is never reused — branch on them freely.
 | `6` | server | the bus reported a failure of its own (5xx), including a fatal 503, **and (2026-08-08) a `watch` message whose body disagrees with its own `size`/`content_sha256` — never retried, cursor left where it was** |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |
+| `9` | version_skew | a `404` on a fixed route the client depends on: **the bus is older than this client** and does not know the route at all. Deliberately not `7` — that is the bus understanding your request and refusing it. Retrying will not help; the bus has to be upgraded. Reachable from `enrol`, `agents`, `watch`, `send` and `broadcast` (documented in each one's `--help` since `INVITE-CLIENT-FU-EXIT9`, 2026-08-14) |
+
+`9` is **not** produced by an unknown recipient on `send` (that 404 is per-resource and is `7`), nor
+by `whoami` (a 404 on the session routes means the bus has forgotten your enrolment, which is `4`).
 
 A `401` from the bus is not one of these directly — `agent-busctl` re-authenticates automatically and you
 should never see it surface as a distinct exit code from ordinary use.

@@ -1201,8 +1201,19 @@ codes without copying a switch.
 | `6` | `server` | The bus reported a failure of its own (5xx), or a capacity refusal that survived retries |
 | `7` | `rejected` | The bus understood the request and refused it (400/404/409/413/415/422) |
 | `8` | `empty` | Succeeded with **nothing to report** (e.g. `whoami --all` on an empty store) |
+| `9` | `version_skew` | A `404` on a fixed route this client depends on: the bus does not know the route at all, so it is **older than this client** (`client.ExitVersionSkew`, `client.KindVersionSkew`). Deliberately NOT `7` — that is the bus understanding the request and refusing it, which is the opposite claim |
 
 `2` is usage rather than `1` to match Go's `flag` package and `cmd/agent-bus`.
+
+**`9` was reachable and documented NOWHERE until `INVITE-CLIENT-FU-EXIT9` (2026-08-14).** It is
+produced by the single `KindVersionSkew` assignment in `client/transport.go`, and the subcommands
+that can return it are `enrol` (`POST /v1/enroll`), `agents` (`GET /v1/agents`), `watch`
+(`POST /v1/wait`, `GET /v1/messages`), `send` (`POST /v1/mint` — the id reservation it signs) and
+`broadcast` (`POST /v1/broadcast`); each of their `--help` EXIT CODES tables now carries the row, and
+`TestEveryVersionSkewCommandDocumentsExitNine` (`cmd/agent-busctl/cli_test.go`) fails if one drops
+it. **Deliberately absent: `send`'s own `/v1/send` 404**, which is a per-resource "unknown recipient"
+carved out to `KindRejected`/`7`; and `whoami`, whose only remote calls are the session routes, where
+`annotateSessionError` overrides a 404 to `KindAuth`/`4`.
 
 No code changes meaning; some commands give one a more specific sense:
 
@@ -1210,7 +1221,8 @@ No code changes meaning; some commands give one a more specific sense:
   nothing before it finished. An unbounded `watch` stopped by a signal is always `0`, however many
   messages it saw.
 - `7` — a 409 idempotency-key conflict on `send`/`broadcast` (same key, different payload — the bus
-  disconnects), and an unknown recipient on `send`.
+  **rejects and logs it and does NOT disconnect**; invariant 10, narrowed 2026-08-08), and an unknown
+  recipient on `send`.
 - `6` — a fatal 503 (the bus's write path cannot durably accept messages, signalled by **no**
   `Retry-After` header) is `KindServer`, so it is exit **6**, not `5`. `5` stays reserved for the bus
   being unreachable at all — refused, DNS, timeout, TLS. See "The 503 split" below. **Also `6`
@@ -1253,7 +1265,7 @@ No code changes meaning; some commands give one a more specific sense:
 | --- | --- |
 | `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprints` (array, **`omitempty`** — present only when at least one certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path`, `invite_id` (**`omitempty`**, added `INVITE-CLIENT` 2026-08-14 — present only when `--invite-file` redeemed an invite; the invite's **id**, never its secret) |
 | `whoami` | the identity fields above, plus `is_current` (bool), and `session` (`agent_id`, `expires_at`, `refresh_at`, `lifetime_seconds`) with `--verify` |
-| `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`created_at`) when any enrolment is unfinished |
+| `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`invite_id` (**`omitempty`**, added `INVITE-CLIENT-FU-PENDINGINVITE` 2026-08-14 — the invite's **id**, never its secret; absent when the attempt presented no invite AND when the record predates the field)/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
 | `logout` | `removed` (array of agent ids), `current_agent_id` (string), `server_notified` |
 | `pin` (`list`/`add`/`remove`) | `agent_id`, `bus_url`, `bus_fingerprints` (array, **never null** — an empty accept-set prints `[]`), `max_bus_fingerprints` (int, `client.MaxBusPins`). See "Certificate pinning" above. |
@@ -1628,10 +1640,18 @@ document or build on invite-only enrolment as live.
 **Output.** `--json` gains `invite_id` (`omitempty` — present only when an invite was redeemed); human
 output gains an `invite <id>` line. The invite **id** is a name, safe to log and to quote in a ticket.
 The invite **secret** is the credential and appears in **no** output, error or log line anywhere in
-this path — not in `EnrolResult`, not in an `*Error`, not in the on-disk `pending` enrolment record
-(which does not carry the invite at all — a KNOWN GAP; see `client/enrol.go`'s comment on
-`inviteID, inviteSecret := ...`), and not in `Invite.String()`/`GoString()`, both of which redact it
-even under `%#v`.
+this path — not in `EnrolResult`, not in an `*Error`, not in the on-disk `pending` enrolment record,
+and not in `Invite.String()`/`GoString()`, both of which redact it even under `%#v`.
+
+**The `pending` record DOES carry the invite ID** since `INVITE-CLIENT-FU-PENDINGINVITE` (2026-08-14):
+`pendingEnrolment.InviteID` (`json:"invite_id,omitempty"`), one optional additive field in
+`identities.json`. The ID ONLY — the secret is not a field of that struct at all, which is a stronger
+guarantee than redacting it would be. **Correcting the earlier wording here, which was wrong in both
+directions:** it called the record "not carrying the invite at all" a KNOWN GAP, in a sentence whose
+subject was the SECRET — but the secret's absence was never a gap, it is the guarantee, and the
+record already carried the invite's *address* as `bus_url` on this path (`Enrol` resolves it via
+`inviteEndpoint`). The real gap was the missing **id**, and that is what is now closed; see
+"Enrolment idempotency" below for what the id is for.
 
 ### Enrolment idempotency (invariant 10)
 
@@ -1642,13 +1662,44 @@ process killed after the bus minted an id does not lose the private key. Records
 - re-running an enrolment with the same `--idempotency-key` and name is answered **from the store**,
   with `"replayed": true` and **no HTTP request**;
 - the same key with a different name on the same bus is refused **locally**, exit `2`, because the
-  bus's answer to that is a 409 **and a disconnection**;
+  bus's answer to that is a 409 it rejects and logs (invariant 10, narrowed 2026-08-08 — it does
+  **not** disconnect), and the round trip would spend a redemption attempt against a single-use
+  invite while teaching the caller nothing the local refusal does not;
+- the same key with a **different invite** — or with none — is refused **locally** too, exit `2`
+  (`inviteConflict`, `KindUsage`; `INVITE-CLIENT-FU-PENDINGINVITE`, 2026-08-14). **Nothing is sent and
+  the stored key material is KEPT** — see the paragraph below, which is the point of the change.
+  For a DIFFERENT invite the server would agree: `POST /v1/enroll`'s invited path fingerprints
+  `(name, public_key, messaging_public_key, invite_id)` (`idem.ComputeFingerprint`,
+  `internal/httpapi/auth.go`) and answers `409` on a mismatch, rejecting and logging it with the
+  connection explicitly KEPT. For **no invite at all** the request would take the *un-invited* path,
+  which never computes that fingerprint — so the bus's answer there is not the same 409, and this
+  document does not claim to know which answer it is. The client refuses it either way: the stored
+  attempt asserted an invite and this one does not, so it is not the same payload;
 - the same key against a different bus is a fresh enrolment;
 - a network failure keeps the record and the error names the exact `--idempotency-key <key>` that
-  resumes it; `whoami --all` lists every unfinished enrolment with the command that resumes it, so a
+  resumes it; `whoami --all` lists every unfinished enrolment with the command that resumes it — and,
+  for an attempt that redeemed an invite, a `redeeming invite <id>` line plus a resume line built
+  around `--invite-file` rather than `--bus` (the invite carries the address and the pin), so a
   process killed before it printed anything still leaves a recoverable identity;
 - pending records are pruned 24h after creation, on the next store write, and are destroyed
   outright by `logout --all`.
+
+**When a failed enrolment KEEPS its key material, and when it drops it** (`client.enrolFailed`,
+tightened by `INVITE-CLIENT-FU-PENDINGINVITE`). A `KindNetwork`/`KindServer` failure has always kept
+the record. It now also keeps it whenever the attempt was **RESUMED** (the seeds belong to an earlier
+request that may already have reached the bus) and whenever the bus answered **409** even on a fresh
+attempt (a 409 says a request under this key arrived — an in-call transport retry can achieve that
+with no pending record having pre-existed). Both errors' remedies say so, naming the
+`--idempotency-key` that reaches the material. What still drops: a fresh attempt refused on the
+merits — a 400, a 403 on an invite, an unknown route. This matters because the record is the ONLY
+copy of the attempt's two private key seeds, and the bus may already hold their public halves; the
+pre-fix path routed the 409 through `KindRejected` and dropped them, making a minted identity
+permanently unrecoverable.
+
+**Reading an `invite_id` back is deliberately lenient in ONE direction.** A stored id that
+*disagrees* with the presented one is refused; an *absent* stored id never is. Empty is ambiguous —
+a genuinely un-invited attempt, or a record written by a build older than this field — and refusing
+it would strand exactly the interrupted enrolment the record exists to rescue.
 
 The claim decision — already applied / resume / start new — is made in ONE locked read-modify-write.
 Two concurrent enrolments under one key would otherwise both generate a key pair, and one private key
@@ -1664,9 +1715,10 @@ a *later* retry the same logical send rather than a second message.
 
 - **Same key + byte-identical body** is a legitimate retry. The bus answers from its applied-key
   table, re-applies nothing, and returns the ORIGINAL result — `"replayed": true`, exit `0`.
-- **Same key + different content** is a protocol violation. The bus answers `409` **and disconnects**
-  — surfaced as its own loud `KindRejected` error, exit `7`. Retrying will not help; use a fresh key
-  for new content.
+- **Same key + different content** is a protocol violation. The bus answers `409`, **rejecting and
+  logging it — it does NOT drop the connection** (invariant 10, narrowed 2026-08-08), so anything
+  else in flight on that connection survives. Surfaced as its own loud `KindRejected` error, exit
+  `7`. Retrying will not help; use a fresh key for new content.
 - A key is remembered only as long as the message it produced is **retained** (1 day, or until 1 GiB
   of messages push it out). A "retry" that arrives after that produces a **second message** rather
   than being rejected — a key is a retry handle for minutes and hours, not for days.
