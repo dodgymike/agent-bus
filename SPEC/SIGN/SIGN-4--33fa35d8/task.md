@@ -62,7 +62,7 @@ GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: 
 - [SIGN-5](../SIGN-5--5cedc580/task.md) — SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must (done)
 - [SIGN-6](../SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 - [SIGN-7](../SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
-- [SWEEP-TWO-PASS-DISCIPLINE](../../PROCESS/SWEEP-TWO-PASS-DISCIPLINE--268a0c73/task.md) — SWEEP-TWO-PASS-DISCIPLINE: a contract change needs a MECHANISM sweep and a PROSE sweep, n… (todo)
+- [SWEEP-TWO-PASS-DISCIPLINE](../../PROCESS/SWEEP-TWO-PASS-DISCIPLINE--268a0c73/task.md) — SWEEP-TWO-PASS-DISCIPLINE: a contract change needs a MECHANISM sweep and a PROSE sweep, n… (done)
 
 ---
 

@@ -5,14 +5,14 @@
 | Public id | `268a0c73-d201-44be-bb49-a36cea11aab6` |
 | Key | SWEEP-TWO-PASS-DISCIPLINE |
 | Epic | [PROCESS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T20:27:40.251455+00:00 |
-| Updated | 2026-08-14T20:27:40.251455+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T20:29:22.687516+00:00 |
+| Completed | 2026-08-14T20:29:22.687500+00:00 |
 
 ## Proof command
 

@@ -80,7 +80,7 @@ RELAY-25 SECURITY AMENDMENT (2026-08-14): the existing `client/wedge_test.go` pr
 - [SIGN-5](../../SIGN/SIGN-5--5cedc580/task.md) — SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must (done)
 - [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 - [SIGN-8](../../SIGN/SIGN-8--71ef73d5/task.md) — SIGN-8: Agent-side messaging key material -- \`agent-bus keygen\`, key file location/permis… (todo)
-- [SWEEP-TWO-PASS-DISCIPLINE](../../PROCESS/SWEEP-TWO-PASS-DISCIPLINE--268a0c73/task.md) — SWEEP-TWO-PASS-DISCIPLINE: a contract change needs a MECHANISM sweep and a PROSE sweep, n… (todo)
+- [SWEEP-TWO-PASS-DISCIPLINE](../../PROCESS/SWEEP-TWO-PASS-DISCIPLINE--268a0c73/task.md) — SWEEP-TWO-PASS-DISCIPLINE: a contract change needs a MECHANISM sweep and a PROSE sweep, n… (done)
 
 ---
 
