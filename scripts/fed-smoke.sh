@@ -11,7 +11,7 @@
 # This script intentionally describes the supported surface as it SHOULD be and
 # therefore cannot pass yet. It fails loudly at the first unavailable step:
 #
-#   * CLI-11 must add `agent-busctl key export-public --data-dir ... --json`.
+#   * CLI-11 must add `agent-bus key export-public --data-dir ... --json`.
 #   * INVITE-CLIENT/INVITE-GATE must make `agent-busctl enrol --invite-file ...`
 #     redeem an operator-minted JSON invite without exposing its secret in argv.
 #   * CLI-6 must add `agent-busctl log --data-dir ... --json`, with ordered
@@ -153,10 +153,10 @@ mint_invite() {
 }
 
 export_signing_key() {
-  local data_dir="$1" bus_name="$2" result=""
+  local server="$1" data_dir="$2" bus_name="$3" result=""
   note "exporting $bus_name signing public key through CLI-11"
-  result="$("$CTL" key export-public --data-dir "$data_dir" --json)" ||
-    die "BLOCKED: CLI-11 agent-busctl key export-public is unavailable for $bus_name"
+  result="$("$server" key export-public --data-dir "$data_dir" --json)" ||
+    die "BLOCKED: CLI-11 agent-bus key export-public is unavailable for $bus_name"
   require_ok "$result" "signing-key export for $bus_name"
   json_string "$result" public_key
 }
@@ -255,9 +255,9 @@ printf '%s\n' "$invite_a" >"$invite_file_a"
 printf '%s\n' "$invite_c" >"$invite_file_c"
 chmod 0600 "$invite_file_a" "$invite_file_c"
 
-signing_a="$(export_signing_key "$DATA_A" A)"
-signing_b="$(export_signing_key "$DATA_B" B)"
-signing_c="$(export_signing_key "$DATA_C" C)"
+signing_a="$(export_signing_key "$SERVER_A" "$DATA_A" A)"
+signing_b="$(export_signing_key "$SERVER_B" "$DATA_B" B)"
+signing_c="$(export_signing_key "$SERVER_C" "$DATA_C" C)"
 
 note "configuring offline routes and trust as independent records"
 # A reaches C through B. A also pins C independently of that next-hop route.
