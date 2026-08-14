@@ -232,3 +232,26 @@ bytes replaced with `?`, so ANSI escapes cannot repaint it to hide what will run
 bare command — a proof that only runs inside our harness is a worse artifact than one anyone can
 paste into a shell. Nothing in the tool can enforce this; its value is an auditable verdict line.
 Full rationale and tradeoffs are in the comment block at the top of the script.
+
+### `scripts/proof-cmd-audit.py` (`TOOLING-1`)
+
+Read-only audit of every stored `proof_cmd` in the complete Spec Server JSON export:
+
+```
+python3 scripts/proof-cmd-audit.py [--json]
+python3 scripts/proof-cmd-audit.py --input export.json [--json]
+```
+
+Default mode makes one GET through `scripts/spec-cloud.sh`; `--input` permits offline fixtures.
+Stored proofs are parsed and never executed. Findings are deterministic and severity-ranked:
+literal Go `-run` identifiers (optional `^`/`$` anchors) that match no top-level test, using Go's
+unanchored substring/prefix/exact semantics, in validated static local packages; no stored pattern
+is passed to a regex engine. Other regex metacharacters are deliberately skipped. Other findings are unconditional success-masking
+pipeline/fallback clauses, and `if` constructs whose two branches both succeed. Ambiguous regexes,
+subtests, recursive or dynamic package expressions, parenthesized pipeline groups, and semantic
+partial coverage are deliberately out of scope. Input bytes, task count, proof size, finding count,
+output, and aggregate unique test-source bytes are bounded. Each canonical package is scanned once
+per run; test-source symlinks/non-regular files are not read. Text is tab-separated
+with control characters neutralized; `--json` emits a stable object. Exit codes: `0` no findings,
+`1` findings, `2` usage/input/fetch error. The tool never calls a Spec mutation endpoint and never
+repairs findings.
