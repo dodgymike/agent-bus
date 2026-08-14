@@ -48,19 +48,22 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `POST` | `/v1/enroll` | none | 501 | **NEW (INVITE-GATE, 2026-08-14).** `{"error":"this bus does not redeem invites"}` — an invite was presented but this bus was built with no invite store (`httpapi.Options.Invites == nil`). Never a silent success: a client must never walk away believing its single-use credential was spent when it was not. |
 | `POST` | `/v1/enroll` | none | 503 | **NEW (INVITE-GATE, 2026-08-14).** the invite table (default 8192 entries, `invite.MaxInvites`) is at capacity; `Retry-After: 5`. A SEPARATE capacity bound from the roster/idempotency 503 above — an invite-table refusal does not touch the roster or idempotency tables and vice versa. |
 | `POST` | `/v1/session/begin` | none (issues the challenge; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","token":"...","challenge_expires_at":"<RFC3339Nano UTC>"}` |
-| `POST` | `/v1/session/begin` | none | 404 | `agent_id` is malformed **or** well-formed but not on this bus's roster — the two cases are deliberately indistinguishable to the caller |
+| `POST` | `/v1/session/begin` | none | 404 | `agent_id` is malformed **or** well-formed but not on this bus's roster — the two cases are deliberately indistinguishable to the caller. **NARROWED 2026-08-14 (MTLS-CROSSCHECK): an EMPTY `agent_id` no longer reaches this row** and is now the 403 below; every other malformed value still 404s here |
+| `POST` | `/v1/session/begin` | none | 403 | **NEW (MTLS-CROSSCHECK, 2026-08-14, `2ea7dfb`).** `{"error":"this credential was not presented over the client certificate it is bound to"}` — invariant 11's cross-check, run **before `BeginSession` mints a challenge**, so a mismatched connection creates no server state at all (a challenge is server state with a lifetime, and an unauthenticated caller must not be able to create it for an agent whose certificate it does not hold). Four causes, deliberately indistinguishable in the response: the named agent holds ≥1 live certificate binding and this connection presented no matching in-date certificate; the connection's certificate is a live binding on a **different** agent; that certificate is live on **two** agents at once (it names nobody until an operator retires all but one); or `agent_id` is **empty**, which names no agent and so cannot be checked against anything. **NO `WWW-Authenticate` header** (the wrong half of the pair is the connection's certificate, chosen at handshake time — resending a header cannot help) and **never `Connection: close`** (invariant 10: a merely buggy client — one that regenerated its client keypair without re-enrolling — reaches this on every request, and the socket may carry other principals' traffic). `body.AgentID` is untrusted here and is never logged raw. See `### Invariant 11's cross-check on the agent plane` below, including the enumeration oracle this row deliberately leaves standing. |
 | `POST` | `/v1/session/begin` | none | 503 | the session table (default 16384 entries, pending + active together) is at capacity; `Retry-After: 5` |
 | `POST` | `/v1/session/complete` | none (activates the credential; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","expires_at":"<RFC3339Nano UTC>","lifetime_seconds":3600,"refresh_after_seconds":2700}` |
 | `POST` | `/v1/session/complete` | none | 400 | `signature` is not valid base64; also returned if the roster holds a corrupt (wrong-length) public key for the agent (defence in depth — see `internal/auth/session.go`) |
 | `POST` | `/v1/session/complete` | none | 401 | the signature does not verify against the agent's enrolled public key, or is not exactly the 64-byte Ed25519 signature size |
 | `POST` | `/v1/session/complete` | none | 404 | `token` names no session (never existed, already expired, or was dropped after a prior failed verification), or a pending/active session has passed its deadline — again deliberately indistinguishable to the caller |
+| `POST` | `/v1/session/complete` | none | 403 | **NEW (MTLS-CROSSCHECK, 2026-08-14, `2ea7dfb`).** The same body and the same four causes as the `/v1/session/begin` 403 above, checked against the **server-recorded `sess.AgentID`** — never a body field, and `SessionCompleteRequestBody` carries no agent id for one to be taken from. It necessarily runs **after** `CompleteSession`, because the agent id is not knowable until the token resolves, so **the session is left ACTIVATED and then refused**. That residue authorises nothing: every authenticated route applies the same check to the same token over any connection, so an activated-but-refused handle is useless until it expires on its own. No `WWW-Authenticate`, no disconnect. |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 400 | malformed JSON, an unrecognised field, or trailing content after the one JSON value the body must contain |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 405 | any method but `POST`; `Allow: POST` |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 413 | request body exceeds `httpapi.MaxAuthRequestBytes` (8 KiB) |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
 | any | any path off the six-entry allow-list (`/healthz`, `/v1/info`, `/v1/discovery`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
+| any | any path off the six-entry allow-list | `Authorization: Bearer <token>` that DID authenticate | 403 | **NEW (MTLS-CROSSCHECK, 2026-08-14, `2ea7dfb`).** `{"error":"this credential was not presented over the client certificate it is bound to"}` — invariant 11's cross-check, applied in `authMiddleware` **after the token authenticates but before the principal is attached to the context**, so no handler can ever see a principal the cross-check did not accept. Same four causes and same fixed body as the two session rows above; the agent id here is server-minted (out of the roster via `Authenticate`), never client-supplied. **No `WWW-Authenticate`** — unlike the 401 rows either side of this one, the caller already authenticated and re-presenting a bearer token cannot help. **Never `Connection: close`.** The acknowledged trade: 403 here versus those 401s does let a caller separate "valid token, wrong certificate" from "invalid token", which is accepted because reaching this row at all requires already holding a valid session token, and collapsing it would cost an honest client its only signal to re-enrol. |
 | any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
-| any | unregistered path, valid bearer token | valid bearer token | 404 | **CHANGED 2026-08-08 (CORE-8): now `{"error":"not found"}` with `Content-Type: application/json; charset=utf-8` and `X-Content-Type-Options: nosniff`.** It was `net/http.ServeMux`'s built-in `text/plain` "404 page not found", which broke the JSON error contract every other route honours — a client, or a wrapper piping through a JSON parser, got a parse error exactly when something was already wrong. Served by a catch-all registered at `RouteCatchAll` (`"/"`) **through `(*Server).route`, i.e. INSIDE the auth wrapper** — see the row above for why that placement is load-bearing. **Every method gets 404, never 405**: 405 would assert the resource exists but not via that verb, which is false here and lets a caller separate "path exists, wrong method" from "path does not exist" by method-probing. The body never echoes the requested path. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
+| any | unregistered path, valid bearer token | valid bearer token **that also passed the cross-check** (MTLS-CROSSCHECK, 2026-08-14 — `authMiddleware` applies the 403 row above before the mux is consulted, so a mismatched certificate never reaches this 404) | 404 | **CHANGED 2026-08-08 (CORE-8): now `{"error":"not found"}` with `Content-Type: application/json; charset=utf-8` and `X-Content-Type-Options: nosniff`.** It was `net/http.ServeMux`'s built-in `text/plain` "404 page not found", which broke the JSON error contract every other route honours — a client, or a wrapper piping through a JSON parser, got a parse error exactly when something was already wrong. Served by a catch-all registered at `RouteCatchAll` (`"/"`) **through `(*Server).route`, i.e. INSIDE the auth wrapper** — see the row above for why that placement is load-bearing. **Every method gets 404, never 405**: 405 would assert the resource exists but not via that verb, which is false here and lets a caller separate "path exists, wrong method" from "path does not exist" by method-probing. The body never echoes the requested path. This 404 is also what `/v1/enroll`, `/v1/session/begin`, and `/v1/session/complete` return when the server was built with `Options.Auth == nil` — those three stay on the allow-list unconditionally (see the AUTH-1 section below), so they reach the mux with or without a credential and 404 there like any other unregistered path. |
 
 ### Discovery document (added 2026-08-07, DISCOVERY-DOC)
 
@@ -828,18 +831,111 @@ agent is the 409 in `## Routes` above: refused before the mint, connection KEPT,
 One certificate must never name two agents — that would let one key holder authenticate as either, at
 which point the fingerprint names nobody.
 
-> **NOT ENFORCED: invariant 11's cross-check is DESIGNED, not LIVE.** Invariant 11 requires that a
-> session token presented over a connection whose client certificate belongs to a DIFFERENT agent be
-> rejected. **No route on this build performs that check.** `auth.Service.AgentIDForClientCertificate`
-> — the seam a cross-check would call — has **no non-test caller at all** (verified by grep at
-> `818207d`, and note that `818207d`'s own commit message says the same of
-> `Roster.AgentIDForCertFingerprint`, which is **stale**: the security gate's pre-mint fix gave it one,
-> `internal/auth/service.go`'s `Enrol`, which decides the 409 above and nothing else). No request path
-> resolves a connection's certificate to a principal. Concretely: **a stolen session token is
-> replayable from any machine, and nothing detects it, on any route, authenticated or not.**
-> MTLS-BIND supplied the antecedent — the stored cert→agent fact — and nothing more; the check
-> itself is `MTLS-CROSSCHECK`, which is still open. Do not read a stored `cert_bindings` entry, or
-> this section, as evidence that a connection's certificate is checked against its token.
+> **SUPERSEDED 2026-08-14 by `2ea7dfb` (MTLS-CROSSCHECK).** Between `818207d` and `2ea7dfb` this
+> spot carried a block declaring invariant 11's cross-check designed but not enforced, and concluding
+> that a stolen session token was replayable from any machine with nothing detecting it on any route.
+> **`2ea7dfb` made both of those statements false**, and the section immediately below replaces them.
+> The pointer is kept rather than the text deleted outright because the old claim was TRUE for the two
+> days MTLS-BIND stood alone, and a reader who acted on it needs to know what changed: MTLS-BIND
+> supplied only the antecedent — the stored cert→agent fact — and `MTLS-CROSSCHECK` supplied the check
+> that reads it. (The original wording is not reproduced here verbatim; `git show 818207d` has it.)
+
+### Invariant 11's cross-check on the agent plane (MTLS-CROSSCHECK, 2026-08-14, `2ea7dfb`)
+
+Invariant 11 requires that **a session token presented over a connection whose client certificate
+belongs to a DIFFERENT agent be rejected** — a stronger property than either mTLS or the session
+token gives alone. `internal/httpapi/crosscheck.go`'s `(*Server).enforceCertBinding` is that check on
+the **agent** plane, and it is LIVE — this section is about that plane only.
+
+The peer plane is separate and is **not** the same claim. Its machinery landed at `ed77bba`
+(RELAY-45/RELAY-20) but **`cmd/agent-bus` mounts no peer route at this commit**, so nothing below
+`## Peer-bus transport identity` is reachable on a running bus; `s.isPeerRoute` is false for every
+path today. When a peer route is mounted, `authMiddleware` returns on it before this gate runs and
+the request is governed by `RequirePeerPrincipal` instead — on that surface the certificate alone
+authorises and there is no PAIR to cross-check, which is recorded as a **named narrowing** of
+invariant 11 (`DECISIONS.md`, `## 2026-08-14 — FEDERATION (RELAY-6), AMENDMENT`, ruling **(i)**), not
+as compliance with it.
+
+**Three call sites, all of them enforcing:**
+
+| Where | When it runs | Which agent id it checks |
+| --- | --- | --- |
+| `authMiddleware` — every authenticated route | after the bearer token authenticates, **before** the principal is attached to the request context | `principal.AgentID`, server-minted out of the roster |
+| `POST /v1/session/begin` | **before** `BeginSession` mints a challenge | `body.AgentID` — client-supplied and unvalidated at that point, deliberately (the check asks whether a credential for the agent this request NAMES may be issued over THIS connection, not whether the caller is that agent) |
+| `POST /v1/session/complete` | **after** `CompleteSession`, which is the earliest the agent id is knowable | `sess.AgentID`, recorded by the server when the challenge was issued |
+
+**The rule, stated once:**
+
+- An agent holding **≥1 live certificate binding** must present a matching, **in-date** client
+  certificate on the connection. Any live binding satisfies it, not the newest — rotation
+  legitimately serves two certificates at once (invariant 11), so requiring the latest would refuse
+  the outgoing certificate mid-rollover. A **retired** binding neither satisfies nor requires.
+- An agent holding **no live binding is unconstrained on the agent side.** This is the deliberate
+  **migration allowance**: bindings only started being written by MTLS-BIND (2026-08-14), so every
+  agent enrolled before it has none, and refusing them all would be a flag day rather than a
+  migration. **For such an agent a stolen session token is still replayable from a connection
+  presenting no certificate** — read that plainly, it is the one part of the old paragraph above that
+  survives, narrowed to unbound agents. It closes agent by agent as they re-enrol under
+  `MTLS-CLIENTCERT`.
+- A presented certificate that is a live binding on a **different** agent is refused **regardless** of
+  whether the named agent has a binding of its own, and so is one that is live on **two** agents at
+  once (reachable from a damaged or hand-edited durable record; it names nobody until an operator
+  retires all but one). An **unbound** certificate on the connection is not itself a refusal — that is
+  the ordinary case for a client that grew a keypair before its bus recorded bindings.
+
+**Refusal shape, fixed for all four causes:** `403` with
+`{"error":"this credential was not presented over the client certificate it is bound to"}`, **no
+`WWW-Authenticate` header**, and **never `Connection: close`, on any path** (invariant 10 — a merely
+buggy client reaches these lines trivially, and the connection does not carry only one principal's
+traffic). The single string hides **which guard fired**, so a caller cannot separate "your
+certificate belongs to someone else" from "this agent requires one and you presented none" from "your
+certificate is live on two agents"; the server LOG names the guard, the agent id and the fingerprint.
+
+**BEHAVIOUR CHANGE: an empty `agent_id` at `POST /v1/session/begin` moved 404 → 403.** An empty id is
+not "an agent that happens to hold no binding", it is no agent at all, so the gate refuses it before
+`BeginSession`'s 404 can see it. Rebuild and restart required; no on-disk format or wire protocol
+change.
+
+**Four routes are NOT cross-checked and still work with no client certificate**: `/healthz`,
+`/v1/info`, `/v1/discovery` and `/v1/enroll`. They reach no principal, so there is no agent id to
+check a certificate against, and `authMiddleware` returns before the gate runs. This is what keeps
+the container healthcheck and pre-enrolment discovery working; `/v1/enroll` is where a binding is
+CREATED, so requiring one there would be circular.
+
+**Two consequences that are accepted rather than fixed, recorded here so nobody rediscovers them as
+bugs:**
+
+1. **An enumeration oracle at the unauthenticated `POST /v1/session/begin`, left standing
+   deliberately.** Measured, for an anonymous caller presenting no certificate: an **unknown** agent
+   → `404`; a **known, not-yet-bound** agent → `200` with a live challenge token; a **known, bound**
+   agent → `403`. So a 403 discloses precisely that an agent holds a live certificate binding, and
+   sweeping guessable ids maps which agents are **not** yet bound. Closing it costs an honest client
+   the only signal telling it to re-enrol rather than retry forever, and moving the gate after
+   `BeginSession` to equalise the shapes would recreate MTLS-BIND's mint-then-refuse defect, which
+   permanently burned an agent-id suffix per refusal. What leaks is bounded — that an agent is not yet
+   bound, never what any certificate is nor whose — and it shrinks as agents re-enrol. The security
+   gate measured the three responses itself and accepted it.
+2. **A deliberate REGRESSION, now live: a bound agent whose certificate EXPIRES is locked out
+   everywhere, including the route it would use to recover.** `WithClientCertificate` attaches nothing
+   for an out-of-date leaf, so the agent-side guard refuses every route — `POST /v1/session/begin`
+   included, so the agent cannot even obtain a session to ask for help. Client certificates are minted
+   for 365 days (`client.ClientCertValidity`), renewal is not automatic, **no code path retires a
+   binding** (`CertBinding.RetiredAt` is only ever populated by decoding a durable record that already
+   carries it — `internal/auth/record.go`), and there is no rebind or rotate route, so the only remedy
+   today is **re-enrolment, which mints a NEW agent
+   id** (invariant 1 — ids are never reused), losing the identity and its mailbox; an operator can
+   otherwise repair the roster record directly. The check was **not** softened, because expiry is the
+   only automatic bound on a leaked client key. Filed as `MTLS-CROSSCHECK-FU-CERTEXPIRY` (P1), which
+   must land before any deployment binds certificates it cannot rotate.
+
+**The check is a gate at request admission, not a supervisor.** A long poll admitted the instant
+before a binding is retired runs to the end of its poll timeout — bounded by `hub.MaxPollTimeout`
+(5 minutes) — exactly as it outlives a revoked session. Closing that is owned by the task titled
+`AUTH-2-FU-POLLEXPIRY` (id `03d7ca66-110e-4560-803e-1a7825d1accc`; it has no short key), which must
+now re-evaluate **both** the session and this cross-check before delivering, not the session alone.
+
+**Enrolment is still NOT invite-gated** — nothing here changes that; see `invite_required` in the
+discovery-document section above.
 
 ## Peer-bus transport identity (RELAY-45, added 2026-08-14) — NOT YET MOUNTED
 
