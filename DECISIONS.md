@@ -4476,3 +4476,93 @@ Replay and snapshot restore admit acknowledged state even when it exceeds today'
 overage is explicit legacy capacity debt: it is logged, retained, and blocks applicable new growth
 until successful checkpoint reclamation clears it. Capacity configuration is prospective admission
 policy, not a retrospective data-loss mechanism.
+
+<!-- ===== BEGIN 2026-08-14 MTLS-CLIENTAUTH ===== -->
+
+## 2026-08-14 — MTLS-CLIENTAUTH: the listener REQUESTS a client certificate, and never requires one
+
+**Decision.** `cmd/agent-bus/tlslisten.go` sets `ClientAuth: tls.RequestClientCert` with a
+`VerifyPeerCertificate` callback (`admitClientCertificate`). A client that has a certificate puts it on
+the connection, where it is visible as `r.TLS.PeerCertificates`. A client that has none still completes
+the handshake and is served exactly as before.
+
+**This deviates from the task's own title, which named `tls.RequireAnyClientCert`**, so it is recorded
+here rather than left as a silent substitution.
+
+### Why not the two neighbouring values
+
+Both were checked against this box's `crypto/tls` source and then EMPIRICALLY, by flipping the
+production value and observing the failures.
+
+- **`tls.RequireAnyClientCert`** refuses every certificate-less client at the handshake — before any
+  route, log line or error message they could act on. That is every agent whose identity directory
+  predates `MTLS-CLIENTCERT`, `agent-bus healthcheck` (which presents none, and is what Docker's
+  `HEALTHCHECK` branches on), and every operator probe of `/healthz`. This repo has shipped
+  server-side enforcement ahead of client-side capability once already — signature checking landed
+  before the client could sign, and every send failed with curl exit 7 until it was reverted.
+- **`tls.VerifyClientCertIfGiven`** (and `RequireAndVerifyClientCert`) sit at or above `crypto/tls`'s
+  verification threshold in `processCertsFromClient`, so the stdlib chain-verifies against
+  `ClientCAs`. **There is no CA in this design and `ClientCAs` is nil, which means the SYSTEM ROOTS.**
+  Observed: `tls: failed to verify client certificate: x509: certificate signed by unknown authority`
+  for both an agent certificate and a peer-bus certificate. It would admit every client *without* a
+  certificate and reject every client *with* one — exactly backwards — and would additionally accept
+  any certificate issued by any public CA carrying the ClientAuth EKU.
+
+### Does this narrow invariant 11's "TLS is MUTUAL"?
+
+**No — it sequences it.** Invariant 11's requirement is that both ends present a certificate and both
+verify. Nothing here weakens that target; what changes is where the refusal lands. The bus will reach
+"mutual" by binding certificate fingerprints to agent ids (`MTLS-BIND`) and then refusing unbound
+principals PER ROUTE, which produces a legible 401/403 an agent can act on, rather than by slamming the
+handshake shut on a fleet that cannot yet speak it. The handshake is the wrong place for that refusal
+in a system whose enrolment route MUST accept a certificate it has never seen.
+
+**The cost, stated plainly: nothing is authorised at the transport layer today.** A certificate on the
+connection proves possession of its private key and nothing more. Until `MTLS-BIND` lands, the session
+token remains the only credential, exactly as before.
+
+### What `admitClientCertificate` deliberately does NOT do
+
+It **admits**; it does not authorise. Its success case returns `nil` having decided nothing, which is
+normally the shape of a silent-accept bug — so the asymmetry with `client/pin.go` is worth stating.
+There, the pin IS the authorisation and the callback is where it lives. Here there is structurally
+nothing to pin against at handshake time: enrolment must accept an unseen certificate (accepting it is
+how the binding gets made, and the INVITE is what authorises it), and every other route needs
+per-request state `crypto/tls` does not have. It guarantees one property only — that a certificate
+reaching the application is a single parseable leaf with a derivable fingerprint.
+
+Three things it must never grow into:
+
+1. **A `CertPool` of enrolled agents' certificates, verified against.** A pool entry is a TRUSTED ROOT,
+   so any agent in it could mint certificates for any name and become a CA for the whole bus.
+   Verification here is a 32-byte fingerprint comparison, never chain building.
+2. **An `IsCA` or `ExtKeyUsage` filter.** It reads like defence in depth and would break relay: the
+   bus's own certificate is `IsCA` with both `ServerAuth` and `ClientAuth`, because a peer bus presents
+   that same certificate when it dials. A test arm asserts an `IsCA` client certificate is admitted.
+3. **Identity from `Subject`/`CN`/`SAN`/`Issuer`/`SerialNumber`,** or a SEARCH of
+   `r.TLS.PeerCertificates` for a known fingerprint. Those fields are chosen by whoever minted the
+   certificate; and the peer controls the whole chain while `CertificateVerify` proves possession of
+   the LEAF key only, so searching the slice is spoofed by appending the victim's public certificate at
+   index 1. Check non-empty, then index `[0]`, fingerprint only — empty is the MAJORITY case under
+   `RequestClientCert`, so an unguarded `[0]` panics on almost every connection.
+
+### One fingerprint construction, named here so nothing computes a second
+
+`buscert.FingerprintOf(r.TLS.PeerCertificates[0])` — `sha256` over the leaf's DER exactly as it arrived
+(`x509.Certificate.Raw`, never a re-marshalling), rendered as 64 LOWERCASE hex characters with no
+prefix, colons or whitespace. The same construction the invite blob carries and `client/pin.go` pins
+the bus with. `RELAY-41`'s peer-record field and `RELAY-20`'s lookup must use this exact helper: a
+second implementation (SPKI instead of `Raw`, base64 instead of hex, uppercase) produces a well-formed
+value that NEVER matches, and nothing anywhere reports the mismatch — it reads as a peering
+configuration fault. Do not call such a value `peerFingerprint`; that name is taken at
+`internal/relay/peer.go` for an idempotency digest of a roster payload.
+
+### Accepted, open gap
+
+**Client-certificate expiry is enforced nowhere on this side.** `RequestClientCert` does no chain
+verification, so `NotAfter` is never checked and an expired agent certificate is admitted. Filed and
+owned separately (Spec Server `ca356fde-0613-42cb-ac85-a629609d9c78`). It is harmless only while
+nothing authorises on a client certificate, so it must close in the same task as
+`MTLS-BIND`/`MTLS-CROSSCHECK` — not after.
+
+<!-- ===== END 2026-08-14 MTLS-CLIENTAUTH ===== -->

@@ -3509,3 +3509,60 @@ the recipient has since stopped being addressable. Fixing it means answering a k
 before consulting admissibility — never moving the roster check, which cca64afd fences.
 
 <!-- ===== END 2026-08-08 feature-runner: RELAY-16 ===== -->
+
+<!-- ===== BEGIN 2026-08-14 feature-runner: MTLS-CLIENTAUTH ===== -->
+
+## 2026-08-14 — MTLS-CLIENTAUTH (cc9558a8-309e-4458-ab91-d9a28517ed53)
+
+**Task.** Make the TLS listener request a client certificate, so a peer credential exists on the wire
+at all. Step 1 of unblocking three-bus relay: `RELAY-20` was attempted and correctly refused to write
+code, because there was no peer credential to resolve a principal from.
+
+**Files.** `cmd/agent-bus/tlslisten.go`, `cmd/agent-bus/tlslisten_test.go`, `CONTRACTS-CLI.md`,
+plus this entry and a `DECISIONS.md` section. 14 non-comment lines of production change.
+
+**Change.** `ClientAuth: tls.NoClientCert` → `tls.RequestClientCert`, plus
+`VerifyPeerCertificate: admitClientCertificate`. Reasoning, the two rejected alternatives, and the
+invariant-11 sequencing argument are in `DECISIONS.md` (2026-08-14) and not repeated here.
+
+**The assertion at `tlslisten_test.go:823` was RETIRED DELIBERATELY, not deleted.** It pinned
+`tls.NoClientCert` specifically so mutual TLS could not be "finished" here before the client could
+present a certificate. This task is the change it was guarding against, arriving legitimately. It is
+replaced by an assertion of the NEW policy that names how each of the four other `ClientAuthType`
+values breaks, plus a new non-nil check on `VerifyPeerCertificate` — so an accidental future move in
+EITHER direction still fails. The `client_auth=none` startup-log assertion moved to `requested` the
+same way.
+
+**Red-capability proved, both directions,** by flipping the production value and observing failures
+before reverting: `NoClientCert` → both "presented" arms fail with "produced 0 peer certificates,
+want 1"; `VerifyClientCertIfGiven` → both fail with `remote error: tls: bad certificate`.
+
+**Proof.** The STORED `proof_cmd` was **VACUOUS**, not red: `verdict=VACUOUS class=test exit=0
+tests_run=0 empty_pkgs=2`. It named `TestHandshakeRequiresClientCert`,
+`TestUnknownClientCertReachesEnrolOnly` and `TestNoInsecureSkipVerifyAnywhere` in `./internal/httpapi`
+and `./cmd/agent-bus`; the first two were never written, and the third lives in `client/`. It was
+authored for the abandoned `RequireAnyClientCert` + middleware design. Replacement, run through
+`scripts/proof-check.sh`: **PASS**, `tests_run=27 top_level=6 skipped=0 failed=0`. spec-keeper must
+STORE the replacement — the task may not be completed on the vacuous one.
+
+**Gates.** Both ran, both re-verified after fixes. security **PASS** (no P0/P1; three P2s). reviewer
+**CHANGES-REQUESTED** on two P1s that are RECORD, not code: the task title/description still mandate
+`RequireAnyClientCert` + middleware, and the stored `proof_cmd` is vacuous. Both are spec-keeper
+actions; this agent was instructed not to mutate Spec Server state.
+
+**A gate disagreement worth recording, because both gates were confident.** The reviewer flagged as
+false my comment claiming `crypto/tls` does not re-verify certificates on a resumed handshake; the
+security gate independently asserted the opposite (that a resumed handshake restores
+`peerCertificates` WITHOUT invoking the callback). Settled from the stdlib source rather than by
+majority: the **reviewer is right for the server side** — TLS 1.2 `doResumeHandshake` and TLS 1.3
+`checkForResumption` both replay the session's cached certificates through `processCertsFromClient`,
+which calls `VerifyPeerCertificate` unconditionally. `client/pin.go`'s warning is about the CLIENT
+side, where it is correct. The comment now says so, checked rather than assumed by symmetry.
+
+**Documentation gate: run, by this agent, on its own three files** rather than dispatched — the doc
+surface that moved is entirely inside the file-ownership boundary (`CONTRACTS-CLI.md`) and dispatching
+a concurrent editor to a file this agent was still editing was the larger risk. `AGENT_PROTOCOL.md`
+and the CLI subcommands are untouched: no agent-facing surface moved, because a certificate-less
+client behaves identically.
+
+<!-- ===== END 2026-08-14 feature-runner: MTLS-CLIENTAUTH ===== -->

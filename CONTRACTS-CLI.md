@@ -32,15 +32,78 @@ certificate and key in `-data-dir` (`bus-tls.crt` + `bus-tls.key`, `internal/bus
 anything can `Serve` on it. There is no plaintext mode and **no flag that requests one**. Unusable key
 material makes the process **refuse to start**, exit `1`, naming the offending path; it never degrades
 to plaintext and never regenerates the material. TLS floor is **1.2** (matching `client/pin.go`'s
-`pinnedTLSConfig`), ALPN is pinned to `http/1.1`, and **`ClientAuth: tls.NoClientCert`** — no client
-certificate is requested or required yet. That is `MTLS-CLIENTAUTH`, still `todo`, and it must not land
-before `MTLS-CLIENTCERT` teaches the client to present one; do not read this listener as mutual TLS.
-The `server started` log line now carries `scheme=https tls=true tls_min_version=1.2 client_auth=none`
-alongside `addr` and `bus_cert_fingerprint=<64 hex>` — `tls=false` no longer appears. A plaintext
+`pinnedTLSConfig`), ALPN is pinned to `http/1.1`, and **`ClientAuth: tls.RequestClientCert`** — see the
+client-certificate policy below.
+The `server started` log line now carries `scheme=https tls=true tls_min_version=1.2
+client_auth=requested` alongside `addr` and `bus_cert_fingerprint=<64 hex>` — `tls=false` no longer
+appears, and `client_auth` is DERIVED from the live `tls.Config` rather than written as a literal. A plaintext
 request to the port never reaches a route: `crypto/tls` fails the handshake and `net/http` writes a
 bare `HTTP/1.0 400 Bad Request` + `Client sent an HTTP request to an HTTPS server.` onto the socket
 and closes it, before any handler or auth middleware runs — see `CONTRACTS-HTTP.md`'s `## Routes` for
 what those handlers answer once TLS has completed.
+
+**The listener REQUESTS a client certificate and never REQUIRES one** (`MTLS-CLIENTAUTH`, landed
+2026-08-14). `ClientAuth: tls.RequestClientCert`, paired with a `VerifyPeerCertificate` callback
+(`admitClientCertificate`, `cmd/agent-bus/tlslisten.go`). The contract, in the terms a caller needs:
+
+| Client presents | Handshake | `r.TLS.PeerCertificates` | Meaning |
+| --- | --- | --- | --- |
+| nothing | **succeeds** | empty | No transport identity. The ordinary path for every agent today, for `agent-bus healthcheck`, and for any operator probe of `/healthz`. Nothing is refused for this reason. |
+| a certificate | **succeeds** | 1+ entries, leaf first | Its holder proved possession of the leaf's private key (`CertificateVerify`, which `crypto/tls` checks in every mode — `RequestClientCert` gets exactly the same proof of possession as `RequireAndVerifyClientCert`). It is **not** authenticated as anybody: no principal has been resolved. |
+| an unparseable leaf | **fails** | — | `bad certificate` alert, fails closed. Note this is `crypto/tls` refusing it *before* the callback runs; `admitClientCertificate` re-checks only so that it has no path returning `nil` without having judged something. |
+
+**`requested` is not a step on the way to `required`; it is the policy.** The two neighbouring values
+are both wrong and in opposite directions, and this is recorded so neither is "finished" later by
+mistake:
+
+- `tls.RequireAnyClientCert` locks out, at the handshake and before any route or log line they could
+  act on, every agent whose identity directory predates `MTLS-CLIENTCERT`, plus `agent-bus healthcheck`
+  (which is what Docker's `HEALTHCHECK` branches on) and every operator `/healthz` probe.
+- `tls.VerifyClientCertIfGiven` (and `RequireAndVerifyClientCert`) sit at or above `crypto/tls`'s
+  verification threshold, so the stdlib chain-verifies against `ClientCAs`. **There is no CA in this
+  design and `ClientCAs` is nil, which means the system roots** — a self-signed agent or peer-bus
+  certificate chains to nothing there. It would admit every client *without* a certificate and reject
+  every client *with* one: exactly backwards.
+
+**Verification is by fingerprint, never by chain.** `admitClientCertificate` deliberately authorises
+nothing: it guarantees only that a certificate which reached the application is a single parseable
+leaf with a derivable fingerprint. Resolving that fingerprint to a principal is application-layer work
+(`MTLS-BIND`, `MTLS-CROSSCHECK`, and `RELAY-20` for peer buses). **The fingerprint of a presented
+certificate has exactly ONE spelling — `buscert.FingerprintOf(r.TLS.PeerCertificates[0])`: `sha256`
+over the leaf's DER exactly as it arrived (`x509.Certificate.Raw`, never a re-marshalling), rendered as
+64 LOWERCASE hex characters, no prefix, no colons, no whitespace.** It is the same construction the
+invite blob carries and `client/pin.go` pins the bus with. Call the helper; a second implementation
+(SPKI instead of `Raw`, base64 instead of hex, uppercase) produces a well-formed value that never
+matches, and nothing reports the mismatch.
+
+**Two rules bind every future consumer of `r.TLS.PeerCertificates`**, both from the security gate:
+the **fingerprint is the only identity** — never `Subject`/`CN`/`SAN`/`Issuer`/`SerialNumber`, which are
+chosen by whoever minted the certificate, i.e. by whoever presented it; and **check the slice is
+non-empty, then index `[0]` only, never iterate it**. Empty is the *majority* case (every ordinary agent
+connects without a certificate), so an unguarded `PeerCertificates[0]` panics on almost every
+connection; and the peer controls the whole chain while `CertificateVerify` proves possession of the
+*leaf* key alone, so a consumer that searched the slice for a known fingerprint would be spoofed by
+anyone appending the victim's public certificate at index 1.
+
+Three further consequences. An `IsCA`/`ExtKeyUsage` filter must **not** be added — the bus's own
+certificate is `IsCA` with both `ServerAuth` and `ClientAuth`, because a peer bus presents that same
+certificate when it dials, so such a filter would refuse exactly the relay connection this enables.
+**Client-certificate expiry is enforced nowhere on this side**: `RequestClientCert` does no chain
+verification, so `NotAfter` is unchecked and an expired agent certificate is admitted. That gap is
+filed and owned separately (Spec Server `ca356fde-0613-42cb-ac85-a629609d9c78`), not closed here; it is
+harmless only for as long as nothing authorises anything on a client certificate, so it must close in
+the same task as `MTLS-BIND`/`MTLS-CROSSCHECK`. And there are two **non-zero costs**: on **TLS 1.2 only**,
+the client Certificate message is unencrypted, so a passive observer gains a stable per-agent
+correlatable identifier (the leaf's public key) that did not exist under `NoClientCert` — TLS 1.3
+encrypts it and no `MaxVersion` is set, so the residue is TLS-1.2-only peers, and the CN is a fixed
+descriptive string so no agent *name* leaks; and an unauthenticated peer can now push a certificate
+chain (bounded by `crypto/tls`'s 64 KiB handshake-message cap) that is retained for the connection's
+lifetime, bounded in practice by the loopback default listen address.
+
+Nothing on disk changed, no wire format moved, and **no existing client is affected**: a client that
+presents no certificate behaves exactly as before. Operators must rebuild the binary and restart the
+bus for the listener to start asking. This is **code-only** — no deploy has been performed, and no
+running bus has been observed doing any of the above.
 
 **Every existing deployment now dials a different scheme.** `http://<bus>` gets that bare 400, never a
 route. An operator must rebuild the binary, restart the bus, and every client must dial `https://` with
@@ -1161,12 +1224,16 @@ a *later* retry the same logical send rather than a second message.
   accept a set of two and `pin add`/`pin remove` manage it (`MTLS-ROTATE`, done), but the bus itself
   still serves exactly ONE certificate — `internal/buscert` has "no rotation machinery yet" — so no
   running deployment has ever presented a client with a second, incoming certificate to roll onto. The
-  **client certificate** half of mutual TLS is still to come (`MTLS-CLIENTCERT`); `tls.Config.Certificates`
-  is unset today, and it belongs in **`client.pinnedTLSConfig`** — *not* in `newHTTPClient`'s unpinned
-  fallback literal, which the pinned branch replaces wholesale, so a client certificate put there would
-  be silently dropped on every pinned (i.e. every real) connection. The bus's own `ClientAuth` is
-  pinned to `tls.NoClientCert` until `MTLS-CLIENTAUTH` lands, and that task may not precede
-  `MTLS-CLIENTCERT` — see the TLS paragraph at the top of this file.
+  **client certificate** half of mutual TLS belongs in **`client.pinnedTLSConfig`** — *not* in
+  `newHTTPClient`'s unpinned fallback literal, which the pinned branch replaces wholesale, so a client
+  certificate put there would be silently dropped on every pinned (i.e. every real) connection.
+  **Updated 2026-08-14 (`MTLS-CLIENTAUTH`).** This bullet previously said "`tls.Config.Certificates` is
+  unset today"; that is **stale** — `client/pin.go` sets `GetClientCertificate` (deliberately not
+  `Certificates`, which `crypto/tls` filters against the server's acceptable-CA list) in
+  `pinnedTLSConfig`, fed with real material via `client/client.go`. Combined with the bus's `ClientAuth`
+  now being `tls.RequestClientCert`, a client that HAS certificate material presents it and the bus can
+  see it. Requested, never required, so a client with none is unaffected. See the client-certificate
+  policy paragraph at the top of this file.
 - ~~**The transport is built before the identity is resolved**~~ — **fixed by `MTLS-PIN`**
   (2026-08-07). The transport is now built **lazily**, on the first request, once the bus URL and its
   pin have been resolved together (`Client.endpoint` → `Client.doer`), and is rebuilt when the pin

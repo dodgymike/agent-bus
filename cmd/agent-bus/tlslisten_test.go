@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	agentclient "github.com/dodgymike/agent-bus/client"
 	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
@@ -88,7 +89,7 @@ func TestServerServesTLSOnly(t *testing.T) {
 		{"tls", "true", "an operator reading one line must be able to tell that this listener is TLS"},
 		{"scheme", "https", "the scheme is what an operator types; there is no http:// form of this bus"},
 		{"tls_min_version", "1.2", "the floor is contract, and it matches client/pin.go's so neither end fails the other with an unreadable handshake error"},
-		{"client_auth", "none", "MTLS-LISTENER does NOT request a client certificate: requiring one before MTLS-CLIENTCERT teaches the client to present one would refuse every agent at the handshake"},
+		{"client_auth", "requested", "MTLS-CLIENTAUTH: the listener REQUESTS a client certificate and never requires one. The summary is derived from the live config, so this is also the check that an operator reading one line learns the real handshake policy -- `none` here would mean r.TLS.PeerCertificates is empty on every connection and relay has no peer credential to resolve"},
 	} {
 		if got := fields[c.key]; got != c.want {
 			t.Errorf("%q field %s = %q, want %q: %s\nline: %s", msgServerStarted, c.key, got, c.want, c.why, started)
@@ -794,11 +795,13 @@ func mustBeUnbound(t *testing.T, addr, when string) {
 // refusal messages, which are unreachable in practice (internal/buscert refuses
 // first) and therefore have no other coverage at all.
 //
-// ClientAuth deserves its own sentence, because this is the assertion that would
-// fail the day someone "finishes" mutual TLS here rather than in
-// MTLS-CLIENTAUTH: the bus must NOT request a client certificate until
-// MTLS-CLIENTCERT teaches the client to present one, or every agent is refused at
-// the handshake.
+// ClientAuth deserves its own sentence, and the sentence CHANGED at
+// MTLS-CLIENTAUTH (2026-08-14). It used to assert tls.NoClientCert, so that
+// nobody "finished" mutual TLS here before the client could present a
+// certificate. That assertion did its job and has been RETIRED DELIBERATELY, not
+// deleted: it is replaced below by an assertion of the new policy, so that a
+// later accidental move in EITHER direction still fails here. Both neighbouring
+// values are wrong and the replacement says which way each one breaks.
 func TestBusTLSConfig(t *testing.T) {
 	t.Parallel()
 
@@ -820,11 +823,23 @@ func TestBusTLSConfig(t *testing.T) {
 		if cfg.MinVersion != tls.VersionTLS12 {
 			t.Errorf("cfg.MinVersion = %#04x, want TLS 1.2 (%#04x); it is deliberately the SAME floor as client/pin.go's pinnedTLSConfig, so neither end fails the other with an unreadable handshake error", cfg.MinVersion, tls.VersionTLS12)
 		}
-		if cfg.ClientAuth != tls.NoClientCert {
-			t.Errorf("cfg.ClientAuth = %v, want tls.NoClientCert. Requiring a client certificate is MTLS-CLIENTAUTH and MUST NOT land before MTLS-CLIENTCERT teaches the client to present one -- a bus that demanded one today would refuse every agent in the fleet at the handshake, before any route, log line or error they could act on.", cfg.ClientAuth)
+		if cfg.ClientAuth != tls.RequestClientCert {
+			t.Errorf("cfg.ClientAuth = %v, want tls.RequestClientCert (MTLS-CLIENTAUTH). Every other value is wrong, in a different direction each way:\n"+
+				"  tls.NoClientCert            -- no certificate is ever asked for, so r.TLS.PeerCertificates is empty on EVERY connection and there is no peer credential for relay (RELAY-20) or MTLS-BIND to resolve at all.\n"+
+				"  tls.RequireAnyClientCert    -- locks out, at the handshake and before any route or log line they could act on, every agent whose identity dir predates MTLS-CLIENTCERT, `agent-bus healthcheck`, and every operator probe of /healthz.\n"+
+				"  tls.VerifyClientCertIfGiven -- chain-verifies against ClientCAs, which is nil, which means the system roots. A self-signed agent or peer-bus certificate chains to nothing there, so it admits every client WITHOUT a certificate and rejects every client WITH one: exactly backwards.\n"+
+				"  tls.RequireAndVerifyClientCert -- both of the above at once.",
+				cfg.ClientAuth)
+		}
+		// The other half of the policy, and it is not optional: with no CA there
+		// is nothing for crypto/tls to verify a client certificate against, so
+		// the callback is what stands in its place. A nil here means a presented
+		// certificate is never judged at all.
+		if cfg.VerifyPeerCertificate == nil {
+			t.Errorf("cfg.VerifyPeerCertificate is nil. RequestClientCert performs NO verification of its own, so this callback is the entire server-side policy for a presented certificate (admitClientCertificate). Removing it does not harden anything -- it silently removes the only place a client certificate is looked at.")
 		}
 		if !cfg.SessionTicketsDisabled {
-			t.Errorf("cfg.SessionTicketsDisabled = false: crypto/tls does not call VerifyPeerCertificate on a RESUMED handshake, and this project's entire certificate pin lives in that callback (client/pin.go). Refusing to issue tickets is what makes the pin unbypassable from the server end regardless of what any client does later.")
+			t.Errorf("cfg.SessionTicketsDisabled = false: a resuming CLIENT does not call VerifyPeerCertificate, and this project's entire certificate pin lives in that callback (client/pin.go). Refusing to issue tickets is what makes the pin unbypassable from the server end regardless of what any client does later. (The CLIENT qualifier matters: a resuming SERVER does re-run its callback, so this setting is not what keeps admitClientCertificate running.)")
 		}
 		if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != "http/1.1" {
 			t.Errorf("cfg.NextProtos = %q, want [\"http/1.1\"]: this listener is wrapped by tls.NewListener and served by Serve, which does not configure HTTP/2, so advertising anything else would be a lie told over ALPN", cfg.NextProtos)
@@ -871,4 +886,293 @@ func TestBusTLSConfig(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestClientCertificateIsRequestedNotRequired is MTLS-CLIENTAUTH's behavioural
+// test: BOTH arms, over real handshakes, against the real busTLSConfig.
+//
+// The two arms are equally load-bearing and a change that satisfies one while
+// breaking the other is the specific failure this task had to avoid:
+//
+//	PRESENTED  -- a client that HAS a certificate gets it onto the connection,
+//	              visible to the application as r.TLS.PeerCertificates, with a
+//	              derivable fingerprint. Without this there is no peer credential
+//	              on the wire at all, which is why RELAY-20 could not be written.
+//	ABSENT     -- a client that has NO certificate still connects and is still
+//	              served. Without this, every agent enrolled before
+//	              MTLS-CLIENTCERT, `agent-bus healthcheck`, and every operator
+//	              probe of /healthz is refused at the handshake, before any route
+//	              or log line they could act on.
+//
+// The PRESENTED arm is run twice, with the two certificate shapes that actually
+// exist in this system, because they are NOT interchangeable:
+//
+//   - an AGENT certificate, minted by agentclient.LoadOrCreateClientCertificate: not a
+//     CA, ExtKeyUsage ClientAuth only.
+//   - a PEER BUS certificate, minted by buscert.LoadOrCreate: IsCA true,
+//     KeyUsageCertSign, ExtKeyUsage ServerAuth AND ClientAuth — because a bus
+//     dialling another bus presents the same certificate it serves with.
+//
+// The bus certificate is the case a plausible-looking hardening would break. An
+// `IsCA` or ExtKeyUsage filter in admitClientCertificate reads like defence in
+// depth and would refuse precisely the relay connection this task exists to
+// enable, while the agent arm above it stayed green.
+//
+// It serves through http.Server over tls.NewListener(busTLSConfig(...)) rather
+// than through the full run() subprocess for one reason: this asserts what the
+// HANDLER sees in r.TLS, and cmd/agent-bus has no route that reports it (plumbing
+// the peer certificate into internal/httpapi is MTLS-BIND's and RELAY-20's work,
+// deliberately not this task's). The config under test is the real one.
+func TestClientCertificateIsRequestedNotRequired(t *testing.T) {
+	t.Parallel()
+
+	busDir := t.TempDir()
+	addr := servePeerCertReporter(t, busDir)
+
+	t.Run("absent: a client with NO certificate still connects and is served", func(t *testing.T) {
+		// Deliberately busTestClient -- the SAME client every other test in this
+		// package dials with, and it presents no certificate. If requesting one
+		// had broken the certificate-less path, this arm and most of the package
+		// would go red together.
+		peers, fp := getPeerCertReport(t, busTestClient(t, busDir), addr)
+		if peers != 0 {
+			t.Errorf("a client presenting no certificate produced %d peer certificates (fingerprint %q), want 0", peers, fp)
+		}
+	})
+
+	t.Run("presented: an AGENT certificate reaches r.TLS.PeerCertificates", func(t *testing.T) {
+		cert, want := agentClientCertificate(t)
+		peers, fp := getPeerCertReport(t, clientPresenting(t, busDir, cert), addr)
+		if peers != 1 {
+			t.Fatalf("a client presenting its agent certificate produced %d peer certificates, want 1: the listener must REQUEST a certificate (tls.RequestClientCert) or nothing is ever put on the connection", peers)
+		}
+		if fp != want {
+			t.Errorf("the handler saw peer certificate fingerprint %q, want %q: the certificate on the connection must be the one the client presented, byte for byte, or the fingerprint MTLS-BIND records identifies nothing", fp, want)
+		}
+	})
+
+	t.Run("presented: a PEER BUS certificate reaches r.TLS.PeerCertificates", func(t *testing.T) {
+		// A second bus's own material: IsCA, CertSign, ServerAuth+ClientAuth.
+		// This is the arm that fails if admitClientCertificate ever grows an
+		// IsCA or EKU filter, and it is the connection RELAY-20 needs.
+		peer, err := buscert.LoadOrCreate(t.TempDir(), buscert.Options{BusID: "bus-peer-clientauth"})
+		if err != nil {
+			t.Fatalf("minting a peer bus's material: %v", err)
+		}
+		if !peer.Certificate().IsCA {
+			t.Fatalf("the peer bus fixture is not a CA certificate; this arm is meant to prove an IsCA client certificate is admitted, so it would be proving nothing")
+		}
+		cert := peer.TLSCertificate()
+		peers, fp := getPeerCertReport(t, clientPresenting(t, busDir, &cert), addr)
+		if peers != 1 {
+			t.Fatalf("a peer bus presenting its own certificate produced %d peer certificates, want 1", peers)
+		}
+		if want := peer.Fingerprint().String(); fp != want {
+			t.Errorf("the handler saw peer certificate fingerprint %q, want the peer bus's %q", fp, want)
+		}
+	})
+}
+
+// TestAdmitClientCertificate is the direct table over the VerifyPeerCertificate
+// callback, covering the arms a live handshake cannot reach.
+//
+// crypto/tls parses every entry before invoking the callback, so the malformed
+// cases below are unreachable in production -- which is exactly why they are
+// tested here. They are the paths where a verifier could return nil without
+// having judged anything, and "unreachable" is a claim about today's crypto/tls,
+// not a property of this function.
+func TestAdmitClientCertificate(t *testing.T) {
+	t.Parallel()
+
+	agent, _ := agentClientCertificate(t)
+
+	cases := []struct {
+		name     string
+		rawCerts [][]byte
+		wantErr  string // "" means the certificate must be ADMITTED
+		why      string
+	}{
+		{
+			name:     "no certificate at all",
+			rawCerts: nil,
+			why:      "the ordinary agent path. Absence is a SUCCESS -- the connection simply carries no transport identity -- and refusing it locks out every client that predates MTLS-CLIENTCERT.",
+		},
+		{
+			name:     "a real agent certificate",
+			rawCerts: [][]byte{agent.Certificate[0]},
+			why:      "a well-formed leaf is admitted, and admitted is NOT authorised: the fingerprint is resolved to a principal later (MTLS-BIND, RELAY-20).",
+		},
+		{
+			name:     "an empty leaf",
+			rawCerts: [][]byte{{}},
+			wantErr:  "EMPTY leaf",
+			why:      "a certificate from which no fingerprint can be derived must fail the handshake, not arrive downstream as a surprise.",
+		},
+		{
+			name:     "a leaf that is not X.509 at all",
+			rawCerts: [][]byte{[]byte("this is not a certificate")},
+			wantErr:  "not a parseable X.509 certificate",
+			why:      "fails CLOSED. A default that returned nil here would accept everything it had not thought of.",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := admitClientCertificate(tc.rawCerts, nil)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("admitClientCertificate(%s) = %v, want nil: %s", tc.name, err, tc.why)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("admitClientCertificate(%s) = nil, want an error mentioning %q: %s", tc.name, tc.wantErr, tc.why)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("admitClientCertificate(%s) error %q does not mention %q", tc.name, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// The fixture handler reports what it observed about the client certificate in
+// these headers, so an assertion is about the SERVER's view of the connection
+// rather than the client's view of what it sent.
+//
+// Named "Certificate" in full, never "peerFingerprint": that name is taken at
+// internal/relay/peer.go for the idempotency fingerprint of a roster payload,
+// and a transport pin conflated with a replay digest is a security bug.
+const (
+	peerCertificateCountHeader       = "X-Peer-Certificate-Count"
+	peerCertificateFingerprintHeader = "X-Peer-Certificate-Fingerprint"
+)
+
+// servePeerCertReporter runs an https server on the REAL busTLSConfig whose only
+// job is to report what arrived in r.TLS.PeerCertificates, and returns its
+// address.
+//
+// The bus material is minted into dataDir so a test client can trust exactly that
+// certificate via busTestClient -- a real x509 verification against one root, not
+// an InsecureSkipVerify, which is banned in this package.
+func servePeerCertReporter(t *testing.T, dataDir string) string {
+	t.Helper()
+
+	material, err := buscert.LoadOrCreate(dataDir, buscert.Options{BusID: "bus-clientauth"})
+	if err != nil {
+		t.Fatalf("minting the bus's material: %v", err)
+	}
+	cfg, err := busTLSConfig(material)
+	if err != nil {
+		t.Fatalf("busTLSConfig over freshly minted material: %v", err)
+	}
+
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening on loopback: %v", err)
+	}
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS == nil {
+				// Impossible behind tls.NewListener, and asserted rather than
+				// assumed: a nil here would make every fingerprint assertion
+				// below pass or fail for the wrong reason.
+				http.Error(w, "the request did not arrive over TLS", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(peerCertificateCountHeader, fmt.Sprint(len(r.TLS.PeerCertificates)))
+			if len(r.TLS.PeerCertificates) > 0 {
+				// buscert.FingerprintOf is the SAME construction the client and
+				// the invite blob use, and is how MTLS-BIND will identify the
+				// certificate. Deriving it here is the proof that a usable
+				// identity -- not merely some bytes -- reached the application.
+				w.Header().Set(peerCertificateFingerprintHeader, buscert.FingerprintOf(r.TLS.PeerCertificates[0]).String())
+			}
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	go func() { _ = srv.Serve(tls.NewListener(raw, cfg)) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	return raw.Addr().String()
+}
+
+// getPeerCertReport makes one request and returns what the handler saw.
+func getPeerCertReport(t *testing.T, c *http.Client, addr string) (peers int, fingerprint string) {
+	t.Helper()
+
+	resp, err := c.Get(busURL(addr, "/"))
+	if err != nil {
+		t.Fatalf("GET %s: %v\nA handshake failure here means the listener refused this client outright -- which for the certificate-less arm is the fleet-wide lockout this task had to avoid.", busURL(addr, "/"), err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	if _, err := fmt.Sscanf(resp.Header.Get(peerCertificateCountHeader), "%d", &peers); err != nil {
+		t.Fatalf("the fixture handler reported peer certificate count %q, which does not parse: %v", resp.Header.Get(peerCertificateCountHeader), err)
+	}
+	return peers, resp.Header.Get(peerCertificateFingerprintHeader)
+}
+
+// clientPresenting returns busTestClient's client, taught to present cert.
+//
+// It ADDS ONE FIELD to the package's one blessed TLS configuration rather than
+// building a second one, on the reviewer gate's finding. That matters more here
+// than it looks: tlsclient_test.go's header warns that a duplicated TLS config is
+// how a stray InsecureSkipVerify eventually gets in "just for this one test", and
+// the package's AST guard (scanPlaintextListener) deliberately skips _test.go
+// files, so a config in a test file is guarded by nothing but review. There is
+// therefore exactly one RootCAs/MinVersion literal in this package's tests, and
+// this helper cannot weaken it — it can only add a client certificate.
+//
+// busTestClient returns a FRESH transport per call, so mutating it here affects
+// only this client. The certificate-less arm calls busTestClient directly and is
+// untouched by this, which is what keeps it real evidence.
+//
+// GetClientCertificate rather than Certificates, for the same reason
+// client/pin.go uses it: crypto/tls FILTERS Certificates against the acceptable-CA
+// list in the server's CertificateRequest, and these certificates chain to no CA.
+// A filtered-out certificate is sent as an EMPTY certificate message, which reads
+// on the server as "this client has no certificate" -- a test that silently
+// exercised the wrong arm.
+func clientPresenting(t *testing.T, dataDir string, cert *tls.Certificate) *http.Client {
+	t.Helper()
+
+	c := busTestClient(t, dataDir)
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("busTestClient's Transport is %T, not *http.Transport; this helper adds a client certificate to it and cannot do so blind", c.Transport)
+	}
+	if tr.TLSClientConfig == nil {
+		t.Fatal("busTestClient's transport has no TLSClientConfig; presenting a client certificate would silently do nothing")
+	}
+	tr.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return cert, nil
+	}
+	return c
+}
+
+// agentClientCertificate mints a REAL agent certificate -- the material an
+// enrolled agent would actually present -- and returns it with its fingerprint.
+//
+// It goes through agentclient.LoadOrCreateClientCertificate rather than building a
+// certificate inline so that this test is pinned to the template agents really
+// use (Ed25519, not a CA, ExtKeyUsage ClientAuth only). A hand-rolled fixture
+// would keep passing on the day that template changed into something the listener
+// rejects.
+func agentClientCertificate(t *testing.T) (*tls.Certificate, string) {
+	t.Helper()
+
+	cc, err := agentclient.LoadOrCreateClientCertificate(t.TempDir())
+	if err != nil {
+		t.Fatalf("minting an agent client certificate: %v", err)
+	}
+	cert, err := tls.LoadX509KeyPair(cc.CertPath, cc.KeyPath)
+	if err != nil {
+		t.Fatalf("loading the agent client certificate from %q: %v", cc.Dir, err)
+	}
+	return &cert, cc.Fingerprint()
 }
