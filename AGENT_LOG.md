@@ -3782,4 +3782,55 @@ observable.
 (`agent-busctl`, which registers no `log` subcommand). It needs exactly the fix commit `1bc778a`
 applied at line 158 for `key export-public` — thread `"$server"` into `read_audit`, update the three
 call sites, and correct the header comment at line 17. `scripts/` is outside this task's ownership
+
+## 2026-08-14 — Log catch-up: six unlogged tasks (`documentation`)
+
+`AGENT_LOG.md` was six tasks behind HEAD (`298d577`). Each claim below re-verified against
+`git show`/the commit body, not taken from a summary. One entry each, terse per the freeze convention.
+
+- **RELAY-20** (`701dc54d`, code in `ed77bba`) — no dedicated entry existed; the RELAY-45 entry above
+  covers only RELAY-45/INVITE-GATE. `internal/httpapi/peermount.go` + a `server.go` hunk register the
+  three `/v1/peer/` handlers behind `RequirePeerPrincipal`, but ONLY when both `Options.Peer` and
+  `Options.PeerPrincipals` are non-nil. `cmd/agent-bus/main.go` sets neither, so the mount code exists
+  and compiles but no running server exposes the route — wiring is `RELAY-24`.
+- **RELAY-24-BLOCKER-HUBINGEST** (`e7a3c49`) — `hub.IngestRelayed` hashes a relayed message's
+  canonical bytes under the ORIGIN bus's id/sequence, reversing the 2026-08-08(c) "refuses rather than
+  substitutes" position (recorded, not erased). Exported but **nothing calls it**; `RELAY-24` stays
+  blocked on the `SIGN-1-FU-OUTOFORDER-POISON` security ruling, quoted verbatim from RELAY-24's own
+  status note: *"reviewer/security not run — task blocked before any code change. No diff exists to
+  gate."* — that is the step-10 justification this task owed.
+- Same commit carried four DECISIONS.md sections (RELAY-45, CLI-11, INVITE-GATE,
+  RELAY-24-BLOCKER-HUBINGEST) held back from `ed77bba` for a shared-file collision. **Verified by
+  diff, not assumed:** `ed77bba`'s own `DECISIONS.md` was 5 BEGIN/5 END fences; `e7a3c49` added one
+  BEGIN and three bare ENDs (CLI-11 and INVITE-GATE each ship an END with no BEGIN), landing HEAD at
+  6/8. The imbalance was introduced by `e7a3c49`, not inherited — corrects two earlier mis-reports
+  that called it pre-existing.
+- **INVITE-FU-STORE-TEST-RED-ON-MAIN** (`298d577`) — `TestInviteNotDurableIsRefused` built its store
+  with no clock injected, so real wall-clock time swept its 2026-08-07-pinned fixture before `Lookup`
+  ran once the box passed ~2026-08-10; fixed by injecting the package's existing fake clock. Security:
+  **N/A**, test-only, zero production surface (stated in the commit body itself: "not applicable — no
+  crypto/auth/secrets/network surface touched"); reviewer PASS, RED-before/GREEN-after independently
+  reproduced in a clean overlay.
+- **RELAY-21** (`14eafd9`) — `internal/relay/accept.go`'s `AcceptRelay` refuses an unknown
+  in-namespace recipient (404, final, not the retriable 503) BEFORE any durable write, so an adjacent
+  peer cannot permanently burn agent-name suffixes (invariant 1); re-forward fires only on
+  `idem.OutcomeNew`. Gates: reviewer PASS-WITH-CONCERNS → RE-VERIFIED PASS; security PASS →
+  RE-VERIFIED PASS (two LOW fixes, mutation-verified). Nothing is live from this commit alone — the
+  callback isn't wired until `RELAY-20` mounts and `RELAY-24` wires it.
+- **CLI-11** (`b88fc0b`) — `agent-bus key export-public` (server binary, not `agent-busctl`): prints
+  the bus's ed25519 signing PUBLIC key in the base64 shape `peer -signing-key` consumes, and never
+  mints an identity when pointed at a directory with none (mutation-tested by the reviewer). Two
+  narrow write-on-the-way-to-refusal races remain, carved out in `CONTRACTS-CLI.md` rather than
+  claimed fixed. Same commit as `CLI-6`, already logged above under its own heading.
+
+**Two process findings, recorded because they are the same failure shape as the code they check.**
+Three instruments reported success while proving nothing, all quietly toward "looks fine": `proof-
+check.sh` counting only top-level PASS/SKIP, fixed at `3d9955a`; a stored `proof_cmd` on
+`RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC` whose second clause pipes into `sed -n`, which exits 0
+regardless of match — confirmed by reading the stored command directly; and a claimed Spec Server
+list-truncation (oldest 200 of a larger total, no marker) — **partially verified**: a bare
+`GET /api/v1/projects/agent-bus/tasks` here returned exactly 200 items with no count/truncation field,
+consistent with the claim, but the specific total (552) and the filed id `82f35b73` could not be
+confirmed — that id 404s against the live Spec Server, so it is reported here as unverified rather
+than restated as fact.
 boundary and was deliberately not touched.
