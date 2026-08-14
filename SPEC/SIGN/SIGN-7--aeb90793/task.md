@@ -75,7 +75,7 @@ this, and keep the live cross-bus clause as the thing that holds it open.
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [RELAY-3](../../RELAY/RELAY-3--e944edda/task.md) — RELAY-3: Loop prevention via traversed-bus path (done)
 - [SIGN-1](../SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
-- [SIGN-4](../SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor (todo)
+- [SIGN-4](../SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- enforced SERVER-SIDE at ingest, never by recipient-side seque… (todo)
 - [SIGN-6](../SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

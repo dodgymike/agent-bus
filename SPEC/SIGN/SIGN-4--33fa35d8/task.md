@@ -1,4 +1,4 @@
-# SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor
+# SIGN-4: Replay/freshness -- enforced SERVER-SIDE at ingest, never by recipient-side sequence ordering
 
 | Field | Value |
 | --- | --- |
@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T12:59:07.533867+00:00 |
-| Updated | 2026-08-02T12:59:07.533867+00:00 |
+| Updated | 2026-08-14T20:10:54.327876+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,7 +22,7 @@ go test -race -run TestReplayRejectedByCursor ./internal/...
 
 ## Description
 
-GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: a validly-signed message can be replayed VERBATIM by anyone who saw it once (including a malicious bus), and Ed25519 verification of a replayed message succeeds every time because nothing about the signature changes. Do not let an implementer assume signing solves this -- it does not, and the SIGN epic description says so explicitly. This task specifies and implements the defence: the bus mints a monotonic sequence number per recipient (or per conversation -- decide and document which, consistent with invariant 1: ids/sequences are server-minted, never client-supplied) INSIDE SIGN-1's signed bytes, and the recipient maintains a durable delivery cursor (highest sequence accepted so far, per sender or per conversation) that MUST only advance, never rewind (same shape as the durable-store invariants 4/5: the cursor is part of the recipient's serving state, rebuilt by replay on restart). A message whose sequence is <= the cursor is rejected as a replay BEFORE the body is handed to the calling agent, even if its signature verifies. State plainly what this does and does not cover: it defeats verbatim replay of a message already delivered; it does NOT provide encryption or hide metadata (accepted per RATCHET-2's rescope). Tests: replaying the exact same signed envelope after successful delivery is rejected; out-of-order delivery within a reasonable window is handled sanely (define the policy -- reject strictly increasing-only, or allow a bounded reorder window, and say why); a cursor is durable across a recipient-side restart (crash-injection style test per CLAUDE.md's durability discipline, since this is exactly invariant-4/5 territory even though it lives on the recipient side, not the bus's WAL).
+GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: a validly-signed message can be replayed VERBATIM by anyone who saw it once (including a malicious bus), and Ed25519 verification of a replayed message succeeds every time because nothing about the signature changes. Do not let an implementer assume signing solves this -- it does not, and the SIGN epic description says so explicitly. This task specifies and implements the defence: AMENDED 2026-08-14 by SIGN-1-FU-REORDER-WATERMARK -- the original wording specified the defect that task removed, and must not be built. Freshness is enforced SERVER-SIDE, AT INGEST: the bus refuses an already-accepted signed message before it is ever served. The recipient performs NO sequence-based freshness check. It deduplicates on message_id and treats its read cursor as an OPAQUE server-assigned DELIVERY POSITION, handed back unmodified. THE SEQUENCE IS AN IDENTITY, NOT AN ORDERING OR FRESHNESS TOKEN: since SIGN-1 it is minted when a client RESERVES, not when it sends, so a message with a LOWER sequence arriving AFTER a higher one is a normal, correct delivery. A recipient that rejects, reorders or discards on sequence re-implements SIGN-1-FU-REORDER-WATERMARK client-side and permanently loses messages the bus has already acknowledged -- in every client rather than in one server. Do NOT specify a recipient-side cursor that "MUST only advance, never rewind" over sequences, and do NOT reject a message whose sequence is <= any recipient-side high-water mark. State plainly what this does and does not cover: it defeats verbatim replay of a message already delivered; it does NOT provide encryption or hide metadata (accepted per RATCHET-2's rescope). Tests: replaying the exact same signed envelope after successful delivery is rejected AT THE BUS, before it is served; a message whose sequence is BELOW one the recipient has already accepted is DELIVERED to the calling agent unchanged (this is the regression test for SIGN-1-FU-REORDER-WATERMARK -- it must be impossible to write a conforming recipient that drops it); deduplication is keyed on message_id and is proven to survive a recipient-side restart.
 
 ## Relations (authoritative)
 
@@ -42,6 +42,8 @@ GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: 
 
 - [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
 - [SIGN-1](../SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
+- [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (superseded)
+- [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

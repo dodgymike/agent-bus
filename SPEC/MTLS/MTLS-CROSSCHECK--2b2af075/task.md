@@ -5,13 +5,13 @@
 | Public id | `2b2af075-a295-4cf3-9826-b1a3554c8795` |
 | Key | MTLS-CROSSCHECK |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:50.814945+00:00 |
-| Updated | 2026-08-07T12:09:34.319097+00:00 |
+| Updated | 2026-08-14T20:09:26.288591+00:00 |
 | Completed | — |
 
 ## Proof command

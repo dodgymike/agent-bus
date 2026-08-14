@@ -10,7 +10,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| RATCHET-2 | RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… | todo | P1 | [task.md](RATCHET-2--ade31a62/task.md) | relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [CRYPTO-3](../CRYPTO/CRYPTO-3--dd1066af/task.md) [RELAY-2](../RELAY/RELAY-2--654140d7/task.md) [CRYPTO-4](../CRYPTO/CRYPTO-4--13f3947e/task.md) [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) |
+| RATCHET-2 | RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… | todo | P1 | [task.md](RATCHET-2--ade31a62/task.md) | relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [CRYPTO-3](../CRYPTO/CRYPTO-3--dd1066af/task.md) [RELAY-2](../RELAY/RELAY-2--654140d7/task.md) [CRYPTO-4](../CRYPTO/CRYPTO-4--13f3947e/task.md) [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) +2 more |
 | RATCHET-6 | RATCHET-6: RFC 8032 Ed25519 known-answer tests wired into the sign/verify implementation | todo | P1 | [task.md](RATCHET-6--fd0f3ca3/task.md) | relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md) [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) |
 
 ## Closed tasks (6) — done, cancelled, superseded

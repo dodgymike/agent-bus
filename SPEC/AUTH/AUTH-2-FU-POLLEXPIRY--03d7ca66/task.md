@@ -36,7 +36,7 @@ Origin: security audit of AUTH-2, 2026-08-02, found forward-looking. Authenticat
 
 - [AUTH-2](../AUTH-2--4b45a6d8/task.md) — AUTH-2: Token verification middleware (done)
 - [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
-- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (todo)
+- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -45,7 +45,7 @@ Origin: security audit of AUTH-2, 2026-08-02, found forward-looking. Authenticat
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (todo)
+- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
 
 ---
 

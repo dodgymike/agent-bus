@@ -59,7 +59,7 @@ GATED on IDEM-1 (payload fingerprint) and IDEM-2 (stored fingerprint). This is t
 - [MSG-2](../../MSG/MSG-2--50995c75/task.md) — MSG-2: POST /v1/broadcast (done)
 - [POLL-1](../../POLL/POLL-1--1b0635b9/task.md) — POLL-1: GET /v1/wait -- long-poll endpoint (done)
 - [RELAY-1](../../RELAY/RELAY-1--9bc9d6c4/task.md) — RELAY-1: Peer enrolment + initial agent-list exchange (done)
-- [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor (todo)
+- [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- enforced SERVER-SIDE at ingest, never by recipient-side seque… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

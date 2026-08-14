@@ -46,7 +46,7 @@ RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify;
 - [DOCS-2](../../DOCS/DOCS-2--41c52cfa/task.md) — DOCS-2: PROTOCOL.md -- wire protocol + on-disk format (todo)
 - [DOCS-3](../../DOCS/DOCS-3--a24bb214/task.md) — DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table (todo)
 - [SIGN-1](../../SIGN/SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
-- [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor (todo)
+- [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- enforced SERVER-SIDE at ingest, never by recipient-side seque… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 
