@@ -80,14 +80,21 @@ func TestStoreAppendOrdering(t *testing.T) {
 		t.Fatalf("Head() = %d after appending 1 then 7, want 7", got)
 	}
 
+	// SIGN-1-FU-OUTOFORDER-POISON retired the strictly-increasing rule: since
+	// SIGN-1 the sequence is minted before the client signs, so a lower number
+	// legitimately lands after a higher one and must be ACCEPTED. What survives
+	// is the duplicate rule (store.ErrDuplicateSequence) and the head, which
+	// never rewinds. wantCount is the retained count AFTER the case, so the
+	// accepted late insert is accounted rather than assumed away.
 	cases := []struct {
-		name string
-		seq  uint64
-		want error
+		name      string
+		seq       uint64
+		want      error
+		wantCount int
 	}{
-		{"Zero", 0, store.ErrInvalidMessage},
-		{"BehindHead", 3, store.ErrOutOfOrder},
-		{"AtHead", 7, store.ErrOutOfOrder},
+		{"Zero", 0, store.ErrInvalidMessage, 2},
+		{"BehindHeadIsAccepted", 3, nil, 3},
+		{"AtHeadIsADuplicate", 7, store.ErrDuplicateSequence, 3},
 	}
 	if len(cases) == 0 {
 		t.Fatal("the out-of-order table is empty")
@@ -102,10 +109,10 @@ func TestStoreAppendOrdering(t *testing.T) {
 				t.Fatalf("Append(seq=%d) = %v, want %v", c.seq, err, c.want)
 			}
 			if got := s.Head(); got != 7 {
-				t.Fatalf("a rejected Append moved the head to %d, want 7", got)
+				t.Fatalf("Append(seq=%d) moved the head to %d, want 7 — the head is the highest sequence EVER appended and never rewinds", c.seq, got)
 			}
-			if count, _, _, _, _ := s.Stats(); count != 2 {
-				t.Fatalf("a rejected Append changed the retained count to %d, want 2", count)
+			if count, _, _, _, _ := s.Stats(); count != c.wantCount {
+				t.Fatalf("after Append(seq=%d) the retained count is %d, want %d", c.seq, count, c.wantCount)
 			}
 		})
 	}

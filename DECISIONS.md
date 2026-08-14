@@ -5315,3 +5315,73 @@ file's append-only rule; the rest of that paragraph still holds — **no running
 (`RELAY-45-FU-CLI`)**, so the surface remains operator-unreachable.
 
 <!-- ===== END 2026-08-14 RELAY-6 amendment (feature-runner) ===== -->
+
+<!-- ===== BEGIN 2026-08-14 SIGN-1-FU-OUTOFORDER-POISON ===== -->
+
+## 2026-08-14 — SIGN-1-FU-OUTOFORDER-POISON: the store's strictly-increasing rule is retired. Two narrowings, stated before the justification
+
+### What is narrowed
+
+`internal/store/Append` no longer requires `m.Seq > head`. Two guarantees the old rule provided are
+deliberately given up, and neither is a side effect:
+
+1. **Duplicate DETECTION is now exact only within the RETAINED window.** Inside it, a re-applied
+   sequence is caught and reported as `ErrDuplicateSequence`. Across the region retention has already
+   dropped, `prunedHead` is a high-water mark, not a set: it PREVENTS the message being served a
+   second time, but it cannot DISTINGUISH a genuine double-apply (an invariant 1 breach) from a
+   merely very late first arrival, so the reissue is prevented but **not detected**. The old rule
+   caught it. This one does not.
+2. **An acknowledged, fsynced message may now be retained by nobody, and may never be delivered.** A
+   sequence arriving at or below `prunedHead` returns `nil` and is dropped from the serving copy; a
+   sequence arriving below the head is retained, but a reader whose cursor has already passed that
+   position never receives it and its parked long poll is never woken. From that recipient's point of
+   view the message was lost.
+
+**Invariant 1 itself is NOT narrowed.** Ids are still server-minted and never reused, and the head
+still never rewinds — it is assigned only under `m.Seq > s.head`. What is narrowed is the store's
+defensive ENFORCEMENT POINT for invariant 1, not the invariant. The 2026-08-02
+reaffirmed-without-narrowing ruling stands.
+
+### The fact that forces it
+
+SIGN-1 made a send two-step: `hub.Mint` allocates and durably BURNS a sequence so the CLIENT can sign
+it, and only then does the client send. Reservations live for `hub.MintTTL`, so two agents holding
+numbers at once and spending them in the other order is the ordinary shape of the protocol, not a
+race. `hub.publish` calls `store.Append` AFTER the two-phase durable write has committed and fsynced
+(invariant 4), so refusing the late arrival orphaned a record already on disk and set `h.poisoned`
+permanently — and on every subsequent start recovery discarded it again, loudly, for ever. Any
+enrolled agent could stop the bus with two mints and two sends. Reproduced live, twice, at P0.
+
+Making the at-or-below-`prunedHead` case an ERROR would reopen a narrower version of exactly that
+DoS: an agent holding a reservation across a byte-pressure prune would poison the bus. So it returns
+`nil`.
+
+### Why this is the right way round, and what is bought back
+
+Invariant 6's ruling is that a discard is sanctioned and a SILENT discard is the defect. Both
+narrowed paths are therefore made LOUD: the at-or-below-`prunedHead` branch logs a WARN that names
+BOTH readings rather than reporting the benign one as fact, and the ordinary late insert logs a WARN
+naming the delivery consequence and the follow-up. Both are pinned by tests that go RED when the call
+is deleted.
+
+Trading a whole-bus halt any enrolled agent can trigger at will for a missed delivery that is logged
+is the right direction, and it is emphatically not the end state. The delivery gap is filed as
+`SIGN-1-FU-REORDER-WATERMARK` and needs a reorder watermark — "no sequence <= W can still arrive" —
+which this package cannot compute, because the answer lives in the hub's table of outstanding mints.
+There is deliberately NO watermark API in `internal/store` for nothing to call. **Wiring relay ingest
+into a served acceptor remains blocked on that task** (security's ruling, restated): `IngestRelayed`
+lets a peer bus advance the local head with no reservation of its own, which widens the
+message-suppression primitive from "any enrolled local agent" to "any peered bus".
+
+Two smaller consequences are written up where they live rather than here: the age bound in
+`pruneLocked` is now soft by at most `hub.MintTTL`, in the OVER-retention direction; and the two new
+WARN lines are uncapped on the recovery path, filed with `SIGN-1-FU-STORE-LOGGER`.
+
+### What must not drift back
+
+Do not restore "strictly greater than the head". Do not turn the at-or-below-`prunedHead` branch into
+an error. Do not sort the serving copy on `SentAt` — that destroys the sequence ordering `Since`
+binary-searches. And do not let the P1 wording in `Append` drift back into claiming `prunedHead`
+DETECTS a reissue; it does not.
+
+<!-- ===== END 2026-08-14 SIGN-1-FU-OUTOFORDER-POISON ===== -->

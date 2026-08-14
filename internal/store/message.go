@@ -92,9 +92,31 @@ var (
 	// recovery path and by the constructor on the write path.
 	ErrInvalidMessage = errors.New("store: invalid message record")
 
-	// ErrOutOfOrder reports an Append whose sequence is not strictly greater
-	// than the sequence already at the head of the store.
-	ErrOutOfOrder = errors.New("store: message sequence is not strictly increasing")
+	// ErrDuplicateSequence reports an Append whose sequence is ALREADY held by
+	// the serving copy. It replaced ErrOutOfOrder in
+	// SIGN-1-FU-OUTOFORDER-POISON.
+	//
+	// (a) What it means: this exact sequence has already been applied. Either a
+	// replay is folding one durable entry in twice, or the write path handed the
+	// same number out twice.
+	//
+	// (b) It is an INVARIANT 1 breach — ids and sequence numbers are minted by
+	// the server and are NEVER reused — so it stays LOUD, and a hub that
+	// poisons itself on it is RIGHT to. This is the one failure Append exists to
+	// catch, and relaxing the ordering rule did not relax it.
+	//
+	// (c) "Behind the head" is NO LONGER an error, and must not be turned back
+	// into one. SIGN-1 made a send two-step: hub.Mint allocates and durably
+	// burns a sequence so the CLIENT can sign it, and only then does the client
+	// send. Reservations live for hub.MintTTL, so two agents routinely hold
+	// numbers at once and spend them in either order. The old rule (strictly
+	// greater than the head) was only ever true because the sequence used to be
+	// allocated immediately before the append, under the same lock — commit
+	// order equalled allocation order by construction. It no longer does. Seq is
+	// now a PRE-ASSIGNED IDENTITY, not a commit-order position, and refusing a
+	// late arrival here rejects a record the hub has ALREADY committed and
+	// fsynced (invariant 4), which orphans it on disk and poisons the bus.
+	ErrDuplicateSequence = errors.New("store: message sequence has already been applied")
 )
 
 // Message is one message in the serving copy.

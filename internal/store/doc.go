@@ -20,6 +20,16 @@
 //     Retention is 1 day or 1 GiB, whichever comes first (user decision,
 //     2026-08-02), and drops whole messages from the oldest end only.
 //
+// Since SIGN-1 a sequence is minted (and durably burned) BEFORE the client
+// signs and sends, so messages do not arrive in sequence order and Store.Append
+// inserts a late one into position rather than refusing it. Three consequences
+// are written up where they live: the delivery gap that leaves a late arrival
+// undelivered to a reader that has already passed it — filed as
+// SIGN-1-FU-REORDER-WATERMARK, Spec Server task
+// c829af9a-4418-437a-a0f8-34ef2f5d15d0 (Store, "KNOWN GAP"); the bounded softening of
+// the age bound (pruneLocked); and the narrowed duplicate DETECTION across the
+// already-pruned region (Append's P1 and the prunedHead branch).
+//
 // Nothing in this package interprets a message body. It is carried and hashed
 // as opaque bytes, which is what lets the CRYPTO epic put ciphertext there
 // without anything on this path changing.
