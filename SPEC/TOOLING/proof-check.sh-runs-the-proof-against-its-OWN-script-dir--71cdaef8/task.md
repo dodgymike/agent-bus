@@ -51,7 +51,7 @@ DEFINITION OF DONE: (1) proof-check.sh either runs the proof in the CALLER'S cwd
 - [PROOF-CHECK-FU-RECURSION](../PROOF-CHECK-FU-RECURSION--69eb6f56/task.md) — PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes wh… (todo)
 - [RELAY-27](../../RELAY/RELAY-27--f417c6a0/task.md) — RELAY-27: fix internal/relay/signed.go:306 to wrap attest.Verify errors with %w, not %v (cancelled)
 - [RELAY-27](../../RELAY/RELAY-27--c2486740/task.md) — RELAY-27: relay error taxonomy collapses ALL FIVE attest sentinels to ErrNoSignerKey/bad_… (done)
-- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (todo)
+- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (done)
 
 ---
 

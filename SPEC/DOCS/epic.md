@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**14 open / 17 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
+**16 open / 20 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (14)
+## Open tasks (16)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -18,20 +18,23 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | IDEM-11-FU-PAPERTRAIL | IDEM-11-FU-PAPERTRAIL: DECISIONS.md and CONTRACTS-HTTP.md state the OPPOSITE of what IDEM… | todo | P1 | [task.md](IDEM-11-FU-PAPERTRAIL--c416a458/task.md) | — | [IDEM-11](../IDEM/IDEM-11--8e2c4de3/task.md) [IDEM-10](../IDEM/IDEM-10--b28e5153/task.md) [IDEM-11-FU-DOWNGRADE](../DUR/IDEM-11-FU-DOWNGRADE--84f5ad57/task.md) |
 | MSG-FU-SUFFIXFLOOR-FU-DOCS | MSG-FU-SUFFIXFLOOR-FU-DOCS: PROTOCOL.md and internal/ids docs still say the suffix wiring… | todo | P1 | [task.md](MSG-FU-SUFFIXFLOOR-FU-DOCS--e5fa08ba/task.md) | blocks [CONTEXT-PROTOCOL-WALFLOOR-DEDUP](../CONTEXT/CONTEXT-PROTOCOL-WALFLOOR-DEDUP--1e9cec15/task.md) | [MSG-FU-SUFFIXFLOOR](../ID/MSG-FU-SUFFIXFLOOR--94159d93/task.md) |
 | 0ba2372a-09f7-4f05-bd33-98a5f80e0e6f | Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE | todo | P2 | [task.md](Journal-catch-up-DECISIONS.md-AGENT_LOG.md-entries-owed--0ba2372a/task.md) | blocks [CONTEXT-LOG-RETIRE](../CONTEXT/CONTEXT-LOG-RETIRE--116179c8/task.md) | [INVITE-MINT](../INVITE/INVITE-MINT--1d0d0e60/task.md) [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
+| 4c97d561-e81f-40a6-a1fe-3c9976d790f1 | INVARIANTS.md invariant 1's entry has no pointer to the 2026-08-14 SIGN-1-FU-OUTOFORDER-P… | todo | P2 | [task.md](INVARIANTS.md-invariant-1-s-entry-has-no-pointer-to-the--4c97d561/task.md) | — | [SIGN-1-FU-OUTOFORDER-POISON](../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) |
 | 83850937-a3c9-4b90-8ac6-19655233cb13 | DECISIONS.md carries the pre-correction (wrong) accepted-limit sentence for the MAC key;… | todo | P2 | [task.md](DECISIONS.md-carries-the-pre-correction-wrong-accepted-l--83850937/task.md) | — | [DUR-12](../DUR/DUR-12--cbc9ab0c/task.md) |
 | DISCOVERY-DOC-FU-README | DISCOVERY-DOC-FU-README: README.md still documents the old three-field /v1/info body | todo | P2 | [task.md](DISCOVERY-DOC-FU-README--be3c84f3/task.md) | blocks [HANDOVER-README](../HANDOVER/HANDOVER-README--1dc9cf90/task.md) | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
 | a695f85f-0c69-42a8-a653-deed4960a610 | PROTOCOL.md §8 cites Spec Server task id INVITE-PEERGUARD (f5d91dbe) as if it were a comm… | todo | P2 | [task.md](PROTOCOL.md-8-cites-Spec-Server-task-id-INVITE-PEERGUARD--a695f85f/task.md) | — | [MTLS-RELAYGUARD](../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) [INVITE-PEERGUARD](../INVITE/INVITE-PEERGUARD--f5d91dbe/task.md) [DOCS-2](DOCS-2--41c52cfa/task.md) [e120153b-9d8a-4b6a-bd4e-89431954496b](../DUR/Fix-WAL-recovery-reissuing-a-discarded-tail-record-index--e120153b/task.md) [db350e39-3dde-4166-b241-b21fa4635359](../DUR/Whole-log-quarantine-reissued-EVERY-sequence-number-ever--db350e39/task.md) |
+| c716f8e7-ad9c-4af9-9fac-1bdb75c8f900 | PROTOCOL.md:1002 says internal/relay is 'imported by nothing' -- false since ed77bba (int… | todo | P2 | [task.md](PROTOCOL.md-1002-says-internal-relay-is-imported-by-noth--c716f8e7/task.md) | — | [SIGN-7](../SIGN/SIGN-7--aeb90793/task.md) [RELAY-24](../RELAY/RELAY-24--e303c624/task.md) [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-13-FU-DOCS](../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) [MTLS-CLIENTCERT](../MTLS/MTLS-CLIENTCERT--0bc7a2eb/task.md) [RELAY-21](../RELAY/RELAY-21--f5ce883e/task.md) |
 | f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78 | Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:12… | todo | P2 | [task.md](Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md) | blocks [CONTEXT-DRIFT-WRAPPERS](../CONTEXT/CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md)<br>blocks [HANDOVER-README](../HANDOVER/HANDOVER-README--1dc9cf90/task.md) | [CONTRACTS-SPLIT](CONTRACTS-SPLIT--360a2679/task.md) [DUR-11-FU-CONTRACTS](DUR-11-FU-CONTRACTS--5b178dde/task.md) |
 | 6b44ee89-612a-4d3d-9c39-1302c07d3c39 | AGENT_PROTOCOL.md error-block label says remedy: but the CLI prints try: | todo | P3 | [task.md](AGENT_PROTOCOL.md-error-block-label-says-remedy-but-the--6b44ee89/task.md) | — | [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
 | 88781750-0005-4c2f-8375-2d93dc1560b8 | DECISIONS.md:1302 cites a superseded bus-serve.sh line for the plaintext-probe follow-on | todo | P3 | [task.md](DECISIONS.md-1302-cites-a-superseded-bus-serve.sh-line-f--88781750/task.md) | follow-up of [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) | [MTLS-LISTENER](../MTLS/MTLS-LISTENER--17e70a7e/task.md) [MTLS-VERIFY](../MTLS/MTLS-VERIFY--9dab7303/task.md) [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) |
 
-## Closed tasks (3) — done, cancelled, superseded
+## Closed tasks (4) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | DOCS-1 | DOCS-1: README.md + DECISIONS.md seed | done | P0 | [task.md](DOCS-1--909e2152/task.md) | — | — |
 | CONTRACTS-SPLIT | CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every pro… | done | P1 | [task.md](CONTRACTS-SPLIT--360a2679/task.md) | — | [AUTH-1-FU-LISTENADDR](../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) [LISTENADDR-FU-CONTRACTS](LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) [DUR-11-FU-CONTRACTS](DUR-11-FU-CONTRACTS--5b178dde/task.md) [ID-2-WIRING-SEAL](../ID/ID-2-WIRING-SEAL--8c9b6489/task.md) [ID-2-WIRING-OBSERVER](../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) [AUTH-1-FU-ACTIVECAP](../AUTH/AUTH-1-FU-ACTIVECAP--2d92b699/task.md) +1 more |
 | LISTENADDR-FU-CONTRACTS | LISTENADDR-FU-CONTRACTS: CONTRACTS.md CLI-flag table still shows -listen default :8080 | done | P1 | [task.md](LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) | — | [AUTH-1-FU-LISTENADDR](../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) [AUTH-1-FU-PENDINGCAP](../AUTH/AUTH-1-FU-PENDINGCAP--687ad8c9/task.md) |
+| CONTRACTS-CLI-1632-STALE | CONTRACTS-CLI.md:1632 states a false fact and dangles a reference to a comment the invite… | done | P2 | [task.md](CONTRACTS-CLI-1632-STALE--ae5011bf/task.md) | relates to [INVITE-CLIENT-FU-PRUNETTL-RACE](../INVITE/INVITE-CLIENT-FU-PRUNETTL-RACE--da0b3a39/task.md) | [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE/INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--970e2a81/task.md) [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--9c85d8df/task.md) [INVITE-CLIENT-FU-PRUNETTL-RACE](../INVITE/INVITE-CLIENT-FU-PRUNETTL-RACE--da0b3a39/task.md) |
 
 ## Epic description
 

@@ -59,8 +59,9 @@ GATED on SIGN-1/SIGN-2. Replaces the encryption-specific scope of superseded CRY
 - [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
 - [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md) — CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path (deferred)
 - [RATCHET-4](../../RATCHET/RATCHET-4--58fd8bc3/task.md) — RATCHET-4: Broadcast fan-out under pairwise ratchets (superseded)
+- [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)
 - [c55bccbb-0c80-4c82-84fb-bcb3437d8f73](../../DUR/CONTRACTS-ONDISK.md-document-the-bus.audit-on-disk-file--c55bccbb/task.md) — CONTRACTS-ONDISK.md: document the bus.audit on-disk file (DUR-5 landed, wave 217a3c0, doc… (todo)
-- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../../TOOLING/proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (todo)
+- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../../TOOLING/proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (done)
 
 ---
 

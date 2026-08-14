@@ -5,14 +5,14 @@
 | Public id | `97f3f1b4-8575-4f63-9196-96bfbc049510` |
 | Key | RELAY-13 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:42.337436+00:00 |
-| Updated | 2026-08-14T12:34:43.255078+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T17:58:09.333805+00:00 |
+| Completed | 2026-08-14T17:58:09.333787+00:00 |
 
 ## Proof command
 
@@ -22,7 +22,7 @@ go test -race -run TestEnrolRegistersMessagingPublicKey ./internal/httpapi
 
 ## Status note
 
-CODE GENUINELY LANDED (server half 61a59eb, client half f1a787c-adjacent, both gated PASS multiple rounds -- verified by reading code directly, not the description, 2026-08-14): messaging_public_key validated/stored server-side (internal/auth/service.go, internal/httpapi/auth.go), client mints+sends it (client/enrol.go:139 MessagingPublicKey field, :325/:343 derivation), CONTRACTS-HTTP.md documents the wire field, two proof tests exist and the packages build clean. BLOCKED FROM COMPLETION solely by RELAY-13-FU-DOCS (7f3a4b80, todo, deliberately held -- see its own status_note): AGENT_PROTOCOL.md and CONTRACTS-CLI.md still assert the OPPOSITE of this shipped behaviour in three places. A task is not complete until its documentation is true (CLAUDE.md) -- this is not neglect, it is a real, correctly-recorded block. Real blocks relation wired: RELAY-13-FU-DOCS blocks this task.
+UPDATE 2026-08-14: RELAY-13-FU-DOCS is now 4/5 landed (0d31d2f) -- but still blocking this task. The 5th site (client/client.go doc comment) is held back because that file carries two ungated non-comment hunks from the live INVITE-CLIENT agent (endpointWith, resolvePinsWith) -- blocked on INVITE-CLIENTs own commit, not on anyone writing text. This task stays blocked a little longer for the same reason as before, just closer to resolved.
 
 ## Description
 
@@ -52,7 +52,8 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 
 
 - [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md) — CRYPTO-3: Enrolment mints and registers the second (messaging) keypair, bound to the serv… (todo)
-- [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
+- [INVITE-CLIENT](../../INVITE/INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (done)
+- [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -62,10 +63,15 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 
 
 - [11d171c2-9f5a-427f-b4fe-cdbfc9f0ad48](../../IDEM/Stale-invariant-10-unconditional-disconnect-prose-WIDENE--11d171c2/task.md) — Stale invariant-10 unconditional-disconnect prose -- WIDENED 2026-08-08: 6 files, 14 site… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [8ef2c753-daf1-4433-86e3-4eee4ad470dc](../../UNASSIGNED/AST-guard-assert-a-doc-comment-attaches-to-the-declarati--8ef2c753/task.md) — AST guard: assert a doc comment attaches to the declaration it names (repo-wide godoc-att… (todo)
-- [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
+- [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (done)
 - [RELAY-13-FU-KEYGEN](../../UNASSIGNED/RELAY-13-FU-KEYGEN--518b18c0/task.md) — RELAY-13-FU-KEYGEN: 3 error-message remedy strings name the nonexistent agent-busctl keyg… (todo)
 - [RELAY-13-FU-MSGKEYPOP](../RELAY-13-FU-MSGKEYPOP--59db5455/task.md) — RELAY-13-FU-MSGKEYPOP: no proof-of-possession of the messaging private key at enrolment,… (todo)
+- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
+- [c716f8e7-ad9c-4af9-9fac-1bdb75c8f900](../../DOCS/PROTOCOL.md-1002-says-internal-relay-is-imported-by-noth--c716f8e7/task.md) — PROTOCOL.md:1002 says internal/relay is 'imported by nothing' -- false since ed77bba (int… (todo)
+- [fbb16f9b-1b81-4fd0-a60f-5b2a76806bff](../internal-httpapi-peermount.go-pre-auth-prober-does-not-e--fbb16f9b/task.md) — internal/httpapi/peermount.go: 'pre-auth prober does not exist' overstates ruling (h), an… (todo)
 
 ---
 

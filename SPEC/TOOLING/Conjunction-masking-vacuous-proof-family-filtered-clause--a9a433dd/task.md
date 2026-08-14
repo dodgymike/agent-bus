@@ -60,6 +60,8 @@ REPLACEMENT proof_cmd (2026-08-02, main/orchestrator), verified clause-by-clause
 
 
 - **blocks** [HANDOVER-BACKLOG-RECONCILE](../../HANDOVER/HANDOVER-BACKLOG-RECONCILE--43d14776/task.md)
+- **relates to** [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md)
+- **relates to** [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -82,7 +84,7 @@ REPLACEMENT proof_cmd (2026-08-02, main/orchestrator), verified clause-by-clause
 
 - [932fe938-0e42-42d8-802d-ff018cb6c955](../../PROCESS/Audit-stored-proof_cmds-for-the-subtest-skip-vacuous-sha--932fe938/task.md) — Audit stored proof_cmds for the subtest-skip vacuous shape (parent-PASS/hidden-child-SKIP… (todo)
 - [HANDOVER-BACKLOG-RECONCILE](../../HANDOVER/HANDOVER-BACKLOG-RECONCILE--43d14776/task.md) — HANDOVER-BACKLOG-RECONCILE: the inherited backlog stops lying about what is in flight (todo)
-- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (todo)
+- [cea09b96-72db-40f1-84b4-c2e227eae1cf](../proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (done)
 
 ---
 

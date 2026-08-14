@@ -5,20 +5,24 @@
 | Public id | `cea09b96-72db-40f1-84b4-c2e227eae1cf` |
 | Key | _(null in the export)_ |
 | Epic | [TOOLING](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | tooling |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T14:38:07.492809+00:00 |
-| Updated | 2026-08-08T14:38:07.492809+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T14:29:53.868362+00:00 |
+| Completed | 2026-08-14T14:29:40.467697+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh "go test -run TestEnrolmentEpoch ./internal/hub" | grep -q 'verdict=VACUOUS'
+bash scripts/proof-check_test.sh
 ```
+
+## Status note
+
+DONE 2026-08-14 at 3d9955afa8ebdcf0d7cc1a2fc09deabc1feada78. Fresh original-shape proof is correctly VACUOUS (checker rc=4; tests_run=4, top_level=1, skipped=3); stable scripts/proof-check_test.sh proof PASS. All mandated gates completed. Deliberately adversarial TestMain/stdout authentication remains separate nonblocking P2 fe0d9030-f95f-49b9-ab3b-68c96860df8a.
 
 ## Description
 
@@ -76,6 +80,7 @@ proof_cmd confirmed RED on 2026-08-08 (before any fix):
 - [84b76d5e-fe02-4651-9828-caba3d82606b](../Proof-command-guard-a-run-pattern-that-matches-no-test-m--84b76d5e/task.md) — Proof-command guard: a \`-run\` pattern that matches no test must FAIL, not pass vacuously (done)
 - [SIGN-3](../../SIGN/SIGN-3--f2daa6bc/task.md) — SIGN-3: Broadcast signature covers the recipient set (prevents split-content broadcasts) (todo)
 - [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](../Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md) — Conjunction-masking vacuous-proof family: filtered-clause proof_cmds hidden by an unfilte… (todo)
+- [fe0d9030-f95f-49b9-ab3b-68c96860df8a](../proof-check.sh-cannot-authenticate-go-test-evidence-agai--fe0d9030/task.md) — proof-check.sh cannot authenticate go test evidence against adversarial TestMain output (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -87,6 +92,7 @@ proof_cmd confirmed RED on 2026-08-08 (before any fix):
 - [71cdaef8-c757-4ba9-a693-a8f744070d08](../proof-check.sh-runs-the-proof-against-its-OWN-script-dir--71cdaef8/task.md) — proof-check.sh runs the proof against its OWN script directory repo root, not the callers… (in_progress)
 - [932fe938-0e42-42d8-802d-ff018cb6c955](../../PROCESS/Audit-stored-proof_cmds-for-the-subtest-skip-vacuous-sha--932fe938/task.md) — Audit stored proof_cmds for the subtest-skip vacuous shape (parent-PASS/hidden-child-SKIP… (todo)
 - [HANDOVER-CHECK](../../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) — HANDOVER-CHECK: one command that tells you the health of this repo, plus its recorded out… (todo)
+- [fe0d9030-f95f-49b9-ab3b-68c96860df8a](../proof-check.sh-cannot-authenticate-go-test-evidence-agai--fe0d9030/task.md) — proof-check.sh cannot authenticate go test evidence against adversarial TestMain output (todo)
 
 ---
 

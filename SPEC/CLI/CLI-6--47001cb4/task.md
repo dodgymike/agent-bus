@@ -5,20 +5,24 @@
 | Public id | `47001cb4-bc0f-44f8-929e-ac51bc6d0fb3` |
 | Key | CLI-6 |
 | Epic | [CLI](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P2 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T12:44:34.429708+00:00 |
-| Updated | 2026-08-14T12:03:46.121916+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T13:18:49.712770+00:00 |
+| Completed | 2026-08-14T13:18:49.712753+00:00 |
 
 ## Proof command
 
 ```sh
 go test -race -run 'TestCLILog' ./cmd/agent-bus/... && go run ./cmd/agent-bus log --help 2>&1 | grep -qi 'metadata only'
 ```
+
+## Status note
+
+Code complete, gates PASSED, NOT yet committed — awaiting the orchestrator's coordinated commit. cmd/agent-bus/main.go is co-owned by three in-flight tasks (CLI-11's key dispatch, CLI-6's log dispatch, INVITE-GATE's server wiring) and does not compile against HEAD, so CLI-6's registration cannot land alone. Proof PASS in a clean HEAD overlay: verdict=PASS class=test,file-assertion exit=0 tests_run=88 top_level=26 skipped=0 failed=0. NOTE: this does NOT make scripts/fed-smoke.sh pass — it has two independent remaining blockers, fed-smoke.sh:191 still invoking agent-busctl (handed to RELAY-25) and the absence of any producer of a multi-hop bus_path (RELAY-20/21/24).
 
 ## Description
 
@@ -67,9 +71,12 @@ RELAY-25 WIDENING (2026-08-14, owner direction): the audit/log CLI output must e
 
 
 - [CLI-1](../CLI-1--0495d133/task.md) — CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single clien… (done)
+- [CLI-11](../../UNASSIGNED/CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (done)
 - [CLI-8](../CLI-8--ae4caacc/task.md) — CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
 - [DUR-5](../../DUR/DUR-5--a7123e88/task.md) — DUR-5: Append-only message audit log (done)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
+- [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -79,9 +86,10 @@ RELAY-25 WIDENING (2026-08-14, owner direction): the audit/log CLI output must e
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [CLI-6-FU-FOLLOW](../CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
+- [CLI-6-FU-NITS](../CLI-6-FU-NITS--643749b3/task.md) — CLI-6-FU-NITS: three non-blocking nits in \`agent-bus log\` raised by the reviewer and secu… (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
-- [RELAY-13-FU-DOCS](../../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [fc8cd234-d275-43a1-9cb0-d10bca4a4086](../../PROCESS/Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) — Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… (todo)
 

@@ -54,7 +54,7 @@ _None recorded._
 
 
 - [CLI-1-FU-BINARYNAME](../../CLI/CLI-1-FU-BINARYNAME--6a1eb5fa/task.md) — CLI-1-FU-BINARYNAME: Decide the INSTALLED name of the client binary (done)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [MTLS-BUSCERT](../../MTLS/MTLS-BUSCERT--93f0dc19/task.md) — MTLS-BUSCERT: generate/load the bus's self-signed certificate + private key in the data d… (done)
 - [e36661b0-687e-465e-b72f-e33245088e38](../../UNASSIGNED/keypatch-probe-spec-keeper-bug-repro-safe-to-cancel--e36661b0/task.md) — keypatch-probe (spec-keeper bug repro, safe to cancel) (cancelled)
 

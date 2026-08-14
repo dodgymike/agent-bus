@@ -5,19 +5,19 @@
 | Public id | `0f7275b9-c45e-41b8-9f6e-3c7b1ec6ec00` |
 | Key | RELAY-6 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:56:37.368139+00:00 |
-| Updated | 2026-08-14T12:35:47.955530+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T16:48:54.744187+00:00 |
+| Completed | 2026-08-14T16:48:54.744171+00:00 |
 
 ## Proof command
 
 ```sh
-grep -n 'every bus-to-bus link is an SSH tunnel' DECISIONS.md && grep -n 'INVITE-GATE does not block the FEDERATION epic' DECISIONS.md
+grep -qF '(c-AMENDED)' DECISIONS.md && grep -qF '(b-CLARIFIED)' DECISIONS.md && grep -qF 'THIS RULING NARROWS INVARIANT 3' DECISIONS.md && grep -qF 'option (a), not (b)' DECISIONS.md && grep -qF 'observable PRE-AUTH' DECISIONS.md && grep -qF 'ONE FACTOR authorises on the peer surface' DECISIONS.md && grep -qF 'satisfiable but WRONG' DECISIONS.md && grep -qF 'RETIRED AND REPLACED, not deleted' DECISIONS.md
 ```
 
 ## Status note
@@ -66,6 +66,7 @@ Verified RED: `grep -c 'SSH tunnel\|ssh-tunnel' DECISIONS.md` -> 0.
 
 
 - **blocks** [RELAY-18](../RELAY-18--fa5d1b0d/task.md)
+- **relates to** [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](../../TOOLING/Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -74,11 +75,11 @@ Verified RED: `grep -c 'SSH tunnel\|ssh-tunnel' DECISIONS.md` -> 0.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [INVITE-PEERGUARD](../../INVITE/INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)
 - [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-RELAYGUARD](../../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) — MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance crit… (todo)
-- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (todo)
+- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -88,11 +89,15 @@ Verified RED: `grep -c 'SSH tunnel\|ssh-tunnel' DECISIONS.md` -> 0.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
 - [RELAY-18](../RELAY-18--fa5d1b0d/task.md) — RELAY-18: Retire the relay import guard deliberately, replaced by a narrower one (done)
+- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-22](../RELAY-22--b4e45cda/task.md) — RELAY-22: Choose and wire the multi-principal relay abuse-control primitive (todo)
 - [RELAY-25-FU-REALHOST](../RELAY-25-FU-REALHOST--8708f7c9/task.md) — RELAY-25-FU-REALHOST: Real three-host SSH-tunnel federation run -- loopback smoke does no… (todo)
 - [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (todo)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
+- [f0a4eaee-8428-4b6c-8485-cf44dd9df779](../internal-httpapi-authmw.go-315-316-states-a-premise-the--f0a4eaee/task.md) — internal/httpapi/authmw.go:315-316 states a premise the security gate refuted: a peer bus… (todo)
+- [fbb16f9b-1b81-4fd0-a60f-5b2a76806bff](../internal-httpapi-peermount.go-pre-auth-prober-does-not-e--fbb16f9b/task.md) — internal/httpapi/peermount.go: 'pre-auth prober does not exist' overstates ruling (h), an… (todo)
 
 ---
 

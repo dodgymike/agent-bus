@@ -5,24 +5,24 @@
 | Public id | `5cedc580-0aa0-4575-be8c-5f70ed1da131` |
 | Key | SIGN-5 |
 | Epic | [SIGN](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | crypto |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T12:59:07.865931+00:00 |
-| Updated | 2026-08-02T12:59:07.865931+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T14:08:19.073407+00:00 |
+| Completed | 2026-08-14T14:08:19.073390+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestVerifyRejects ./internal/... -- one subtest per rejection case, each asserting non-zero exit / verify-failure, none asserting success
+bash scripts/proof-check.sh "go test -race -run TestVerifyRejects ./internal/signing"
 ```
 
 ## Description
 
-GATED on SIGN-1/SIGN-2 and CRYPTO-10's verify implementation existing (may run in parallel with CRYPTO-10 against a stub). MANDATORY, not nice-to-have, per invariant 9: broken or misused crypto fails SILENTLY -- it still 'verifies', and provides none of the protection it appears to. 'Our tests pass' is never evidence for a crypto change; a verifier that accepts everything passes every positive test ever written. This task exists specifically to make that failure mode impossible to ship undetected. Required cases, EACH proven REJECTED with a distinct assertion (not just 'an error occurred' -- assert the specific failure path fired): (1) TAMPERED BODY -- flip one byte of the signed body, signature must fail; (2) SWAPPED SENDER -- a validly-signed message re-labelled as if from a different sender must fail (proves the sender id is inside the signed bytes per SIGN-1, not just alongside them); (3) REPLAYED MESSAGE -- re-deliver an already-accepted signed envelope verbatim, must be rejected by SIGN-4's cursor even though the signature itself verifies; (4) WRONG KEY -- verify against a public key that is NOT the signer's (e.g. a different enrolled agent's real key), must fail; (5) TRUNCATED SIGNATURE -- a short/malformed signature byte string must be rejected cleanly (no panic, no out-of-bounds read -- crypto/ed25519.Verify is documented to handle this safely, confirm it and pin the confirmation in a test) . Add any other rejection case the implementation surfaces (e.g. corrupted/garbage public key bytes). Every case must have its own named test, not be folded into one assertion, so a future regression names exactly which property broke.
+GATED on SIGN-1/SIGN-2 and CRYPTO-10 verify implementation. Per invariant 9, this mandatory test-only suite prevents silent crypto misuse. A verifier cannot reject a verbatim replay of a valid envelope: Ed25519 verification succeeds unchanged. Replay acceptance is transferred to SIGN-4, whose cursor tests own that case; SIGN-5 must not claim it. Required distinct named verifier-negative cases: tampered body rejects; swapped sender rejects because sender is signed; wrong signer key rejects; truncated or malformed signature rejects cleanly without panic; include malformed public-key cases surfaced by implementation. Each case must assert its specific rejection path. Every negative must be mutation or neutering sensitive: disabling its targeted verification check must make that test RED. Scope is tests only; no production edits.
 
 ## Relations (authoritative)
 

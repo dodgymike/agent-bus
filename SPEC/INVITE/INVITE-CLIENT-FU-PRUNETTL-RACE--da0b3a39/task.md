@@ -1,0 +1,71 @@
+# INVITE-CLIENT-FU-PRUNETTL-RACE: client prunePending destroys kept key material at 24h while the server can still replay it for ~50h -- a 26-hour data-loss window
+
+| Field | Value |
+| --- | --- |
+| Public id | `da0b3a39-78e1-4b29-b185-d37e5b4bdb11` |
+| Key | INVITE-CLIENT-FU-PRUNETTL-RACE |
+| Epic | [INVITE](../epic.md) |
+| Status | todo |
+| Priority | P1 |
+| Component | client |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-14T19:00:17.432341+00:00 |
+| Updated | 2026-08-14T19:00:17.432341+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run TestClientPruneTTLExceedsServerRetention ./client
+```
+
+## Description
+
+Filed 2026-08-14. Found by security while re-verifying INVITE-CLIENT-FU-PENDINGINVITE (7bb6edf0) -- SAME CLASS as that task's own defect (a client silently destroying private key material the server would still accept), DIFFERENT MECHANISM: that one lost the key on a 409 retry race (now fixed by the resumed||409 keep guard); this one loses it on a plain timer, unconditionally, regardless of how careful the keep-guard is.
+
+THE TWO CONSTANTS, MEASURED not read (security compiled the server one to get the real value):
+  client  pendingTTL     = 24h              (client/store.go:468)
+  server  SpentRetention = 50h10m22s        (internal/invite/retention.go:129 = idem.RetentionWindow = MaxRetryHorizon * RetentionSafetyFactor)
+
+That leaves a ~26 HOUR WINDOW in which the BUS can still replay the identity -- the durable invite record still holds the original 201 body, and the server's idempotency table still holds the key -- while the CLIENT has already silently destroyed the only copy of the private half. The material is not discarded once it is worthless; it is discarded WHILE IT IS STILL REDEEMABLE. This is the project's own invariant-6 anti-pattern (silent discard is the P0 defect) applied to a private key the bus attests to peers.
+
+prunePending runs on EVERY store write, not just at some periodic sweep or at logout -- client/store.go:1082 inside update(), and again at :1339 in ListPending. It destroys silently: no warnf, no Warnings() entry (confirmed by the same security pass that found it).
+
+THE SAFETY OF THE RELATED KEEP-GUARD (INVITE-CLIENT-FU-PENDINGINVITE's resumed||409 discriminator) DEPENDS ON THIS SAME INEQUALITY HOLDING: 24h < 50h10m22s is what stops a legitimate retry from ever meeting an aged-out invite record and taking a 403-then-drop. Two constants chosen independently in two different packages (client/store.go and internal/invite/retention.go), with no cross-check and no test pinning the relation between them today.
+
+SCOPE, per the coordinator's explicit instruction: file this WITH a test pinning the inequality -- client prune interval must exceed server retention -- so the two numbers cannot drift apart again silently in either direction (either package's constant changing without the other noticing). This is a MINIMUM bar; the fuller fix (do not silently destroy key material at all, or warn loudly per invariant 6 when doing so, or raise pendingTTL to exceed SpentRetention with margin) is for whoever implements this to design, but the inequality-pinning test must exist regardless of which fix is chosen.
+
+NOT A REGRESSION: pre-existing behaviour, untouched by INVITE-CLIENT-FU-PENDINGINVITE's diff -- but that change RAISES exposure to it, since fewer records are now dropped eagerly (the new keep guard), so more records survive to hit the 24h prune than before. Security explicitly flagged it should be PRIORITISED rather than parked for exactly that reason.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **relates to** [CONTRACTS-CLI-1632-STALE](../../DOCS/CONTRACTS-CLI-1632-STALE--ae5011bf/task.md)
+- **relates to** [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) — INVITE-CLIENT-FU-PENDINGINVITE: pendingEnrolment does not record the invite id, so a mism… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CONTRACTS-CLI-1632-STALE](../../DOCS/CONTRACTS-CLI-1632-STALE--ae5011bf/task.md) — CONTRACTS-CLI.md:1632 states a false fact and dangles a reference to a comment the invite… (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

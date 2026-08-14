@@ -2,14 +2,15 @@
 
 [← all epics](../../SPEC.md)
 
-**3 open / 12 total.** Full records live in `SPEC/AGENTIF/<task>/task.md`.
+**4 open / 13 total.** Full records live in `SPEC/AGENTIF/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (3)
+## Open tasks (4)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| 4b51635d-336f-4f25-94c2-64c53578859d | AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… | todo | P1 | [task.md](AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) | — | [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) [CLI-6](../CLI/CLI-6--47001cb4/task.md) [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-13-FU-DOCS](../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) [MTLS-CLIENTCERT](../MTLS/MTLS-CLIENTCERT--0bc7a2eb/task.md) |
 | 5a900716-1916-44ac-bd5a-ff695146adc8 | Wire \`-backfill-suffix-floors\` through scripts/bus-serve.sh and document it (invariant 7… | todo | P1 | [task.md](Wire-backfill-suffix-floors-through-scripts-bus-serve.sh--5a900716/task.md) | — | — |
 | ae594fa8-03bb-4d51-aa31-641f5ddcae66 | RUN_DIR created with no ownership check -- enables binary swap and pidfile symlink attack | todo | P1 | [task.md](RUN_DIR-created-with-no-ownership-check-enables-binary-s--ae594fa8/task.md) | follow-up of [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) | [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) |
 | AGENTIF-10 | AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop | todo | P2 | [task.md](AGENTIF-10--1e837ac9/task.md) | — | [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |

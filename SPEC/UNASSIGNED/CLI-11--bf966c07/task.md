@@ -5,19 +5,19 @@
 | Public id | `bf966c07-5f99-4fe6-bb23-52868ed04c33` |
 | Key | CLI-11 |
 | Epic | [UNASSIGNED](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T11:08:39.812734+00:00 |
-| Updated | 2026-08-14T11:49:56.789053+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T13:17:20.916072+00:00 |
+| Completed | 2026-08-14T13:17:20.916055+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'set -euo pipefail; T=$(mktemp -d); trap "AGENT_BUS_RUN_DIR=$T/run AGENT_BUS_DATA_DIR=$T/data scripts/bus-serve.sh stop >/dev/null 2>&1 || true; rm -rf $T" EXIT; EMPTY=$T/empty; mkdir -p $EMPTY; go build -o $T/agent-bus ./cmd/agent-bus && ! $T/agent-bus key export-public --data-dir $EMPTY --json && test -z "$(ls -A $EMPTY)" && AGENT_BUS_RUN_DIR=$T/run AGENT_BUS_DATA_DIR=$T/data scripts/bus-serve.sh start >/dev/null && AGENT_BUS_RUN_DIR=$T/run AGENT_BUS_DATA_DIR=$T/data scripts/bus-serve.sh stop >/dev/null && test -n "$($T/agent-bus key export-public --data-dir $T/data --json | jq -r .public_key)"'
+go test -race -run TestCLIExportBusSigningPublicKey ./cmd/agent-bus
 ```
 
 ## Description
@@ -55,12 +55,15 @@ CORRECTION 2026-08-14 -- OFFLINE ONLY, not "against a running bus": the original
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [CLI-11-FU-BUSIDBOUND](../CLI-11-FU-BUSIDBOUND--82f9e452/task.md) — CLI-11-FU-BUSIDBOUND: internal/ids reads the bus-id file with an unbounded os.ReadFile (todo)
 - [CLI-11-FU-LOADONLY](../CLI-11-FU-LOADONLY--b140724b/task.md) — CLI-11-FU-LOADONLY: load-only accessors for bus key material and the bus id, so a READ ca… (todo)
 - [CLI-11-FU-STATERR](../CLI-11-FU-STATERR--555967a6/task.md) — CLI-11-FU-STATERR: invite mint tells an operator to restore a file that is present but un… (todo)
+- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
 - [CLI-6-FU-FOLLOW](../../CLI/CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
-- [RELAY-13-FU-DOCS](../../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
+- [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
+- [de0fc1df-a948-4b44-95a4-4b9d01cab267](../../TOOLING/DECISIONS.md-HTML-comment-section-fences-are-imbalanced--de0fc1df/task.md) — DECISIONS.md HTML-comment section fences are imbalanced (6 BEGIN / 8 END) -- introduced b… (todo)
 
 ---
 

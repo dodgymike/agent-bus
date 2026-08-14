@@ -50,7 +50,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
+- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)
 - [SIGN-8](../../SIGN/SIGN-8--71ef73d5/task.md) — SIGN-8: Agent-side messaging key material -- \`agent-bus keygen\`, key file location/permis… (todo)
 
 ---

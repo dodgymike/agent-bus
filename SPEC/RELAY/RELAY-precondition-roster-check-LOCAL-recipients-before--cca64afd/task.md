@@ -54,7 +54,7 @@ PROOF. A test that a relayed message naming an unenrolled local recipient is REF
 
 - [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
 - [RELAY-16-FU-RETRY404](../RELAY-16-FU-RETRY404--7f515d76/task.md) — RELAY-16-FU-RETRY404: retry of an already-committed send can 404 if the recipient stopped… (todo)
-- [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (todo)
+- [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
 
 ---
 

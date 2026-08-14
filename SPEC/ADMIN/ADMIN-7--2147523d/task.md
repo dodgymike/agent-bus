@@ -61,7 +61,7 @@ _None recorded._
 
 - [ADMIN-4](../ADMIN-4--e12b4149/task.md) — ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall t… (todo)
 - [ADMIN-6](../ADMIN-6--f92aa33f/task.md) — ADMIN-6: bounded, tail-tolerant STREAMING audit reader in internal/wal (no dir lock, torn… (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

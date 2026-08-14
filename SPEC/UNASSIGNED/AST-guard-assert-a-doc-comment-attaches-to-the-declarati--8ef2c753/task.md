@@ -46,7 +46,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
+- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)
 - [RELAY-9-FU-CODEGUARD](../../RELAY/RELAY-9-FU-CODEGUARD--1e9b54d2/task.md) — RELAY-9-FU-CODEGUARD: AST guard asserting every peer error code constant has a handler ca… (todo)
 
 ---

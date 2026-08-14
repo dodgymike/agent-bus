@@ -62,7 +62,7 @@ _None recorded._
 
 - [ADMIN-1](../ADMIN-1--db334b3c/task.md) — ADMIN-1: record the operator-console trust/transport/control rulings D1-D7 in DECISIONS.m… (blocked)
 - [ADMIN-7](../ADMIN-7--2147523d/task.md) — ADMIN-7: audit view in the console, for a CO-LOCATED bus only (D5) (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

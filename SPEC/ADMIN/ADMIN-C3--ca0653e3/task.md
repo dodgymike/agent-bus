@@ -66,7 +66,7 @@ _None recorded._
 - [ADMIN-4](../ADMIN-4--e12b4149/task.md) — ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall t… (todo)
 - [ADMIN-8](../ADMIN-8--7f550309/task.md) — ADMIN-8: GET /v1/status -- authenticated, in-process counters, exhaustive field-set pin,… (todo)
 - [ADMIN-C2](../ADMIN-C2--d31d77ff/task.md) — ADMIN-C2: \`agent-busctl report\` -- the node reporter: allow-list check, refuse-with-reaso… (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

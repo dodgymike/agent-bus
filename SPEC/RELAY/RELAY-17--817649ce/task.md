@@ -81,7 +81,7 @@ every relayed message is ErrUnpeeredBus/403 by construction until a trust chain 
 - [45af210c-2520-4a3a-9444-31f8e020bab1](../Reconcile-PROTOCOL.md-relay-trust-text-with-PeerStore-ba--45af210c/task.md) — Reconcile PROTOCOL.md relay-trust text with PeerStore-backed CrossBusTrust (todo)
 - [48223968-0f96-4ac2-8d7e-710a1a4026b8](../Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md) — Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link (todo)
 - [RELAY-10](../RELAY-10--7e9a5b63/task.md) — RELAY-10: Durable peer records that survive restart (done)
-- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (todo)
+- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-22](../RELAY-22--b4e45cda/task.md) — RELAY-22: Choose and wire the multi-principal relay abuse-control primitive (todo)
 - [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
 - [RELAY-27](../RELAY-27--f417c6a0/task.md) — RELAY-27: fix internal/relay/signed.go:306 to wrap attest.Verify errors with %w, not %v (cancelled)
@@ -95,6 +95,9 @@ every relayed message is ErrUnpeeredBus/403 by construction until a trust chain 
 - [RELAY-38](../RELAY-38--4b4beaab/task.md) — RELAY-38: signed-relay-ingest comments and docs are silent on the CodeInvalidRelay path R… (todo)
 - [RELAY-7](../RELAY-7--756655f3/task.md) — RELAY-7: Cross-bus trust deep-dive (done)
 - [RELAY-9-FU-CODEGUARD](../RELAY-9-FU-CODEGUARD--1e9b54d2/task.md) — RELAY-9-FU-CODEGUARD: AST guard asserting every peer error code constant has a handler ca… (todo)
+- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
+- [RELAY-FU-DOCGO-GAP7-BACKOFF](../RELAY-FU-DOCGO-GAP7-BACKOFF--8aacfd4c/task.md) — internal/relay/doc.go gap 7: a fair-share or capacity refusal from AcceptRelay becomes a… (todo)
+- [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) — SIGN-1-FU-OUTOFORDER-POISON: Reserve-then-send lets mints be spent out of order, which pe… (done)
 
 ---
 

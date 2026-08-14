@@ -51,7 +51,7 @@ _None recorded._
 - [IDEM-5](../IDEM-5--9631dfcb/task.md) — IDEM-5: Same key + DIFFERENT payload is a protocol violation -- reject, log, and disconne… (superseded)
 - [POLL-1](../../POLL/POLL-1--1b0635b9/task.md) — POLL-1: GET /v1/wait -- long-poll endpoint (done)
 - [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor (todo)
-- [SIGN-5](../../SIGN/SIGN-5--5cedc580/task.md) — SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must (todo)
+- [SIGN-5](../../SIGN/SIGN-5--5cedc580/task.md) — SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

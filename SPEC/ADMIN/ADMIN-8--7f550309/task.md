@@ -62,7 +62,7 @@ SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a
 
 - [ADMIN-2](../ADMIN-2--786e0de1/task.md) — ADMIN-2: client.Info/Health/Discovery + \`agent-busctl status \[--json\]\`, shipped together… (todo)
 - [CORE-5](../../CORE/CORE-5--06c5b1f5/task.md) — CORE-5: Observability: metrics/inspect endpoint (follow-up) (superseded)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

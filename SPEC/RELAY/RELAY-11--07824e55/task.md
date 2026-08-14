@@ -65,6 +65,7 @@ there is no overlap. Do not start RELAY-16's work here.
 - [RELAY-11-FU-BUSID-ECHO](../RELAY-11-FU-BUSID-ECHO--18b3307a/task.md) — ids.ValidateBusID echoes an oversized bus id with %q and no length guard (todo)
 - [RELAY-11-FU-INGEST-LOOPGUARD](../RELAY-11-FU-INGEST-LOOPGUARD--a41c273c/task.md) — Relay ingest MUST route through relay.CheckIncomingPath before hub.publish, or a 64-hop l… (todo)
 - [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+- [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
 
 ---
 

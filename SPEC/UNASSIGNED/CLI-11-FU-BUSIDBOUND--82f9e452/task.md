@@ -48,7 +48,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CLI-11](../CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (todo)
+- [CLI-11](../CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (done)
 
 ---
 

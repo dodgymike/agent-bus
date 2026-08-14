@@ -42,6 +42,7 @@ Proof must show the OLD behaviour is currently reachable (a 404 on a route-depen
 
 
 - **relates to** [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md)
+- **relates to** INVITE-CLIENT-FU-EXIT9 (unresolved)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -52,7 +53,7 @@ Proof must show the OLD behaviour is currently reachable (a 404 on a route-depen
 
 - [45b2e17a-7b88-4b71-b6a0-a18bd9e4f70e](../enrolFailed-replaces-the-remedy-and-never-sets-Error.Ide--45b2e17a/task.md) — enrolFailed replaces the remedy and never sets Error.IdempotencyKey (done)
 - [76ec4aa1-0e8e-4913-b77f-bc7f61914ed5](../writeFailed-s-empty-Remedy-branch-is-unreachable-by-fixt--76ec4aa1/task.md) — writeFailed's empty-Remedy branch is unreachable-by-fixture and untested (done)
-- [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md) — cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- laten… (todo)
+- [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md) — cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- laten… (superseded)
 - [IDEM-14-FU-CLIENTTEXT](../../IDEM/IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) — IDEM-14-FU-CLIENTTEXT: client remedy text (messages.go:1175) asserts a server disconnect… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -62,7 +63,7 @@ Proof must show the OLD behaviour is currently reachable (a 404 on a route-depen
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md) — cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- laten… (todo)
+- [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md) — cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- laten… (superseded)
 
 ---
 

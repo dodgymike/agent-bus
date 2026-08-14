@@ -1,0 +1,75 @@
+# RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not the peer-asserted origin sender
+
+| Field | Value |
+| --- | --- |
+| Public id | `8774f265-230d-49c9-90e4-bd96c866fd8d` |
+| Key | RELAY-FU-IDEM-METER-BY-PEER |
+| Epic | [RELAY](../epic.md) |
+| Status | todo |
+| Priority | P0 |
+| Component | relay |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-14T15:11:47.939604+00:00 |
+| Updated | 2026-08-14T18:07:55.564201+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run 'TestAppliedKeyMeteredByAuthenticatedPeer' ./internal/relay ./internal/httpapi
+```
+
+## Status note
+
+PRIORITY RAISED P1 -> P0, 2026-08-14 (coordinator judgement call, recorded not silently applied): this task was filed P1 despite security calling it P0 #1 of four remaining on the RELAY-24 critical path. An attacker-controllable applied-key-table exhaustion (a peer asserting M distinct agent names converges the table toward 65536/(M+1+L) keys, refusing EVERY LOCAL AGENTs next send bus-wide once past the pressure line) is not a P1 by this project's own severity conventions -- it is exactly the shape of finding filed P0 elsewhere this session (the out-of-order mint poison, the invite-gate enforcement gap). Raised to match. SEPARATE JUDGEMENT CALL, ALSO RECORDED: this task's own description says its fix belongs at the wiring site specifically, because internal/hub never sees the authenticated peer identity that internal/httpapi resolves. That makes it a REQUIREMENT of RELAY-24s own composition wiring, not a separable prerequisite a different agent could close first and hand off. See RELAY-24s own status_note for the full read across all items on this path, not just this one.
+
+## Description
+
+Filed 2026-08-14 from the RELAY-24-BLOCKER-HUBINGEST security gate. HIGH -- GATES RELAY-24 (the wiring), not the ingest commit.
+
+THE DEFECT: relay.RelayedMessage.Scope() / hub.IngestRelayed key internal/idem on m.Sender, which is PEER-ASSERTED. internal/idem/store.go:417-421 argues its per-agent fair share is safe precisely because the bucket key is "a PROVEN IDENTITY, not an attacker-chosen label". IngestRelayed makes that statement FALSE the moment RELAY-24 wires a caller.
+
+MEASURED IMPACT (security, not theory): the share is not enforced at all BELOW the pressure line (maxEntries/2 = 32768), and a peer asserting M distinct agent names gets M x 65536/(M+1+L) keys, converging on the whole 65536-entry table. At that point EVERY LOCAL AGENT's next send is refused with ErrCapacity, bus-wide, for up to the 50h10m retention window, evicting nothing -- by design.
+
+WHERE THE FIX BELONGS: the wiring site. It genuinely CANNOT live in internal/hub, because the only PROVEN identity is the authenticated peer and internal/hub never sees it (httpapi.PeerBusIDFromContext does). Meter by the authenticated peer bus.
+
+ALSO UPDATE THE DOC: internal/relay/doc.go item 2 records this gap and UNDERSTATES it -- it does not say the fair share is unenforced below the pressure line, nor that the end state is a bus-wide ErrCapacity for local agents. Correct that text in the same change.
+
+PROOF NOTE: the stored proof_cmd names a test this task MUST WRITE. Require proof-check.sh verdict=PASS, not VACUOUS.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
+- **relates to** [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md)
+- **relates to** [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
+- [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

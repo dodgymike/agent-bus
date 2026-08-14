@@ -65,7 +65,7 @@ _None recorded._
 
 
 - [ADMIN-C1](../ADMIN-C1--9074f7f2/task.md) — ADMIN-C1: versioned control/telemetry schema in a new internal/adminctl -- unknown kinds… (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

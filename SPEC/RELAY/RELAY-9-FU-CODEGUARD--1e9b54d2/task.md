@@ -49,7 +49,7 @@ _None recorded._
 
 
 - [RELAY-17](../RELAY-17--817649ce/task.md) — RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope (done)
-- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (todo)
+- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-9](../RELAY-9--06f5e347/task.md) — RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes (done)
 
 ## Referenced by other tasks (derived, not authoritative)

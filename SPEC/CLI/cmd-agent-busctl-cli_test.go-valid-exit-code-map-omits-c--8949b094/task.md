@@ -5,13 +5,13 @@
 | Public id | `8949b094-66ab-4704-8c8d-39dd54981ca1` |
 | Key | _(null in the export)_ |
 | Epic | [CLI](../epic.md) |
-| Status | todo |
+| Status | superseded |
 | Priority | P1 |
 | Component | cli |
 | Section | backlog |
 | Tags | latent-trap, exit-codes, 52930611-followup |
 | Created | 2026-08-08T15:13:38.006521+00:00 |
-| Updated | 2026-08-08T15:13:38.006521+00:00 |
+| Updated | 2026-08-14T18:58:11.836994+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 grep -n "client.ExitVersionSkew" cmd/agent-busctl/cli_test.go && go test -race -run TestHelpExitCodeTablesAgreeWithClientExitCodes ./cmd/agent-busctl/
 ```
+
+## Status note
+
+SUPERSEDED 2026-08-14 by INVITE-CLIENT-FU-EXIT9 (9c85d8df-352c-44f7-bb96-7fc6d960484d), a genuine duplicate -- same defect (cli_test.go valid map omits client.ExitVersionSkew), verified by direct read of both descriptions. INVITE-CLIENT-FU-EXIT9 preferred as survivor: its fix (part a, the valid-map entry) is ALREADY PRESENT in the current working tree (cli_test.go:300, with an explanatory comment at :284 naming the surviving task by name), confirmed by direct grep before superseding. NEITHER task is complete yet -- nothing is committed. Per coordinator: close the survivor against the same commit that lands the two invite tasks doc rows, once it lands, not before.
 
 ## Description
 
@@ -32,6 +36,7 @@ cmd/agent-busctl/cli_test.go:287-297 (TestHelpExitCodeTablesAgreeWithClientExitC
 
 
 - **relates to** [52930611-1b7e-479f-a2d3-cd72fa09044e](../client-404-on-a-route-the-client-depends-on-reports-as-v--52930611/task.md)
+- **superseded by** INVITE-CLIENT-FU-EXIT9 (unresolved)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -41,6 +46,8 @@ cmd/agent-busctl/cli_test.go:287-297 (TestHelpExitCodeTablesAgreeWithClientExitC
 
 
 - [52930611-1b7e-479f-a2d3-cd72fa09044e](../client-404-on-a-route-the-client-depends-on-reports-as-v--52930611/task.md) — client: 404 on a route the client depends on reports as version skew, not exit-7 message… (in_progress)
+- [INVITE-CLIENT-FU-EXIT9](../../INVITE/INVITE-CLIENT-FU-EXIT9--970e2a81/task.md) — INVITE-CLIENT-FU-EXIT9: exit code 9 (ExitVersionSkew) is reachable but undocumented, brea… (cancelled)
+- [INVITE-CLIENT-FU-EXIT9](../../INVITE/INVITE-CLIENT-FU-EXIT9--9c85d8df/task.md) — INVITE-CLIENT-FU-EXIT9: exit code 9 (ExitVersionSkew) is reachable but undocumented, brea… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

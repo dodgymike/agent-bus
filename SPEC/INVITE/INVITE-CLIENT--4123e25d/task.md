@@ -5,19 +5,19 @@
 | Public id | `4123e25d-4644-48e0-9ee1-e0a9a273fd8c` |
 | Key | INVITE-CLIENT |
 | Epic | [INVITE](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | agentif |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:49.134940+00:00 |
-| Updated | 2026-08-14T11:41:59.529070+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T17:57:27.391149+00:00 |
+| Completed | 2026-08-14T17:57:27.391132+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestClientEnrolWithInvite ./client/... && grep -qi 'invite' AGENT_PROTOCOL.md && grep -qi 'invite' CONTRACTS-AGENT.md
+go test -race -run TestClientEnrolWithInvite ./client/... && go test -race -run TestEnrolInviteFileArgv ./cmd/agent-busctl/... && grep -qF -- "--invite-file" AGENT_PROTOCOL.md && grep -qF -- "--invite-file" CONTRACTS-CLI.md
 ```
 
 ## Status note
@@ -55,7 +55,7 @@ CLARIFICATION: the intended CLI surface is `agent-busctl enrol --invite-file <pa
 - [AGENTIF-2](../../AGENTIF/AGENTIF-2--15e4509c/task.md) — AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry (superseded)
 - [CLI-1](../../CLI/CLI-1--0495d133/task.md) — CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single clien… (done)
 - [CLI-2](../../CLI/CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
-- [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
@@ -67,7 +67,19 @@ CLARIFICATION: the intended CLI surface is `agent-busctl enrol --invite-file <pa
 
 
 - [0b43393e-556b-409a-938a-846be2fb4a75](../EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) — EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner… (superseded)
-- [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [CLAUDE-PATHSPEC-MM-NOT-GATE](../../PROCESS/CLAUDE-PATHSPEC-MM-NOT-GATE--077bcba5/task.md) — CLAUDE.md: MM is not the gate -- a clean M can still hide another agent's worktree hunks (todo)
+- [INVITE-CLIENT-FU-BUSIDCHECK](../INVITE-CLIENT-FU-BUSIDCHECK--2de773bf/task.md) — INVITE-CLIENT-FU-BUSIDCHECK: client.Invite.BusID is carried but never validated or cross-… (todo)
+- [INVITE-CLIENT-FU-DOCSTALE](../INVITE-CLIENT-FU-DOCSTALE--66266b5f/task.md) — INVITE-CLIENT-FU-DOCSTALE: CONTRACTS-HTTP.md and DECISIONS.md still assert facts INVITE-C… (todo)
+- [INVITE-CLIENT-FU-ENROLBODYREDACT](../INVITE-CLIENT-FU-ENROLBODYREDACT--f65a7b3d/task.md) — INVITE-CLIENT-FU-ENROLBODYREDACT: EnrolRequestBody carries a bearer invite secret with no… (todo)
+- [INVITE-CLIENT-FU-EXIT9](../INVITE-CLIENT-FU-EXIT9--970e2a81/task.md) — INVITE-CLIENT-FU-EXIT9: exit code 9 (ExitVersionSkew) is reachable but undocumented, brea… (cancelled)
+- [INVITE-CLIENT-FU-EXIT9](../INVITE-CLIENT-FU-EXIT9--9c85d8df/task.md) — INVITE-CLIENT-FU-EXIT9: exit code 9 (ExitVersionSkew) is reachable but undocumented, brea… (done)
+- [INVITE-CLIENT-FU-INFLIGHT409](../INVITE-CLIENT-FU-INFLIGHT409--6568bacd/task.md) — INVITE-CLIENT-FU-INFLIGHT409: client misreports a transient in-flight-redemption 409 as k… (todo)
+- [INVITE-CLIENT-FU-NETERRURL](../INVITE-CLIENT-FU-NETERRURL--b8bd54d2/task.md) — INVITE-CLIENT-FU-NETERRURL: networkError interpolates an unbounded bus URL into the error… (todo)
+- [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) — INVITE-CLIENT-FU-PENDINGINVITE: pendingEnrolment does not record the invite id, so a mism… (done)
+- [INVITE-CLIENT-FU-RAWECHO](../INVITE-CLIENT-FU-RAWECHO--37ccbcf6/task.md) — INVITE-CLIENT-FU-RAWECHO: defence-in-depth -- several attacker-influenced strings reach t… (todo)
+- [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
+- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)
+- [RELAY-13-FU-DOCS](../../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (done)
 
 ---
 

@@ -56,7 +56,7 @@ RED verification observed (2026-08-08): RUNBOOK.md does not exist and scripts/ha
 
 - [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md) — HANDOVER-REGISTER: KNOWN_ISSUES.md, the known-defect register (todo)
 - [HANDOVER-RUNBOOK-SMOKE](../HANDOVER-RUNBOOK-SMOKE--5906705d/task.md) — HANDOVER-RUNBOOK-SMOKE: an executable cold-start -- certs, invite, two agents, one message (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 
 ---

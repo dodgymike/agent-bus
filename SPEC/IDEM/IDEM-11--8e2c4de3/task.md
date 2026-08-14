@@ -75,6 +75,7 @@ _None recorded._
 - [CLI-3](../../CLI/CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [CLI-5](../../CLI/CLI-5--86dea094/task.md) — CLI-5: agents -- roster listing (replaces bus-agents.sh) (done)
+- [HUB-FU-RECOVER-IDEM-RELAY-ARM](../../RELAY/HUB-FU-RECOVER-IDEM-RELAY-ARM--5e74485a/task.md) — HUB-FU-RECOVER-IDEM-RELAY-ARM: recoverIdemRecord has no relay arm, and a lost relay appli… (todo)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
 - [IDEM-11-FU-DOWNGRADE](../../DUR/IDEM-11-FU-DOWNGRADE--84f5ad57/task.md) — IDEM-11-FU-DOWNGRADE: an old binary SILENTLY DISCARDS acknowledged writes after IDEM-11 -… (todo)
 - [IDEM-11-FU-FAIRSHARE](../IDEM-11-FU-FAIRSHARE--5abec835/task.md) — IDEM-11-FU-FAIRSHARE: applied-key capacity is bus-wide fail-closed with no per-agent shar… (done)

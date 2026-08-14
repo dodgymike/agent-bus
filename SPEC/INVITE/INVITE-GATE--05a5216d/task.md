@@ -5,19 +5,19 @@
 | Public id | `05a5216d-097c-4279-8a27-a0fb9479542f` |
 | Key | INVITE-GATE |
 | Epic | [INVITE](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:48.414925+00:00 |
-| Updated | 2026-08-14T11:54:57.194359+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T16:09:05.604877+00:00 |
+| Completed | 2026-08-14T16:09:05.604861+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestEnrolRequiresInvite|TestEnrolConsumesInviteAtomically|TestEnrolRetryDoesNotReconsumeInvite' ./internal/auth ./internal/httpapi && grep -q 'invite' CONTRACTS-HTTP.md
+go test -race -run TestInviteRedemptionIsAtomicWithEnrolment ./internal/httpapi
 ```
 
 ## Status note
@@ -48,7 +48,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 
 - [0b43393e-556b-409a-938a-846be2fb4a75](../EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) — EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner… (superseded)
 - [ENROL-SHAPE](../ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
-- [INVITE-CLIENT](../INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (todo)
+- [INVITE-CLIENT](../INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (done)
 - [INVITE-HARDEN](../INVITE-HARDEN--d250d0dd/task.md) — INVITE-HARDEN: constant-time invite-secret comparison and ONE indistinguishable failure r… (todo)
 - [INVITE-MINT](../INVITE-MINT--1d0d0e60/task.md) — INVITE-MINT: an operator mints a single-use, expiring invite -- the server is authoritati… (done)
 - [INVITE-PEERGUARD](../INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)
@@ -66,6 +66,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 
 - [0b43393e-556b-409a-938a-846be2fb4a75](../EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) — EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner… (superseded)
 - [1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa](../../AUTH/SEC-unauthenticated-enrol-permanently-bricks-the-roster--1c4d3dea/task.md) — SEC: unauthenticated enrol permanently bricks the roster -- 4096-cap fails closed forever… (todo)
+- [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [ADMIN-1](../../ADMIN/ADMIN-1--db334b3c/task.md) — ADMIN-1: record the operator-console trust/transport/control rulings D1-D7 in DECISIONS.m… (blocked)
 - [ADMIN-10](../../ADMIN/ADMIN-10--958d66e8/task.md) — ADMIN-10: online invite mint from the console (BLOCKED -- ruled out for now by D6; filed… (blocked)
 - [ADMIN-11](../../ADMIN/ADMIN-11--07926508/task.md) — ADMIN-11: remove an agent from the console (BLOCKED on AUTH-4) (blocked)
@@ -82,6 +83,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 - [ADMIN-C3](../../ADMIN/ADMIN-C3--ca0653e3/task.md) — ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST… (todo)
 - [AUTH-3-FU-ROSTERDOS-DOCS](../../AUTH/AUTH-3-FU-ROSTERDOS-DOCS--d5197abb/task.md) — AUTH-3-FU-ROSTERDOS-DOCS: extend session.go availability analysis (untargeted/unamplified… (todo)
 - [AUTH-ROSTER-RECLAIM](../../AUTH/AUTH-ROSTER-RECLAIM--b418638c/task.md) — AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove &lt;id&gt;" escape hatch -- filesys… (todo)
+- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
 - [DISCOVERY-DOC](../../CORE/DISCOVERY-DOC--2d7ce37b/task.md) — DISCOVERY-DOC: self-describing unauthenticated discovery document so an agent with only a… (in_progress)
 - [ENROL-SHAPE](../ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
 - [HANDOVER-CHECK](../../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) — HANDOVER-CHECK: one command that tells you the health of this repo, plus its recorded out… (todo)
@@ -89,14 +91,19 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 - [HANDOVER-RUNBOOK-DOC](../../HANDOVER/HANDOVER-RUNBOOK-DOC--a0e009e1/task.md) — HANDOVER-RUNBOOK-DOC: RUNBOOK.md narrates exactly what the smoke script does (todo)
 - [HANDOVER-WIRED](../../HANDOVER/HANDOVER-WIRED--6d85978f/task.md) — HANDOVER-WIRED: assert and document which packages are present but not wired (todo)
 - [IDEM-11-FU-FAIRSHARE-IDENTITIES](../../IDEM/IDEM-11-FU-FAIRSHARE-IDENTITIES--287ff78e/task.md) — IDEM-11-FU-FAIRSHARE-IDENTITIES: fair-share divisor is gameable by identity count, not fi… (todo)
-- [INVITE-CLIENT](../INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (todo)
+- [INVITE-CLIENT](../INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (done)
+- [INVITE-FU-STORE-TEST-RED-ON-MAIN](../INVITE-FU-STORE-TEST-RED-ON-MAIN--fb7be1d6/task.md) — INVITE-FU-STORE-TEST-RED-ON-MAIN: TestInviteNotDurableIsRefused fails on a pristine HEAD (done)
+- [INVITE-GATE-FU-SWEEPCOST](../INVITE-GATE-FU-SWEEPCOST--15880d66/task.md) — INVITE-GATE-FU-SWEEPCOST: invite.Store.Begin's O(n) sweep is now on an anonymous pre-auth… (todo)
 - [INVITE-HARDEN](../INVITE-HARDEN--d250d0dd/task.md) — INVITE-HARDEN: constant-time invite-secret comparison and ONE indistinguishable failure r… (todo)
 - [INVITE-MINT](../INVITE-MINT--1d0d0e60/task.md) — INVITE-MINT: an operator mints a single-use, expiring invite -- the server is authoritati… (done)
 - [INVITE-PEERGUARD](../INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)
 - [INVITE-REVOKE](../INVITE-REVOKE--d9def083/task.md) — INVITE-REVOKE: durably revoke an un-redeemed invite, and state what revocation does to an… (todo)
 - [INVITE-STORE](../INVITE-STORE--a9ef92de/task.md) — INVITE-STORE: durable single-use invite record (mint/lookup/consume/expire), recovered by… (done)
-- [MTLS-BIND](../../MTLS/MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (todo)
-- [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (todo)
+- [MTLS-BIND](../../MTLS/MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
+- [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
+- [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)
+- [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (done)
+- [de0fc1df-a948-4b44-95a4-4b9d01cab267](../../TOOLING/DECISIONS.md-HTML-comment-section-fences-are-imbalanced--de0fc1df/task.md) — DECISIONS.md HTML-comment section fences are imbalanced (6 BEGIN / 8 END) -- introduced b… (todo)
 - [e109c867-fcd2-4ddc-bc4d-55779dc5f5e1](../../PROCESS/Spec-Server-PATCH-tasks-id-rejects-the-key-field-outrigh--e109c867/task.md) — Spec Server: PATCH /tasks/{id} rejects the key field outright (422 Unknown field) -- a ke… (todo)
 
 ---

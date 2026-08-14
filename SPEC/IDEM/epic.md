@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**18 open / 31 total.** Full records live in `SPEC/IDEM/<task>/task.md`.
+**19 open / 32 total.** Full records live in `SPEC/IDEM/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (18)
+## Open tasks (19)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -17,8 +17,9 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | IDEM-14 | IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… | todo | P1 | [task.md](IDEM-14--b0facce9/task.md) | — | [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) [IDEM-13](IDEM-13--a869264d/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [AUTH-4](../AUTH/AUTH-4--a853261d/task.md) +4 more |
 | IDEM-16 | IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… | todo | P1 | [task.md](IDEM-16--b6b76aeb/task.md) | — | [IDEM-12](IDEM-12--26dd5625/task.md) [IDEM-13](IDEM-13--a869264d/task.md) [IDEM-14](IDEM-14--b0facce9/task.md) [IDEM-17](IDEM-17--8b1e85fd/task.md) [DUR-6](../DUR/DUR-6--d56a997d/task.md) [IDEM-8](IDEM-8--d1ecfc75/task.md) +1 more |
 | IDEM-18 | IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… | in_progress | P1 | [task.md](IDEM-18--61f80a28/task.md) | blocked by [IDEM-10](IDEM-10--b28e5153/task.md)<br>blocked by [IDEM-12](IDEM-12--26dd5625/task.md) | [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) [IDEM-16](IDEM-16--b6b76aeb/task.md) [IDEM-17](IDEM-17--8b1e85fd/task.md) [IDEM-14](IDEM-14--b0facce9/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) +2 more |
+| IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS | IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS: idem.MaxResultBytes (512) is too small for a multi-… | todo | P1 | [task.md](IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS--6a09349b/task.md) | relates to [RELAY-24-BLOCKER-HUBINGEST](../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) | [RELAY-24-BLOCKER-HUBINGEST](../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) |
 | 10212db3-4dc8-4b61-ad29-5cc1681e5702 | Give the hub a sentinel for a reservation spent by a DIFFERENT agent | todo | P2 | [task.md](Give-the-hub-a-sentinel-for-a-reservation-spent-by-a-DIF--10212db3/task.md) | — | [372b5072-2396-4e2a-8a80-398d5d006894](Narrow-invariant-10-s-disconnect-to-the-third-party-repl--372b5072/task.md) |
-| 11d171c2-9f5a-427f-b4fe-cdbfc9f0ad48 | Stale invariant-10 unconditional-disconnect prose -- WIDENED 2026-08-08: 6 files, 14 site… | todo | P2 | [task.md](Stale-invariant-10-unconditional-disconnect-prose-WIDENE--11d171c2/task.md) | — | [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [IDEM-14-FU-CLIENTTEXT](IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) |
+| 11d171c2-9f5a-427f-b4fe-cdbfc9f0ad48 | Stale invariant-10 unconditional-disconnect prose -- WIDENED 2026-08-08: 6 files, 14 site… | todo | P2 | [task.md](Stale-invariant-10-unconditional-disconnect-prose-WIDENE--11d171c2/task.md) | — | [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [IDEM-14-FU-CLIENTTEXT](IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE/INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) |
 | IDEM-11-FU-FAIRSHARE-FREEGROWTH | IDEM-11-FU-FAIRSHARE-FREEGROWTH: below-pressure admission is first-come-first-served and… | todo | P2 | [task.md](IDEM-11-FU-FAIRSHARE-FREEGROWTH--77f4c31a/task.md) | — | — |
 | IDEM-11-FU-FAIRSHARE-IDENTITIES | IDEM-11-FU-FAIRSHARE-IDENTITIES: fair-share divisor is gameable by identity count, not fi… | todo | P2 | [task.md](IDEM-11-FU-FAIRSHARE-IDENTITIES--287ff78e/task.md) | — | [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) |
 | IDEM-11-FU-HUBAPPLY | IDEM-11-FU-HUBAPPLY: hub.Apply returns early for non-message Entry.Kind, so IDEM-13/14/15… | todo | P2 | [task.md](IDEM-11-FU-HUBAPPLY--a9f827b9/task.md) | — | [IDEM-11](IDEM-11--8e2c4de3/task.md) [IDEM-13](IDEM-13--a869264d/task.md) [IDEM-14](IDEM-14--b0facce9/task.md) |

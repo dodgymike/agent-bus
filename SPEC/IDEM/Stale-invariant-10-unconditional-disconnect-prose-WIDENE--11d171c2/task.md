@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | spec-defect, invariant-10, doc-only, stale-security-prose |
 | Created | 2026-08-08T10:23:15.169441+00:00 |
-| Updated | 2026-08-08T19:58:47.703330+00:00 |
+| Updated | 2026-08-14T19:12:00.910334+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 bash -c '! grep -qF "and a disconnection" CONTRACTS-CLI.md && ! grep -qF "and disconnects" CONTRACTS-CLI.md && ! grep -qF "earns a 409 AND a disconnection" client/messages.go && ! grep -qF "protocol violation that disconnects the client" client/messages.go && ! grep -qF "answer to it is a disconnection" client/messages.go && ! grep -qF "DISCONNECTS the offending client" internal/auth/errors.go && ! grep -qF "bus punishes with a disconnect" client/store.go && ! grep -qF "and earning a disconnect" client/store.go && ! grep -qF "client DISCONNECTED" client/store.go && ! grep -qF "bus answers 409 and DISCONNECTS" client/store.go && ! grep -qF "refusal comes with a disconnection" client/enrol.go && ! grep -qF "violation that earns a disconnect" client/enrol.go && ! grep -qF "DISCONNECTS the client (invariant 10)" client/enrol.go && ! grep -qF "disconnects the client" cmd/agent-busctl/enrol.go'
 ```
+
+## Status note
+
+PROGRESS 2026-08-14: commit 54395b6 (INVITE-CLIENT-FU-PENDINGINVITE + -EXIT9) fixed both CONTRACTS-CLI.md sites as a byproduct -- this is the CONTRACTS-CLI.md contradicting invariant 10 in three places the coordinator separately flagged (bus claimed to disconnect on a 409 key conflict; narrowed 2026-08-08 to reject-and-log, internal/httpapi/auth.go:509 logs "rejected, and the connection is KEPT"; AGENT_PROTOCOL.md was already correct). Re-ran the full 14-site proof directly: now 10/14 fixed (up from 8/14), all four remaining stale sites are in client/messages.go (3) and internal/auth/errors.go (1). This task is the correct owner of that finding -- recorded here since the coordinator asked for it on whichever task owns invariant-10 doc conformance.
 
 ## Description
 
@@ -56,7 +60,8 @@ _None recorded._
 
 - [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (in_progress)
 - [IDEM-14-FU-CLIENTTEXT](../IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) — IDEM-14-FU-CLIENTTEXT: client remedy text (messages.go:1175) asserts a server disconnect… (done)
-- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
+- [INVITE-CLIENT-FU-PENDINGINVITE](../../INVITE/INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) — INVITE-CLIENT-FU-PENDINGINVITE: pendingEnrolment does not record the invite id, so a mism… (done)
+- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)
 
 ---
 
