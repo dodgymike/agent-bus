@@ -945,9 +945,10 @@ arguments, only applies them to the concrete envelope.
 **`bus_path` semantics.** An ordered list of bus ids, oldest first: it starts at the origin bus (the
 bus that accepted the message from its own agent) and gains exactly one hop, appended at the end, on
 every relay a message passes through — so `bus_path[0]` is always the origin and the last element is
-always whichever bus most recently forwarded it. A path carries at most `MaxBusPath` (64) hops, the
-same constant as `store.MaxBusPath` (§3's on-disk cap): the relay ingress cap must never exceed the
-durable one, because a path accepted here and later refused by the durable record would be an
+always whichever bus most recently forwarded it. A received path carries at most
+`MaxReceivedBusPath` (63) hops. The receiving bus appends itself before persistence, producing at
+most `store.MaxBusPath` (64) stored hops (§3's on-disk cap). Reserving that local hop at relay
+ingress prevents a path accepted there from being refused by durable ingest as an
 acknowledged-but-lost message, which invariant 5 forbids.
 
 **Two mechanisms, and both are needed — the ingress rule and the egress split horizon.**
@@ -966,9 +967,10 @@ it defeated was the only thing that had been stopping it.
 
 **What an untrusted `bus_path` is, and is not, guaranteed to say.** Guaranteed by the ingress
 validation (`ValidateBusPath` / `CheckIncomingPath`): well-formed (every hop a legal bus id), at most
-`MaxBusPath` hops, no duplicate hop (compared case-insensitively, closing the same confusable-id
-avenue `ValidatePeerBusID` closes elsewhere), `bus_path[0] == origin_bus`, and this bus is not
-currently on it. **Not guaranteed: that any of it is true.** A peer that strips us out of the path
+`MaxReceivedBusPath` (63) received hops, no duplicate hop (compared case-insensitively, closing the
+same confusable-id avenue `ValidatePeerBusID` closes elsewhere), `bus_path[0] == origin_bus`, and this
+bus is not currently on it. **Not guaranteed: that any of it is true.** A peer that strips us out of
+the path
 before forwarding defeats the ingress check completely, and there is no detection of that — the path
 is metadata outside the signature (§8.5) and a lying peer can rewrite it freely. There is, however, no
 *second* evasion route: hop comparison folds ASCII case and every hop's charset is already restricted

@@ -67,7 +67,7 @@ const DropLoop = "loop"
 //	body        store.MaxBodyBytes (65,536) base64-expanded by 4/3 = 87,384
 //	recipients  store.MaxRecipients (64) x (ids.MaxAgentIDLen 150 + 3 for two
 //	            quotes and a comma)                                  =  9,792
-//	bus_path    MaxBusPath (64) x (64-byte bus id + 3)               =  4,288
+//	bus_path    MaxReceivedBusPath (63) x (64-byte bus id + 3)       =  4,221
 //	signature   64 raw bytes base64-expanded by 4/3, padded          =    88
 //	attestation agent id (150) + key (44 base64) + signature (88
 //	            base64) + epoch/timestamps (60) + field names        =   ~400

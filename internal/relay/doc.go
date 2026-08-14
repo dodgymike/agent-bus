@@ -580,8 +580,10 @@
 // # Accepted residuals, written down rather than discovered later
 //
 //   - WHAT bus_path CAN AND CANNOT GUARANTEE, exactly. Guaranteed: well-formed,
-//     at most MaxBusPath hops, no duplicate hop, BusPath[0] == OriginBus, and we
-//     are not on it. NOT guaranteed: that any of it is TRUE. A peer that strips
+//     at most MaxReceivedBusPath (63) hops on ingress, no duplicate hop,
+//     BusPath[0] == OriginBus, and we are not on it. This leaves one hop for the
+//     receiving bus to append before persisting at store.MaxBusPath (64). NOT
+//     guaranteed: that any of it is TRUE. A peer that strips
 //     us out defeats the ingress check completely and there is no detection.
 //     There is, however, no SECOND evasion route — PathContains folds ASCII
 //     case, and validateHops has already restricted every hop to

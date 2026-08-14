@@ -620,12 +620,12 @@ func TestRelayEnvelopeBoundsAreLimitsNotOffByOnes(t *testing.T) {
 			want: ErrInvalidRelay,
 		},
 		{
-			name: "a bus path of exactly MaxBusPath hops",
-			mod:  func(r *RelayRequest) { r.BusPath = path(MaxBusPath) },
+			name: "a bus path of exactly MaxReceivedBusPath hops",
+			mod:  func(r *RelayRequest) { r.BusPath = path(MaxReceivedBusPath) },
 		},
 		{
-			name: "a bus path one hop over MaxBusPath",
-			mod:  func(r *RelayRequest) { r.BusPath = path(MaxBusPath + 1) },
+			name: "a bus path one hop over MaxReceivedBusPath",
+			mod:  func(r *RelayRequest) { r.BusPath = path(MaxReceivedBusPath + 1) },
 			want: ErrBusPathTooLong,
 		},
 		{
@@ -648,11 +648,15 @@ func TestRelayEnvelopeBoundsAreLimitsNotOffByOnes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a message EXACTLY at the cap was refused: %v; the cap is a limit, not an off-by-one", err)
 			}
-			// And what we accepted is what we can still forward and persist: a
-			// path at the cap cannot take our hop, which is a documented
-			// ErrBusPathTooLong rather than a surprise at the store.
-			if _, ferr := m.Forward(localBus); len(m.BusPath) == MaxBusPath && !errors.Is(ferr, ErrBusPathTooLong) {
-				t.Fatalf("Forward on a path already at the cap gave %v, want one wrapping ErrBusPathTooLong", ferr)
+			// What ingress accepts can still take our local hop and fit the
+			// durable boundary; this is the exact off-by-one contract.
+			if forwarded, ferr := m.Forward(localBus); len(m.BusPath) == MaxReceivedBusPath {
+				if ferr != nil {
+					t.Fatalf("Forward on the maximum received path: %v", ferr)
+				}
+				if len(forwarded.BusPath) != store.MaxBusPath {
+					t.Fatalf("forwarded path length = %d, want durable maximum %d", len(forwarded.BusPath), store.MaxBusPath)
+				}
 			}
 		})
 	}
@@ -896,7 +900,7 @@ func TestMaxRelayBytesFitsAMaximumMessage(t *testing.T) {
 	for i := range recipients {
 		recipients[i] = fmt.Sprintf("%s.b%s-%d", localBus, longName, i+1)
 	}
-	path := make([]string, MaxBusPath)
+	path := make([]string, MaxReceivedBusPath)
 	for i := range path {
 		path[i] = strings.Repeat("p", 58) + fmt.Sprintf("-%d", i)
 	}

@@ -84,6 +84,12 @@ const MaxIdempotencyKeyLen = 128
 // clients.
 const MaxBusPath = 64
 
+// MaxReceivedBusPath is the largest path a bus may accept from a peer. The
+// receiving bus appends itself before persistence, so the wire boundary is one
+// hop smaller than MaxBusPath. Relay and hub ingress share this constant so a
+// path accepted at the HTTP boundary cannot be refused at durable ingest.
+const MaxReceivedBusPath = MaxBusPath - 1
+
 // Sentinel errors. All are checkable with errors.Is.
 var (
 	// ErrInvalidMessage reports a Record that cannot be turned into a Message:

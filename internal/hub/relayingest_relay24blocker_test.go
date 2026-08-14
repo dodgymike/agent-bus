@@ -480,7 +480,7 @@ func TestIngestRelayedRecipientRules(t *testing.T) {
 // afterwards, so a lost, forged or fabricated path is permanent.
 func TestIngestRelayedBusPathRules(t *testing.T) {
 	t.Parallel()
-	longPath := make([]string, store.MaxBusPath)
+	longPath := make([]string, store.MaxReceivedBusPath+1)
 	for i := range longPath {
 		longPath[i] = "hop" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 	}
@@ -531,7 +531,7 @@ func TestIngestRelayedBusPathRules(t *testing.T) {
 			name:    "one hop too long once ours is appended",
 			path:    longPath,
 			wantErr: hub.ErrInvalidBusPath,
-			why:     "store.MaxBusPath is the durable bound; refusing here means no number is burned for a record that cannot be built",
+			why:     "store.MaxReceivedBusPath retains room for this bus within the durable bound; refusing here means no number is burned for a record that cannot be built",
 		},
 	}
 	for _, c := range cases {

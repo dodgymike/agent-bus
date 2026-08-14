@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/dodgymike/agent-bus/internal/store"
 )
 
 // TestRelayLoopPrevention is RELAY-3's proof at the unit level: every way a
 // traversed path can be malformed is refused, and a path this bus is already on
 // is dropped — including when it is spelled in a different ASCII case.
 func TestRelayLoopPrevention(t *testing.T) {
-	overCap := make([]string, MaxBusPath+1)
+	overCap := make([]string, MaxReceivedBusPath+1)
 	for i := range overCap {
 		overCap[i] = fmt.Sprintf("bus-%d", i)
 	}
-	atCap := make([]string, MaxBusPath)
+	atCap := make([]string, MaxReceivedBusPath)
 	for i := range atCap {
 		atCap[i] = fmt.Sprintf("bus-%d", i)
 	}
@@ -154,13 +156,17 @@ func TestRelayLoopPreventionAppendHop(t *testing.T) {
 		}
 	})
 
-	t.Run("refuses to grow past the cap", func(t *testing.T) {
-		atCap := make([]string, MaxBusPath)
+	t.Run("maximum received path retains one local hop", func(t *testing.T) {
+		atCap := make([]string, MaxReceivedBusPath)
 		for i := range atCap {
 			atCap[i] = fmt.Sprintf("bus-%d", i)
 		}
-		if _, err := AppendHop(atCap, localBus); !errors.Is(err, ErrBusPathTooLong) {
-			t.Fatalf("error = %v, want one wrapping ErrBusPathTooLong", err)
+		got, err := AppendHop(atCap, localBus)
+		if err != nil {
+			t.Fatalf("AppendHop at the maximum received boundary: %v", err)
+		}
+		if len(got) != store.MaxBusPath {
+			t.Fatalf("appended path length = %d, want durable maximum %d", len(got), store.MaxBusPath)
 		}
 	})
 
@@ -215,12 +221,12 @@ func TestRelayLoopPreventionSplitHorizon(t *testing.T) {
 // refuse is a message we would acknowledge and then fail to persist — the
 // acknowledged-but-lost message invariant 5 forbids.
 func TestMaxBusPathIsHardLinkedToTheDurableCap(t *testing.T) {
-	atCap := make([]string, MaxBusPath)
+	atCap := make([]string, MaxReceivedBusPath)
 	for i := range atCap {
 		atCap[i] = fmt.Sprintf("bus-%d", i)
 	}
 	if err := validateHops(atCap); err != nil {
-		t.Fatalf("a path of exactly MaxBusPath hops was refused: %v", err)
+		t.Fatalf("a path of exactly MaxReceivedBusPath hops was refused: %v", err)
 	}
 	if err := validateHops(append(atCap, "bus-onemore")); !errors.Is(err, ErrBusPathTooLong) {
 		t.Fatalf("error = %v, want one wrapping ErrBusPathTooLong", err)

@@ -442,8 +442,8 @@ func (h *Hub) relayedBusPath(received []string) ([]string, error) {
 	if len(received) == 0 {
 		return nil, fmt.Errorf("%w: a relayed message carries the path it travelled, so an empty one is a path that was lost; recording it as this bus alone would claim the message originated here", ErrInvalidBusPath)
 	}
-	if len(received)+1 > store.MaxBusPath {
-		return nil, fmt.Errorf("%w: the message arrived with %d hops and appending this bus would exceed the %d-hop limit", ErrInvalidBusPath, len(received), store.MaxBusPath)
+	if len(received) > store.MaxReceivedBusPath {
+		return nil, fmt.Errorf("%w: the message arrived with %d hops, but a received path carries at most %d so this bus can append itself within the %d-hop durable limit", ErrInvalidBusPath, len(received), store.MaxReceivedBusPath, store.MaxBusPath)
 	}
 	for i, hop := range received {
 		if err := ids.ValidateBusID(hop); err != nil {

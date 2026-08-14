@@ -38,16 +38,15 @@ import (
 // message that has already visited us collapses that from unbounded traffic to
 // one extra hop per cycle. It is a traffic-amplification control.
 
-// MaxBusPath is the ingress cap on the traversed-bus list.
+// MaxReceivedBusPath is the ingress cap on the traversed-bus list.
 //
 // It is HARD-LINKED to store.MaxBusPath rather than re-declared as a literal,
 // because the two caps are not independent: a path we accept here is a path we
-// go on to persist, and a path the durable record would refuse is a message we
-// would ACKNOWLEDGE AND THEN FAIL TO PERSIST — the acknowledged-but-lost
-// message CLAUDE.md invariant 5 forbids. The relay ingress cap must therefore
-// never exceed the on-disk cap, and the cheapest way to guarantee that is to
-// have exactly one number.
-const MaxBusPath = store.MaxBusPath
+// go on to persist after appending the receiving bus. The received cap is
+// therefore derived as one less than the durable cap; otherwise a path accepted
+// here could be ACKNOWLEDGED AND THEN FAIL TO PERSIST — the acknowledged-but-
+// lost message invariant 5 forbids.
+const MaxReceivedBusPath = store.MaxReceivedBusPath
 
 // Bus path failures. All are checkable with errors.Is.
 var (
@@ -55,7 +54,7 @@ var (
 	// not be, or carries the same bus twice.
 	ErrInvalidBusPath = errors.New("relay: invalid traversed bus path")
 
-	// ErrBusPathTooLong reports a path longer than MaxBusPath.
+	// ErrBusPathTooLong reports a path longer than MaxReceivedBusPath.
 	ErrBusPathTooLong = errors.New("relay: traversed bus path too long")
 
 	// ErrRelayLoop reports that THIS bus is already on the traversed path, so
@@ -102,7 +101,7 @@ func PathContains(path []string, busID string) bool {
 //     say. (The origin's own EGRESS path is the single legitimate empty one;
 //     see AppendHop, which accepts it. This validator is the INGRESS rule.)
 //  2. The LENGTH is refused before any per-hop parsing, so a hostile peer
-//     cannot make us parse MaxBusPath+N hops before we decline.
+//     cannot make us parse MaxReceivedBusPath+N hops before we decline.
 //  3. Each hop is bounded BEFORE ids.ValidateBusID sees it, because that
 //     function quotes the id it rejects with %q and %q expands a control byte
 //     to four characters — a peer sending a 200 KiB "hop" would otherwise
@@ -125,8 +124,8 @@ func ValidateBusPath(path []string) error {
 // AppendHop, which must apply the identical per-hop rules but must NOT reject
 // an empty path — see AppendHop.
 func validateHops(path []string) error {
-	if len(path) > MaxBusPath {
-		return fmt.Errorf("%w: %d hops, but a traversed path carries at most %d; a longer path is a routing pathology, not a topology", ErrBusPathTooLong, len(path), MaxBusPath)
+	if len(path) > MaxReceivedBusPath {
+		return fmt.Errorf("%w: %d hops, but a received traversed path carries at most %d; the receiving bus must retain one hop for itself", ErrBusPathTooLong, len(path), MaxReceivedBusPath)
 	}
 	seen := make(map[string]struct{}, len(path))
 	for i, hop := range path {
@@ -190,8 +189,8 @@ func AppendHop(path []string, localBusID string) ([]string, error) {
 	if PathContains(path, localBusID) {
 		return nil, fmt.Errorf("%w: bus %q is already on the path, so appending it would fabricate a second visit", ErrRelayLoop, localBusID)
 	}
-	if len(path)+1 > MaxBusPath {
-		return nil, fmt.Errorf("%w: appending a hop to a %d-hop path would exceed the %d-hop limit", ErrBusPathTooLong, len(path), MaxBusPath)
+	if len(path)+1 > store.MaxBusPath {
+		return nil, fmt.Errorf("%w: appending a hop to a %d-hop path would exceed the %d-hop durable limit", ErrBusPathTooLong, len(path), store.MaxBusPath)
 	}
 	out := make([]string, 0, len(path)+1)
 	out = append(out, path...)
