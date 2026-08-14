@@ -21,14 +21,19 @@
 //     2026-08-02), and drops whole messages from the oldest end only.
 //
 // Since SIGN-1 a sequence is minted (and durably burned) BEFORE the client
-// signs and sends, so messages do not arrive in sequence order and Store.Append
-// inserts a late one into position rather than refusing it. Three consequences
-// are written up where they live: the delivery gap that leaves a late arrival
-// undelivered to a reader that has already passed it — filed as
-// SIGN-1-FU-REORDER-WATERMARK, Spec Server task
-// c829af9a-4418-437a-a0f8-34ef2f5d15d0 (Store, "KNOWN GAP"); the bounded softening of
-// the age bound (pruneLocked); and the narrowed duplicate DETECTION across the
-// already-pruned region (Append's P1 and the prunedHead branch).
+// signs and sends, so messages do not arrive in sequence order. IDENTITY and
+// DELIVERY ORDER are therefore two different numbers on a Message
+// (SIGN-1-FU-REORDER-WATERMARK): Seq is the server-minted, client-signed
+// identity, and Pos is the delivery position — the WAL commit index, which is
+// what Store keeps its slice ordered by, what a cursor points at, and what
+// Since binary-searches. A late, low sequence gets a HIGH position, lands at
+// the tail of the delivery order, and is served to every reader; the split is
+// what stops an acknowledged message being invisible to a reader that had
+// already passed its sequence. Pos is DERIVED from where the record sits in the
+// log and is not part of the durable record, so it cost no on-disk change.
+//
+// One consequence is written up where it lives: the narrowed duplicate
+// DETECTION across the already-pruned region (Append's P1 and Store.bySeq).
 //
 // Nothing in this package interprets a message body. It is carried and hashed
 // as opaque bytes, which is what lets the CRYPTO epic put ciphertext there

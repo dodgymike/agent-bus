@@ -18,6 +18,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | --- | --- | --- |
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
 | `ondisk-format-version` | `1` (legacy, read-only), `2` (current WAL frames), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`), `6` (`peer-withdrawal-floor`, `internal/relay/peerstore.go`), `7` (authenticated WAL checkpoint generations, `internal/wal/checkpoint.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below). `6` is the durable PEER WITHDRAWAL floor file's format (RELAY-34, reserved 2026-08-08 — see the `peer-withdrawal-floor` subsection below). `7` is the authenticated checkpoint-generation directory/manifest/snapshot format described below; its tail still uses WAL frame version 2. |
+| `cursor-format-version` | `1` (superseded), `2` (current, `internal/hub/cursor.go`) | The version prefix inside the OPAQUE read cursor. **Not an on-disk server format** — the cursor is a client-held token — but it is reserved from the same ledger because two agents bumping it independently would produce two incompatible `v2`s. `1` was the sequence-based cursor; `2` is the delivery-position cursor introduced by `SIGN-1-FU-REORDER-WATERMARK` (2026-08-14). A cursor carrying an unrecognised version is **accepted and remapped to position 0**, never rejected — see `CONTRACTS-HTTP.md`. Value `1` was allocated retrospectively to cover the already-shipped v1, exactly as `store-record-version` was seeded. |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -187,6 +188,17 @@ its own, and `-data /srv/bus[` disable the reaper permanently via `ErrBadPattern
   byte-for-byte identical to a shorter one, so no operator can satisfy that caveat, and following it
   reissued an index at 2268 of 2289 measured truncation offsets.
 
+  **Since 2026-08-14 (SIGN-1-FU-REORDER-WATERMARK) a reissued WAL record index costs more than
+  reissued ids.** The WAL commit index is now also the message DELIVERY POSITION — what every client
+  cursor points at. So resuming the index below numbers already handed out does not merely risk a
+  duplicate message id: it makes every message committed in the reissued range **silently and
+  permanently undeliverable** to any reader whose cursor already sits above that range. Those messages
+  are durable, they are in the audit trail, and they are never handed to that reader and never wake
+  its long poll. Nothing downstream can detect it, and unlike a duplicate id it is invisible in the
+  log. Treat deletion of `wal-index-floor` as forfeiting delivery for the affected range as well as
+  forfeiting invariant 1. The matching operator-facing remedy in `internal/wal/indexfloor.go`'s
+  `indexFloorCorrupt` says the same thing, so the file and the error message agree.
+
 **This file adds NO refuse-to-start behaviour, and recovery from LOG DAMAGE still always reaches a
 running server.** A quarantine still starts a fresh log; it just starts it above the floor instead
 of at 1. Every index skip is logged loudly (WARN, or ERROR after a quarantine) naming
@@ -355,6 +367,45 @@ New exported surface introduced by this file: `hub.SeqFloorFileName` (= `"messag
 `hub.ErrSeqFloorFileCorrupt`. `hub.Options.DataDir` is REQUIRED for any hub with a durable write
 path, because this is where the file lives. No new HTTP route, CLI flag, env var, or header is
 introduced by it.
+
+## The DELIVERY POSITION, and why it is not on disk (2026-08-14, SIGN-1-FU-REORDER-WATERMARK)
+
+Since SIGN-1 a message carries **two** server-minted numbers, and conflating them is the defect
+`SIGN-1-FU-REORDER-WATERMARK` fixed:
+
+| | `Seq` — the sequence | `Pos` — the delivery position |
+|---|---|---|
+| minted when | the client RESERVES (`/v1/mint`) | the record COMMITS |
+| minted by | `internal/ids.Sequence`, floored by `message-seq-floor` | `internal/wal` — it IS the commit record's WAL index |
+| signed by the client | **yes** | no |
+| monotone in ARRIVAL order | **no** — reservations may be spent out of order | **yes**, by construction |
+| what it is for | IDENTITY (`<bus-id>-<seq>`, invariant 1) | DELIVERY ORDER — what a cursor points at |
+| **on disk** | yes, in the message record | **NO — see below** |
+
+**`Pos` is NOT stored in the message record, and `store.RecordVersion` did NOT move for it.** It is
+*derived* from where the record sits in the log: the hub stamps it from `wal.Committed.CommitIndex`
+on the live path and from the same field on the recovery path, where replay runs in commit order. A
+number that is already implied by a record's own position in an append-only log does not need to be
+written into that record, and writing it would be a format change plus a second copy that could
+disagree with the first.
+
+**Consequence for recovery, and it is the reason this is the WAL index rather than a counter of our
+own:** a store-local counter incremented per successfully-applied record would NOT be stable across
+a restart. Recovery skips records it cannot decode, and the set it skips differs between runs (a
+schema bump skips all of them). Every skip would shift every later position down by one, so a
+persisted client cursor would silently point one message further on and SKIP a message — the very
+defect being fixed, reintroduced through the recovery path. The WAL index never moves and is never
+reused, so a position means the same thing before and after a restart.
+
+Positions are **sparse and that is correct**: seq-floor records, enrolment records and invite
+records all consume WAL indices without being messages, so a reader's cursor jumps. Cursors need
+order, not density — the same rule `internal/ids/sequence.go` states for the sequence.
+
+**Nothing may hand two messages the same position.** The one place `CommitIndex` is not unique at
+the applier boundary today is a composite entry expanded to several appliers
+(`internal/auth/inviteenrol.go`'s multiplex path); none of those records carries a message, and none
+ever may. `store.Append` enforces the rule directly — a position at or below the highest already
+appended is logged at ERROR as an invariant-1 incident.
 
 ## The write-ahead log at startup (added 2026-08-02)
 

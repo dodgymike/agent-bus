@@ -738,11 +738,42 @@ func TestMessagesCursorRoute(t *testing.T) {
 	})
 
 	t.Run("a malformed cursor is refused", func(t *testing.T) {
-		for _, bad := range []string{"not-base64!!", base64.RawURLEncoding.EncodeToString([]byte("v1|only-two")), base64.RawURLEncoding.EncodeToString([]byte("v9|" + beta.id + "|1"))} {
+		// NOTE: an unknown cursor VERSION is deliberately NOT in this table any
+		// more. Since SIGN-1-FU-REORDER-WATERMARK it is accepted and remapped to
+		// position 0 rather than refused — see the two subtests below, which
+		// replace the entry that used to live here. Malformed SHAPE is still 400.
+		for _, bad := range []string{"not-base64!!", base64.RawURLEncoding.EncodeToString([]byte("v1|only-two"))} {
 			rec := authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages+"?cursor="+bad, "")
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("cursor %q gave %d, want 400", bad, rec.Code)
 			}
+		}
+	})
+
+	// An UNKNOWN cursor version is accepted and remapped to the start of the
+	// retained window. Rejecting it would be unrecoverable rather than merely
+	// lossy: a 400 is not retried by the watch loop and nothing clears the
+	// stored cursor, so the same value would be re-presented on every poll for
+	// ever. One replay is the correct price; at-least-once delivery already
+	// requires every client to tolerate duplicates.
+	t.Run("an unknown cursor version is remapped, not refused", func(t *testing.T) {
+		c := base64.RawURLEncoding.EncodeToString([]byte("v9|" + beta.id + "|1"))
+		rec := authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages+"?cursor="+c, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("an unknown-version cursor gave %d, want 200 with a remap to position 0", rec.Code)
+		}
+	})
+
+	// THE ORDERING THAT MAKES THE REMAP SAFE, asserted at the wire. The agent
+	// binding is checked BEFORE the version, so an old-version cursor issued to
+	// somebody else is still refused. An early return on the version branch
+	// would bypass the binding check and is invisible to the subtest above —
+	// this is the only route-level guard against that.
+	t.Run("an unknown version bound to another agent is still refused", func(t *testing.T) {
+		c := base64.RawURLEncoding.EncodeToString([]byte("v9|" + alpha.id + "|1"))
+		rec := authed(t, srv, beta, http.MethodGet, httpapi.RouteMessages+"?cursor="+c, "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("an unknown-version cursor bound to another agent gave %d, want 400", rec.Code)
 		}
 	})
 

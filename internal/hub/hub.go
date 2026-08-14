@@ -976,15 +976,27 @@ func (h *Hub) Apply(c wal.Committed) error {
 		}
 		return nil
 	}
+	// THE DELIVERY POSITION, from the SAME field the live path uses
+	// (SIGN-1-FU-REORDER-WATERMARK). Replay folds the log in commit order, so
+	// stamping the commit index here reproduces exactly the positions the
+	// messages had before the restart — which is what makes a client's stored
+	// cursor still mean what it meant, rather than pointing into a renumbered
+	// window.
+	m.Pos = c.CommitIndex
 	if err := h.store.Append(m); err != nil {
 		h.log.Error("DISCARDING a message record that could not be applied during recovery; it is not in this bus's history and will not be delivered",
 			"prepare_index", c.PrepareIndex,
 			"message_id", m.ID,
 			"seq", m.Seq,
+			"pos", m.Pos,
 			"err", err,
 		)
 		return nil
 	}
+	// appliedSeq tracks the SEQUENCE, not the position, and the two must not be
+	// mixed: it feeds the mint sequence floor (invariant 1), which is a statement
+	// about numbers this bus has handed out to be signed, not about where records
+	// sit in the log.
 	if m.Seq > h.appliedSeq {
 		h.appliedSeq = m.Seq
 	}
@@ -1689,21 +1701,43 @@ func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 	// that makes the trail trustworthy: every field invariant 6 names is
 	// present, and the body is not.
 	//
-	// The returned wal.Committed is DISCARDED, and that is a change from before
-	// SIGN-6: its PrepareIndex was the input to the poison check documented
-	// below, and with that check retired there is no longer anything on this path
-	// that may be decided by a WAL index. Discarding it explicitly, rather than
-	// binding it to a name nothing reads, is the point — a live `committed` here
-	// is an invitation to reintroduce an index-versus-sequence comparison that is
-	// no longer sound.
-	if _, err := h.durable.Write(wal.Entry{
+	// THE RETURNED wal.Committed IS BOUND, AND ITS CommitIndex BECOMES THE
+	// MESSAGE'S DELIVERY POSITION (SIGN-1-FU-REORDER-WATERMARK).
+	//
+	// This comment used to argue for DISCARDING it, and the point it was making
+	// still stands in full: there must be no index-versus-SEQUENCE comparison on
+	// this path. SIGN-1's reserve-then-send made the two counters unrelated, the
+	// old `committed.PrepareIndex < seq` poison fired on healthy traffic, and
+	// reintroducing any such comparison is still forbidden — see the section
+	// below.
+	//
+	// Using the index as a delivery POSITION is a different use and a sound one.
+	// It is not compared with a sequence; it is the order in which this bus took
+	// responsibility for records, which is exactly what a reader's cursor needs
+	// to be expressed in. It is monotone, durable, never reused, and replay
+	// reproduces it exactly because replay folds the log in commit order.
+	//
+	// THE MONOTONICITY RESTS ON writeMu BEING HELD ACROSS BOTH HALVES — this
+	// Write and the store.Append below. Do not move either out from under it, and
+	// do not add a third caller that appends off this lock: interleaving would
+	// let a higher position be applied first, and the lower one would then land
+	// below cursors that had already passed it, which is the very suppression
+	// this design removed. store.Append cannot detect that for you; it retains
+	// the message and shouts.
+	committed, err := h.durable.Write(wal.Entry{
 		Kind:  store.RecordKind,
 		Body:  payload,
 		Idem:  encodedIdem,
 		Audit: auditRec,
-	}); err != nil {
+	})
+	if err != nil {
 		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: durably recording message %s: %w", m.ID, err)
 	}
+	// THE DELIVERY POSITION, stamped on the in-memory message only. It is NOT
+	// part of the durable record — the record's own location in the log IS the
+	// position — so nothing above this line changes and store.RecordVersion does
+	// not move. Recovery re-stamps it from the same field (Hub.Apply).
+	m.Pos = committed.CommitIndex
 
 	// THE RESERVATION IS SPENT, and only now. The message is durable, so the
 	// number is unambiguously consumed and no retry may be answered from the

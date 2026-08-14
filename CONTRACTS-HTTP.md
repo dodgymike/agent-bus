@@ -173,7 +173,7 @@ added to it.
 | `GET` | `/v1/messages` | bearer | 200 | `{"messages":[<message>...],"cursor":"<opaque>","more":false,"timed_out":false}` — history from a cursor; never parks. Query: `?cursor=<opaque>&limit=<1..256>` |
 | `GET` | `/v1/wait` | bearer | 200 | Same body. Parks until a visible message arrives or the deadline passes. Query: `?cursor=<opaque>&limit=<1..256>&timeout=<1..300 seconds>` |
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 200 | **A long-poll timeout is a 200**, with `"messages":[]`, `"timed_out":true` and the **same `cursor` that was sent**. It is never an error status: a quiet bus is the steady state. |
-| `GET` | `/v1/messages`, `/v1/wait` | bearer | 400 | `cursor` malformed, not base64url, an unknown cursor version, or **bound to a different agent**; `limit` not a positive integer or over 256; `timeout` not a positive whole number of seconds or over 300 |
+| `GET` | `/v1/messages`, `/v1/wait` | bearer | 400 | `cursor` malformed, not base64url, or **bound to a different agent**; an **unknown cursor version is NOT a 400** — it is accepted and remapped to the start of the retained window (see below); `limit` not a positive integer or over 256; `timeout` not a positive whole number of seconds or over 300 |
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 403 | `{"error":"sender is not enrolled on this bus"}` — authenticated, but not on this bus's roster. The read paths **fail closed** rather than returning an empty batch; see the enrolment epoch below for why an unknown reader must never be read with no epoch. |
 | `GET` | `/v1/wait` | bearer | 503 | this agent already has `hub.MaxWaitersPerAgent` (32) long polls parked; `Retry-After: 5` |
 | `HEAD` | `/v1/agents`, `/v1/messages`, `/v1/wait` | bearer | 200 | **Added 2026-08-08 (CORE-7).** Accepted exactly as on the unauthenticated GET routes: same status, same headers, no body. Authentication is unchanged — `HEAD` goes through the same default-deny `authMiddleware` as `GET`, so an anonymous `HEAD` is 401. Safe because every `requireGET` route is a pure read: the cursor is the client-supplied `after`/`cursor` parameter, so a `HEAD` consumes and advances nothing a later `GET` needed. |
@@ -271,8 +271,14 @@ a stale cursor, or (once the RELAY epic lands) a cyclic peer topology. What the 
 - **Every message is delivered whole or not at all.** Recovery never serves a torn record: a
   message that survives carries its original sender, recipients, body and content hash, and the hash
   is re-verified on the way back off disk.
-- **The order is total and stable.** Every message has a server-minted sequence (invariant 1) and is
-  read back in ascending sequence order.
+- **The order is total, stable and server-assigned — but it is NOT sequence order.** Every message
+  carries a server-minted `seq` (invariant 1) that is unique and never reused, and is read back in
+  ascending **delivery-position** order — a second server-minted number, stamped from the WAL commit
+  index. Because a sequence is minted at *reservation* time and reservations may be spent out of
+  order, **the delivered `seq` stream is not ascending.** The order is total and stable in the sense
+  that matters: every reader traverses the same order, that order never changes, and a message can
+  never land behind a cursor that has already passed it. `seq` is an identity; the cursor is a
+  position; they are different numbers and are not comparable.
 
 Duplicates are absorbed by invariant 10 on the WRITE side (idempotency keys) and are expected to be
 tolerated by the reader. A client that must not act twice on one message should key on `message_id`.
@@ -282,9 +288,28 @@ tolerated by the reader. A client that must not act twice on one message should 
 Opaque, versioned, base64url. It encodes a **position and nothing else**, and it is **bound to the
 agent it was issued to**: presenting agent A's cursor as agent B is a 400.
 
+**The cursor is an opaque, agent-bound delivery position, and its format is versioned.** Clients
+must treat it as bytes: pass back exactly what you were given. The current format version is `v2`
+(RESERVED from the Spec Server `cursor-format-version` namespace, not chosen by hand). A cursor
+carrying a version this build does not issue is **accepted and remapped to position 0** — one replay
+of the retained window — rather than rejected.
+
+That asymmetry is deliberate and is a correctness requirement, not a convenience. A 400 here is not
+a recoverable error for a real client: it surfaces as a rejection the watch loop does not retry, and
+nothing in the client clears the stored cursor, so the same rejected value is re-read from disk and
+re-presented on every restart, for ever. Remapping costs one duplicate-delivery burst, which
+at-least-once delivery already requires every client to tolerate. Rejecting costs the agent its
+entire message stream, permanently.
+
+**The agent binding is still enforced for an old-version cursor.** A `v1` cursor issued to a
+DIFFERENT agent is still a 400 — the version remap happens only after the agent-id check, never
+before it.
+
 - An **absent or empty** `cursor` means position 0 — "I have seen nothing" — so a fresh agent reads
   back through the whole retained window, paginated.
-- A **non-empty batch** returns the sequence of its last message as the next cursor.
+- A **non-empty batch** returns the **delivery position** of its last message as the next cursor —
+  NOT its sequence. The two are different server-minted numbers (see the delivery-order bullet
+  above); a cursor is never comparable to a `seq`.
 - An **empty batch returns the cursor unchanged**, byte for byte. This is what makes a long-poll
   timeout resumable, and it is the safe direction: a cursor is never advanced past messages the
   caller was not handed.

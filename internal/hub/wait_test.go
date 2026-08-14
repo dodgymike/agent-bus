@@ -80,8 +80,10 @@ func TestLongPollWait(t *testing.T) {
 		if batch.TimedOut {
 			t.Fatal("the fast path reported TimedOut")
 		}
-		if batch.Cursor != res.Seq {
-			t.Fatalf("Wait returned cursor %d, want %d", batch.Cursor, res.Seq)
+		// The cursor is the message's DELIVERY POSITION, not its sequence — the
+		// two are different counters since SIGN-1-FU-REORDER-WATERMARK.
+		if batch.Cursor != batch.Messages[0].Pos {
+			t.Fatalf("Wait returned cursor %d, want the delivered message's position %d", batch.Cursor, batch.Messages[0].Pos)
 		}
 		if elapsed > timeout/10 {
 			t.Fatalf("the fast path took %v against a %v timeout; it parked when it had something to return", elapsed, timeout)
@@ -430,7 +432,11 @@ func TestWaiterWakeup(t *testing.T) {
 		const iterations = 200
 		delivered := 0
 		for i := 0; i < iterations; i++ {
-			_, _, _, after, _ := h.Store().Stats()
+			// The head POSITION, not Stats's head sequence: a cursor is a
+			// delivery position (SIGN-1-FU-REORDER-WATERMARK), and parking at a
+			// sequence would land below everything already published, so the fast
+			// path would return and the registration race would never be exercised.
+			after := h.Store().PosHead()
 
 			type outcome struct {
 				batch hub.Batch
@@ -648,7 +654,9 @@ func TestPollConcurrency(t *testing.T) {
 		}
 		// The bucket drains, so the cap is a CONCURRENCY bound and not a lifetime
 		// quota: the same agent can poll again.
-		if _, err := h.Wait(context.Background(), b, res.Seq, 10, 50*time.Millisecond); err != nil {
+		// Polled from the HEAD POSITION, so this is a park-and-time-out rather
+		// than a fast-path read. Stats's head is a sequence and would not do.
+		if _, err := h.Wait(context.Background(), b, h.Store().PosHead(), 10, 50*time.Millisecond); err != nil {
 			t.Fatalf("after its waiters drained, %s was still refused: %v", b, err)
 		}
 	})

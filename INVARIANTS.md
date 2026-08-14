@@ -41,7 +41,10 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    which WAS deliberately narrowed — this one was not.
    **Enforcement point narrowed 2026-08-14 (`SIGN-1-FU-OUTOFORDER-POISON`, `DECISIONS.md`) — the
    STORE's check, NOT this invariant:** `store.Append` no longer requires strictly-increasing
-   sequences; it enforces that no sequence is served twice and the slice stays sequence-sorted,
+   sequences; it enforces that no sequence is served twice (via a retained-window sequence index)
+   and that the slice stays sorted by DELIVERY POSITION — amended 2026-08-14 by
+   `SIGN-1-FU-REORDER-WATERMARK`, which moved the serving copy off sequence order onto the WAL
+   commit index; the slice is no longer sequence-sorted,
    `head` uses `max` and never rewinds, and allocation is structurally independent of `store.head`.
 ### Invariant 2 — Fully-qualified agent ids
 
@@ -155,8 +158,13 @@ one needs an explicit decision recorded in `DECISIONS.md`.
       landing on the party most likely to be honest.
     - **Replay of an already-accepted signed message** (by a peer, a relay, or a third party) is
       rejected outright **and disconnects the sender**. A signature does not stop replay — a valid
-      signed message can be resent verbatim — so freshness comes from the server-minted monotonic
-      sequence plus recipient-side cursor, not from the signature. This is the one party the
+      signed message can be resent verbatim — so freshness is enforced **server-side at ingest**, by
+      refusing an already-accepted signed message. It is **not** derived from sequence ordering
+      (corrected 2026-08-14, SIGN-1-FU-REORDER-WATERMARK): the sequence is minted at reservation time
+      and may be spent out of order, so it is an **identity**, never a freshness or ordering token,
+      and the delivery cursor is an opaque server-assigned **position**, not a sequence. A recipient
+      that filters on sequence ordering re-implements the very defect that task fixed, client-side,
+      and silently loses messages the bus has already acknowledged. This is the one party the
       disconnect is for: it presents material it was never issued. On `/v1/send` it is detected by
       the `sender` inside the signed bytes not being the authenticated principal, and **the
       disconnect fires ONLY when that claim is a well-formed fully-qualified `<bus-id>.<agent-id>`**

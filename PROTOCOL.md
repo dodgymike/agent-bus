@@ -557,10 +557,19 @@ before.
 
 This is the collision SIGN-7 raised, and this is its resolution. The signed bytes carry the **origin
 bus's** message id and sequence, which are already bus-namespaced (`"<bus-id>-<seq>"`, invariants 1
-and 2) and so are globally unambiguous and not a peer's to mint. A **receiving** bus mints its **own
-local delivery sequence** for its own recipients' cursors (SIGN-4) **outside** the signed bytes and
-binds it in its durable record. Neither bus cedes id authority to a peer, and no relayed signature
-breaks.
+and 2) and so are globally unambiguous and not a peer's to mint. A **receiving** bus assigns its own
+**delivery position** for its own recipients' cursors **outside** the signed bytes and binds it in
+its durable record. Neither bus cedes id authority to a peer, and no relayed signature breaks.
+
+**Amended 2026-08-14 by `SIGN-1-FU-REORDER-WATERMARK`.** The receiving bus's number is a **delivery
+POSITION** (the WAL commit index), not a "local delivery sequence", and a recipient's cursor is a
+position rather than a sequence. The distinction is not cosmetic: it is what makes a relayed message
+deliverable at all. A relayed message is committed like any other, so it takes the next commit index
+and therefore lands ABOVE every reader's cursor — it can never arrive below one and be silently
+suppressed. The earlier wording implied the receiving bus mints a *sequence* the recipient then
+orders and freshness-checks on, which is the design that task removed; a recipient performs **no**
+sequence-based freshness check and deduplicates on `message_id`. See `CONTRACTS-ONDISK.md`, "The
+DELIVERY POSITION, and why it is not on disk".
 
 What is deliberately **not** covered, stated so nobody assumes otherwise:
 

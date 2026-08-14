@@ -493,7 +493,12 @@ func TestMessagingCrashRecoveryLeavesAWorkingHub(t *testing.T) {
 	a := agentID(t, testBusID, "alpha")
 	b := agentID(t, testBusID, "beta")
 
-	_, _, _, head, _ := h.Store().Stats()
+	// The cursor is a DELIVERY POSITION, so it comes from PosHead and NOT from
+	// Stats's head, which is a SEQUENCE (SIGN-1-FU-REORDER-WATERMARK). Parking at
+	// a sequence would put the waiter somewhere arbitrary in the position space:
+	// on this fixture it is BELOW everything recovered, so Wait's fast path would
+	// return immediately and nothing would ever park.
+	head := h.Store().PosHead()
 	if head == 0 {
 		t.Fatalf("recovery from a %d-byte truncation kept nothing, so the wake-up check would be vacuous", cut)
 	}

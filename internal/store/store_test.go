@@ -50,12 +50,38 @@ func agentIDFor(t *testing.T, name string) string {
 
 // mkMessage builds a valid Message through the only constructor, so the
 // interdependent fields (id from seq, hash from body) cannot drift.
+//
+// # It stamps Pos == Seq, which is the IN-ORDER case and nothing more
+//
+// The delivery position is assigned by the hub from the WAL commit index and is
+// not a constructor field, so a test has to supply it. Pos == Seq models the
+// ordinary bus where every reservation is spent in the order it was minted:
+// commit order and sequence order coincide, and every cursor assertion in this
+// package can be written in either counter without ambiguity.
+//
+// A FIXTURE THAT APPENDS SEQUENCES OUT OF ORDER MUST OVERRIDE Pos — see
+// mkMessageAt. Leaving Pos == Seq there would hand Append a position below the
+// one already applied, which is the server-bug branch (it retains the message,
+// logs at ERROR and bumps NonMonotonicPositions) rather than the ordinary late
+// spend the fixture means to exercise.
 func mkMessage(t *testing.T, sender string, broadcast bool, recipients []string, seq uint64, sentAt time.Time, body string) store.Message {
 	t.Helper()
 	m, err := store.NewMessage(testBusID, sender, broadcast, recipients, seq, sentAt, []byte(body), fmt.Sprintf("key-%d", seq), testTimestampMs, testSignature(t))
 	if err != nil {
 		t.Fatalf("store.NewMessage(seq=%d): %v", seq, err)
 	}
+	// The DELIVERY POSITION. See the doc comment.
+	m.Pos = seq
+	return m
+}
+
+// mkMessageAt is mkMessage with the delivery position given separately: pos is
+// the arrival (commit) order, seq the minted identity. It is what an
+// out-of-order spend looks like — a low sequence carrying a high position.
+func mkMessageAt(t *testing.T, sender string, broadcast bool, recipients []string, seq, pos uint64, sentAt time.Time, body string) store.Message {
+	t.Helper()
+	m := mkMessage(t, sender, broadcast, recipients, seq, sentAt, body)
+	m.Pos = pos
 	return m
 }
 
@@ -86,15 +112,20 @@ func TestStoreAppendOrdering(t *testing.T) {
 	// is the duplicate rule (store.ErrDuplicateSequence) and the head, which
 	// never rewinds. wantCount is the retained count AFTER the case, so the
 	// accepted late insert is accounted rather than assumed away.
+	// Each case carries its own POSITION, and every one of them is above the
+	// last: positions are commit order, so a table row that reused one would be
+	// exercising the server-bug branch rather than the rule it names.
 	cases := []struct {
 		name      string
 		seq       uint64
+		pos       uint64
 		want      error
 		wantCount int
 	}{
-		{"Zero", 0, store.ErrInvalidMessage, 2},
-		{"BehindHeadIsAccepted", 3, nil, 3},
-		{"AtHeadIsADuplicate", 7, store.ErrDuplicateSequence, 3},
+		{"Zero", 0, 8, store.ErrInvalidMessage, 2},
+		{"PositionZero", 5, 0, store.ErrInvalidMessage, 2},
+		{"BehindHeadIsAccepted", 3, 9, nil, 3},
+		{"AtHeadIsADuplicate", 7, 10, store.ErrDuplicateSequence, 3},
 	}
 	if len(cases) == 0 {
 		t.Fatal("the out-of-order table is empty")
@@ -104,6 +135,7 @@ func TestStoreAppendOrdering(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := mkMessage(t, a, true, nil, 1, clock.now(), "x")
 			m.Seq = c.seq // deliberately desynchronised from the id: Append is the check
+			m.Pos = c.pos
 			err := s.Append(m)
 			if !errors.Is(err, c.want) {
 				t.Fatalf("Append(seq=%d) = %v, want %v", c.seq, err, c.want)

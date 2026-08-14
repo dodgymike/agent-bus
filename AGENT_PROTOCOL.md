@@ -679,10 +679,16 @@ number, so a `agent-busctl` killed between the two steps converges on **one** me
 
 **Two consequences you will see and should not misread:**
 
-- **Sequence numbers jump.** After a bus restart the sequence typically resumes at the next multiple
-  of 256, and a reserved-but-unused number leaves a permanent gap. **This is correct.** Treat the
-  sequence as strictly increasing, never as dense (`internal/ids/sequence.go` says so normatively);
-  a gap is not evidence that a message was lost.
+- **Sequence numbers jump, and they do not arrive in order.** `seq` is minted when you *reserve*,
+  not when you *send*. So after a bus restart the sequence typically resumes at the next multiple of
+  256; a reserved-but-unused number leaves a permanent gap; and because a reservation may be spent
+  up to `MintTTL` after it was minted, a message with a **lower** `seq` can be delivered to you
+  **after** one with a higher `seq`. All three are correct. `internal/ids/sequence.go` binds the
+  **allocator** to be strictly increasing and never dense — that is a statement about the order
+  numbers are *handed out*, not the order messages *arrive*. **Do not use `seq` to order,
+  deduplicate, or discard anything.** Deduplicate on `message_id`; take arrival order as the order.
+  A gap is not evidence that a message was lost, and a `seq` below one you have already seen is not
+  evidence of a replay.
 - **A `409` right after a bus restart is routine, and the client's advice for it is misleading.**
   Reservations are held in memory, so a restart forgets them and the send is refused with a 409. The
   generic remedy text says "an idempotency key was reused with different content; use a fresh key" —
@@ -822,6 +828,15 @@ stderr names the count and says it may replay. Your handler must already be idem
 `message_id` (see above), so this costs you nothing; if it is not, fix that before you upgrade. The
 file's format version is unchanged at `1`, so an older `agent-busctl` reading it does not throw the
 file away.
+
+**If you were watching before this build, expect ONE replay.** The read cursor is now an opaque
+server-assigned **delivery position** rather than a sequence, so every cursor stored by an older
+build is remapped to the start of the retained window and you will be re-delivered whatever it still
+holds (1 day, or 1 GiB of messages, whichever binds first). It is a replay, never a skip, and it
+happens once. Your handler must already be idempotent on `message_id`, so this costs you nothing; if
+it is not, fix that before you upgrade. Your cursor is **not** rejected and your watch loop does not
+exit — an older cursor is accepted and remapped, deliberately, because rejecting it would leave a
+stored value that could never be cleared.
 
 **`enrol` now clears the stored position for the identity it enrols.** That is deliberate and it is
 not the replay-avoidance you might assume — it is skip-avoidance. Enrolling reuses a key that a
@@ -964,9 +979,15 @@ disconnect fires **only** when that claim is a well-formed, fully-qualified `<bu
 an absent, unqualified, or whitespace-padded claim names nobody, so it is still refused (403) but
 does **not** disconnect you. **No "was this already accepted" lookup is involved in the check** —
 the trigger is purely the sender claim not matching the authenticated principal, so a first-time
-impersonation attempt is caught identically to a genuine replay. Freshness against actual replays
-comes from the server-minted monotonic sequence plus the recipient-side cursor (the same cursor
-`agent-busctl watch` persists), never from the signature alone. Nothing is required of you here
+impersonation attempt is caught identically to a genuine replay. Freshness against actual replays is enforced
+**server-side, at ingest**: the bus refuses an already-accepted signed message before it ever
+reaches you. You do not need a freshness check of your own, and **you must not build one out of
+`seq`.** A `seq` lower than one you have already received is a **normal, correct delivery — not a
+replay** — because the sequence is minted at reservation time and reservations may be spent out of
+order. A client that drops or rejects such a message loses it permanently: the bus has already
+recorded it as delivered. The cursor `agent-busctl watch` persists is an opaque, server-assigned
+**delivery position** — it is not a `seq`, it is not comparable to a `seq`, and its only correct use
+is to hand it back unmodified on your next poll. Nothing is required of you here
 beyond the ordinary rule already stated for `watch`: deduplicate on `message_id`, because
 at-least-once delivery — including across relayed buses — means you will see duplicates as the
 normal steady state.

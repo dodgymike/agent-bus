@@ -127,9 +127,33 @@ var (
 // body and, for a directed message, the recipient — and both are validated
 // before they reach here.
 type Message struct {
-	// Seq is the server-minted sequence number. It is the total order of the
-	// bus and the value a cursor points at.
+	// Seq is the server-minted sequence number. It is the message's IDENTITY —
+	// the number the id derives from and the number the SENDER SIGNED — and it
+	// is NOT the delivery order. Since SIGN-1 a sequence is minted and durably
+	// burned before the client signs and sends, so two agents holding
+	// reservations spend them in whatever order they please. See Pos.
 	Seq uint64
+
+	// Pos is the server-assigned DELIVERY POSITION: the WAL commit index of the
+	// record that made this message durable. It is what a cursor points at, what
+	// Store keeps the serving copy ordered by, and what Since binary-searches.
+	//
+	// It is monotone, never reused and stable across restart — replay folds
+	// records in commit order, so a recovered message is assigned the same
+	// position it had before — but it is NOT part of the durable record and does
+	// NOT appear in Record, in the JSON, or in the audit trail. It is DERIVED
+	// from where the record sits in the log, which is why splitting it out of Seq
+	// cost no on-disk format change and did not move RecordVersion.
+	//
+	// Zero means UNSET. Store.Append refuses it: 0 is the reserved "I have seen
+	// nothing" cursor value, so a zero stamp would sit below every cursor and
+	// replay a reader's whole retention window.
+	//
+	// Do not conflate the two counters. Seq feeds the mint sequence floor
+	// (invariant 1: never reused, never rewound); Pos feeds delivery. A late,
+	// low Seq gets a HIGH Pos, lands above every cursor, and is therefore
+	// delivered to — and wakes — every reader (SIGN-1-FU-REORDER-WATERMARK).
+	Pos uint64
 
 	// ID is the fully-qualified message id "<bus-id>-<seq>" (ids.MessageID).
 	ID string
@@ -185,9 +209,17 @@ type Message struct {
 	// is what the SENDER claimed and is the only one a recipient can check
 	// against the signature. A bus that collapsed them would either be signing
 	// its own clock (which the sender never saw) or ordering on a clock a client
-	// chooses. Clocks lie, so this is not a freshness mechanism either: replay
-	// protection is the server-minted monotonic sequence plus the recipient's
-	// cursor (invariant 10).
+	// chooses. Clocks lie, so this is not a freshness mechanism either.
+	//
+	// NOR IS THE SEQUENCE (corrected 2026-08-14, SIGN-1-FU-REORDER-WATERMARK —
+	// the previous wording here named "the server-minted monotonic sequence plus
+	// the recipient's cursor", and a recipient built from that sentence
+	// re-implements the very suppression that task fixed). Replay protection is
+	// enforced SERVER-SIDE AT INGEST, by refusing an already-accepted signed
+	// message (invariant 10). Seq is minted when a client RESERVES, not when it
+	// sends, so it is NOT monotone in delivery order and is an IDENTITY rather
+	// than a freshness token; the recipient's cursor is a delivery POSITION (see
+	// Message.Pos), which is a different number and is not comparable to Seq.
 	TimestampUnixMilli int64
 
 	// Signature is the sender's 64-byte detached Ed25519 signature over
@@ -285,6 +317,15 @@ func (m Message) VisibleTo(agentID string, enrolledAt time.Time) bool {
 // unknown field here would turn a forward-compatible addition into a refusal
 // to recover. That is what lets the CRYPTO epic add an encrypted-envelope
 // descriptor without an on-disk break.
+//
+// # Message.Pos is DELIBERATELY ABSENT, and adding it would be a mistake
+//
+// The delivery position is the WAL commit index of the very entry this record
+// is the body of, so writing it INTO that entry would record a fact the entry's
+// own location already states — and would create a second copy free to disagree
+// with the first. Decode therefore returns a Message with Pos == 0 and Hub.Apply
+// stamps it from wal.Committed.CommitIndex, which is what makes the position
+// identical on the live and the recovery paths without an on-disk format change.
 type Record struct {
 	V             int      `json:"v"`
 	MessageID     string   `json:"message_id"`

@@ -5385,3 +5385,191 @@ binary-searches. And do not let the P1 wording in `Append` drift back into claim
 DETECTS a reissue; it does not.
 
 <!-- ===== END 2026-08-14 SIGN-1-FU-OUTOFORDER-POISON ===== -->
+
+<!-- ===== BEGIN 2026-08-14 SIGN-1-FU-REORDER-WATERMARK ===== -->
+
+## 2026-08-14 — SIGN-1-FU-REORDER-WATERMARK: delivery order is the WAL commit index, not the sequence
+
+Spec Server task `86c7d368-9733-434e-848d-05dd12fecf3a` (P0). Supersedes
+`c829af9a-4418-437a-a0f8-34ef2f5d15d0`, whose note journal did not survive the recreate.
+
+**This section SUPERSEDES the SIGN-4 freshness model wherever it is recorded in this file** —
+including the entries at `:222`, `:371` and `:1005`, which each state that freshness comes from "the
+server-minted monotonic sequence plus the recipient-side cursor". Those entries are dated and this
+file is append-only, so they are **left exactly as they are**; this pointer exists because without it
+a grep for the freshness rule lands on the superseded answer three times and the current one once.
+The sequence is minted at reservation time, is therefore not monotone in delivery order, and is an
+identity rather than a freshness token; freshness is enforced server-side at ingest.
+
+### The defect
+
+SIGN-1 made a send two-step: `hub.Mint` allocates and durably burns a sequence so the client can
+sign it, and the send follows. So a message can be committed at a sequence BELOW a reader's cursor.
+`store.Since` binary-searched for the first retained message strictly after the cursor and
+`hub.notify` skipped any waiter with `m.Seq <= w.after`, so an actively long-polling reader — the
+normal state of every agent on this bus — never received that message and was never woken. The
+sender got a successful ack carrying a message id, and the record was durable and in the audit
+trail. Security rated it HIGH: a deterministic targeted suppression and false-ack primitive, not
+merely a lost message.
+
+`SIGN-1-FU-OUTOFORDER-POISON` (commit `800fe25`) did not cause this and did not fix it. It removed
+the HALT that was MASKING it: before that fix the bus stopped dead instead of skipping a message.
+
+### What we rejected: the reorder watermark
+
+The task as filed sketched a watermark `W` = (lowest outstanding mint) − 1, pushed down from the
+hub, with the returned cursor clamped to `min(next, max(W, after))` so a reader re-reads the reorder
+window. We rejected it, and the reason is worth recording because the shape is intuitive and will be
+proposed again.
+
+**It livelocks, and this was reproduced by execution rather than argued.** With a reader at
+`after=3`, `W` pinned at 3 by one outstanding mint for sequence 4, and messages 5..200 present,
+three consecutive polls returned the IDENTICAL batch 5..104 with `next=104, more=true`.
+`DefaultBatchLimit` is 64, so the batch limit binds long before the window closes and the clamp puts
+the cursor straight back. The client does not rescue itself: `client/watch.go` backs off only on an
+EMPTY batch, and a clamped batch is never empty.
+
+The cost to an attacker is one `/v1/mint` per `MintTTL`. Measured: one unspent reservation at
+sequence 1 let the head reach 201, i.e. **200 durable, acknowledged messages withheld from every
+reader on the bus** — so the clamp trades a targeted suppression of one message for a bus-wide
+denial of delivery. Head-of-line blocking is the watermark's mechanism and not an incidental
+side effect, so every bounded variant merely trades the livelock for a permanent tail suppression
+plus a stall. Shortening `MintTTL` narrows the window and closes nothing.
+
+### What we did instead: a delivery position, distinct from the signed sequence
+
+The sequence was carrying two jobs that SIGN-1 pulled apart, and the fix is to stop conflating them:
+
+- **`Seq` is IDENTITY.** Server-minted, signed by the client, never reused, never rewound. Unchanged.
+- **`Pos` is DELIVERY ORDER.** Server-assigned at commit, monotone by construction. New.
+
+`Pos` is the WAL commit index (`wal.Committed.CommitIndex`) — taken on the live path from the return
+of `h.durable.Write`, which publish had been discarding, and on the recovery path from the
+`wal.Committed` handed to `Hub.Apply`. Cursors, `store.Since`, `store.HasVisibleAfter` and
+`hub.notify` all move onto `Pos`.
+
+A late-arriving low `Seq` therefore gets a HIGH `Pos`, lands ABOVE every reader's cursor, is
+delivered to every reader and wakes every parked waiter. There is no watermark, no reorder window,
+no redelivery amplification and no starvation, and the delivery decision is O(1).
+
+### Why the WAL index and not a counter of our own
+
+A store-local `pos++` assigned per successful `Append` is NOT stable across a restart. `Hub.Apply`
+skips records it cannot decode, and the set it skips can differ between runs — a schema bump skips
+every message record. Any skip shifts every later position down by one, so a persisted client cursor
+would silently point one message further along and SKIP a message. That is the very defect being
+fixed, reintroduced through the recovery path. The WAL index is durable, monotone, never reused, and
+replay is defined to run in commit order, so a position means the same thing before and after a
+restart.
+
+`Pos` is deliberately NOT persisted inside the message record. It is derivable from where the record
+sits in the log, so this is **not** an on-disk format change: `store.RecordVersion` does not move and
+no record-type number was reserved.
+
+### Consequences accepted
+
+- **Delivery order is no longer ascending `Seq`.** Inside the reorder window a reader sees a higher
+  sequence before a lower one. This is not a regression to be fixed later: ANY fix that delivers a
+  late arrival to a reader who has already passed that position must hand it over out of sequence
+  order. The alternative is not "ordered delivery", it is "no delivery".
+- **Every client-held cursor changes meaning.** `cursorVersion` moves to `v2`. A `v1` cursor is
+  REMAPPED TO POSITION 0 — one replay of the retention window — and is NOT rejected. Rejecting it
+  would be a permanent wedge rather than a one-off replay: a 400 surfaces as a rejection the watch
+  loop does not retry, and nothing clears the stored cursor, so the same poisoned value is
+  re-presented for ever. `AGENT_PROTOCOL.md` already documents at-least-once delivery and an
+  idempotent-on-`message_id` handler, and there is precedent for exactly this announced one-off
+  replay in the 2026-08-08 cursor-store change.
+- **The retention age bound becomes exact.** It was documented as soft by up to `MintTTL` because
+  the slice was ordered by `Seq` while expiry is judged on `SentAt`. Ordered by `Pos`, the slice is
+  in commit order, which IS `SentAt` order, so the age loop no longer stops early.
+- **The prune race dies structurally.** A late low sequence arriving after higher sequences were
+  pruned now gets a high position and is delivered normally, instead of landing at-or-below
+  `prunedHead` and being retained by nobody.
+
+### NARROWING: pruned-region re-serve PREVENTION is traded for delivery
+
+**This is a deliberate narrowing of a stated store-level property and it is called out separately
+because the reviewer gate blocked the commit until it was written down.**
+
+`store.Append` used to carry an at-or-below-`prunedHead` branch that refused to RETAIN a message
+whose sequence was at or below the highest sequence retention had already dropped. Its documented
+job was: across the already-pruned region, a re-arriving sequence is **PREVENTED from being served a
+second time**, though it is **not DETECTED** — a high-water mark cannot distinguish a double-apply
+from a genuinely very late first arrival, and the previous entry says so explicitly.
+
+**That branch is deleted, so the PREVENTION is gone.** A sequence that was served, then pruned, then
+re-arrives is now retained and served again.
+
+Why that is the right trade, and not a regression:
+
+- Under the new design that branch would drop **exactly the message this task exists to deliver**. A
+  late low sequence arriving after higher sequences were pruned now gets the HIGHEST position, sits
+  at the tail of the delivery order, and is deliverable to every reader. Refusing it would preserve
+  the suppression in the one case an attacker can force — which is precisely the prune-race finding
+  the security gate raised (roughly 1 GiB of max-size sends past a victim's outstanding mint made
+  the victim's acknowledged message retained by nobody).
+- What is actually lost is the ability to re-serve-proof a region we can no longer see. Within the
+  RETAINED window nothing is lost: the new `bySeq` index detects a genuine double-apply exactly as
+  before and still returns `ErrDuplicateSequence`, loudly.
+- DETECTION across the pruned region was already absent before this change, so no detection was
+  given up — only a prevention that was, by construction, indistinguishable from dropping a valid
+  message.
+- Re-serving is a DUPLICATE DELIVERY, which `AGENT_PROTOCOL.md` already requires every client to
+  tolerate (at-least-once, deduplicate on `message_id`). Dropping is unrecoverable. Between an
+  outcome the contract already covers and one it does not, this takes the former.
+
+It is pinned by a test (`TestReorderWatermark…` in `internal/store/reorder_watermark_sign1fu_test.go`)
+so the narrowing is a recorded decision rather than a silent behaviour change.
+
+### What must not drift back
+
+Do not restore the at-or-below-`prunedHead` refusal. It reads like a safety check and is now a
+message-suppression bug.
+
+Do not reintroduce a watermark, a reorder window, or any rule that holds a reader behind an
+outstanding mint — that is the livelock above, and `MintTTL` is 15 minutes.
+
+Do not derive the delivery position from anything but the WAL index — specifically not from a
+per-`Append` counter, and not from `SentAt`.
+
+Do not "restore ordering" by sorting the serving copy on `Seq` again. That re-opens the suppression
+in full. The serving copy is ordered by `Pos`; `Seq` ordering is now maintained only where identity
+needs it, by the duplicate-sequence index.
+
+Do not make a `v1` cursor an error.
+
+### Amendments to the immediately preceding section, recorded HERE
+
+This file is append-only and a reversal is recorded **by** a later entry, never **in** the entry it
+reverses. So the two sentences below are NOT edited where they stand in
+`## 2026-08-14 — SIGN-1-FU-OUTOFORDER-POISON`; they are amended from here. Read that section with
+these two substitutions applied.
+
+**Amendment 1** — in that section's `### What must not drift back` list, the sentence *"Do not sort
+the serving copy on `SentAt` — that destroys the sequence ordering `Since` binary-searches."* is
+amended to read:
+
+> Do not sort the serving copy on `SentAt`. ~~that destroys the sequence ordering `Since`
+> binary-searches~~ — **AMENDED 2026-08-14 by SIGN-1-FU-REORDER-WATERMARK.** The prohibition on
+> `SentAt` stands, but its stated REASON no longer does: `Since` no longer binary-searches on
+> sequence. The serving copy is now ordered by the delivery position (the WAL commit index) and
+> `Since` searches on that. Sorting on `SentAt` remains wrong because a wall-clock field is not a
+> durable, monotone, never-reused ordering and cannot be recovered identically; use `Pos`.
+
+The other three items in that list are intact, unaffected and still correct.
+
+**Amendment 2** — in the same section, the sentence beginning *"Two smaller consequences are written
+up where they live rather than here"* is **false in both halves** — `internal/store/store.go` now
+states *"The age bound is EXACT again"*, and there are no longer "two new WARN lines" (this change
+deleted the ordinary late-insert WARN entirely; the package now emits exactly ONE line, an ERROR on
+the non-monotone-position fault). It is amended to read:
+
+> Two smaller consequences were written up where they live rather than here. **Both were overtaken on
+> 2026-08-14 by `SIGN-1-FU-REORDER-WATERMARK` and are recorded here only so the trail is followed
+> rather than believed:** the `pruneLocked` age bound was soft by at most `hub.MintTTL` in the
+> OVER-retention direction — it is **EXACT again** now that the serving copy is ordered by delivery
+> position, which is commit order and therefore `SentAt` order; and the two uncapped recovery-path
+> WARN lines (filed with `SIGN-1-FU-STORE-LOGGER`) **no longer exist** — the ordinary late-insert WARN
+> was deleted, and `internal/store` now emits a single ERROR line, on the non-monotone-position fault.
+
+<!-- ===== END 2026-08-14 SIGN-1-FU-REORDER-WATERMARK ===== -->

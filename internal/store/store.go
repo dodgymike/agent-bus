@@ -64,16 +64,18 @@ type Options struct {
 	// Defaults to time.Now.
 	Now func() time.Time
 
-	// Logger receives the ONE event this package discards: a message whose
-	// sequence arrived after retention had already dropped that position
-	// (Append, SIGN-1-FU-OUTOFORDER-POISON).
+	// Logger receives the ONE event this package now reports: an Append whose
+	// delivery POSITION is not above every position already appended
+	// (SIGN-1-FU-REORDER-WATERMARK). That cannot happen without a server bug —
+	// positions are WAL commit indices minted under the hub's write lock — so it
+	// is logged at ERROR, and the message is retained anyway.
 	//
 	// It defaults to a logger on os.Stderr rather than to the discarding logger
 	// the rest of the repo defaults to, and that difference is deliberate:
-	// invariant 6 sanctions the discard but makes SILENT discard the defect, and
-	// the only production caller (internal/hub) builds Options without this
-	// field. A discarding default would therefore make the real bus silent,
-	// which is the failure mode the invariant names.
+	// invariant 6 makes SILENT loss the defect, and the only production caller
+	// (internal/hub) builds Options without this field. A discarding default
+	// would therefore make the real bus silent, which is the failure mode the
+	// invariant names.
 	Logger *logging.Logger
 }
 
@@ -81,53 +83,56 @@ type Options struct {
 // memory is the serving copy, disk is the truth). It is safe for concurrent
 // use.
 //
-// # Held in sequence order, which is NOT arrival order
+// # Held in DELIVERY ORDER (Message.Pos), which is not sequence order
 //
-// Messages are held in one slice in strictly ascending sequence order. They do
-// not ARRIVE in that order: since SIGN-1 the sequence is minted (and durably
-// burned) before the client signs and sends, so two agents holding concurrent
-// reservations spend them in whatever order they please, and Append inserts a
-// late lower number into position rather than refusing it. See Append.
+// Messages are held in one slice in ascending Message.Pos — the WAL commit
+// index, i.e. the order this bus took responsibility for them. They are NOT
+// held in sequence order, and the difference is the whole subject of
+// SIGN-1-FU-REORDER-WATERMARK.
 //
-// # KNOWN GAP: a late arrival is not DELIVERED to a reader that has passed it
+// # IDENTITY (Seq) IS SEPARATE FROM DELIVERY ORDER (Pos), and that CLOSED the gap
 //
-// Filed as SIGN-1-FU-REORDER-WATERMARK, Spec Server task
-// c829af9a-4418-437a-a0f8-34ef2f5d15d0. LOOK IT UP BY THE UUID: that task's
-// `key` field is null and the server has no way to set one after creation, so
-// fetching it by the readable name 404s. Deliberately NOT closed here — this
-// type cannot close it (see the watermark paragraph below).
+// Since SIGN-1 a sequence is minted, and durably burned, BEFORE the client
+// signs and sends: hub.Mint hands the number out so the SENDER can sign it, and
+// the send follows up to hub.MintTTL later. Two agents holding reservations at
+// once therefore spend them in whatever order they please. Seq is a
+// PRE-ASSIGNED IDENTITY; it says nothing about when the message committed.
 //
-// A cursor is a sequence. If seq 2 is delivered and a reader's cursor advances
-// to 2, a seq 1 that lands afterwards is inserted BELOW that cursor, and Since
-// — which binary-searches for the first message strictly after the cursor —
-// will never hand it to that reader. The message is durable, it is in the audit
-// trail, and it is served to every cursor still below it; what it is not is
-// delivered to a reader that has already passed that position.
+// This type used to keep the slice in Seq order and let a cursor be a Seq, and
+// that combination lost mail. A message committed, fsynced and ACKNOWLEDGED at
+// a sequence below a reader's cursor was inserted BELOW that cursor, Since
+// binary-searched strictly after the cursor and never reached it, and
+// hub.notify skipped the parked waiter for the same reason — so an actively
+// long-polling reader missed it permanently and was never even woken. The
+// sender chose when to spend, which made it a targeted suppression and
+// false-ack primitive rather than a race.
 //
-// # DO NOT read this as "rare" — for an actively waiting agent it is the COMMON case
+// The fix is the split, not a watermark. A watermark ("no sequence <= W can
+// still arrive") was REFUTED by execution: one unspent reservation withheld 200
+// already-acknowledged messages from every reader on the bus, and with
+// hub.DefaultBatchLimit at 64 a reader clamped behind it cannot drain what it
+// is finally released. So:
 //
-// The obvious reading is that only a reader who happened to poll between the
-// two spends loses the message. That reading is wrong, and it was measured: a
-// reader LONG-POLLING AT THE HEAD CURSOR misses it permanently AND ITS POLL
-// NEVER WAKES. The mechanism is in the hub, not here: hub.notify skips any
-// waiter whose cursor is at or above the message's sequence, and every wake
-// point then re-reads through Since with that same cursor — so a late arrival
-// lands below it twice over, once for the wake and once for the read.
-// Long-poll-at-head is the primary mode of every agent on this bus, so for an
-// actively waiting recipient this is the ordinary outcome, not a narrow race.
+//   - Seq is unchanged: server-minted, client-signed, never reused, never
+//     rewound (invariant 1 is NOT narrowed by this).
+//   - Pos is the delivery position and is the wal.Committed.CommitIndex of the
+//     record that made the message durable. Cursors, Since, HasVisibleAfter and
+//     hub.notify all read it.
 //
-// This is a pre-existing consequence of SIGN-1, not of the fix. The poison
-// MASKED it: before this fix the bus stopped dead instead of skipping a
-// message, so the gap could not be observed. Trading a whole-bus halt that any
-// enrolled agent could trigger at will for a missed delivery is the right way
-// round, and it is emphatically not the end state.
+// A late arrival with a LOW Seq therefore gets a HIGH Pos, lands ABOVE every
+// cursor, is served to every reader and wakes every waiter. Nothing is
+// suppressed and nothing is stalled.
 //
-// Closing it needs a REORDER WATERMARK — "no sequence <= W can still arrive" —
-// and this package cannot compute one: the answer lives in the hub's table of
-// outstanding mints (a reservation is outstanding until it is spent or its TTL
-// expires), which the store cannot see and must not be given a back channel to.
-// So the fix belongs above this type, and there is deliberately NO watermark
-// API here for nothing to call.
+// # WHY THE POSITION MUST BE THE WAL INDEX and not a counter of this type's own
+//
+// It has to survive a restart, and it has to survive it IDENTICALLY. Replay
+// folds the log in commit order, so a recovered message is handed the same
+// index it committed under; a counter incremented inside Append would restart at
+// 1 and renumber the whole retained window, so every stored client cursor would
+// silently point somewhere else. The index is also already monotone, already
+// durable, and already never reused — invariant 1 is what guarantees that, and
+// internal/wal's index floor is what enforces it across restarts. See Append for
+// the ordering the monotonicity actually rests on.
 //
 // There is no per-agent queue and deliberately so: a broadcast would have to be copied
 // into every queue, an agent that enrols later could not read back through the
@@ -154,41 +159,60 @@ type Store struct {
 	now      func() time.Time
 	log      *logging.Logger
 
-	// msgs is ascending by Seq and holds no gaps of its own making: a gap in
-	// the sequence means the bus burned a number (a discarded prepare, a failed
-	// write), which is correct and must not be compacted away — invariant 1
-	// never rewinds a sequence.
+	// msgs is ascending by Pos — DELIVERY ORDER — and holds no gaps of its own
+	// making. Gaps in both counters are normal and must not be compacted away: a
+	// gap in the SEQUENCE means the bus burned a number (a discarded prepare, an
+	// expired reservation), and a gap in the POSITION means the log holds
+	// records that are not messages (floor records, enrolment, aborts). Neither
+	// is damage, and invariant 1 never rewinds either counter.
 	msgs []Message
+
+	// bySeq maps a retained message's sequence to its id. It is the ONLY
+	// duplicate-sequence detector left: the slice is no longer sequence-sorted,
+	// so the insertion search cannot double as the duplicate check.
+	//
+	// It covers the RETAINED window only, and that is a real narrowing rather
+	// than an oversight — a sequence that was served and has since been pruned
+	// leaves no evidence here, so a double-apply of it is not DETECTED. What
+	// the split does buy is that a re-arrival cannot be served from a slot
+	// behind the window either: it gets a fresh, higher position and appears at
+	// the tail like any other late arrival. See Append.
+	bySeq map[uint64]string
 
 	// bytes is the sum of Size() over msgs.
 	bytes int64
 
-	// head is the highest sequence ever APPENDED, which is not the same as the
-	// highest retained: it survives pruning, so a cursor at the head stays at
-	// the head even after everything behind it has aged out.
+	// head is the highest SEQUENCE ever APPENDED, which is not the same as the
+	// highest retained: it survives pruning. It feeds nothing on the read path —
+	// cursors are positions — and exists for the operator statistics and for the
+	// invariant-1 assertion that it never rewinds.
 	head uint64
 
-	// prunedHead is the HIGHEST sequence retention has ever dropped, 0 if
-	// nothing has been dropped. It only ever grows.
+	// posHead is the highest POSITION ever appended, 0 for an empty store. It is
+	// what makes the ordinary append O(1): a position above it goes at the end.
+	// It only ever grows, and it survives pruning for the same reason head does —
+	// a cursor at the head must stay at the head after the window moves.
+	posHead uint64
+
+	// prunedPos is the HIGHEST position retention has ever dropped, 0 if nothing
+	// has been dropped. It only ever grows.
 	//
-	// It stops a sequence that has already been served and then pruned from
-	// sailing back in and being served a SECOND time from a slot behind the
-	// window. The old strictly-increasing rule got that for free from
-	// monotonicity: a number below the head could not be re-admitted because no
-	// number below the head could be admitted at all. Ordered insertion loses it,
-	// because the duplicate check can only see what is still RETAINED.
-	//
-	// NOTE WHAT IT DOES NOT DO, and do not let the P1 wording in Append drift
-	// back into claiming it: this is a HIGH-WATER MARK, not a set, so it PREVENTS
-	// the re-serve without DETECTING the reissue. Once a position is pruned, a
-	// genuine double-apply of that sequence and a merely very late arrival are
-	// indistinguishable here, and both take the same branch. See that branch for
-	// why it must not be an error.
-	prunedHead uint64
+	// NOTHING IS REFUSED ON IT, and reintroducing such a refusal would reopen
+	// the suppression this design closes — under delivery ordering a late
+	// arrival is genuinely deliverable however low its sequence, because it
+	// lands at the TAIL. It is kept as the operator-facing measure of how far
+	// behind the window a non-monotone position landed.
+	prunedPos uint64
 
 	// dropped counts messages retention has removed, for the operator-facing
 	// statistics. It only ever grows.
 	dropped uint64
+
+	// nonMonotonicPos counts appends whose position was NOT above posHead. It is
+	// a fault counter for a case that cannot be reached without a server bug
+	// (see Append) and is exposed by NonMonotonicPositions so the condition is
+	// observable rather than log-only.
+	nonMonotonicPos uint64
 }
 
 // New returns an empty Store.
@@ -198,6 +222,7 @@ func New(opts Options) *Store {
 		maxBytes: opts.MaxBytes,
 		now:      opts.Now,
 		log:      opts.Logger,
+		bySeq:    make(map[uint64]string),
 	}
 	if s.maxAge <= 0 {
 		s.maxAge = DefaultMaxAge
@@ -209,9 +234,10 @@ func New(opts Options) *Store {
 		s.now = time.Now
 	}
 	if s.log == nil {
-		// os.Stderr, NOT io.Discard — see Options.Logger. WARN is the only level
-		// this package emits, so the threshold costs nothing and cannot silence
-		// the one line invariant 6 requires.
+		// os.Stderr, NOT io.Discard — see Options.Logger. ERROR is the only level
+		// this package emits (the non-monotone-position fault in Append), and a
+		// LevelWarn threshold is below it, so the threshold cannot silence the
+		// one line invariant 6 requires.
 		s.log = logging.New(os.Stderr, logging.LevelWarn)
 	}
 	return s
@@ -245,20 +271,38 @@ func New(opts Options) *Store {
 //
 //	P1  No sequence is ever SERVED twice (invariant 1: ids are never reused).
 //	    Within the RETAINED window this is exact, and a violation is DETECTED
-//	    and reported as ErrDuplicateSequence. Across the region retention has
-//	    already dropped it is enforced only in the weaker sense that prunedHead
-//	    refuses to retain the message a second time: the reissue is PREVENTED
-//	    from being served but is NOT detected, because a high-water mark cannot
-//	    distinguish a double-apply from a merely very late first arrival. That
-//	    is a deliberate narrowing of an enforcement point the old rule covered —
-//	    see the branch below, and the Spec Server task
-//	    SIGN-1-FU-OUTOFORDER-POISON, which carries the reasoning and both gate
-//	    findings in full.
-//	P2  msgs stays sorted ascending by Seq, because Since binary-searches it
-//	    (and HasVisibleAfter, which shares the search). A late message appended
-//	    at the END rather than into
-//	    position would be invisible to every reader, which is a worse bug than
-//	    the one being fixed.
+//	    and reported as ErrDuplicateSequence, out of bySeq. Across the region
+//	    retention has already dropped, the detection is GONE — a pruned sequence
+//	    leaves no evidence — and that narrowing is deliberate and recorded on
+//	    the Spec Server task SIGN-1-FU-OUTOFORDER-POISON.
+//	P2  msgs stays sorted ascending by Pos, because Since binary-searches it
+//	    (and HasVisibleAfter, which shares the search).
+//
+// # THE AT-OR-BELOW-prunedHead REFUSAL IS GONE, and must not come back
+//
+// A sequence arriving after retention had dropped that sequence's slot used to
+// be accepted-but-NOT-retained. Under delivery ordering that would be pure
+// suppression: the message is not going into a slot behind the window, it is
+// going to the TAIL of the delivery order at a position above every live
+// cursor, so it is genuinely deliverable to everyone. Refusing to retain it
+// would discard an acknowledged message for no property gained
+// (SIGN-1-FU-REORDER-WATERMARK).
+//
+// # THE POSITION MUST BE MONOTONE, and NOTHING IN THIS PACKAGE CAN ENFORCE THAT
+//
+// This is the load-bearing precondition and it is invisible from here.
+// Positions are monotone only because hub.publish holds writeMu ACROSS
+// durable.Write → store.Append, so the WAL hands out commit indices and this
+// type consumes them in the same order. Recovery gets it for free: replay is
+// single-threaded and in commit order.
+//
+// A THIRD CALLER APPENDING OFF THAT LOCK SILENTLY RESTORES THE DEFECT THIS
+// DESIGN CLOSED — two writers interleaved between Write and Append would let a
+// higher position be applied first, and the lower one would then land below
+// cursors that have already passed it. There is no check here that would catch
+// it: the branch below RETAINS the message (see the reasoning there), so the
+// only signal is the ERROR line and NonMonotonicPositions. If you are adding a
+// call site, hold writeMu across both halves or do not add it.
 //
 // The head still NEVER rewinds (invariant 1). It is the highest sequence ever
 // appended, and a late lower number must not drag it back: the next number the
@@ -270,115 +314,114 @@ func (s *Store) Append(m Message) error {
 	if m.Seq == 0 {
 		return fmt.Errorf("%w: sequence 0 is never allocated", ErrInvalidMessage)
 	}
+	if m.Pos == 0 {
+		// Position 0 is the RESERVED "I have seen nothing" cursor value, so a
+		// message stamped 0 would sit below every cursor in existence and be
+		// re-served on every poll — a message that replays a reader's whole
+		// retention window for ever. It is not a degraded delivery, it is a
+		// caller that forgot to stamp the WAL commit index, and it is refused
+		// with the same shape as sequence 0 so the two read alike.
+		return fmt.Errorf("%w: delivery position 0 is never assigned; the position is the WAL commit index and 0 is the reserved \"seen nothing\" cursor (message %s, sequence %d)", ErrInvalidMessage, m.ID, m.Seq)
+	}
 
-	// The insertion point, and the duplicate check, in one search: i is the
-	// first retained message whose sequence is >= m.Seq.
-	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Seq >= m.Seq })
-	if i < len(s.msgs) && s.msgs[i].Seq == m.Seq {
+	if prev, dup := s.bySeq[m.Seq]; dup {
 		// P1. A genuine double-apply, and it stays LOUD: the hub poisons itself
 		// on this, and that is the correct response to the server having handed
 		// the same id out twice.
-		return fmt.Errorf("%w: sequence %d is already applied (appending message %s, retained message %s)", ErrDuplicateSequence, m.Seq, m.ID, s.msgs[i].ID)
+		return fmt.Errorf("%w: sequence %d is already applied (appending message %s, retained message %s)", ErrDuplicateSequence, m.Seq, m.ID, prev)
 	}
 
-	if m.Seq <= s.prunedHead {
-		// ACCEPTED BUT NOT RETAINED, which is precisely what retention means.
-		// The window has already moved past this position, so keeping the
-		// message would resurrect a slot BEHIND the window.
+	if m.Pos > s.posHead {
+		// THE ORDINARY CASE, and it is O(1). Positions are monotone (see the doc
+		// comment), so the tail of the slice is the insertion point and there is
+		// no search to do. A late LOW SEQUENCE takes this branch like any other
+		// message — that is the whole point of the split.
+		s.msgs = append(s.msgs, m)
+	} else {
+		// A NON-MONOTONE OR DUPLICATE POSITION. It is RETAINED, in order, and the
+		// call RETURNS NIL. All three halves of that are deliberate, and the
+		// resolution is recorded on SIGN-1-FU-REORDER-WATERMARK:
 		//
-		// THIS BRANCH IS AMBIGUOUS AND THE AMBIGUITY IS NOT RESOLVABLE HERE. It
-		// is taken by two different events that this type cannot tell apart:
+		//   - It is NOT client-reachable. Positions are WAL commit indices minted
+		//     by the server under the hub's write lock, so a merely BUGGY (or
+		//     hostile) client cannot steer a message here — invariant 10's first
+		//     question. It is therefore not a denial-of-service vector whichever
+		//     answer is chosen, and the choice can be made on damage alone.
+		//   - RETURNING AN ERROR WOULD POISON THE HUB. By the time this runs the
+		//     record is committed and fsynced (invariant 4), so a refusal orphans
+		//     it on disk and stops the bus — exactly the P0 that
+		//     SIGN-1-FU-OUTOFORDER-POISON fixed. A distinct sentinel does not
+		//     help: the caller's only response to any error here is to poison.
+		//   - RETURNING NIL WITHOUT RETAINING would be silent suppression, which
+		//     is the defect this whole task exists to remove.
 		//
-		//  1. a legitimate first arrival that is simply later than the window —
-		//     harmless, and nothing is owed to it beyond the log line;
-		//  2. a DOUBLE-APPLY of a sequence that was already served and has since
-		//     been pruned — an invariant 1 breach, which the old
-		//     strictly-increasing rule DID catch and this one does not.
-		//
-		// prunedHead is a high-water mark, not a set, so once the position is
-		// gone there is no evidence left to separate them. The log line therefore
-		// names BOTH readings rather than reporting the benign one as fact.
-		//
-		// It must not be an ERROR, and that is the reason the ambiguity is
-		// tolerated rather than resolved by failing closed. The record is already
-		// committed and fsynced by the time it reaches here, so an error re-opens
-		// a narrower version of the very DoS this change closes: an agent holding
-		// a reservation across a byte-pressure prune would poison the bus. Case 2
-		// is also, by construction, unable to serve the sequence twice — which is
-		// the harm invariant 1 exists to prevent — so what is lost is DETECTION,
-		// not the property. The narrowing is deliberate and is recorded on the
-		// Spec Server task SIGN-1-FU-OUTOFORDER-POISON.
-		s.log.Warn("message NOT applied to the serving copy: its sequence is at or below the highest sequence retention has already dropped, so the window has moved past that position. This is EITHER a legitimate arrival later than the retention window OR a double-apply of a sequence that was already served and pruned (invariant 1), and the store cannot tell them apart once the position is gone. The message is durable and in the audit trail; it will NOT be served",
+		// So: retain, stay up, and be LOUD (invariant 6 — the discard is never
+		// the defect, the SILENCE is). It is counted as well as logged, because a
+		// log line is not queryable and this is the one signal that the write
+		// path's locking assumption has stopped holding.
+		s.nonMonotonicPos++
+		s.log.Error("message applied with a delivery position that is NOT above the highest position already applied. Positions are WAL commit indices and must be monotone; this means the durable write and the serving-copy append are no longer serialised by the hub's write lock, and readers whose cursor is already past this position will NOT be handed this message. The message is durable, and it is RETAINED rather than discarded — refusing it would orphan a committed record and halt the bus (SIGN-1-FU-REORDER-WATERMARK)",
+			"pos", m.Pos,
+			"pos_head", s.posHead,
+			"pruned_pos", s.prunedPos,
 			"seq", m.Seq,
 			"message_id", m.ID,
 			"sender", m.Sender,
-			"pruned_head", s.prunedHead,
+			"non_monotonic_total", s.nonMonotonicPos,
 		)
-		return nil
+		// P2: insert in POSITION order, not at the end. A message appended past
+		// the tail of an ordered slice would break the binary search in Since and
+		// be invisible to every reader — a worse outcome than the one being
+		// reported.
+		i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Pos >= m.Pos })
+		s.msgs = append(s.msgs, Message{})
+		copy(s.msgs[i+1:], s.msgs[i:])
+		s.msgs[i] = m
 	}
 
-	// A LATE INSERT IS LOGGED, and this line is not decoration.
-	//
-	// The message IS retained and IS served to every cursor still below it, so
-	// this is not a discard in the store's own terms. But a reader that has
-	// already passed this position never receives it and is never woken — see
-	// the "KNOWN GAP" section on Store — and FROM THAT RECIPIENT'S POINT OF VIEW
-	// the message was silently dropped. Invariant 6 rates a silent discard the
-	// defect, so the ordinary late insert must not be the one event on this path
-	// that says nothing.
-	//
-	// The volume is bounded by the reservation system, not by this line: on the
-	// LIVE path a late insert requires an outstanding mint, mints are capped at
-	// hub.MaxOutstandingMintsPerAgent per agent and hub.MaxOutstandingMints
-	// bus-wide per hub.MintTTL, and every one of them costs the sender a fsynced
-	// durable send.
-	//
-	// THE RECOVERY PATH IS NOT COVERED BY THAT BOUND, and an earlier draft of
-	// this comment claimed it was bounded by the retained set. THAT WAS FALSE and
-	// the security gate refuted it with a running test: with MaxBytes tuned so
-	// only two messages are retained, replaying twenty out-of-order records
-	// emitted TWENTY lines. Replay calls Append for every record in the log, and
-	// the log is never compacted (internal/wal), so the real bound is the number
-	// of out-of-order records EVER WRITTEN — and it is re-paid in full on every
-	// single start, with no further cost to whoever produced them.
-	//
-	// So this line is UNCAPPED on the recovery path, unlike the analogous replay
-	// line one layer up, which hub caps one-shot and then reports a total. That
-	// is a known defect, not a considered trade: at volume these lines can drown
-	// the capped invariant-6 DISCARD errors they interleave with. Filed with the
-	// logger pass-through fix, which shares the same call site.
-	//
-	// It is emitted under s.mu, like the branch above. That serialises readers
-	// against a blocking write to the log sink for the duration of one line.
-	// Accepted: the alternative is collecting the event and logging it after the
-	// unlock, which lets two concurrent appends report in an order that does not
-	// match the order they were applied — and on this branch, whose entire
-	// subject is a confusing order, that is the worse trade.
-	if m.Seq < s.head {
-		s.log.Warn("message applied BELOW the head of the serving copy: it was minted before, and spent after, a higher sequence. It is durable, retained and served to every cursor still behind it, but a reader whose cursor has ALREADY passed this position will never be handed it and will not be woken. Tracked as SIGN-1-FU-REORDER-WATERMARK, Spec Server task c829af9a-4418-437a-a0f8-34ef2f5d15d0 (look it up by that UUID, not by the name)",
-			"seq", m.Seq,
-			"message_id", m.ID,
-			"sender", m.Sender,
-			"head", s.head,
-		)
-	}
-
-	// P2: insert in sequence order, not at the end.
-	s.msgs = append(s.msgs, Message{})
-	copy(s.msgs[i+1:], s.msgs[i:])
-	s.msgs[i] = m
-
+	s.bySeq[m.Seq] = m.ID
 	s.bytes += int64(m.Size())
-	// The head only ever GROWS (invariant 1 — it never rewinds).
+	// Both high-water marks only ever GROW (invariant 1 — neither rewinds).
 	if m.Seq > s.head {
 		s.head = m.Seq
+	}
+	if m.Pos > s.posHead {
+		s.posHead = m.Pos
 	}
 	s.pruneLocked()
 	return nil
 }
 
-// Head reports the highest sequence ever appended, or 0 for an empty store. It
-// is the position a cursor reaches when it has seen everything.
+// NonMonotonicPositions reports how many appends have arrived with a delivery
+// position that was not above every position already applied.
+//
+// It is ZERO on a correct server and can only become non-zero through a bug in
+// the write path's locking (see Append). It is exposed separately from Stats,
+// which reports the RETAINED state an operator reads routinely, because this is
+// a fault counter: an alert watches it for any value at all rather than for a
+// trend.
+func (s *Store) NonMonotonicPositions() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nonMonotonicPos
+}
+
+// PosHead reports the highest DELIVERY POSITION ever appended, or 0 for an empty
+// store. It is the cursor value a reader reaches when it has seen everything,
+// and — unlike Head, which reports a sequence — it is the counter cursors are
+// expressed in.
+func (s *Store) PosHead() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.posHead
+}
+
+// Head reports the highest SEQUENCE ever appended, or 0 for an empty store.
+//
+// It is NOT a cursor value and must not be used as one: cursors are delivery
+// positions (Message.Pos), and PosHead is their high-water mark. The two
+// counters are unrelated — a message's sequence is minted before it is signed,
+// its position when it commits.
 func (s *Store) Head() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -386,6 +429,11 @@ func (s *Store) Head() uint64 {
 }
 
 // Stats reports the retained state, for operators and tests.
+//
+// oldest and head are both SEQUENCES — the sequence of the oldest retained
+// message and the highest ever appended. Neither is a cursor value; see PosHead
+// for the delivery-position high-water mark, and NonMonotonicPositions for the
+// fault counter that is deliberately not folded in here.
 func (s *Store) Stats() (count int, bytes int64, oldest uint64, head uint64, dropped uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -395,11 +443,17 @@ func (s *Store) Stats() (count int, bytes int64, oldest uint64, head uint64, dro
 	return len(s.msgs), s.bytes, oldest, s.head, s.dropped
 }
 
-// Since returns up to limit messages with a sequence strictly greater than
-// after that are VISIBLE TO agentID, in sequence order.
+// Since returns up to limit messages with a DELIVERY POSITION strictly greater
+// than after that are VISIBLE TO agentID, in delivery order.
+//
+// after is a POSITION (Message.Pos), not a sequence. That is what closes
+// SIGN-1-FU-REORDER-WATERMARK: a message minted early and spent late carries a
+// low sequence but a HIGH position, so it lands above every live cursor and is
+// served to every reader rather than being invisible to the ones that had
+// already passed its sequence.
 //
 // The returned next is the cursor position the caller should resume from:
-//   - the sequence of the last message in the batch, when the batch is
+//   - the POSITION of the last message in the batch, when the batch is
 //     non-empty;
 //   - after, UNCHANGED, when the batch is empty.
 //
@@ -412,13 +466,6 @@ func (s *Store) Stats() (count int, bytes int64, oldest uint64, head uint64, dro
 // and another call will return immediately. It is NOT "the batch was full": a
 // batch that exactly fills the limit with nothing visible behind it reports
 // more == false, because a further call would return nothing.
-//
-// A cursor is a SEQUENCE, so a message that lands below a cursor that has
-// already passed it is never handed to that reader — and for a reader parked on
-// a long poll at the head cursor, that is the ordinary outcome rather than a
-// rare one. Read the "KNOWN GAP" section on Store before treating it as a bug
-// to fix here: it is filed as SIGN-1-FU-REORDER-WATERMARK (Spec Server task
-// c829af9a-4418-437a-a0f8-34ef2f5d15d0) and it cannot be closed in this package.
 //
 // The filter is applied with agentID and enrolledAt, which the caller takes
 // from the AUTHENTICATED principal and this bus's roster. See
@@ -444,7 +491,7 @@ func (s *Store) Since(agentID string, enrolledAt time.Time, after uint64, limit 
 	// GONE, which is what a retention window means. CONTRACTS-HTTP.md states
 	// it; it is not a delivery bug to be hidden.
 	var bytes int64
-	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Seq > after })
+	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Pos > after })
 	for ; i < len(s.msgs); i++ {
 		m := s.msgs[i]
 		if !m.VisibleTo(agentID, enrolledAt) {
@@ -459,19 +506,24 @@ func (s *Store) Since(agentID string, enrolledAt time.Time, after uint64, limit 
 		}
 		batch = append(batch, copyMessage(m))
 		bytes += int64(m.Size())
-		next = m.Seq
+		next = m.Pos
 	}
 	return batch, next, false
 }
 
-// HasVisibleAfter reports whether any retained message strictly after
-// is visible to agentID. It is the cheap predicate the long-poll registration
-// path uses to decide whether to park, without materialising a batch.
+// HasVisibleAfter reports whether any retained message strictly after the given
+// DELIVERY POSITION is visible to agentID. It is the cheap predicate the
+// long-poll registration path uses to decide whether to park, without
+// materialising a batch.
+//
+// It shares Since's search and must keep sharing its counter: a predicate that
+// asked about sequences while Since served positions would park a poll on a
+// message the very next read would not return.
 func (s *Store) HasVisibleAfter(agentID string, enrolledAt time.Time, after uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Seq > after })
+	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Pos > after })
 	for ; i < len(s.msgs); i++ {
 		if s.msgs[i].VisibleTo(agentID, enrolledAt) {
 			return true
@@ -503,35 +555,34 @@ func copyMessage(m Message) Message {
 // keeps its original SentAt, so a restart does not silently reset the retention
 // clock and resurrect a day of history that had already aged out.
 //
-// # The age bound is SOFT by at most hub.MintTTL (SIGN-1-FU-OUTOFORDER-POISON)
+// # The age bound is EXACT again (SIGN-1-FU-REORDER-WATERMARK)
 //
 // The age loop stops at the first message that has NOT expired, which assumes
-// msgs is ordered by SentAt. Since Append began inserting late arrivals into
-// sequence position, that assumption no longer holds exactly: msgs is ordered
-// by Seq, and a message minted EARLY but spent LATE carries a NEWER SentAt than
-// the higher-sequence neighbours BEHIND it, which were minted later and spent
-// sooner. (Stated in that direction deliberately — the first draft of this
-// paragraph had it backwards, and the inverted version makes the conclusion
-// below look like under-retention when it is the opposite.)
+// msgs is ordered by SentAt. It is: msgs is ordered by Message.Pos, and COMMIT
+// ORDER IS SentAt ORDER. On the live path hub.publish stamps SentAt and takes
+// the WAL commit index under the same writeMu, so the two advance together; on
+// the recovery path replay folds records in commit order carrying their
+// original SentAt, so the same holds after a restart.
 //
-// So the loop can stop EARLY, on a young message sitting at a low sequence
-// position, leaving genuinely expired messages behind it retained. That is
-// OVER-retention, and it is the harmless direction: the loop only ever drops a
-// message it has individually tested as expired, so nothing is dropped before
-// its time.
+// This paragraph previously documented a SOFT bound — over-retention by up to
+// hub.MintTTL — because the slice was then ordered by SEQUENCE, and a message
+// minted early but spent late sat at a low sequence position carrying a newer
+// SentAt than its neighbours. Ordering by position removed the disorder rather
+// than bounding it. DO NOT restore the soft-bound wording: it would assert a
+// disorder that no longer exists and invite a "fix" for it.
 //
-// It is accepted, not overlooked, because the disorder is BOUNDED. For any two
-// retained messages k before j in the slice, seq_k < seq_j implies k was minted
-// no later than j; a sequence cannot be spent more than hub.MintTTL after it was
-// minted (the reservation expires); so SentAt_k − SentAt_j ≤ hub.MintTTL. A
-// message is therefore retained at most MintTTL past its expiry.
+// The one residual is the non-monotone-position branch of Append, which cannot
+// be reached without a server bug, is logged at ERROR and counted by
+// NonMonotonicPositions. In that case the loop can stop early and OVER-retain,
+// which is the harmless direction: nothing is dropped that has not been
+// individually tested as expired.
 //
-// The BYTE bound — the memory-safety one — is unaffected: it drops from the
-// front unconditionally, without consulting a timestamp.
+// The BYTE bound — the memory-safety one — is unaffected either way: it drops
+// from the front unconditionally, without consulting a timestamp.
 //
-// What would break the bound is growing hub.MintTTL substantially. Do NOT
-// "fix" this by sorting on SentAt: that destroys P2 (see Append), and Since —
-// the read path every client reaches — binary-searches this slice by sequence.
+// Do NOT "fix" anything here by sorting on SentAt: that destroys P2 (see
+// Append), and Since — the read path every client reaches — binary-searches this
+// slice by position.
 func (s *Store) pruneLocked() {
 	if len(s.msgs) == 0 {
 		return
@@ -551,12 +602,21 @@ func (s *Store) pruneLocked() {
 		return
 	}
 	s.dropped += uint64(drop)
-	// msgs is ascending by Seq and drops come off the front, so the last
-	// dropped message carries the highest sequence retention has just removed.
-	// Guarded so prunedHead only ever grows — it is the floor Append refuses
-	// below, and a floor that could fall would let a pruned sequence back in.
-	if last := s.msgs[drop-1].Seq; last > s.prunedHead {
-		s.prunedHead = last
+	// The duplicate-sequence index covers the RETAINED window, so a dropped
+	// message's sequence leaves it with the message. This is where P1's
+	// narrowing physically happens: past this point a re-arrival of that
+	// sequence is indistinguishable from a first one. It is not a leak to
+	// "fix" by keeping the whole history — an unbounded set keyed on every
+	// sequence the bus ever issued is exactly the growth retention exists to
+	// stop.
+	for k := 0; k < drop; k++ {
+		delete(s.bySeq, s.msgs[k].Seq)
+	}
+	// msgs is ascending by Pos and drops come off the front, so the last dropped
+	// message carries the highest position retention has just removed. Guarded so
+	// prunedPos only ever grows. NOTHING IS REFUSED ON IT — see the field.
+	if last := s.msgs[drop-1].Pos; last > s.prunedPos {
+		s.prunedPos = last
 	}
 
 	// Re-slice into a FRESH backing array rather than s.msgs[drop:]. Keeping

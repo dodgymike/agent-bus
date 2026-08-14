@@ -137,14 +137,21 @@ func TestOutOfOrderMintSpendDoesNotPoison(t *testing.T) {
 		t.Fatalf("a THIRD agent's mint+send after the out-of-order spend was refused, so the bus is stopped: %v", err)
 	}
 
-	// BOTH messages are readable, in ASCENDING SEQUENCE ORDER. carol is the
-	// recipient of both and the sender of neither, so History is the read path a
-	// real client would use. Ordering matters as much as presence: the serving
-	// copy is binary-searched by cursor, so a late message parked at the end of
-	// the slice would be invisible to every reader already past it.
-	if got, want := historyIDs(t, h, carol), []string{aliceRes.MessageID, bobRes.MessageID}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("carol reads %v, want %v — both messages, in ascending sequence order (alice minted %d, bob minted %d)",
-			got, want, aliceMint.Seq, bobMint.Seq)
+	// BOTH messages are readable, in SPEND ORDER. carol is the recipient of both
+	// and the sender of neither, so History is the read path a real client would
+	// use.
+	//
+	// REVISED BY SIGN-1-FU-REORDER-WATERMARK: this expected ASCENDING SEQUENCE
+	// order, on the reasoning that the serving copy is binary-searched by cursor
+	// and a message parked at the end would be invisible to readers already past
+	// it. The premise was right and the conclusion was backwards — sorting by
+	// sequence is what put the late message below those readers' cursors. The
+	// cursor is now a DELIVERY POSITION, the slice is ordered by it, and a late
+	// spend is served LAST and reaches everyone.
+	if got, want := historyIDs(t, h, carol), []string{bobRes.MessageID, aliceRes.MessageID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("carol reads %v, want %v — both messages, in the order they were SPENT (bob spent sequence %d "+
+			"first, alice spent %d second). The stream is delivery order, not sequence order",
+			got, want, bobMint.Seq, aliceMint.Seq)
 	}
 }
 
@@ -204,9 +211,12 @@ func TestOutOfOrderMintSpendSurvivesRestart(t *testing.T) {
 			"and the message's applied-key record is never rebuilt. Recovery log was:\n%s",
 			aliceMint.Seq, got)
 	}
-	if got, want := historyIDs(t, h2, carol), []string{aliceMint.MessageID, bobMint.MessageID}; !reflect.DeepEqual(got, want) {
-		t.Errorf("after a restart carol reads %v, want %v — recovery must rebuild EXACTLY what was served "+
-			"(invariant 5: memory is the serving copy, disk is the truth)", got, want)
+	// SPEND ORDER, not sequence order, and the restart must reproduce it exactly —
+	// which is the whole reason the delivery position is the WAL commit index
+	// rather than a counter this process increments (SIGN-1-FU-REORDER-WATERMARK).
+	if got, want := historyIDs(t, h2, carol), []string{bobMint.MessageID, aliceMint.MessageID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("after a restart carol reads %v, want %v — recovery must rebuild EXACTLY what was served, in "+
+			"the same order (invariant 5: memory is the serving copy, disk is the truth)", got, want)
 	}
 	if p := h2.Poisoned(); p != nil {
 		t.Errorf("the REOPENED hub is poisoned: %v", p)

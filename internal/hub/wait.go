@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/store"
@@ -12,8 +13,15 @@ import (
 // purpose. An agent that catches up with GET /v1/messages and then parks on GET
 // /v1/wait uses one cursor and one parser for both.
 type Batch struct {
-	// Messages are in ascending sequence order and are already filtered to
-	// what the requesting agent may see.
+	// Messages are in DELIVERY ORDER — ascending store.Message.Pos, the order
+	// this bus committed them — and are already filtered to what the requesting
+	// agent may see.
+	//
+	// That is NOT ascending sequence order, and the difference is deliberate
+	// (SIGN-1-FU-REORDER-WATERMARK): a sequence is minted before the client
+	// signs, so a message minted early and spent late carries a low sequence and
+	// a high position. Serving in sequence order would put it below cursors that
+	// have already passed it and lose it for those readers permanently.
 	Messages []store.Message
 
 	// Cursor is the position to resume from. On an EMPTY batch it is the
@@ -44,7 +52,11 @@ type waiter struct {
 	// a message the waiter is not entitled to see.
 	agentID string
 
-	// after is the cursor position the waiter parked at.
+	// after is the cursor the waiter parked at: a DELIVERY POSITION
+	// (store.Message.Pos), never a sequence. notify compares it against the same
+	// counter store.Since binary-searches, and the two must not drift apart — a
+	// wake filter on one counter and a read on the other is precisely how a
+	// parked poll ends up never woken for a message its own read would return.
 	after uint64
 
 	// enrolledAt is the waiter's enrolment epoch, pinned at registration. It is
@@ -78,12 +90,23 @@ type waiter struct {
 // so a waiter is never woken for a message its own next read would filter out —
 // which is what keeps "one broadcast, one wake per eligible waiter" true rather
 // than approximately true.
+//
+// # The position test is the same counter store.Since searches, and must stay so
+//
+// This compared m.Seq against the waiter's cursor until
+// SIGN-1-FU-REORDER-WATERMARK. That was the second half of the suppression: a
+// message minted early and spent late carries a LOW sequence, so every parked
+// waiter at the head was skipped here AND the message sat below their cursor in
+// Since — lost once for the wake and once for the read. Moving Since onto
+// positions without moving this line would leave the message served on the next
+// poll but the parked poll never woken, which is the same bug wearing a longer
+// timeout.
 func (h *Hub) notify(m store.Message) {
 	h.waitMu.Lock()
 	defer h.waitMu.Unlock()
 
 	for w := range h.waiters {
-		if m.Seq <= w.after || !m.VisibleTo(w.agentID, w.enrolledAt) {
+		if m.Pos <= w.after || !m.VisibleTo(w.agentID, w.enrolledAt) {
 			continue
 		}
 		select {
@@ -101,6 +124,48 @@ func (h *Hub) WaiterCount() int {
 	h.waitMu.Lock()
 	defer h.waitMu.Unlock()
 	return len(h.waiters)
+}
+
+// waiterParkedHook is a TEST-ONLY observation point, nil in production.
+//
+// # Why it has to exist in this file rather than in a test
+//
+// "The waiter is parked" cannot be observed from outside. WaiterCount() goes to
+// one as soon as Wait registers in the map, but registration is NOT the park:
+// Wait then does a SECOND store.Since read to close the registration race (see
+// Wait's doc comment). A test that publishes as soon as the count rises lands
+// inside that gap, so the message is returned by that READ — which consults
+// Message.Pos whatever notify compares — and notify is never exercised at all.
+//
+// That is not a theoretical gap. It was measured on SIGN-1-FU-REORDER-WATERMARK:
+// with the fix's `m.Pos <= w.after` mutated back to the defective
+// `m.Seq <= w.after`, BOTH parked-poll tests still passed, because both were
+// really testing the second read. Waking the parked poll IS this task's P0, so a
+// proof that never reaches notify is not a proof.
+//
+// # Cost in production
+//
+// One atomic load and a nil check per PARKED poll — not per message, not per
+// send, and not on the fast path, which returns before this point. The hook is
+// never set outside tests.
+//
+// It is an atomic rather than a plain var because the reader is the request
+// goroutine and the writer is a test goroutine, and this package's tests run
+// with -race.
+var waiterParkedHook atomic.Pointer[func()]
+
+// SetWaiterParkedHook installs fn, which Wait calls once it has registered its
+// waiter AND completed the registration-race read — the instant from which the
+// ONLY way that call can still return a message is a notify wake. It returns a
+// function that restores the previous hook.
+//
+// TEST-ONLY. Nothing in cmd/ or internal/httpapi calls it, and production leaves
+// the hook nil. It is exported only because the tests that need it live in
+// package hub_test; see waiterParkedHook for why an external observation point
+// cannot do this job.
+func SetWaiterParkedHook(fn func()) (restore func()) {
+	prev := waiterParkedHook.Swap(&fn)
+	return func() { waiterParkedHook.Store(prev) }
 }
 
 // clampLimit bounds a client-requested batch size.
@@ -227,6 +292,17 @@ func (h *Hub) Wait(ctx context.Context, agentID string, after uint64, limit int,
 	// race.
 	if msgs, next, more := h.store.Since(agentID, epoch, after, limit); len(msgs) > 0 {
 		return Batch{Messages: msgs, Cursor: next, More: more}, nil
+	}
+
+	// TEST-ONLY, nil in production: the waiter is registered and the
+	// registration-race read is behind us, so from here notify is the only thing
+	// that can still hand this call a message. See waiterParkedHook.
+	//
+	// It is safe for the wake to arrive before the select below is reached: w.ch
+	// is buffered with capacity 1 and notify's send is non-blocking, so the edge
+	// is retained rather than missed.
+	if hook := waiterParkedHook.Load(); hook != nil && *hook != nil {
+		(*hook)()
 	}
 
 	timer := time.NewTimer(timeout)

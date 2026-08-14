@@ -144,10 +144,16 @@ type signedMessage struct {
 	// assignment the origin bus gave it at /v1/mint.
 	MessageID string
 
-	// Sequence is the origin bus's monotonic sequence. It is encoded as a
+	// Sequence is the origin bus's message sequence. It is encoded as a
 	// fixed-width integer AS WELL AS appearing inside MessageID: the integer is
-	// what a verifier compares for ordering, and the redundancy is CHECKED
-	// rather than assumed.
+	// what a verifier cross-checks AGAINST THE SEQUENCE EMBEDDED IN MessageID,
+	// and the redundancy is CHECKED rather than assumed.
+	//
+	// It is an IDENTITY, not an ordering or freshness token (corrected
+	// 2026-08-14, SIGN-1-FU-REORDER-WATERMARK — this comment previously said
+	// the integer is "what a verifier compares for ordering"). The sequence is
+	// minted at RESERVATION time, so a lower sequence arriving after a higher
+	// one is a normal, correct delivery. Do not order on it.
 	Sequence uint64
 
 	// Sender is the fully-qualified "<bus-id>.<agent-id>" (invariant 2).
@@ -168,9 +174,21 @@ type signedMessage struct {
 	// the wire form and the signed form is a place the two sides can drift, so
 	// there is none.
 	//
-	// It is NOT a freshness mechanism: clocks lie. Replay protection is the
-	// server-minted monotonic sequence plus the recipient's cursor (invariant
-	// 10).
+	// It is NOT a freshness mechanism: clocks lie.
+	//
+	// NEITHER IS THE SEQUENCE (corrected 2026-08-14,
+	// SIGN-1-FU-REORDER-WATERMARK — the previous wording here named "the
+	// server-minted monotonic sequence plus the recipient's cursor", and an
+	// embedder building a recipient from that sentence re-implements the very
+	// message-suppression defect that task fixed, in their client rather than in
+	// the bus). Replay protection is enforced SERVER-SIDE AT INGEST: the bus
+	// refuses an already-accepted signed message before it is ever served
+	// (invariant 10). Seq is minted when a client RESERVES, not when it sends,
+	// so it is NOT monotone in delivery order — a lower Seq arriving after a
+	// higher one is a normal, correct delivery, and dropping it loses a message
+	// the bus has already acknowledged. Seq is an IDENTITY; the read cursor is
+	// an opaque DELIVERY POSITION; they are different numbers and are not
+	// comparable. Deduplicate on the message id.
 	TimestampUnixMilli int64
 
 	// Body is the payload, opaque bytes, length-prefixed and copied verbatim.

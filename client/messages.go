@@ -110,9 +110,18 @@ type Message struct {
 	// at-least-once, so a message may legitimately arrive twice.
 	MessageID string `json:"message_id"`
 
-	// Seq is the server-minted monotonic sequence. Together with the recipient
-	// cursor it is the freshness half of the replay defence (invariant 10) — a
-	// signature alone cannot stop a verbatim resend.
+	// Seq is the server-minted sequence: a unique, never-reused IDENTITY.
+	//
+	// It is NOT a freshness or ordering token, and it is NOT monotone in the
+	// order messages arrive (corrected 2026-08-14,
+	// SIGN-1-FU-REORDER-WATERMARK — the previous wording called it "the
+	// freshness half of the replay defence"). It is minted when a client
+	// RESERVES, so a message with a LOWER Seq can arrive AFTER one with a
+	// higher Seq: that is a normal, correct delivery, and discarding it loses a
+	// message the bus has already acknowledged. Freshness against replay is
+	// enforced server-side at ingest (invariant 10); a signature alone cannot
+	// stop a verbatim resend, but neither can this number. Order by arrival,
+	// deduplicate on MessageID.
 	Seq uint64 `json:"seq"`
 
 	// From is the fully-qualified sender id (invariant 2).

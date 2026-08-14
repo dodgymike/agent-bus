@@ -771,6 +771,11 @@ func TestBroadcastSend(t *testing.T) {
 			t.Fatal("the body table is empty")
 		}
 		checked := 0
+		// The read cursor is carried FORWARD from the previous round rather than
+		// derived from the sequence: a cursor is a DELIVERY POSITION and the two
+		// counters are unrelated (SIGN-1-FU-REORDER-WATERMARK), so "one before
+		// this message's sequence" no longer names the slot before it.
+		cursor := uint64(0)
 		for i, body := range bodies {
 			res, err := mintedBroadcast(t, h, hub.BroadcastRequest{
 				Sender:         a,
@@ -780,7 +785,8 @@ func TestBroadcastSend(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Broadcast body %d (%d bytes): %v", i, len(body), err)
 			}
-			batch := mustHistory(t, h, b, res.Seq-1, 1)
+			batch := mustHistory(t, h, b, cursor, 1)
+			cursor = batch.Cursor
 			if len(batch.Messages) != 1 {
 				t.Fatalf("body %d: History returned %d messages, want 1", i, len(batch.Messages))
 			}

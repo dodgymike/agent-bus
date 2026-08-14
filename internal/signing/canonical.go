@@ -101,10 +101,15 @@ type Message struct {
 	// equal Sequence; Canonicalize enforces both.
 	MessageID string
 
-	// Sequence is the origin bus's monotonic message sequence. It is encoded as
-	// a fixed-width integer as well as appearing inside MessageID: the integer
-	// is what a verifier compares for ordering, and the redundancy is checked
-	// rather than assumed.
+	// Sequence is the origin bus's message sequence. It is encoded as a
+	// fixed-width integer as well as appearing inside MessageID: the integer is
+	// what a verifier cross-checks against the sequence embedded in MessageID,
+	// and the redundancy is checked rather than assumed.
+	//
+	// It is an IDENTITY, not an ordering or freshness token (corrected
+	// 2026-08-14, SIGN-1-FU-REORDER-WATERMARK). The sequence is minted at
+	// RESERVATION time, so it is not monotone in delivery order; a verifier
+	// must not order on it.
 	Sequence uint64
 
 	// Sender is the fully-qualified sender id, "<bus-id>.<agent-id>"
@@ -132,9 +137,14 @@ type Message struct {
 	// conversion between the wire form and the signed form is a place the two
 	// sides can drift, so there is none.
 	//
-	// It is not a freshness mechanism: clocks lie. Replay protection is the
-	// server-minted monotonic sequence plus the recipient's cursor (SIGN-4,
-	// invariant 10).
+	// It is not a freshness mechanism: clocks lie. Neither is the sequence
+	// (corrected 2026-08-14, SIGN-1-FU-REORDER-WATERMARK): it is minted at
+	// RESERVATION time, so it is not monotone in delivery order and is an
+	// IDENTITY rather than a freshness token, and the recipient's cursor is a
+	// delivery POSITION, a different number that is not comparable to it.
+	// Replay protection is enforced SERVER-SIDE AT INGEST, by refusing an
+	// already-accepted signed message (invariant 10). NOTE this supersedes
+	// SIGN-4's original wording, which is being amended on the Spec Server.
 	TimestampUnixMilli int64
 
 	// Body is the message payload, opaque bytes, length-prefixed and copied

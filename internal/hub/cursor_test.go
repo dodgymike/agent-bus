@@ -20,6 +20,30 @@ import (
 // cursor usable in the first place.
 // ---------------------------------------------------------------------------
 
+// issuedCursorVersion reads the version field out of a cursor this build
+// actually issues.
+//
+// The constant is unexported, so a test that wants to corrupt some OTHER field
+// of a cursor has to spell the version out — and a spelled-out version that
+// falls behind a bump stops testing what it names and starts testing the
+// version branch, silently. Deriving it keeps the forgery fixtures pointed at
+// the field they mean to corrupt.
+func issuedCursorVersion(t *testing.T, agentID string) string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(hub.EncodeCursor(agentID, 1))
+	if err != nil {
+		t.Fatalf("a cursor this build issued is not base64url: %v", err)
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 3 {
+		t.Fatalf("a cursor this build issued has %d fields, want 3: %q", len(parts), raw)
+	}
+	if parts[0] == "" {
+		t.Fatal("a cursor this build issued carries an EMPTY version field")
+	}
+	return parts[0]
+}
+
 func TestMessageHistoryCursor(t *testing.T) {
 	t.Run("EmptyCursorIsPositionZeroAndYieldsEverything", func(t *testing.T) {
 		h, _, _ := newTestHub(t, "alpha", "beta")
@@ -122,11 +146,13 @@ func TestMessageHistoryCursor(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 
-		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("only one"), IdempotencyKey: "k-tail"})
-		if err != nil {
+		if _, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("only one"), IdempotencyKey: "k-tail"}); err != nil {
 			t.Fatalf("Broadcast: %v", err)
 		}
-		caughtUp := hub.EncodeCursor(b, res.Seq)
+		// The caught-up cursor comes from a real read, NOT from the message's
+		// sequence: a cursor is a DELIVERY POSITION and the two counters are
+		// unrelated (SIGN-1-FU-REORDER-WATERMARK).
+		caughtUp := hub.EncodeCursor(b, mustHistory(t, h, b, 0, 10).Cursor)
 
 		pos, err := hub.DecodeCursor(b, caughtUp)
 		if err != nil {
@@ -180,23 +206,36 @@ func TestMessageHistoryCursor(t *testing.T) {
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
 
+		// The malformed-POSITION fixtures are built with the version this build
+		// actually issues, read back out of a real cursor rather than written as a
+		// literal. A literal that fell behind a version bump would silently stop
+		// testing the position field and start testing the version branch — which
+		// is exactly what happened when cursors moved to v2
+		// (SIGN-1-FU-REORDER-WATERMARK): every one of these cases short-circuited
+		// on the version and proved nothing about position parsing.
+		ver := issuedCursorVersion(t, b)
+
 		cases := []struct {
 			name   string
 			cursor string
 		}{
 			{"IssuedToAnotherAgent", hub.EncodeCursor(a, 5)},
+			// THE BINDING CHECK RUNS BEFORE THE VERSION REMAP. An OLD-version
+			// cursor issued to another agent must still be refused — an
+			// implementation that returned early on the unknown version would
+			// accept this one as "start from zero" and skip the one check that
+			// makes a cursor agent-bound.
+			{"OldVersionIssuedToAnotherAgent", base64.RawURLEncoding.EncodeToString([]byte("v1|" + a + "|5"))},
 			{"NotBase64URL", "!!!not base64!!!"},
-			{"StandardBase64Padding", base64.StdEncoding.EncodeToString([]byte("v1|" + b + "|5"))},
-			{"WrongFieldCountTooFew", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b))},
-			{"WrongFieldCountTooMany", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|5|extra"))},
-			{"UnknownVersion", base64.RawURLEncoding.EncodeToString([]byte("v2|" + b + "|5"))},
-			{"EmptyVersion", base64.RawURLEncoding.EncodeToString([]byte("|" + b + "|5"))},
-			{"LeadingZeroPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|007"))},
-			{"SignedPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|+7"))},
-			{"NegativePosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|-7"))},
-			{"EmptyPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|"))},
-			{"NonNumericPosition", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|seven"))},
-			{"PositionOverflowsUint64", base64.RawURLEncoding.EncodeToString([]byte("v1|" + b + "|18446744073709551616"))},
+			{"StandardBase64Padding", base64.StdEncoding.EncodeToString([]byte(ver + "|" + b + "|5"))},
+			{"WrongFieldCountTooFew", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b))},
+			{"WrongFieldCountTooMany", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|5|extra"))},
+			{"LeadingZeroPosition", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|007"))},
+			{"SignedPosition", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|+7"))},
+			{"NegativePosition", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|-7"))},
+			{"EmptyPosition", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|"))},
+			{"NonNumericPosition", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|seven"))},
+			{"PositionOverflowsUint64", base64.RawURLEncoding.EncodeToString([]byte(ver + "|" + b + "|18446744073709551616"))},
 			{"Oversized", strings.Repeat("A", hub.MaxCursorLen+1)},
 		}
 		if len(cases) == 0 {
@@ -223,6 +262,67 @@ func TestMessageHistoryCursor(t *testing.T) {
 		// above are discrimination rather than a blanket refusal.
 		if _, err := hub.DecodeCursor(b, hub.EncodeCursor(b, 5)); err != nil {
 			t.Fatalf("a legitimate cursor for %s was rejected: %v", b, err)
+		}
+	})
+
+	// REVISED BY SIGN-1-FU-REORDER-WATERMARK. "UnknownVersion" and
+	// "EmptyVersion" used to sit in the forgery table above and expect
+	// ErrInvalidCursor. They now mean ACCEPTED AND REMAPPED, and the reason is a
+	// WEDGE rather than a preference.
+	//
+	// Cursors moved from a SEQUENCE (v1) to a DELIVERY POSITION (v2), and there
+	// is no translation between the two counters. Rejecting the old value would
+	// answer 400, which the client renders as KindRejected; watchShouldRetry
+	// returns false for that, and NOTHING ever clears the stored cursor — so the
+	// same poisoned value is re-presented on every poll, for ever. One build
+	// upgrade would permanently silence every agent that had ever stored a
+	// cursor. Remapping costs one replay of the retention window, which
+	// at-least-once delivery already permits (invariant 10).
+	t.Run("AnUnknownVersionIsRemappedToPositionZeroNotRejected", func(t *testing.T) {
+		h, _, _ := newTestHub(t, "alpha", "beta")
+		b := agentID(t, h.BusID(), "beta")
+
+		cases := []struct {
+			name    string
+			version string
+		}{
+			// The real one: a cursor this bus itself issued before the split.
+			{"TheShippedV1Cursor", "v1"},
+			{"EmptyVersion", ""},
+			{"AFutureVersion", "v99"},
+			{"NotAVersionAtAll", "garbage"},
+		}
+		if len(cases) == 0 {
+			t.Fatal("the unknown-version table is empty")
+		}
+		for _, c := range cases {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				cursor := base64.RawURLEncoding.EncodeToString([]byte(c.version + "|" + b + "|5"))
+				pos, err := hub.DecodeCursor(b, cursor)
+				if err != nil {
+					t.Fatalf("DecodeCursor with version %q returned %v, want nil — a rejected cursor is never "+
+						"cleared by the client and would be re-presented for ever, wedging that agent "+
+						"permanently (SIGN-1-FU-REORDER-WATERMARK)", c.version, err)
+				}
+				if pos != 0 {
+					t.Fatalf("DecodeCursor with version %q returned position %d, want 0 — the number inside is a "+
+						"value in a counter this build does not use, so carrying it forward would drop the "+
+						"reader at an arbitrary point in the stream", c.version, pos)
+				}
+			})
+		}
+
+		// AND THE REMAP DOES NOT SWALLOW THE BINDING CHECK. The same unknown
+		// version, bound to somebody else, is still refused — this is the ordering
+		// requirement, asserted here as well as in the forgery table so that
+		// whichever of the two a future edit reads, it sees it.
+		other := agentID(t, h.BusID(), "alpha")
+		wrong := base64.RawURLEncoding.EncodeToString([]byte("v1|" + other + "|5"))
+		if pos, err := hub.DecodeCursor(b, wrong); !errors.Is(err, hub.ErrInvalidCursor) {
+			t.Fatalf("a v1 cursor issued to %s was accepted for %s: (%d, %v). The version remap MUST run after "+
+				"the agent-binding check, or changing one byte of the version field bypasses the binding",
+				other, b, pos, err)
 		}
 	})
 
