@@ -68,7 +68,7 @@ save it on ~15) -- do not "simplify" this task by relocating there.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) — CONTEXT-CLAUDE-TRIM: the agent roster descriptions and model-selection rationale leave CL… (todo)
+- [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) — CONTEXT-CLAUDE-TRIM: the agent roster descriptions and model-selection rationale leave CL… (done)
 - [CONTEXT-DISPATCH-RULE](../CONTEXT-DISPATCH-RULE--81bc24d6/task.md) — CONTEXT-DISPATCH-RULE: dispatch briefs stop restating standing rules already in every sub… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -78,7 +78,7 @@ save it on ~15) -- do not "simplify" this task by relocating there.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONTEXT-AGENTDESC-TRIM](../CONTEXT-AGENTDESC-TRIM--eaea0581/task.md) — CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn… (todo)
+- [CONTEXT-AGENTDESC-TRIM](../CONTEXT-AGENTDESC-TRIM--eaea0581/task.md) — CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn… (done)
 - [CONTEXT-DISPATCH-RULE](../CONTEXT-DISPATCH-RULE--81bc24d6/task.md) — CONTEXT-DISPATCH-RULE: dispatch briefs stop restating standing rules already in every sub… (todo)
 
 ---

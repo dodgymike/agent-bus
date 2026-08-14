@@ -90,7 +90,6 @@ RELAY-25 WIDENING (2026-08-14, owner direction): the audit/log CLI output must e
 - [CLI-6-FU-FOLLOW](../CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
 - [CLI-6-FU-NITS](../CLI-6-FU-NITS--643749b3/task.md) — CLI-6-FU-NITS: three non-blocking nits in \`agent-bus log\` raised by the reviewer and secu… (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
-- [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [fc8cd234-d275-43a1-9cb0-d10bca4a4086](../../PROCESS/Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) — Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… (todo)
 
 ---

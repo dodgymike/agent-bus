@@ -5,13 +5,13 @@
 | Public id | `4b0f5e57-d513-42e8-8eab-a73c265fe50c` |
 | Key | CONTEXT-SPEC-BRIEF |
 | Epic | [CONTEXT](../epic.md) |
-| Status | todo |
+| Status | superseded |
 | Priority | P2 |
 | Component | tooling |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:24:36.967488+00:00 |
-| Updated | 2026-08-08T15:24:36.967488+00:00 |
+| Updated | 2026-08-14T20:59:01.157662+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -59,6 +59,7 @@ read whole. Also a small per-write saving in the repo diff each time the mirror 
 
 
 - **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
+- **superseded by** [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -34,6 +34,7 @@ ACCEPTANCE CRITERION ADDED (spec-keeper, 2026-08-02, from ID-3 reviewer F2 + sec
 
 
 - **blocked by** [AUTH-2-FU-POLLEXPIRY](../AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md)
+- **blocked by** [f505fb57-25ab-46e1-a7a1-2ca5787529ab](../Any-roster-reclamation-path-must-ship-a-bound-on-distinc--f505fb57/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -70,6 +71,7 @@ ACCEPTANCE CRITERION ADDED (spec-keeper, 2026-08-02, from ID-3 reviewer F2 + sec
 - [MSG-FU-SUFFIXFLOOR-FU-ROSTERASSERT](../../ID/MSG-FU-SUFFIXFLOOR-FU-ROSTERASSERT--6b0e561e/task.md) — MSG-FU-SUFFIXFLOOR-FU-ROSTERASSERT: assert a freshly-minted agent-suffix is not already i… (todo)
 - [SIGN-8](../../SIGN/SIGN-8--71ef73d5/task.md) — SIGN-8: Agent-side messaging key material -- \`agent-bus keygen\`, key file location/permis… (todo)
 - [ac4f9c2b-5460-4e83-997d-0e433194752f](../Enrol-accepts-a-duplicate-enrolment-public-key-one-keypa--ac4f9c2b/task.md) — Enrol accepts a duplicate enrolment public key -- one keypair can hold unlimited agent ids (todo)
+- [f505fb57-25ab-46e1-a7a1-2ca5787529ab](../Any-roster-reclamation-path-must-ship-a-bound-on-distinc--f505fb57/task.md) — Any roster-reclamation path must ship a bound on distinct agent names in the SAME change… (todo)
 
 ---
 

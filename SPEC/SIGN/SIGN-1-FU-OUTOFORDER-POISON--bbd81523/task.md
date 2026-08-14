@@ -70,7 +70,6 @@ PROOF NOTE: the stored proof_cmd names a regression test this task MUST WRITE (b
 
 
 - [4c97d561-e81f-40a6-a1fe-3c9976d790f1](../../DOCS/INVARIANTS.md-invariant-1-s-entry-has-no-pointer-to-the--4c97d561/task.md) — INVARIANTS.md invariant 1's entry has no pointer to the 2026-08-14 SIGN-1-FU-OUTOFORDER-P… (todo)
-- [CONTEXT-KEY-IDENTITY](../../CONTEXT/CONTEXT-KEY-IDENTITY--73dec684/task.md) — CONTEXT-KEY-IDENTITY: Standardize task identity (public_id vs key) before SPEC/&lt;epic&gt;/&lt;ta… (todo)
 - [RELAY-24-BLOCKER-HUBINGEST](../../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
 - [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (superseded)
 - [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (todo)

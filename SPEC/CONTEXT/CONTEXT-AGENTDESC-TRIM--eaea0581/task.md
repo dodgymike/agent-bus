@@ -5,14 +5,14 @@
 | Public id | `eaea0581-ddd3-4abd-b14b-09275214001f` |
 | Key | CONTEXT-AGENTDESC-TRIM |
 | Epic | [CONTEXT](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:24:34.988888+00:00 |
-| Updated | 2026-08-08T15:24:34.988888+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T20:57:17.762461+00:00 |
+| Completed | 2026-08-14T20:57:17.762444+00:00 |
 
 ## Proof command
 

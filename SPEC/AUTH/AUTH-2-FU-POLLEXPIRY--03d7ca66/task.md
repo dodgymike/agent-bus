@@ -46,6 +46,7 @@ Origin: security audit of AUTH-2, 2026-08-02, found forward-looking. Authenticat
 
 
 - [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-CROSSCHECK-FU-POLLRECHECK](../../MTLS/MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (todo)
 
 ---
 

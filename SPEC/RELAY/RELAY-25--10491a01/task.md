@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | vacuous-today, epic-deliverable |
 | Created | 2026-08-08T15:56:48.369932+00:00 |
-| Updated | 2026-08-14T11:32:43.079224+00:00 |
+| Updated | 2026-08-14T20:50:20.490508+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,7 +22,7 @@ bash scripts/fed-smoke.sh
 
 ## Status note
 
-Assigned to codex-1 for RELAY-25 implementation. Scope: scripts/fed-smoke.sh plus narrowly necessary test/docs wiring; depends on RELAY-24. Commit dc29d46c625ded0e9b004992a0c22c4e76e5fb4f landed scripts/fed-smoke.sh alone. Evidence: full `bash scripts/fed-smoke.sh` proof is RED/non-passing because required compiled CLI/runtime federation capabilities are not yet available; this is not a completion claim. Remaining blockers: CLI-11 (bf966c07-5f99-4fe6-bb23-52868ed04c33) public-key export, CLI-6 (47001cb4-bc0f-44f8-929e-ac51bc6d0fb3) audit bus_path output, invite/enrolment tasks, RELAY-41, RELAY-45, RELAY-20, RELAY-21, RELAY-24, SIGN-6, and CRYPTO-10. Must prove non-vacuous three-bus A->B->C exactly-once delivery, audit bus path A/B/C, and document loopback limitations. Do not touch tracked data/ or unrelated tasks/files.
+Owner codex-1; RELAY-25 remains in progress and must not be completed until the non-vacuous three-bus live proof passes. Current atomic follow-up acceptance: (1) fail-closed preflight names occupied 9101/9102/9103 ports and stale /tmp/fed-smoke-{a,b,c} roots before mutation, prints exact manual remediation, and never deletes them; (2) a zero-delivery C watch reads C audit first and, when the target record has bus_path [A,B,C], reports watch timeout/environmental slowness rather than relay failure, otherwise preserves relay/audit failure attribution; (3) read_audit uses each stopped per-bus server binary via agent-bus log --data-dir, never agent-busctl; (4) syntax/static/focused diagnostics, reviewer, and security gates pass. Full bash scripts/fed-smoke.sh may remain dependency-RED pending RELAY-24 and the recorded federation dependency closure; that RED is not a completion claim.
 
 ## Description
 
@@ -61,15 +61,7 @@ three-host run over actual SSH tunnels; the loopback smoke does not substitute f
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CLI-11](../../UNASSIGNED/CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (done)
-- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
-- [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)
-- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
-- [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
-- [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
-- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
-- [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

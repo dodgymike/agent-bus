@@ -11,18 +11,18 @@
 | Section | backlog |
 | Tags | spec-mirror, identity, blocks-CONTEXT-SPEC-TREE |
 | Created | 2026-08-14T11:11:34.256817+00:00 |
-| Updated | 2026-08-14T17:54:40.047275+00:00 |
+| Updated | 2026-08-14T21:01:07.125605+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-bash scripts/spec-cloud.sh -sf '/api/v1/projects/agent-bus/export?format=json' | python3 -c "import json,sys; d=json.load(sys.stdin); t=d['tasks']; assert len(t)>0; nullkey=[x for x in t if not x.get('key')]; nullepic=[x for x in t if not x.get('epic_key')]; print('keyless:',len(nullkey),'epicless:',len(nullepic))"
+grep -qi 'public_id.*identity\|standardiz.*public_id' DECISIONS.md && test -d SPEC/UNASSIGNED && echo KEY_IDENTITY_DECISION_RECORDED
 ```
 
 ## Status note
 
-PROCEDURE CORRECTION 2026-08-14 (coordinator): the recreate-and-supersede remedy loses TWO things, not one -- the note journal (already known) AND any relations pointing at the old id, inbound as well as outgoing. My own earlier caveat only checked OUTGOING relations on the old task (there were none) before recreating -- but I did not separately verify there was no INBOUND edge that some OTHER task might add later, or that already existed and I missed. RE-CHECKED JUST NOW FOR THIS SPECIFIC INSTANCE: neither the old task (c829af9a) nor the new one (86c7d368) actually carried a real blocks edge to RELAY-24 at the time of recreation -- RELAY-24s only real SIGN-1-related blocker was SIGN-1-FU-OUTOFORDER-POISON (now done). The BLOCKING claim existed only as PROSE inside the old tasks description, never as a real relation -- so nothing was technically lost in THIS case, but the coordinators point stands generally and I have now wired the missing real edge (86c7d368 -> blocks -> RELAY-24) that should have existed regardless of the recreation. UPDATED PROCEDURE: after recreating a task to fix key=null, check the OLD tasks relations from BOTH directions (GET .../relations already returns both incoming and outgoing in one call, so this is one extra read, not two) BEFORE assuming nothing needs re-wiring -- and separately, check whether the task SHOULD carry edges that were only ever described in prose and never wired as real relations, since a recreation is also a natural point to close that gap.
+AUDITED 2026-08-14, LEFT OPEN. TWO of three deliverables verified DONE in practice: (1) CONTEXT-SPEC-TREE's directory-naming scheme correctly uses public_id as the leaf identity for EVERY task (e.g. SPEC/SIGN/SIGN-1--43fd21ae/), uniform whether key is populated or not, matching this task's decision items 1/3; (2) epic_key=null tasks land in an explicit SPEC/UNASSIGNED/ bucket rather than being dropped, matching decision item 4. NOT done: the DECISION ITSELF is not recorded in DECISIONS.md (grep for public_id anywhere in DECISIONS.md returns nothing) -- this task's own description requires the decision be written down in DECISIONS.md or the doc that owns spec-mirror conventions, and it currently exists only as the de-facto behaviour of gen-spec-mirror.sh, not as a stated, citable decision. Server-side constraint question (raised by the coordinator): answered NO, not this task's scope -- that half is tracked separately and correctly related as SPEC-API-LIST-SILENT-TRUNCATION (82f35b73, todo, relates edge already wired per this task's own notes from earlier today). Also corrected the proof_cmd: the original just printed counts with no assertion (len(t)>0 is trivially true against 587 tasks) -- it could never fail, so it verified nothing. Replaced with a real check for the DECISIONS.md entry plus the UNASSIGNED bucket, confirmed RED now.
 
 ## Description
 
@@ -63,12 +63,9 @@ See CONTEXT-SPEC-DEPS (public_id 8280358d-fc62-4376-8e24-52d43236a4a8) kind=repo
 
 - [CONTEXT-SPEC-DEPS](../CONTEXT-SPEC-DEPS--8280358d/task.md) — CONTEXT-SPEC-DEPS: Adopt and document the blocks-relation convention for task dependencies (todo)
 - [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (done)
-- [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
 - [RELAY-41](../../RELAY/RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 - [SIGN-1](../../SIGN/SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
-- [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) — SIGN-1-FU-OUTOFORDER-POISON: Reserve-then-send lets mints be spent out of order, which pe… (done)
-- [SIGN-1-FU-REORDER-WATERMARK](../../SIGN/SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (superseded)
-- [SIGN-1-FU-REORDER-WATERMARK](../../SIGN/SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (todo)
+- [SPEC-API-LIST-SILENT-TRUNCATION](../../UNASSIGNED/SPEC-API-LIST-SILENT-TRUNCATION--82f35b73/task.md) — Task-list API silently truncates at 200 with no total, no next and no working pagination… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

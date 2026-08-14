@@ -11,14 +11,18 @@
 | Section | backlog |
 | Tags | spec-server, schema, dependencies |
 | Created | 2026-08-14T11:05:52.915014+00:00 |
-| Updated | 2026-08-14T11:15:29.585299+00:00 |
+| Updated | 2026-08-14T20:58:33.281861+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-grep -qi 'depends_on.*blocks\|X depends_on Y' DECISIONS.md && grep -n 'kind.*blocks' AGENTS_API.md | grep -qi depend
+grep -qi 'depends_on.*==.*POST.*relations.*kind.*blocks\|X depends_on Y.*==.*POST\|blocks.*inert.*cycle' DECISIONS.md
 ```
+
+## Status note
+
+AUDITED 2026-08-14, LEFT OPEN -- the empirical verification half (item in this task's scope: directionality/cycle/side-effect confirmation) IS done, recorded in this task's own notes from earlier today (ZZ-SCRATCH-RELATIONS-A/B probe). The DOCUMENTATION half is NOT done: grep -qi against DECISIONS.md for the confirmed convention returns no match -- no dated entry exists recording \"X depends_on Y == POST to Y's relations {kind:blocks,target:X}\", the inertness of blocks, or the cycle-permissiveness. Also corrected the proof_cmd itself: it named AGENTS_API.md, which is NOT a file in this repo -- CLAUDE.md's own preamble states AGENTS_API.md lives at ~/source/spec-keeper/AGENTS_API.md, a different repository entirely, outside agent-bus and outside anything I or any agent-bus agent edits. Corrected proof_cmd checks DECISIONS.md only. This is documentation-authoring work (a dated DECISIONS.md entry), which is documentation/implementer territory, not spec-keeper's (task-state only) -- leaving open for that agent to pick up.
 
 ## Description
 

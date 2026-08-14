@@ -11,14 +11,18 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:50.814945+00:00 |
-| Updated | 2026-08-14T20:09:26.288591+00:00 |
+| Updated | 2026-08-14T20:58:02.757745+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestSessionTokenRejectedOnForeignClientCert|TestSessionBeginRejectedOnForeignClientCert|TestSessionCompleteRejectedOnForeignClientCert' ./internal/httpapi ./internal/auth && grep -qi 'cross-check' CONTRACTS-HTTP.md
+go test -race -run 'TestCrossCheck' ./internal/httpapi ./internal/auth
 ```
+
+## Status note
+
+Code complete, reviewer and security gates both COMPLETED (see notes). Completion is BLOCKED on CONTRACTS-HTTP.md correction (a live doc sweep owns that file) -- per CLAUDE.md step 9, do not flip to done until the doc lands. Follow-up filed: MTLS-CROSSCHECK-FU-DOCS. proof_cmd corrected: was VACUOUS (named tests never existed) and its grep clause passed on incidental RELAY-20/RELAY-45 matches at CONTRACTS-HTTP.md:750,790-791 before any work landed.
 
 ## Description
 
@@ -33,7 +37,9 @@ EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BIND | BLOCKS: MTL
 > task's own field.
 
 
-_None recorded._
+- **follow-up of** [MTLS-CROSSCHECK-FU-CERTEXPIRY](../MTLS-CROSSCHECK-FU-CERTEXPIRY--b5d86daa/task.md)
+- **follow-up of** [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md)
+- **follow-up of** [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -44,7 +50,10 @@ _None recorded._
 
 - [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
 - [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
+- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
 - [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
+- [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -58,6 +67,9 @@ _None recorded._
 - [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
 - [MTLS-BIND-FU-DOCS](../MTLS-BIND-FU-DOCS--8c40ea26/task.md) — MTLS-BIND-FU-DOCS: document the enrolment certificate binding -- CONTRACTS-HTTP.md 409, D… (todo)
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
+- [MTLS-CROSSCHECK-FU-CERTEXPIRY](../MTLS-CROSSCHECK-FU-CERTEXPIRY--b5d86daa/task.md) — A bound agent whose client certificate expires is locked out permanently, including from… (todo)
+- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
+- [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (todo)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)

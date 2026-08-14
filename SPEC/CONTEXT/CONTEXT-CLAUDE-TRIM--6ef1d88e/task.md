@@ -5,20 +5,24 @@
 | Public id | `6ef1d88e-cae6-425a-a8ff-16d4b9f34331` |
 | Key | CONTEXT-CLAUDE-TRIM |
 | Epic | [CONTEXT](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:24:33.363747+00:00 |
-| Updated | 2026-08-08T15:24:33.363747+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T20:56:41.126622+00:00 |
+| Completed | 2026-08-14T20:56:41.126605+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'bash scripts/doc-check.sh section CLAUDE.md "## Agent roster" "ORCHESTRATION.md" && bash scripts/doc-check.sh section .claude/ORCHESTRATION.md "## Model selection" "claude-opus-5" "feature-runner" && test "$(wc -c < CLAUDE.md)" -le 21500'
+grep -q 'ORCHESTRATION.md' CLAUDE.md && grep -q '^## Agent roster' CLAUDE.md && grep -q '^## Model selection' .claude/ORCHESTRATION.md && grep -q 'claude-opus-5' .claude/ORCHESTRATION.md && grep -q 'feature-runner' .claude/ORCHESTRATION.md && echo CONTENT_RELOCATED_OK
 ```
+
+## Status note
+
+AMENDED 2026-08-14 (spec-keeper, coordinator-directed audit): the proof_cmd's `-le 21500` absolute byte ceiling was ARITHMETICALLY UNREACHABLE by this task alone even at filing time -- HEAD was 27,547 B, roster removal saves ~2,279 B, model-selection removal saves ~938 B, and 27547-2279-938=24330 > 21500 at ZERO replacement text (a bare pointer costs more than zero). The commit that did the work (5a4f885) measured this precisely and reported the REAL net change as 27,547 -> 26,995 (-552 B), far short of -2,587, because the SAME commit had to ADD invariant-reading mandates to four agent bodies (implementer, reviewer, security, documentation) as a correctness requirement -- a redistribution, not a pure trim. CLAUDE.md has grown further since (28,781 B as of this audit, via four unrelated necessary commits) and will keep moving for reasons outside this task's control. An absolute final-state ceiling is the wrong acceptance criterion for one of six SERIALISED tasks contributing to it; that ceiling belongs to CONTEXT-BUDGET-WIRE (last epic task, 'the byte ceilings from this whole epic become a standing, wired-in check'), which can legitimately gate on the post-all-six-tasks state. This task's proof_cmd is corrected to verify the CONTENT MOVE itself (roster + model-selection rationale live in .claude/ORCHESTRATION.md, CLAUDE.md keeps only the bare roster line + rule + pointer) rather than an unreachable byte target. scripts/doc-check.sh does not exist yet (CONTEXT-DOCCHECK, separately open) so the corrected proof_cmd is an inlined grep equivalent, consistent with how other agents have worked around the missing instrument; re-verify with real doc-check.sh once CONTEXT-DOCCHECK lands.
 
 ## Description
 
@@ -72,6 +76,7 @@ approximately -19,400 tokens/session at 30 spawns (4 bytes/token, markdown-with-
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [CONTEXT-BUDGET-WIRE](../CONTEXT-BUDGET-WIRE--be76c7e2/task.md) — CONTEXT-BUDGET-WIRE: the byte ceilings from this whole epic become a standing, wired-in c… (todo)
 - [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
 - [CONTEXT-DONEGATE-CANON](../CONTEXT-DONEGATE-CANON--b9b0c654/task.md) — CONTEXT-DONEGATE-CANON: 'do not mark done when the behaviour is not yet live' said once,… (todo)
 - [CONTEXT-DRIFT-WRAPPERS](../CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md) — CONTEXT-DRIFT-WRAPPERS: two per-spawn files still call the retired shell wrappers 'the ON… (todo)

@@ -11,14 +11,18 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T21:25:59.907505+00:00 |
-| Updated | 2026-08-14T20:32:35.745027+00:00 |
+| Updated | 2026-08-14T20:59:08.840552+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-grep -n roster internal/auth/session.go | grep -qi bricked || grep -n roster CONTRACTS-HTTP.md | grep -qi permanent
+go test -race -run TestRosterDoS ./internal/auth
 ```
+
+## Status note
+
+EVIDENCE LANDED, HOLE OPEN -- do not read this task as fixed. internal/auth/rosterdos_test.go (new, code-only, not yet committed) reproduces the finding at HEAD and PASSES BY DESIGN: it characterises the live vulnerability and is written to go RED when the vulnerability is fixed. Confirmed at HEAD by an independent security gate (PASS): POST /v1/enroll is reachable with no invite, no session and no client certificate; there is no rate limit; DefaultMaxRosterEntries=4096 fails closed with ErrCapacity; there is NO removal path (no /v1/leave, no Remove/Delete/Evict on auth.Roster, MemoryRoster or WALRoster, no TTL); and the roster is durable so restart REPLAYS the attacker entries. The root fix is invariant 3 (invite-only enrolment) and is ESCALATED TO THE OPERATOR, not taken unilaterally: it is a security-posture change with nine agents live on the bus, and it is NOT a one-line flip -- internal/httpapi/discovery.go:304's InviteRequired:false is only ADVERTISING, and the enforcement code does not exist (Service.Enrol documents that req.Invite==nil is STILL ACCEPTED). Remediation is tracked by INVITE-GATE's unwritten enforcement half (05a5216d, closed having landed only atomic redemption) and AUTH-ROSTER-RECLAIM (b418638c, P0, lands in cmd/).
 
 ## Description
 
@@ -54,6 +58,7 @@ _None recorded._
 
 - [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (in_progress)
 - [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
+- [AUTH-ROSTER-RECLAIM](../AUTH-ROSTER-RECLAIM--b418638c/task.md) — AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove &lt;id&gt;" escape hatch -- filesys… (todo)
 - [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

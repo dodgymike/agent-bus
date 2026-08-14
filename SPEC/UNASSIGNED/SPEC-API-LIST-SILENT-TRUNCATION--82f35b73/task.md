@@ -152,6 +152,7 @@ Task 73b29060-f595-4f4d-90a9-3f13d231b909 ("Spec Server: warn on likely-duplicat
 
 
 - [9e6544a1-d606-4e65-8c43-0764ac3f0aa4](../../TOOLING/spec-cloud.sh-task-list-workflow-GET-...-tasks-silently--9e6544a1/task.md) — spec-cloud.sh / task-list workflow: GET .../tasks silently truncates to the oldest 200 of… (superseded)
+- [CONTEXT-KEY-IDENTITY](../../CONTEXT/CONTEXT-KEY-IDENTITY--73dec684/task.md) — CONTEXT-KEY-IDENTITY: Standardize task identity (public_id vs key) before SPEC/&lt;epic&gt;/&lt;ta… (todo)
 
 ---
 

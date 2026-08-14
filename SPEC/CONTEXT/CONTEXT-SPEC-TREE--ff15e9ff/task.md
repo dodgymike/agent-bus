@@ -116,7 +116,7 @@ commit message where nobody would find it later.
 > task's own field.
 
 
-_None recorded._
+- **supersedes** [CONTEXT-SPEC-BRIEF](../CONTEXT-SPEC-BRIEF--4b0f5e57/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
