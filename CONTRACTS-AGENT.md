@@ -16,13 +16,17 @@ were `/healthz` and `/v1/info`.
 serves a third audience the wrappers never could — an agent that EMBEDS the client. `AGENT_PROTOCOL.md`
 exists and is the usage doc; `CONTRACTS-CLI.md` is the exact flag/JSON/exit-code reference.
 
-`scripts/` holds exactly three files, and only one of them is agent-facing:
+`scripts/` holds exactly six files (count corrected 2026-08-14: it said three, while `git ls-files
+scripts/` lists six), and only one of them is agent-facing:
 
 | Script | Agent-facing? | Purpose |
 |---|---|---|
 | `scripts/bus-serve.sh` | yes | Start/stop/status the SERVER for a session. The only surviving `bus-*.sh`. |
 | `scripts/spec-cloud.sh` | no | Authed `curl` shim for the Spec Server (task state) |
 | `scripts/proof-check.sh` | no | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something |
+| `scripts/proof-check_test.sh` | no | Guard test for `proof-check.sh` — pins the caller-cwd resolution fix (`535876c`) |
+| `scripts/gen-spec-mirror.sh` | no | Regenerates the backlog mirror: `SPEC.md` (epic index) **and** the `SPEC/` tree. The ONLY supported way to write either. |
+| `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Deliberately describes the surface as it SHOULD be, so it fails loudly at the first unavailable step. |
 
 ### `scripts/bus-serve.sh` — the health probe is now https, and verified (`MTLS-LISTENER`/`MTLS-VERIFY`, 2026-08-07)
 
@@ -95,6 +99,56 @@ it to talk to a bus.
 | --- | --- |
 | `scripts/spec-cloud.sh` | Authed `curl` shim for the Spec Server (task state). See `CLAUDE.md`. |
 | `scripts/proof-check.sh` | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something. |
+| `scripts/proof-check_test.sh` | Guard test for the above: proves proofs resolve against the CALLER's cwd, not the script's tree. |
+| `scripts/gen-spec-mirror.sh` | Regenerates `SPEC.md` + the `SPEC/` tree from the Spec Server. |
+| `scripts/fed-smoke.sh` | Three-bus federation smoke test (RELAY-25); currently expected to fail at the first unavailable step. |
+
+### `scripts/gen-spec-mirror.sh` — the backlog mirror (restructured 2026-08-14)
+
+The Spec Server is the source of truth for task state; this script writes the mirror, and it is the
+only supported way to write it. It emits **two** artefacts and rewrites both on every run:
+
+| Path | Contents |
+| --- | --- |
+| `SPEC.md` | Epic INDEX only — one row per epic with open/total counts and a pointer. No task descriptions. |
+| `SPEC/<EPIC>/epic.md` | Every task in that epic: key, title, status, priority, task pointer, relations, derived refs. Open tasks first, closed in a separate section. |
+| `SPEC/<EPIC>/<task>/task.md` | The full record for one task, description UNTRUNCATED. |
+
+Directory names are `<key-or-title-slug>--<public-id-prefix>`; the public-id fragment supplies
+uniqueness because `key` is null for about a third of the backlog. Use the full `public_id`
+(recorded in each `task.md`) for Spec Server lookups — prefix resolution does not exist server-side.
+
+`SPEC.md` and `SPEC/` are **tracked in git deliberately**: the mirror is the server-down fallback,
+and an untracked fallback is not one. The staging directory the script builds into (`/.spec-tree.*`,
+a sibling of `SPEC/` so the swap can be a rename) is gitignored, and removed on exit including on
+failure.
+
+| Flag | Behaviour |
+| --- | --- |
+| *(none)* | Write `SPEC.md` + `SPEC/`, fetching real relations. ~70 s per the script header. |
+| `--no-relations` | Skip the relation fetch — fast regen. Every file then reads "NOT FETCHED — unknown, not absent" instead of implying a task has no edges. |
+| `--stdout` | Print the `SPEC.md` index to stdout and write nothing. |
+| `--all` | Accepted, **no-op**. Kept so old invocations do not fail; the tree always contains every task. |
+| `-h`, `--help` | Print the script header (the authoritative description of this surface). |
+
+**Closed tasks are INCLUDED.** The previous single-file mirror dropped them to save bytes; in a tree
+they cost nothing until a file is opened, and their absence was the main reason the server-down
+fallback was worse than the server itself.
+
+**Two kinds of task-to-task link, never blurred.** *Relations* are authoritative edges fetched from
+the server (`blocks`, `supersedes`, `relates`, `follow_up`) — there is no bulk endpoint, so this
+costs one rate-limited request per task, hence two workers with exponential backoff. *Referenced
+(derived)* links are key-shaped strings matched out of description free text: best-effort, labelled
+as such everywhere, and not a dependency list. A task whose relations cannot be fetched is a
+REFUSAL, not an empty list.
+
+**It refuses to write rather than publish a damaged mirror.** Three guards: a structural check on
+the raw markdown export, a count cross-check between the markdown and JSON exports (re-fetched once,
+since concurrent agents file tasks constantly), and a no-task-lost check asserting one directory per
+task. On any breach `SPEC.md` and `SPEC/` are left untouched. After the swap it also asks git
+whether any file it just wrote is IGNORED — a task directory swallowed by an unanchored
+`.gitignore` credential pattern would vanish from the fallback while `git status` stayed clean — and
+exits 3 with the offending paths if so.
 
 ### `scripts/proof-check.sh` (added 2026-08-02)
 

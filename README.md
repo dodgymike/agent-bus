@@ -136,4 +136,6 @@ here to avoid the two going out of sync.
 - [`AGENT_PROTOCOL.md`](./AGENT_PROTOCOL.md) — agent-facing instructions (`agent-busctl`)
 - [`PROTOCOL.md`](./PROTOCOL.md) — the on-disk format and the canonical signing format
 - [`AGENT_LOG.md`](./AGENT_LOG.md) — per-task work log
-- [`SPEC.md`](./SPEC.md) — generated mirror of the Spec Server backlog (never hand-edit)
+- [`SPEC.md`](./SPEC.md) — generated epic INDEX of the Spec Server backlog; the task records live in
+  [`SPEC/`](./SPEC) (`SPEC/<EPIC>/epic.md` per epic, `SPEC/<EPIC>/<task>/task.md` per task). Never
+  hand-edit either — regenerate with `bash scripts/gen-spec-mirror.sh`

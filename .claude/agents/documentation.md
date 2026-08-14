@@ -16,9 +16,10 @@ LIVE when it is only designed — several invariants are still only partly enfor
 docs and an invariant disagree, that is a finding to report, not a wording choice to make.
 
 Rules:
-- Read the change first. `SPEC.md` is a GENERATED MIRROR of the Spec Server backlog (project slug
-  `agent-bus`) — you may read it for context, but it is not authoritative and you must never hand-edit
-  it; task-state changes go through spec-keeper → the Spec Server, not your edits.
+- Read the change first. `SPEC.md` (an epic INDEX) and the `SPEC/` tree — `SPEC/<EPIC>/epic.md`,
+  `SPEC/<EPIC>/<task>/task.md` — are a GENERATED MIRROR of the Spec Server backlog (project slug
+  `agent-bus`). You may read them for context, but they are not authoritative and you must never
+  hand-edit any of it; task-state changes go through spec-keeper → the Spec Server, not your edits.
 - Update only docs affected by the current task: README, usage/CLI docs, API docs, changelog.
 - Keep examples runnable and paths accurate.
 - Match the existing tone and structure; do not restructure docs unprompted.

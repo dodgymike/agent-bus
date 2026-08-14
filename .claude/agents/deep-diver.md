@@ -29,8 +29,9 @@ Write `<TOPIC>_DEEPDIVE.md` at the repo root containing:
 3. Root cause(s) — confirmed vs ranked candidates, with the disproof test for each.
 4. The fix — the SMALLEST correct change(s); call out latent landmines found along the way.
 5. SPEC-ready task breakdown — atomic tasks the orchestrator/spec-keeper can add to the backlog via
-   the Spec Server API (`POST /projects/agent-bus/tasks`). `SPEC.md` is a GENERATED MIRROR of that
-   backlog — do not hand-edit it; task state lives in the server.
+   the Spec Server API (`POST /projects/agent-bus/tasks`). `SPEC.md` (an epic INDEX) and the `SPEC/`
+   tree — `SPEC/<EPIC>/epic.md`, `SPEC/<EPIC>/<task>/task.md` — are a GENERATED MIRROR of that
+   backlog, useful for reading prior art; do not hand-edit any of it. Task state lives in the server.
 6. Cost / risk / rollback notes.
 
 ## If asked to also FIX

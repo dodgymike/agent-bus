@@ -103,7 +103,7 @@ internal/…            server packages (ids, store, wal, hub, http, relay, auth
 cmd/agent-busctl/     the CLI — THE client, and the only interface agents use (invariant 7)
 scripts/bus-*.sh      RETIRED wrappers; only bus-serve.sh remains (server lifecycle). Do not add one
 scripts/spec-cloud.sh authed curl shim for the Spec Server (task state)
-scripts/gen-spec-mirror.sh regenerates SPEC.md — the ONLY supported way to write it
+scripts/gen-spec-mirror.sh regenerates SPEC.md AND SPEC/ — the ONLY supported way to write either
 INVARIANTS.md         the 11 invariants WITH their reasoning — read the relevant one IN FULL
                       before working on that plane; CLAUDE.md carries only the one-line rules
 .claude/ORCHESTRATION.md  which sub-agent to pick, which model to pass, the review panel — read
@@ -117,7 +117,9 @@ CONTRACTS-ONDISK.md     record types, wire protocol versions, on-disk files, WAL
 CONTRACTS-AGENT.md      agent-facing wrappers + repo tooling scripts
 DECISIONS.md          design decisions and their rationale (append-only, dated)
 AGENT_LOG.md          per-task work log (append-only, dated)
-SPEC.md               GENERATED mirror of the Spec Server backlog — never hand-edit
+SPEC.md               GENERATED epic INDEX of the Spec Server backlog — never hand-edit
+SPEC/<EPIC>/epic.md   GENERATED — that epic's tasks, open first then closed
+SPEC/<EPIC>/<task>/task.md  GENERATED — one full task record, description untruncated
 ```
 
 ## Runtime target: Docker Compose
@@ -237,10 +239,16 @@ API, never by hand-editing a file:
   **Never pick a number by eyeballing the list** — that is the classic parallel-agent collision.
 - **Your own tasks** → `GET $B/projects/agent-bus/tasks?owner=<you>`.
 - **Refresh the mirror** after mutations → `bash scripts/gen-spec-mirror.sh`.
-  That is the ONLY write anyone makes to `SPEC.md`. It mirrors **open tasks
-  only** — closed ones are 39% of the backlog and the server keeps them; pass `--all` if you really
-  need them. Do NOT regenerate with a bare `spec-cloud.sh … export > SPEC.md`: that restores the
-  closed tasks and silently overwrites the mirror with an error page if the fetch fails.
+  That is the ONLY write anyone makes to `SPEC.md` **or** `SPEC/`, and it rewrites BOTH. `SPEC.md`
+  is an epic INDEX; the records live in `SPEC/<EPIC>/epic.md` and `SPEC/<EPIC>/<task>/task.md`, one
+  file per task, description untruncated. **Closed tasks ARE included** — in a tree they cost
+  nothing until a file is opened — so **`--all` is now a NO-OP**, kept only so old invocations do
+  not fail. The default run also fetches the authoritative `blocks`/`supersedes`/`relates`/
+  `follow_up` edges, one request per task against a rate-limited API (~70 s per the script header);
+  `--no-relations` is the fast path and then every file says "NOT FETCHED — unknown, not absent".
+  Do NOT regenerate with a bare `spec-cloud.sh … export > SPEC.md`: that puts the old 640 KB
+  single-file mirror back over the index, bypasses the generator's guards, and silently overwrites
+  it with an error page if the fetch fails.
 
 ## Spec Server task notes are the work JOURNAL
 

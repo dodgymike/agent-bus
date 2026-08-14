@@ -12,13 +12,25 @@ task state.
 - **The running Spec Server is authoritative** (project slug `agent-bus`), reached over HTTP at
   `/api/v1`. Mutate tasks through the API — claim, complete, reserve, add — never
   by hand-editing a file. Confirm the server is up first: `bash scripts/spec-cloud.sh -sf /readyz`.
-- **`SPEC.md` is a GENERATED MIRROR — do not author task state in it.** It is regenerated from the
-  server with `/export`; treat it as read-only history that other agents/tools (and humans) can skim.
-  The only write you make to `SPEC.md` is refreshing the whole mirror from the server (see below).
-- **Fallback escape hatch:** if `bash scripts/spec-cloud.sh -sf /readyz` fails (server unreachable), fall back
-  to the legacy SPEC.md flow — edit `SPEC.md` directly, keep the checkbox legend
-  (`[ ]` todo · `[~]` in progress · `[x]` done · `[-]` superseded), and reconcile to the server once it
-  is back up (`POST .../import` then `/export`). Say in your report that you used the fallback.
+- **`SPEC.md` AND the `SPEC/` tree are a GENERATED MIRROR — do not author task state in them.**
+  `SPEC.md` is an epic INDEX only (one row per epic, no task records). The records live in
+  `SPEC/<EPIC>/epic.md` (that epic's tasks, open first then closed) and
+  `SPEC/<EPIC>/<task>/task.md` (one full record, description untruncated). Both are regenerated
+  from the server by `scripts/gen-spec-mirror.sh`, which builds into a staging directory and swaps
+  the whole tree in by rename — so **NOTHING in `SPEC.md` or `SPEC/` is safe to hand-edit**, and
+  any edit you make is destroyed wholesale by the next regen. There are no task checkboxes to tick
+  anywhere in the mirror any more. The only write you make is running the generator (see below).
+- **Fallback escape hatch:** if `bash scripts/spec-cloud.sh -sf /readyz` fails (server unreachable),
+  the mirror is the READ side of the fallback and it is complete — every task, open and closed, with
+  its full description, `proof_cmd` and relations. **Do NOT hand-edit it to record state.** Instead:
+  bring up the local server (`cd ~/source/spec-keeper && docker compose up -d`, then
+  `curl -s localhost:8080/api/v1/…`) and mutate there, re-syncing to cloud once it is back; or, if
+  that is also unavailable, record the intended mutations in `AGENT_LOG.md`, apply them through the
+  API when the server returns, and only then regenerate. The old `POST .../import` reconciliation
+  took the single-file markdown mirror as its body — the current `SPEC.md` carries no task records
+  at all, so do not feed it to `import` (unverified whether that errors or silently imports nothing;
+  either way it is not a reconciliation). Say in your report that you used the fallback, and which
+  branch of it.
 
 Set a base var for brevity: `B=/api/v1`.
 
@@ -51,9 +63,21 @@ Set a base var for brevity: `B=/api/v1`.
   `GET $B/projects/agent-bus/tasks/<id>` (one task). Claim stamps the `owner` field.
 - Use `If-Match: "v<version>"` on edits when you read-then-write, so a concurrent change yields 412
   instead of a lost update; on 412, re-read and retry.
-- **Regenerate the SPEC.md mirror after mutations** so humans and mirror-readers see current state: `bash scripts/gen-spec-mirror.sh` (open tasks only; `--all` includes closed). Never regenerate with a bare `spec-cloud.sh … export > SPEC.md` — that restores the 39% of closed tasks the mirror deliberately omits, and on a failed fetch it silently overwrites SPEC.md with an error page. This is the only SPEC.md write
-  you make in normal (server-up) operation. Optionally dry-run first:
-  `bash scripts/spec-cloud.sh -s -X POST $B/projects/agent-bus/export/diff --data-binary @SPEC.md -H 'Content-Type: text/markdown'`.
+- **Regenerate the mirror after mutations** so humans and mirror-readers see current state:
+  `bash scripts/gen-spec-mirror.sh`. It rewrites `SPEC.md` **and** the whole `SPEC/` tree, and it
+  includes EVERY task, open and closed — closed ones cost nothing until a file is opened. `--all` is
+  still accepted but is now a **no-op**, kept only so old invocations do not fail; do not pass it
+  expecting different output. The default run also fetches the authoritative `blocks` /
+  `supersedes` / `relates` / `follow_up` edges — one request per task against a rate-limited API,
+  ~70 s per the script header. `--no-relations` is the fast path, and the tree then says
+  "NOT FETCHED — unknown, not absent" in every file rather than implying a task has no edges. The
+  generator refuses to write on a failed fetch, a structural anomaly or a count mismatch, leaving
+  the old mirror in place. Never regenerate with a bare `spec-cloud.sh … export > SPEC.md` — that
+  puts the old 640 KB single-file mirror back over the index and bypasses every one of those
+  guards, and on a failed fetch it silently overwrites `SPEC.md` with an error page. This is the
+  only `SPEC.md`/`SPEC/` write you make in normal (server-up) operation.
+  The `export/diff` dry-run took the OLD single-file mirror as its body and is not valid against the
+  current index-only `SPEC.md`; use `GET $B/projects/agent-bus/tasks` to check state before regen.
 - Never edit source code. Never run application tests (that's test-engineer).
 
 Read `~/source/spec-keeper/AGENTS_API.md` for the full recipe book if you need an endpoint not listed
@@ -61,7 +85,8 @@ here.
 
 ## Definition of done (yours to enforce)
 A task is done only when its status is `done` in the server backlog, its `proof_cmd` and
-`commit_sha`/`test_summary` are recorded via `complete`, the SPEC.md mirror has been regenerated, and
+`commit_sha`/`test_summary` are recorded via `complete`, the mirror (`SPEC.md` + `SPEC/`) has been
+regenerated, and
 the reviewer + security steps actually ran (or a skip is justified in `AGENT_LOG.md`). Each agent that
 touched the task must have posted at minimum `kind=report` + `kind=model` notes (reviewers also
 `kind=response`). See the notes journal rule above.
