@@ -7,15 +7,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/idem"
+	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
 // RELAY-5's evidence: a federation that is BOTH a cycle and a diamond, a real
@@ -572,6 +579,695 @@ func TestRelayCrashLoopIntegration(t *testing.T) {
 		_, after := recoverAppliedKeys(t, logPath)
 		if len(after) != 2 {
 			t.Fatalf("the applied-key log holds %d records, want 2 (the pre-crash record plus the one fresh message); two duplicate arrivals must have written nothing at all", len(after))
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-19: the FORWARDER writes and settles durable outbox records
+// ---------------------------------------------------------------------------
+//
+// RELAY-15's own crash evidence (TestOutboxSurvivesACrashMidEnqueue, in
+// outbox_test.go) proves that a RECORD survives a SIGKILL. It says nothing
+// about the forwarder, because part 1 deliberately did not touch it: the outbox
+// was a library nothing called.
+//
+// What is proved here is the property that library was built for, and it is a
+// property of the WHOLE PATH rather than of the record:
+//
+//	a message handed to Forwarder.Enqueue and then lost to a kill -9 is
+//	re-enqueued on recovery, delivered, and delivered EXACTLY ONCE.
+//
+// Three things make that claim non-trivial, and each is asserted separately
+// below rather than inferred from the others:
+//
+//  1. THE ORDER. The pending record is fsynced BEFORE the job is offered to any
+//     queue. The child dies inside the durable write, so if the order were the
+//     other way round the peer stand-in would already have a delivery on disk.
+//     The parent asserts that file does NOT exist — which is the only way to
+//     observe an ordering from outside a process that no longer exists, and is
+//     the shape RELAY-15's own child uses for the same reason.
+//  2. THE RE-ENQUEUE. The parent replays the crashed log into a fresh Outbox,
+//     builds a fresh Forwarder, and calls Resume — the startup sequence a
+//     restarted server performs — and the peer receives the message.
+//  3. EXACTLY ONCE, in both directions it can fail. Within the process, a
+//     second Resume is refused. Across restarts, a THIRD open of the same
+//     directory must find an EMPTY pending set: the delivered tombstone is what
+//     stops a recovered job being re-sent forever, and without assertion 3 a
+//     forwarder that re-sent on every boot would pass 1 and 2 perfectly.
+
+const (
+	// envFwdCrashChild selects the child role. Unset means "not a crash child",
+	// so the child test is a no-op skip in an ordinary package run. The names
+	// are distinct from outbox_test.go's RELAY_OUTBOX_CRASH_* pair because the
+	// two harnesses re-exec DIFFERENT child tests, and a shared variable would
+	// let one harness's child be started by the other's parent.
+	envFwdCrashChild = "RELAY_FORWARD_OUTBOX_CRASH_CHILD"
+	// envFwdCrashDir is the data directory the child writes into: always a
+	// parent-owned t.TempDir(), never the tracked data/ dir.
+	envFwdCrashDir = "RELAY_FORWARD_OUTBOX_CRASH_DIR"
+
+	fwdCrashLocalBus = "bus-fwd-local"
+	fwdCrashPeerBus  = "bus-fwd-peer"
+	fwdCrashSeq      = 9001
+
+	// fwdCrashDeliveries is the peer stand-in's on-disk record of what actually
+	// reached it. It is a FILE rather than a counter because the two processes
+	// that write to it do not share memory, and because "nothing arrived before
+	// the crash" is a claim about the child that only the parent can check.
+	fwdCrashDeliveries = "peer-deliveries.log"
+)
+
+// fwdCrashMessage is the message under test. Every field the outbox record
+// derives from — origin message id, size, content hash — is deterministic, so
+// the job id the child wrote and the job id the parent recomputes are the same
+// string in two processes.
+func fwdCrashMessage() RelayedMessage {
+	return originMessage(fwdCrashLocalBus, fwdCrashLocalBus+".alpha-1", fwdCrashSeq, []byte("a relay hop that must outlive a kill -9"), func(m *RelayedMessage) {
+		m.Recipients = []string{fwdCrashPeerBus + ".target-1"}
+	})
+}
+
+// fwdCrashPeerServer is a peer bus's relay ingress that RECORDS what it
+// received, appending one line per accepted envelope and fsyncing before it
+// answers. The fsync is fidelity to the real path: the parent reads this file
+// after the child has been SIGKILLed, and a buffered write would make "nothing
+// arrived" indistinguishable from "something arrived and was never flushed".
+func fwdCrashPeerServer(t *testing.T, dir string) *httptest.Server {
+	t.Helper()
+	path := filepath.Join(dir, fwdCrashDeliveries)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, MaxRelayBytes))
+		var req RelayRequest
+		line := "undecodable\n"
+		if err := json.Unmarshal(body, &req); err == nil {
+			line = req.MessageID + "\n"
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := f.WriteString(line); err != nil {
+			_ = f.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = f.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RelayResponse{Accepted: true, MessageID: fwdCrashPeerBus + "-1"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// fwdCrashDeliveryLines is what the peer stand-in actually received, or nil if
+// it was never called at all.
+func fwdCrashDeliveryLines(t *testing.T, dir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, fwdCrashDeliveries))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading the peer stand-in's delivery log: %v", err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, strings.TrimSpace(line))
+		}
+	}
+	return out
+}
+
+// fwdCrashForwarder wires a Registry, a Client and a durable Forwarder around
+// the peer stand-in. The child and the parent build it IDENTICALLY apart from
+// the outbox, so a difference between them cannot be the reason the parent
+// succeeds where the child died.
+func fwdCrashForwarder(t *testing.T, ob *Outbox, srv *httptest.Server) *Forwarder {
+	t.Helper()
+	reg, err := NewRegistry(RegistryOptions{BusID: fwdCrashLocalBus})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if err := reg.UpsertPeer(PeerRoster{BusID: fwdCrashPeerBus, Agents: []string{fwdCrashPeerBus + ".target-1"}}); err != nil {
+		t.Fatalf("UpsertPeer: %v", err)
+	}
+	cli, err := NewClient(ClientConfig{
+		BusID:       fwdCrashLocalBus,
+		LocalRoster: func() []string { return nil },
+		HTTPClient:  srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	fwd, err := NewForwarder(ForwarderOptions{
+		BusID:    fwdCrashLocalBus,
+		Registry: reg,
+		Client:   cli,
+		Timeout:  5 * time.Second,
+		PeerBaseURL: func(busID string) (string, bool) {
+			if busID != fwdCrashPeerBus {
+				return "", false
+			}
+			return srv.URL, true
+		},
+		Outbox: ob,
+		// The stand-in for the durable message store. The real wiring reads
+		// store.Message by origin id; what matters to this test is that the
+		// forwarder can rebuild an envelope it did NOT carry across the crash,
+		// because the record deliberately holds routing facts and not a body.
+		RecoverMessage: func(originMessageID string) (RelayedMessage, bool, error) {
+			m := fwdCrashMessage()
+			if originMessageID != m.OriginMessageID {
+				return RelayedMessage{}, false, nil
+			}
+			return m, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewForwarder: %v", err)
+	}
+	return fwd
+}
+
+// fwdKillOnPending delegates to the REAL *wal.Log.Write — prepare, commit and
+// both fsyncs — and kills the process the instant a PENDING outbox record is on
+// stable storage, before Outbox.Enqueue can return and therefore before
+// Forwarder.Enqueue can offer anything to a queue.
+type fwdKillOnPending struct{ l *wal.Log }
+
+func (k *fwdKillOnPending) Write(e wal.Entry) (wal.Committed, error) {
+	// Checked HERE because this is the only place the entry can be seen before
+	// it is written; the parent would otherwise be asserting over bytes that
+	// never meant what it assumed.
+	if e.Kind != OutboxRecordKind {
+		return wal.Committed{}, fmt.Errorf("child: the outbox handed the log an entry of kind %q, want %q", e.Kind, OutboxRecordKind)
+	}
+	rec, err := DecodeOutboxRecord(e.Body)
+	if err != nil {
+		return wal.Committed{}, fmt.Errorf("child: the entry does not decode as an outbox record: %v", err)
+	}
+	c, err := k.l.Write(e)
+	if err != nil {
+		return wal.Committed{}, err
+	}
+	if rec.State == OutboxPending {
+		obKillSelf()
+	}
+	return c, nil
+}
+
+// TestRelayForwardOutboxCrashChild is the child half. It does NOTHING in an
+// ordinary run.
+func TestRelayForwardOutboxCrashChild(t *testing.T) {
+	if os.Getenv(envFwdCrashChild) == "" {
+		t.Skip("not a crash child: " + envFwdCrashChild + " is unset")
+	}
+	dir := os.Getenv(envFwdCrashDir)
+	if dir == "" {
+		t.Fatalf("child: %s is set but %s is empty", envFwdCrashChild, envFwdCrashDir)
+	}
+
+	srv := fwdCrashPeerServer(t, dir)
+
+	// NO deferred Close on the log: a Close that ran would be exactly the
+	// graceful shutdown this test exists to rule out.
+	lg, err := wal.Open(wal.LogOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("child: wal.Open(%s): %v", dir, err)
+	}
+	ob, err := NewOutbox(OutboxOptions{BusID: fwdCrashLocalBus, Durable: &fwdKillOnPending{l: lg}})
+	if err != nil {
+		t.Fatalf("child: NewOutbox: %v", err)
+	}
+
+	fwd := fwdCrashForwarder(t, ob, srv)
+	queued, err := fwd.Enqueue(fwdCrashMessage())
+	t.Fatalf("child: Enqueue returned (%d, %v), but the durable log kills this process the instant the PENDING record is fsynced. "+
+		"Either the record was never written — in which case the forwarder is not recording deliveries at all — or it was written AFTER the offer, "+
+		"which is the ordering RELAY-19 exists to establish", queued, err)
+}
+
+// fwdRunCrashChild re-execs this test binary as the crash child and asserts it
+// really DIED ON SIGKILL. Without the wait-status check a child that merely
+// failed its own assertions would masquerade as a crash and leave the parent
+// asserting over an empty directory — which passes.
+func fwdRunCrashChild(t *testing.T, dir string) {
+	t.Helper()
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v; refusing to fall back to os.Args[0], which exec.Command would resolve through PATH", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, self, "-test.run=^TestRelayForwardOutboxCrashChild$", "-test.v")
+	cmd.Env = append(os.Environ(), envFwdCrashChild+"=1", envFwdCrashDir+"="+dir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("the crash child did not finish in time: %v\n--- child output ---\n%s", ctx.Err(), out.String())
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("crash child: Run returned %v, want an *exec.ExitError from a signalled death\n--- child output ---\n%s", err, out.String())
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("crash child: wait status is %T, want syscall.WaitStatus", ee.Sys())
+	}
+	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("crash child exited with status %d instead of dying on SIGKILL; the crash was never injected\n--- child output ---\n%s",
+			ws.ExitStatus(), out.String())
+	}
+}
+
+// fwdWaitFor polls until cond holds, and fails with why if it never does. Used
+// instead of a sleep because the settle happens on a peer worker goroutine.
+func fwdWaitFor(t *testing.T, why string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", why)
+}
+
+// fwdOpenOutbox reopens dir the way a restarting server does: a fresh Outbox
+// wired as the log's Applier, so recovery runs the real replay path.
+func fwdOpenOutbox(t *testing.T, dir string) (*Outbox, *wal.Log) {
+	t.Helper()
+	ob, err := NewOutbox(OutboxOptions{BusID: fwdCrashLocalBus, Logger: logging.New(&obLogSink{}, logging.LevelDebug)})
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+	lg, err := wal.Open(wal.LogOptions{Dir: dir, Applier: ob})
+	if err != nil {
+		t.Fatalf("wal.Open(%s): %v", dir, err)
+	}
+	ob.durable = lg
+	return ob, lg
+}
+
+// TestRelayOutboxSurvivesCrash is RELAY-19's crash evidence.
+func TestRelayOutboxSurvivesCrash(t *testing.T) {
+	dir := t.TempDir()
+	wantJob := DeriveJobID(fwdCrashPeerBus, fwdCrashMessage().OriginMessageID)
+
+	fwdRunCrashChild(t, dir)
+
+	// -----------------------------------------------------------------------
+	// 1. THE ORDER: durable first, wire second.
+	// -----------------------------------------------------------------------
+	if got := fwdCrashDeliveryLines(t, dir); len(got) != 0 {
+		t.Fatalf("the peer received %v BEFORE the crash. The child dies inside the durable write of the PENDING record, so anything on the wire at that point means the job was offered to the queue before it was recorded — the exact ordering RELAY-19 is about", got)
+	}
+
+	// -----------------------------------------------------------------------
+	// 2. THE RECORD survived, and it is PENDING.
+	// -----------------------------------------------------------------------
+	recs := obRecordsIn(t, obReplayCommitted(t, dir))
+	if len(recs) != 1 {
+		t.Fatalf("the crashed log holds %d outbox records, want exactly 1: the child was killed the instant the first PENDING commit was fsynced", len(recs))
+	}
+	if recs[0].State != OutboxPending || recs[0].JobID != wantJob {
+		t.Fatalf("the recovered record is %+v, want a PENDING record for job %s", recs[0], wantJob)
+	}
+
+	// -----------------------------------------------------------------------
+	// 3. THE RESTART re-enqueues it, and the peer gets it.
+	// -----------------------------------------------------------------------
+	ob, lg := fwdOpenOutbox(t, dir)
+	if got := obPendingIDs(ob); len(got) != 1 || got[0] != wantJob {
+		t.Fatalf("replay rebuilt the pending set as %v, want exactly [%s]", got, wantJob)
+	}
+
+	srv := fwdCrashPeerServer(t, dir)
+	fwd := fwdCrashForwarder(t, ob, srv)
+
+	requeued, err := fwd.Resume()
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if requeued != 1 {
+		t.Fatalf("Resume re-enqueued %d jobs, want 1: the message was durably owed and nothing had settled it", requeued)
+	}
+
+	fwdWaitFor(t, "the recovered job to settle DELIVERED", func() bool {
+		r, ok := ob.Lookup(wantJob)
+		return ok && r.State == OutboxDelivered
+	})
+	if got := fwdCrashDeliveryLines(t, dir); len(got) != 1 || got[0] != fwdCrashMessage().OriginMessageID {
+		t.Fatalf("the peer received %v after the restart, want exactly one copy of %s", got, fwdCrashMessage().OriginMessageID)
+	}
+
+	// -----------------------------------------------------------------------
+	// 4. EXACTLY ONCE, within the process.
+	// -----------------------------------------------------------------------
+	if n, err := fwd.Resume(); !errors.Is(err, ErrForwarderResumed) || n != 0 {
+		t.Fatalf("a second Resume returned (%d, %v), want (0, ErrForwarderResumed). A repeated Resume that re-offered the pending set would deliver every recovered job twice", n, err)
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := fwd.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("closing the log: %v", err)
+	}
+
+	// -----------------------------------------------------------------------
+	// 5. EXACTLY ONCE, across restarts — the tombstone is what proves it.
+	// -----------------------------------------------------------------------
+	//
+	// Without this a forwarder that re-sent every recovered job on EVERY boot
+	// would pass all four assertions above and still deliver the message once
+	// per restart, forever.
+	again, lg2 := fwdOpenOutbox(t, dir)
+	defer func() { _ = lg2.Close() }()
+	if got := obPendingIDs(again); len(got) != 0 {
+		t.Fatalf("a second restart found %v still pending; the delivered settlement must retire the job, or every boot re-sends a message the peer already took", got)
+	}
+	r, ok := again.Lookup(wantJob)
+	if !ok || r.State != OutboxDelivered {
+		t.Fatalf("after a second restart job %s is %+v (present=%v), want a DELIVERED tombstone", wantJob, r, ok)
+	}
+	if got := fwdCrashDeliveryLines(t, dir); len(got) != 1 {
+		t.Fatalf("the peer received %d copies in total, want exactly 1", len(got))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-19: the settle paths, without a crash
+// ---------------------------------------------------------------------------
+
+// fwdCountingPeer answers every relay attempt with `status`, counting arrivals.
+// It is separate from fwdCrashPeerServer because these tests never cross a
+// process boundary and want the count in memory rather than on disk.
+func fwdCountingPeer(t *testing.T, status int) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var got atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		got.Add(1)
+		if status != http.StatusOK {
+			http.Error(w, "the peer refuses this envelope", status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RelayResponse{Accepted: true, MessageID: fwdCrashPeerBus + "-1"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+// fwdSettleFixture is a durable forwarder over an in-memory log.
+func fwdSettleFixture(t *testing.T, srv *httptest.Server) (*Forwarder, *Outbox, *obLogSink) {
+	t.Helper()
+	sink := &obLogSink{}
+	ob, err := NewOutbox(OutboxOptions{
+		BusID:   fwdCrashLocalBus,
+		Durable: &obNullDurable{},
+		Logger:  logging.New(sink, logging.LevelDebug),
+	})
+	if err != nil {
+		t.Fatalf("NewOutbox: %v", err)
+	}
+	return fwdCrashForwarder(t, ob, srv), ob, sink
+}
+
+// fwdBlockingDurable holds the PENDING write open so a test can look at the
+// world while the record is mid-fsync — the window in which the wrong ordering
+// would already have put the message on the wire.
+type fwdBlockingDurable struct {
+	inner   obNullDurable
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *fwdBlockingDurable) Write(e wal.Entry) (wal.Committed, error) {
+	if rec, err := DecodeOutboxRecord(e.Body); err == nil && rec.State == OutboxPending {
+		d.entered <- struct{}{}
+		<-d.release
+	}
+	return d.inner.Write(e)
+}
+
+// TestForwarderSettlesOutboxRecords is RELAY-19's proof: the forwarder WRITES
+// the pending record before it offers, and SETTLES it — one way or the other —
+// for every outcome that is not a shutdown.
+//
+// The four cases below are the four different answers the code must give, and
+// they are asserted separately because getting one right says nothing about the
+// others: a settle-everything forwarder passes 1 and 2 and destroys 4, and a
+// settle-nothing forwarder passes 4 and loses every guarantee in 1 and 2.
+func TestForwarderSettlesOutboxRecords(t *testing.T) {
+	msg := fwdCrashMessage()
+	wantJob := DeriveJobID(fwdCrashPeerBus, msg.OriginMessageID)
+
+	t.Run("the pending record is durable BEFORE anything is offered to a queue", func(t *testing.T) {
+		srv, received := fwdCountingPeer(t, http.StatusOK)
+		blocking := &fwdBlockingDurable{entered: make(chan struct{}, 1), release: make(chan struct{})}
+		ob, err := NewOutbox(OutboxOptions{BusID: fwdCrashLocalBus, Durable: blocking, Logger: logging.New(&obLogSink{}, logging.LevelDebug)})
+		if err != nil {
+			t.Fatalf("NewOutbox: %v", err)
+		}
+		fwd := fwdCrashForwarder(t, ob, srv)
+		defer closeForwarder(t, fwd)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if _, err := fwd.Enqueue(msg); err != nil {
+				t.Errorf("Enqueue: %v", err)
+			}
+		}()
+
+		select {
+		case <-blocking.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the forwarder never attempted a durable write; it is not recording deliveries at all")
+		}
+		// THE WINDOW. The pending write is in flight, so nothing may have been
+		// offered yet — and therefore nothing may be on the wire. This is the
+		// in-process half of the crash test's assertion 1; it is cheap, it is
+		// deterministic, and it fails the moment the two are reordered.
+		time.Sleep(50 * time.Millisecond)
+		if n := received.Load(); n != 0 {
+			t.Fatalf("the peer received %d copies while the PENDING record was still being written; the record must be durable BEFORE the job is offered", n)
+		}
+		close(blocking.release)
+		<-done
+		fwdWaitFor(t, "the delivered settlement", func() bool {
+			r, ok := ob.Lookup(wantJob)
+			return ok && r.State == OutboxDelivered
+		})
+	})
+
+	t.Run("a peer that accepts settles the job DELIVERED", func(t *testing.T) {
+		srv, received := fwdCountingPeer(t, http.StatusOK)
+		fwd, ob, _ := fwdSettleFixture(t, srv)
+		defer closeForwarder(t, fwd)
+
+		if n, err := fwd.Enqueue(msg); err != nil || n != 1 {
+			t.Fatalf("Enqueue = (%d, %v), want (1, nil)", n, err)
+		}
+		if r, ok := ob.Lookup(wantJob); !ok || r.State != OutboxPending {
+			t.Fatalf("immediately after Enqueue job %s is %+v (present=%v), want PENDING: the record is written before the offer", wantJob, r, ok)
+		}
+		fwdWaitFor(t, "the delivered settlement", func() bool {
+			r, ok := ob.Lookup(wantJob)
+			return ok && r.State == OutboxDelivered
+		})
+		if got := received.Load(); got != 1 {
+			t.Fatalf("the peer received %d copies, want 1", got)
+		}
+		if got := ob.Pending(); len(got) != 0 {
+			t.Fatalf("the pending set is %v after a delivery, want empty: a settled job must not be re-offered by a later Resume", got)
+		}
+		if r, _ := ob.Lookup(wantJob); r.Reason != "" {
+			t.Fatalf("the delivered record carries reason %q; only an abandoned job has one", r.Reason)
+		}
+	})
+
+	t.Run("a permanent refusal settles the job ABANDONED, with a reason", func(t *testing.T) {
+		srv, received := fwdCountingPeer(t, http.StatusBadRequest)
+		fwd, ob, _ := fwdSettleFixture(t, srv)
+		defer closeForwarder(t, fwd)
+
+		if n, err := fwd.Enqueue(msg); err != nil || n != 1 {
+			t.Fatalf("Enqueue = (%d, %v), want (1, nil)", n, err)
+		}
+		fwdWaitFor(t, "the abandonment", func() bool {
+			r, ok := ob.Lookup(wantJob)
+			return ok && r.State == OutboxAbandoned
+		})
+		r, _ := ob.Lookup(wantJob)
+		// Invariant 6: a message this bus will never deliver is recorded
+		// SPECIFICALLY, not merely recorded. An abandonment that said "abandoned"
+		// and nothing else would satisfy the record's own validate and tell an
+		// operator nothing.
+		if !strings.Contains(r.Reason, "permanently") {
+			t.Fatalf("the abandonment reason is %q; it must say WHY this message will never reach the peer", r.Reason)
+		}
+		if got := received.Load(); got != 1 {
+			t.Fatalf("the peer was called %d times, want exactly 1: a 400 is final and must not be retried", got)
+		}
+		if got := fwd.Stats().Dropped.Permanent; got != 1 {
+			t.Fatalf("Dropped.Permanent = %d, want 1", got)
+		}
+	})
+
+	t.Run("a SHUTDOWN leaves the job PENDING so the next start re-offers it", func(t *testing.T) {
+		// The whole point of the durable outbox: the four shutdown paths in
+		// forward.go used to be uncounted, silent loss. None of them may settle
+		// anything — an abandonment here would convert a recoverable shutdown
+		// back into the permanent loss it used to be.
+		hanging := newPeerServer(t, true)
+		fwd, ob, _ := fwdSettleFixture(t, hanging.srv)
+
+		if n, err := fwd.Enqueue(msg); err != nil || n != 1 {
+			t.Fatalf("Enqueue = (%d, %v), want (1, nil)", n, err)
+		}
+		fwdWaitFor(t, "the attempt to reach the hanging peer", func() bool { return hanging.hanging.Load() > 0 })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if err := fwd.Close(ctx); err == nil {
+			t.Fatal("Close returned nil against a hanging peer, so the shutdown path under test never ran")
+		}
+		r, ok := ob.Lookup(wantJob)
+		if !ok || r.State != OutboxPending {
+			t.Fatalf("after a shutdown mid-attempt job %s is %+v (present=%v), want PENDING. A shutdown is not a verdict on the message, and settling it here is exactly the silent loss RELAY-19 removes", wantJob, r, ok)
+		}
+		if got := obPendingIDs(ob); len(got) != 1 || got[0] != wantJob {
+			t.Fatalf("the pending set is %v, want [%s]: the job must still be owed so Resume re-offers it", got, wantJob)
+		}
+	})
+}
+
+// closeForwarder shuts a forwarder down and fails on anything but a clean stop.
+func closeForwarder(t *testing.T, f *Forwarder) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := f.Close(ctx); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestForwarderResumeDoesNotAbandonWhatItCannotRoute covers the two guards the
+// RELAY-19 review added, both of which turn a WIRING mistake into something
+// recoverable instead of something durable.
+func TestForwarderResumeDoesNotAbandonWhatItCannotRoute(t *testing.T) {
+	msg := fwdCrashMessage()
+	wantJob := DeriveJobID(fwdCrashPeerBus, msg.OriginMessageID)
+
+	t.Run("a recovered job with no route stays OWED rather than being abandoned", func(t *testing.T) {
+		// The shape this defends against: Resume running before the peer roster
+		// is restored. Every peer then looks unknown at once, so abandoning would
+		// destroy the WHOLE recovered backlog, durably, at boot.
+		srv, received := fwdCountingPeer(t, http.StatusOK)
+		ob, err := NewOutbox(OutboxOptions{BusID: fwdCrashLocalBus, Durable: &obNullDurable{}, Logger: logging.New(&obLogSink{}, logging.LevelDebug)})
+		if err != nil {
+			t.Fatalf("NewOutbox: %v", err)
+		}
+		if _, err := ob.Enqueue(OutboxJob{
+			PeerBusID:       fwdCrashPeerBus,
+			OriginMessageID: msg.OriginMessageID,
+			Size:            len(msg.Body),
+			ContentSHA256:   msg.ContentSHA256,
+		}); err != nil {
+			t.Fatalf("seeding the pending job: %v", err)
+		}
+
+		reg, err := NewRegistry(RegistryOptions{BusID: fwdCrashLocalBus})
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		cli, err := NewClient(ClientConfig{BusID: fwdCrashLocalBus, LocalRoster: func() []string { return nil }, HTTPClient: srv.Client()})
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		fwd, err := NewForwarder(ForwarderOptions{
+			BusID:    fwdCrashLocalBus,
+			Registry: reg,
+			Client:   cli,
+			// THE EMPTY ROSTER: nothing resolves, exactly as it would before the
+			// peers were loaded.
+			PeerBaseURL:    func(string) (string, bool) { return "", false },
+			Outbox:         ob,
+			RecoverMessage: func(string) (RelayedMessage, bool, error) { return msg, true, nil },
+		})
+		if err != nil {
+			t.Fatalf("NewForwarder: %v", err)
+		}
+		defer closeForwarder(t, fwd)
+
+		n, err := fwd.Resume()
+		if err != nil || n != 0 {
+			t.Fatalf("Resume = (%d, %v), want (0, nil): nothing can be routed", n, err)
+		}
+		r, ok := ob.Lookup(wantJob)
+		if !ok || r.State != OutboxPending {
+			t.Fatalf("job %s is %+v (present=%v) after an unroutable Resume, want it still PENDING. Abandoning here would destroy the whole recovered backlog on a startup-ordering bug", wantJob, r, ok)
+		}
+		if got := received.Load(); got != 0 {
+			t.Fatalf("the peer received %d copies, want 0", got)
+		}
+	})
+
+	t.Run("a forwarder that would out-retry its own outbox is refused at construction", func(t *testing.T) {
+		// A shorter outbox horizon sweeps a job while the forwarder still holds it
+		// live: the message goes out and its settlement is then refused as an
+		// unknown job — sent, with no durable record that it was.
+		ob, err := NewOutbox(OutboxOptions{
+			BusID:            fwdCrashLocalBus,
+			Durable:          &obNullDurable{},
+			RetryHorizon:     time.Hour,
+			SettledRetention: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("NewOutbox: %v", err)
+		}
+		reg, err := NewRegistry(RegistryOptions{BusID: fwdCrashLocalBus})
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		srv, _ := fwdCountingPeer(t, http.StatusOK)
+		cli, err := NewClient(ClientConfig{BusID: fwdCrashLocalBus, LocalRoster: func() []string { return nil }, HTTPClient: srv.Client()})
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		_, err = NewForwarder(ForwarderOptions{
+			BusID:          fwdCrashLocalBus,
+			Registry:       reg,
+			Client:         cli,
+			PeerBaseURL:    func(string) (string, bool) { return srv.URL, true },
+			Outbox:         ob,
+			RecoverMessage: func(string) (RelayedMessage, bool, error) { return msg, true, nil },
+		})
+		if err == nil {
+			t.Fatal("NewForwarder accepted a retry horizon longer than the outbox retains a pending record; the settle would later fail as an unknown job")
+		}
+		if !strings.Contains(err.Error(), "outbox") {
+			t.Fatalf("NewForwarder error is %q; it must name the outbox horizon it disagrees with", err)
 		}
 	})
 }

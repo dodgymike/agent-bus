@@ -116,13 +116,41 @@ const (
 var ErrForwarderClosed = errors.New("relay: forwarder is closed")
 
 // DropCounts breaks down why messages were not forwarded.
+//
+// "DROPPED" MEANS "NOT SENT NOW", AND WITH AN OUTBOX CONFIGURED THAT IS NO
+// LONGER THE SAME AS "LOST". Read each counter against whether RELAY-19 wrote a
+// terminal outbox record for it:
+//
+//   - Expired, Permanent, Yielded and attempt's no-route arm SETTLE the job
+//     `abandoned`. The message is genuinely lost, and the durable record says
+//     so by name (invariant 6).
+//   - Full does NOT settle anything. The pending record stands, so the job is
+//     still owed and Resume re-offers it after the next restart. Nor does
+//     RESUME's OWN no-route arm — the one place NoRoute means "later" rather
+//     than "never", for the reason resumeJob sets out.
+//   - NotDurable never had a record to begin with.
+//
+// With no outbox configured every one of them is a silent loss, which is what
+// the Forwarder doc means by BEST EFFORT.
 type DropCounts struct {
-	// Full: the peer's queue was at its depth. LOSSY BY DESIGN — see Forwarder.
+	// Full: the peer's queue was at its depth, so nothing was offered onto it.
+	//
+	// WITHOUT an outbox this is a LOSS BY DESIGN — see Forwarder. WITH one the
+	// job stays PENDING and is re-offered by Resume on the next start: an
+	// in-memory bound is a reason to send later, never a reason to destroy work
+	// this bus has already durably accepted responsibility for.
 	Full uint64
 	// Loop: the split horizon refused the target, or the message's own path
 	// already contained us.
 	Loop uint64
 	// NoRoute: no peer owns the recipient, or the peer has no known base URL.
+	//
+	// IT IS THE ONE COUNTER THAT MEANS TWO DIFFERENT THINGS, so it is spelled
+	// out rather than left to be discovered. Raised at Enqueue or by attempt it
+	// is FINAL — the peer was de-peered or moved, and the job is abandoned.
+	// Raised by RESUME it is not: the job stays owed, because at startup the
+	// identical reading is what an unloaded peer roster looks like. See
+	// resumeJob.
 	NoRoute uint64
 
 	// Expired: the job's retry horizon ran out — either it sat in the queue
@@ -158,6 +186,17 @@ type DropCounts struct {
 	// opposite responses: Expired means fix the link, Permanent means fix the
 	// message or the peering.
 	Permanent uint64
+
+	// NotDurable: the delivery could not be RECORDED, so it was never queued.
+	// Either the outbox refused it (ErrOutboxCapacity — this peer's or the
+	// bus's pending-work quota is full) or the durable write itself failed.
+	//
+	// IT IS COUNTED APART FROM Full BECAUSE THE REMEDY IS DIFFERENT AND SO IS
+	// THE OUTCOME. A Full drop is a message we still owe and will re-offer; a
+	// NotDurable drop is a message that was never taken responsibility for at
+	// all, and no restart brings it back. Rising NotDurable means the outbox
+	// backlog is not draining, or the disk is not accepting writes.
+	NotDurable uint64
 }
 
 // ForwarderStats is the observable state of a Forwarder. Queued counts jobs
@@ -238,6 +277,39 @@ type ForwarderOptions struct {
 	// construction error.
 	RetryBackoffCap time.Duration
 
+	// Outbox makes cross-bus delivery DURABLE (RELAY-19). It is OPTIONAL, and
+	// what it costs when it is absent is spelled out in the Forwarder doc:
+	// without it this forwarder is exactly the best-effort, in-memory one
+	// RELAY-4 left behind.
+	//
+	// The message handed to Enqueue must carry Size and ContentSHA256 —
+	// len(Body) and its hex SHA-256 — because those are the two facts the record
+	// keeps so that a job REBUILT at recovery can be CHECKED against the message
+	// it was created for rather than assumed to match it. A RelayedMessage that
+	// came out of ValidateRelayRequest always has them.
+	Outbox *Outbox
+
+	// RecoverMessage reads a message back by its ORIGIN message id so Resume can
+	// rebuild the envelope for a pending job. REQUIRED whenever Outbox is set,
+	// and refused when it is not: a durable outbox nothing can replay from is a
+	// table of jobs that will never move again, which is worse than no outbox at
+	// all because it also consumes the pending quota.
+	//
+	// The outbox record deliberately does NOT carry the body (invariant 6, and
+	// see outbox.go's file comment): the body is already durable exactly once in
+	// this bus's own message record, and a second copy per peer could disagree
+	// with the first. So the wiring site supplies the lookup — store.Message
+	// retains every field the envelope needs.
+	//
+	// ok=false means "no such message" and is a settled, ABANDONED job: a job
+	// naming a message this bus can no longer produce is not deliverable and
+	// saying so durably is invariant 6's requirement. A non-nil error is treated
+	// identically — Resume cannot tell a missing message from an unreadable one,
+	// and guessing in the other direction would mean retrying a job forever.
+	//
+	// It is called once per pending job during Resume, on Resume's goroutine.
+	RecoverMessage func(originMessageID string) (RelayedMessage, bool, error)
+
 	// Logger is optional; nil discards.
 	Logger *logging.Logger
 }
@@ -254,6 +326,19 @@ type relayJob struct {
 	baseURL    string
 	req        RelayRequest
 	enqueuedAt time.Time
+
+	// jobID names this job's DURABLE outbox record, and is empty when no outbox
+	// is configured. Every settlement in this file is keyed on it, so a job
+	// carrying "" is silently non-durable — which is the correct behaviour for a
+	// forwarder built without an Outbox and the reason settle() checks it rather
+	// than assuming.
+	jobID string
+
+	// lastErr is the most recent attempt failure, carried so the DURABLE
+	// abandonment can say what actually went wrong instead of "permanently
+	// refused". It is untrusted text (a peer's status line can reach it) and is
+	// bounded by sanitiseOutboxReason on the way into the record.
+	lastErr string
 }
 
 // Forwarder relays messages to peers IN THE BACKGROUND.
@@ -295,16 +380,66 @@ type relayJob struct {
 // peer is eventually lost. Only a durable outbox fixes the second case, and it
 // is a separate follow-up.
 //
-// # THIS QUEUE IS IN-MEMORY AND THEREFORE LOSSY. DO NOT OVERCLAIM DELIVERY.
+// # THE QUEUE IS STILL IN-MEMORY. WHAT CHANGED IS THAT IT IS NO LONGER THE ONLY
+// # RECORD (RELAY-19)
 //
-// Stated plainly because the honest version is easy to lose: a message accepted
-// by Enqueue is NOT guaranteed to reach the peer. It is lost if the process
-// crashes with the queue non-empty, and it is dropped — counted in
-// Dropped.Full, logged at Warn — if the peer stays down long enough for its
-// queue to fill. RELAY-4 added RETRY; it did NOT add a DURABLE RELAY OUTBOX, and
-// retry does nothing for a crash because the queue it retries from is the
-// process's own memory. Until the outbox lands, cross-bus delivery is BEST
-// EFFORT and nothing in the product should claim otherwise.
+// The paragraph that stood here said cross-bus delivery is BEST EFFORT and that
+// nothing in the product should claim otherwise. It was TRUE until this task,
+// and it is retracted NOW rather than earlier because retracting it before the
+// wiring existed would have been the false claim this repo keeps deleting.
+//
+// The retraction is CONDITIONAL, and the condition is a field, not a promise:
+//
+//   - WITH ForwarderOptions.Outbox SET, a delivery is written to the durable
+//     outbox as `pending` and FSYNCED BEFORE it is offered to any queue, and it
+//     is settled `delivered`/`abandoned` only once its outcome is known. A CRASH
+//     with the queue non-empty therefore loses nothing: the pending records
+//     survive, and Resume re-offers them after the next start. So does an
+//     ordinary SHUTDOWN — the four paths that used to drop a job silently now
+//     leave it owed.
+//   - WITH NO OUTBOX the old paragraph still applies WORD FOR WORD: the queue is
+//     process memory, a crash loses it, a full queue drops it, and cross-bus
+//     delivery is BEST EFFORT. Nothing in the product may claim otherwise for a
+//     forwarder built this way, and NewForwarder logs the fact at construction
+//     so a mis-wired deployment is visible in the log rather than only in a
+//     lost message.
+//
+// # WHAT IS STILL LOST WITH AN OUTBOX — THE COMPLETE LIST, BECAUSE A SHORT ONE
+// # IS THE MORE DANGEROUS COMMENT
+//
+// An earlier draft of this paragraph said "TWO THINGS", named the horizon and a
+// permanent refusal, and stopped. outbox.go's upsertLocked names that exact
+// trap: an enumeration declared CLOSED while omitting a member tells the next
+// reader to stop looking. Every arm below settles the job ABANDONED — counted,
+// and logged by name, which is what invariant 6 asks — or, in the last case,
+// never records it at all:
+//
+//	Dropped.Expired    the RETRY HORIZON ran out, in the queue or across
+//	                   retries. Kept as a LOSS deliberately: retrying past
+//	                   idem.PeerOutageBudget is a DUPLICATE delivery, which is
+//	                   worse.
+//	Dropped.Permanent  the peer refused with a status resending cannot change.
+//	Dropped.Yielded    the head of a FULL queue was yielded after a retriable
+//	                   failure, so one message is lost instead of every message
+//	                   behind it. NOTE THIS QUALIFIES THE CLAIM ABOVE: a full
+//	                   queue does not destroy the message being OFFERED, but it
+//	                   is exactly what destroys the message at the HEAD.
+//	Dropped.NoRoute    the peer was de-peered, or its address moved, after the
+//	                   message was queued. Abandoned by design — see attempt.
+//	                   RESUME's no-route arm is NOT in this list: it leaves the
+//	                   job owed, because at startup the same reading is what an
+//	                   unloaded peer roster looks like.
+//	(Resume)           a recovered job whose message cannot be read back,
+//	                   whose content no longer matches the record, or whose
+//	                   envelope cannot be rebuilt.
+//	Dropped.NotDurable the outbox refused the enqueue or the durable write
+//	                   failed, so the delivery was never recorded and never
+//	                   offered. The only arm with no durable trail — there was
+//	                   nothing to write it to.
+//
+// Dropped.Full and the four SHUTDOWN paths are NOT in this list, and that is the
+// change RELAY-19 makes: they leave the job PENDING, still owed, and Resume
+// re-offers it.
 type Forwarder struct {
 	busID        string
 	reg          *Registry
@@ -316,6 +451,11 @@ type Forwarder struct {
 	backoffBase  time.Duration
 	backoffCap   time.Duration
 	log          *logging.Logger
+
+	// outbox is the durable delivery table, or nil for the best-effort
+	// forwarder. recoverMessage rebuilds an envelope for Resume.
+	outbox         *Outbox
+	recoverMessage func(string) (RelayedMessage, bool, error)
 
 	// rand is THIS forwarder's own jitter source, seeded from crypto/rand. It
 	// is not the global math/rand: under go.mod's go 1.19 that source is seeded
@@ -347,20 +487,27 @@ type Forwarder struct {
 
 	mu     sync.Mutex
 	closed bool
-	queues map[string]chan relayJob
-	wg     sync.WaitGroup
+	// resumed makes Resume ONCE-ONLY, which is the mechanism behind
+	// "re-enqueued exactly once": a second Resume would offer a second copy of
+	// every job still pending from the first. warnedUnresumed keeps the
+	// forward-before-Resume warning to one line per process.
+	resumed         bool
+	warnedUnresumed bool
+	queues          map[string]chan relayJob
+	wg              sync.WaitGroup
 
-	queued        atomic.Uint64
-	sent          atomic.Uint64
-	failed        atomic.Uint64
-	retried       atomic.Uint64
-	dropFull      atomic.Uint64
-	dropLoop      atomic.Uint64
-	dropNoRoute   atomic.Uint64
-	dropExpired   atomic.Uint64
-	dropPermanent atomic.Uint64
-	dropYielded   atomic.Uint64
-	workers       atomic.Int64
+	queued         atomic.Uint64
+	sent           atomic.Uint64
+	failed         atomic.Uint64
+	retried        atomic.Uint64
+	dropFull       atomic.Uint64
+	dropLoop       atomic.Uint64
+	dropNoRoute    atomic.Uint64
+	dropExpired    atomic.Uint64
+	dropPermanent  atomic.Uint64
+	dropYielded    atomic.Uint64
+	dropNotDurable atomic.Uint64
+	workers        atomic.Int64
 }
 
 // NewForwarder validates opts and returns a Forwarder with no goroutines
@@ -379,6 +526,21 @@ func NewForwarder(opts ForwarderOptions) (*Forwarder, error) {
 	}
 	if opts.PeerBaseURL == nil {
 		return nil, errors.New("relay: ForwarderOptions.PeerBaseURL is required; a routing decision with no address to send it to would have to be guessed at")
+	}
+	// A DURABLE OUTBOX WITHOUT A WAY TO REPLAY FROM IT IS REFUSED AT
+	// CONSTRUCTION, not discovered at the restart that needed it. Such a
+	// forwarder would write pending records nothing could ever turn back into an
+	// envelope: every recovered job would sit owed until its horizon ran out,
+	// holding its peer's pending quota the whole time, and the bus would look
+	// durable while delivering strictly less than the best-effort one.
+	if opts.Outbox != nil && opts.RecoverMessage == nil {
+		return nil, errors.New("relay: ForwarderOptions.RecoverMessage is required whenever Outbox is set; a pending outbox record carries routing facts and NOT the body, so Resume cannot rebuild the envelope without a way to read the message back by its origin id")
+	}
+	// The mirror image: a lookup with no outbox is a wiring mistake in the other
+	// direction, and a silent one — the forwarder would run best-effort while the
+	// caller believed it had wired durability.
+	if opts.Outbox == nil && opts.RecoverMessage != nil {
+		return nil, errors.New("relay: ForwarderOptions.RecoverMessage is set but Outbox is nil; nothing would ever call it, and a forwarder with no outbox is BEST EFFORT (see the Forwarder doc) rather than durable")
 	}
 	if opts.QueueDepth < 0 {
 		return nil, fmt.Errorf("relay: ForwarderOptions.QueueDepth is %d; it must be zero (meaning %d) or positive", opts.QueueDepth, DefaultQueueDepth)
@@ -455,23 +617,52 @@ func NewForwarder(opts ForwarderOptions) (*Forwarder, error) {
 	if log == nil {
 		log = logging.New(io.Discard, logging.LevelError)
 	}
+	// THE OUTBOX MUST RETAIN A PENDING JOB AT LEAST AS LONG AS THIS FORWARDER
+	// WILL RETRY IT, AND THAT IS CHECKED RATHER THAN ASSUMED.
+	//
+	// The defaults satisfy it by derivation — the outbox keeps a pending record
+	// for RetryHorizonCeiling and this forwarder stops at ceiling minus one
+	// timeout — but OutboxOptions.RetryHorizon is configurable, and a shorter one
+	// produces a silent, specific defect: the outbox sweeps a job the forwarder
+	// still holds live, so the delivery goes out and its SETTLE then fails with
+	// ErrOutboxUnknownJob. The message is sent with no durable record that it
+	// was, which is the one state this whole task exists to remove.
+	if opts.Outbox != nil && horizon+timeout > opts.Outbox.retryHorizon {
+		return nil, fmt.Errorf(
+			"relay: RetryHorizon (%s) + Timeout (%s) = %s exceeds the outbox's own pending-record horizon (%s). "+
+				"The outbox would sweep a job while this forwarder was still retrying it, so the message would be sent and its settlement refused as an unknown job",
+			horizon, timeout, horizon+timeout, opts.Outbox.retryHorizon)
+	}
+
+	if opts.Outbox == nil {
+		// SAID AT CONSTRUCTION, ONCE, RATHER THAN AT EVERY LOSS. A forwarder with
+		// no outbox is the RELAY-4 forwarder, and everything it queues dies with
+		// the process — see the Forwarder doc. That is a legitimate
+		// configuration, and it is also exactly the mis-wiring that would
+		// otherwise be invisible until a crash lost traffic nobody was told
+		// about.
+		log.Warn("relay forwarder has NO durable outbox: cross-bus delivery from this bus is BEST EFFORT — anything queued is lost on a crash and dropped when a peer's queue fills",
+			"local_bus", opts.BusID)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
-		busID:        opts.BusID,
-		reg:          opts.Registry,
-		client:       opts.Client,
-		peerBaseURL:  opts.PeerBaseURL,
-		depth:        depth,
-		timeout:      timeout,
-		retryHorizon: horizon,
-		backoffBase:  backoffBase,
-		backoffCap:   backoffCap,
-		log:          log,
-		ctx:          ctx,
-		cancel:       cancel,
-		stopping:     make(chan struct{}),
-		queues:       make(map[string]chan relayJob),
-		rand:         rand.New(rand.NewSource(cryptoSeed())),
+		busID:          opts.BusID,
+		reg:            opts.Registry,
+		client:         opts.Client,
+		peerBaseURL:    opts.PeerBaseURL,
+		depth:          depth,
+		timeout:        timeout,
+		retryHorizon:   horizon,
+		backoffBase:    backoffBase,
+		backoffCap:     backoffCap,
+		log:            log,
+		outbox:         opts.Outbox,
+		recoverMessage: opts.RecoverMessage,
+		ctx:            ctx,
+		cancel:         cancel,
+		stopping:       make(chan struct{}),
+		queues:         make(map[string]chan relayJob),
+		rand:           rand.New(rand.NewSource(cryptoSeed())),
 	}, nil
 }
 
@@ -581,6 +772,34 @@ func (f *Forwarder) sleep(d time.Duration) bool {
 // exactly once, every other field verbatim (PROTOCOL.md §8.5) — and shared by
 // every target, because the path a copy carries depends on where it has BEEN,
 // not on where it is going next.
+//
+// # THE DURABLE RECORD IS WRITTEN BEFORE THE OFFER, AND THAT ORDER IS THE TASK
+//
+// With an Outbox configured, each target's `pending` record is written and
+// FSYNCED before the job is offered to that peer's queue. The reverse order
+// would leave a window — small, and hit exactly when it hurts — in which a job
+// is being sent to a peer with nothing on disk saying we owe it, so a crash
+// mid-flight loses a hop that the peer may or may not have taken. Writing first
+// means the durable set is always a SUPERSET of what is in flight, which is the
+// direction that costs a duplicate (which invariant 10's applied-key check
+// absorbs) rather than a loss (which nothing absorbs).
+//
+// # SO Enqueue NOW COSTS TWO FSYNCS PER TARGET PEER, ON THE CALLER'S GOROUTINE
+//
+// Stated plainly, and stated EXACTLY, because it is a real cost the caller
+// cannot see: one Outbox.Enqueue is one wal.Log.Write, and that is a PREPARE and
+// a COMMIT with an unconditional fsync each (internal/wal/writer.go). So a
+// broadcast to N peers performs 2N fsyncs, serially, before returning. (An
+// earlier version of this paragraph said N and was corrected by the security
+// gate; a cost comment that is wrong by a factor of two is worse than none,
+// because it is what the next person capacity-plans against.)
+//
+// It does not violate "a slow or dead peer must never make a local send slow" —
+// no peer is involved in an fsync, and the queue send is still non-blocking —
+// but it does mean a local send now waits on local disk proportionally to the
+// federation size. Batching all N jobs into one WAL entry is the obvious
+// remedy; it changes the record shape RELAY-15 fixed (one record = one job) and
+// is deliberately NOT done here.
 func (f *Forwarder) Enqueue(m RelayedMessage) (int, error) {
 	targets := f.targets(m)
 	if len(targets) == 0 {
@@ -605,6 +824,36 @@ func (f *Forwarder) Enqueue(m RelayedMessage) (int, error) {
 		return 0, nil
 	}
 
+	// FORWARDING BEFORE Resume IS A WIRING BUG, AND IT IS SAID OUT LOUD ONCE.
+	//
+	// Resume's doc requires it to run before this forwarder is put in service. If
+	// it does not, a live Enqueue for a (peer, message) that is STILL PENDING
+	// from the last run gets handed the existing record by Outbox.Enqueue's
+	// idempotent path and offers a second copy of a job Resume is about to offer
+	// too — one duplicate relay, plus an ErrOutboxSettled at Error when the
+	// second settle lands.
+	//
+	// THE SECURITY GATE PROPOSED REFUSING THE ENQUEUE INSTEAD, AND THAT IS
+	// DELIBERATELY NOT DONE. A refusal converts a startup-ordering mistake into a
+	// TOTAL forwarding outage, while the thing it prevents is a duplicate that
+	// invariant 10's applied-key check is designed to absorb. Same trade, and the
+	// same direction, as resumeJob's no-route arm: recoverable beats
+	// irreversible. What is not acceptable is it being INVISIBLE, so it is a
+	// Warn, and it fires once rather than per message because a per-send line
+	// would bury itself.
+	if f.outbox != nil {
+		f.mu.Lock()
+		warn := !f.resumed && !f.warnedUnresumed
+		if warn {
+			f.warnedUnresumed = true
+		}
+		f.mu.Unlock()
+		if warn {
+			f.log.Warn("relay forwarding started BEFORE Resume: deliveries still owed from the last run have not been re-offered yet, so a message already pending for a peer may be sent twice. Call Resume after the peer roster is restored and before serving traffic",
+				"local_bus", f.busID)
+		}
+	}
+
 	queued := 0
 	for _, peerBusID := range targets {
 		baseURL, ok := f.peerBaseURL(peerBusID)
@@ -614,27 +863,168 @@ func (f *Forwarder) Enqueue(m RelayedMessage) (int, error) {
 				"local_bus", f.busID, "peer_bus", peerBusID, "origin_message_id", m.OriginMessageID)
 			continue
 		}
-		accepted, err := f.offer(relayJob{peerBusID: peerBusID, baseURL: baseURL, req: req, enqueuedAt: f.now()})
+		job := relayJob{peerBusID: peerBusID, baseURL: baseURL, req: req, enqueuedAt: f.now()}
+		if f.outbox != nil {
+			// THE PEER ID IS STORED AS THE REGISTRY SPELLS IT, NOT FOLDED — AND
+			// THAT DECLINES WHAT DeriveJobID'S DOC ASKS RELAY-19 TO DO. The reason
+			// is mechanical and was found by trying it: Registry.PeerBaseURL and
+			// Registry.Route both require an EXACT match on the stored spelling
+			// (registry.go:506 and :624 compare st.busID, having only KEYED the map
+			// on the folded form). A record holding a folded id therefore cannot
+			// resolve its own peer's address at Resume — every job for a
+			// mixed-case peer would come back from a crash unroutable and be
+			// abandoned. Folding here would trade a duplicate that cannot happen
+			// for a loss that would.
+			//
+			// The duplicate DeriveJobID warns about needs two case-variant
+			// spellings of one peer to reach this line, and they cannot: targets()
+			// takes every id from the Registry, which is keyed on the folded form
+			// and holds exactly ONE spelling per peer at a time. The fix belongs
+			// where the ambiguity is — the Registry canonicalising the id it
+			// stores, so every consumer sees one spelling — and is reported as a
+			// follow-up rather than patched around here.
+			rec, err := f.outbox.Enqueue(OutboxJob{
+				PeerBusID:       peerBusID,
+				OriginMessageID: m.OriginMessageID,
+				Size:            len(m.Body),
+				ContentSHA256:   m.ContentSHA256,
+			})
+			if err != nil {
+				// NOT OFFERED — but WHY it was not offered decides whether this is
+				// a loss, and two of the errors here are not losses at all. Filing
+				// them under NotDurable would raise a "this message is gone" alarm
+				// for a job that is delivered or is being written right now, and a
+				// counter that cries wolf is a counter an operator learns to
+				// ignore.
+				switch {
+				case errors.Is(err, ErrOutboxSettled):
+					// ALREADY DELIVERED OR ABANDONED for this peer. The outbox
+					// refusing to resurrect it is the anti-duplicate rule working
+					// exactly as designed, so this is a SUPPRESSION, not a drop.
+					f.log.Debug("relay delivery not re-queued: this peer's copy of the message is already settled in the durable outbox",
+						"local_bus", f.busID, "peer_bus", peerBusID, "origin_message_id", m.OriginMessageID, "err", err.Error())
+				case errors.Is(err, ErrOutboxInFlight):
+					// A CONCURRENT Enqueue of the SAME job is mid-fsync. outbox.go
+					// documents this as RETRYABLE and requires callers to treat it
+					// so; here the retry is implicit and better than a resend,
+					// because the enqueue already in flight will offer this exact
+					// job when it lands. Nothing is lost and a restart would find
+					// the record.
+					f.log.Warn("relay delivery not queued here: an enqueue of the same job is already being written, and that one will queue it",
+						"local_bus", f.busID, "peer_bus", peerBusID, "origin_message_id", m.OriginMessageID, "err", err.Error())
+				default:
+					// A GENUINE LOSS: the capacity bound, or the durable write
+					// failed. A job with no durable record cannot be settled, so
+					// sending it anyway would put an unsettleable delivery on the
+					// wire and make every terminal outcome log ErrOutboxUnknownJob
+					// at ERROR — burying the one line that means a real lost hop
+					// under a stream that does not. Refusing is also what the
+					// capacity bound is FOR: it says this bus already owes more
+					// than it can track.
+					f.dropNotDurable.Add(1)
+					f.log.Warn("relay delivery could NOT be recorded durably, so it was never queued; this message will not reach the peer and no restart brings it back",
+						"local_bus", f.busID,
+						"peer_bus", peerBusID,
+						"origin_message_id", m.OriginMessageID,
+						"err", err.Error(),
+						"dropped_not_durable_total", f.dropNotDurable.Load(),
+					)
+				}
+				continue
+			}
+			job.jobID = rec.JobID
+			// THE DURABLE ANCHOR WINS OVER THE LOCAL CLOCK READING. deliver's
+			// deadline is enqueuedAt + retryHorizon, and after a restart Resume
+			// can only supply the RECORD's anchor — so using it here too makes the
+			// horizon mean the same thing before and after a crash. It is also the
+			// subtraction outbox.go asks RELAY-19 to own: the record is retained
+			// for the full RetryHorizonCeiling, while the forwarder issues attempts
+			// only inside its own (ceiling - timeout) horizon measured from this
+			// same instant, so the last outbound byte cannot leave after the
+			// budget.
+			job.enqueuedAt = rec.EnqueuedAt
+		}
+		accepted, err := f.offer(job)
 		if err != nil {
+			// ErrForwarderClosed. The pending record is deliberately NOT settled:
+			// a shutdown is not a verdict on the message, and leaving it owed is
+			// precisely what makes it survive to the next start.
 			return queued, err
 		}
 		if accepted {
 			f.queued.Add(1)
 			queued++
 		} else {
-			// LOSSY, DELIBERATELY, AND COUNTED. Blocking here would be
-			// back-pressure from a dead peer onto a local send.
+			// A FULL QUEUE IS NO LONGER A LOSS WHEN THE JOB IS DURABLE. The record
+			// stays PENDING and Resume re-offers it on the next start — an
+			// in-memory bound is a reason to send later, not a licence to destroy
+			// work already accepted. Blocking here would still be back-pressure
+			// from a dead peer onto a local send, so the offer stays non-blocking.
+			//
+			// At default settings this arm is nearly unreachable WITH an outbox:
+			// the per-peer pending quota and the queue depth are both
+			// DefaultQueueDepth, so the outbox refuses (NotDurable) before the
+			// queue fills. It is reachable for a caller that configures them
+			// apart.
 			f.dropFull.Add(1)
-			f.log.Warn("relay queue full; message dropped for this peer (the outbound queue is in-memory and has no durable outbox: RELAY-4 owns retry, and cross-bus delivery is BEST EFFORT until it lands)",
-				"local_bus", f.busID,
-				"peer_bus", peerBusID,
-				"origin_message_id", m.OriginMessageID,
-				"queue_depth", f.depth,
-				"dropped_full_total", f.dropFull.Load(),
-			)
+			if f.outbox != nil {
+				f.log.Warn("relay queue full; the message is NOT sent now, but it remains durably owed and will be re-offered after the next restart",
+					"local_bus", f.busID,
+					"peer_bus", peerBusID,
+					"origin_message_id", m.OriginMessageID,
+					"job_id", job.jobID,
+					"queue_depth", f.depth,
+					"dropped_full_total", f.dropFull.Load(),
+				)
+			} else {
+				f.log.Warn("relay queue full; message dropped for this peer (this forwarder has no durable outbox, so the outbound queue is process memory and cross-bus delivery is BEST EFFORT)",
+					"local_bus", f.busID,
+					"peer_bus", peerBusID,
+					"origin_message_id", m.OriginMessageID,
+					"queue_depth", f.depth,
+					"dropped_full_total", f.dropFull.Load(),
+				)
+			}
 		}
 	}
 	return queued, nil
+}
+
+// settle writes the TERMINAL outbox record for a job that has reached an
+// outcome, and is a no-op for a forwarder with no outbox.
+//
+// A FAILURE HERE IS LOGGED AT ERROR AND SWALLOWED, because there is nothing
+// left to fail: the delivery attempt has already happened.
+//
+// WHAT IT COSTS DEPENDS ON WHICH FAILURE IT IS, AND THE LOG LINE MUST NOT PICK
+// ONE. An earlier version said "the job stays pending and will be re-sent",
+// which is true only for the transport-level failures:
+//
+//   - the durable write failed, or the job is transiently ErrOutboxInFlight —
+//     the record is still PENDING, so the next start re-offers it and the peer
+//     absorbs a duplicate (invariant 10). Safe direction, not free.
+//   - ErrOutboxSettled / ErrOutboxUnknownJob — the record is already terminal,
+//     or is not there at all (swept past its horizon, or dropped by the skew
+//     guard). NOTHING will be re-sent, and the outcome this call was reporting
+//     is simply absent from the durable trail.
+//
+// Both are worth an ERROR and neither may be described as the other, so the
+// line names the state it tried to write and quotes the error rather than
+// predicting the consequence.
+func (f *Forwarder) settle(job relayJob, state OutboxState, reason string) {
+	if f.outbox == nil || job.jobID == "" {
+		return
+	}
+	if _, err := f.outbox.Settle(job.jobID, state, reason); err != nil {
+		f.log.Error("could not record the OUTCOME of a relay delivery durably; the durable trail for this job is now incomplete — if its record is still pending the next start re-sends it (a duplicate the peer absorbs), and if it is settled or gone this outcome is simply unrecorded",
+			"local_bus", f.busID,
+			"peer_bus", job.peerBusID,
+			"origin_message_id", job.req.MessageID,
+			"job_id", job.jobID,
+			"state", state.String(),
+			"err", err.Error(),
+		)
+	}
 }
 
 // targets resolves which peers should receive m, applying the egress split
@@ -725,8 +1115,14 @@ func (f *Forwarder) serve(peerBusID string, ch chan relayJob) {
 		case <-f.ctx.Done():
 			// Close has given up waiting; abandon the rest of the queue rather
 			// than outliving the shutdown.
-			f.log.Warn("relay peer worker abandoned its queue at shutdown",
-				"local_bus", f.busID, "peer_bus", peerBusID, "abandoned", len(ch)+1)
+			//
+			// NOTHING IS SETTLED HERE, DELIBERATELY. This is one of the four
+			// shutdown paths that used to be uncounted silent loss; with an outbox
+			// every job still on this queue keeps its PENDING record, so the next
+			// start re-offers it. Writing an abandonment would convert a
+			// recoverable shutdown into the permanent loss it used to be.
+			f.log.Warn("relay peer worker abandoned its queue at shutdown; every abandoned job keeps its durable outbox record and is re-offered after the next start (a forwarder with no outbox loses them)",
+				"local_bus", f.busID, "peer_bus", peerBusID, "abandoned", len(ch)+1, "durable", f.outbox != nil)
 			return
 		default:
 		}
@@ -748,6 +1144,7 @@ func (f *Forwarder) deliver(job relayJob, queue chan relayJob) {
 	deadline := job.enqueuedAt.Add(f.retryHorizon)
 	if !f.now().Before(deadline) {
 		f.dropExpired.Add(1)
+		f.settle(job, OutboxAbandoned, "the retry horizon elapsed while this job waited in the peer's queue; retrying past idem.PeerOutageBudget would be applied by the peer as a NEW message")
 		f.log.Warn("relay job passed its retry horizon while queued; dropped without being attempted (the peer has been unreachable longer than the outage budget)",
 			"local_bus", f.busID,
 			"peer_bus", job.peerBusID,
@@ -770,15 +1167,20 @@ func (f *Forwarder) deliver(job relayJob, queue chan relayJob) {
 			// or a peering after every ordinary restart — the counter is only
 			// worth having if it means what it says.
 			if f.ctx.Err() != nil {
-				f.log.Warn("relay forward abandoned at shutdown",
+				// SHUTDOWN, AND THEREFORE NOT SETTLED — the second of the four
+				// paths that used to lose a message silently. The pending record
+				// stands and the next start re-offers this job.
+				f.log.Warn("relay forward abandoned at shutdown; the job keeps its durable outbox record and is re-offered after the next start",
 					"local_bus", f.busID,
 					"peer_bus", job.peerBusID,
 					"origin_message_id", job.req.MessageID,
 					"attempts", attempt+1,
+					"durable", f.outbox != nil,
 				)
 				return
 			}
 			f.dropPermanent.Add(1)
+			f.settle(job, OutboxAbandoned, "the peer refused permanently, so resending identical bytes cannot change the answer: "+job.lastErr)
 			f.log.Warn("relay forward permanently refused; NOT retried, because resending identical bytes cannot change this answer",
 				"local_bus", f.busID,
 				"peer_bus", job.peerBusID,
@@ -791,7 +1193,14 @@ func (f *Forwarder) deliver(job relayJob, queue chan relayJob) {
 		wait := f.jitter(f.backoffWindow(attempt))
 		if !f.now().Add(wait).Before(deadline) {
 			f.dropExpired.Add(1)
-			f.log.Warn("relay forward gave up: the retry horizon is exhausted and the message is LOST (there is no durable relay outbox)",
+			// SETTLED abandoned, NOT left pending. This is the one loss a durable
+			// outbox deliberately does not prevent: keeping the job would mean
+			// retrying it past idem.PeerOutageBudget, where the peer has forgotten
+			// the applied key and takes the retry as a NEW message. A duplicate
+			// delivery is worse than a recorded loss, so the horizon still wins and
+			// the record says exactly why (invariant 6).
+			f.settle(job, OutboxAbandoned, "the retry horizon was exhausted against an unreachable peer; retrying past idem.PeerOutageBudget would be applied by the peer as a NEW message: "+job.lastErr)
+			f.log.Warn("relay forward gave up: the retry horizon is exhausted and the message is LOST — it is settled ABANDONED rather than kept, because a retry past idem.PeerOutageBudget is a DUPLICATE delivery",
 				"local_bus", f.busID,
 				"peer_bus", job.peerBusID,
 				"origin_message_id", job.req.MessageID,
@@ -819,6 +1228,11 @@ func (f *Forwarder) deliver(job relayJob, queue chan relayJob) {
 		// the full horizon.
 		if len(queue) == cap(queue) {
 			f.dropYielded.Add(1)
+			// SETTLED abandoned. The yield exists to free the head so the rest of
+			// the queue moves; leaving this job pending would put it straight back
+			// at the head of the same full queue on the next start, which is the
+			// poison-message loop the yield was written to break.
+			f.settle(job, OutboxAbandoned, "yielded the head of a FULL queue after a retriable failure, so the rest of the peer's queue could move: "+job.lastErr)
 			f.log.Warn("relay forward yielded the head of a FULL queue after a retriable failure; this message is dropped so the rest of the peer's queue can move (one message lost instead of every message behind it)",
 				"local_bus", f.busID,
 				"peer_bus", job.peerBusID,
@@ -832,8 +1246,13 @@ func (f *Forwarder) deliver(job relayJob, queue chan relayJob) {
 			// Close, or a cancelled forwarder context. Abandoning the retry is
 			// the correct shutdown behaviour: waiting out a dead peer's backoff
 			// would make every shutdown as slow as the worst peer.
-			f.log.Warn("relay forward abandoned mid-backoff at shutdown",
-				"local_bus", f.busID, "peer_bus", job.peerBusID, "origin_message_id", job.req.MessageID)
+			//
+			// The third un-settled shutdown path. The job is mid-retry, so it is
+			// exactly the case a durable outbox exists for: its pending record
+			// stands and the next start picks it up where this one left off.
+			f.log.Warn("relay forward abandoned mid-backoff at shutdown; the job keeps its durable outbox record and is re-offered after the next start",
+				"local_bus", f.busID, "peer_bus", job.peerBusID, "origin_message_id", job.req.MessageID,
+				"durable", f.outbox != nil)
 			return
 		}
 	}
@@ -864,6 +1283,13 @@ func (f *Forwarder) attempt(job *relayJob, attempt int) (settled, retriable bool
 	baseURL, ok := f.peerBaseURL(job.peerBusID)
 	if !ok || baseURL == "" {
 		f.dropNoRoute.Add(1)
+		// SETTLED abandoned, and this one is a SECURITY property as much as a
+		// bookkeeping one: the address was re-resolved precisely so that
+		// de-peering takes effect on the next attempt. A job left pending here
+		// would be re-offered at every restart and keep trying to post the
+		// message to a bus an operator has deliberately removed, for the whole
+		// horizon. De-peered means we do not owe it any more.
+		f.settle(*job, OutboxAbandoned, "the destination peer is no longer known, or has no base URL: it was de-peered, or its address was moved, after this message was queued")
 		f.log.Warn("relay forward abandoned: the peer is no longer known, or has no base URL (de-peered, or its address was moved, since this message was queued)",
 			"local_bus", f.busID,
 			"peer_bus", job.peerBusID,
@@ -893,6 +1319,10 @@ func (f *Forwarder) attempt(job *relayJob, attempt int) (settled, retriable bool
 	if err != nil {
 		f.failed.Add(1)
 		retriable = f.retriable(err)
+		// Carried so the DURABLE abandonment deliver may write can say what went
+		// wrong. It is untrusted text and is bounded on the way into the record by
+		// sanitiseOutboxReason, never here.
+		job.lastErr = err.Error()
 		f.log.Warn("relay forward failed",
 			"local_bus", f.busID,
 			"peer_bus", job.peerBusID,
@@ -913,6 +1343,14 @@ func (f *Forwarder) attempt(job *relayJob, attempt int) (settled, retriable bool
 		f.log.Debug("peer dropped a relayed message as a loop",
 			"local_bus", f.busID, "peer_bus", job.peerBusID, "origin_message_id", job.req.MessageID)
 	}
+	// SETTLED delivered — and that covers the loop drop above as well as an
+	// acceptance. OutboxDelivered means "the peer answered finally, and there is
+	// nothing left to send", which is exactly what a 200 with a loop drop is: the
+	// peer looked at the message and settled it (relayhttp.go answers 200 for
+	// precisely this reason). Recording it as ABANDONED would file the expected
+	// steady state of a cyclic topology as a message this bus failed to deliver,
+	// and would put a Warn on every lap of every cycle.
+	f.settle(*job, OutboxDelivered, "")
 	return true, false
 }
 
@@ -944,6 +1382,197 @@ func (f *Forwarder) retriable(err error) bool {
 	return true
 }
 
+// ErrForwarderResumed reports a SECOND Resume on one Forwarder.
+//
+// It is an error rather than a no-op because the two readings of a repeated
+// Resume are opposite and only the caller knows which it meant: a harmless
+// re-run of startup code, or a bug that is about to send every still-pending
+// job a second time. Refusing loudly picks neither and reports the fact.
+var ErrForwarderResumed = errors.New("relay: forwarder has already resumed its durable outbox")
+
+// ErrForwarderNotDurable reports Resume on a forwarder with no Outbox.
+var ErrForwarderNotDurable = errors.New("relay: forwarder has no durable outbox to resume from")
+
+// Resume re-offers the durable pending set: every delivery this bus still owes
+// a peer, recovered from the outbox and put back on its peer's queue.
+//
+// It returns how many jobs were re-offered. IT MUST BE CALLED AFTER THE
+// FORWARDER IS CONSTRUCTED AND BEFORE IT IS PUT IN SERVICE, and the ordering is
+// the task's own definition of done — the pending set is rebuilt by the WAL
+// replay at Open, so it exists before this Forwarder does, and re-offering it is
+// what turns a recovered record back into work in progress.
+//
+// # AND AFTER THE PEER ROSTER IS RESTORED. THIS IS A PRECONDITION, NOT A HINT
+//
+// Every recovered job is resolved through PeerBaseURL. A Resume that runs
+// before the roster is loaded therefore sees EVERY peer as unknown — so the
+// wiring order is part of the contract, and the failure it produces would be
+// silent, total and at startup. The no-route arm below is written to survive
+// exactly that mistake (it leaves such jobs OWED rather than abandoning them),
+// but relying on that recovery instead of the ordering would mean a bus that
+// re-offers nothing on every boot and says so only at Warn.
+//
+// # EXACTLY ONCE, AND EXACTLY WHERE THAT PROPERTY COMES FROM
+//
+// Not from this function alone. Three mechanisms compose, and each covers a
+// window the others do not:
+//
+//  1. WITHIN A PROCESS, the resumed flag. A second Resume is refused, so a job
+//     recovered here can be offered at most once per process lifetime.
+//  2. ACROSS RESTARTS, the TOMBSTONE. A job that was delivered is settled, and
+//     Outbox.Pending never returns a settled record — so the next start does not
+//     see it at all. That is the mechanism that stops a recovered job being
+//     re-sent forever, and it is why every terminal path in this file settles.
+//  3. AGAINST A CRASH BETWEEN THE SEND AND THE SETTLE, nothing here — and
+//     deliberately. That window is real: the peer took the message and this bus
+//     died before writing `delivered`, so the next start re-offers it and the
+//     peer sees it twice. It is absorbed by invariant 10's applied-key check at
+//     the receiving bus, which is what at-least-once delivery means. Closing it
+//     locally is impossible; a durable record can be written before the send or
+//     after it, never atomically with it.
+//
+// A job that cannot be rebuilt is SETTLED ABANDONED rather than left pending:
+// invariant 6 requires a message this bus will never deliver to be recorded
+// specifically, and leaving it pending would re-run the same failing rebuild at
+// every start while holding its peer's quota until the horizon expired.
+func (f *Forwarder) Resume() (int, error) {
+	if f.outbox == nil {
+		return 0, ErrForwarderNotDurable
+	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return 0, ErrForwarderClosed
+	}
+	if f.resumed {
+		f.mu.Unlock()
+		return 0, ErrForwarderResumed
+	}
+	f.resumed = true
+	f.mu.Unlock()
+
+	// Pending() is ordered oldest-enqueue-first, so a restart re-offers jobs in
+	// the sequence it would have sent them.
+	pending := f.outbox.Pending()
+	requeued := 0
+	for _, rec := range pending {
+		offered, err := f.resumeJob(rec)
+		if offered {
+			requeued++
+		}
+		if err != nil {
+			// A CLOSE MID-RESUME STOPS THE PASS AND IS REPORTED. Continuing would
+			// call offer once per remaining job for a forwarder that is shutting
+			// down, and returning nil would tell the caller the pending set had
+			// been resumed when most of it never was — the jobs are still owed, so
+			// this is a truthfulness bug rather than a loss.
+			f.log.Warn("relay outbox resume stopped early", "local_bus", f.busID,
+				"pending", len(pending), "requeued", requeued, "err", err.Error())
+			return requeued, err
+		}
+	}
+	if len(pending) > 0 {
+		f.log.Info("relay outbox resumed: deliveries this bus still owed at the last shutdown are back on their peers' queues",
+			"local_bus", f.busID, "pending", len(pending), "requeued", requeued)
+	}
+	return requeued, nil
+}
+
+// resumeJob rebuilds one recovered job and offers it, reporting whether it went
+// onto a queue and whether the forwarder was closed underneath it.
+func (f *Forwarder) resumeJob(rec OutboxRecord) (bool, error) {
+	abandon := func(reason string) (bool, error) {
+		f.settle(relayJob{peerBusID: rec.PeerBusID, jobID: rec.JobID, req: RelayRequest{MessageID: rec.OriginMessageID}}, OutboxAbandoned, reason)
+		f.log.Warn("a recovered relay job could NOT be resumed and is ABANDONED; this message will never reach the peer",
+			"local_bus", f.busID, "peer_bus", rec.PeerBusID,
+			"origin_message_id", rec.OriginMessageID, "job_id", rec.JobID, "reason", reason)
+		return false, nil
+	}
+
+	m, ok, err := f.recoverMessage(rec.OriginMessageID)
+	if err != nil {
+		return abandon("the message this job names could not be read back from the durable store: " + err.Error())
+	}
+	if !ok {
+		return abandon("the message this job names is no longer in the durable store, so the envelope cannot be rebuilt")
+	}
+	// THE REBUILD IS CHECKED, NOT ASSUMED — which is the reason the record stores
+	// Size and ContentSHA256 at all (outbox.go's file comment, reason 2). A
+	// message id is minted once and never reused, so a message that no longer
+	// hashes to what the job was created for means the store handed back
+	// something else, and sending it would relay content nobody signed off on.
+	if m.ContentSHA256 != rec.ContentSHA256 || len(m.Body) != rec.Size {
+		return abandon(fmt.Sprintf("the recovered message does not match the job: the job names %s (%d bytes) and the store returned %s (%d bytes)",
+			rec.ContentSHA256, rec.Size, m.ContentSHA256, len(m.Body)))
+	}
+	// THE SPLIT HORIZON IS RE-APPLIED AT RESUME. The path is carried by the
+	// message, not by the record, and a peer that has since appeared on this
+	// message's traversed path is a hop we must not make — the same check
+	// targets() applies on the live path, applied again because the federation
+	// may have changed shape while this bus was down.
+	if !NextHopAllowed(m.BusPath, rec.PeerBusID) {
+		f.dropLoop.Add(1)
+		return abandon("the destination peer is already on this message's traversed bus path, so forwarding it would be a loop")
+	}
+	req, err := m.Forward(f.busID)
+	if err != nil {
+		return abandon("the outbound envelope could not be rebuilt: " + err.Error())
+	}
+	baseURL, ok := f.peerBaseURL(rec.PeerBusID)
+	if !ok || baseURL == "" {
+		// LEFT PENDING, NOT ABANDONED — and this is the ONE arm of resumeJob that
+		// declines to settle, which is why it is argued rather than asserted.
+		//
+		// attempt() abandons on the same condition, and consistency would say to
+		// do it here too. The difference is WHEN: attempt runs on a bus that has
+		// been up long enough to have queued the job, so "this peer is unknown"
+		// means it was de-peered. Resume runs at STARTUP, where the identical
+		// reading is also produced by a wiring mistake — Resume called before the
+		// peer roster is loaded (see the precondition above) — and there it is
+		// true of EVERY peer at once. Abandoning would then destroy the entire
+		// recovered backlog, durably, at boot, from an ordering bug.
+		//
+		// So the fail-safe direction wins: the job stays owed, the next start with
+		// the correct ordering delivers it, and a peer that really is gone costs a
+		// pending slot until the horizon retires the job anyway. A recoverable
+		// delay is a smaller failure than an irreversible loss.
+		f.dropNoRoute.Add(1)
+		f.log.Warn("a recovered relay job has no route: the peer is unknown or has no base URL, so it is NOT re-offered. It remains durably owed. If this fires for every job at startup, Resume is running before the peer roster is restored",
+			"local_bus", f.busID, "peer_bus", rec.PeerBusID,
+			"origin_message_id", rec.OriginMessageID, "job_id", rec.JobID)
+		return false, nil
+	}
+
+	// THE DURABLE ANCHOR IS THE RECORD'S, NOT NOW. deliver measures the retry
+	// horizon from enqueuedAt, so re-anchoring on the restart instant would give
+	// every recovered job a FRESH full horizon — and a bus that restarted daily
+	// could retry one job indefinitely, landing outside idem.PeerOutageBudget
+	// where the peer applies it as a NEW message. Keeping the original anchor is
+	// also what lets deliver drop a job that expired while this bus was down,
+	// before it is attempted.
+	job := relayJob{peerBusID: rec.PeerBusID, baseURL: baseURL, req: req, enqueuedAt: rec.EnqueuedAt, jobID: rec.JobID}
+	accepted, err := f.offer(job)
+	if err != nil {
+		// Closed mid-Resume. Not settled: still owed, and the next start re-offers.
+		// Reported so Resume stops rather than walking the rest of the backlog
+		// against a forwarder that is shutting down.
+		return false, err
+	}
+	if !accepted {
+		// The pending record STANDS. See Enqueue's full-queue arm: an in-memory
+		// bound is a reason to send later. Reachable here when a recovered
+		// backlog for one peer exceeds the queue depth, which replay admits
+		// deliberately (outbox.go's pre-quota backlog note).
+		f.dropFull.Add(1)
+		f.log.Warn("a recovered relay job did not fit its peer's queue; it remains durably owed and is re-offered after the next start",
+			"local_bus", f.busID, "peer_bus", rec.PeerBusID,
+			"origin_message_id", rec.OriginMessageID, "job_id", rec.JobID, "queue_depth", f.depth)
+		return false, nil
+	}
+	f.queued.Add(1)
+	return true, nil
+}
+
 // Stats reports the forwarder's counters.
 func (f *Forwarder) Stats() ForwarderStats {
 	return ForwarderStats{
@@ -953,12 +1582,13 @@ func (f *Forwarder) Stats() ForwarderStats {
 		Retried: f.retried.Load(),
 		Workers: f.workers.Load(),
 		Dropped: DropCounts{
-			Full:      f.dropFull.Load(),
-			Loop:      f.dropLoop.Load(),
-			NoRoute:   f.dropNoRoute.Load(),
-			Expired:   f.dropExpired.Load(),
-			Permanent: f.dropPermanent.Load(),
-			Yielded:   f.dropYielded.Load(),
+			Full:       f.dropFull.Load(),
+			Loop:       f.dropLoop.Load(),
+			NoRoute:    f.dropNoRoute.Load(),
+			Expired:    f.dropExpired.Load(),
+			Permanent:  f.dropPermanent.Load(),
+			Yielded:    f.dropYielded.Load(),
+			NotDurable: f.dropNotDurable.Load(),
 		},
 	}
 }
