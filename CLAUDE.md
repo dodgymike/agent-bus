@@ -183,6 +183,12 @@ hand-written `curl` and **never** through a `scripts/bus-*.sh` wrapper — those
 if the capability has no subcommand yet, that is the missing half of the task, not a reason to reach
 for `curl`.
 
+**A passing parent test does not rescue skipped children.** Go reports a parent as PASS when every
+leaf subtest called `t.Skip`; that shape exercised no assertion and `proof-check.sh` therefore reports
+VACUOUS. Its plain-text and JSON parsers judge leaf results so an indented child `--- SKIP:` cannot be
+hidden by the unindented parent `--- PASS:` line. Results remain scoped to their package, and a
+package's `[no tests to run]` summary overrides marker-shaped output printed by `TestMain`.
+
 **Verify in a clean overlay of HEAD, not in your working tree — and run the OVERLAY's `proof-check.sh`,
 not the live one.** A working tree that builds proves nothing about what is COMMITTED: a definition
 you consume may be sitting uncommitted beside you, so a consumer can land before its definition and

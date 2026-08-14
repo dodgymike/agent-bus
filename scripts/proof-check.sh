@@ -530,19 +530,85 @@ SAW_GO_TESTS=0
 if [[ -s "$GOTEST_LOG" ]]; then
   SAW_GO_TESTS=1
   if grep -q '"Action":"run"' "$GOTEST_LOG" 2>/dev/null; then
-    # `go test -json`: the same events, minus the --- PASS/FAIL/SKIP markers.
-    # Package-level events carry no "Test" field, so require one.
-    TESTS_RUN="$(grep -c '"Action":"run"[^}]*"Test":' "$GOTEST_LOG" || true)"
-    TOP_LEVEL="$TESTS_RUN"
-    PASSED="$(grep -c '"Action":"pass"[^}]*"Test":' "$GOTEST_LOG" || true)"
-    FAILED="$(grep -c '"Action":"fail"[^}]*"Test":' "$GOTEST_LOG" || true)"
-    SKIPPED="$(grep -c '"Action":"skip"[^}]*"Test":' "$GOTEST_LOG" || true)"
+    # JSON events name their package. Keep it in the identity: two packages
+    # may legitimately use the same test/subtest names. An explicit empty
+    # package summary is authoritative over event-looking text from TestMain.
+    read -r TESTS_RUN TOP_LEVEL PASSED SKIPPED FAILED < <(awk '
+      function value(key, line, out) {
+        out=line; sub("^.*\\\"" key "\\\":\\\"", "", out); sub("\\\".*$", "", out)
+        return out
+      }
+      /"Package":"/ {
+        pkg=value("Package", $0)
+        if ($0 ~ /\[no test(s to run| files)\]/) empty[pkg]=1
+        if ($0 !~ /"Test":"/) next
+        name=value("Test", $0); action=value("Action", $0); key=pkg SUBSEP name
+        if (action == "run") ran[key]=1
+        if (action == "pass" || action == "skip" || action == "fail") status[key]=action
+      }
+      END {
+        runs=top=pass=skip=fail=0
+        for (key in ran) {
+          split(key, part, SUBSEP)
+          if (!empty[part[1]]) { runs++; if (part[2] !~ /\//) top++ }
+        }
+        for (key in status) {
+          split(key, part, SUBSEP); if (empty[part[1]]) continue
+          leaf=1
+          for (other in status) {
+            split(other, otherpart, SUBSEP)
+            if (otherpart[1] == part[1] && index(otherpart[2], part[2] "/") == 1) { leaf=0; break }
+          }
+          if (status[key] == "fail") fail++
+          if (leaf && status[key] == "pass") pass++
+          if (leaf && status[key] == "skip") skip++
+        }
+        print runs, top, pass, skip, fail
+      }' "$GOTEST_LOG")
   else
-    TESTS_RUN="$(grep -c '^=== RUN' "$GOTEST_LOG" || true)"
-    TOP_LEVEL="$(grep -cE '^=== RUN[[:space:]]+[^/]+$' "$GOTEST_LOG" || true)"
-    PASSED="$(grep -cE '^--- PASS:' "$GOTEST_LOG" || true)"
-    FAILED="$(grep -cE '^--- FAIL:' "$GOTEST_LOG" || true)"
-    SKIPPED="$(grep -cE '^--- SKIP:' "$GOTEST_LOG" || true)"
+    # Verbose text is emitted in package-sized blocks ending in an ok/FAIL/?
+    # summary. Finalise each block separately so identical names do not merge,
+    # and discard alleged events when that summary says no tests ran.
+    read -r TESTS_RUN TOP_LEVEL PASSED SKIPPED FAILED < <(awk '
+      BEGIN { runs=top=pass=skip=fail=0 }
+      function finish(empty, name, other, leaf) {
+        if (!empty) {
+          for (name in ran) { runs++; if (name !~ /\//) top++ }
+          for (name in status) {
+            leaf=1
+            for (other in status)
+              if (index(other, name "/") == 1) { leaf=0; break }
+            if (status[name] == "FAIL") fail++
+            if (leaf && status[name] == "PASS") pass++
+            if (leaf && status[name] == "SKIP") skip++
+          }
+        }
+        for (name in ran) delete ran[name]
+        for (name in status) delete status[name]
+      }
+      /^=== RUN[[:space:]]+/ {
+        name=$0; sub(/^=== RUN[[:space:]]+/, "", name); ran[name]=1
+      }
+      /^[[:space:]]*--- (PASS|SKIP):/ {
+        status_name=$0
+        sub(/^[[:space:]]*--- /, "", status_name)
+        result=status_name; sub(/:.*/, "", result)
+        sub(/^[^:]*:[[:space:]]*/, "", status_name)
+        sub(/[[:space:]]+\([^)]*\)[[:space:]]*$/, "", status_name)
+        status[status_name]=result
+      }
+      /^[[:space:]]*--- FAIL:/ {
+        status_name=$0
+        sub(/^[[:space:]]*--- FAIL:[[:space:]]*/, "", status_name)
+        sub(/[[:space:]]+\([^)]*\)[[:space:]]*$/, "", status_name)
+        status[status_name]="FAIL"
+      }
+      /^(ok|FAIL|\?)[[:space:]]+/ { finish($0 ~ /\[no test(s to run| files)\]/) }
+      END {
+        # Defensive fallback for an unusual stream with no package summary.
+        if (length(ran) || length(status)) finish(0)
+        print runs, top, pass, skip, fail
+      }' "$GOTEST_LOG")
   fi
   # A test binary that produced result lines but no RUN lines (unusual, but
   # possible if output interleaved badly) still counts as having run tests.
@@ -550,8 +616,13 @@ if [[ -s "$GOTEST_LOG" ]]; then
   # Packages that compiled and reported success while running nothing. Covers
   # both `[no tests to run]` (pattern matched nothing) and `[no test files]`
   # (the package has no tests at all) — including the `(cached)` variants.
-  EMPTY_PKG_NAMES="$(grep -oE '^(ok|\?)[[:space:]]+[^[:space:]]+[[:space:]].*\[no test(s to run| files)\]' "$GOTEST_LOG" \
-    | awk '{print $2}' | sort -u | tr '\n' ' ')"
+  EMPTY_PKG_NAMES="$(awk '
+    /\[no test(s to run| files)\]/ {
+      if ($0 ~ /^(ok|\?)[[:space:]]+/) { print $2; next }
+      if ($0 ~ /"Package":"/) {
+        pkg=$0; sub(/^.*"Package":"/, "", pkg); sub(/".*$/, "", pkg); print pkg
+      }
+    }' "$GOTEST_LOG" | sort -u | tr '\n' ' ')"
   EMPTY_PKGS="$(printf '%s' "$EMPTY_PKG_NAMES" | wc -w | tr -d ' ')"
 fi
 
@@ -583,7 +654,7 @@ if (( SAW_GO_TESTS )); then
     exit "$EXIT_VACUOUS"
   fi
   if (( PASSED == 0 && SKIPPED > 0 )); then
-    say "VACUOUS — ${SKIPPED} test(s) ran and EVERY ONE of them skipped."
+    say "VACUOUS — all ${SKIPPED} leaf test result(s) skipped."
     say "  Exit 0 here means 'not exercised', not 'verified'."
     verdict_line "$CLASS" VACUOUS "$RC" "$TESTS_RUN" "$TOP_LEVEL" "$SKIPPED" "$EMPTY_PKGS" "$FAILED"
     exit "$EXIT_VACUOUS"
