@@ -74,6 +74,43 @@ package main
 // HOP's; the record's bus id is the DESTINATION. They are not the same field
 // and must not be treated as one.
 //
+// # THE FIRST SUCH CREDENTIAL: -tls-fingerprint (RELAY-41)
+//
+// It is keyed exactly as the paragraph above requires, and this is the worked
+// example for everything that follows it. `-tls-fingerprint` pins the
+// certificate of the bus AT -url, so:
+//
+//	peer add -bus-id busB -url https://b:8443 -tls-fingerprint <fpB> -route-for busC
+//
+// writes fpB — busB's, THE NEXT HOP'S — onto BOTH records: busB's own route and
+// the busC route whose address is busB's. The busC record therefore carries a
+// bus id of busC and a certificate fingerprint of busB, and that is correct
+// rather than a mix-up: the handshake it describes terminates at busB. Nothing
+// on the command line can key a pin to a destination, because the flag is
+// refused without -url and the value is written onto whatever records receive
+// that address. TestPeerAddTLSFingerprintRoundTripsOnDisk pins it.
+//
+// WHICH CERTIFICATE, IN WHICH DIRECTION — read this before wiring it to
+// anything. This pins the certificate presented BY THE HOP AT -url WHEN WE DIAL
+// IT: an OUTBOUND, SERVER-side certificate, keyed to an address. It is NOT a
+// source of INBOUND peer identity. RELAY-20 holds the mirror-image problem — the
+// peer's CLIENT certificate on a connection to us (r.TLS.PeerCertificates[0]) —
+// and nothing here or in MTLS-CLIENTAUTH establishes that the two are the same
+// certificate.
+//
+// So do NOT invert this into a `fingerprint -> bus id` lookup to answer it. One
+// fingerprint is deliberately on N records with N different bus ids (fpB is on
+// busB's route AND on busC's), so fingerprint-first is ambiguous BY
+// CONSTRUCTION and would resolve an inbound busB connection to busC — a peer
+// principal spoofed out of entirely correct data read backwards. `base_url ->
+// bus id` is the same trap in the other field, for the same reason. The sound
+// direction is address-first, and only for the outbound case: "I am dialling
+// this address; does the certificate I was served match this record's pin?"
+// Inbound peer identity needs its own binding, which this task does not add.
+//
+// The pin is CONFIGURATION ONLY here, exactly like everything else this command
+// writes: nothing verifies any connection against it yet.
+//
 // # THE REPLAY PRECONDITION, WHICH THIS FILE IS THE PLACE TO HONOUR
 //
 // relay.PeerStoreOptions.Durable states it: THE CALLER MUST REPLAY THE LOG INTO
@@ -115,6 +152,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -211,7 +249,8 @@ const peerUsage = `agent-bus peer — configure this bus's federation: routes an
 
 USAGE
   agent-bus peer add    -data-dir <dir> -bus-id <busID> [-url <https origin>]
-                        [-signing-key <base64> ...] [-route-for <busID> ...] [-json]
+                        [-tls-fingerprint <64 hex>] [-signing-key <base64> ...]
+                        [-route-for <busID> ...] [-json]
   agent-bus peer list   [-data-dir <dir>] [-json]
   agent-bus peer remove -data-dir <dir> -bus-id <busID> (-route | -trust | -route -trust) [-json]
 
@@ -235,6 +274,14 @@ DIAL to reach it, so:
 means "busB lives at that address, and traffic for busC leaves via it". A fourth
 bus needs its own -route-for entry on every bus that must reach it.
 
+A CERTIFICATE PIN BELONGS TO THE ADDRESS, NOT TO THE BUS ID. -tls-fingerprint
+pins the certificate of the bus at -url — THE NEXT HOP — and is written onto
+every route this invocation gives that address to. In the line above, adding
+-tls-fingerprint <busB's fingerprint> pins busB on BOTH records: busB's own
+route AND the busC route, because a connection carrying traffic for busC still
+terminates at busB. That is why the flag requires -url and why it is never keyed
+to -bus-id.
+
 FLAGS (add)
   -data-dir <dir>      the bus's data directory (default "./data"). It must
                        already hold this bus's bus-id file; this command NEVER
@@ -246,6 +293,23 @@ FLAGS (add)
                        nothing else. No path, query, fragment or userinfo: the
                        relay path is appended at every dial, so a stored path
                        would ride along on all of them.
+  -tls-fingerprint <hex>
+                       pin the TLS certificate of the bus AT -url — the NEXT
+                       HOP — as 64 LOWERCASE hex characters (sha256 of the
+                       certificate's DER; no "sha256:" prefix, no colons).
+                       REQUIRES -url: a pin belongs to an address, and a bus you
+                       only pin a SIGNING KEY for is never dialled. Uppercase is
+                       refused rather than normalised, so one fingerprint has
+                       exactly one spelling. It is NOT a signing key and NOT an
+                       idempotency fingerprint: it authenticates the HOP on the
+                       wire, nothing inside a message.
+                       A ROUTE RECORD IS WRITTEN WHOLE, so an omitted pin is an
+                       ERASED pin. Re-adding a route that is already pinned
+                       WITHOUT this flag is refused, and so is re-pinning one
+                       destination through a hop while leaving its siblings on
+                       the old certificate — name every -route-for destination
+                       through that hop in the same invocation. Neither refusal
+                       fires on an unpinned route, and neither writes anything.
   -signing-key <b64>   a pinned Ed25519 BUS SIGNING key, standard base64.
                        Repeatable, at most 2 — and TWO MEANS A ROLLOVER IS IN
                        PROGRESS (the outgoing key and the incoming one), not a
@@ -308,6 +372,16 @@ type peerChange struct {
 	// BaseURL is the address to dial to reach BusID. Empty on a trust record
 	// and on a withdrawal (a tombstone carries no live configuration).
 	BaseURL string `json:"base_url,omitempty"`
+
+	// NextHopTLSCertFingerprint is the pinned certificate of whatever answers at
+	// BaseURL, 64 lowercase hex characters, or empty when the hop is unpinned.
+	//
+	// The JSON key says NEXT HOP because the value is a property of BaseURL and
+	// NOT of BusID: on a -route-for record those name different buses, and a
+	// reader of this output who assumed otherwise would conclude this bus had
+	// pinned the DESTINATION's certificate. It is the same key the durable
+	// record uses, so `peer list --json` and the on-disk record read alike.
+	NextHopTLSCertFingerprint string `json:"next_hop_tls_cert_sha256,omitempty"`
 
 	// SigningKeys are the pinned keys, standard base64, in the operator's
 	// order. Empty on a route record and on a withdrawal.
@@ -458,22 +532,30 @@ func (f *stringListFlag) Set(v string) error {
 // errors (exit 2) all happen before a lock is taken and before a byte is
 // written.
 type peerAddRequest struct {
-	busID     string
-	baseURL   string
-	keys      []ed25519.PublicKey
-	routeFor  []string
-	keysGiven bool
+	busID   string
+	baseURL string
+	// tlsFingerprint pins the certificate of whatever answers at baseURL — the
+	// NEXT HOP. It is a property of -url, NOT of -bus-id, which is why it is
+	// written onto every record this invocation gives that address to, including
+	// the -route-for records whose bus id is a DIFFERENT bus. Zero value = no
+	// pin. It is buscert.Fingerprint rather than a string so that it cannot
+	// arrive here in a spelling buscert would not recognise.
+	tlsFingerprint buscert.Fingerprint
+	keys           []ed25519.PublicKey
+	routeFor       []string
+	keysGiven      bool
 }
 
 func runPeerAdd(args []string, stdout, stderr io.Writer) int {
 	var (
-		dataDir  string
-		busID    string
-		baseURL  string
-		keys     stringListFlag
-		routeFor stringListFlag
-		asJSON   bool
-		logLevel string
+		dataDir    string
+		busID      string
+		baseURL    string
+		tlsCertHex string
+		keys       stringListFlag
+		routeFor   stringListFlag
+		asJSON     bool
+		logLevel   string
 	)
 	fs := flag.NewFlagSet("agent-bus peer add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -484,6 +566,7 @@ func runPeerAdd(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&dataDir, "data-dir", defaultDataDir, "the bus's data directory; it must already hold this bus's bus-id file")
 	fs.StringVar(&busID, "bus-id", "", "REQUIRED: the peer bus this entry is about")
 	fs.StringVar(&baseURL, "url", "", "the peer's address: a BARE https origin, e.g. https://b.example:8443")
+	fs.StringVar(&tlsCertHex, "tls-fingerprint", "", "pin the TLS certificate of the bus AT -url (the NEXT HOP): 64 lowercase hex characters; requires -url")
 	fs.Var(&keys, "signing-key", "a pinned Ed25519 bus signing key, standard base64; repeatable, at most 2 (two means a rollover)")
 	fs.Var(&routeFor, "route-for", "install a static next-hop route for this bus through -url; repeatable")
 	fs.BoolVar(&asJSON, "json", false, "emit the result as one JSON object on stdout")
@@ -509,11 +592,26 @@ func runPeerAdd(args []string, stdout, stderr io.Writer) int {
 		return exitPeerUsage
 	}
 
+	// PRESENCE, NOT EMPTINESS, and only for -tls-fingerprint. `-tls-fingerprint
+	// ""` is what `-tls-fingerprint "$PEER_FP"` becomes when PEER_FP is unset,
+	// and treating that as "the flag was not given" would write an UNPINNED
+	// route while reporting success — a trust anchor lost to an unset shell
+	// variable, which is the fail-silent direction (a security-gate P1). Every
+	// sibling flag already refuses its empty value on its own: -signing-key ""
+	// decodes to 0 bytes and -url "" is simply absent, neither of which can
+	// silently discard something that was there before.
+	tlsFlagGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "tls-fingerprint" {
+			tlsFlagGiven = true
+		}
+	})
+
 	lvl, err := logging.ParseLevel(logLevel)
 	if err != nil {
 		return peerFail(stdout, stderr, asJSON, "add", usagePeerError(fmt.Sprintf("invalid -log-level: %v", err), "use one of "+logging.Levels))
 	}
-	req, cmdErr := validatePeerAdd(busID, baseURL, keys, routeFor)
+	req, cmdErr := validatePeerAdd(busID, baseURL, tlsCertHex, tlsFlagGiven, keys, routeFor)
 	if cmdErr != nil {
 		return peerFail(stdout, stderr, asJSON, "add", cmdErr)
 	}
@@ -531,7 +629,7 @@ func runPeerAdd(args []string, stdout, stderr io.Writer) int {
 //
 // It does NOT check a bus id against THIS bus's id — that fact lives on disk and
 // is checked in applyPeerAdd, before any write, once the local id is known.
-func validatePeerAdd(busID, baseURL string, keys, routeFor []string) (peerAddRequest, *peerCmdError) {
+func validatePeerAdd(busID, baseURL, tlsCertHex string, tlsFlagGiven bool, keys, routeFor []string) (peerAddRequest, *peerCmdError) {
 	var req peerAddRequest
 
 	if err := validatePeerCLIBusID("-bus-id", busID); err != nil {
@@ -545,6 +643,29 @@ func validatePeerAdd(busID, baseURL string, keys, routeFor []string) (peerAddReq
 			return req, err
 		}
 		req.baseURL = canonical
+	}
+
+	// GIVEN, not non-empty: an empty value is a LOST value, and it is refused by
+	// parsePeerTLSFingerprint's length check rather than silently skipped.
+	if tlsFlagGiven {
+		fp, err := parsePeerTLSFingerprint(tlsCertHex)
+		if err != nil {
+			return req, err
+		}
+		req.tlsFingerprint = fp
+	}
+	// REFUSED WITHOUT -url, mirroring -route-for's refusal below and for a
+	// stronger reason than symmetry: this pin is a fact about the certificate
+	// served at -url, so without -url it names no hop at all. Storing it against
+	// -bus-id instead would be exactly the destination-keyed pin this whole
+	// surface is shaped to prevent — for a -route-for entry the address belongs
+	// to a DIFFERENT bus than the record's bus id, and pinning the destination's
+	// identity against a connection that terminates at the next hop breaks every
+	// non-adjacent hop.
+	if req.tlsFingerprint != (buscert.Fingerprint{}) && req.baseURL == "" {
+		return req, usagePeerError(
+			"-tls-fingerprint was given without -url, so there is no hop whose certificate it could pin",
+			"a certificate pin belongs to the ADDRESS being dialled, not to a bus id: pass it alongside -url, e.g. -bus-id busB -url https://b.example:8443 -tls-fingerprint <busB's certificate fingerprint>. A bus you only PIN A SIGNING KEY for is never dialled, so it has no certificate to pin")
 	}
 
 	req.keysGiven = len(keys) > 0
@@ -657,6 +778,14 @@ func applyPeerAdd(dataDir string, req peerAddRequest, lg *logging.Logger) (strin
 		}
 	}
 
+	// THE PIN CONSISTENCY CHECK RUNS BEFORE THE FIRST WRITE, for the same reason
+	// the self-peer check above does: it is state-dependent, so it cannot live in
+	// validatePeerAdd, and a refusal discovered half way through would leave a
+	// partly-applied configuration.
+	if cmdErr := checkPeerPinConsistency(store, dataDir, req); cmdErr != nil {
+		return localBusID, nil, cmdErr
+	}
+
 	if req.keysGiven {
 		// The no-op predicate is evaluated BEFORE the write, against the same
 		// question the store asks itself: is this exact pin set already active?
@@ -675,8 +804,8 @@ func applyPeerAdd(dataDir string, req peerAddRequest, lg *logging.Logger) (strin
 	}
 
 	if req.baseURL != "" {
-		unchanged := routeAlreadyActive(store, req.busID, req.baseURL)
-		rec, err := store.Put(relay.PeerConfig{BusID: req.busID, BaseURL: req.baseURL})
+		unchanged := routeAlreadyActive(store, req.busID, req.baseURL, req.tlsFingerprint)
+		rec, err := store.Put(relay.PeerConfig{BusID: req.busID, BaseURL: req.baseURL, NextHopTLSCertFingerprint: req.tlsFingerprint})
 		if err != nil {
 			return localBusID, nil, &peerCmdError{
 				code:    exitPeerFailed,
@@ -688,9 +817,18 @@ func applyPeerAdd(dataDir string, req peerAddRequest, lg *logging.Logger) (strin
 		changes = append(changes, routeChange(rec, "", unchanged))
 	}
 
+	// THE PIN TRAVELS WITH THE ADDRESS, NOT WITH THE BUS ID, and this loop is
+	// where that is decided. Every one of these records has `dest` as its bus id
+	// and req.baseURL — the address of req.busID, THE NEXT HOP — as its address,
+	// so the fingerprint written here is the NEXT HOP'S, identical to the one on
+	// the hop's own route record above. Keying it to `dest` instead would pin a
+	// destination bus's identity against a connection that terminates at the
+	// intermediate one, and would refuse every non-adjacent hop in the A -> B ->
+	// C topology this epic exists to build.
+	// TestPeerAddTLSFingerprintRoundTripsOnDisk is the anti-regression test.
 	for _, dest := range req.routeFor {
-		unchanged := routeAlreadyActive(store, dest, req.baseURL)
-		rec, err := store.Put(relay.PeerConfig{BusID: dest, BaseURL: req.baseURL})
+		unchanged := routeAlreadyActive(store, dest, req.baseURL, req.tlsFingerprint)
+		rec, err := store.Put(relay.PeerConfig{BusID: dest, BaseURL: req.baseURL, NextHopTLSCertFingerprint: req.tlsFingerprint})
 		if err != nil {
 			return localBusID, nil, &peerCmdError{
 				code:    exitPeerFailed,
@@ -702,6 +840,134 @@ func applyPeerAdd(dataDir string, req peerAddRequest, lg *logging.Logger) (strin
 		changes = append(changes, routeChange(rec, req.busID, unchanged))
 	}
 	return localBusID, changes, nil
+}
+
+// checkPeerPinConsistency refuses, BEFORE anything is written, the two ways an
+// `add` can silently leave a hop less pinned than the operator believes.
+//
+// Both were found by the security gate, both are in the FAIL-SILENT-UNPINNED
+// direction, and both are the same shape: `store.Put` writes the COMPLETE
+// record in its post-transition state (that is the record design — never a
+// delta), so whatever this invocation does not say is not merely unchanged, it
+// is ERASED.
+//
+//  1. A SILENT DOWNGRADE. `peer add -bus-id busB -url X` re-run without
+//     -tls-fingerprint against a busB that is already pinned replaces the record
+//     with an unpinned one, exit 0, nothing said. The realistic path is not
+//     carelessness: it is a colleague following a runbook written before the
+//     flag existed, or a script adding one more destination through a hop
+//     somebody else pinned.
+//
+//  2. TWO PINS FOR ONE ADDRESS. Routes reached through the same hop are separate
+//     records, so re-pinning a rotated certificate with `-bus-id busB -url X
+//     -tls-fingerprint FP2` updates busB and leaves every -route-for destination
+//     through busB still pinning FP1. The operator sees a successful rotation;
+//     half the routing table still trusts the old certificate. CONTRACTS-CLI.md
+//     says "one address, one certificate", and without this check that is a
+//     claim about one invocation rather than about the bus.
+//
+// BOTH ARE REFUSALS, NOT REPAIRS. This command does not guess — the same
+// discipline that makes `remove` demand -route/-trust rather than picking one.
+// Silently carrying the old pin forward would be wrong whenever the address
+// moved, and silently erasing it is the bug. The remedy names both legitimate
+// intents, and neither refusal writes anything.
+func checkPeerPinConsistency(store *relay.PeerStore, dataDir string, req peerAddRequest) *peerCmdError {
+	if req.baseURL == "" {
+		// No route is being written at all (a trust-only add), so no pin can be
+		// disturbed. -tls-fingerprint without -url was already refused at exit 2.
+		return nil
+	}
+
+	targets := append([]string{req.busID}, req.routeFor...)
+	folded := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		folded[strings.ToLower(t)] = struct{}{}
+	}
+
+	// A NOTE ON ASCII CASE, because the obvious "improvement" here is a
+	// regression. store.Lookup resolves a bus id in its CANONICAL SPELLING ONLY
+	// (busTable.lookup: the table is keyed case-insensitively so a confusable can
+	// be REFUSED at the door, not so that both spellings resolve). So a
+	// case-variant target reads as ABSENT below and check (1) does not fire —
+	// and it does not need to: relay.PeerStore then refuses the write itself with
+	// ErrPeerBusIDCollision, so no unpinned record is reachable by that route.
+	// Verified by hand: pinning bus-b then adding BUS-B unpinned leaves the pin
+	// intact. Do NOT fold the lookup to "fix" it; that would resolve a confusable
+	// here and mask the store's clearer refusal.
+	//
+	// (1) A target that is pinned today, and an add that says nothing.
+	if req.tlsFingerprint == (buscert.Fingerprint{}) {
+		for _, t := range targets {
+			rec, ok := store.Lookup(t)
+			if ok && rec.State == relay.PeerRecordActive && rec.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+				return &peerCmdError{
+					code: exitPeerUsage,
+					msg: fmt.Sprintf("refusing to write an UNPINNED route for %s: it currently pins the certificate at %s, and this add would silently remove that pin",
+						rec.BusID, rec.BaseURL),
+					remedy: "re-state the pin with -tls-fingerprint (run `agent-bus peer list` to read the one on disk), " +
+						fmt.Sprintf("or, if you really mean to stop pinning that hop, withdraw the route first with `agent-bus peer remove -data-dir %q -bus-id %s -route` ", dataDir, rec.BusID) +
+						"— note that withdraws the ROUTE entirely, leaving a tombstone, so you must then re-add it unpinned. " +
+						"A route record is written whole, so an omitted pin is an erased pin, not an unchanged one",
+				}
+			}
+		}
+	}
+
+	// (2) Another active route to the SAME ADDRESS that would be left disagreeing
+	// with the pin this invocation writes.
+	for _, rec := range store.ActivePeers() {
+		// EqualFold, not ==, because host case is preserved on the way in:
+		// validatePeerBareOrigin deliberately does not rewrite the address an
+		// operator typed, so `https://X.EXAMPLE:8443` and `https://x.example:8443`
+		// are one origin stored two ways, and a byte comparison let the second one
+		// in UNPINNED (a security-gate finding, reproduced).
+		//
+		// Folding the WHOLE string is safe here, and the honest reason is the
+		// FAILURE DIRECTION rather than a claim that folding is exact. It is a
+		// BARE origin — scheme, host and optional port, with no path, query,
+		// fragment or userinfo that folding could corrupt — but url.Parse does
+		// accept a non-ASCII host, and Unicode simple folding is not ASCII case
+		// folding (U+212A folds to "k"). So EqualFold can OVER-match. It cannot
+		// under-match, and every branch reached on equality either skips or
+		// REFUSES: no branch grants or inherits a pin. An over-match therefore
+		// costs one extra exit-2 refusal and can never let an address inherit a
+		// pin it was not given.
+		//
+		// What it does NOT catch, because this compares strings and resolves
+		// nothing: `https://h` versus `https://h:443`, a trailing-dot FQDN, and
+		// two DNS names for one machine are all "different addresses" here.
+		if !strings.EqualFold(rec.BaseURL, req.baseURL) {
+			continue
+		}
+		if _, isTarget := folded[strings.ToLower(rec.BusID)]; isTarget {
+			continue // this invocation is about to rewrite it
+		}
+		if rec.NextHopTLSCertFingerprint == req.tlsFingerprint {
+			continue // already agrees, including "both unpinned"
+		}
+		// THE MESSAGE MUST NOT CLAIM A CONFLICTING PIN THAT DOES NOT EXIST. The
+		// commonest real case is an operator adopting pinning for the FIRST time
+		// on an existing unpinned federation: the sibling route pins NOTHING, and
+		// telling them it "pins a DIFFERENT certificate" sends them to `peer list`
+		// to hunt a fingerprint that is not there. The zero value is correctly a
+		// disagreement for the REFUSAL and is not one for the PROSE.
+		var msg string
+		if rec.NextHopTLSCertFingerprint == (buscert.Fingerprint{}) {
+			msg = fmt.Sprintf("refusing: the route for %s already reaches %s and is UNPINNED, so this add would leave one address half-pinned",
+				rec.BusID, rec.BaseURL)
+		} else {
+			msg = fmt.Sprintf("refusing: the route for %s already reaches %s and pins a DIFFERENT certificate for it, so this add would leave one address with two pins",
+				rec.BusID, rec.BaseURL)
+		}
+		return &peerCmdError{
+			code: exitPeerUsage,
+			msg:  msg,
+			remedy: "one address is one bus and presents one certificate: name every destination reached through that hop in the SAME invocation " +
+				"(-route-for " + rec.BusID + " …) so they are all pinned together, or withdraw the ones you no longer route. " +
+				"Adopting pinning on an existing federation therefore means re-stating its -route-for destinations once",
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,6 +1488,59 @@ func parsePeerSigningKey(i int, raw string) (ed25519.PublicKey, *peerCmdError) {
 	return ed25519.PublicKey(key), nil
 }
 
+// parsePeerTLSFingerprint decodes -tls-fingerprint.
+//
+// IT CALLS buscert.ParseFingerprint AND NOTHING ELSE, and this file deliberately
+// contains no second way to turn text into a fingerprint and no way at all to
+// turn a CERTIFICATE into one. That is the whole safety property: the value
+// stored here is compared, on a live connection, against
+// buscert.FingerprintOf(cert) — sha256 over the leaf's DER exactly as it
+// arrived. A second construction anywhere (a digest over PEM, over the SPKI, or
+// an uppercase spelling) would not fail loudly; every peer connection would
+// simply be refused as unknown, with nothing reporting a mismatch.
+//
+// The value is a PUBLIC one — it is in the invite blob and derivable by anyone
+// who completes a handshake — but it is NEVER ECHOED on a refusal, per this
+// file's elidePeerText discipline: it is argv on its way to a terminal, and its
+// only relevant property on this path is that it is not a fingerprint.
+// buscert's own errors quote no input either, so wrapping one is safe.
+func parsePeerTLSFingerprint(raw string) (buscert.Fingerprint, *peerCmdError) {
+	trimmed := strings.TrimSpace(raw)
+	// SURROUNDING whitespace is trimmed (an operator's shell or a copy-paste
+	// carries it in, exactly as for -signing-key); everything else about the
+	// spelling is refused rather than normalised, so the trim can never produce
+	// a value buscert would spell differently.
+	remedy := "pass the peer bus's certificate fingerprint as 64 LOWERCASE hexadecimal characters — no \"sha256:\" prefix, no colons, no internal spaces — exactly as that bus's invite blob spells it. Surrounding whitespace is trimmed; uppercase is refused rather than normalised, so that two spellings of one fingerprint can never be compared and found different"
+	if want := 2 * buscert.DigestSize; len(trimmed) != want {
+		// Length is checked BEFORE the parse so that an enormous argv value
+		// cannot choose the size of the diagnostic we print about refusing it —
+		// the same discipline -signing-key and -url use.
+		return buscert.Fingerprint{}, usagePeerError(
+			fmt.Sprintf("-tls-fingerprint is %d characters, but a certificate fingerprint is exactly %d; it is not echoed here", len(trimmed), want),
+			remedy)
+	}
+	fp, err := buscert.ParseFingerprint(trimmed)
+	if err != nil {
+		return buscert.Fingerprint{}, &peerCmdError{
+			code:   exitPeerUsage,
+			msg:    "-tls-fingerprint is not a certificate fingerprint",
+			remedy: remedy,
+			cause:  err,
+		}
+	}
+	// AN ALL-ZERO FINGERPRINT IS REFUSED, for isAllZeroKey's reason plus one
+	// specific to this field: the zero value is the record's sentinel for "no
+	// pin", so 64 zeros would be stored as NO PIN AT ALL while the operator was
+	// told the pin was written — the fail-silent direction, and the one that
+	// leaves a hop unauthenticated. It is also not a value any certificate has.
+	if fp == (buscert.Fingerprint{}) {
+		return buscert.Fingerprint{}, usagePeerError(
+			"-tls-fingerprint is all zero, which is either an uninitialised value or a copy that lost its content",
+			"copy the peer bus's certificate fingerprint again; all-zero is the record's marker for NO PIN, so it would be stored as an unpinned hop rather than as the pin you asked for")
+	}
+	return fp, nil
+}
+
 // isAllZeroKey reports whether a key is entirely zero bytes. A public key is
 // public, so nothing here is timing-sensitive and nothing should be read as
 // implying it is.
@@ -1245,9 +1564,14 @@ func isAllZeroKey(k ed25519.PublicKey) bool {
 //
 // A wrong answer here changes only the wording of a report line: the store
 // decides what is written, and this decides nothing.
-func routeAlreadyActive(store *relay.PeerStore, busID, wantURL string) bool {
+// The PIN is part of the comparison, matching relay.PeerStore.Put's own no-op
+// predicate exactly: re-pinning a rotated certificate at an unchanged address is
+// a real write, and reporting it as "already configured; nothing written" would
+// tell an operator the opposite of what happened.
+func routeAlreadyActive(store *relay.PeerStore, busID, wantURL string, wantFP buscert.Fingerprint) bool {
 	rec, ok := store.Lookup(busID)
-	return ok && rec.State == relay.PeerRecordActive && rec.BaseURL == wantURL
+	return ok && rec.State == relay.PeerRecordActive && rec.BaseURL == wantURL &&
+		rec.NextHopTLSCertFingerprint == wantFP
 }
 
 func trustAlreadyPinned(store *relay.PeerStore, busID string, want []ed25519.PublicKey) bool {
@@ -1279,7 +1603,7 @@ func trustAlreadyWithdrawn(store *relay.PeerStore, busID string) bool {
 }
 
 func routeChange(rec relay.PeerRecord, nextHop string, unchanged bool) peerChange {
-	return peerChange{
+	c := peerChange{
 		Kind:         "route",
 		BusID:        rec.BusID,
 		State:        rec.State.String(),
@@ -1289,6 +1613,13 @@ func routeChange(rec relay.PeerRecord, nextHop string, unchanged bool) peerChang
 		UpdatedAt:    rec.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		Unchanged:    unchanged,
 	}
+	// Rendered through buscert.Fingerprint.String() — the one textual form — and
+	// only when there IS a pin, so an unpinned hop reports an absent field
+	// rather than 64 zeros, which would read as a pin nobody set.
+	if rec.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+		c.NextHopTLSCertFingerprint = rec.NextHopTLSCertFingerprint.String()
+	}
+	return c
 }
 
 func trustChange(rec relay.BusTrustRecord, unchanged bool) peerChange {
@@ -1353,6 +1684,12 @@ func describePeerChange(c peerChange) string {
 		if c.NextHopBusID != "" {
 			fmt.Fprintf(&b, " (static next hop: %s)", c.NextHopBusID)
 		}
+		// Said as "the certificate AT that address", never as the bus id's
+		// certificate: on a -route-for line the bus id printed at the start of
+		// this line is the DESTINATION and the pin belongs to the hop.
+		if c.NextHopTLSCertFingerprint != "" {
+			fmt.Fprintf(&b, " (pinned cert at that address: %s)", c.NextHopTLSCertFingerprint)
+		}
 	}
 	fmt.Fprintf(&b, "  [config_seq %d]", c.ConfigSeq)
 	if c.Unchanged {
@@ -1378,6 +1715,17 @@ func writePeerListHuman(w io.Writer, out peerListResult) {
 	}
 	for _, c := range out.Routes {
 		fmt.Fprintf(w, "  %-24s %s  [config_seq %d]\n", c.BusID, c.BaseURL, c.ConfigSeq)
+		// The pin is printed on its OWN line, indented under the address rather
+		// than under the bus id, because that is what it belongs to: for a route
+		// to a bus reached THROUGH another, the certificate is the intermediate
+		// bus's. "unpinned" is stated rather than left blank — a hop with no pin
+		// is a fact an operator must be able to see at a glance, not the absence
+		// of one.
+		if c.NextHopTLSCertFingerprint != "" {
+			fmt.Fprintf(w, "  %-24s   pinned certificate at that address: %s\n", "", c.NextHopTLSCertFingerprint)
+		} else {
+			fmt.Fprintf(w, "  %-24s   no certificate pinned for that address\n", "")
+		}
 	}
 
 	fmt.Fprint(w, "\nTRUST (bus signing keys pinned for a bus — it need not have a route)\n")

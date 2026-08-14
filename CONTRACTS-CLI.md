@@ -374,6 +374,7 @@ knows it from the same command line; `peer list` does not, and says so in its ou
 | `-data-dir` | `./data` | **Never created, and neither is the `bus-id` file in it** (exit `4` otherwise). Unlike `invite mint` the **certificate is NOT required**: peer configuration pins no certificate of ours. |
 | `-bus-id` | *(REQUIRED)* | The peer bus this entry is about. Validated with `ids.ValidateBusID` behind a length guard (`relay.MaxPeerBusIDLen` = 64) so an oversized value cannot size the diagnostic. **May not be this bus's own id** (invariant 2) — refused before anything is written. |
 | `-url` | *(none)* | A **BARE https origin**: scheme, host, optional port, and nothing else. No path, query (including a bare `?`), fragment, userinfo or opaque form; `https` only (invariant 11); ≤ `relay.MaxPeerBaseURLLen` (512). One trailing `/` is trimmed; **nothing else is rewritten**, so the address an operator typed is the address the bus will dial. |
+| `-tls-fingerprint` | *(none)* | Pins the TLS certificate of the bus **at `-url`** — the **NEXT HOP** — as exactly **64 LOWERCASE hex** characters: `sha256` over the leaf certificate's DER, the value `buscert.FingerprintOf` returns (no `sha256:` prefix, no colons, no internal spaces; surrounding whitespace is trimmed as for `-signing-key`; uppercase is **refused**, not normalised, so one fingerprint has exactly one spelling). **Requires `-url`** — a pin belongs to an address, and a bus you only `-signing-key` is never dialled. **Written onto every route this invocation gives that address to, `-route-for` records included** (see the next-hop paragraph below). All-zero is refused, and so is an **empty value** (`-tls-fingerprint "$FP"` with `FP` unset is a *lost* value, not an absent flag — presence is detected with `fs.Visit`): both would otherwise store an unpinned hop while reporting success. Not repeatable — one address, one certificate. **It is a transport pin, not a signing key and not an idempotency fingerprint.** |
 | `-signing-key` | *(none)* | A pinned Ed25519 **bus signing** key, standard base64 (44 chars). **Repeatable, at most 2** (`relay.MaxPinnedBusSigningKeys`) — two means a **rollover window**, the outgoing key and the incoming one, not a general-purpose accept list. Repeating the flag **REPLACES** the pin set; it never adds to it. Order is preserved and is part of the record. |
 | `-route-for` | *(none)* | Repeatable. Installs a static next-hop route for another bus through `-url`. **Requires `-url`**; may not name this bus, may not name `-bus-id` (that route is what `-url` installs), and may not repeat a destination (two spellings differing only by ASCII case are the same routing key). |
 | `-json` | off | One JSON object on **stdout**. |
@@ -399,7 +400,7 @@ and never influences a minted number.
 | --- | --- | --- |
 | `0` | Every requested change is durable — or was already the configuration on disk, which writes nothing and reports `"unchanged": true`. | — |
 | `1` | A change failed. Anything already durable is listed under `applied` in `--json` (and after `ALREADY DURABLE:` on stderr otherwise). | Read the message; `peer list`; retry. |
-| `2` | Usage: bad flag, unknown subcommand, positional argument, malformed bus id, bad `-url`/`-signing-key`, a self-peer, or a combination that would do nothing (`add` with neither `-url` nor `-signing-key`; `remove` with neither `-route` nor `-trust`; `-route-for` without `-url`). Nothing is written. | `agent-bus peer -h` |
+| `2` | Usage: bad flag, unknown subcommand, positional argument, malformed bus id, bad `-url`/`-signing-key`/`-tls-fingerprint`, a self-peer, or a combination that would do nothing (`add` with neither `-url` nor `-signing-key`; `remove` with neither `-route` nor `-trust`; `-route-for` without `-url`; `-tls-fingerprint` without `-url` or with an empty value). **Also the two pin-consistency refusals** — an `add` that would erase an existing pin, or leave one address with two pins; those are decided under the lock but **before any write**. Nothing is written. | `agent-bus peer -h` |
 | `3` | The data directory is **locked** — a bus is running. | Stop the bus, configure peering, start it again. |
 | `4` | The data directory is missing, is not a directory, or holds no `bus-id` file. **Nothing is written, not even `bus.lock`.** | Start the bus once if it has **never run**; restore `bus-id` from backup if it has. |
 | `5` | `remove` found **none** of the record kinds it was asked to withdraw, so **nothing is written**. If one of `-route`/`-trust` existed and the other did not, the one that existed **is** withdrawn, the command exits `0`, and the absent kind is named in `not_found`. | `agent-bus peer list` and check the spelling — a bus id differing only by ASCII case is a **different** bus. |
@@ -419,8 +420,8 @@ pinned** while exiting with the code a script is told it may ignore. Both gates 
 ```json
 {"ok":true,"bus_id":"<this bus>","changes":[
   {"kind":"trust","bus_id":"busA","state":"active","signing_keys":["<b64>"],"config_seq":1,"updated_at":"…"},
-  {"kind":"route","bus_id":"busB","state":"active","base_url":"https://b.example:8443","config_seq":2,"updated_at":"…"},
-  {"kind":"route","bus_id":"busC","state":"active","base_url":"https://b.example:8443","next_hop_bus_id":"busB","config_seq":3,"updated_at":"…"}]}
+  {"kind":"route","bus_id":"busB","state":"active","base_url":"https://b.example:8443","next_hop_tls_cert_sha256":"<64 hex>","config_seq":2,"updated_at":"…"},
+  {"kind":"route","bus_id":"busC","state":"active","base_url":"https://b.example:8443","next_hop_tls_cert_sha256":"<64 hex — busB's>","next_hop_bus_id":"busB","config_seq":3,"updated_at":"…"}]}
 
 {"ok":true,"bus_id":"<this bus>","routes":[…],"trust":[…]}
 ```
@@ -430,7 +431,12 @@ reported rather than dropped so a partial withdrawal is visible. `kind` is `"rou
 `state` is `"active"` or `"removed"`. `unchanged: true` appears when
 the store found that exact configuration already applied and therefore wrote **nothing** — `config_seq`
 then names the **earlier** generation. `next_hop_bus_id` is **this command's knowledge, not a durable
-field**. `list` reports ACTIVE records only, each sorted by bus id.
+field**; `next_hop_tls_cert_sha256` **is** durable and is the same key the on-disk record uses, so
+`--json` and the record read alike. It is absent when the hop is unpinned — never 64 zeros, which
+would read as a pin nobody set. **On a `-route-for` line it is the certificate of the bus at
+`base_url`, NOT of `bus_id`**, and those are different buses. `list` reports ACTIVE records only, each
+sorted by bus id, and its human output prints the pin (or `no certificate pinned for that address`)
+indented under the address it belongs to.
 
 Failure (`--json`, on **stdout**, so a caller that discarded stderr still gets a parseable answer):
 
@@ -457,6 +463,71 @@ and a partial failure leaves the earlier ones on disk.
 certificate pin, a client certificate, a peer principal — would pin the *destination's* identity
 against a connection that terminates at the *next hop*, and would break every non-adjacent hop. The
 identity on the wire is the next hop's; the record's bus id is the destination.
+
+> **RELAY-41 IS THE RESOLUTION OF THAT WARNING for the first such credential.** `-tls-fingerprint`
+> and `PeerRecord.NextHopTLSCertFingerprint` are keyed to the record that carries `-url` — the next
+> hop — and never to the record's bus id. Worked example:
+>
+> ```
+> agent-bus peer add -bus-id busB -url https://b.example:8443 -tls-fingerprint <fpB> -route-for busC
+> ```
+>
+> writes `fpB` — **busB's, the next hop's** — onto **both** records, so the `busC` route record
+> carries `bus_id: busC` **and** `next_hop_tls_cert_sha256: <fpB>`. That mismatch between the bus id
+> and the fingerprint is **correct, not a mix-up**: the handshake that record describes terminates at
+> busB. Nothing on the command line can key a pin to a destination — the flag is refused without
+> `-url`, and the value is written onto whatever records receive that address.
+> `TestPeerAddTLSFingerprintRoundTripsOnDisk` (`cmd/agent-bus`) and
+> `TestPeerRecordTLSFingerprintIsKeyedToTheNextHop` (`internal/relay`) are the anti-regression tests;
+> both use two **different real certificates**, because with one certificate every assertion would
+> pass under either keying.
+>
+> The warning above still stands **unresolved for the credentials RELAY-41 did not add** — a client
+> certificate, a peer principal. Each must be keyed the same way.
+>
+> **WHICH CERTIFICATE, IN WHICH DIRECTION — and DO NOT INVERT THE PIN.** This pins the certificate
+> presented **by the hop at `-url` when this bus DIALS it**: an **outbound, server-side** certificate
+> keyed to an **address**. It is **not a source of inbound peer identity** — `RELAY-20`'s
+> `r.TLS.PeerCertificates[0]` is the peer's **client** certificate on a connection *to* us, and
+> nothing in this task or in `MTLS-CLIENTAUTH` establishes that the two certificates are the same.
+> That binding needs its own record.
+> Next-hop keying also puts **one fingerprint on several records with different bus ids** (`fpB` is
+> on busB's route *and* on busC's, above), so a `fingerprint -> bus id` index is **ambiguous by
+> construction** and would resolve an inbound busB connection to **busC** — a peer-principal spoof
+> produced by reading correct data backwards. `base_url -> bus id` is the same trap in the other
+> field. Resolve **address first, outbound only**, and read **each record's own pin** rather than
+> caching one per address.
+>
+> **Still configuration only.** No connection is verified against this pin yet. Whatever eventually
+> compares it must compute it with `buscert.FingerprintOf`, byte for byte — a mismatched pin does not
+> report a mismatch, it reports an unknown peer.
+
+**A route record is written WHOLE, so an omitted pin is an ERASED pin — `add` refuses two shapes of
+that, before writing anything** (both found by RELAY-41's security gate; both exit `2`):
+
+- **Re-adding a pinned route without `-tls-fingerprint`.** `peer add -bus-id busB -url X` against a
+  busB that is already pinned would replace the record with an unpinned one and exit `0`. The
+  realistic path is a colleague following a runbook written before the flag existed. Remedy: re-state
+  the pin (`peer list` shows it), or — if you really mean to stop pinning that hop — `peer remove
+  -bus-id busB -route` first, which withdraws the **route** entirely and leaves a tombstone, so you
+  must then re-add it unpinned.
+- **Leaving one address half-pinned.** Routes through one hop are separate records, so
+  `-bus-id busB -url X -tls-fingerprint <new>` alone would update busB and leave every `-route-for`
+  destination through busB on the OLD certificate (or unpinned) — a rotation reported as successful
+  while half the routing table trusts the old key. Remedy: name every destination through that hop in
+  the SAME invocation.
+
+**What that costs, stated plainly: adopting pinning on an EXISTING federation means re-stating that
+hop's `-route-for` destinations once**, in the invocation that first pins it — otherwise the
+already-unpinned siblings trip the second refusal. An add that pins **nothing** is unaffected, so a
+federation that never uses `-tls-fingerprint` behaves exactly as before.
+
+**The scope of "one address, one certificate": it is a CLI check over the stored `base_url` STRING,
+compared case-insensitively.** It resolves nothing, so all of these are *different addresses* as far
+as it is concerned and may end up carrying divergent pins: `https://h` versus `https://h:443`, a
+trailing-dot FQDN, and two DNS names for one machine. It is also **not enforced by the record** — a
+hand-edited or externally-generated log can still hold a divergence. So a consumer must read **each
+record's own pin** and never cache one pin per address.
 
 **Dependency on `RELAY-34`.** `openPeerStore` passes `relay.PeerStoreOptions.Dir = <data-dir>` on
 **both** the writable and the read-only path. Withdrawals are refused by the store without it (a

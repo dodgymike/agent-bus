@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/relay"
@@ -805,6 +806,511 @@ func TestPeerAddSigningKeySetRules(t *testing.T) {
 		code, _, _ := runPeer(t, "add", "-data-dir", dir, "-bus-id", "bus-zero", "-signing-key", zero)
 		if code != exitPeerUsage {
 			t.Errorf("exit = %d, want %d", code, exitPeerUsage)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-41: -tls-fingerprint, the per-NEXT-HOP certificate pin
+// ---------------------------------------------------------------------------
+
+// peerTestCert mints a REAL self-signed bus certificate and returns its
+// fingerprint both as the typed value and in the spelling an operator copies
+// onto a command line.
+//
+// It computes the fingerprint with buscert.FingerprintOf and with nothing else.
+// That is the load-bearing detail of this whole file: the value `peer add`
+// stores will be compared, on a live connection, against
+// buscert.FingerprintOf of the certificate the hop at -url SERVES WHEN THIS BUS
+// DIALS IT — outbound and server-side, never an inbound client certificate (see
+// relay.PeerRecord.NextHopTLSCertFingerprint). If this test invented its own
+// digest — over the PEM, over the SPKI, in a different case — it would pass
+// while the product refused every peer connection as unknown, because a
+// mismatched pin does not report a mismatch: it reports an unknown peer.
+func peerTestCert(t *testing.T, busID string) (buscert.Fingerprint, string) {
+	t.Helper()
+	m, err := buscert.LoadOrCreate(t.TempDir(), buscert.Options{BusID: busID})
+	if err != nil {
+		t.Fatalf("buscert.LoadOrCreate(%s): %v", busID, err)
+	}
+	fp := buscert.FingerprintOf(m.Certificate())
+	return fp, fp.String()
+}
+
+// TestPeerAddTLSFingerprintRoundTripsOnDisk is RELAY-41's proof, and its first
+// subtest is the anti-regression test the task exists for.
+//
+// THE CONSTRAINT: a route record's bus id is the DESTINATION and its address is
+// the NEXT HOP, and for a bus reached through another those are DIFFERENT
+// BUSES. The certificate presented on a connection to that address is the NEXT
+// HOP's, so the pin must be keyed to -url and never to -bus-id. A
+// destination-keyed pin would compare the intermediate bus's certificate
+// against the destination's fingerprint and would refuse every non-adjacent hop
+// — the entire A -> B -> C topology this epic exists to build.
+//
+// Two REAL, DIFFERENT certificates are used so that "it stored the next hop's"
+// is distinguishable from "it stored the destination's". With one certificate
+// every assertion here would pass under either keying, which is precisely how
+// this class of bug survives a test suite.
+func TestPeerAddTLSFingerprintRoundTripsOnDisk(t *testing.T) {
+	t.Parallel()
+
+	const (
+		hopBus  = "bus-hop"  // busB — the bus we dial
+		destBus = "bus-dest" // busC — reached THROUGH busB
+		hopURL  = "https://b.example:8443"
+	)
+
+	t.Run("the pin is keyed to the NEXT HOP, not to the destination", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		hopFP, hopFPHex := peerTestCert(t, hopBus)
+		destFP, _ := peerTestCert(t, destBus)
+		if hopFP == destFP {
+			t.Fatal("fixture error: the two certificates share a fingerprint, so this test could not tell next-hop keying from destination keying")
+		}
+
+		code, stdout, stderr := runPeer(t, "add",
+			"-data-dir", dir,
+			"-bus-id", hopBus,
+			"-url", hopURL,
+			"-tls-fingerprint", hopFPHex,
+			"-route-for", destBus,
+			"-json")
+		if code != exitPeerOK {
+			t.Fatalf("peer add exit = %d, want %d\nstdout: %s\nstderr: %s", code, exitPeerOK, stdout, stderr)
+		}
+
+		// DURABLE, not merely reported: read back off the write-ahead log.
+		routes, _ := walPeerConfig(t, dir)
+		if len(routes) != 2 {
+			t.Fatalf("the log holds %d route records, want 2 (the hop's own route and the destination's route through it)", len(routes))
+		}
+		byBus := map[string]relay.PeerRecord{}
+		for _, r := range routes {
+			byBus[r.BusID] = r
+		}
+
+		// THE ASSERTION THE TASK IS ABOUT.
+		dest, ok := byBus[destBus]
+		if !ok {
+			t.Fatalf("no route record for the destination %s; got %v", destBus, byBus)
+		}
+		if dest.BaseURL != hopURL {
+			t.Fatalf("the %s route dials %q, want the NEXT HOP's address %q", destBus, dest.BaseURL, hopURL)
+		}
+		if dest.NextHopTLSCertFingerprint != hopFP {
+			t.Fatalf("the %s ROUTE record pins %s, but the connection it describes terminates at %s and presents %s's certificate (%s).\n"+
+				"A pin keyed to the record's BUS ID would refuse every non-adjacent hop.",
+				destBus, dest.NextHopTLSCertFingerprint, hopBus, hopBus, hopFP)
+		}
+		if dest.NextHopTLSCertFingerprint == destFP {
+			t.Fatalf("the %s route pins the DESTINATION's own certificate; nothing ever presents it on that connection", destBus)
+		}
+
+		// And the hop's own route carries the same pin — one address, one
+		// certificate, whatever the record's bus id says.
+		hop, ok := byBus[hopBus]
+		if !ok {
+			t.Fatalf("no route record for the hop %s; got %v", hopBus, byBus)
+		}
+		if hop.NextHopTLSCertFingerprint != hopFP {
+			t.Fatalf("the %s route pins %s, want %s", hopBus, hop.NextHopTLSCertFingerprint, hopFP)
+		}
+
+		// The --json report says the same thing, under a key that names the next
+		// hop so a consumer cannot read it as the destination's certificate.
+		var res peerResult
+		if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+			t.Fatalf("--json output is not one JSON object: %v\ngot: %s", err, stdout)
+		}
+		for _, c := range res.Changes {
+			if c.Kind != "route" {
+				continue
+			}
+			if c.NextHopTLSCertFingerprint != hopFPHex {
+				t.Errorf("reported pin for %s = %q, want the next hop's %q", c.BusID, c.NextHopTLSCertFingerprint, hopFPHex)
+			}
+		}
+		if !strings.Contains(stdout, `"next_hop_tls_cert_sha256"`) {
+			t.Errorf("--json output does not carry next_hop_tls_cert_sha256: %s", stdout)
+		}
+	})
+
+	t.Run("peer list surfaces it in --json and in human output", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		_, hopFPHex := peerTestCert(t, hopBus)
+
+		code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", hopFPHex, "-route-for", destBus)
+		if code != exitPeerOK {
+			t.Fatalf("peer add exit = %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+		}
+
+		out := listPeers(t, dir)
+		if len(out.Routes) != 2 {
+			t.Fatalf("peer list reports %d routes, want 2", len(out.Routes))
+		}
+		for _, r := range out.Routes {
+			if r.NextHopTLSCertFingerprint != hopFPHex {
+				t.Errorf("peer list --json route %s reports pin %q, want %q", r.BusID, r.NextHopTLSCertFingerprint, hopFPHex)
+			}
+		}
+
+		code, human, stderr := runPeer(t, "list", "-data-dir", dir)
+		if code != exitPeerOK {
+			t.Fatalf("peer list exit = %d\nstderr: %s", code, stderr)
+		}
+		if !strings.Contains(human, hopFPHex) {
+			t.Fatalf("human `peer list` output does not show the pinned fingerprint:\n%s", human)
+		}
+	})
+
+	t.Run("an UNPINNED route is visible as unpinned rather than blank", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		if code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL); code != exitPeerOK {
+			t.Fatalf("peer add exit = %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+		}
+		out := listPeers(t, dir)
+		if len(out.Routes) != 1 || out.Routes[0].NextHopTLSCertFingerprint != "" {
+			t.Fatalf("an unpinned route reports a pin: %+v", out.Routes)
+		}
+		code, human, _ := runPeer(t, "list", "-data-dir", dir)
+		if code != exitPeerOK || !strings.Contains(human, "no certificate pinned") {
+			t.Fatalf("human `peer list` does not say the hop is unpinned:\n%s", human)
+		}
+	})
+
+	t.Run("re-pinning a rotated certificate WRITES; re-applying the same one does not", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		_, firstHex := peerTestCert(t, hopBus)
+
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", firstHex); code != exitPeerOK {
+			t.Fatalf("first add exit = %d\nstderr: %s", code, stderr)
+		}
+		// The SAME pin at the SAME address is a no-op and is reported as one.
+		code, stdout, _ := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", firstHex, "-json")
+		if code != exitPeerOK {
+			t.Fatalf("re-apply exit = %d: %s", code, stdout)
+		}
+		var same peerResult
+		if err := json.Unmarshal([]byte(stdout), &same); err != nil {
+			t.Fatalf("--json: %v", err)
+		}
+		if len(same.Changes) != 1 || !same.Changes[0].Unchanged {
+			t.Fatalf("re-applying an identical pin was reported as a fresh write: %+v", same.Changes)
+		}
+
+		// A ROTATED certificate at an UNCHANGED address must be written. This is
+		// the case a no-op predicate comparing only the URL would swallow,
+		// leaving the old certificate trusted while reporting success.
+		rotatedFP, rotatedHex := peerTestCert(t, hopBus)
+		code, stdout, _ = runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", rotatedHex, "-json")
+		if code != exitPeerOK {
+			t.Fatalf("rotate exit = %d: %s", code, stdout)
+		}
+		var rotated peerResult
+		if err := json.Unmarshal([]byte(stdout), &rotated); err != nil {
+			t.Fatalf("--json: %v", err)
+		}
+		if len(rotated.Changes) != 1 || rotated.Changes[0].Unchanged {
+			t.Fatalf("re-pinning a rotated certificate was reported as unchanged: %+v", rotated.Changes)
+		}
+		out := listPeers(t, dir)
+		if len(out.Routes) != 1 || out.Routes[0].NextHopTLSCertFingerprint != rotatedHex {
+			t.Fatalf("after rotation the store still reports %+v, want the rotated pin %s", out.Routes, rotatedFP)
+		}
+	})
+
+	t.Run("a withdrawal drops the pin with the route", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		_, hopFPHex := peerTestCert(t, hopBus)
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", hopFPHex); code != exitPeerOK {
+			t.Fatalf("add exit = %d\nstderr: %s", code, stderr)
+		}
+		if code, _, stderr := runPeer(t, "remove", "-data-dir", dir, "-bus-id", hopBus, "-route"); code != exitPeerOK {
+			t.Fatalf("remove exit = %d\nstderr: %s", code, stderr)
+		}
+		routes, _ := walPeerConfig(t, dir)
+		for _, r := range routes {
+			if r.State == relay.PeerRecordRemoved && r.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+				t.Fatalf("the tombstone for %s still carries a certificate pin; withdrawing a route must withdraw the credential that dialled it", r.BusID)
+			}
+		}
+	})
+}
+
+// TestPeerAddTLSFingerprintRefusals covers every way the flag is refused, and
+// each refusal must write NOTHING — the exit-2 discipline this command already
+// holds for -url and -signing-key.
+func TestPeerAddTLSFingerprintRefusals(t *testing.T) {
+	t.Parallel()
+	_, validHex := peerTestCert(t, "bus-hop")
+	_, signingKeyB64 := newSigningKey(t)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		// why states the property, so a failure names the property rather than
+		// the flag.
+		why string
+	}{
+		{
+			name: "without -url there is no hop to pin",
+			args: []string{"-bus-id", "bus-hop", "-tls-fingerprint", validHex},
+			why:  "a certificate pin belongs to an ADDRESS; keyed to a bus id instead it would be the destination-keyed pin that breaks every non-adjacent hop",
+		},
+		{
+			name: "with -signing-key but no -url, which is the trust-only entry",
+			// The A <-> B <-> C case: a bus whose signing key we pin and which
+			// we NEVER DIAL. It has no connection, so it has no certificate to
+			// pin — and accepting one here is how a pin ends up keyed to a bus
+			// rather than to a hop.
+			args: []string{"-bus-id", "bus-hop", "-signing-key", signingKeyB64, "-tls-fingerprint", validHex},
+			why:  "a bus we only pin a SIGNING KEY for is never dialled, so there is no hop whose certificate could be pinned",
+		},
+		{
+			name: "UPPERCASE hex",
+			args: []string{"-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", strings.ToUpper(validHex)},
+			why:  "one fingerprint must have exactly one spelling, or two equal pins eventually compare unequal",
+		},
+		{
+			name: "a sha256: prefix",
+			args: []string{"-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", "sha256:" + validHex},
+			why:  "the stored value must be byte-comparable with buscert.FingerprintOf's output",
+		},
+		{
+			name: "truncated",
+			args: []string{"-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", validHex[:32]},
+			why:  "a short pin is not a weaker pin, it is a different value that matches nothing",
+		},
+		{
+			name: "all zero",
+			args: []string{"-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", strings.Repeat("0", 64)},
+			why:  "the zero value is the record's marker for NO PIN, so it would be stored as an unpinned hop while the operator was told the pin was written",
+		},
+		{
+			name: "not hex",
+			args: []string{"-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", strings.Repeat("z", 64)},
+			why:  "a malformed pin must be refused before the lock is taken, not discovered at the durable write",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, _ := initPeerDataDir(t)
+			args := append([]string{"add", "-data-dir", dir}, tc.args...)
+			code, stdout, stderr := runPeer(t, args...)
+			if code != exitPeerUsage {
+				t.Fatalf("exit = %d, want %d (usage): %s\nstdout: %s\nstderr: %s", code, exitPeerUsage, tc.why, stdout, stderr)
+			}
+			// NOTHING WRITTEN: a usage refusal happens before the data
+			// directory is touched, so the log must not exist at all.
+			if _, err := os.Stat(filepath.Join(dir, wal.WALFileName)); !os.IsNotExist(err) {
+				t.Fatalf("a refused `peer add` wrote a log: %v", err)
+			}
+		})
+	}
+
+	t.Run("the without--url refusal names the remedy", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", "bus-hop", "-tls-fingerprint", validHex)
+		if code != exitPeerUsage {
+			t.Fatalf("exit = %d, want %d\nstderr: %s", code, exitPeerUsage, stderr)
+		}
+		// The message must send the operator to -url. A generic "this add would
+		// do nothing" would be true and useless, and would leave them guessing
+		// that the pin belongs on -bus-id.
+		if !strings.Contains(stderr, "-url") {
+			t.Fatalf("the refusal does not name -url as the remedy:\n%s", stderr)
+		}
+	})
+
+	t.Run("an oversized value is refused without being echoed", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		huge := strings.Repeat("a", 4096)
+		code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", "bus-hop", "-url", "https://b.example:8443", "-tls-fingerprint", huge)
+		if code != exitPeerUsage {
+			t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, exitPeerUsage, stdout, stderr)
+		}
+		// An enormous argv value must not choose the size of the diagnostic we
+		// print about refusing it.
+		if strings.Contains(stdout+stderr, huge[:64]) {
+			t.Fatalf("the refusal echoed the oversized value back to the terminal:\nstdout: %s\nstderr: %s", stdout, stderr)
+		}
+	})
+}
+
+// TestPeerAddNeverSilentlyUnpinsAHop is the regression test for the two
+// FAIL-SILENT-UNPINNED defects the security gate found in RELAY-41's first
+// implementation. Both are the same shape, and it is the shape the record
+// design makes easy to miss:
+//
+//	A ROUTE RECORD IS WRITTEN WHOLE, NEVER AS A DELTA. So whatever an `add`
+//	does not say is not left unchanged — it is ERASED.
+//
+// Neither defect was exploitable at the time (nothing verifies the pin yet),
+// and that is exactly why they had to be fixed then: RELAY-20 is what turns a
+// durably-unpinned hop into a live transport-trust hole, and by then the bad
+// state is already on disk.
+func TestPeerAddNeverSilentlyUnpinsAHop(t *testing.T) {
+	t.Parallel()
+
+	const (
+		hopBus  = "bus-hop"
+		destBus = "bus-dest"
+		hopURL  = "https://b.example:8443"
+	)
+
+	t.Run("omitting -tls-fingerprint on a pinned hop is REFUSED, not applied", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		hopFP, hopFPHex := peerTestCert(t, hopBus)
+
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", hopFPHex, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("first add exit = %d\nstderr: %s", code, stderr)
+		}
+
+		// The realistic accident: a colleague adds one more destination through
+		// the same hop, following a runbook written before the flag existed.
+		code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-route-for", "bus-other", "-json")
+		if code != exitPeerUsage {
+			t.Fatalf("an add that would erase an existing pin exited %d, want %d (usage)\nstdout: %s\nstderr: %s", code, exitPeerUsage, stdout, stderr)
+		}
+
+		// AND THE PIN IS STILL THERE. A refusal that had already written the
+		// first record would be the same bug with an error message.
+		out := listPeers(t, dir)
+		if len(out.Routes) != 2 {
+			t.Fatalf("the refusal changed the routing table: %+v", out.Routes)
+		}
+		for _, r := range out.Routes {
+			if r.NextHopTLSCertFingerprint != hopFPHex {
+				t.Fatalf("route %s lost its pin (%q) to a refused add; the certificate at %s is still %s", r.BusID, r.NextHopTLSCertFingerprint, hopURL, hopFP)
+			}
+		}
+	})
+
+	t.Run("an empty flag value is refused, not read as absent", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+
+		// `-tls-fingerprint "$PEER_FP"` with PEER_FP unset. Treating it as
+		// "the flag was not given" would write an UNPINNED route and report
+		// success — a trust anchor lost to an unset shell variable.
+		for _, empty := range []string{"", "   "} {
+			code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", empty)
+			if code != exitPeerUsage {
+				t.Fatalf("-tls-fingerprint %q exited %d, want %d\nstdout: %s\nstderr: %s", empty, code, exitPeerUsage, stdout, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(dir, wal.WALFileName)); !os.IsNotExist(err) {
+				t.Fatalf("a refused add wrote a log: %v", err)
+			}
+		}
+	})
+
+	t.Run("two DIFFERENT pins for one address are refused", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := initPeerDataDir(t)
+		_, firstHex := peerTestCert(t, hopBus)
+
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", firstHex, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("first add exit = %d\nstderr: %s", code, stderr)
+		}
+
+		// Rotating the pin while naming only the hop would leave every
+		// -route-for destination through it still trusting the OLD certificate,
+		// while telling the operator the rotation succeeded.
+		_, rotatedHex := peerTestCert(t, hopBus)
+		code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", rotatedHex)
+		if code != exitPeerUsage {
+			t.Fatalf("a partial re-pin exited %d, want %d (usage)\nstdout: %s\nstderr: %s", code, exitPeerUsage, stdout, stderr)
+		}
+		if !strings.Contains(stderr, destBus) {
+			t.Fatalf("the refusal does not name the destination left behind (%s):\n%s", destBus, stderr)
+		}
+		for _, r := range listPeers(t, dir).Routes {
+			if r.NextHopTLSCertFingerprint != firstHex {
+				t.Fatalf("the refused rotation still changed %s: %+v", r.BusID, r)
+			}
+		}
+
+		// Naming EVERY destination through the hop in one invocation succeeds
+		// and re-pins them together — the remedy the refusal points at.
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", rotatedHex, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("re-pinning every destination together exited %d\nstderr: %s", code, stderr)
+		}
+		for _, r := range listPeers(t, dir).Routes {
+			if r.NextHopTLSCertFingerprint != rotatedHex {
+				t.Fatalf("route %s still pins %q after a full re-pin, want %q", r.BusID, r.NextHopTLSCertFingerprint, rotatedHex)
+			}
+		}
+	})
+
+	t.Run("adopting pinning on an existing UNPINNED federation says so accurately", func(t *testing.T) {
+		t.Parallel()
+		// The commonest real case, and the one whose refusal message was wrong
+		// in the first implementation: the sibling route pins NOTHING, so a
+		// message claiming it "pins a DIFFERENT certificate" sends the operator
+		// hunting a fingerprint that does not exist (a reviewer finding).
+		dir, _ := initPeerDataDir(t)
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("unpinned add exit = %d\nstderr: %s", code, stderr)
+		}
+		_, hopFPHex := peerTestCert(t, hopBus)
+		code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", hopFPHex)
+		if code != exitPeerUsage {
+			t.Fatalf("half-pinning exit = %d, want %d\nstderr: %s", code, exitPeerUsage, stderr)
+		}
+		if strings.Contains(stderr, "DIFFERENT certificate") {
+			t.Fatalf("the refusal claims a conflicting pin that does not exist:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "UNPINNED") {
+			t.Fatalf("the refusal does not say the sibling route is unpinned:\n%s", stderr)
+		}
+		// The documented remedy — name every destination in one invocation —
+		// must actually work.
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-tls-fingerprint", hopFPHex, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("adopting pinning across every destination exit = %d\nstderr: %s", code, stderr)
+		}
+	})
+
+	t.Run("the address comparison is case-insensitive, so host case cannot bypass it", func(t *testing.T) {
+		t.Parallel()
+		// A bare origin is case-insensitive, but validatePeerBareOrigin
+		// deliberately does not rewrite what the operator typed — so one origin
+		// can be stored two ways, and a byte comparison let an UNPINNED route in
+		// beside a pinned one (a security-gate finding, reproduced).
+		dir, _ := initPeerDataDir(t)
+		_, hopFPHex := peerTestCert(t, hopBus)
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", "https://b.example:8443", "-tls-fingerprint", hopFPHex); code != exitPeerOK {
+			t.Fatalf("pinned add exit = %d\nstderr: %s", code, stderr)
+		}
+		code, stdout, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", "bus-e", "-url", "https://B.EXAMPLE:8443")
+		if code != exitPeerUsage {
+			t.Fatalf("an unpinned route at the same origin spelled in a different case exited %d, want %d\nstdout: %s\nstderr: %s", code, exitPeerUsage, stdout, stderr)
+		}
+	})
+
+	t.Run("an unpinned hop may still be added to and removed freely", func(t *testing.T) {
+		t.Parallel()
+		// The refusals must not make the UNPINNED world harder to work with:
+		// every existing federation is unpinned, and nothing above may fire on
+		// one. This is the false-positive guard.
+		dir, _ := initPeerDataDir(t)
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-route-for", destBus); code != exitPeerOK {
+			t.Fatalf("unpinned add exit = %d\nstderr: %s", code, stderr)
+		}
+		if code, _, stderr := runPeer(t, "add", "-data-dir", dir, "-bus-id", hopBus, "-url", hopURL, "-route-for", "bus-third"); code != exitPeerOK {
+			t.Fatalf("a second unpinned add through the same hop exit = %d\nstderr: %s", code, stderr)
+		}
+		if code, _, stderr := runPeer(t, "remove", "-data-dir", dir, "-bus-id", destBus, "-route"); code != exitPeerOK {
+			t.Fatalf("remove exit = %d\nstderr: %s", code, stderr)
 		}
 	})
 }

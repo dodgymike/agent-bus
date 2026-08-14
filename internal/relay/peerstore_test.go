@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -2848,5 +2850,313 @@ func TestPeerStoreNeverFloorsACaseConfusable(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, PeerWithdrawalFloorFileName)); !os.IsNotExist(err) {
 		t.Fatalf("a case-confusable withdrawal was floored: %+v", psFloors(t, dir))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-41: the NEXT-HOP TLS certificate pin
+// ---------------------------------------------------------------------------
+
+// psCertFor mints a REAL self-signed bus certificate and returns it with its
+// fingerprint, computed by buscert.FingerprintOf.
+//
+// It uses a real certificate rather than a hand-written 32-byte value on
+// purpose: the claim this file has to support is that what the peer store holds
+// is byte-for-byte what a consumer computes from a LIVE CONNECTION'S
+// certificate — specifically, the certificate served BY THE HOP AT BaseURL WHEN
+// THIS BUS DIALS IT (outbound, server-side; see the field's doc comment for why
+// it is NOT inbound peer identity and must not be inverted into a
+// fingerprint -> bus id lookup). A fixture built from an arbitrary digest could
+// not tell a correct construction from a second, subtly different one — and a
+// second construction fails silently: every peer connection is simply refused
+// as unknown.
+func psCertFor(t *testing.T, busID string) (*x509.Certificate, buscert.Fingerprint) {
+	t.Helper()
+	m, err := buscert.LoadOrCreate(t.TempDir(), buscert.Options{BusID: busID})
+	if err != nil {
+		t.Fatalf("buscert.LoadOrCreate(%s): %v", busID, err)
+	}
+	fp := buscert.FingerprintOf(m.Certificate())
+	// The package's own accessor and the free function must agree; if they ever
+	// stop agreeing, every test below is measuring the wrong thing.
+	if fp != m.Fingerprint() {
+		t.Fatalf("buscert.FingerprintOf(cert) = %s but Material.Fingerprint() = %s; there must be exactly ONE construction", fp, m.Fingerprint())
+	}
+	return m.Certificate(), fp
+}
+
+// TestPeerRecordTLSFingerprintIsKeyedToTheNextHop is RELAY-41's record-level
+// proof, and the constraint it pins is the whole task:
+//
+//	A ROUTE RECORD'S BUS ID IS THE DESTINATION; ITS BaseURL IS THE NEXT HOP.
+//	FOR A NON-ADJACENT DESTINATION THOSE ARE DIFFERENT BUSES, SO THE
+//	CERTIFICATE PIN IS A PROPERTY OF THE ADDRESS AND NEVER OF THE BUS ID.
+//
+// In the laptop(A) <-> internet(B) <-> here(C) line, the record this bus holds
+// for busC carries busB's ADDRESS, because that is where traffic for busC
+// leaves. The TLS handshake on that connection therefore terminates at busB and
+// presents BUSB'S certificate. A pin keyed to the record's bus id would compare
+// busB's certificate against busC's fingerprint, fail, and refuse every
+// non-adjacent hop — the entire topology this epic exists to build.
+//
+// The test uses two REAL, DIFFERENT certificates so that "it stored the next
+// hop's" is distinguishable from "it stored the destination's": with one
+// certificate every assertion below would pass under either keying.
+func TestPeerRecordTLSFingerprintIsKeyedToTheNextHop(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+
+	const (
+		nextHopBus     = "bus-ps-hop"  // busB: the bus we dial
+		destinationBus = "bus-ps-dest" // busC: the bus we reach THROUGH busB
+		nextHopURL     = "https://hop.internal:8443"
+	)
+	_, hopFP := psCertFor(t, nextHopBus)
+	_, destFP := psCertFor(t, destinationBus)
+	if hopFP == destFP {
+		t.Fatal("fixture error: the two certificates share a fingerprint, so this test could not tell next-hop keying from destination keying")
+	}
+
+	// THE RECORD UNDER TEST: bus id busC, address busB's, fingerprint busB's.
+	// Note the deliberate mismatch between the bus id and the fingerprint —
+	// that is the correct state, not a mix-up.
+	rec := PeerRecord{
+		BusID:                     destinationBus,
+		ConfigSeq:                 1,
+		State:                     PeerRecordActive,
+		BaseURL:                   nextHopURL,
+		NextHopTLSCertFingerprint: hopFP,
+		UpdatedAt:                 at,
+	}
+
+	body, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	t.Run("the DESTINATION's fingerprint appears nowhere on disk", func(t *testing.T) {
+		if strings.Contains(string(body), destFP.String()) {
+			t.Fatalf("the encoded record for %s carries the DESTINATION's certificate fingerprint; the connection it describes terminates at %s and presents %s's certificate: %s",
+				destinationBus, nextHopBus, nextHopBus, body)
+		}
+		if !strings.Contains(string(body), hopFP.String()) {
+			t.Fatalf("the encoded record does not carry the NEXT HOP's fingerprint %s: %s", hopFP, body)
+		}
+	})
+
+	t.Run("the wire key names the NEXT HOP", func(t *testing.T) {
+		// The durable spelling is asserted rather than left to the struct tag: a
+		// renamed key is an ON-DISK FORMAT CHANGE, and it must be visible as one
+		// here rather than only in a tag nobody diffs. The value is the ONE
+		// textual form — 64 lowercase hex.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("the record is not a JSON object: %v", err)
+		}
+		v, ok := raw["next_hop_tls_cert_sha256"]
+		if !ok {
+			t.Fatalf("the record has no next_hop_tls_cert_sha256 field: %s", body)
+		}
+		var got string
+		if err := json.Unmarshal(v, &got); err != nil {
+			t.Fatalf("next_hop_tls_cert_sha256 is not a JSON string: %v", err)
+		}
+		if got != hopFP.String() {
+			t.Fatalf("next_hop_tls_cert_sha256 = %q, want %q (lowercase hex over the leaf's DER)", got, hopFP.String())
+		}
+		if got != strings.ToLower(got) || len(got) != 2*buscert.DigestSize {
+			t.Fatalf("next_hop_tls_cert_sha256 = %q, want exactly %d LOWERCASE hex characters; a second spelling of one fingerprint eventually compares unequal to itself", got, 2*buscert.DigestSize)
+		}
+	})
+
+	t.Run("it round-trips as the SAME type a live certificate produces", func(t *testing.T) {
+		back, err := DecodePeerRecord(body)
+		if err != nil {
+			t.Fatalf("DecodePeerRecord: %v", err)
+		}
+		if back.BusID != destinationBus {
+			t.Errorf("bus id = %q, want the DESTINATION %q", back.BusID, destinationBus)
+		}
+		if back.BaseURL != nextHopURL {
+			t.Errorf("base URL = %q, want the NEXT HOP's address %q", back.BaseURL, nextHopURL)
+		}
+		// buscert.Fingerprint is a value type, so this is the same comparison a
+		// consumer makes against buscert.FingerprintOf(peerCert) — no encoding,
+		// no length check, no second construction in between.
+		if back.NextHopTLSCertFingerprint != hopFP {
+			t.Fatalf("decoded fingerprint = %s, want the NEXT HOP's %s", back.NextHopTLSCertFingerprint, hopFP)
+		}
+		if back.NextHopTLSCertFingerprint == destFP {
+			t.Fatal("the decoded record carries the DESTINATION's fingerprint")
+		}
+	})
+
+	t.Run("the durable store keys it the same way", func(t *testing.T) {
+		dir := t.TempDir()
+		st, lg := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg.Close() }()
+
+		// This is the store-level shape of `peer add -bus-id busB -url ...
+		// -tls-fingerprint <fpB> -route-for busC`: two records, ONE address, ONE
+		// fingerprint — the hop's — and two different bus ids.
+		if _, err := st.Put(PeerConfig{BusID: nextHopBus, BaseURL: nextHopURL, NextHopTLSCertFingerprint: hopFP}); err != nil {
+			t.Fatalf("Put(hop): %v", err)
+		}
+		if _, err := st.Put(PeerConfig{BusID: destinationBus, BaseURL: nextHopURL, NextHopTLSCertFingerprint: hopFP}); err != nil {
+			t.Fatalf("Put(destination): %v", err)
+		}
+		for _, busID := range []string{nextHopBus, destinationBus} {
+			got, ok := st.Lookup(busID)
+			if !ok {
+				t.Fatalf("no route for %s", busID)
+			}
+			if got.NextHopTLSCertFingerprint != hopFP {
+				t.Errorf("route for %s pins %s, want the NEXT HOP's %s", busID, got.NextHopTLSCertFingerprint, hopFP)
+			}
+		}
+	})
+
+	t.Run("re-pinning a rotated certificate is NOT a no-op", func(t *testing.T) {
+		// The address does not move when a peer rotates its certificate, so a
+		// no-op predicate that compared only BaseURL would swallow the new pin
+		// and leave the OLD certificate trusted while reporting success.
+		dir := t.TempDir()
+		st, lg := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg.Close() }()
+
+		first, err := st.Put(PeerConfig{BusID: nextHopBus, BaseURL: nextHopURL, NextHopTLSCertFingerprint: hopFP})
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		_, rotatedFP := psCertFor(t, nextHopBus)
+		second, err := st.Put(PeerConfig{BusID: nextHopBus, BaseURL: nextHopURL, NextHopTLSCertFingerprint: rotatedFP})
+		if err != nil {
+			t.Fatalf("Put(rotated): %v", err)
+		}
+		if second.ConfigSeq == first.ConfigSeq {
+			t.Fatalf("re-pinning at the same address reused config_seq %d, so nothing was written; the rotated certificate would never be trusted", second.ConfigSeq)
+		}
+		if second.NextHopTLSCertFingerprint != rotatedFP {
+			t.Fatalf("stored pin = %s, want the rotated %s", second.NextHopTLSCertFingerprint, rotatedFP)
+		}
+		// And an IDENTICAL re-application still writes nothing.
+		third, err := st.Put(PeerConfig{BusID: nextHopBus, BaseURL: nextHopURL, NextHopTLSCertFingerprint: rotatedFP})
+		if err != nil {
+			t.Fatalf("Put(same): %v", err)
+		}
+		if third.ConfigSeq != second.ConfigSeq {
+			t.Fatalf("re-applying the IDENTICAL pin minted config_seq %d over %d; an operator's config-management run must not grow the log", third.ConfigSeq, second.ConfigSeq)
+		}
+	})
+}
+
+// TestPeerRecordTLSFingerprintRequiresAHopToPin is the "set if and only if there
+// is an address" half, checked in BOTH directions — on the way out (Encode,
+// before the durable write) and on the way in (Decode, where a record off disk
+// is untrusted input even though this server wrote it).
+//
+// A TOMBSTONE carrying a pin is the shape that matters: a withdrawn route has
+// given up its address, so a pin on it names a hop that is not there — and an
+// address plus the credential to trust it is exactly what a resurrection wants.
+func TestPeerRecordTLSFingerprintRequiresAHopToPin(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	_, fp := psCertFor(t, "bus-ps-hop")
+
+	t.Run("Encode refuses a tombstone carrying a pin", func(t *testing.T) {
+		_, err := PeerRecord{
+			BusID: psRemoteBus, ConfigSeq: 3, State: PeerRecordRemoved,
+			NextHopTLSCertFingerprint: fp, UpdatedAt: at,
+		}.Encode()
+		if !errors.Is(err, ErrInvalidPeerRecord) {
+			t.Fatalf("Encode returned %v, want ErrInvalidPeerRecord: a tombstone holds no live configuration", err)
+		}
+	})
+
+	t.Run("Decode refuses a hand-built tombstone carrying a pin", func(t *testing.T) {
+		// Hand-built because Encode cannot produce it — which is the point: the
+		// decode check is what catches a record corrupted or edited on disk,
+		// and it may not rely on our own encoder's discipline.
+		raw := fmt.Sprintf(`{"v":%d,"rec":%q,"bus_id":%q,"config_seq":3,"state":"removed","next_hop_tls_cert_sha256":%q,"updated_at":%q}`,
+			PeerRecordVersion, PeerRecordKind, psRemoteBus, fp.String(), at.Format(time.RFC3339Nano))
+		if _, err := DecodePeerRecord([]byte(raw)); !errors.Is(err, ErrInvalidPeerRecord) {
+			t.Fatalf("DecodePeerRecord returned %v, want ErrInvalidPeerRecord", err)
+		}
+	})
+
+	t.Run("a removal DROPS the pin rather than carrying it into the tombstone", func(t *testing.T) {
+		dir := t.TempDir()
+		st, lg := psOpenStore(t, dir, nil, nil)
+		defer func() { _ = lg.Close() }()
+
+		if _, err := st.Put(PeerConfig{BusID: psRemoteBus, BaseURL: psURLGen1, NextHopTLSCertFingerprint: fp}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		rec, err := st.Remove(psRemoteBus)
+		if err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+		if rec.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+			t.Fatalf("the tombstone carries a pin (%s); withdrawing a route must withdraw the credential that dialled it", rec.NextHopTLSCertFingerprint)
+		}
+	})
+
+	t.Run("a spelling that is not the one textual form is refused", func(t *testing.T) {
+		for _, tc := range []struct{ name, value string }{
+			{"UPPERCASE hex", strings.ToUpper(fp.String())},
+			{"a sha256: prefix", "sha256:" + fp.String()},
+			{"colon-separated bytes", strings.Join([]string{fp.String()[:2], fp.String()[2:]}, ":")},
+			{"truncated", fp.String()[:32]},
+			{"not hex at all", strings.Repeat("z", 2*buscert.DigestSize)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := fmt.Sprintf(`{"v":%d,"rec":%q,"bus_id":%q,"config_seq":1,"state":"active","base_url":%q,"next_hop_tls_cert_sha256":%q,"updated_at":%q}`,
+					PeerRecordVersion, PeerRecordKind, psRemoteBus, psURLGen1, tc.value, at.Format(time.RFC3339Nano))
+				_, err := DecodePeerRecord([]byte(raw))
+				if !errors.Is(err, ErrInvalidPeerRecord) {
+					t.Fatalf("DecodePeerRecord accepted %s, want ErrInvalidPeerRecord; one fingerprint must have exactly one spelling or two equal pins eventually compare unequal", tc.name)
+				}
+				// The refusal must not echo the offending text back into an
+				// operator's log — it is file-derived and unbounded.
+				if strings.Contains(err.Error(), tc.value) {
+					t.Errorf("the refusal echoes the offending value: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// TestPeerRecordWithoutATLSFingerprintStaysDecodable is the ADDITIVE half of the
+// change, and the reason PeerRecordVersion is NOT bumped.
+//
+// Every route record already on disk was written without this field. Decoding
+// must therefore treat its absence as "no pin" rather than as a malformed
+// record — a mandatory field, or a version bump (DecodePeerRecord requires the
+// version to EQUAL PeerRecordVersion), would make an existing federation's log
+// undecodable at replay, which is a data-loss bug dressed as a compatibility
+// marker.
+func TestPeerRecordWithoutATLSFingerprintStaysDecodable(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+
+	// Byte-for-byte the shape written before this field existed.
+	raw := fmt.Sprintf(`{"v":%d,"rec":%q,"bus_id":%q,"config_seq":1,"state":"active","base_url":%q,"updated_at":%q}`,
+		PeerRecordVersion, PeerRecordKind, psRemoteBus, psURLGen1, at.Format(time.RFC3339Nano))
+	rec, err := DecodePeerRecord([]byte(raw))
+	if err != nil {
+		t.Fatalf("a route record written before this field existed no longer decodes: %v", err)
+	}
+	if rec.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+		t.Fatalf("an absent pin decoded to %s, want the zero value (no pin)", rec.NextHopTLSCertFingerprint)
+	}
+
+	// And an unpinned route re-encodes WITHOUT the key, so it is byte-identical
+	// to what the previous binary wrote.
+	body, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if strings.Contains(string(body), "next_hop_tls_cert_sha256") {
+		t.Fatalf("an unpinned route emits the pin key: %s", body)
 	}
 }

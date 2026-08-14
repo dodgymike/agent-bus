@@ -1396,7 +1396,7 @@ split comes from RELAY-7's cross-bus trust deep-dive.
 
 | `wal.Entry.Kind` | Go type | carries | never carries |
 | --- | --- | --- | --- |
-| `"peer"` | `relay.PeerRecord` | `bus_id`, `config_seq`, `state`, `base_url` | any key material |
+| `"peer"` | `relay.PeerRecord` | `bus_id`, `config_seq`, `state`, `base_url`, `next_hop_tls_cert_sha256` | any key material — a certificate fingerprint is a public digest, not a key |
 | `"bustrust"` | `relay.BusTrustRecord` | `bus_id`, `config_seq`, `state`, `bus_signing_keys[]` | any transport/address |
 
 `bus_signing_keys` is a **LIST, not a scalar**, and that is load-bearing rather than generous:
@@ -1433,6 +1433,7 @@ Read off the struct tags in `internal/relay/peerstore.go` (`peerRecordJSON`, `bu
 ```
 {"v":1,"rec":"peer","bus_id":"<bus id>","config_seq":<uint64 >=1>,"state":"active"|"removed",
  "base_url":"https://host[:port]",              // ONLY when state=="active"
+ "next_hop_tls_cert_sha256":"<64 lowercase hex>",  // OPTIONAL; ONLY when state=="active"
  "updated_at":"<RFC3339Nano UTC>"}
 
 {"v":1,"rec":"bustrust","bus_id":"<bus id>","config_seq":<uint64 >=1>,"state":"active"|"removed",
@@ -1454,6 +1455,7 @@ it is being read as.
 | `config_seq` | decimal, `>= 1`, `<= 2^53-1` (`jq` reads JSON numbers as float64, so above that the value an operator reads would stop being the value on disk) | never |
 | `state` | **fixed string** `"active"` / `"removed"` — never the numeric enum, for the reason the invite record states | never |
 | `base_url` | a **BARE https origin** — scheme, host, optional port and **nothing else**, `<= MaxPeerBaseURLLen` (512, derived: `https://` + a 253-byte DNS name + `:65535` = 267, with headroom for a bracketed IPv6 literal) | `state != "active"`, and always on a trust record |
+| `next_hop_tls_cert_sha256` (RELAY-41, 2026-08-14) | **64 LOWERCASE hex** — `buscert.Fingerprint.String()`, i.e. `sha256` over the leaf certificate's DER **exactly as it arrived** (`x509.Certificate.Raw`, never re-marshalled). No prefix, no colons, no whitespace; uppercase is REFUSED by `buscert.ParseFingerprint` rather than normalised, so one fingerprint has exactly one spelling. Parsed by that function and by nothing else — see the byte-for-byte note below | `state != "active"`; **also when the hop is unpinned** (the field is OPTIONAL) and always on a trust record |
 | `bus_signing_keys` | **base64 std**, matching `auth.RosterEntry`'s `auth_pub`; each exactly 32 bytes, pairwise distinct, all-zero REFUSED (uninitialised or corrupt, and a small-order point) | `state != "active"`, and always on a route record |
 | `updated_at` | `RFC3339Nano`, UTC. On a tombstone it is also the input to `PeerTombstoneRetention` | never |
 
@@ -1469,7 +1471,116 @@ for the rest of that peer's life. A rejected request is a moment; a persisted ba
 network would be a trust anchor chosen by whoever we are trying to authenticate. The keys are copied
 out of band exactly as the invite blob carries a bus's TLS certificate fingerprint (`DECISIONS.md`,
 E6). A `"removed"` record is a TOMBSTONE and carries NO live configuration — no `base_url`, no keys,
-enforced field by field in both directions.
+no certificate pin, enforced field by field in both directions.
+
+### `next_hop_tls_cert_sha256` is keyed to the ADDRESS, never to the bus id (RELAY-41, 2026-08-14)
+
+**This is the whole point of the field and the one thing a future edit must not collapse.** A route
+record's `bus_id` is the **DESTINATION**; its `base_url` is the address of the **NEXT HOP**. For a
+directly-peered bus those are the same machine. For a bus reached *through* another they are
+different buses:
+
+```
+agent-bus peer add -bus-id busB -url https://b.example:8443 -tls-fingerprint <fpB> -route-for busC
+```
+
+writes **two** route records, and both carry **`fpB` — busB's, the next hop's**. The `busC` record
+therefore has `bus_id: busC` and `next_hop_tls_cert_sha256: <fpB>`. **That mismatch is correct, not a
+mix-up**: the TLS handshake that record describes terminates at busB and presents busB's certificate.
+A pin keyed to `bus_id` would compare busB's certificate against busC's fingerprint, fail, and
+**refuse every non-adjacent hop** — the entire `A -> B -> C` topology the FEDERATION epic exists to
+build. The Go field is named `NextHopTLSCertFingerprint` and the wire key names the next hop for the
+same reason: so that the constraint survives in the durable format rather than only in a doc comment.
+`TestPeerRecordTLSFingerprintIsKeyedToTheNextHop` (`internal/relay`) and
+`TestPeerAddTLSFingerprintRoundTripsOnDisk` (`cmd/agent-bus`) are the anti-regression tests, and both
+use two **different real certificates** — with one certificate every assertion would pass under
+either keying, which is how this bug class survives a suite.
+
+**It is NOT `idem.Fingerprint`.** `peerFingerprint` / `idem.Fingerprint` in `internal/relay/peer.go`
+are the **idempotency** fingerprint of a roster payload — a replay-protection digest over request
+bytes. This one authenticates a **hop on the wire** and nothing inside a message. The names are kept
+deliberately far apart.
+
+> **WHICH CERTIFICATE, IN WHICH DIRECTION — and DO NOT INVERT IT.**
+>
+> This field pins the certificate presented **by the hop at `base_url` when THIS bus DIALS it**: an
+> **OUTBOUND, SERVER-side** certificate, keyed to an **address**. It is **NOT a source of inbound
+> peer identity.** `RELAY-20` holds the mirror-image problem — the peer's **CLIENT** certificate on a
+> connection *to* us (`r.TLS.PeerCertificates[0]`) — and **nothing in this task or in
+> `MTLS-CLIENTAUTH` establishes that those two certificates are the same.** Binding an inbound client
+> certificate to a peer principal needs its own record; this one does not provide it, and an earlier
+> draft of this section wrongly implied it did.
+>
+> **`fingerprint -> bus id` is forbidden.** Next-hop keying puts **one fingerprint on N records with N
+> different `bus_id`s** — in the worked example, `fpB` is on busB's route *and* on busC's — so a
+> fingerprint-first lookup is **ambiguous by construction** and would resolve an inbound busB
+> connection to **busC**: a peer-principal spoof produced entirely by correct data read backwards.
+>
+> **`base_url -> bus id` is the same trap in the other field**, for the same reason: N records
+> legitimately share one address, so an address-keyed map resolves to an arbitrary *destination*
+> rather than to the hop.
+>
+> The only sound direction is **address-first, outbound**: *I am dialling this address — does the
+> certificate I was served match this record's pin?* And because the pin is **duplicated across every
+> record sharing that address, and can diverge** (a hand-edited log, or a partial failure part-way
+> through an `add`), a consumer must read **each record's own pin** rather than caching one per
+> address.
+
+**ONE CONSTRUCTION, and the failure mode if that ever stops being true.** The value is produced and
+consumed only through `buscert.FingerprintOf` / `buscert.FingerprintOfDER` / `buscert.ParseFingerprint`
+— whichever end eventually compares it must compute it the same way. **A second construction — a
+digest over PEM, over the SPKI, or an uppercase spelling — would not fail loudly: every peer
+connection would simply be refused as an unknown peer, with nothing reporting a mismatch.** That is
+why the decoder parses with `buscert.ParseFingerprint` and refuses every other spelling, and why
+nothing in `internal/relay` or `cmd/agent-bus` hashes a certificate itself.
+
+**OPTIONAL and ADDITIVE, and `v` is deliberately NOT bumped.** Every route record already on disk was
+written without this field, and its absence decodes to the zero fingerprint, meaning *no pin*. A
+version bump would do the **opposite** of what it looks like it does: `DecodePeerRecord` requires `v`
+to **equal** `PeerRecordVersion`, so raising it to `2` would make this binary refuse every `v1`
+record on disk — a migration, not a compatibility marker. Nothing was reserved from
+`ondisk-format-version`, and nothing needed to be.
+
+**The cost, stated precisely so an operator can act on it — and it is worse than "it refuses".** The
+decoder rejects unknown fields, so an OLDER `agent-bus` binary cannot decode a record carrying this
+field. `PeerStore.Apply` **logs at ERROR ("DISCARDING a peer-configuration record that could not be
+decoded") and returns nil** — it does not refuse to boot (invariant 6: recovery always reaches a
+running server, and every discard is logged loudly). So the actual downgrade behaviour is: **the
+pinned generation is discarded at replay and the route reverts to its last generation without the
+field — a stale, UNPINNED route — or disappears entirely if there is no earlier generation.** The
+discard is loud, and it fails toward "no route" rather than "unverified route", but
+**downgrading a binary after pinning a next-hop certificate is not supported**: withdraw the pinned
+routes first, or keep the newer binary.
+
+**Set only where there is a hop to pin, checked in both directions** (encode, before the durable
+write; decode, because a record off disk is untrusted input even though this server wrote it). A
+tombstone carrying a pin is refused: it has given up its address, so the pin names a hop that is not
+there — and an address plus the credential to trust it is exactly the shape a resurrection wants.
+`PeerStore.Remove` therefore drops the pin with the route. The converse is **not** enforced: an
+active route may legitimately have no pin (that is every record written before this field existed,
+and the state until `MTLS-CLIENTAUTH` puts a certificate on the connection at all).
+
+**Re-pinning is a real write.** `PeerStore.Put`'s no-op predicate compares the **pin as well as the
+address**, because a peer rotating its certificate does not move: comparing only `base_url` would
+swallow the new pin, leave the old certificate trusted, and report success.
+
+**A record is written WHOLE, never as a delta — so an omitted pin is an ERASED pin.** That is the
+record design (every durable entry carries the complete post-transition state) and it is what makes
+two fail-silent-unpinned mistakes easy at the CLI. `agent-bus peer add` refuses both **before any
+write** rather than repairing them, and the refusals are documented in `CONTRACTS-CLI.md`: re-adding
+a pinned route without `-tls-fingerprint`, and re-pinning one destination through a hop while leaving
+its siblings on the old certificate. **Nothing serves this pin yet** — no connection is verified
+against it until `RELAY-20`.
+
+**One pin per address is enforced at the CLI, not by the record — and only as far as the CLI can
+see.** Nothing in `PeerRecord` stops two route records at one `base_url` carrying different
+fingerprints; a replayed log holding that state decodes fine. It is `agent-bus peer add` that refuses
+to create it, which is the right layer (the record must stay decodable). Two consequences, stated
+rather than implied: a hand-edited or externally-generated log can still hold a divergence, and the
+CLI's comparison is on the stored `base_url` STRING, compared case-insensitively and resolving
+nothing — so `https://h` versus `https://h:443`, a trailing-dot FQDN, and two DNS names for one
+machine are all different addresses to it. **A consumer must therefore read each record's own pin and
+never cache one pin per address.**
 
 ### `config_seq` is a BUS-WIDE counter, and that is a fix, not a style choice
 

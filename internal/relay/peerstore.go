@@ -80,6 +80,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -385,6 +386,78 @@ type PeerRecord struct {
 	// message addressed to its agents.
 	BaseURL string
 
+	// NextHopTLSCertFingerprint pins the TLS certificate of the bus THAT ANSWERS
+	// AT BaseURL — the NEXT HOP — and it is deliberately NOT keyed to BusID.
+	//
+	// # Why the name says NEXT HOP and says TLS
+	//
+	// Two traps meet on this field, and the name is what keeps a future reader
+	// out of both.
+	//
+	// The first is the ROUTING one, and it is the reason this field exists in
+	// this shape (cmd/agent-bus/peer.go's file comment, CONTRACTS-CLI.md):
+	//
+	//	a route record's BusID is the DESTINATION, and its BaseURL is the
+	//	address of the NEXT HOP — for a non-adjacent destination those are
+	//	DIFFERENT BUSES.
+	//
+	// `peer add -bus-id busB -url https://b:8443 -route-for busC` writes a
+	// record whose BusID is busC and whose BaseURL is busB's address. The
+	// certificate presented on a connection to that address is busB's, so a pin
+	// keyed to the record's BusID would be pinning busC's identity against a
+	// handshake that terminates at busB, and EVERY non-adjacent hop would be
+	// refused. The field is therefore named NEXT HOP — the thing at BaseURL —
+	// and the two fields sit next to each other so that a reader who copies one
+	// thinks about the other.
+	//
+	// The second is a NAMING collision inside this package: peer.go's
+	// peerFingerprint and idem.Fingerprint are the IDEMPOTENCY fingerprint of a
+	// roster payload — a replay-protection digest over request bytes, with no
+	// relation to transport or to any certificate. That is why this one says
+	// TLS: nothing here may be called a bare "fingerprint" without saying which
+	// of the two it is.
+	//
+	// # Construction and optionality
+	//
+	// It is a buscert.Fingerprint — THE fingerprint of the design,
+	// sha256.Sum256(leaf.Raw), the exact value buscert.FingerprintOf returns from
+	// a live connection's certificate. It is that TYPE and not a []byte or a
+	// string precisely so that whatever eventually compares it computes it the
+	// same way and cannot accidentally agree with a second construction — which
+	// would fail SILENTLY, refusing every peer as unknown with nothing reporting
+	// a mismatch.
+	//
+	// # WHICH CERTIFICATE, IN WHICH DIRECTION — read this before consuming it
+	//
+	// This is the certificate the hop at BaseURL presents WHEN THIS BUS DIALS IT:
+	// an OUTBOUND, SERVER-side certificate, keyed to an ADDRESS. It is NOT a
+	// source of INBOUND peer identity. A peer's CLIENT certificate arriving on a
+	// connection TO us (r.TLS.PeerCertificates[0]) is the mirror-image problem,
+	// and nothing here or in MTLS-CLIENTAUTH establishes that the two are the
+	// same certificate; binding an inbound client certificate to a peer principal
+	// needs its OWN record.
+	//
+	// So this must NOT be inverted into a `fingerprint -> bus id` lookup to
+	// answer that question. Next-hop keying deliberately puts ONE fingerprint on
+	// N records with N DIFFERENT bus ids (fpB sits on busB's route and on busC's),
+	// so fingerprint-first is ambiguous BY CONSTRUCTION and would resolve an
+	// inbound busB connection to busC — a peer principal spoofed out of entirely
+	// correct data read backwards. `BaseURL -> bus id` is the same trap in the
+	// other field. The sound direction is address-first and outbound only: "I am
+	// dialling this address; does the certificate I was served match THIS
+	// record's pin?" — and because the pin is duplicated across every record
+	// sharing an address and can diverge, read each record's own pin rather than
+	// caching one per address.
+	//
+	// The ZERO VALUE MEANS ABSENT, following invite.Record.CertFingerprint. It is
+	// OPTIONAL on an active route and FORBIDDEN on a tombstone: validate enforces
+	// "a pin only where there is a hop to pin", in both the encode and the decode
+	// direction. The converse — requiring a pin on every active route — is
+	// deliberately NOT enforced, because every route record already on disk was
+	// written without one and a mandatory field would make an existing federation
+	// undecodable at replay.
+	NextHopTLSCertFingerprint buscert.Fingerprint
+
 	// UpdatedAt is when this generation was written. For a tombstone it is also
 	// the input to PeerTombstoneRetention, so a removed record without one could
 	// never be swept.
@@ -400,9 +473,16 @@ func (r PeerRecord) recordUpdatedAt() time.Time   { return r.UpdatedAt }
 // backing array a caller could reach into.
 func (r PeerRecord) clone() busScopedRecord { return r }
 
+// sameGenerationAs compares EVERY configured field, the TLS pin included. It
+// must: this predicate is what keeps a re-applied record silent, so a field it
+// ignored would let a record differing only in that field be folded in as "what
+// I already have" — and for this field that is a stale certificate pin surviving
+// a rotation.
 func (r PeerRecord) sameGenerationAs(o busScopedRecord) bool {
 	other, ok := o.(PeerRecord)
-	return ok && r.State == other.State && r.BaseURL == other.BaseURL && r.UpdatedAt.Equal(other.UpdatedAt)
+	return ok && r.State == other.State && r.BaseURL == other.BaseURL &&
+		r.NextHopTLSCertFingerprint == other.NextHopTLSCertFingerprint &&
+		r.UpdatedAt.Equal(other.UpdatedAt)
 }
 
 // peerRecordJSON is the routing record's wire shape.
@@ -413,6 +493,17 @@ func (r PeerRecord) sameGenerationAs(o busScopedRecord) bool {
 // route withdrawal in the trust table with no decode error at all, silently
 // un-pinning a bus. It costs eleven bytes and turns that class of bug into a
 // refusal at the door.
+//
+// THE VERSION IS NOT BUMPED BY next_hop_tls_cert_sha256, and that is a decision
+// rather than an omission. The field is ADDITIVE and OPTIONAL, so this binary
+// reads every record ever written by an older one. A bump would do the opposite
+// of what it looks like it does: DecodePeerRecord requires the version to EQUAL
+// PeerRecordVersion, so raising it to 2 would make this binary refuse every v1
+// record on disk — it would not be a compatibility marker, it would be a
+// migration nobody asked for. The cost of not bumping is stated where an
+// operator can act on it (CONTRACTS-ONDISK.md): an OLDER binary reading a record
+// that carries this field refuses it as an unknown field, so a downgrade after
+// pinning a next-hop certificate is not supported.
 type peerRecordJSON struct {
 	Version   int    `json:"v"`
 	Rec       string `json:"rec"`
@@ -420,6 +511,15 @@ type peerRecordJSON struct {
 	ConfigSeq uint64 `json:"config_seq"`
 	State     string `json:"state"`
 	BaseURL   string `json:"base_url,omitempty"`
+
+	// NextHopTLSCertSHA256 is the LOWERCASE HEX spelling of
+	// PeerRecord.NextHopTLSCertFingerprint — buscert.Fingerprint.String(), the
+	// one textual form (buscert.ParseFingerprint rejects every other spelling,
+	// uppercase included). The key names the NEXT HOP, not the record's bus, so
+	// that the constraint survives in the durable format and not only in a Go
+	// doc comment.
+	NextHopTLSCertSHA256 string `json:"next_hop_tls_cert_sha256,omitempty"`
+
 	UpdatedAt string `json:"updated_at"`
 }
 
@@ -462,6 +562,16 @@ func (r PeerRecord) validate() error {
 			// attacker-chosen text into an operator's log.
 			return fmt.Errorf("%w: a removed peer route carries a base URL (%d bytes); a tombstone holds no live configuration", ErrInvalidPeerRecord, len(r.BaseURL))
 		}
+		// The pin is live configuration too, and it is refused here for a
+		// sharper reason than symmetry: a pin is a property of the HOP AT
+		// BaseURL, and a tombstone has no BaseURL, so a fingerprint on one names
+		// a hop that is not there. Left admissible it would also be the second
+		// half of a resurrection — an address and the credential to trust it.
+		// The value is not echoed even though it is public: on a record that
+		// should not have one it is either corruption or injected.
+		if r.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+			return fmt.Errorf("%w: a removed peer route carries a next-hop TLS certificate fingerprint; a tombstone holds no live configuration, and a pin is a property of the address it has just given up", ErrInvalidPeerRecord)
+		}
 	default:
 		return fmt.Errorf("%w: %s is not one of the fixed lifecycle states", ErrInvalidPeerRecord, r.State)
 	}
@@ -483,11 +593,18 @@ func (r PeerRecord) Encode() (json.RawMessage, error) {
 		State:     r.State.String(),
 		UpdatedAt: r.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
-	// The state-owned field is written ONLY for the state that owns it, so the
-	// encoder cannot produce a record its own validate would refuse on the way
-	// back in.
+	// The state-owned fields are written ONLY for the state that owns them, so
+	// the encoder cannot produce a record its own validate would refuse on the
+	// way back in. The pin travels with the address it is a pin FOR: they are
+	// written under one condition because they are one fact about one hop.
 	if r.State == PeerRecordActive {
 		j.BaseURL = r.BaseURL
+		if r.NextHopTLSCertFingerprint != (buscert.Fingerprint{}) {
+			// String() is buscert's one textual form. The field is omitempty, so
+			// a route with no pin is byte-identical on disk to one written before
+			// this field existed — which is what keeps the change additive.
+			j.NextHopTLSCertSHA256 = r.NextHopTLSCertFingerprint.String()
+		}
 	}
 	return encodePeerJSON(j)
 }
@@ -522,12 +639,40 @@ func DecodePeerRecord(b []byte) (PeerRecord, error) {
 	if err != nil {
 		return PeerRecord{}, err
 	}
+	// ABSENT stays absent — a record written before this field existed decodes
+	// to the zero fingerprint, which validate reads as "no pin". Present is
+	// parsed by buscert.ParseFingerprint and by nothing else: it is the same
+	// strict 64-lowercase-hex rule the invite blob and the CLI flag use, so a
+	// record whose pin was hand-edited into a different spelling is refused here
+	// rather than silently failing to match a live certificate later.
+	var fp buscert.Fingerprint
+	if j.NextHopTLSCertSHA256 != "" {
+		parsed, ferr := buscert.ParseFingerprint(j.NextHopTLSCertSHA256)
+		if ferr != nil {
+			// The offending text is NOT echoed: it is file-derived and its only
+			// relevant property is that it is not a fingerprint. buscert's own
+			// error quotes no input either.
+			return PeerRecord{}, fmt.Errorf("%w: next_hop_tls_cert_sha256 is not a certificate fingerprint: %v", ErrInvalidPeerRecord, ferr)
+		}
+		// AN EXPLICIT 64 ZEROS IS REFUSED, matching the all-zero refusal this
+		// package already applies to a pinned signing key — and here for a
+		// sharper reason: the zero value is this record's marker for NO PIN, so
+		// a present-but-zero field would decode to a hop that reads as unpinned
+		// while the bytes on disk say an operator pinned something. That is the
+		// fail-silent direction, and a record that cannot mean two things is
+		// cheaper than a reader that has to know which one it meant.
+		if parsed == (buscert.Fingerprint{}) {
+			return PeerRecord{}, fmt.Errorf("%w: next_hop_tls_cert_sha256 is all zero; the field is omitted when a hop is unpinned, so a present all-zero value is either corruption or an injected 'pinned to nothing'", ErrInvalidPeerRecord)
+		}
+		fp = parsed
+	}
 	r := PeerRecord{
-		BusID:     j.BusID,
-		ConfigSeq: j.ConfigSeq,
-		State:     state,
-		BaseURL:   j.BaseURL,
-		UpdatedAt: updatedAt,
+		BusID:                     j.BusID,
+		ConfigSeq:                 j.ConfigSeq,
+		State:                     state,
+		BaseURL:                   j.BaseURL,
+		NextHopTLSCertFingerprint: fp,
+		UpdatedAt:                 updatedAt,
 	}
 	if err := r.validate(); err != nil {
 		return PeerRecord{}, err
@@ -1762,10 +1907,20 @@ func (t *busTable) lookup(busID string) (busScopedRecord, bool) {
 type PeerConfig struct {
 	// BusID is the peer's bus id. It is validated against OUR id
 	// (ValidatePeerBusID): a peer may never assert our own namespace.
+	//
+	// FOR A STATIC NEXT-HOP ROUTE THIS IS THE DESTINATION, and BaseURL below is
+	// the address of the intermediate bus that carries the traffic. The two name
+	// different buses, which is exactly why the pin is keyed to the address.
 	BusID string
 
 	// BaseURL is a BARE https origin — scheme, host, optional port.
 	BaseURL string
+
+	// NextHopTLSCertFingerprint pins the certificate of whatever answers at
+	// BaseURL. Optional; the zero value means no pin. See
+	// PeerRecord.NextHopTLSCertFingerprint for why it is keyed to BaseURL and
+	// never to BusID.
+	NextHopTLSCertFingerprint buscert.Fingerprint
 }
 
 // BusTrust is one operator instruction: pin these bus signing keys for this bus.
@@ -2129,20 +2284,33 @@ func (s *PeerStore) BusID() string { return s.busID }
 // check and the sequence number are decided BEFORE anything is written, and the
 // record is folded into memory only after Durable.Write has fsynced both phases.
 //
-// A Put whose address is identical to the peer's current active route is a
-// NO-OP that returns the existing record and writes nothing. That is not an
-// optimisation: an operator's config-management run that re-applies the same
-// peering would otherwise append a record on every pass and the log would grow
-// with nothing having changed. Note the deliberate asymmetry with invariant 10's
-// wire-level rule — there is no client, no idempotency key and no lost ack here,
-// because this is an in-process operator API reached from an offline subcommand
-// under the dirlock, not a route.
+// A Put whose address AND next-hop certificate pin are identical to the peer's
+// current active route is a NO-OP that returns the existing record and writes
+// nothing. That is not an optimisation: an operator's config-management run that
+// re-applies the same peering would otherwise append a record on every pass and
+// the log would grow with nothing having changed. Note the deliberate asymmetry
+// with invariant 10's wire-level rule — there is no client, no idempotency key
+// and no lost ack here, because this is an in-process operator API reached from
+// an offline subcommand under the dirlock, not a route.
+//
+// THE PIN IS PART OF THAT COMPARISON, and leaving it out would be the bug this
+// sentence exists to prevent: re-pinning a rotated certificate at an unchanged
+// address is precisely a Put whose BaseURL has not moved, and it would be
+// swallowed as a no-op while the operator was told it succeeded.
 func (s *PeerStore) Put(cfg PeerConfig) (PeerRecord, error) {
 	rec, err := s.write(s.routes, cfg.BusID, func(existing busScopedRecord, seq uint64, now time.Time) (busScopedRecord, bool, error) {
-		if cur, ok := existing.(PeerRecord); ok && cur.State == PeerRecordActive && cur.BaseURL == cfg.BaseURL {
+		if cur, ok := existing.(PeerRecord); ok && cur.State == PeerRecordActive &&
+			cur.BaseURL == cfg.BaseURL && cur.NextHopTLSCertFingerprint == cfg.NextHopTLSCertFingerprint {
 			return cur, false, nil
 		}
-		return PeerRecord{BusID: cfg.BusID, ConfigSeq: seq, State: PeerRecordActive, BaseURL: cfg.BaseURL, UpdatedAt: now}, true, nil
+		return PeerRecord{
+			BusID:                     cfg.BusID,
+			ConfigSeq:                 seq,
+			State:                     PeerRecordActive,
+			BaseURL:                   cfg.BaseURL,
+			NextHopTLSCertFingerprint: cfg.NextHopTLSCertFingerprint,
+			UpdatedAt:                 now,
+		}, true, nil
 	})
 	if err != nil {
 		return PeerRecord{}, err
