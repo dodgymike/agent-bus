@@ -56,6 +56,7 @@ _None recorded._
 - [0b43393e-556b-409a-938a-846be2fb4a75](../../INVITE/EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) — EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner… (superseded)
 - [AUTH-1-FU-ACTIVECAP](../AUTH-1-FU-ACTIVECAP--2d92b699/task.md) — AUTH-1-FU-ACTIVECAP: cap ACTIVE sessions per agent -- the one place an agent-id-keyed cap… (done)
 - [AUTH-1-FU-ACTIVECAP-DOCS](../AUTH-1-FU-ACTIVECAP-DOCS--27a811c9/task.md) — AUTH-1-FU-ACTIVECAP-DOCS: document the per-agent ACTIVE-session cap in CONTRACTS-HTTP.md… (todo)
+- [AUTH-1-FU-SESSIONSCALE](../AUTH-1-FU-SESSIONSCALE--067b80cf/task.md) — AUTH-1-FU-SESSIONSCALE: session-table O(n) scans and refuse-not-evict policy cause CPU/lo… (todo)
 - [LISTENADDR-FU-CONTRACTS](../../DOCS/LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) — LISTENADDR-FU-CONTRACTS: CONTRACTS.md CLI-flag table still shows -listen default :8080 (done)
 
 ---

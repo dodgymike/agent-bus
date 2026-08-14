@@ -48,7 +48,7 @@ PRIORITY P1: main currently documents the wrong transport as fact to any agent r
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-VERIFY-FU-DOCSCHEME](../../DOCS/MTLS-VERIFY-FU-DOCSCHEME--cb4fd330/task.md) — MTLS-VERIFY-FU-DOCSCHEME: README + AGENT_PROTOCOL still tell agents to dial http:// a bus… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

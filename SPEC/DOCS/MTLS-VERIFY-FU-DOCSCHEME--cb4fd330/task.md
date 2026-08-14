@@ -44,7 +44,7 @@ MTLS-LISTENER made the bus TLS-only, so a plaintext request gets a bare 400 Bad 
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

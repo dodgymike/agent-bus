@@ -46,7 +46,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)
 - [MTLS-ROTATE](../MTLS-ROTATE--c2e8df5b/task.md) — MTLS-ROTATE: a client accepts a SET of pinned bus certificates so a rotation does not for… (done)
 - [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
@@ -64,7 +64,7 @@ _None recorded._
 - [3cb182dc-9bd2-489b-8a91-0d8529f77200](../No-behavioural-test-asserts-that-a-resumed-TLS-handshake--3cb182dc/task.md) — No behavioural test asserts that a resumed TLS handshake still re-verifies the pinned bus… (todo)
 - [51710f76-ea92-42fd-bbc3-b86415fbc8e1](../../CLI/Latent-data-race-in-cmd-agent-busctl-enrol_test.go-serve--51710f76/task.md) — Latent data race in cmd/agent-busctl/enrol_test.go: server stderr buffer is read while os… (done)
 - [CONTEXT-CLI-SECTIONS](../../CONTEXT/CONTEXT-CLI-SECTIONS--3b4bd434/task.md) — CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… (todo)
-- [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-LISTENER-FU-CLIENTHTTP](../MTLS-LISTENER-FU-CLIENTHTTP--8d906b8b/task.md) — MTLS-LISTENER-FU-CLIENTHTTP: client/config.go still allows unpinned http:// to loopback,… (todo)
 - [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (done)
 - [efc7facd-ac16-4a17-a3af-c0c3b69c72ae](../Config.HTTPClient-lets-an-embedder-bypass-certificate-pi--efc7facd/task.md) — Config.HTTPClient lets an embedder bypass certificate pinning entirely (todo)

@@ -50,7 +50,7 @@ _None recorded._
 - [767f0cd9-beaa-4d5f-a260-44e7681891fc](../../MTLS/CONTRACTS-ONDISK.md-document-the-client-side-identities--767f0cd9/task.md) — CONTRACTS-ONDISK.md: document the client-side identities.json format and the bus_fingerpr… (todo)
 - [INVITE-MINT](../../INVITE/INVITE-MINT--1d0d0e60/task.md) — INVITE-MINT: an operator mints a single-use, expiring invite -- the server is authoritati… (done)
 - [MTLS-EXPIRY](../../MTLS/MTLS-EXPIRY--3604af80/task.md) — MTLS-EXPIRY: the client never checks the pinned bus certificate validity period -- the 36… (done)
-- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-ROTATE](../../MTLS/MTLS-ROTATE--c2e8df5b/task.md) — MTLS-ROTATE: a client accepts a SET of pinned bus certificates so a rotation does not for… (done)
 - [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
 - [bd662bae-4c6c-426d-a736-7830d2d21037](../../MTLS/parseBusURL-does-not-canonicalise-redundant-path-slashes--bd662bae/task.md) — parseBusURL does not canonicalise redundant path slashes/segments, so a differently-spell… (todo)

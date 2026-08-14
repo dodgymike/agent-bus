@@ -70,7 +70,7 @@ EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BIND | BLOCKS: MTL
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-CROSSCHECK-FU-CERTEXPIRY](../MTLS-CROSSCHECK-FU-CERTEXPIRY--b5d86daa/task.md) — A bound agent whose client certificate expires is locked out permanently, including from… (todo)
 - [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
-- [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (todo)
+- [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (superseded)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)

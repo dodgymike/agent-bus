@@ -5,19 +5,19 @@
 | Public id | `fa26036c-ecb5-4c0e-a7cf-d72963cae686` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | core |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T22:31:37.855573+00:00 |
-| Updated | 2026-08-08T10:29:38.478268+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T22:31:20.878963+00:00 |
+| Completed | 2026-08-14T22:31:20.878945+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestHubReadsTheDurableRoster ./internal/hub
+go test -race -run TestTwoAgentsKeepTalkingAcrossARestartWithoutReEnrolling ./cmd/agent-bus
 ```
 
 ## Description
@@ -40,7 +40,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (in_progress)
+- [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

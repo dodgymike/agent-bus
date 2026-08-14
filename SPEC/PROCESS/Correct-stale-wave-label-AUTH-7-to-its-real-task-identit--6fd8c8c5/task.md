@@ -34,7 +34,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MSG-FU-ROSTERSOURCE](../../AUTH/MSG-FU-ROSTERSOURCE--fa26036c/task.md) — MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes e… (todo)
+- [MSG-FU-ROSTERSOURCE](../../AUTH/MSG-FU-ROSTERSOURCE--fa26036c/task.md) — MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes e… (done)
 
 ---
 

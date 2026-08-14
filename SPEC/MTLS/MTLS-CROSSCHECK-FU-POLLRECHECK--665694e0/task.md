@@ -5,13 +5,13 @@
 | Public id | `665694e0-c81e-4fcb-9d26-c767d6f33d35` |
 | Key | MTLS-CROSSCHECK-FU-POLLRECHECK |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | superseded |
 | Priority | P2 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T20:58:31.521378+00:00 |
-| Updated | 2026-08-14T20:58:31.521378+00:00 |
+| Updated | 2026-08-14T22:33:06.317442+00:00 |
 | Completed | — |
 
 ## Description
@@ -26,6 +26,7 @@ MTLS-CROSSCHECK adds a SECOND property that a parked long poll can outlive. The 
 
 
 - **follow-up** [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md)
+- **superseded by** [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -36,6 +37,15 @@ MTLS-CROSSCHECK adds a SECOND property that a parked long poll can outlive. The 
 
 - [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
 - [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
 
 ---
 

@@ -6,12 +6,12 @@
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
 | Status | todo |
-| Priority | P0 |
+| Priority | P1 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T21:26:19.887450+00:00 |
-| Updated | 2026-08-07T21:26:19.887450+00:00 |
+| Updated | 2026-08-14T22:31:56.642933+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,14 @@
 ```sh
 go build ./... && ./agent-bus roster --help 2>&1 | grep -qi remove
 ```
+
+## Status note
+
+REPRIORITISED P0->P1, 2026-08-14 (coordinator-directed AUTH audit), WHY STILL WANTED: invite-gating closes the ATTACK (an unauthenticated flooder saturating the roster) but not the EXHAUSTION -- 4096 legitimate, operator-invited enrolments still end at the only remedy today, deleting the whole data directory (confirmed: internal/httpapi/server.go's route table has no removal/leave route wired, and internal/auth/roster.go has zero Remove/Delete/Evict functions -- grep confirms). Reachability collapses to holders of operator-minted single-use invites, so impact is unchanged (total data-directory loss is still the only remedy) and reachability is merely transformed from anonymous to invited. That is a real downgrade in exploitability (P0->P1), not a closure of the underlying problem, hence this stays a live P1, not superseded or deferred.
+
+CONFLICT TO RECORD, subtler than a red test: this task will FALSIFY internal/auth/rosterdos_test.go's central "permanent" claim WHILE LEAVING THE TEST GREEN. Verified directly (2026-08-14; note this file is CURRENTLY STAGED/UNCOMMITTED in the live working tree -- git status shows "A  internal/auth/rosterdos_test.go", not yet part of any commit including ec14bb8, so cite it as current-tree not ec14bb8-tree): the guard's own comment says plainly "It reflects over the auth.Roster INTERFACE... It is NOT a module-wide proof that nothing can free a slot. Reclamation would slip past it in at least two shapes: a method added only to a CONCRETE roster... and an OFFLINE operator tool that edits the data directory without going through this package at all -- which is exactly the shape AUTH-ROSTER-RECLAIM... proposes, in cmd/. Whoever lands that must update this file deliberately; it will not be caught here." A silently-passing test asserting something no longer true is the worse failure than a red one. THIS TASK MUST ship a deliberate update to rosterdos_test.go alongside the reclaim tool -- not merely avoid breaking it, but actively correct its now-false central claim, per its own author's instruction.
+
+Also required, per this task's existing description and restated here for emphasis: a RESERVED (not hand-picked) WAL record-type number if a new one is needed, and explicit confirmation in the implementation and its tests that removal frees the roster SLOT, never the id/suffix (invariant 1 -- ids are never reused, including across restarts).
 
 ## Description
 

@@ -54,7 +54,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 - [INVITE-PEERGUARD](../INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)
 - [INVITE-REVOKE](../INVITE-REVOKE--d9def083/task.md) — INVITE-REVOKE: durably revoke an un-redeemed invite, and state what revocation does to an… (todo)
 - [INVITE-STORE](../INVITE-STORE--a9ef92de/task.md) — INVITE-STORE: durable single-use invite record (mint/lookup/consume/expire), recovered by… (done)
-- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (in_progress)
+- [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)

@@ -119,7 +119,7 @@ _None recorded._
 - [4eb903f8-04cd-497c-ba4a-7eadceb65725](../../SIGN/SEC-ed25519.Verify-panics-on-wrong-size-public-key-remot--4eb903f8/task.md) — SEC: ed25519.Verify panics on wrong-size public key -- remote DoS across AUTH-1/CRYPTO-10… (todo)
 - [AGENTIF-2](../../AGENTIF/AGENTIF-2--15e4509c/task.md) — AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry (superseded)
 - [AUTH-2](../AUTH-2--4b45a6d8/task.md) — AUTH-2: Token verification middleware (done)
-- [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (in_progress)
+- [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (done)
 - [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
 - [CLI-2](../../CLI/CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
 - [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)

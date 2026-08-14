@@ -5,13 +5,13 @@
 | Public id | `c6530638-7cca-4404-bc61-88ca6c2d30b9` |
 | Key | RELAY-24-FU-STOREMSGLOOKUP |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | store |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:00:50.162925+00:00 |
-| Updated | 2026-08-14T22:00:50.162925+00:00 |
+| Updated | 2026-08-14T22:06:41.239022+00:00 |
 | Completed | — |
 
 ## Proof command

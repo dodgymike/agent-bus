@@ -5,19 +5,19 @@
 | Public id | `d53e3b21-2dae-4be8-974f-87ce7d62c919` |
 | Key | AUTH-3 |
 | Epic | [AUTH](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T09:05:48.742293+00:00 |
-| Updated | 2026-08-08T10:20:40.314945+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T22:31:01.182209+00:00 |
+| Completed | 2026-08-14T22:31:01.182193+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestRosterRecovery ./internal/auth
+go test -race -run TestAUTH3AcceptanceAgentAuthenticatesAndIsListedAfterARestart ./internal/auth
 ```
 
 ## Status note
@@ -59,7 +59,6 @@ CORRECTION (spec-keeper, 2026-08-02, from ID-3 security+reviewer gate findings):
 
 - [1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa](../SEC-unauthenticated-enrol-permanently-bricks-the-roster--1c4d3dea/task.md) — SEC: unauthenticated enrol permanently bricks the roster -- 4096-cap fails closed forever… (in_progress)
 - [AUTH-1](../AUTH-1--54fa94c0/task.md) — AUTH-1: POST /v1/enroll -- signed credential issuance (done)
-- [AUTH-1-FU-SESSIONSCALE](../AUTH-1-FU-SESSIONSCALE--067b80cf/task.md) — AUTH-1-FU-SESSIONSCALE: session-table O(n) scans and refuse-not-evict policy cause CPU/lo… (todo)
 - [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
 - [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md) — CRYPTO-3: Enrolment mints and registers the second (messaging) keypair, bound to the serv… (todo)
 - [ENROL-SHAPE](../../INVITE/ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
@@ -70,7 +69,7 @@ CORRECTION (spec-keeper, 2026-08-02, from ID-3 security+reviewer gate findings):
 - [IDEM-13](../../IDEM/IDEM-13--a869264d/task.md) — IDEM-13: Idempotent enrol / leave / peer-enrol (todo)
 - [IDEM-6](../../IDEM/IDEM-6--208c4fb5/task.md) — IDEM-6: Idempotent enrol, leave, and peer-enrol (superseded)
 - [LIVE-5](../../LIVE/LIVE-5--7f62eeee/task.md) — LIVE-5: Durable last-observation and restart liveness reconstruction (todo)
-- [MSG-FU-ROSTERSOURCE](../MSG-FU-ROSTERSOURCE--fa26036c/task.md) — MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes e… (todo)
+- [MSG-FU-ROSTERSOURCE](../MSG-FU-ROSTERSOURCE--fa26036c/task.md) — MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes e… (done)
 - [MSG-FU-SUFFIXFLOOR](../../ID/MSG-FU-SUFFIXFLOOR--94159d93/task.md) — MSG-FU-SUFFIXFLOOR: resume per-name agent-id suffix counters from disk (agent ids are now… (in_progress)
 - [MSG-FU-SUFFIXFLOOR-FU-ENROLRECORDS](../../ID/MSG-FU-SUFFIXFLOOR-FU-ENROLRECORDS--477b8eeb/task.md) — MSG-FU-SUFFIXFLOOR-FU-ENROLRECORDS: fold ENROLMENT records into the legacy-dir suffix bac… (todo)
 - [MTLS-BIND](../../MTLS/MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)

@@ -9,7 +9,7 @@
 > - `SPEC/<EPIC>/epic.md` — every task in the epic, open first, then closed
 > - `SPEC/<EPIC>/<task>/task.md` — the full record for one task
 
-**594 tasks in 28 epics — 391 open, 203 closed.**
+**594 tasks in 28 epics — 387 open, 207 closed.**
 
 | Epic | Open | Total | Summary | Tasks |
 | --- | ---: | ---: | --- | --- |
@@ -17,7 +17,7 @@
 | ADMIN | 14 | 14 | The local operator console for a set of agent-bus nodes. Ships as a NEW BINARY \`agent-busadm\` | [SPEC/ADMIN/epic.md](SPEC/ADMIN/epic.md) |
 | AGENTIF | 4 | 13 | scripts/bus-*.sh wrappers (serve, enrol, agents, send, broadcast, wait, leave, peer) plus AGENT_PROTOCOL.md,… | [SPEC/AGENTIF/epic.md](SPEC/AGENTIF/epic.md) |
 | ART | 18 | 18 | Planning epic for secure small inline and resumable chunked artifact transfer, including federated buses. Git… | [SPEC/ART/epic.md](SPEC/ART/epic.md) |
-| AUTH | 17 | 24 | Agent submits a key, server signs it and returns a bearer token; token verification middleware; revocation/le… | [SPEC/AUTH/epic.md](SPEC/AUTH/epic.md) |
+| AUTH | 15 | 24 | Agent submits a key, server signs it and returns a bearer token; token verification middleware; revocation/le… | [SPEC/AUTH/epic.md](SPEC/AUTH/epic.md) |
 | CLI | 13 | 35 | A first-class command-line client for PEOPLE, distinct from the scripts/bus-*.sh agent wrappers. The wrappers… | [SPEC/CLI/epic.md](SPEC/CLI/epic.md) |
 | COMMS | 13 | 13 | Inter-agent communication over the bus: establish by measurement, not assertion, what a well-formed message b… | [SPEC/COMMS/epic.md](SPEC/COMMS/epic.md) |
 | CONTEXT | 20 | 25 | Cut the token cost of this repo's documentation without losing the rationale that stops agents breaking thing… | [SPEC/CONTEXT/epic.md](SPEC/CONTEXT/epic.md) |
@@ -32,7 +32,7 @@
 | INVITE | 18 | 28 | Invites are single-use, expiring and revocable, minted by an operator; redeeming one is the ONLY route onto t… | [SPEC/INVITE/epic.md](SPEC/INVITE/epic.md) |
 | LIVE | 15 | 15 | Planning epic for authenticated agent liveness detection and authorized status subscriptions. Assumption: use… | [SPEC/LIVE/epic.md](SPEC/LIVE/epic.md) |
 | MSG | 1 | 6 | Agent list, broadcast, DM, message history, cursor semantics. | [SPEC/MSG/epic.md](SPEC/MSG/epic.md) |
-| MTLS | 30 | 38 | Self-signed certificates, mutual TLS, no certificate authority anywhere; TLS is the required transport and th… | [SPEC/MTLS/epic.md](SPEC/MTLS/epic.md) |
+| MTLS | 28 | 38 | Self-signed certificates, mutual TLS, no certificate authority anywhere; TLS is the required transport and th… | [SPEC/MTLS/epic.md](SPEC/MTLS/epic.md) |
 | POLL | 0 | 3 | Park a waiter, wake on new message, timeout, cursor advance, no goroutine leak on client disconnect, thunderi… | [SPEC/POLL/epic.md](SPEC/POLL/epic.md) |
 | PROCESS | 7 | 11 | Epic key reserved 2026-08-08 (reservation namespace epic-key, value 1). Work about HOW THIS PROJECT IS BUILT… | [SPEC/PROCESS/epic.md](SPEC/PROCESS/epic.md) |
 | RATCHET | 2 | 8 | Research and de-risk the Signal-style double-ratchet requirement, with one governing constraint: WE DO NOT WR… | [SPEC/RATCHET/epic.md](SPEC/RATCHET/epic.md) |

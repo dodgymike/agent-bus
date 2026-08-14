@@ -5,19 +5,19 @@
 | Public id | `17e70a7e-2f29-453a-8ded-74cbd01c4274` |
 | Key | MTLS-LISTENER |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:50.174921+00:00 |
-| Updated | 2026-08-07T20:03:28.266973+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T22:26:49.426047+00:00 |
+| Completed | 2026-08-14T22:26:49.426031+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestServerServesTLSOnly|TestPlaintextClientIsRejected|TestRunRefusesToStartWithoutUsableCert|TestCmdHasNoPlaintextListener' ./cmd/agent-bus && grep -qi 'tls' CONTRACTS-CLI.md
+go test -race -run 'TestServerServesTLSOnly|TestPlaintextClientIsRejected|TestRunRefusesToStartWithoutUsableCert|TestCmdHasNoPlaintextListener' ./cmd/agent-bus && test "$(grep -Fxc '**The server serves TLS and ONLY TLS (invariant 11, `MTLS-LISTENER`, landed 2026-08-07).** `-listen`' CONTRACTS-CLI.md)" -eq 1
 ```
 
 ## Status note

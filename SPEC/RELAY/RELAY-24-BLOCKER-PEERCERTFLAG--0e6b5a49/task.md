@@ -5,13 +5,13 @@
 | Public id | `0e6b5a49-74be-432e-ab1e-485847a84fd0` |
 | Key | RELAY-24-BLOCKER-PEERCERTFLAG |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:00:22.363350+00:00 |
-| Updated | 2026-08-14T22:00:22.363350+00:00 |
+| Updated | 2026-08-14T22:06:34.821261+00:00 |
 | Completed | — |
 
 ## Proof command
