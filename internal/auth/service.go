@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -178,7 +179,17 @@ type idempotentEnrol struct {
 	// message it signs then fails to verify, everywhere, with nothing pointing
 	// at the cause.
 	messagingKey []byte
-	result       EnrolResult
+	// inviteID is part of the REMEMBERED PAYLOAD for exactly the reason
+	// messagingKey is. An enrolment presented with an invite ASSERTS that invite,
+	// so the same key re-presented with a DIFFERENT invite id is a key reused for
+	// different content — ErrIdempotencyKeyReused — and not a retry. Leaving it
+	// out would be worse than a missing check: the replay would return the
+	// ORIGINAL result and apply nothing, so the second invite would be left
+	// UNSPENT while the caller walked away believing it had been redeemed.
+	// An UN-INVITED enrolment remembers the empty string, so a retry that adds an
+	// invite to a previously un-invited key is caught too.
+	inviteID string
+	result   EnrolResult
 }
 
 // NewService builds a Service from opts.
@@ -260,7 +271,75 @@ type EnrolRequest struct {
 	// REQUIRED: without one, a retry after a lost acknowledgement mints a
 	// second agent id for the same agent, and the client has no way to tell.
 	IdempotencyKey string
+
+	// Invite is an in-flight invite redemption this enrolment must be ATOMIC
+	// with. It is supplied by the caller (internal/httpapi), which has already
+	// verified the presented secret.
+	//
+	// NIL MEANS AN UN-INVITED ENROLMENT, AND THAT IS STILL FULLY SUPPORTED. This
+	// build REDEEMS an invite when one is presented; it does not REQUIRE one.
+	// Invariant 3's end state is invite-only enrolment, and making that flip is a
+	// SEPARATE task — nothing here may be read as "enrolment is gated". The flip
+	// cannot be made here in any case: the compiled CLI cannot yet present an
+	// invite, so requiring one would lock every enrolled agent's peers out of the
+	// bus.
+	//
+	// When it is non-nil the roster MUST support the composite write
+	// (PutWithInvite). A roster that does not — MemoryRoster is one — makes the
+	// enrolment fail with ErrInviteNotAtomic rather than proceed: see Enrol.
+	Invite InviteRedemption
 }
+
+// InviteRedemption is one in-flight invite redemption the enrolment it
+// authorises must be ATOMIC with. *invite.Redemption is adapted to it by the
+// CALLER (internal/httpapi), so this package composes the transaction without
+// importing internal/invite.
+//
+// The lifecycle mirrors invite.Redemption exactly: Consume builds the durable
+// consumption record, the caller writes it in the SAME wal.Entry as the
+// enrolment, and Commit folds it into the serving copy afterwards — or Abort
+// releases the reservation when nothing became durable.
+//
+// # Commit and Abort return NOTHING, on purpose
+//
+// The only error invite.Redemption.Commit returns is caller MISUSE (commit
+// without consume), which cannot happen on this path because Enrol calls them in
+// exactly one order. And by the time Commit runs, the enrolment is DURABLE: a
+// durable enrolment must never be reported to the client as failed over a
+// bookkeeping error in the serving copy. The ADAPTER logs it.
+type InviteRedemption interface {
+	// InviteID is the id of the invite being redeemed. It is recorded on the
+	// roster entry as provenance.
+	InviteID() string
+
+	// RiderKind is the wal.Entry.Kind the consumption record replays as
+	// (invite.RecordKind).
+	RiderKind() string
+
+	// Consume builds the durable consumption record for this redemption, given
+	// the result the enrolment produced. It writes nothing.
+	Consume(EnrolResult) (json.RawMessage, error)
+
+	// Commit folds the consumption into the serving copy. Called ONLY after the
+	// composite entry is durable.
+	Commit()
+
+	// Abort releases the reservation. Called ONLY when the write demonstrably
+	// did not commit. It is a documented no-op after a successful Commit and on
+	// a replay outcome.
+	Abort()
+}
+
+// ErrInviteNotAtomic reports an INVITED enrolment against a roster that cannot
+// write the invite consumption and the enrolment as one transaction.
+//
+// It is a REFUSAL, not a downgrade to two writes. Splitting them reopens exactly
+// the window the participant API exists to close: a crash between the two leaves
+// an agent enrolled against an invite that is still open (redeemable a second
+// time), or an invite spent on an enrolment that never happened. Failing closed
+// costs one refused enrolment; the alternative costs single use, which is the
+// property the whole invite mechanism rests on.
+var ErrInviteNotAtomic = errors.New("auth: this roster cannot record an enrolment and its invite consumption in one transaction")
 
 // EnrolResult is what an accepted enrolment produced.
 type EnrolResult struct {
@@ -330,6 +409,20 @@ type EnrolResult struct {
 // NO TASK HAS BEEN FILED for it yet, so name one here when one exists. Read this
 // method as "records it when offered", never as "requires it".
 //
+// # An invite is REDEEMED when one is presented — and is NOT required
+//
+// When req.Invite is non-nil the enrolment record and the invite CONSUMPTION
+// record are written as ONE composite wal.Entry (EnrolInviteRecordKind, through
+// WALRoster.PutWithInvite), so a crash can never leave an agent enrolled
+// against an invite that is still open, or an invite spent on an enrolment that
+// never happened. A roster that cannot do that write refuses the enrolment
+// outright (ErrInviteNotAtomic) rather than splitting it into two transactions.
+//
+// req.Invite == nil is an UN-INVITED enrolment and is STILL ACCEPTED. This
+// build redeems an invite; it does not require one. Invite-only enrolment
+// (invariant 3) is a separate task and nothing here may be read as claiming the
+// gate is on.
+//
 // # The suffix is BURNED by Mint, and that is correct
 //
 // If the roster write fails after the id is minted, the suffix the minter
@@ -338,6 +431,42 @@ type EnrolResult struct {
 // re-issuing a number after a failure is how a later agent inherits an earlier
 // agent's identity. A failed enrolment costs one number out of 2^64 per name.
 func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
+	// THE RESOLVE GUARD, AND IT IS THE FIRST STATEMENT IN THE METHOD ON PURPOSE.
+	// Every path that leaves Enrol WITHOUT a durable composite entry releases the
+	// invite reservation the caller handed in, so a failed enrolment never
+	// strands an invite in the in-flight table until the ReservationTTL sweep
+	// reaps it.
+	//
+	// THE PLACEMENT IS THE GUARANTEE, not the comment. The reservation is already
+	// held when Enrol is entered — internal/httpapi/auth.go takes it before
+	// calling — so ANY return statement above this defer is an uncovered leak.
+	// It sat below the input validation until 2026-08-14, and four validation
+	// refusals (bad idempotency key, bad name, bad auth key, bad or duplicated
+	// messaging key) were reachable from the wire with a valid invite presented
+	// and leaked the reservation for the TTL. Registering the defer before the
+	// first `if` is what makes "every exit releases it" a property of control
+	// flow rather than a claim to be re-audited on every edit; if you add a
+	// return, it is covered without your doing anything. Nothing above it may
+	// return, and nothing may be moved above it.
+	//
+	// A BLANKET GUARD IS SAFE BECAUSE ABORT CANNOT UN-SPEND ANYTHING.
+	// invite.Redemption.Abort is a documented no-op after a successful Commit,
+	// and a no-op on an OutcomeReplay redemption (it returns before touching the
+	// table in both cases), so covering the replay and success exits costs
+	// nothing and risks nothing. The ONE case where an abort WOULD be wrong — a
+	// write that failed AFTER its commit record was fsynced, where the invite is
+	// durably spent — never reaches Abort either, because the durable branch of
+	// PutWithInvite's error path sets resolved below.
+	//
+	// It is also safe this early because the guard touches no shared state and
+	// takes no lock: it only reads req.Invite, which is the caller's.
+	resolved := false
+	defer func() {
+		if req.Invite != nil && !resolved {
+			req.Invite.Abort()
+		}
+	}()
+
 	// Validation first, and OUTSIDE the lock: it touches no shared state, and
 	// keeping it out means a flood of malformed requests cannot serialise
 	// behind the enrolments that are actually doing work.
@@ -410,13 +539,19 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 	if prev, ok := s.idem[req.IdempotencyKey]; ok {
 		if prev.name != req.Name ||
 			!bytes.Equal(prev.publicKey, req.PublicKey) ||
-			!bytes.Equal(prev.messagingKey, req.MessagingPublicKey) {
+			!bytes.Equal(prev.messagingKey, req.MessagingPublicKey) ||
+			prev.inviteID != inviteIDOf(req.Invite) {
 			// Same key, different content. Not a retry — a protocol violation.
 			// The payload is NOT echoed into the error: the caller already
 			// knows what it sent, and the two public keys have no business in a
 			// log line.
 			return EnrolResult{}, fmt.Errorf("%w: key %q was applied for agent %q", ErrIdempotencyKeyReused, req.IdempotencyKey, prev.result.AgentID)
 		}
+		// A REPLAY APPLIES NOTHING, so the guard above aborts the (fresh)
+		// reservation this call took, and that is exactly right: this enrolment
+		// spends no invite, and the reservation must go back so the invite is not
+		// locked out by a retry. Note the invite is NOT re-spent either — the
+		// original enrolment already spent whichever invite it carried.
 		out := prev.result
 		out.Replayed = true
 		return out, nil
@@ -460,25 +595,88 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		// without rewriting EnrolledAt. See RosterEntry.Epoch.
 		Epoch:      now,
 		EnrolledAt: now,
-		// InviteID and CertBindings are left ZERO. They remain reserved (see
-		// RosterEntry): the INVITE and MTLS-BIND epics populate them, and nothing
-		// on this path may invent a value for them. MessagingPublicKey is no
-		// longer among them — RELAY-13 populates it above, from the request.
+		// CertBindings is left ZERO and remains reserved (see RosterEntry):
+		// MTLS-BIND populates it, and nothing on this path may invent a value for
+		// it. MessagingPublicKey is no longer among the reserved fields —
+		// RELAY-13 populates it above, from the request — and neither is InviteID:
+		// INVITE-GATE populates it just below, from the redemption, so an invited
+		// enrolment records WHICH invite admitted it.
 	}
-	if err := s.roster.Put(entry); err != nil {
-		// The suffix inside agentID is spent. See the doc comment: it is not
-		// reused, and the gap it leaves is correct.
-		return EnrolResult{}, fmt.Errorf("auth: recording enrolment of %q: %w", agentID, err)
+	if req.Invite != nil {
+		entry.InviteID = req.Invite.InviteID()
 	}
 
+	// Built BEFORE the write because Consume needs it: the consumption record
+	// stores the agent id the redemption created and the response a legitimate
+	// retry will be replayed verbatim.
 	result := EnrolResult{
 		AgentID:    agentID,
 		BusID:      s.minter.BusID(),
 		Name:       req.Name,
 		EnrolledAt: now,
 	}
+
+	if req.Invite == nil {
+		// THE UN-INVITED PATH, unchanged. An enrolment carrying no invite is
+		// still accepted; see EnrolRequest.Invite.
+		if err := s.roster.Put(entry); err != nil {
+			// The suffix inside agentID is spent. See the doc comment: it is not
+			// reused, and the gap it leaves is correct.
+			return EnrolResult{}, fmt.Errorf("auth: recording enrolment of %q: %w", agentID, err)
+		}
+	} else {
+		// THE INVITED PATH: the enrolment record and the invite consumption
+		// record ride in ONE wal.Entry.
+		ir, ok := s.roster.(interface {
+			PutWithInvite(RosterEntry, InviteRider) (bool, error)
+		})
+		if !ok {
+			// FAIL CLOSED. See ErrInviteNotAtomic: an invited enrolment whose
+			// consumption cannot share the transaction must not proceed at all,
+			// because the two-write alternative can spend an invite on an
+			// enrolment that never happened, or enrol an agent against an invite
+			// that stays redeemable.
+			return EnrolResult{}, fmt.Errorf("%w: refusing the invited enrolment of %q; the injected roster (%T) has no PutWithInvite, so the consumption record could only be written as a SEPARATE transaction, which is exactly the window the composite record exists to close", ErrInviteNotAtomic, agentID, s.roster)
+		}
+		body, err := req.Invite.Consume(result)
+		if err != nil {
+			// Nothing is durable and the guard aborts the reservation. The agent
+			// id SUFFIX is already burned, and that is CORRECT and must not be
+			// "fixed": invariant 1 — ids are never reused and gaps are correct.
+			return EnrolResult{}, fmt.Errorf("auth: consuming the invite for the enrolment of %q: %w", agentID, err)
+		}
+		durable, err := ir.PutWithInvite(entry, InviteRider{Kind: req.Invite.RiderKind(), Body: body})
+		if err != nil {
+			if durable {
+				// The composite entry — INCLUDING the invite consumption record —
+				// is on stable storage. DO NOT abort: releasing the reservation
+				// would admit a SECOND redemption of an invite the log already
+				// says is spent (internal/invite/store.go's Redeem states this
+				// rule and PutWithInvite inherits it verbatim). Leaving it
+				// unresolved is fail-closed: the invite stays locked until a
+				// restart rebuilds the table from the durable log.
+				resolved = true
+			}
+			return EnrolResult{}, fmt.Errorf("auth: recording enrolment of %q: %w", agentID, err)
+		}
+		// Durable. Resolve BEFORE committing so the guard cannot abort a
+		// redemption that is already spent on disk, whatever Commit does.
+		resolved = true
+		req.Invite.Commit()
+	}
+
 	s.recordIdempotent(req, result)
 	return result, nil
+}
+
+// inviteIDOf is the invite id an enrolment asserts, or "" for an un-invited
+// one. It is what the idempotency replay check compares, so a nil Invite and an
+// invite id are never confused.
+func inviteIDOf(r InviteRedemption) string {
+	if r == nil {
+		return ""
+	}
+	return r.InviteID()
 }
 
 // recordIdempotent remembers that key was applied, with the payload it was
@@ -516,7 +714,9 @@ func (s *Service) recordIdempotent(req EnrolRequest, result EnrolResult) {
 		// nil and empty alike, so a client that sends "" and a client that omits
 		// the field are the same payload rather than a false conflict.
 		messagingKey: append([]byte(nil), req.MessagingPublicKey...),
-		result:       result,
+		// "" for an un-invited enrolment; see idempotentEnrol.inviteID.
+		inviteID: inviteIDOf(req.Invite),
+		result:   result,
 	}
 }
 

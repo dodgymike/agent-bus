@@ -26,6 +26,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
+	"github.com/dodgymike/agent-bus/internal/invite"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -442,18 +443,31 @@ func run(cfg Config) error {
 	// SERVING, not about binding: nothing here promises the socket is unbound
 	// during replay, only that nothing answers on it.
 	//
-	// THE APPLIER IS THE ENROLMENT ROSTER, and the three-step order below is
-	// fixed (see auth.WALRoster's type doc, which spells it out):
+	// THE APPLIER IS A MULTIPLEXER OVER THE ENROLMENT ROSTER AND THE INVITE
+	// TABLE (INVITE-GATE), and the three-step order below is fixed (see
+	// auth.WALRoster's type doc, which spells it out):
 	//
-	//	1. build the roster            -- it is the applier, so it must exist first
-	//	2. wal.Open(Applier: roster)   -- replay REBUILDS the roster, inside Open
-	//	3. roster.Attach(log)          -- only now may it accept a live enrolment
+	//	1. build the roster AND the invite store  -- they are the appliers, so they
+	//	                                             must exist before the log
+	//	2. wal.Open(Applier: multiplexer)         -- replay REBUILDS both, inside Open
+	//	3. Attach(log) on each                    -- only now may either accept a
+	//	                                             live write
 	//
-	// Step 2 is what makes enrolment survive a restart (AUTH-7), and step 3 is
-	// what makes a LIVE enrolment durable: wal.Log.Write hands every committed
-	// entry to the log's applier after the commit fsync, so this roster must be
-	// THAT applier or Put would write to disk and never reach the serving copy.
+	// Step 2 is what makes enrolment and invite state survive a restart (AUTH-7
+	// for the roster, INVITE-STORE for the invites), and step 3 is what makes a
+	// LIVE write durable: wal.Log.Write hands every committed entry to the log's
+	// applier after the commit fsync, so these appliers must be reachable from
+	// THAT applier or a Put would write to disk and never reach the serving copy.
 	// WALRoster.Put checks for exactly that mis-wiring and refuses.
+	//
+	// The multiplexer is auth.MultiplexApplier: it dispatches by wal.Entry.Kind
+	// and EXPANDS a composite "agent+invite" entry -- the one an INVITED
+	// enrolment writes -- into its enrolment half and its invite half, so an
+	// enrolment and the invite it spent are ONE transaction. It is NOT
+	// internal/wal's MultiApplier (that is the checkpoint dispatcher, which is
+	// deliberately not wired here) and, unlike it, it stays SILENT about kinds it
+	// does not own -- which is what keeps the message and seqfloor records below
+	// from being treated as damage.
 	//
 	// The hub is deliberately NOT an applier here. Its Apply is safe on the
 	// replay path only -- it inserts applied-key records through idem.Recover,
@@ -462,7 +476,23 @@ func run(cfg Config) error {
 	// make publish's own admission control dead code. It is given a read-only
 	// replay pass of its own below instead. See (*hub.Hub).Apply.
 	authRoster := auth.NewWALRoster(lg)
-	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg, Applier: authRoster})
+	// Built here, BEFORE wal.Open, because it is one of the appliers replay feeds
+	// -- and with no Durable: it gets its log in step 3, once wal.Open has
+	// returned. Until then every mutating call on it refuses with ErrNotDurable,
+	// which is the correct order: recovery finishes before the first live mint or
+	// redemption.
+	inviteStore, err := invite.NewStore(invite.StoreOptions{BusID: busID, Logger: lg})
+	if err != nil {
+		return fmt.Errorf("creating the invite store: %w", err)
+	}
+	applier, err := auth.NewMultiplexApplier(lg, map[string]wal.Applier{
+		auth.RecordKind:   authRoster,
+		invite.RecordKind: inviteStore,
+	})
+	if err != nil {
+		return fmt.Errorf("creating the write-ahead log applier: %w", err)
+	}
+	walLog, err := wal.Open(wal.LogOptions{Dir: cfg.DataDir, Logger: lg, Applier: applier})
 	if err != nil {
 		// FATAL, but this is now a NARROW case, not the general one. Under the
 		// always-restart decision (2026-08-02) recovery repairs or QUARANTINES
@@ -570,6 +600,22 @@ func run(cfg Config) error {
 	if err := authRoster.Attach(walLog); err != nil {
 		return fmt.Errorf("attaching the durable enrolment roster to the write-ahead log: %w", err)
 	}
+	// The same third step for the invite table, and FATAL for the same reason: a
+	// store with no log refuses every mint and every redemption (ErrNotDurable),
+	// because single use held only in memory is decorative -- a restart would
+	// forget which invites were spent.
+	if err := inviteStore.Attach(walLog); err != nil {
+		return fmt.Errorf("attaching the durable invite store to the write-ahead log: %w", err)
+	}
+	// One line, at INFO, and worded so it can NEVER be read as "enrolment is
+	// gated": it is not. This build REDEEMS an invite that is presented, and
+	// still ACCEPTS an enrolment that presents none. invites_recovered is proof
+	// the table was rebuilt by the replay that just ran.
+	lg.Info("invite table recovered and REDEEMABLE: an invite presented to POST /v1/enroll is now spent atomically with the enrolment it authorises, in ONE durable transaction. ENROLMENT IS NOT GATED -- an enrolment presenting NO invite is still accepted, exactly as before; invite-only enrolment is a separate change and is not in this build",
+		"bus_id", busID,
+		"invites_recovered", inviteStore.Len(),
+		"enrolment_invite_required", false,
+	)
 	authSvc, err := auth.NewService(auth.Options{Minter: minter, Roster: authRoster})
 	if err != nil {
 		return fmt.Errorf("creating the auth service: %w", err)
@@ -707,6 +753,10 @@ func run(cfg Config) error {
 		// Registers /v1/enroll, /v1/session/begin and /v1/session/complete.
 		// It authenticates NO other route -- that is AUTH-2.
 		Auth: authSvc,
+		// Makes an invite PRESENTED to /v1/enroll redeemable, atomically with the
+		// enrolment. It does NOT require one: an enrolment carrying no invite is
+		// still accepted (see httpapi.Options.Invites).
+		Invites: inviteStore,
 		// Registers the messaging surface: /v1/agents, /v1/broadcast, /v1/send,
 		// /v1/messages and /v1/wait. Every one of them authenticates.
 		Hub: h,

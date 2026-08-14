@@ -202,6 +202,69 @@ func NewStore(o StoreOptions) (*Store, error) {
 	return s, nil
 }
 
+// Attach binds the store to the durable log it writes through. It must be
+// called EXACTLY ONCE, after wal.Open has returned.
+//
+// It exists for the same chicken-and-egg reason auth.WALRoster.Attach does:
+// wal.Open needs the APPLIER before the *wal.Log exists (replay runs inside Open
+// and hands every committed entry to the applier before Open returns), so this
+// store must be constructible first and given its log afterwards. The ordering
+// is three steps and is not optional:
+//
+//	s, err := invite.NewStore(invite.StoreOptions{BusID: id, Logger: lg})  // 1. applier first
+//	log, err := wal.Open(...)                                             // 2. replay fills s
+//	err = s.Attach(log)                                                   // 3. now it can write
+//
+// Between steps 1 and 3 the table can be READ and REBUILT but not WRITTEN:
+// every mutating method returns ErrNotDurable. That is the correct order —
+// recovery must finish before the first live mint or redemption.
+//
+// A nil log is an ERROR rather than a silent no-op: it would leave the store in
+// the exact false-durability state ErrNotDurable exists to refuse. A SECOND call
+// is an ERROR and changes nothing, for the reason WALRoster.Attach gives: two
+// logs mean two distinct durable histories behind one in-memory table, and
+// whichever won the race would silently own the redemptions the other had
+// already acknowledged.
+func (s *Store) Attach(d DurableLog) error {
+	if d == nil {
+		return fmt.Errorf("invite: attaching the durable log: it must not be nil; a store with no log would acknowledge mints and redemptions that never reached disk, and single use held only in memory is decorative (%v)", ErrNotDurable)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.durable != nil {
+		return errors.New("invite: attaching the durable log: already attached; a store is bound to exactly one durable log, and a second would give one in-memory invite table two durable histories")
+	}
+	s.durable = d
+	return nil
+}
+
+// durableLog reads the attached log under the lock.
+//
+// It is a method rather than a bare field read because Attach can now WRITE
+// s.durable after construction: an unsynchronised read from Mint, Revoke or
+// Redeem would be a data race with it (and a race here is a P0 — concurrency is
+// the product). Every one of those methods captures the value ONCE and uses the
+// captured local for both its nil check and its later Write, so it cannot check
+// one log and write to another.
+func (s *Store) durableLog() DurableLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.durable
+}
+
+// Len reports how many invite records the table currently retains, after a
+// sweep. It is the count a startup line uses to prove the table was rebuilt by
+// replay.
+//
+// It is a RETENTION count, not a count of usable invites: a retired-but-retained
+// record (see retiredAt) is refused exactly as hard as a dropped one.
+func (s *Store) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(s.now())
+	return len(s.invites)
+}
+
 // ---------------------------------------------------------------------------
 // Mint
 // ---------------------------------------------------------------------------
@@ -261,7 +324,10 @@ func (m Minted) GoString() string { return m.String() }
 // check refuses BEFORE anything is generated or written, and the record is
 // folded into memory only after Durable.Write has fsynced both phases.
 func (s *Store) Mint(req MintRequest) (Minted, error) {
-	if s.durable == nil {
+	// Captured ONCE, under the lock, and used for both the check and the Write
+	// below: Attach may set it concurrently. See durableLog.
+	durable := s.durableLog()
+	if durable == nil {
 		return Minted{}, fmt.Errorf("%w: refusing to mint an invite whose single-use state would be lost on restart", ErrNotDurable)
 	}
 	if s.busID == "" {
@@ -331,7 +397,7 @@ func (s *Store) Mint(req MintRequest) (Minted, error) {
 	if err != nil {
 		return Minted{}, err
 	}
-	if _, err := s.durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
+	if _, err := durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
 		// NOTHING was acknowledged and nothing is in memory. The secret dies
 		// here, unlogged.
 		return Minted{}, fmt.Errorf("invite: recording invite %s durably: %w", id, err)
@@ -387,7 +453,9 @@ func (s *Store) Revoke(id, reason string) (Record, error) {
 	if len(reason) > MaxReasonLen {
 		return Record{}, fmt.Errorf("%w: reason is %d bytes, but a reason is at most %d; it is not echoed here because it is oversized", ErrInvalidRecord, len(reason), MaxReasonLen)
 	}
-	if s.durable == nil {
+	// Captured ONCE, under the lock; see durableLog.
+	durable := s.durableLog()
+	if durable == nil {
 		return Record{}, fmt.Errorf("%w: refusing to revoke, because a revocation held only in memory is undone by the next restart", ErrNotDurable)
 	}
 
@@ -447,7 +515,7 @@ func (s *Store) Revoke(id, reason string) (Record, error) {
 	t.consumed = true
 	s.mu.Unlock()
 
-	if _, err := s.durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
+	if _, err := durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
 		// THE SAME RULE Store.Redeem FOLLOWS, and it must be applied here too:
 		// wal.Txn.Commit returns ErrDiverged AFTER the commit record is fsynced,
 		// so the revocation is durably recorded and only a neighbouring
@@ -567,7 +635,14 @@ type Result struct {
 // Redemption must be ATOMIC with the effect it authorises — the roster write
 // that creates the agent. A wal.Entry is exactly one transaction, so "atomic"
 // means the consumption record and the roster record ride in the SAME entry.
-// INVITE-GATE/AUTH-3 composes that entry; this package cannot and must not.
+// THAT ENTRY IS COMPOSED BY auth.Service.Enrol + auth.WALRoster.PutWithInvite
+// (kind auth.EnrolInviteRecordKind, INVITE-GATE 2026-08-14); this package
+// cannot and must not compose it, which is why the flow below hands the caller
+// a body and waits.
+//
+// Note what INVITE-GATE did and did not do: an invite PRESENTED at enrolment is
+// now genuinely redeemed, and enrolment is still NOT gated — an enrolment
+// carrying no invite is accepted.
 //
 // The flow:
 //
@@ -618,9 +693,14 @@ type Redemption struct {
 // The triage, per invariant 10 (these must not be collapsed):
 //
 //	correct secret, same key, same fingerprint      -> OutcomeReplay: the ORIGINAL result
-//	correct secret, same key, DIFFERENT fingerprint -> ErrKeyReuse: reject, log, DISCONNECT
+//	correct secret, same key, DIFFERENT fingerprint -> ErrKeyReuse: reject and log, CONNECTION KEPT
 //	correct secret, different key                   -> ErrAlreadyRedeemed: single use is spent
 //	wrong secret or unknown id                      -> ErrUnknownInvite
+//
+// THE CONNECTION IS KEPT on ErrKeyReuse (invariant 10, NARROWED 2026-08-08):
+// same key + different payload is REJECTED AND LOGGED, and only replay of an
+// already-accepted SIGNED MESSAGE disconnects. See ErrKeyReuse for the argument,
+// which is at its strongest on the enrolment route.
 //
 // While a reservation is held, any other Begin on that invite returns
 // ErrRedemptionInFlight — INCLUDING one presenting the same key. See that
@@ -686,7 +766,7 @@ func (s *Store) Begin(req RedeemRequest) (*Redemption, error) {
 		if subtle.ConstantTimeCompare(cur.RedeemFingerprint[:], req.Fingerprint[:]) != 1 {
 			// Neither payload is echoed: one is attacker-chosen and the other
 			// belongs to the earlier request.
-			return nil, fmt.Errorf("%w: idempotency key %q already redeemed invite %s with a DIFFERENT payload; this is a protocol violation, not a retry, and the caller must be disconnected",
+			return nil, fmt.Errorf("%w: idempotency key %q already redeemed invite %s with a DIFFERENT payload; this is a protocol violation, not a retry — it is REFUSED AND LOGGED, and the connection is KEPT (invariant 10, narrowed 2026-08-08)",
 				ErrKeyReuse, req.Key, req.InviteID)
 		}
 		return &Redemption{s: s, req: withoutSecret(req), invite: copyRecord(cur), outcome: OutcomeReplay}, nil
@@ -851,7 +931,9 @@ func (r *Redemption) Abort() {
 // It exists so this package is complete and provable on its own, today, before
 // anything composes it.
 func (s *Store) Redeem(req RedeemRequest, res Result) (Record, error) {
-	if s.durable == nil {
+	// Captured ONCE, under the lock; see durableLog.
+	durable := s.durableLog()
+	if durable == nil {
 		return Record{}, fmt.Errorf("%w: refusing to redeem, because a spent invite remembered only in memory is redeemable again after the next restart", ErrNotDurable)
 	}
 	r, err := s.Begin(req)
@@ -866,7 +948,7 @@ func (s *Store) Redeem(req RedeemRequest, res Result) (Record, error) {
 		r.Abort()
 		return Record{}, err
 	}
-	if _, err := s.durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
+	if _, err := durable.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
 		// ABORT ONLY WHEN THE WRITE DEMONSTRABLY DID NOT COMMIT.
 		//
 		// wal.Txn.Commit returns ErrDiverged AFTER the commit record has been

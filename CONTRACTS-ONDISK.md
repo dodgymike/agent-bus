@@ -1042,6 +1042,90 @@ the `POST /v1/enroll` wire shape that will present an invite secret; `INVITE-MIN
 the operator-facing surface for minting and revoking one. Nothing in this section is reachable by an
 agent yet.
 
+## A composite `Entry.Kind`, `"agent+invite"`, and the WAL applier is now a multiplexer (INVITE-GATE, 2026-08-14)
+
+The route described in `CONTRACTS-HTTP.md`'s `## Enrolment and sessions` section — `POST /v1/enroll`
+now accepting optional `invite_id`/`invite_secret` — is composed on disk here. **Invite redemption is
+now genuinely LIVE, and enrolment is still NOT gated**: an enrolment carrying NO invite is unaffected
+and still accepted; see that file's "Known gaps" note, which this section does not repeat.
+
+**One `wal.Entry`, one transaction, two fsyncs — never two entries.** The enrolment record (roster
+half) and the invite consumption record (rider half) that authorises it ride in the SAME entry, so a
+crash can never leave an agent enrolled against an invite that is still open, nor an invite spent on an
+enrolment that never happened. `internal/auth/inviteenrol.go` owns the composition:
+`EncodeEnrolWithInvite`/`DecodeEnrolWithInvite`, kind `EnrolInviteRecordKind = "agent+invite"`, version
+`EnrolInviteRecordVersion = 1` (versions ONLY the envelope — each half still carries its own version
+inside its own bytes). The composer that USES it is `auth.Service.Enrol` + `auth.WALRoster.PutWithInvite`
+(`internal/httpapi/auth.go`'s `handleEnroll` is the caller); `internal/invite/store.go`'s standalone
+`Store.Redeem` — which writes its own, separate transaction — is explicitly NOT used on this path (see
+that function's doc for why splitting the two writes would reopen the exact crash window the composite
+entry exists to close).
+
+**NO RESERVATION WAS TAKEN, AND NONE IS NEEDED — same rule as `"agent"` and `"invite"` above.**
+`wal.Entry.Kind` is a free-form APPLICATION STRING, not a reserved `record-type` NUMBER; `"agent+invite"`
+sits inside the PREPARE payload exactly as `"agent"`, `"invite"` and `"seqfloor"` already do, and
+`internal/wal/format.go` was not touched. Written down explicitly, again, so a future reader does not go
+and reserve a number nothing requires.
+
+**The envelope** (`internal/auth/inviteenrol.go`'s `compositeJSON`; these field names are FOREVER —
+written into an append-only log a later build must still read):
+
+```
+{"v":1,
+ "enrolment":{...the exact bytes auth.Encode produces, verbatim...},
+ "rider_kind":"invite",
+ "rider":{...the exact bytes invite.Record.Encode produces, verbatim...}}
+```
+
+Both halves are embedded as raw JSON, byte-for-byte what each half's OWN package would have produced
+writing it alone — that is what makes replay exact: `rider_kind` names the applier the rider is handed
+to (`invite.RecordKind`, i.e. `"invite"` — see the section above), and it may be neither `auth.RecordKind`
+(the enrolment kind itself) nor `EnrolInviteRecordKind` (the envelope itself); both are refused by
+`validateRiderKind` before anything is written.
+
+**The log's `Applier` is no longer the roster alone — it is `auth.NewMultiplexApplier`, dispatching by
+`Entry.Kind`.** This corrects, without rewriting, the "durable enrolment record" section above, whose
+`What run() actually does` list (step 2) says `wal.Open(wal.LogOptions{…, Applier: authRoster})`: as of
+this task the value passed is the multiplexer, not the roster directly. `cmd/agent-bus/main.go` now
+builds it as `auth.NewMultiplexApplier(lg, map[string]wal.Applier{auth.RecordKind: authRoster,
+invite.RecordKind: inviteStore})` and passes THAT as `wal.LogOptions.Applier`. On a committed
+`"agent+invite"` entry it EXPANDS the composite into its two halves and dispatches each to its own
+applier — enrolment first, then the rider, so a rider applier reading the roster (none does today) would
+see the agent the invite was spent on. On any OTHER kind (`"message"`, `"seqfloor"`, and any future
+neighbour) it is silent, exactly as `WALRoster.Apply` and `invite.Store.Apply` already are about kinds
+they do not own — a neighbour's record is not damage. **The invite store is rebuilt by replay exactly as
+the roster is**, inside `wal.Open`, and attached afterward
+(`inviteStore.Attach(walLog)`) — the SAME three-step ordering `auth.WALRoster`'s doc already establishes
+(construct empty → `wal.Open` replays → `Attach` permits live writes), now run for both participants
+side by side.
+
+**An undecodable composite discards BOTH halves, loudly, and the two directions are NOT symmetric.**
+`MultiplexApplier.Apply` returns `nil`, never an error — a non-nil error would poison the log on a live
+write (`wal.ErrDiverged`) and fail `Open` on recovery, which invariant 6 forbids (recovery must always
+reach a running server). So the discard is an `ERROR` log line naming both indices, and:
+
+- the AGENT is not in the roster: it was acknowledged as enrolled, holds an id this bus minted and told
+  it, and must re-enrol under a NEW id — the old suffix stays burned (invariant 1);
+- the INVITE is NOT marked spent, so it stays redeemable — this direction is FAIL-OPEN, the same
+  exception `doc.go` section 5 already documents for a lost spend record, and an operator seeing the log
+  line should revoke the invite if they can identify it, rather than assume the discard was safe.
+
+**THE FORWARD HAZARD — read this before checkpoints are wired into the server run path.**
+`internal/wal` has a SECOND, unrelated type also named for dispatch-by-kind: `wal.MultiApplier`
+(`internal/wal/checkpoint.go`), the CHECKPOINT dispatcher, and it must not be confused with
+`auth.MultiplexApplier` above — the two share a shape and nothing else. `wal.MultiApplier` treats an
+UNOWNED kind as a HARD ERROR (`"no registered checkpoint participant"`), which poisons the log via
+`wal.ErrDiverged` on a live write and fails `Open` on recovery. **Checkpoints are NOT wired into the
+server run path today** — `cmd/agent-bus/main.go` passes `wal.LogOptions{Applier: applier}` (the
+auth-side multiplexer above), never `Checkpoints:` — so `"agent+invite"` reaches only
+`auth.MultiplexApplier`, which is deliberately silent about kinds it does not own. **On the day
+checkpoints ARE wired in, `"agent+invite"` MUST be registered with a `wal.CheckpointParticipant` or the
+bus stops starting on its next restart.** This is not a future-proofing note; it is the exact bug shape
+`internal/auth/inviteenrol.go`'s own `EnrolInviteRecordKind` doc warns the next reader about.
+
+No new `record-type` reservation, no `ondisk-format-version` bump, no new on-disk FILE. This is a new
+`Entry.Kind` value inside the existing WAL frame shape, nothing more.
+
 ## The message record is version 2 — a DESTRUCTIVE, BIDIRECTIONAL break (SIGN-2/SIGN-6, 2026-08-07)
 
 **`store.RecordVersion` is `2`.** It was `1`, and every passage in this file that still says `1` for
@@ -1397,7 +1481,7 @@ split comes from RELAY-7's cross-bus trust deep-dive.
 | `wal.Entry.Kind` | Go type | carries | never carries |
 | --- | --- | --- | --- |
 | `"peer"` | `relay.PeerRecord` | `bus_id`, `config_seq`, `state`, `base_url`, `next_hop_tls_cert_sha256` | any key material — a certificate fingerprint is a public digest, not a key |
-| `"bustrust"` | `relay.BusTrustRecord` | `bus_id`, `config_seq`, `state`, `bus_signing_keys[]` | any transport/address |
+| `"bustrust"` | `relay.BusTrustRecord` | `bus_id`, `config_seq`, `state`, `bus_signing_keys[]`, `peer_client_tls_cert_sha256` (RELAY-45, 2026-08-14) | a route address or an OUTBOUND next-hop pin — see the INBOUND vs OUTBOUND section below |
 
 `bus_signing_keys` is a **LIST, not a scalar**, and that is load-bearing rather than generous:
 `signed.go:178-182` fixes the meaning — "MORE THAN ONE KEY IS RETURNED ONLY DURING A SIGNING-KEY
@@ -1438,6 +1522,7 @@ Read off the struct tags in `internal/relay/peerstore.go` (`peerRecordJSON`, `bu
 
 {"v":1,"rec":"bustrust","bus_id":"<bus id>","config_seq":<uint64 >=1>,"state":"active"|"removed",
  "bus_signing_keys":["<base64 std, 32 bytes>", …],  // ONLY when state=="active", 1..2 entries
+ "peer_client_tls_cert_sha256":"<64 lowercase hex>",  // OPTIONAL; ONLY when state=="active" (RELAY-45)
  "updated_at":"<RFC3339Nano UTC>"}
 ```
 
@@ -1457,6 +1542,7 @@ it is being read as.
 | `base_url` | a **BARE https origin** — scheme, host, optional port and **nothing else**, `<= MaxPeerBaseURLLen` (512, derived: `https://` + a 253-byte DNS name + `:65535` = 267, with headroom for a bracketed IPv6 literal) | `state != "active"`, and always on a trust record |
 | `next_hop_tls_cert_sha256` (RELAY-41, 2026-08-14) | **64 LOWERCASE hex** — `buscert.Fingerprint.String()`, i.e. `sha256` over the leaf certificate's DER **exactly as it arrived** (`x509.Certificate.Raw`, never re-marshalled). No prefix, no colons, no whitespace; uppercase is REFUSED by `buscert.ParseFingerprint` rather than normalised, so one fingerprint has exactly one spelling. Parsed by that function and by nothing else — see the byte-for-byte note below | `state != "active"`; **also when the hop is unpinned** (the field is OPTIONAL) and always on a trust record |
 | `bus_signing_keys` | **base64 std**, matching `auth.RosterEntry`'s `auth_pub`; each exactly 32 bytes, pairwise distinct, all-zero REFUSED (uninitialised or corrupt, and a small-order point) | `state != "active"`, and always on a route record |
+| `peer_client_tls_cert_sha256` (RELAY-45, 2026-08-14) | **64 LOWERCASE hex** — `buscert.Fingerprint.String()`, i.e. `sha256` over the leaf certificate's DER **exactly as it arrived**, but of the peer's TLS **CLIENT** certificate presented on an INBOUND connection (`r.TLS.PeerCertificates[0]`), never the outbound server certificate `next_hop_tls_cert_sha256` describes. Keyed by the record's own `bus_id` — the ADJACENT bus principal that certificate names — not by an address. Parsed and validated by `relay.ParsePeerClientTLSFingerprint` **only** (the same one textual spelling, all-zero additionally REFUSED rather than read as "absent"); the durable decoder and any future operator-facing writer must both call it, so a value one of them would reject can never reach disk through the other | `state != "active"`, and always on a route record; also OPTIONAL when active — most trust records will carry no binding until an operator configures one |
 | `updated_at` | `RFC3339Nano`, UTC. On a tombstone it is also the input to `PeerTombstoneRetention` | never |
 
 **`base_url` is validated more strictly HERE than the package's live-dial helper.** `peerURL`
@@ -1581,6 +1667,54 @@ CLI's comparison is on the stored `base_url` STRING, compared case-insensitively
 nothing — so `https://h` versus `https://h:443`, a trailing-dot FQDN, and two DNS names for one
 machine are all different addresses to it. **A consumer must therefore read each record's own pin and
 never cache one pin per address.**
+
+### `peer_client_tls_cert_sha256` is keyed to the BUS PRINCIPAL, never to an address (RELAY-45, 2026-08-14)
+
+**This field is the mirror image of `next_hop_tls_cert_sha256` above, and it lives on a different
+record for that exact reason.** Read the "WHICH CERTIFICATE, IN WHICH DIRECTION" block first — this
+section states the field that block predicted would need its "own record" and never provided:
+
+| | `next_hop_tls_cert_sha256` (`PeerRecord`, RELAY-41) | `peer_client_tls_cert_sha256` (`BusTrustRecord`, RELAY-45) |
+| --- | --- | --- |
+| direction | **OUTBOUND** — the certificate the hop at `base_url` presents when THIS bus DIALS it | **INBOUND** — the certificate the adjacent bus presents when IT dials us (`r.TLS.PeerCertificates[0]`) |
+| keyed by | an **address** (`base_url`) | a **bus principal** (the record's own `bus_id`) |
+| cardinality | one fingerprint legitimately sits on **N records with N different `bus_id`s** (`-route-for`: `fpB` on both busB's route and busC's) | one fingerprint may bind **at most one `bus_id`** — enforced, not merely intended |
+| `fingerprint -> bus id` lookup | **FORBIDDEN** — ambiguous by construction, and would resolve an inbound busB connection to busC | **SOUND** — and only for the reason in the next paragraph |
+
+**`fingerprint -> bus id` is sound on THIS field, and ONLY because uniqueness is enforced at write and
+ambiguity fails closed at read — do not carry the conclusion to `next_hop_tls_cert_sha256` without
+carrying the reason.** `relay.PeerStore.PutTrust` refuses (`ErrPeerClientCertAlreadyBound`) to bind one
+fingerprint to a second `bus_id` before anything is written, and `InboundPeerPrincipal` — the one
+reader of this field — fails closed with `ErrAmbiguousInboundPeerCert` if it ever finds two active
+bindings anyway (a hand-edited data directory, a log written by another binary). It is the enforced
+uniqueness that makes the lookup sound, not the direction of the arrow: reading `next_hop_tls_cert_sha256`
+the same way is forbidden precisely because no such uniqueness is enforced or enforceable there — one
+fingerprint on N `bus_id`s is the deliberate, correct shape of that field.
+
+**Optionality, tombstones and the version, exactly as `next_hop_tls_cert_sha256`'s own entry states —
+restated here because this is the field an operator or a downgraded binary will actually meet.** The
+zero value means absent; an explicit all-zero digest is REFUSED rather than read as absent
+(`relay.ParsePeerClientTLSFingerprint`); a `"removed"` (tombstoned) trust record carries no binding, in
+both the encode and the decode direction — a withdrawn principal that still bound a live client
+certificate is exactly the admission-after-revocation shape `RELAY-34`'s durable withdrawal floor
+exists to prevent. **`v` is NOT bumped**: the field is additive and optional, and `DecodeBusTrustRecord`
+requires `v` to equal `PeerRecordVersion`, so bumping it would refuse every `v1` record already on disk
+rather than mark a compatibility boundary. The cost is the same shape as `next_hop_tls_cert_sha256`'s:
+an OLDER binary refuses (`DisallowUnknownFields`) a record carrying this field, so **downgrading after
+binding an inbound peer certificate is not supported** — withdraw the binding first, or keep the newer
+binary. `PeerStore.Apply` logs the discard loudly at ERROR rather than refusing to boot (invariant 6).
+
+**An active trust record still requires at least one pinned bus signing key — this field does not
+relax that.** A bus adjacent enough to open a TLS connection to us is a bus whose relay signatures we
+must be able to verify; a transport binding with no signing pin would describe a peer we admit and then
+cannot believe. See `DECISIONS.md` "2026-08-14 — RELAY-45" for the fuller reasoning on this and the
+other three decisions this field's shape rests on.
+
+**Nothing reachable yet.** `relay.PeerStore.InboundPeerPrincipal` and `httpapi.RequirePeerPrincipal`
+exist and are tested, but no route is mounted (`RELAY-20`) and no running server constructs a
+`PeerStore` for the HTTP layer to consult (`RELAY-24`) — see `### Peer-bus transport identity` in
+`CONTRACTS-HTTP.md`. This field is durable configuration with no operator surface: there is no CLI flag
+yet, and `CONTRACTS-CLI.md` is deliberately not touched by this section.
 
 ### `config_seq` is a BUS-WIDE counter, and that is a fix, not a style choice
 

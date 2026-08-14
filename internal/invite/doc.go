@@ -10,8 +10,17 @@
 // `agent-bus invite mint` subcommand in cmd/agent-bus/invite.go, authorised by
 // FILESYSTEM ACCESS to the data directory rather than by anything on the wire
 // (DECISIONS.md, E4). It is a caller of Store.Mint and adds nothing to this
-// package. NOTHING CONSUMES AN INVITE YET — enrolment is still ungated until
-// INVITE-GATE lands, so a minted invite is durable but inert.
+// package.
+//
+// INVITE-GATE (2026-08-14) MADE THE INVITE LIVE, AND DID NOT TURN THE GATE ON.
+// A minted invite is no longer inert: an invite PRESENTED to POST /v1/enroll is
+// REDEEMED, atomically with the enrolment it authorises. The composer is
+// auth.Service.Enrol plus auth.WALRoster.PutWithInvite, which write the
+// consumption record and the roster record as ONE wal.Entry of kind
+// auth.EnrolInviteRecordKind ("agent+invite"). What has NOT changed is that
+// enrolment is NOT YET GATED: an enrolment carrying NO invite is still accepted,
+// and the discovery document says so. Requiring one (invariant 3's end state) is
+// a separate task.
 //
 // # 1. Why it exists — build to this, not just to the API
 //
@@ -124,11 +133,15 @@
 //
 // Redemption must be atomic with the effect it authorises — the roster write
 // that creates the agent. A wal.Entry is exactly one transaction, so "atomic"
-// means the consumption record and the roster record ride in the SAME entry,
-// composed by INVITE-GATE/AUTH-3. This package therefore exposes a participant
-// (Store.Begin -> Redemption.Consume -> the caller's write -> Commit/Abort),
-// not a one-shot. Store.Redeem is the standalone path and INVITE-GATE must not
-// use it; see its doc.
+// means the consumption record and the roster record ride in the SAME entry.
+// This package therefore exposes a participant (Store.Begin ->
+// Redemption.Consume -> the caller's write -> Commit/Abort), not a one-shot.
+//
+// THE COMPOSER IS auth.Service.Enrol + auth.WALRoster.PutWithInvite
+// (INVITE-GATE, 2026-08-14), writing one entry of kind
+// auth.EnrolInviteRecordKind. Store.Redeem remains the standalone path and the
+// enrolment route must NOT use it; see its doc, which is still true and points
+// at the composer above.
 //
 // # 7. What this package does NOT do
 //

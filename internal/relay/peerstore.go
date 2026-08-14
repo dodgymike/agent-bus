@@ -64,6 +64,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -226,6 +227,39 @@ var (
 	// frames already owns the trust table, so this is a diagnosis problem rather
 	// than a new exposure.
 	ErrPeerWithdrawalSeqTooHigh = errors.New("relay: this bus's configuration sequence is too high to record a withdrawal")
+
+	// ErrPeerClientCertAlreadyBound reports an attempt to bind ONE inbound peer
+	// client certificate fingerprint to a SECOND adjacent bus principal.
+	//
+	// It is refused rather than resolved, and the refusal is the security
+	// property: InboundPeerPrincipal answers "which single bus is on the other
+	// end of this connection", so two live answers is not a preference to be
+	// broken by ordering — it is an ambiguity that would let whichever record
+	// won authorise busB's certificate as busC. There is exactly one legitimate
+	// way to reach this state (the same certificate genuinely being reused by two
+	// buses, which means one operator copied a private key between machines) and
+	// it is a misconfiguration worth failing loudly over.
+	//
+	// Note the contrast with NextHopTLSCertFingerprint, where one fingerprint on
+	// N records is CORRECT and deliberate. That is the outbound table, keyed by
+	// address; this is the inbound table, keyed by principal.
+	ErrPeerClientCertAlreadyBound = errors.New("relay: that inbound peer client certificate is already bound to a different bus")
+
+	// ErrUnknownInboundPeerCert reports a presented client certificate that no
+	// ACTIVE trust record binds — including the case where the binding existed
+	// and was withdrawn. Unknown and revoked are deliberately ONE answer, for
+	// PinnedKeys's reason: there is no "unknown, so allow" outcome to reach by
+	// accident, and telling the two apart would be an enumeration oracle for
+	// anyone probing which buses this bus has peered with.
+	ErrUnknownInboundPeerCert = errors.New("relay: no adjacent bus principal is bound to the presented client certificate")
+
+	// ErrAmbiguousInboundPeerCert reports two or more ACTIVE trust records
+	// binding the SAME fingerprint to DIFFERENT buses. PutTrust refuses to create
+	// that state; this is the fail-CLOSED answer for the paths that can produce
+	// it anyway — a log written by another binary, a downgrade/upgrade cycle, or
+	// a hand-edited data directory. Resolving it by picking one (first, lowest,
+	// newest) would be choosing which bus to impersonate.
+	ErrAmbiguousInboundPeerCert = errors.New("relay: the presented client certificate is bound to more than one bus")
 
 	// ErrPeerWithdrawalFloorCorrupt reports a peer-withdrawal-floor file that
 	// EXISTS but does not verify: bad header, unknown version, checksum mismatch,
@@ -715,6 +749,71 @@ type BusTrustRecord struct {
 	// (signed.go:178-182). It is not a general-purpose accept list.
 	SigningKeys []ed25519.PublicKey
 
+	// PeerClientTLSCertFingerprint binds the certificate this bus presents AS A
+	// TLS CLIENT when it dials us — the INBOUND transport credential of the
+	// ADJACENT bus — to BusID, which is the principal that certificate names.
+	//
+	// # IT IS THE OPPOSITE DIRECTION FROM PeerRecord.NextHopTLSCertFingerprint
+	//
+	// Read both fields' comments together; conflating them is the whole reason
+	// RELAY-45 exists as a separate task, and the assumption that one field could
+	// do both jobs was written into two task records before a review refuted it.
+	//
+	//	NextHopTLSCertFingerprint  OUTBOUND. The SERVER certificate presented
+	//	                           to us BY THE HOP AT BaseURL WHEN WE DIAL IT.
+	//	                           Keyed to an ADDRESS, and deliberately
+	//	                           DUPLICATED across every route record sharing
+	//	                           that address — so one fingerprint sits on N
+	//	                           records with N DIFFERENT bus ids.
+	//
+	//	PeerClientTLSCertFingerprint
+	//	                           INBOUND. The CLIENT certificate presented to
+	//	                           us BY THE ADJACENT BUS WHEN IT DIALS US
+	//	                           (r.TLS.PeerCertificates[0]). Keyed to a BUS
+	//	                           PRINCIPAL, and UNIQUE across the trust table —
+	//	                           PutTrust refuses to bind one fingerprint to two
+	//	                           bus ids, and InboundPeerPrincipal fails closed
+	//	                           if it ever sees two anyway.
+	//
+	// That uniqueness is the ONLY reason a fingerprint -> bus id lookup is sound
+	// on THIS field and forbidden on the other one. Do not carry the conclusion
+	// across; carry the reason.
+	//
+	// # WHY IT LIVES ON THE TRUST RECORD AND NOT ON THE ROUTE RECORD
+	//
+	// A route record's BusID is the DESTINATION, which for a `-route-for` entry
+	// is NOT the bus at the far end of the connection. A credential keyed there
+	// would name the wrong bus by construction. A trust record's BusID has no
+	// such split: it is the bus whose material this record vouches for, and it
+	// needs no route at all — which is also what gives revocation for free, since
+	// RemoveTrust already fsyncs a withdrawal floor OUTSIDE the log (RELAY-34)
+	// before the tombstone is written. An inbound credential that could come back
+	// after an operator revoked it would be the worst version of this field.
+	//
+	// # Construction, optionality and the tombstone rule
+	//
+	// It is a buscert.Fingerprint — sha256.Sum256(leaf.Raw), exactly what
+	// buscert.FingerprintOf returns from a live connection's certificate, and it
+	// is that TYPE rather than a string so no second construction can be invented
+	// (a digest over the SPKI, or base64, or uppercase hex, would be well-formed
+	// and would NEVER match, refusing every peer with nothing reporting a
+	// mismatch).
+	//
+	// The ZERO VALUE MEANS ABSENT, following NextHopTLSCertFingerprint and
+	// invite.Record.CertFingerprint. It is OPTIONAL on an active record and
+	// FORBIDDEN on a tombstone — validate enforces "no live credential on a
+	// withdrawn principal" in both the encode and the decode direction. An
+	// explicitly recorded all-zero value is REFUSED at decode rather than folded
+	// into "absent": see ParsePeerClientTLSFingerprint.
+	//
+	// A record carrying this field still requires at least one pinned signing
+	// key, because an active trust record always did and this task does not
+	// relax it. That is a deliberate coupling rather than an oversight: a bus
+	// adjacent enough to open a TLS connection to us is a bus whose relay
+	// signatures we must be able to verify, so a transport binding without a
+	// signing pin describes a peer we would admit and then be unable to believe.
+	PeerClientTLSCertFingerprint buscert.Fingerprint
+
 	// UpdatedAt is when this generation was written; on a tombstone it is also
 	// the input to PeerTombstoneRetention.
 	UpdatedAt time.Time
@@ -731,14 +830,32 @@ func (r BusTrustRecord) clone() busScopedRecord {
 	return out
 }
 
+// sameGenerationAs compares EVERY configured field, the inbound peer client
+// certificate binding included — PeerRecord.sameGenerationAs's rule, and it
+// matters here for the same reason: a field left out of this predicate lets a
+// record differing only in that field be folded in silently as "what I already
+// have", and for this field that is a REBOUND OR REVOKED transport credential
+// being ignored.
 func (r BusTrustRecord) sameGenerationAs(o busScopedRecord) bool {
 	other, ok := o.(BusTrustRecord)
-	return ok && r.State == other.State && r.UpdatedAt.Equal(other.UpdatedAt) && sameKeySet(r.SigningKeys, other.SigningKeys)
+	return ok && r.State == other.State && r.UpdatedAt.Equal(other.UpdatedAt) &&
+		r.PeerClientTLSCertFingerprint == other.PeerClientTLSCertFingerprint &&
+		sameKeySet(r.SigningKeys, other.SigningKeys)
 }
 
 // busTrustRecordJSON is the trust record's wire shape. "rec" is there for the
 // reason peerRecordJSON's is: the two kinds' tombstones would otherwise be
 // byte-identical, and a Kind mix-up would silently un-pin a bus.
+//
+// THE VERSION IS NOT BUMPED BY peer_client_tls_cert_sha256, for the reason
+// peerRecordJSON states about its own added field: the field is ADDITIVE and
+// OPTIONAL, DecodeBusTrustRecord requires the version to EQUAL
+// PeerRecordVersion, and raising it to 2 would therefore make this binary refuse
+// every v1 record already on disk — a migration nobody asked for wearing the
+// costume of a compatibility marker. The cost is stated where an operator can
+// act on it (CONTRACTS-ONDISK.md): an OLDER binary reading a record that carries
+// this field refuses it as an unknown field, so DOWNGRADING after binding an
+// inbound peer certificate is not supported.
 type busTrustRecordJSON struct {
 	Version     int      `json:"v"`
 	Rec         string   `json:"rec"`
@@ -746,7 +863,16 @@ type busTrustRecordJSON struct {
 	ConfigSeq   uint64   `json:"config_seq"`
 	State       string   `json:"state"`
 	SigningKeys []string `json:"bus_signing_keys,omitempty"`
-	UpdatedAt   string   `json:"updated_at"`
+
+	// PeerClientTLSCertSHA256 is the LOWERCASE HEX spelling of
+	// BusTrustRecord.PeerClientTLSCertFingerprint. The key says PEER CLIENT so
+	// that it can never be read as, or copied from,
+	// peerRecordJSON.NextHopTLSCertSHA256 — the two name certificates travelling
+	// in opposite directions, and on disk is where that distinction has to
+	// survive a reader who has not read the Go doc comments.
+	PeerClientTLSCertSHA256 string `json:"peer_client_tls_cert_sha256,omitempty"`
+
+	UpdatedAt string `json:"updated_at"`
 }
 
 // validate checks a BusTrustRecord is self-consistent, in both directions, for
@@ -789,6 +915,16 @@ func (r BusTrustRecord) validate() error {
 		if len(r.SigningKeys) != 0 {
 			return fmt.Errorf("%w: a removed trust record still pins %d key(s); a tombstone holds no trust anchor", ErrInvalidPeerRecord, len(r.SigningKeys))
 		}
+		if r.PeerClientTLSCertFingerprint != (buscert.Fingerprint{}) {
+			// A WITHDRAWN PRINCIPAL CARRIES NO LIVE CREDENTIAL. Checked rather
+			// than trusted, and checked in BOTH directions: a tombstone that
+			// still bound an inbound client certificate is exactly the shape an
+			// admission-after-revocation wants, and it would be read by
+			// InboundPeerPrincipal — which iterates records — if it ever existed.
+			// It is not echoed: on a record that should not have one, its value
+			// is either corruption or an attacker's choice.
+			return fmt.Errorf("%w: a removed trust record still binds an inbound peer client certificate; a tombstone holds no transport credential", ErrInvalidPeerRecord)
+		}
 	default:
 		return fmt.Errorf("%w: %s is not one of the fixed lifecycle states", ErrInvalidPeerRecord, r.State)
 	}
@@ -813,6 +949,13 @@ func (r BusTrustRecord) Encode() (json.RawMessage, error) {
 		j.SigningKeys = make([]string, 0, len(r.SigningKeys))
 		for _, k := range r.SigningKeys {
 			j.SigningKeys = append(j.SigningKeys, base64.StdEncoding.EncodeToString(k))
+		}
+		// Written only when set: the zero value MEANS ABSENT, and omitempty plus
+		// this guard keep "absent" spelled exactly one way on disk. validate has
+		// already refused it on a tombstone, so this branch is also what stops a
+		// withdrawn principal ever carrying one.
+		if r.PeerClientTLSCertFingerprint != (buscert.Fingerprint{}) {
+			j.PeerClientTLSCertSHA256 = r.PeerClientTLSCertFingerprint.String()
 		}
 	}
 	return encodePeerJSON(j)
@@ -865,10 +1008,59 @@ func DecodeBusTrustRecord(b []byte) (BusTrustRecord, error) {
 		}
 		r.SigningKeys = append(r.SigningKeys, ed25519.PublicKey(key))
 	}
+	if j.PeerClientTLSCertSHA256 != "" {
+		// ABSENT is the empty key, and nothing else. A PRESENT value must be the
+		// one textual form and must not be the all-zero digest; both refusals
+		// live in ParsePeerClientTLSFingerprint so that the durable read path and
+		// whatever operator surface writes the field can never disagree about
+		// what a well-formed binding looks like.
+		fp, err := ParsePeerClientTLSFingerprint(j.PeerClientTLSCertSHA256)
+		if err != nil {
+			return BusTrustRecord{}, err
+		}
+		r.PeerClientTLSCertFingerprint = fp
+	}
 	if err := r.validate(); err != nil {
 		return BusTrustRecord{}, err
 	}
 	return r, nil
+}
+
+// ParsePeerClientTLSFingerprint decodes the textual form of an INBOUND peer
+// client certificate binding: 64 LOWERCASE hexadecimal characters, no prefix, no
+// colons, no whitespace — buscert.ParseFingerprint's one spelling — with the
+// all-zero digest additionally refused.
+//
+// It is exported because it is the single validator for this field: the durable
+// decoder calls it, and the operator surface that eventually writes the field
+// must call it too rather than reimplementing "looks like a fingerprint". Two
+// validators for one field is how a value that one of them rejects gets onto
+// disk through the other.
+//
+// # Why all-zero is refused HERE rather than tolerated as "absent"
+//
+// The Go zero value of buscert.Fingerprint means ABSENT, so an explicitly
+// recorded 64-zero digest is indistinguishable from an unset field ONCE PARSED.
+// Silently folding it into "absent" would mean an operator (or a corrupt record)
+// could write a value that reads back as "no binding configured" while every
+// surface reports it as accepted — which is the fail-OPEN reading of a
+// credential field. It is also never a real certificate's digest: SHA-256 of any
+// DER is not zero, so nothing legitimate is being refused.
+//
+// The returned error wraps ErrInvalidPeerRecord so a caller can classify it with
+// the rest of this package's record failures.
+func ParsePeerClientTLSFingerprint(s string) (buscert.Fingerprint, error) {
+	fp, err := buscert.ParseFingerprint(s)
+	if err != nil {
+		// The offending text is NOT echoed. It arrives either from a file or
+		// from an operator's command line, and its only relevant property here
+		// is that it is not a fingerprint.
+		return buscert.Fingerprint{}, fmt.Errorf("%w: inbound peer client certificate fingerprint: %v", ErrInvalidPeerRecord, err)
+	}
+	if fp == (buscert.Fingerprint{}) {
+		return buscert.Fingerprint{}, fmt.Errorf("%w: the inbound peer client certificate fingerprint is all zero, which is either an uninitialised field or corruption; it is refused rather than read as 'no binding configured'", ErrInvalidPeerRecord)
+	}
+	return fp, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1934,6 +2126,15 @@ type BusTrust struct {
 	// SigningKeys are the pins, in the operator's order. Two only during a
 	// rollover.
 	SigningKeys []ed25519.PublicKey
+
+	// PeerClientTLSCertFingerprint binds the certificate this bus presents AS A
+	// TLS CLIENT when it dials us. See BusTrustRecord's field of the same name
+	// for which certificate that is, why it is not NextHopTLSCertFingerprint,
+	// and why it is unique across the table. The zero value means "no inbound
+	// transport binding", and PutTrust WRITES THE WHOLE RECORD, so a caller that
+	// leaves it zero while a binding exists REMOVES that binding — carry the
+	// existing value forward if that is not what you meant.
+	PeerClientTLSCertFingerprint buscert.Fingerprint
 }
 
 // PeerStoreOptions configures NewPeerStore. Every zero value means "the derived
@@ -2363,16 +2564,46 @@ func (s *PeerStore) Remove(busID string) (PeerRecord, error) {
 // THE BUS NEED NOT HAVE A ROUTE, and that is the whole reason this is a separate
 // record: in an A <-> B <-> C line, C pins A while never peering with A.
 //
-// Passing the identical pin set, in the identical order, is a no-op.
+// Passing the identical pin set, in the identical order, AND the identical
+// inbound peer client certificate binding is a no-op. The binding is part of
+// that comparison for the reason Put's next-hop pin is part of its own: a
+// re-binding after the peer rotated its client certificate is precisely a
+// PutTrust whose keys have not moved, and it would otherwise be swallowed as
+// "nothing changed" while the operator was told it succeeded.
+//
+// # THE INBOUND BINDING IS UNIQUE ACROSS THE TABLE, and that is enforced here
+//
+// A fingerprint already bound to a DIFFERENT bus is refused with
+// ErrPeerClientCertAlreadyBound before anything is written. That refusal is what
+// makes InboundPeerPrincipal's fingerprint -> bus id lookup sound; without it
+// the inbound table would inherit the ambiguity that makes the same lookup
+// forbidden over route records.
 func (s *PeerStore) PutTrust(t BusTrust) (BusTrustRecord, error) {
 	// Copied before anything else so the caller cannot mutate the slice between
 	// validation and the durable write.
 	keys := copySigningKeys(t.SigningKeys)
 	rec, err := s.write(s.trust, t.BusID, func(existing busScopedRecord, seq uint64, now time.Time) (busScopedRecord, bool, error) {
-		if cur, ok := existing.(BusTrustRecord); ok && cur.State == PeerRecordActive && sameKeySet(cur.SigningKeys, keys) {
+		// Checked INSIDE build, which runs under s.mu with writeMu held, so the
+		// table cannot change between the check and the write. A check in
+		// PutTrust's body before s.write would be a TOCTOU window on exactly the
+		// property it is defending.
+		if t.PeerClientTLSCertFingerprint != (buscert.Fingerprint{}) {
+			if other, clash := s.busBoundToPeerClientCertLocked(t.PeerClientTLSCertFingerprint, strings.ToLower(t.BusID)); clash {
+				return nil, false, fmt.Errorf("%w: %q already binds it; one inbound client certificate names exactly one bus principal, so binding it to %q as well would make an inbound connection resolvable to either", ErrPeerClientCertAlreadyBound, other, t.BusID)
+			}
+		}
+		if cur, ok := existing.(BusTrustRecord); ok && cur.State == PeerRecordActive &&
+			sameKeySet(cur.SigningKeys, keys) && cur.PeerClientTLSCertFingerprint == t.PeerClientTLSCertFingerprint {
 			return cur, false, nil
 		}
-		return BusTrustRecord{BusID: t.BusID, ConfigSeq: seq, State: PeerRecordActive, SigningKeys: keys, UpdatedAt: now}, true, nil
+		return BusTrustRecord{
+			BusID:                        t.BusID,
+			ConfigSeq:                    seq,
+			State:                        PeerRecordActive,
+			SigningKeys:                  keys,
+			PeerClientTLSCertFingerprint: t.PeerClientTLSCertFingerprint,
+			UpdatedAt:                    now,
+		}, true, nil
 	})
 	if err != nil {
 		return BusTrustRecord{}, err
@@ -2794,6 +3025,168 @@ func (s *PeerStore) TrustedBuses() []BusTrustRecord {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BusID < out[j].BusID })
 	return out
+}
+
+// InboundPeerPrincipal resolves the CLIENT certificate a peer bus presented on a
+// connection TO US to the single adjacent bus principal it names.
+//
+// It is the inbound half of federation identity, and it is the ONLY supported
+// way to obtain it. cert is r.TLS.PeerCertificates[0] and nothing else: the LEAF,
+// checked for presence by the caller and indexed at zero, NEVER searched for.
+// The handshake's CertificateVerify proves possession of the leaf's private key
+// and of nothing else in the chain, so a caller that iterated the chain looking
+// for a known fingerprint would be spoofed by anyone who appended the victim's
+// (public) certificate at index 1.
+//
+// # WHAT IT READS, AND THE SIX THINGS IT MUST NEVER READ
+//
+// It reads exactly one thing: the fingerprint of the presented leaf, matched
+// against BusTrustRecord.PeerClientTLSCertFingerprint on ACTIVE, non-withdrawn
+// trust records. It does not consult, and must never be extended to consult:
+//
+//   - route records or PeerRecord.NextHopTLSCertFingerprint — an OUTBOUND pin,
+//     deliberately duplicated across records with different bus ids, so reading
+//     it here resolves an inbound busB connection to busC;
+//   - BaseURL, or the source address of the connection — same trap, other field;
+//   - a `-route-for` destination — that names where traffic is GOING, never who
+//     is speaking;
+//   - a pinned bus SIGNING key — a message-attribution anchor, not a transport
+//     identity, and matching one would let an attestation stand in for a
+//     handshake;
+//   - the certificate's Subject, CN, SAN, Issuer or SerialNumber — every one of
+//     them is chosen by whoever minted the certificate, which for a self-signed
+//     certificate is whoever presented it;
+//   - an origin or attestation claim carried in the request body — that names a
+//     bus somewhere in the path, not the bus at the other end of THIS socket.
+//
+// # WHY FINGERPRINT-FIRST IS SOUND HERE AND FORBIDDEN NEXT DOOR
+//
+// Because the binding is UNIQUE by enforcement: PutTrust refuses to bind one
+// fingerprint to a second bus, and this function fails CLOSED with
+// ErrAmbiguousInboundPeerCert if it ever finds two anyway (a log written by
+// another binary, a hand-edited directory). Next door, on route records, one
+// fingerprint on N bus ids is CORRECT and deliberate, so the same lookup is
+// ambiguous by construction. The soundness comes from the enforced uniqueness,
+// not from the direction of the arrow — do not carry the shape across without
+// the enforcement.
+//
+// A CALLER THAT ALSO HAS A CLAIMED IDENTITY MUST CROSS-CHECK IT AGAINST THIS
+// ANSWER, never instead of it: `principal, err := InboundPeerPrincipal(leaf)`
+// then `principal == claim`. That is invariant 11's session-token cross-check
+// (a token presented over a connection whose certificate belongs to a different
+// principal is rejected) at bus scope. Trusting the claim and using it to LOOK
+// UP a fingerprint to compare would be equivalent only while the binding is
+// unique — which is exactly the property this function refuses to assume.
+//
+// # FAILURES ARE ALL FAIL-CLOSED, AND NONE OF THEM HAS A FALLBACK
+//
+// A nil store, a store that cannot see the durable withdrawal floor, a nil or
+// empty certificate, an unbound fingerprint, a withdrawn binding and an
+// ambiguous one all return an error and NO principal. There is no "unknown, so
+// allow", no TOFU, and no default principal — a caller that gets an error has
+// learned only that this connection names nobody.
+//
+// The floor requirement is PinnedBusSigningKeys's, for a sharper reason: a store
+// built without PeerStoreOptions.Dir cannot consult the RELAY-34 withdrawal
+// floor, so a discarded WAL tombstone would resurrect a REVOKED transport
+// binding and this function would admit a peer the operator had removed.
+func (s *PeerStore) InboundPeerPrincipal(cert *x509.Certificate) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("relay: inbound peer principal lookup has a nil peer store")
+	}
+	if s.floorPath == "" {
+		return "", fmt.Errorf("relay: peer store for bus %q has no durable withdrawal floor; it cannot decide inbound peer admission safely, because a revoked binding could come back with a discarded log tail", s.busID)
+	}
+	if cert == nil {
+		return "", fmt.Errorf("%w: no client certificate was presented", ErrUnknownInboundPeerCert)
+	}
+	if len(cert.Raw) == 0 {
+		// A certificate whose DER is absent cannot be fingerprinted as it
+		// arrived, and hashing an empty Raw would produce a well-formed digest of
+		// nothing. Reachable only by synthesising an x509.Certificate in process,
+		// never from a handshake — refused so that it stays unreachable.
+		return "", fmt.Errorf("%w: the presented certificate carries no DER bytes to fingerprint", ErrUnknownInboundPeerCert)
+	}
+
+	fp := buscert.FingerprintOf(cert)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trust.sweep(s.now(), s.log, s.busID)
+	bound := s.peerClientCertBindingsLocked(fp)
+
+	switch len(bound) {
+	case 0:
+		// UNKNOWN AND REVOKED ARE ONE ANSWER. See ErrUnknownInboundPeerCert.
+		return "", fmt.Errorf("%w", ErrUnknownInboundPeerCert)
+	case 1:
+	default:
+		s.log.Error("REFUSING an inbound peer connection: its client certificate is bound to more than one bus, so no single principal names it; one of these bindings is a misconfiguration and this bus will admit neither until it is resolved",
+			"local_bus", s.busID, "bound_buses", strings.Join(bound, ","))
+		return "", fmt.Errorf("%w: %d bindings", ErrAmbiguousInboundPeerCert, len(bound))
+	}
+
+	principal := bound[0]
+	// RE-VALIDATED AT THE POINT OF USE. The record was validated on the way in,
+	// but this value is about to become an authorisation subject, and the cost of
+	// checking it again is one regexp against a table that holds at most MaxPeers
+	// entries. ValidatePeerBusID also refuses OUR OWN id, which is the one
+	// principal that must never arrive over the network: a record binding a
+	// certificate to this bus would let anyone holding it speak as us.
+	if err := ValidatePeerBusID(s.busID, principal); err != nil {
+		s.log.Error("REFUSING an inbound peer connection: the bus id bound to its client certificate is not a usable peer principal",
+			"local_bus", s.busID, "err", err)
+		return "", fmt.Errorf("%w: the bound bus id is not a usable peer principal: %v", ErrUnknownInboundPeerCert, err)
+	}
+	return principal, nil
+}
+
+// peerClientCertBindingsLocked returns the canonical bus ids of every ACTIVE,
+// non-withdrawn trust record binding fp, sorted, freshly allocated.
+//
+// It is the ONE place the inbound binding is matched, so the write path's
+// uniqueness refusal and the read path's resolution cannot drift apart — and in
+// particular so that both apply busTable.withdrawn, without which a revoked
+// binding would still authorise a connection.
+//
+// The caller must hold s.mu and must already have swept s.trust.
+func (s *PeerStore) peerClientCertBindingsLocked(fp buscert.Fingerprint) []string {
+	if fp == (buscert.Fingerprint{}) {
+		// The zero fingerprint MEANS ABSENT on a record, so matching it would
+		// match every record that has no binding at all. Never a real digest.
+		return nil
+	}
+	var out []string
+	for _, entry := range s.trust.entries {
+		if s.trust.withdrawn(entry) {
+			continue
+		}
+		rec, typed := entry.(BusTrustRecord)
+		if !typed || rec.State != PeerRecordActive {
+			continue
+		}
+		if rec.PeerClientTLSCertFingerprint.Equal(fp) {
+			out = append(out, rec.BusID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// busBoundToPeerClientCertLocked reports whether fp is already bound to a bus
+// OTHER than exceptFolded, and names it. exceptFolded is the LOWERCASED bus id
+// of the record about to be written, so re-writing a bus's own binding is not a
+// self-collision.
+//
+// The caller must hold s.mu and must already have swept s.trust.
+func (s *PeerStore) busBoundToPeerClientCertLocked(fp buscert.Fingerprint, exceptFolded string) (string, bool) {
+	for _, busID := range s.peerClientCertBindingsLocked(fp) {
+		if strings.ToLower(busID) == exceptFolded {
+			continue
+		}
+		return busID, true
+	}
+	return "", false
 }
 
 // Apply implements wal.Applier: it folds one committed peer-configuration entry

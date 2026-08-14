@@ -20,8 +20,10 @@ import (
 // claim "the highest suffix EVER WRITTEN TO DISK by this bus". That claim was
 // FALSE, the security gate reproduced it, and both the name and the sentence
 // were the whole of the danger — so both are gone. What it actually returns is
-// the maximum over records of Kind == RecordKind, and that is a STRICT SUBSET of
-// the agent ids on disk:
+// the maximum over ENROLMENT-BEARING prepare records — Kind == RecordKind, plus
+// Kind == EnrolInviteRecordKind, the composite whose enrolment half is unwrapped
+// out of the envelope (see "COMPOSITE enrol+invite records are folded in too"
+// below) — and that is a STRICT SUBSET of the agent ids on disk:
 //
 //   - An agent id is also durable inside a store "message" record, as the sender
 //     and in the recipient list. Those records are Kind == store.RecordKind and
@@ -138,6 +140,28 @@ import (
 // build, carrying a field this one has never heard of, must still raise the
 // floor.
 //
+// # COMPOSITE enrol+invite records are folded in too (INVITE-GATE)
+//
+// An INVITED enrolment is written as ONE composite entry
+// (EnrolInviteRecordKind) carrying the enrolment record and the invite
+// consumption record together, so its agent id is NOT sitting at the top level
+// of the prepare body where the lenient scan below would find it. It burned a
+// suffix exactly as a plain enrolment did. A fold that looked only at
+// RecordKind would therefore derive a LOWER floor on any bus that has ever
+// gated an enrolment — i.e. it would re-mint agent id suffixes, which is the
+// invariant-1 violation this whole function exists to prevent. This matters
+// beyond this function: it is one half of the union
+// cmd/agent-bus/suffixfloors.go's walAgentIDFloors derives for the
+// -backfill-suffix-floors path.
+//
+// The composite envelope is unwrapped with the STRICT DecodeEnrolWithInvite
+// rather than a lenient peek, and that is a deliberate exception to the
+// leniency above. The two are not in conflict: leniency exists so a record this
+// build cannot fully interpret still RAISES the floor, and an undecodable
+// composite here does not lower it — it makes the whole derivation FAIL, per
+// "Failure is TOTAL" below. Fail-loud is the safe direction; a silently
+// unread composite is the unsafe one.
+//
 // # Failure is TOTAL: never a partial map
 //
 // Any failure returns (nil, err): a ScanAll error, a DecodePrepare error, or an
@@ -212,11 +236,28 @@ func EnrolmentSuffixesInWAL(walPath string, busID string) (map[string]uint64, er
 		if err != nil {
 			return nil, fmt.Errorf("auth: deriving agent id suffix floors from %s: record %d does not decode, so the derivation is INCOMPLETE and must not be used: %w", walPath, rec.Index, err)
 		}
-		if entry.Kind != RecordKind {
+		body := entry.Body
+		switch entry.Kind {
+		case RecordKind:
+		case EnrolInviteRecordKind:
+			// A COMPOSITE enrol+invite record burned a suffix exactly as a plain
+			// enrolment did — the enrolment half inside it carries the very agent
+			// id the minter issued. Its enrolment half is unwrapped through the
+			// strict decoder and re-encoded, so the lenient scan below reads the
+			// same "agent_id" field it reads on a plain record.
+			e, _, err := DecodeEnrolWithInvite(entry.Body)
+			if err != nil {
+				return nil, fmt.Errorf("auth: deriving agent id suffix floors from %s: composite enrolment+invite record %d does not decode, so the derivation is INCOMPLETE and must not be used: %w", walPath, rec.Index, err)
+			}
+			body, err = Encode(e)
+			if err != nil {
+				return nil, fmt.Errorf("auth: deriving agent id suffix floors from %s: composite enrolment+invite record %d does not re-encode, so the derivation is INCOMPLETE and must not be used: %w", walPath, rec.Index, err)
+			}
+		default:
 			continue
 		}
 
-		agentID, err := scanAgentID(entry.Body)
+		agentID, err := scanAgentID(body)
 		if err != nil {
 			return nil, fmt.Errorf("auth: deriving agent id suffix floors from %s: enrolment record %d: %w", walPath, rec.Index, err)
 		}

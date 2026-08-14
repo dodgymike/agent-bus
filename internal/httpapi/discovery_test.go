@@ -210,8 +210,15 @@ func TestDiscoveryFieldSetIsPinned(t *testing.T) {
 	})
 
 	t.Run("enrolment", func(t *testing.T) {
+		// invite_accepted was ADDED by INVITE-GATE, and it meets the bar the
+		// failure message above sets: it is derived ONCE IN New from whether an
+		// invite store was supplied, which is fixed for the process lifetime, so
+		// it carries no bus state, no count, no clock and nothing derived from
+		// s.routes -- /v1/enroll is registered either way. A caller learns the
+		// same bit anyway the first time it presents an invite and gets 201
+		// rather than 501.
 		exhaustiveKeys(t, "enrolment", asMap(t, "enrolment", body["enrolment"]),
-			"invite_required", "invite_note", "you_supply", "you_receive")
+			"invite_required", "invite_accepted", "invite_note", "you_supply", "you_receive")
 	})
 
 	t.Run("session", func(t *testing.T) {

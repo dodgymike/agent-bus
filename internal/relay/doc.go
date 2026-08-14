@@ -18,10 +18,16 @@
 //     unexported, so no caller outside this package can assemble one any other
 //     way; and TestRelayIngressCannotBeBuiltWithoutCrossBusTrust asserts that
 //     refusal AND the shape of every relay.RelayConfig literal at a wiring site.
-//   - NO PEER ROUTE IS REGISTERED ON A MUX, enforced by refusing to let one be
-//     NAMED: TestRelayPeerRoutesAreNotMountedYet fails if any file outside this
-//     package mentions PeerEnrollPath, PeerRelayPath or PeerRosterPath, or a
-//     string literal under "/v1/peer/". Registration is checked that broadly
+//   - A PEER ROUTE IS REGISTERED IN EXACTLY ONE REVIEWED PLACE, enforced by
+//     refusing to let one be NAMED anywhere else:
+//     TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile fails if any file
+//     outside this package — other than internal/httpapi/peermount.go, and that
+//     package's own test files — mentions PeerEnrollPath, PeerRelayPath or
+//     PeerRosterPath, or a string literal under "/v1/peer/". Until RELAY-20 the
+//     rule was "nowhere at all"; it was NARROWED rather than deleted when the
+//     mount landed, and what it still buys is that a SECOND mount cannot appear
+//     and that cmd/agent-bus cannot mount these itself. Registration is checked
+//     that broadly
 //     because internal/httpapi registers every route through a helper of its
 //     own, so the mount site need not import this package at all — an
 //     argument-shaped check on Handle/HandleFunc misses the NORMAL wiring shape,
@@ -54,16 +60,77 @@
 // # IMPORTING IS NOT SERVING, and what governs serving is a recorded ruling
 //
 // Handler still performs NO AUTHENTICATION OF THE PEER, and none is missing by
-// accident. Nothing in this package registers a route; the MOUNT is what has to
-// carry a peer principal, and RELAY-20 owns building it.
+// accident. Nothing in this package registers a route; the MOUNT carries the
+// peer principal, and RELAY-20 built it at internal/httpapi/peermount.go. So
+// these handlers must still never be handed to a mux from anywhere else — every
+// one of them assumes something in front has already decided WHICH ADJACENT BUS
+// is on the connection.
 //
-// RELAY-20 IS NEITHER OF THE TWO TASKS THE RULING NAMES, and that distinction is
-// the one most likely to be skipped past. Ruling (c) resolves only "once
-// f5d91dbe and 8192c3c7 both land and the handler is wired to a listener", and
-// its own "given up" clause is "nothing — this ruling authorises no shortcut;
-// the handler stays unregistered until both gating tasks land". So writing a
-// peer principal is necessary and is not by itself sufficient: RELAY-20 either
-// lands under those two tasks or amends the ruling in DECISIONS.md first.
+// WHAT THE MOUNT NOW GUARANTEES TO EVERY HANDLER HERE, so a callback can rely on
+// it rather than re-deriving it:
+//
+//   - the request arrived over TLS and presented a client certificate;
+//   - that certificate was IN DATE, judged by crypto/x509 (tls.RequestClientCert
+//     verifies no dates, so nothing upstream had checked);
+//   - its leaf — index [0] only, never a searched chain — resolved through the
+//     durable trust table to EXACTLY ONE adjacent bus, with unknown, withdrawn
+//     and ambiguous all failing closed;
+//   - httpapi.PeerBusIDFromContext(ctx) names that bus, and NO agent principal
+//     is visible on the context at all.
+//
+// That last line is what makes gaps 3, 5 and 6 below implementable at last: a
+// callback can now compare the claimed PeerEnrollRequest.BusID, the claimed
+// RosterUpdate.BusID, and a bus path's last hop, against the authenticated
+// connection.
+//
+// NONE OF THOSE THREE CHECKS EXISTS. The principal being AVAILABLE is not the
+// same as it being USED, and RELAY-21 (14eafd9) landed without writing any of
+// them — deliberately, since its callback signatures carry no peer principal and
+// the security gate ruled the residual is replay rather than forgery (the
+// envelope is bound to the origin agent's attested key). They are unowned
+// follow-ups; see the note under gap 6 for exactly how a wiring site writes them
+// and why an explicit parameter would be better than the context.
+//
+// RELAY-20 HAS MOUNTED THE ROUTES, AND THE RULING IT LANDED UNDER IS NOT YET
+// WRITTEN DOWN. Both halves of that sentence are load-bearing; read the second.
+//
+// What landed (2026-08-14): the three peer routes are served, behind an
+// authenticated adjacent-bus principal, at internal/httpapi/peermount.go — now
+// the ONE place outside this package permitted to name these paths. The gate it
+// was authorised against is MTLS-CLIENTAUTH (a97f854), which flips the listener
+// off tls.NoClientCert so a presented certificate reaches the application layer
+// at all, plus RELAY-45, which supplies the durable binding from that
+// certificate to exactly one adjacent bus (PeerStore.InboundPeerPrincipal).
+//
+// THE DIRECTION ARGUMENT is why those two and not the two ruling (c) names, and
+// it is the part most likely to be lost: on /v1/peer/* WE ARE THE SERVER, so the
+// principal comes from INGRESS — the certificate a peer presents to us — while
+// MTLS-RELAYGUARD (8192c3c7) governs EGRESS, the certificate we present when we
+// dial out. It authenticates the wrong direction to gate this mount, so making
+// it a precondition would have been a category error rather than caution.
+//
+// # THE OUTSTANDING DEBT, STATED PLAINLY RATHER THAN ASSUMED CLOSED
+//
+// DECISIONS.md ruling (c) — 2026-08-08, FEDERATION (RELAY-6), landed at 77d2b73
+// — STILL NAMES THE OLD GATE, and its "given up" clause still reads "nothing;
+// this ruling authorises no shortcut; the handler stays unregistered until both
+// gating tasks land". THAT TEXT HAS NOT BEEN AMENDED. RELAY-6 (0f7275b9) owns
+// DECISIONS.md and the amendment is its work, not this file's — a package
+// comment cannot amend a recorded decision, and an earlier draft of THIS
+// paragraph asserted the amendment had happened, which would have put a false
+// dated claim in main. Both review gates caught it; it is written this way so
+// nobody reinstates it.
+//
+// So until RELAY-6 lands that amendment, the code and the recorded ruling
+// DISAGREE, and the ruling is the authority. Anyone reconciling them should
+// amend DECISIONS.md — never soften this comment, and never delete the mount to
+// match the stale text.
+//
+// WHAT INVITE-PEERGUARD (f5d91dbe) STILL OWNS EITHER WAY: the peering material
+// itself (item 8 below), and the fact that the inbound binding is installed by an
+// OPERATOR with `agent-bus peer add` rather than redeemed from a single-use
+// invite. Invariant 3 says an invite is the only way onto the bus "including for
+// peer buses", so that difference is real and is NOT closed by this mount.
 //
 // A SEPARATE, NARROWER BLOCKER SITS ON RELAY INGEST SPECIFICALLY, and it is not
 // waived by either: no implementation of CrossBusTrust exists (RELAY-17 owns
@@ -92,11 +159,15 @@
 //     the tunnel authenticates the MACHINE and not the bus process, and a bus
 //     listening on loopback cannot tell tunnelled traffic from local traffic.
 //   - (c) peer-principal authentication is NOT part of that deferral. It is a
-//     forward precondition, and the ruling as landed names INVITE-PEERGUARD
-//     (f5d91dbe) and MTLS-RELAYGUARD (8192c3c7) as the tasks that close it. A
-//     mount that authenticates no peer principal is therefore outside the ruling
-//     whatever the topology looks like, and the way to change that is to amend
-//     DECISIONS.md — never to soften this comment.
+//     forward precondition, and the ruling AS LANDED AND AS IT STILL READS names
+//     INVITE-PEERGUARD (f5d91dbe) and MTLS-RELAYGUARD (8192c3c7) as the tasks
+//     that close it. RELAY-20 mounted under MTLS-CLIENTAUTH + RELAY-45 instead,
+//     on the direction argument above; that substitution is REAL but is NOT YET
+//     RECORDED in DECISIONS.md, and RELAY-6 owes the amendment. What holds
+//     regardless: a mount that authenticates no peer principal is outside the
+//     ruling whatever the topology looks like, and the way to change that is to
+//     amend DECISIONS.md — never to soften this comment. The mount that landed
+//     authenticates one.
 //
 // Two of the gaps listed below are the FUNCTIONALITY half of (c), and neither is
 // closed here: roster updates are not bound to the authenticated connection
@@ -235,22 +306,74 @@
 //     MaxUint64 wedges that peer PERMANENTLY: every genuine update it sends is
 //     then refused as stale, recoverable only by re-handshake. One request.
 //
-//  4. "FORWARD ONLY ON A NEW ACCEPTANCE" IS A REAL RULE AND IT IS NOT IN THIS
-//     PACKAGE. Re-relaying only when the applied-key table says OutcomeNew — so
-//     a duplicate is answered and goes no further — is what actually bounds
-//     fan-out. The split horizon alone admits one copy per simple path, which
-//     in a full mesh is factorial, not linear. It lives in the wiring site's
-//     AcceptRelay callback, which is why the cycle test implements it there.
+//  4. CLOSED BY RELAY-21 (14eafd9). "FORWARD ONLY ON A NEW ACCEPTANCE" IS NOW
+//     IN THIS PACKAGE, in accept.go. This item read "…AND IT IS NOT IN THIS
+//     PACKAGE" until that commit, which was true when written and false the
+//     moment Acceptor landed — the stale-package-doc failure this repository
+//     keeps paying for, corrected here rather than left for the next reader.
+//
+//     Acceptor.Accept re-relays ONLY when the applied-key table reports
+//     idem.OutcomeNew, so a duplicate is answered from the original result and
+//     goes no further. That is what actually bounds fan-out: the split horizon
+//     alone admits one copy per simple path, which in a full mesh is factorial,
+//     not linear. Note the trap accept.go names at its Outcome field — the ZERO
+//     VALUE of idem.Outcome IS OutcomeNew, so a seam left unfilled re-forwards
+//     everything, which is the amplification this gate exists to stop.
+//
+//     WHAT IS STILL THE WIRING SITE'S: supplying the Acceptor with a real
+//     applied-key store and a real forwarder. The seam is only as good as what
+//     RELAY-24 passes into it.
 //
 //  5. THE BUS ID IN A HANDSHAKE RESPONSE IS NEVER BOUND TO THE HOST WE DIALLED.
 //     Client.Enroll validates the responder's claimed id for SHAPE only, and
 //     Registry.UpsertPeer then installs whatever it claimed. The gate must
 //     cross-check it against the pinned certificate or the invite.
 //
+//     THIS ITEM IS THE OUTBOUND HALF ONLY, and the security gate on RELAY-20
+//     found the INBOUND twin missing from this list entirely, which is worth
+//     more than the item it sits under: PeerEnrollRequest.BusID — the id a peer
+//     claims when it dials US — is likewise validated for SHAPE only
+//     (handshake.go, ValidatePeerBusID), and AcceptPeer receives it unbound to
+//     the connection. Once a wiring site routes AcceptPeer to
+//     Registry.UpsertPeer, peer B presenting its own valid certificate and
+//     claiming bus_id "C" REPLACES C's roster and resets its version. The fix is
+//     the same one gaps 3 and 6 need and it is now available — see the note
+//     under gap 6.
+//
 //  6. NOTHING CHECKS BusPath's LAST HOP AGAINST THE SENDING PEER. A path naming
 //     three buses, none of them the peer on the connection, is accepted today.
 //     Once the connection has an authenticated identity this is cheap to
 //     enforce and worth enforcing.
+//
+//     THE IDENTITY NOW EXISTS AND IS REACHABLE, WHICH CHANGES THIS ITEM FROM
+//     "IMPOSSIBLE" TO "NOT DONE" — for gaps 3, 5 and 6 alike, so read it once
+//     here. RELAY-20's mount attaches the authenticated adjacent-bus principal
+//     to the REQUEST CONTEXT, and every callback in this package takes a
+//     context.Context: Config.AcceptPeer, RelayConfig.AcceptRelay and
+//     RosterConfig.Apply all receive the same ctx the handler was called with.
+//     So a wiring site writes
+//
+//     peerBus := httpapi.PeerBusIDFromContext(ctx)
+//
+//     and compares it against the claimed PeerEnrollRequest.BusID, the claimed
+//     RosterUpdate.BusID, or BusPath's last hop. NOTHING IN THIS PACKAGE DOES
+//     THAT YET, and none of these three checks exists.
+//
+//     THE ARGUMENT AGAINST LEAVING IT IN THE CONTEXT, recorded because it is a
+//     real design question and not a nit: a value on a context is INVISIBLE in
+//     the callback's signature, so a wiring site that never reads it compiles,
+//     passes every test, and silently skips the binding. An explicit parameter —
+//     `AcceptPeer(ctx, peerBusID string, p PeerRoster)` — cannot be forgotten,
+//     because omitting it will not build. That change belongs to whoever closes
+//     these gaps; it is NOT RELAY-20's, which owns the mount and must not
+//     rewrite three callback signatures other tasks are actively editing. The
+//     context route is what makes the work possible today; the signature route
+//     is what would make it unforgettable.
+//
+//     NOTE THE IMPORT DIRECTION. This package must NEVER import internal/httpapi
+//     (it would be a cycle, and TestRelayImportedOnlyByWiringSites governs the
+//     other direction), so the check can only ever live in the CALLBACK, at the
+//     wiring site — never in a handler here.
 //
 //  7. A FAIR-SHARE OR CAPACITY REFUSAL FROM AcceptRelay BECOMES A 503, which
 //     tells the peer to retry the very thing that is refusing it. The gate
@@ -318,7 +441,7 @@
 // PeerRosterPath, Registry), loop prevention over the traversed bus path
 // (path.go) and a background Forwarder.
 //
-// # THESE ARE ALSO UNMOUNTED, AND UNDER THE SAME RULING AS THE HANDSHAKE
+// # THESE ARE MOUNTED BY THE SAME ONE MOUNT, AND THEY RAISE THE STAKES
 //
 // Nothing here registers a route either, and the relay surface raises the stakes
 // rather than lowering them: an ungated relay ingress accepts messages

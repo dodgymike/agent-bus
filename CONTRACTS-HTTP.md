@@ -32,6 +32,13 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `messaging_public_key` **when present** (three checks: standard base64, exactly 32 bytes, and not equal to `public_key` — see the request-body section below); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
 | `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key`/`messaging_public_key` than its first use — a protocol violation, not a retry (invariant 10). Rejected and logged; **the connection is KEPT** — narrowed 2026-08-08, this row carried `Connection: close` until then (see `## Headers`) |
 | `POST` | `/v1/enroll` | none | 503 | the roster (default 4096 entries) or the idempotency table (default 16384 entries) is at capacity; `Retry-After: 5` |
+| `POST` | `/v1/enroll` | none | 201 | **NEW (INVITE-GATE, 2026-08-14).** Presenting a valid, unspent `invite_id`+`invite_secret` alongside a fresh enrolment redeems the invite ATOMICALLY, in the SAME `wal.Entry` as the enrolment record — one transaction, two fsyncs (see `CONTRACTS-ONDISK.md`, kind `"agent+invite"`). The 201 body is the same `EnrolResponseBody` shape as above. A legitimate retry of the invite redemption (same invite id + same idempotency key + same payload) replays the ORIGINAL 201 body verbatim with `Idempotency-Replayed: true` — sourced from the invite's own stored consumption record, not the roster's applied-key table (see `## Headers` below). **Presenting no invite at all is still accepted and still 201** — enrolment is NOT gated by this change; see the `enrolment` row of the discovery document and the "Known gaps" note below. |
+| `POST` | `/v1/enroll` | none | 400 | **NEW (INVITE-GATE, 2026-08-14).** `invite_id` and `invite_secret` presented but not both — they must arrive TOGETHER; omitting both is accepted (no invite), sending exactly one is refused rather than silently treated as "no invite", because that would leave a client believing a credential it half-sent was spent. Neither value is echoed. |
+| `POST` | `/v1/enroll` | none | 403 | **NEW (INVITE-GATE, 2026-08-14).** `{"error":"invite not accepted"}` — the deliberately COLLAPSED answer for unknown id, expired, revoked, already-redeemed, or malformed invite id (`internal/invite/errors.go`), so this route is not an oracle for which invite ids exist or are live. The specific reason is logged server-side only. |
+| `POST` | `/v1/enroll` | none | 409 | **NEW (INVITE-GATE, 2026-08-14).** `{"error":"idempotency key already used with a different payload"}` — the invite's OWN (invite id, idempotency key) pair was reused with a DIFFERENT payload fingerprint; a protocol violation, not a retry (invariant 10). Rejected and logged, **connection KEPT**. This is a SEPARATE idempotency scope from the roster-level 409 above — see `internal/invite/doc.go` section 4 for why the invite, not the agent or the bus, is the right namespace. |
+| `POST` | `/v1/enroll` | none | 409 | **NEW (INVITE-GATE, 2026-08-14).** `{"error":"another redemption of this invite is in flight; retry"}` — another lifecycle transition for this invite (a concurrent redemption or a revocation mid-write) is already in progress, including one presenting the SAME key. Safe to distinguish from the row above: `Begin` only reaches this check after the presented secret has already verified, so it tells a non-holder nothing. |
+| `POST` | `/v1/enroll` | none | 501 | **NEW (INVITE-GATE, 2026-08-14).** `{"error":"this bus does not redeem invites"}` — an invite was presented but this bus was built with no invite store (`httpapi.Options.Invites == nil`). Never a silent success: a client must never walk away believing its single-use credential was spent when it was not. |
+| `POST` | `/v1/enroll` | none | 503 | **NEW (INVITE-GATE, 2026-08-14).** the invite table (default 8192 entries, `invite.MaxInvites`) is at capacity; `Retry-After: 5`. A SEPARATE capacity bound from the roster/idempotency 503 above — an invite-table refusal does not touch the roster or idempotency tables and vice versa. |
 | `POST` | `/v1/session/begin` | none (issues the challenge; only registered when `Options.Auth != nil`) | 200 | `{"agent_id":"...","token":"...","challenge_expires_at":"<RFC3339Nano UTC>"}` |
 | `POST` | `/v1/session/begin` | none | 404 | `agent_id` is malformed **or** well-formed but not on this bus's roster — the two cases are deliberately indistinguishable to the caller |
 | `POST` | `/v1/session/begin` | none | 503 | the session table (default 16384 entries, pending + active together) is at capacity; `Retry-After: 5` |
@@ -62,10 +69,20 @@ top-level fields, in this order:
 | `paths_are_relative_to` | string | States that every `path` below is relative to the base URL the caller already fetched this document from, and explains why the document does NOT echo a self-URL (the `Host` header is client-supplied; a reflected URL could point a reader at an attacker's bus). |
 | `steps` | array of 8 strings | The ordered enrolment recipe, from fetching this document through generating a keypair, `POST /v1/enroll`, the session handshake, and `GET /v1/wait`/`POST /v1/mint`+`POST /v1/send`. |
 | `endpoints` | array of 11 objects | `{name, method, path, auth, purpose}` per entry; `auth` is `"none"` or `"bearer"`. |
-| `enrolment` | object | `{invite_required (bool), invite_note, you_supply, you_receive}`. |
+| `enrolment` | object | `{invite_required (bool), invite_accepted (bool), invite_note, you_supply, you_receive}`. **`invite_accepted` is NEW (INVITE-GATE, 2026-08-14)** — see the note immediately below the table. |
 | `session` | object | `{model, lifetime_seconds, refresh_after_seconds, authorization_header, signing_context}`. |
 | `client` | object | `{binary, build, go_package, note}` — points at the compiled `agent-busctl` CLI and the importable `client` Go package (invariant 7). |
 | `limitations` | array of 5 strings | Blunt, verified-true-of-this-build negative claims — see below. |
+
+**`invite_required` and `invite_accepted` are two DIFFERENT questions (INVITE-GATE, 2026-08-14) and
+must never be collapsed.** `invite_required` reports whether an enrolment MUST carry an invite — it is
+`false` in this build (verified: `internal/httpapi/discovery.go`'s `InviteRequired: false`, and
+`cmd/agent-bus/main.go` logs `enrolment_invite_required=false` at startup), and that is the truth, not
+a placeholder: enrolment WITHOUT an invite is still accepted. `invite_accepted` reports whether an
+invite PRESENTED to `POST /v1/enroll` is genuinely redeemed — `true` on any build with an invite store
+wired (every `cmd/agent-bus` binary today), `false` only for a `httpapi` build that omits one (a
+`501` on presenting one, never a silent ignore). Do not read `invite_accepted: true` as "invites are
+mandatory" — it answers only "a presented one works", not "one is required".
 
 **Invariants that govern this document, and must not be relaxed by a future edit:**
 
@@ -375,8 +392,9 @@ passes the hub as the WAL's `Applier`:
 | `Content-Type` | out | `application/json; charset=utf-8` on every JSON response. |
 | `X-Content-Type-Options` | out | `nosniff` on every JSON response. |
 | `Idempotency-Replayed` | out | `true` on `POST /v1/enroll`'s 201, on `POST /v1/send`'s 201, and (added 2026-08-07) on `POST /v1/mint`'s 201, when the response was replayed rather than freshly applied — from the applied-key table for `enroll`/`send`, from the outstanding-reservation table for `mint`. The BODY is byte-identical to the original either way — the header is the only out-of-band signal that this call re-applied (and, for `mint`, allocated) nothing. Not reachable on `/v1/broadcast`, which answers 501. |
+| `Idempotency-Replayed` | out | **NEW (INVITE-GATE, 2026-08-14).** Also `true` on `POST /v1/enroll`'s 201 when the INVITE REDEMPTION itself (not the roster-level enrolment) was a legitimate retry — same invite id, same idempotency key, same payload — sourced from the invite's own stored consumption record (`internal/invite`'s `Record.Result`), a DIFFERENT table from the roster's applied-key table the row above reads. The body is still byte-identical to the original either way. |
 | `Connection` | out | `close` on **exactly one** response: the **403** from `POST /v1/send` when `sender` is a well-formed fully-qualified agent id naming an agent that is not the authenticated caller (a malformed or absent `sender` is 403 WITHOUT a disconnect — it names nobody and is a client bug). That is invariant 10's REPLAY clause — an accepted signed message can be resent verbatim by anyone who has seen it and the bytes still verify, and what identifies the replayer is that the sender inside those bytes is not the agent on the session. The server closes the socket after the response. **NARROWED 2026-08-08:** this header was previously sent on the 409 key-reuse conflicts from `POST /v1/enroll` and `POST /v1/send`, and is not any more — those keys are the caller's OWN (keys are scoped per agent), so the conflict is a client bug rather than an attack, and dropping the socket destroyed every other request the client had pipelined on it, including its long poll. Those paths now reject and log. The SIGN-6 409s (`ErrUnknownMint`, `ErrMintMismatch`) do **not** disconnect either — see the `hub.ErrUnknownMint` row in the sentinel table for why the hostile and honest cases are currently indistinguishable there. |
-| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit), on a 503 from `/v1/send` caused by the applied-key table being at capacity, and on a 503 from `/v1/mint` caused by the outstanding-reservation bounds. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, an expiring reservation, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. It is also deliberately **absent from every SIGN-6 4xx**, which are terminal for their idempotency key. |
+| `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit; **added INVITE-GATE 2026-08-14: also the invite table's own 8192-entry capacity limit, `invite.MaxInvites`, on `POST /v1/enroll` when an invite is presented**), on a 503 from `/v1/send` caused by the applied-key table being at capacity, and on a 503 from `/v1/mint` caused by the outstanding-reservation bounds. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, an expiring reservation, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. It is also deliberately **absent from every SIGN-6 4xx**, which are terminal for their idempotency key. |
 | `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/mint`, `/v1/broadcast` or `/v1/send`. |
 | `Cache-Control` | out | `no-store` on `POST /v1/session/begin` only. That response body carries a LIVE credential (the session token); the other two auth responses carry none, so the header is deliberately not set on them and its presence stays meaningful. |
 
@@ -407,6 +425,8 @@ or a future build that intentionally omits the auth surface).
 | `public_key` | base64 std, padded | yes | The agent's Ed25519 **AUTH** public key, exactly 32 bytes. Proves the agent to **this bus**. |
 | `messaging_public_key` | base64 std, padded | **no — see below** | **NEW 2026-08-08 (RELAY-13).** The agent's Ed25519 **MESSAGING** public key, exactly 32 bytes, and it may **not** be the same value as `public_key` (400 if it is). Stored on the roster entry as `MessagingPublicKey` and written to the durable enrolment record as `msg_pub` (`CONTRACTS-ONDISK.md`), so it survives a restart by WAL replay. It is client-supplied **material, not identity**: it is validated as input and has **no influence on the minted agent id** (invariant 1). |
 | `idempotency_key` | string | yes | 1–128 bytes of `[A-Za-z0-9._-]`. Makes the enrolment safe to retry (invariant 10). |
+| `invite_id` | string | **no — see below** | **NEW (INVITE-GATE, 2026-08-14).** The invite being redeemed, `^inv-[a-z2-7]{16,32}$` (`invite.InviteIDPattern`). Must be presented TOGETHER with `invite_secret` — one without the other is 400. Omitting both is accepted and unchanged from before this task: enrolment with no invite is still accepted (`invite_required` is `false`, `GET /v1/discovery`). |
+| `invite_secret` | string | **no — see below** | **NEW (INVITE-GATE, 2026-08-14).** The invite's plaintext bearer secret, exactly as the operator handed it out (`invite.Minted.Secret`). NEVER logged, echoed, or present in an error, on any path — the same discipline a session token gets. Whoever holds it can enrol an agent onto this bus. |
 
 **Why two keys, with the right control named.** It is *not* that the bus could forge with the auth
 key — the bus holds only the **public** half of both keys and can forge with neither. The hazard is
@@ -456,6 +476,17 @@ includes this field: presenting one idempotency key with two different messaging
 be answered as a replay, the roster would keep the **first** key, and the client would leave believing
 the second was registered. Every message it signed would then fail to verify for every peer, with
 nothing pointing at the cause.
+
+**The invite has its OWN idempotency scope, separate from the roster-level one above (INVITE-GATE,
+2026-08-14).** When `invite_id`/`invite_secret` are presented, the fingerprint `internal/invite`
+compares a retry against is computed over exactly `name`, the DECODED `public_key` bytes, the DECODED
+`messaging_public_key` bytes (empty if absent), and `invite_id` — in that order
+(`idem.ComputeFingerprint`, called at `internal/httpapi/auth.go`'s `handleEnroll`). The invite secret
+itself is deliberately NOT in that list: it is a bearer credential already proved by `invite.Store.Begin`,
+and hashing it would put a credential-derived value into a durable record. This scope is keyed to
+`(invite id, client idempotency key)`, not to the agent (there is no authenticated agent id yet) and not
+bus-wide (an unauthenticated caller could otherwise squat a key ahead of a legitimate retry) — see
+`internal/invite/doc.go` section 4 for the full argument.
 
 **The signing contract — load-bearing for any future client.** `POST /v1/session/complete`'s
 `signature` field is an Ed25519 signature over the exact byte string:
@@ -599,6 +630,18 @@ routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE 
   below). `auth.Service.Authenticate` is the seam `authMiddleware` calls on every request; it is no
   longer unwired.
 - **There is no revocation** (AUTH-4). A session is valid until it expires, at most one hour.
+- **SHARPENED, NOT CLOSED (INVITE-GATE, 2026-08-14): `POST /v1/enroll` is STILL unauthenticated, and
+  that is the point — it is how a credential is obtained at all, and invariant 3 requires it stay
+  reachable with nothing in hand.** What changed is that a presented invite is no longer decorative: an
+  `invite_id`+`invite_secret` pair, when sent, is genuinely single-use and REDEEMED atomically with the
+  enrolment (see the routes table above and `CONTRACTS-ONDISK.md`'s `"agent+invite"` entry). **This does
+  NOT gate the route.** An enrolment presenting NO invite is still accepted exactly as before this task
+  — `GET /v1/discovery`'s `enrolment.invite_required` is `false` and says so, and every gap in this list
+  still applies in full to the no-invite path, which remains the common case. Requiring an invite
+  (invariant 3's end state) is a separate, not-yet-filed change. Nor does a CLI exist to exercise the
+  invite half of this route: `agent-busctl enrol --invite` is refused locally (`client/enrol.go`), so an
+  agent cannot redeem an invite today even though the HTTP surface accepts one — that gap is task
+  `INVITE-CLIENT`.
 
 ## Authentication (added 2026-08-02)
 
@@ -685,6 +728,72 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `store.Message.VisibleTo(agentID string, enrolledAt time.Time) bool` | The **one** authorization boundary of the read path. Applied on all four read paths (history, the long-poll fast path, its post-registration re-read, and its wake re-read) and by the wake filter itself, always with the AUTHENTICATED principal and that agent's roster entry — never with anything taken from a cursor. A zero `enrolledAt` disables the epoch check and exists only for roster-less callers (an audit tool); it must never be reached from a request path. |
 | `hub.Result` / `hub.Batch` | What a send returns and what a read returns; see `internal/hub/hub.go` and `internal/hub/wait.go`. |
 | `store.RecordKind` / `store.RecordVersion` | `"message"` / **`2`** (was `1`; bumped 2026-08-07 by SIGN-6, reserved from the Spec Server `store-record-version` namespace) — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. v2 adds REQUIRED `timestamp_ms` and `signature`, and **refusing v1 records at recovery is a destructive, bidirectional break** — see `CONTRACTS-ONDISK.md`. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
+
+## Peer-bus transport identity (RELAY-45, added 2026-08-14) — NOT YET MOUNTED
+
+`internal/httpapi/peerprincipal.go` answers exactly one question, for the routes a peer bus will
+eventually call: **which single ADJACENT BUS is at the other end of THIS TLS connection?** It is a
+**TRANSPORT** principal, structurally distinct from the **agent** principal `authMiddleware` attaches
+above — different context keys, different Go types, and `RequirePeerPrincipal` never reads a token or
+a header:
+
+| | agent principal (`### Authentication`, above) | peer principal (this section) |
+| --- | --- | --- |
+| names | a fully-qualified `<bus-id>.<agent-id>` (invariant 2) | a bare bus id — `ids.ValidateBusID` refuses the `.` that would make it one |
+| credential | a session token (opaque server-side handle), obtained by enrolling and completing a session (invariant 3) | the TLS **client certificate** presented on the connection, bound to a bus id in the durable trust table (`relay.BusTrustRecord.PeerClientTLSCertFingerprint` — see `CONTRACTS-ONDISK.md`) |
+| context accessor | `PrincipalFromContext` / `AgentIDFromContext` | `PeerPrincipalFromContext` / `PeerBusIDFromContext` |
+
+**Neither is ever accepted as the other.** `RequirePeerPrincipal` **removes** any agent principal
+already attached to the request context rather than leaving it to coexist — a peer bus is very often
+also an enrolled agent on the buses it peers with, and a peer request may carry a valid session token
+as well as a client certificate. Picking it up as though it authorised the peer request would be
+exactly the credential confusion invariant 11's cross-check exists to prevent, so the context handed
+downstream carries a value under the agent-principal key that no assertion can succeed against
+(`noAgentPrincipal{}`) — a peer route sees exactly one principal, the transport one.
+
+**`Options.PeerPrincipals InboundPeerPrincipals`** (`internal/httpapi/server.go`) is the resolver,
+satisfied by `*relay.PeerStore`. **It has NO DEFAULT.** A `nil` value is not a degraded mode to be
+filled in with something permissive — it is the fail-closed state, and `RequirePeerPrincipal` refuses
+every request behind it while it is unset, logging `errNoPeerResolver` rather than admitting anyone.
+
+**`(*Server).RequirePeerPrincipal(next http.Handler) http.Handler` — the order of its checks is the
+contract:**
+
+1. A resolver must be configured (`Options.PeerPrincipals != nil`), or every request is refused.
+2. The connection must have arrived over TLS (`r.TLS != nil` — never true on the plaintext listener
+   this server refuses to serve, invariant 11, but reachable from a test harness or future in-process
+   listener).
+3. A client certificate must have been presented. The listener only **requests** one
+   (`tls.RequestClientCert`), so an empty `r.TLS.PeerCertificates` is the ORDINARY case for every
+   ordinary agent connection, not an exotic one.
+4. **`r.TLS.PeerCertificates[0]` only — this handler never iterates the chain.** The peer controls
+   every certificate after the leaf, while the handshake's `CertificateVerify` proves possession of
+   the leaf's private key alone; a gate that searched the chain would be spoofed by appending the
+   victim's public certificate at index 1.
+5. The leaf resolves through `InboundPeerPrincipal`, or the request is refused. No fallback, no second
+   lookup, no principal on any error path.
+
+**Refusal is `403`, with NO `WWW-Authenticate` challenge, and ONE fixed reason
+(`peerPrincipalRefusal = "this connection is not an authorised peer bus"`) for all six causes** — no
+resolver configured, no TLS, no certificate, an unknown fingerprint, a withdrawn binding, an ambiguous
+binding. This deliberately mirrors the two-string collapse `### Authentication` above already applies
+to session-token failures, for the same enumeration-oracle reason, and it is `403` rather than `401`
+because the only challenge this server speaks is `Bearer` — offering it here would invite a refused
+peer to retry with a session token, i.e. advertise exactly the credential confusion this gate exists to
+prevent (see `DECISIONS.md` "2026-08-14 — RELAY-45"). The LOG line (not the response) names which of
+the six it was, and — since a certificate is public once presented — includes the fingerprint on every
+resolver-failure path so an operator can see exactly what needs to be bound.
+
+**`PeerPrincipal{BusID, CertFingerprint}`** is what a handler downstream receives:
+`CertFingerprint` is carried so a handler or an operator can name the credential in a log line without
+recomputing it; it is public data, derivable by anyone who completes the handshake. **A handler that
+also has a claimed peer identity in the request body MUST cross-check it against this value, never use
+it instead** — the same invariant-11 rule the session-token cross-check enforces, applied at bus scope.
+
+**NO ROUTE USES THIS YET.** Nothing in this build mounts a peer route behind `RequirePeerPrincipal` —
+`RELAY-20` is the task that does — and nothing in a running server constructs the `*relay.PeerStore`
+this section's resolver needs (`RELAY-24` is the composition root). This section documents code that
+exists and is tested, not behaviour an operator or a peer bus can reach today.
 
 ### Panic log records (added 2026-08-08 — CORE-14, CORE-6)
 

@@ -56,6 +56,15 @@ const MaxBearerTokenLen = 512
 //     signature over the server-chosen token, which handleSessionComplete
 //     verifies; the token in the body is not a credential until it succeeds.
 //
+// THE /v1/peer/ ROUTES DO NOT BELONG HERE AND MUST NEVER BE ADDED (RELAY-20).
+// They ARE authenticated -- by the TLS client certificate, through
+// RequirePeerPrincipal -- so adding one would not be documenting an existing
+// exemption, it would CREATE an ungated federation ingress: an anonymous POST in
+// front of our roster, our routing table and our relay ingest. authMiddleware
+// handles them through s.isPeerRoute, whose membership is derived from the mount
+// rather than declared here, and mountPeerRoute REFUSES to register a pattern
+// that appears in this map.
+//
 // Matching is EXACT string equality against r.URL.Path -- no prefix match, no
 // path cleaning, no normalisation, no trailing-slash tolerance. That is
 // deliberate and fail-closed: any non-canonical spelling ("//healthz",
@@ -292,6 +301,37 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// No principal is attached here, on purpose: a handler on an
 			// unauthenticated route must never see one, so it cannot come to
 			// depend on an identity that is not always present.
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// A REGISTERED PEER-BUS ROUTE IS AUTHENTICATED BY A DIFFERENT
+		// AUTHENTICATOR, NOT BY NONE (RELAY-20). This is NOT the allow-list
+		// above wearing a second name, and the difference is the whole point:
+		//
+		//   - the allow-list means "served with NO credential at all";
+		//   - this means "served with a credential this function cannot read".
+		//
+		// A peer bus is not an enrolled agent. It holds no session token and
+		// there is no route through which it could obtain one, so a bearer
+		// requirement here would be UNSATISFIABLE rather than strict -- the same
+		// shape as /v1/session/complete, which is on the allow-list for exactly
+		// that reason. Its credential is the TLS client certificate, and the
+		// decision belongs to RequirePeerPrincipal, which is fail-closed:
+		// no resolver, no TLS, no certificate, an unknown fingerprint, a
+		// withdrawn binding or an ambiguous one all refuse.
+		//
+		// WHAT MAKES THIS SAFE IS THAT MEMBERSHIP IS DERIVED, NOT DECLARED.
+		// s.peerRoutes is written by exactly one function -- mountPeerRoute --
+		// which in the same breath wraps the handler in RequirePeerPrincipal.
+		// There is no way to add a path here without gating it, which is
+		// precisely the property a hand-maintained second allow-list could not
+		// offer. The set is also empty on every build that does not federate.
+		//
+		// The peer gate REMOVES any agent principal rather than merely ignoring
+		// it, so a session token can never be read as a peer-bus credential
+		// downstream; see peerprincipal.go.
+		if s.isPeerRoute(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

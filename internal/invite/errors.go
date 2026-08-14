@@ -76,7 +76,25 @@ var (
 
 	// ErrKeyReuse reports the SAME idempotency key presented with a DIFFERENT
 	// payload fingerprint (invariant 10). It is a PROTOCOL VIOLATION, not a
-	// retry: the caller must reject it, log it and DISCONNECT the client.
+	// retry: the caller must REJECT it and LOG it, and MUST NOT DISCONNECT.
+	//
+	// # THE CONNECTION IS KEPT (invariant 10, NARROWED 2026-08-08)
+	//
+	// This doc said "disconnect" until the narrowing, which was made by user
+	// decision after the behaviour was measured at the raw socket: same key +
+	// different payload is rejected and logged with the connection KEPT, and only
+	// replay of an already-accepted SIGNED MESSAGE disconnects.
+	//
+	// The argument is at its STRONGEST on the enrolment route, and it is the one
+	// internal/httpapi/auth.go already makes for auth.ErrIdempotencyKeyReused:
+	// /v1/enroll is UNAUTHENTICATED, so the socket identifies NO PRINCIPAL to
+	// punish — the party disconnected is simply whoever owns that socket, which on
+	// a shared address need not be the party that sent the request. And dropping
+	// it destroys every other request pipelined on that connection, hitting an
+	// honest client part-way through obtaining a credential, with no session yet
+	// to fall back on. A merely BUGGY client reaches this line easily; that is the
+	// first of the two questions invariant 10 requires before adding any
+	// disconnect, and it answers itself here.
 	//
 	// It is a separate sentinel from ErrAlreadyRedeemed precisely because the
 	// two demand opposite reactions — one is "you are too late", the other is

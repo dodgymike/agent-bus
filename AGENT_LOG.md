@@ -3588,3 +3588,198 @@ agent's boundary. One entry each, per `CLAUDE.md` step 10.
   re-runs; two fail-silent-unpinned P1s (an omitted pin erasing an existing one; a rotation leaving
   sibling `-route-for` records on the old certificate) were fixed as pre-write refusals rather than
   filed as follow-ups.
+
+## 2026-08-14 — RELAY-45 (`4be32336`): docs closed, but the task is NOT complete as filed (`documentation`)
+
+`internal/relay/peerstore.go` (`BusTrustRecord.PeerClientTLSCertFingerprint`,
+`ParsePeerClientTLSFingerprint`, `PutTrust`'s uniqueness refusal, `InboundPeerPrincipal`) and
+`internal/httpapi/peerprincipal.go` (`Options.PeerPrincipals`, `RequirePeerPrincipal`,
+`PeerPrincipalFromContext`/`PeerBusIDFromContext`) shipped as code.
+
+**The gate history, stated exactly, because the first version of this paragraph claimed a reviewer
+PASS that had not been given** — and a false dated claim in a shared append-only file is the same
+defect class this task's own round-1 finding closed (a Go comment asserting a document that did not
+exist). SECURITY: PASS, first pass, with four findings — two MEDIUM and two LOW/informational.
+MEDIUM (1) is a REAL LATENT DEFECT and is recorded here in full because an earlier revision of this
+paragraph erased it by mis-splitting MEDIUM (2) into two: `cmd/agent-bus/peer.go:789-803`, the ONLY
+production `PutTrust` caller, passes a ZERO `PeerClientTLSCertFingerprint`, and `PutTrust` writes the
+WHOLE record — so once the operator flag lands, a routine `peer add -signing-key` rotation SILENTLY
+DESTROYS an inbound binding while `trustAlreadyPinned` (which compares keys only) reports
+`unchanged`. Fail-closed in direction, unreachable today because nothing sets the field, and carried
+on `RELAY-45-FU-CLI` as a must-fix. MEDIUM (2) is completeness: acceptance criteria 2 and 5 unmet —
+no operator CLI surface and no documentation. LOW (3): the certificate VALIDITY WINDOW is checked
+nowhere on this side — `tls.RequestClientCert` does no chain verification and this gate does not
+either, so an EXPIRED peer certificate would resolve; owned by `ca356fde-0613-42cb-ac85-a629609d9c78`,
+now extended to name the peer plane, and it must close before or with `RELAY-20`. LOW (4): each
+request reaching the gate takes `PeerStore.mu` and runs a sweep plus a table scan bounded by
+`MaxPeers` before refusing. REVIEWER: **CHANGES-REQUIRED** on the first pass — the code was
+judged correct and the tests real evidence, and every blocker was COMPLETENESS against the task's own
+acceptance criteria (no CLI flag, no docs, a Go comment citing a document that did not yet exist, and
+therefore no compiled-CLI proof). The in-boundary findings were fixed and the reviewer RE-VERIFIED
+them; the out-of-boundary ones are the follow-up recorded below. Security's PASS named MISSING
+DOCUMENTATION as a finding; this entry, plus
+`CONTRACTS-ONDISK.md` (the `"bustrust"` record's field table/JSON shape, and a new "keyed to the BUS
+PRINCIPAL, never to an address" section), `CONTRACTS-HTTP.md` (a new "Peer-bus transport identity"
+section) and `DECISIONS.md` ("2026-08-14 — RELAY-45", four decisions), close it. Invariants read in
+full before writing: 1 (server-authoritative ids — the bound `bus_id` is re-validated at the point of
+use), 2 (fully-qualified ids — `PeerPrincipal.BusID` is deliberately a BARE bus id, not one), 6
+(loud discard — an older binary's `DisallowUnknownFields` refusal on this field), 10 (idempotency —
+`PutTrust`'s same-binding-is-a-no-op / different-binding-is-a-real-write rule) and 11 (mTLS, no CA, the
+session-token/certificate cross-check this task's `403` refusal and agent-principal shadowing both
+extend to bus scope).
+
+**The task is NOT complete as filed, and this entry says so on the record rather than letting the
+`done` flip imply otherwise.** RELAY-45's own acceptance criteria 2 and 5 require a CLI/operator
+configuration surface (`--json`, stable errors) for writing this binding, and `AGENT_PROTOCOL.md` +
+`CONTRACTS-CLI.md` documentation of it. That surface is `cmd/agent-bus/peer.go` (the existing `agent-bus
+peer add`/`peer` family), which sits OUTSIDE this agent's file-ownership boundary for this task — this
+agent edits `CONTRACTS-ONDISK.md`, `CONTRACTS-HTTP.md`, `DECISIONS.md`, `AGENT_LOG.md` only, per its
+brief. **`AGENT_PROTOCOL.md` and `CONTRACTS-CLI.md` are correspondingly left untouched here, not by
+oversight: no CLI subcommand and no agent-facing route exist yet for this binding, so writing either
+document as though one did would be the exact "documenting a guarantee as LIVE when it is only
+designed" failure mode this agent is warned against.** The CLI half of criteria 2 and 5 is
+`RELAY-45-FU-CLI` (`b9d645be`): a flag on `agent-bus peer add` (or an equivalent) that writes
+`PeerClientTLSCertFingerprint` through `relay.ParsePeerClientTLSFingerprint` — never a second
+"looks like a fingerprint" check — plus the matching `AGENT_PROTOCOL.md`/`CONTRACTS-CLI.md` entries in
+the SAME task, per invariant 7. **It must also fix security MEDIUM (1) above, and the two cannot be
+separated: the silent-unbind lives in the very function the flag lands in.** Carry the existing
+record's fingerprint forward and include it in `trustAlreadyPinned`'s comparison (or give `PutTrust` an
+explicit tri-state), and refuse a certificate-only `peer add` with a message naming `-signing-key`
+rather than letting a bare `ErrInvalidPeerRecord` surface with no remedy.
+
+**Also not shipped, and not claimed here as shipped:** no route is mounted behind
+`RequirePeerPrincipal` (`RELAY-20`), and no running server constructs a `*relay.PeerStore` to satisfy
+`Options.PeerPrincipals` (`RELAY-24`). Nothing in this task, or in the docs it adds, is operator-reachable
+or verifiable in production.
+
+## 2026-08-14 — INVITE-GATE (`05a5216d-097c-4279-8a27-a0fb9479542f`): docs closed (`documentation`)
+
+Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation (this entry).
+Code shipped: `internal/auth/inviteenrol.go` (new — the composite `"agent+invite"` `wal.Entry` and
+`auth.NewMultiplexApplier`), `internal/auth/walroster.go` (`WALRoster.PutWithInvite`),
+`internal/auth/service.go`, `internal/auth/floors.go`, `internal/invite/store.go` (`Store.Begin` /
+`Redemption.Consume/Commit/Abort` — the participant API), `internal/invite/doc.go`,
+`internal/invite/errors.go`, `internal/httpapi/auth.go` (`handleEnroll`'s `invite_id`/`invite_secret`,
+`inviteRedemption` adapter, `writeInviteError`'s mandatory sentinel collapse), `internal/httpapi/
+discovery.go` (`invite_accepted`), and the invite hunks of `internal/httpapi/server.go` +
+`cmd/agent-bus/main.go` (invite store construction, `auth.NewMultiplexApplier` wiring, the
+`invites_recovered` / `enrolment_invite_required=false` startup log line).
+
+**Documentation updated:** `CONTRACTS-HTTP.md` (the `POST /v1/enroll` routes-table rows for the two new
+optional fields and every new status — 201 atomic-redemption, 400 half-invite, 403 collapsed refusal,
+two distinct 409s, 501, 503 — the `Idempotency-Replayed` and `Retry-After` header rows, the
+`invite_accepted` field in the discovery-document table plus a note distinguishing it from
+`invite_required`, the invite's own idempotency-scope paragraph, and a new bullet under "Known gaps"
+that SHARPENS rather than deletes the existing "these three routes are unauthenticated" gap — the route
+is still unauthenticated by design, and that did not change); `CONTRACTS-ONDISK.md` (a new section: the
+`"agent+invite"` composite entry, its `{v,enrolment,rider_kind,rider}` envelope, the no-reservation-
+needed note, and the correction that the log's `Applier` is now `auth.NewMultiplexApplier` rather than
+the roster alone, including the FORWARD HAZARD that `wal.MultiApplier` — the checkpoint dispatcher, a
+different type — would hard-fail on this kind the day checkpoints are wired into `cmd/agent-bus`, which
+they are not today); `AGENT_PROTOCOL.md` (one note under `enrol`: the wire accepts an invite, the CLI
+still cannot send one, `--invite` still fails locally at exit 2); `DECISIONS.md` (new dated section: why
+one `wal.Entry` not two writes, why a free-form `Entry.Kind` and no reservation, why the gate ships OFF
+— naming both the CLI blocker and the live-bus lockout risk explicitly, and pointing at `INVITE-CLIENT`
+— why `invite_accepted` is a separate field from `invite_required`, and a CORRECTED residual-risk
+statement: the task's own stored description says the secret crosses the wire in cleartext until
+`MTLS-LISTENER` lands; `MTLS-LISTENER` landed 2026-08-07, so that claim is now stale and was not
+repeated — the risk that remains is one-way TLS with no CA and no trust-on-first-use, closed only by a
+client pinning the bus's certificate fingerprint from its invite blob).
+
+**No CLI subcommand ships with this capability, which invariant 7 would normally require.** This is
+NOT an oversight: the client half is task `INVITE-CLIENT`, and `client/` (and `cmd/agent-busctl`) sat
+outside this task's boundary — verified in this build, not assumed: `client/enrol.go`'s `Enrol` still
+refuses `opts.Invite != ""` locally (`KindUsage`, exit 2), and no `agent-busctl` flag or route reaches
+`invite_id`/`invite_secret`. The HTTP surface exists and is documented as HTTP-surface-only; the
+agent-facing half does not exist yet, and no doc written here claims otherwise.
+
+**Invariants read in full before writing:** 1 (server-authoritative ids — an undecodable composite
+never resurrects a burned suffix), 3 (invite-only enrolment is the STATED end state and is explicitly
+NOT what this build does — `invite_required` is `false` and every doc says so), 4 (nothing acknowledged
+before durable — the composite entry's one-prepare-one-commit shape), 6 (loud discard, never silent —
+the composite-decode-failure log line and its fail-open note on the invite half), 10 (idempotency scopes
+— the invite's own `(invite id, key)` namespace is distinct from the roster's, and same-key-different-
+payload on either keeps the connection open), 11 (TLS is mandatory and one-way; no plaintext fallback;
+no trust-on-first-use — this is what makes the corrected residual-risk paragraph in `DECISIONS.md`
+correct rather than the stale one it replaces).
+
+**Verified against the code, not assumed:** `invite_required` is `false`
+(`internal/httpapi/discovery.go`'s `InviteRequired: false`, `cmd/agent-bus/main.go`'s
+`enrolment_invite_required=false` startup log line, `internal/httpapi/discovery_test.go`'s
+`"invite_required is false"` subtest); no `agent-busctl` subcommand or flag redeems an invite
+(`client/enrol.go:197-220`); `cmd/agent-bus/main.go` passes `wal.LogOptions{Applier: applier}`, never
+`Checkpoints:`, confirming the forward hazard recorded in `CONTRACTS-ONDISK.md` is live risk and not a
+hypothetical.
+
+## 2026-08-14 — CLI-6 (`47001cb4-bc0f-44f8-929e-ac51bc6d0fb3`): `agent-bus log`, the audit-trail reader (`feature-runner`)
+
+Added an OFFLINE, dirlock-taking, read-only `agent-bus log` subcommand that prints the append-only
+message audit trail (`bus.audit`) as METADATA ONLY, NDJSON under `--json`, with the ordered `bus_path`
+on every record. New file `cmd/agent-bus/auditlog.go`; two purely additive registration hunks in
+`cmd/agent-bus/main.go`; tests in `cmd/agent-bus/auditlog_cli6_test.go`; docs in `CONTRACTS-CLI.md`
+and `AGENT_PROTOCOL.md`.
+
+**It is on the SERVER binary, not `agent-busctl`** — the same call CLI-11 made an hour earlier. Its
+authority is FILESYSTEM ACCESS to the data directory, not a network privilege (DECISIONS.md E4), and
+it takes the same EXCLUSIVE dirlock as `invite mint` / `peer add` / `key export-public`, so it needs
+the bus STOPPED. `agent-busctl` is a pure HTTP client importing only `client/` with no data-dir or
+dirlock plumbing.
+
+**Invariants read in full before writing:** 6 (the log records METADATA AND ROUTING ONLY, never
+bodies; damage is discarded but EVERY discard is logged loudly and specifically — silent discard is
+the defect; integrity is a keyed MAC, never a CRC) and 7 (the compiled CLI is THE client: `--json`
+everywhere, stable documented exit codes, no interactive prompt, and the `AGENT_PROTOCOL.md` entry
+ships in the SAME task).
+
+**Two premises were corrected before any code was written.** The stored `proof_cmd` named
+`./cmd/agent-bus-cli/...`, a binary that does not exist in this repo; it was corrected through
+spec-keeper and re-baselined RED (`verdict=FAIL … tests_run=0`) against a clean `git archive HEAD`
+overlay. And `--follow`, which the description required, is NOT deliverable as described: the dirlock
+is exclusive, so this command only ever runs against a stopped bus, and tailing a file nobody is
+appending to is not a capability. It moved to `CLI-6-FU-FOLLOW`. The absorbed WAL frame-dumper went
+to CLI-8 (the description permits either home).
+
+**The security gate found three HIGH defects, all proved by probe, all fixed and re-probed:**
+
+1. A planted **format-version-1** `bus.audit` was printed as an authentic trail at **exit 0 with an
+   empty stderr** — v1 frames are authenticated by an UNKEYED CRC32C anyone can compute, so the probe
+   got `message_id="…FORGED-BY-ATTACKER"` rendered under the "METADATA ONLY" header. `internal/wal`
+   QUARANTINES such a file at startup; this reader, which by design runs before any quarantine can
+   fire and may be the only thing that ever reads a backup, did not. Now refused (exit 5).
+2. The "read-only" reader **silently MINTED a durable `wal-mac.key`**. `wal.ScanAll → macKeyFor →
+   macKeyMayBeCreated` returns true for a zero-length or unknown-magic audit file, and `ScanAll`
+   passes a nil logger so wal's own "generated a new MAC key" line is suppressed. Measured harm: on a
+   directory with an INTACT `bus.wal` whose key was lost, one run converted the actionable
+   `ErrMACKeyMissing` ("restore the key") into `ErrMACKeyMismatch`, whose documented remedy is to move
+   `bus.wal` aside — i.e. destroy the WAL. Fixed by requiring `wal.MACKeyFileName` to already exist:
+   `macKeyFor` only reaches `createMACKey` when `loadMACKey` returns `ErrMACKeyMissing`, so with the
+   key present no creation path can fire for ANY shape of `bus.audit`.
+3. Human output printed client-derived ids raw. `wal`'s `auditID` bounds only emptiness and length —
+   it imposes NO character restriction — so a newline in `sender` forged a complete fake record line,
+   and ESC/CR reached the terminal. Now `%q`-quoted, PER ELEMENT for `bus_path`. Note the asymmetry
+   that made this worth fixing: `internal/wal` already `%q`-quotes and elides these same values on its
+   damage path, so the success path was less careful than the package it wraps.
+
+**Two accuracy fixes on top:** an `EACCES` on an existing trail was reported as "there is NO
+provenance record for any message this bus may have routed" — the exact opposite of the truth, in the
+one message that must never be confused with damage; it now splits on `errors.Is(err, os.ErrNotExist)`
+(exit 4 absent, exit 1 "could NOT BE EXAMINED"). And one operator condition was reporting under two
+exit codes depending on WHICH path was unreadable; `checkAuditFormatVersion` now separates "could not
+open the file" (exit 1) from "read it and the content is not version 2" (exit 5).
+
+**`bus_path` — what is proven and what is NOT.** The reader is proven against directly-constructed
+1-, 2- and 3-hop fixtures, asserted in exact order, with a mutation test that turns red on a reversed
+path. But **no running bus produces a path longer than one element today.** RELAY-11 (`d4a1985`)
+landed the plumbing — `store.NewMessageWithBusPath` validates every hop — but `hub.publish` has
+exactly two callers (`Send`, `Broadcast`), NEITHER sets `busPath`, and no relay-ingest route is
+registered, so `publish` always substitutes `store.LocalBusPath(h.busID)`. Multi-hop is RECORDABLE but
+not REACHABLE until RELAY-20/21/24. Consequently `scripts/fed-smoke.sh` is still blocked: this task
+removes its "CLI-6 … is unavailable" die, but `assert_audit_path` will fail on buses B and C until the
+relay chain lands. Stated here so the backlog does not read as though federation traversal is
+observable.
+
+**Not done, and owned elsewhere:** `scripts/fed-smoke.sh:191` still invokes `"$CTL" log`
+(`agent-busctl`, which registers no `log` subcommand). It needs exactly the fix commit `1bc778a`
+applied at line 158 for `key export-public` — thread `"$server"` into `read_audit`, update the three
+call sites, and correct the header comment at line 17. `scripts/` is outside this task's ownership
+boundary and was deliberately not touched.

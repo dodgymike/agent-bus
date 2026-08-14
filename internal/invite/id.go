@@ -80,7 +80,19 @@ func ValidateInviteID(id string) error {
 		return fmt.Errorf("%w: %d bytes, but an invite id is at most %d; it is not echoed here because it is oversized", ErrInvalidInviteID, len(id), MaxInviteIDLen)
 	}
 	if !inviteIDRegexp.MatchString(id) {
-		return fmt.Errorf("%w: %q must match %s", ErrInvalidInviteID, id, InviteIDPattern)
+		// The id is NOT echoed, at any length. The oversized branch above already
+		// refuses to echo, and echoing here was the remaining hole: a malformed id
+		// is attacker-chosen input on an UNAUTHENTICATED route (POST /v1/enroll
+		// redeems an invite), it reaches an operator's log through this error, and
+		// this server has no rate limit. Quoting it made every rejected request
+		// worth up to MaxInviteIDLen bytes of log volume that the caller chooses.
+		//
+		// Reported as a LENGTH plus the pattern, which is everything a legitimate
+		// caller needs to fix its own request and nothing an attacker can use as an
+		// amplifier or an echo. This is the same discipline the oversized branch
+		// above already applies, and the same one auth.validateIdempotencyKey
+		// applies to an oversized key.
+		return fmt.Errorf("%w: a %d-byte id that must match %s; it is not echoed here because it is client-supplied and unvalidated", ErrInvalidInviteID, len(id), InviteIDPattern)
 	}
 	return nil
 }

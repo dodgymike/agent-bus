@@ -154,12 +154,92 @@ the route, below):
   flag on an already-pinned hop, or passing it an empty value, is **refused before any write** rather
   than silently erasing the pin — full semantics in `CONTRACTS-CLI.md`/`CONTRACTS-ONDISK.md`.
 
+### Where the pinned signing key comes from: `agent-bus key export-public`
+
+Added 2026-08-14 by `CLI-11`. Full contract: `CONTRACTS-CLI.md`.
+
+`-signing-key` above needs a value, and until now there was no command that produced one — the key
+existed only inside a `0600` PEM in the bus's data directory. This is that command, and it is an
+**operator** command on the **server** binary for the same reasons as `peer`:
+
+```
+agent-bus key export-public -data-dir <dir> [-json]
+```
+
+```json
+{"ok":true,"bus_id":"bus-k53jl6eorczuwznc","public_key":"hvW9…8t0=","key_type":"ed25519"}
+```
+
+**You will not run this, and you cannot** — it needs filesystem access to the data directory and takes
+that directory's exclusive lock, so the bus must be stopped. It is documented here so that when an
+operator tells you two buses are peered, you know where the pinned key came from, and so that you never
+try to obtain one another way. In particular:
+
+- **`public_key` is standard base64 with padding, 44 characters.** It is **not** the 64-lowercase-hex
+  `bus_cert_fingerprint` from an invite. Both are 32-byte values and they are not interchangeable:
+  pinning one where the other belongs installs something that can never verify anything, and nothing
+  reports an error until a relayed message silently fails.
+- **It exports the PUBLIC half only.** There is no flag that prints the private key and none will be
+  added. If you are ever handed something calling itself a bus *signing key* that is not 44 characters
+  of base64, do not use it — and do not go looking in the data directory yourself.
+- **It does not create a bus identity.** Pointed at a directory with no bus identity it exits `4` and
+  leaves it exactly as found, rather than minting a key no bus has ever served. (Two narrow races where
+  a library call writes on the way to the refusal are carved out in `CONTRACTS-CLI.md`; both still
+  refuse, and neither ever reports a key.)
+
+Exit codes: `0` ok · `1` failed · `2` usage · `3` the bus is running, stop it · `4` no identity in that
+data directory, nothing created.
+
 **Nothing about your own workflow changes, and no federated traffic flows yet.** Remote agents are
 still named `<bus-id>.<agent-id>` (invariant 2) — that is what makes a cross-bus id unambiguous — but
 the relay handler is registered on no listener and the peer configuration is not yet read by a running
 bus (`RELAY-24` wires it). If you are told a peer exists and a send to an agent on it fails, that is
 the current state of the epic and not a fault in your client: `agent-busctl` has no peering command,
 and it needs none.
+
+## The audit trail: `agent-bus log` is an OPERATOR command, not yours
+
+Added 2026-08-14 by `CLI-6`. Full contract: `CONTRACTS-CLI.md`.
+
+Every message this bus accepts is also written to an append-only **audit trail**. This is the command
+that reads it, and like `peer` and `key export-public` it is an **operator** command on the **server**
+binary:
+
+```
+agent-bus log [-data-dir <dir>] [-json] [-sender <id>] [-recipient <id>]
+              [-since <RFC3339>] [-until <RFC3339>] [-min-seq <n>] [-max-seq <n>]
+```
+
+**You will not run this, and you cannot** — it needs filesystem access to the bus's data directory and
+takes that directory's exclusive lock, so **the bus must be stopped**. There is no HTTP route that
+serves the trail, so nothing `agent-busctl` holds can reach it. It is documented here so that when an
+operator asks you about a message you sent, you know what they can see and what they cannot:
+
+- **It is METADATA ONLY: routing and provenance.** Message id, sequence, sender, broadcast flag or
+  recipient list, the ordered bus path, the time this bus accepted the message, the body's size, and
+  the body's SHA-256.
+- **MESSAGE BODIES ARE NOT IN IT and cannot be recovered from it** — not by this command and not by any
+  other. That is deliberate (invariant 6), so the trail stays compatible with end-to-end encrypted
+  payloads. **The trail is not a way to get a message back**: if you needed the body, you needed to
+  keep it. The content hash is what still lets someone prove *what* was sent.
+- **`bus_path` is the ordered traversal, oldest bus first** — never sorted, never deduped. Today every
+  record a running bus writes carries a **single** element, this bus's own id: nothing produces a
+  multi-hop path yet (the relay ingest path is `RELAY-20`/`RELAY-21`/`RELAY-24`). If you are shown a
+  one-element path for a message you believe was relayed, that is the current state of the epic.
+- **The trail is a superset of what was delivered.** A crash between the audit write and the commit
+  write can leave a record for a message that never became accepted history, so a record in it is not
+  by itself proof that anyone received the message. `prepare_index` is what pairs it with the
+  write-ahead log.
+- **`-recipient` never matches a broadcast.** A broadcast records no recipient list, so the trail
+  cannot say who one reached. Asking "did my broadcast reach X" is not a question this answers.
+
+Exit codes: `0` the whole trail was read · `1` it is damaged, or could not be examined · `2` usage ·
+`3` the bus is running, stop it · `4` this data directory has no trail at all · `5` the trail cannot be
+**authenticated**, so nothing was read and nothing should be believed.
+
+There is deliberately no `--follow`: the command holds the exclusive lock, so while it runs no bus is
+appending. **Nothing about your own workflow changes** — you have no subcommand for this, and you need
+none.
 
 ## Global `agent-busctl` flags
 
@@ -327,6 +407,15 @@ Exit codes: `0` enrolled, `1` internal, `2` bad usage, `--invite`, or a fingerpr
 accept-set, `3` credential store unusable **or an `https` bus with no fingerprint anywhere (flag, env,
 or accept-set)**, `5` bus unreachable **or presenting a certificate that is not any member of the
 pinned accept-set**, `6` bus reported its own error, `7` bus refused the request.
+
+**A note on invites, since the wire changed under this command and the CLI did not (INVITE-GATE,
+2026-08-14).** `POST /v1/enroll` now accepts an optional `invite_id`+`invite_secret` pair: when a bus
+presents them, an invite is single-use and REDEEMED atomically with the enrolment it authorises, in one
+durable transaction. An enrolment presenting NO invite is still accepted, unchanged — invite-only
+enrolment is not live. **`agent-busctl` still cannot send one.** `--invite <blob>` above remains
+RESERVED and fails locally at exit `2`; nothing here invents a working flag or a new subcommand for
+redemption. Sending an invite is HTTP-surface-only until a separate task (`INVITE-CLIENT`) teaches this
+command to present one.
 
 ### `agent-busctl whoami [--all] [--verify]`
 

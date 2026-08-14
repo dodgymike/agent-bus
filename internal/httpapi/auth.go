@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
+	"github.com/dodgymike/agent-bus/internal/idem"
+	"github.com/dodgymike/agent-bus/internal/invite"
+	"github.com/dodgymike/agent-bus/internal/logging"
 )
 
 // The three routes that ISSUE a credential. All are POST, all take and return
@@ -32,12 +35,15 @@ const (
 // MaxAuthRequestBytes bounds the body of an auth route.
 //
 // The largest legitimate request here is an enrolment: a 64-byte name, TWO
-// 44-byte base64 Ed25519 public keys (auth and messaging) and a 128-byte
-// idempotency key — under a third of a kilobyte with JSON overhead. 8 KiB is
-// generous by an order of magnitude and still finite, which is the point: an
-// unauthenticated caller must not be able to stream unbounded bytes into
-// json.Decode. The second key moved the legitimate maximum by 44 bytes, which
-// is why this bound did not need revisiting when it landed.
+// 44-byte base64 Ed25519 public keys (auth and messaging), a 128-byte
+// idempotency key and — since INVITE-GATE — an invite id (at most
+// invite.MaxInviteIDLen) with its base64url secret (at most
+// invite.MaxSecretLen), which together move the legitimate maximum by roughly
+// another 90 bytes. That is still under half a kilobyte with JSON overhead. 8
+// KiB is generous by an order of magnitude and still finite, which is the
+// point: an unauthenticated caller must not be able to stream unbounded bytes
+// into json.Decode. Neither the second key nor the invite fields came close to
+// needing this bound revisited.
 const MaxAuthRequestBytes = 8 << 10
 
 // IdempotencyReplayedHeader marks a response that was replayed from the
@@ -106,6 +112,28 @@ type EnrolRequestBody struct {
 
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10).
 	IdempotencyKey string `json:"idempotency_key"`
+
+	// InviteID is the id of the invite this enrolment redeems. OPTIONAL in this
+	// build: an enrolment carrying no invite is still accepted (see
+	// DiscoveryEnrolment.InviteRequired, which is false and says so). It must be
+	// presented TOGETHER with InviteSecret; one without the other is a 400.
+	//
+	// Presenting an invite to a build with no invite store is 501, never a
+	// silent success: a client must never walk away believing its single-use
+	// credential was spent when it was not.
+	InviteID string `json:"invite_id"`
+
+	// InviteSecret is the invite's plaintext BEARER CREDENTIAL, exactly as the
+	// operator handed it out (invite.Minted.Secret).
+	//
+	// IT IS NEVER LOGGED, NEVER ECHOED AND NEVER APPEARS IN AN ERROR, on any
+	// path in this package — the same discipline a session token gets, and for
+	// the same reason: whoever holds it can enrol an agent onto this bus
+	// (DECISIONS.md, E6 — the invite blob is the trust anchor). internal/invite
+	// drops it the moment it has been verified.
+	//
+	// OPTIONAL, as InviteID is, and accepted rather than REQUIRED in this build.
+	InviteSecret string `json:"invite_secret"`
 }
 
 // EnrolResponseBody is the 201 body of POST /v1/enroll, and is replayed byte
@@ -200,11 +228,125 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// THE INVITE, WHEN ONE IS PRESENTED. Presenting one is OPTIONAL in this
+	// build and enrolment without one is accepted unchanged — the whole no-invite
+	// path below is byte-for-byte what it was before INVITE-GATE.
+	presented := body.InviteID != "" || body.InviteSecret != ""
+	var redemption auth.InviteRedemption
+	if presented {
+		if body.InviteID == "" || body.InviteSecret == "" {
+			// Refused rather than treated as no invite at all: a client that sent
+			// half a credential has a bug, and quietly enrolling it WITHOUT the
+			// invite would leave it believing its single-use invite was spent.
+			// Neither value is echoed.
+			s.log.Debug("enrolment presented only half an invite",
+				"request_id", RequestIDFromContext(r.Context()),
+				"have_invite_id", body.InviteID != "",
+			)
+			s.writeJSON(w, r, http.StatusBadRequest, ErrorResponse{Error: "invite_id and invite_secret must be presented together"})
+			return
+		}
+		if s.invites == nil {
+			// 501, the same posture /v1/broadcast takes for a capability this
+			// build does not implement. NOT a silent ignore: see
+			// Options.Invites.
+			//
+			// The id goes through inviteIDLogFields, NOT into the line raw: this
+			// branch is reached before anything has validated it.
+			kv := append([]interface{}{
+				"request_id", RequestIDFromContext(r.Context()),
+			}, inviteIDLogFields(body.InviteID)...)
+			s.log.Info("an invite was presented to a bus built without an invite store; refused with 501 rather than enrolling without it", kv...)
+			s.writeJSON(w, r, http.StatusNotImplemented, ErrorResponse{Error: "this bus does not redeem invites"})
+			return
+		}
+
+		// The key's SHAPE is validated here, BEFORE Begin, because invite.Begin
+		// rejects a malformed key as ErrInvalidRecord, which writeInviteError maps
+		// to a 500 — a client error reported as a server one. idem.ValidateKey is
+		// byte-for-byte the same rule auth.validateIdempotencyKey applies (both:
+		// non-empty, at most 128 bytes, [A-Za-z0-9._-] only), so the invited and
+		// un-invited paths cannot disagree about which keys are acceptable.
+		if err := idem.ValidateKey(body.IdempotencyKey); err != nil {
+			s.log.Debug("enrolment idempotency key rejected before invite redemption",
+				"request_id", RequestIDFromContext(r.Context()),
+				"err", err,
+			)
+			s.writeJSON(w, r, http.StatusBadRequest, ErrorResponse{Error: "invalid idempotency key"})
+			return
+		}
+
+		// THE FINGERPRINT FIELD LIST AND ORDER, DOCUMENTED AT THE CALL SITE as
+		// invite.RedeemRequest.Fingerprint requires. It is, in this exact order:
+		//
+		//	1. name                (the requested agent name)
+		//	2. public_key          (the DECODED Ed25519 auth key bytes)
+		//	3. messaging_public_key(the DECODED messaging key bytes, empty if absent)
+		//	4. invite_id           (the invite being redeemed)
+		//
+		// That is everything the enrolment ASSERTS, so a key re-presented with any
+		// different content is caught as ErrKeyReuse rather than answered with
+		// somebody else's original result. The DECODED key bytes are hashed rather
+		// than their base64 spelling because the decoder is Strict() — exactly one
+		// spelling per key — so the two are equivalent, and the decoded form is
+		// what internal/auth compares. The invite SECRET is deliberately NOT in the
+		// list: it is a bearer credential, it is already proved by Begin, and
+		// hashing it would put a credential-derived value in a durable record.
+		fp := idem.ComputeFingerprint([]byte(body.Name), pub, msgPub, []byte(body.InviteID))
+
+		red, err := s.invites.Begin(invite.RedeemRequest{
+			InviteID:    body.InviteID,
+			Secret:      body.InviteSecret,
+			Key:         body.IdempotencyKey,
+			Fingerprint: fp,
+		})
+		if err != nil {
+			s.writeInviteError(w, r, body.InviteID, err)
+			return
+		}
+
+		if red.Outcome() == invite.OutcomeReplay {
+			// A LEGITIMATE RETRY of a redemption this bus already applied: return
+			// the ORIGINAL result, verbatim, apply nothing, and do NOT punish the
+			// client (invariant 10).
+			resp := red.Result()
+			if len(resp) == 0 {
+				// A redeemed record with no stored result is THIS SERVER's bug, not
+				// the client's — the record should have carried the 201 body — so it
+				// is a 500 and an ERROR line, never a 4xx blaming the caller.
+				s.log.Error("an invite redemption replay carries no stored result; the durable record was written without the response it must replay",
+					"request_id", RequestIDFromContext(r.Context()),
+					"invite_id", body.InviteID,
+				)
+				s.writeJSON(w, r, http.StatusInternalServerError, ErrorResponse{Error: "internal error"})
+				return
+			}
+			w.Header().Set(IdempotencyReplayedHeader, "true")
+			s.log.Info("enrolment replayed from the invite redemption record",
+				"request_id", RequestIDFromContext(r.Context()),
+				"invite_id", body.InviteID,
+			)
+			// writePreformattedJSON's rule is that the body must never be DERIVED
+			// FROM REQUEST INPUT, and these bytes are not: they are this server's
+			// OWN earlier 201 body, read back out of the durable invite record —
+			// bounded by idem.MaxResultBytes and already validated as JSON by
+			// invite.DecodeRecord on the way in. Returning them VERBATIM is exactly
+			// what invariant 10 requires of a legitimate retry: the body a retry
+			// parses must be indistinguishable from the original's.
+			s.writePreformattedJSON(w, r, http.StatusCreated, append(resp, '\n'))
+			return
+		}
+		redemption = &inviteRedemption{red: red, inviteID: body.InviteID, log: s.log}
+	}
+
 	res, err := s.auth.Enrol(auth.EnrolRequest{
 		Name:               body.Name,
 		PublicKey:          pub,
 		MessagingPublicKey: msgPub,
 		IdempotencyKey:     body.IdempotencyKey,
+		// nil unless an invite was presented; a nil Invite is an UN-INVITED
+		// enrolment and is accepted.
+		Invite: redemption,
 	})
 	if err != nil {
 		// The NAME is logged, the public key is not: a name is what an operator
@@ -240,12 +382,190 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	// 201 on the replay too: the response to a retry is the response to the
 	// original, status included.
-	s.writeJSON(w, r, http.StatusCreated, EnrolResponseBody{
+	s.writeJSON(w, r, http.StatusCreated, enrolResponseBody(res))
+}
+
+// enrolResponseBody renders the 201 body of POST /v1/enroll.
+//
+// It is a shared helper and not an inline literal because the SAME body is
+// produced in two places — here for the live 201, and in inviteRedemption.
+// Consume for the bytes stored in the durable invite record and replayed
+// verbatim to a legitimate retry. Two literals would be free to drift, and the
+// drift would be invisible until a client compared an original with its retry.
+func enrolResponseBody(res auth.EnrolResult) EnrolResponseBody {
+	return EnrolResponseBody{
 		AgentID:    res.AgentID,
 		BusID:      res.BusID,
 		Name:       res.Name,
 		EnrolledAt: formatInstant(res.EnrolledAt),
-	})
+	}
+}
+
+// inviteRedemption adapts *invite.Redemption to auth.InviteRedemption, so
+// internal/auth can compose the enrolment and the invite consumption into ONE
+// durable transaction without importing internal/invite.
+//
+// It holds no secret: invite.Store.Begin drops the presented secret the moment
+// it verifies it, and nothing here ever sees it again.
+type inviteRedemption struct {
+	red      *invite.Redemption
+	inviteID string
+	log      *logging.Logger
+}
+
+// InviteID implements auth.InviteRedemption. It returns the id from the REQUEST,
+// which Begin has already validated and matched against a stored secret digest.
+func (a *inviteRedemption) InviteID() string { return a.inviteID }
+
+// RiderKind implements auth.InviteRedemption: the wal.Entry.Kind the consumption
+// record replays as.
+func (a *inviteRedemption) RiderKind() string { return invite.RecordKind }
+
+// Consume implements auth.InviteRedemption: it builds the durable consumption
+// record, carrying the agent id the enrolment minted and the EXACT bytes the 201
+// will return, so a later retry replays a byte-identical body.
+func (a *inviteRedemption) Consume(res auth.EnrolResult) (json.RawMessage, error) {
+	b, err := json.Marshal(enrolResponseBody(res))
+	if err != nil {
+		return nil, err
+	}
+	return a.red.Consume(invite.Result{AgentID: res.AgentID, Response: b})
+}
+
+// Commit implements auth.InviteRedemption. It returns nothing on purpose: by the
+// time it runs the enrolment is DURABLE, and the only error invite.Redemption.
+// Commit returns is caller misuse (commit without consume), which this path
+// cannot produce. Reporting a committed enrolment to the client as failed would
+// be strictly worse than a serving-copy discrepancy a restart repairs from the
+// log — so the error is LOGGED HERE, at ERROR, and goes no further.
+func (a *inviteRedemption) Commit() {
+	if err := a.red.Commit(); err != nil {
+		a.log.Error("folding a DURABLE invite consumption into the serving copy failed; the durable log is the truth and a restart will rebuild from it",
+			"invite_id", a.inviteID, "err", err)
+	}
+}
+
+// Abort implements auth.InviteRedemption: it releases the reservation. It is
+// called only when nothing became durable — see auth.Service.Enrol's resolve
+// guard — and invite.Redemption.Abort is a documented no-op after a successful
+// Commit and on a replay.
+func (a *inviteRedemption) Abort() { a.red.Abort() }
+
+// writeInviteError maps an internal/invite failure to a status code and answers.
+//
+// # THE COLLAPSE IS MANDATORY, AND internal/invite/errors.go SAYS SO
+//
+// ErrUnknownInvite, ErrExpired, ErrRevoked, ErrAlreadyRedeemed and
+// ErrInvalidInviteID all get the SAME status and the SAME body. The distinct
+// sentinels exist for the OPERATOR — they are logged here, server-side, with the
+// invite id when it is a VALID one (inviteIDLogFields) — but the set of answers
+// is an oracle for "does invite X exist" and
+// "is invite X still live", which is exactly what an attacker enumerating invite
+// ids wants. That is why this function exists at all rather than a per-sentinel
+// mapping in writeAuthError.
+//
+// THE INVITE SECRET APPEARS NOWHERE: not in a log line, not in an error, not in
+// a response, on any path here. It is a bearer credential.
+func (s *Server) writeInviteError(w http.ResponseWriter, r *http.Request, inviteID string, err error) {
+	// inviteIDLogFields, not a raw "invite_id": this function is reached for
+	// ErrInvalidInviteID too, i.e. precisely when the id is client-chosen junk
+	// that nothing has accepted.
+	kv := append([]interface{}{
+		"request_id", RequestIDFromContext(r.Context()),
+		"op", "invite redeem",
+	}, inviteIDLogFields(inviteID)...)
+	kv = append(kv, "err", err)
+
+	switch {
+	case errors.Is(err, invite.ErrUnknownInvite),
+		errors.Is(err, invite.ErrExpired),
+		errors.Is(err, invite.ErrRevoked),
+		errors.Is(err, invite.ErrAlreadyRedeemed),
+		errors.Is(err, invite.ErrInvalidInviteID):
+		// ONE status, ONE body. Info rather than Debug: a run of these is the
+		// shape of somebody guessing invite ids, and an operator should see it by
+		// default. The specific sentinel is in "err", server-side only.
+		s.log.Info("invite redemption refused", kv...)
+		s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "invite not accepted"})
+
+	case errors.Is(err, invite.ErrKeyReuse):
+		// Invariant 10: same key + DIFFERENT payload is a protocol violation, not
+		// a retry. Reject it and LOG it — and KEEP THE CONNECTION (narrowed
+		// 2026-08-08). No "Connection: close" here, ever.
+		//
+		// The reasoning is the one writeAuthError already carries for
+		// auth.ErrIdempotencyKeyReused: /v1/enroll is UNAUTHENTICATED, so the
+		// socket identifies NO principal to punish — whoever owns it need not be
+		// whoever sent the request — and dropping it destroys every other request
+		// pipelined there, hitting an honest client part-way through obtaining a
+		// credential. A merely BUGGY client reaches this line easily, which is the
+		// first question invariant 10 demands before adding any disconnect.
+		s.log.Warn("invite idempotency key reused with a different payload; rejected, and the connection is KEPT because this route is unauthenticated and the socket identifies no principal to punish", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "idempotency key already used with a different payload"})
+
+	case errors.Is(err, invite.ErrRedemptionInFlight):
+		// A DISTINCT answer, and distinct is safe HERE AND ONLY HERE: Begin
+		// reaches the in-flight check only AFTER the presented secret has
+		// verified, so it can only be reported to the invite's holder and tells a
+		// non-holder nothing. It is worth distinguishing because the remedy is
+		// specific and temporary — retry, and the original's result will be there.
+		s.log.Info("invite redemption refused: another transition for this invite is in flight", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "another redemption of this invite is in flight; retry"})
+
+	case errors.Is(err, invite.ErrCapacity):
+		w.Header().Set("Retry-After", capacityRetryAfterSeconds)
+		s.log.Warn("invite redemption refused at a capacity limit", kv...)
+		s.writeJSON(w, r, http.StatusServiceUnavailable, ErrorResponse{Error: "server at capacity, retry later"})
+
+	default:
+		// ErrNotDurable, ErrInvalidRecord, ErrResultTooLarge and anything
+		// unforeseen. Every one of them is THIS SERVER's problem, not the
+		// client's, so it is a 500 with a fixed body and an ERROR line.
+		s.log.Error("invite redemption failed", kv...)
+		s.writeJSON(w, r, http.StatusInternalServerError, ErrorResponse{Error: "internal error"})
+	}
+}
+
+// inviteIDLogFields renders a client-supplied invite id for a log line on the
+// ENROL path: the value itself when it is a VALID id, and its LENGTH — never
+// its bytes — when it is not.
+//
+// THIS IS ABOUT VOLUME, NOT ESCAPING, and restoring the raw value would undo
+// it. logging.writeValue already runs every field through strconv.Quote, so an
+// invite id is SAFE to write; the problem is that /v1/enroll needs no
+// credential, this server rate-limits nothing, and MaxAuthRequestBytes lets an
+// anonymous caller put ~1 KiB (internal/logging's per-value cap) of chosen
+// bytes into an Info-level record, several times over, per cheap request. That
+// is log amplification against a 161-byte baseline.
+//
+// A VALID id is logged in full and must stay that way: an operator correlating
+// a refused redemption needs it, and it is bounded by
+// invite.MaxInviteIDLen. Everything else gets "invite_id_len" only —
+// deliberately NOT a truncated prefix, because a prefix of an attacker-chosen
+// id is still attacker-chosen bytes and it invites the next reader to "just log
+// a bit more". This is the same discipline invite.ValidateInviteID already
+// applies when it refuses to echo an OVERSIZED id back (internal/invite/id.go).
+//
+// THE "err" FIELD IS THE OTHER HALF OF THIS, AND IT IS EASY TO MISS. This
+// helper controls only the "invite_id" field; every writeInviteError line ALSO
+// carries "err", and a wrapped sentinel can smuggle the id back into the record
+// that this helper just took it out of. invite.ValidateInviteID's malformed-id
+// branch did exactly that — it quoted the offending id — so before that was
+// fixed (internal/invite/id.go) the raw value still reached the log through
+// "err", bounded only by MaxInviteIDLen rather than by this function. Both the
+// reviewer and the security gate found that independently, which is why it is
+// written down rather than assumed obvious.
+//
+// So the rule is not "sanitise the id field", it is: NO ERROR ON THIS PATH MAY
+// ECHO A CLIENT-SUPPLIED INVITE ID. A future sentinel that starts quoting one
+// reopens this hole without touching a line of this file.
+//
+// The invite SECRET appears here on no path at all; it is a bearer credential.
+func inviteIDLogFields(inviteID string) []interface{} {
+	if err := invite.ValidateInviteID(inviteID); err != nil {
+		return []interface{}{"invite_id_len", len(inviteID)}
+	}
+	return []interface{}{"invite_id", inviteID}
 }
 
 // handleSessionBegin serves POST /v1/session/begin.

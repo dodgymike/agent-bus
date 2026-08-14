@@ -246,7 +246,7 @@ func scanRepoGoFiles(t *testing.T, root string) []scannedFile {
 // list, that the ingress cannot be built without a real CrossBusTrust, and that
 // no peer route is registered on a mux yet. This guard is the first of those
 // three; TestRelayIngressCannotBeBuiltWithoutCrossBusTrust and
-// TestRelayPeerRoutesAreNotMountedYet are the others. None is redundant with the
+// TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile are the others. None is redundant with the
 // rest and none may be dropped on the grounds that another covers it.
 //
 // IMPORTING IS NOT SERVING, and this guard deliberately measures only the first.
@@ -271,7 +271,7 @@ func TestRelayImportedOnlyByWiringSites(t *testing.T) {
 		// import this package.
 		if s.dot {
 			t.Errorf("%s DOT-IMPORTS %s. Import it with its package name: a dot-import removes the qualifier "+
-				"that TestRelayIngressCannotBeBuiltWithoutCrossBusTrust and TestRelayPeerRoutesAreNotMountedYet "+
+				"that TestRelayIngressCannotBeBuiltWithoutCrossBusTrust and TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile "+
 				"match on, so it would turn both of them into no-ops without failing anything.", s.file, modulePath)
 		}
 		if wiringSites[s.dir] {
@@ -400,7 +400,8 @@ func TestRelayImportGuardCanActuallyFail(t *testing.T) {
 // one of the three peer surfaces with a trust chain to omit. The handshake
 // (relay.Config/NewHandler) and the roster sync (relay.RosterConfig/
 // NewRosterHandler) have no Trust field at all, so what protects those is not
-// this test but TestRelayPeerRoutesAreNotMountedYet, which refuses to let any of
+// this test but TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile, which
+// refuses to let any of
 // the three be registered on a mux. The security gate reached them this way on
 // the first draft of this file, when only RelayConfig was guarded.
 func TestRelayIngressCannotBeBuiltWithoutCrossBusTrust(t *testing.T) {
@@ -604,7 +605,213 @@ var peerRoutePathIdents = map[string]bool{
 // written out by hand — including one this package has not defined yet.
 const peerRoutePrefix = "/v1/peer/"
 
-// TestRelayPeerRoutesAreNotMountedYet is the guard that survives from the
+// peerMountFile is THE ONE FILE outside this package permitted to name a peer
+// route (RELAY-20). It is the mount, and it is a single file rather than a
+// directory on purpose — see peerRouteMountSiteExempt.
+const peerMountFile = "internal/httpapi/peermount.go"
+
+// peerMountDir is the directory the mount lives in. Its TEST files are exempt
+// too; see peerRouteMountSiteExempt.
+const peerMountDir = "internal/httpapi"
+
+// peerMountFunc is the ONE function a peer route may legitimately be passed to
+// inside the mount file: it wraps the handler in RequirePeerPrincipal and
+// records the path as a peer route in the same breath. Every other callee is an
+// escape — see peerMountFileEscapes.
+const peerMountFunc = "mountPeerRoute"
+
+// peerRouteMountSiteExempt reports whether f is the reviewed mount file, or one
+// of that package's own test files.
+//
+// # WHY A FILE AND NOT A PACKAGE, for PRODUCTION code
+//
+// internal/httpapi is a large package with a dozen non-test files, and it is the
+// package that would most plausibly grow a SECOND registration — a route table,
+// a convenience wrapper, a "peer" case in a switch. Exempting the DIRECTORY for
+// production code would make every one of those invisible to this guard.
+// Exempting one FILE keeps the property that matters after RELAY-20: not "nobody
+// serves these" (somebody does now), but "exactly one reviewed place decides
+// which handler is served at which peer path, and behind what".
+//
+// # WHY THE MOUNT PACKAGE'S TEST FILES ARE EXEMPT
+//
+// A _test.go file cannot be compiled into the server binary, so it can serve
+// nothing — which is the same reason this guard already exempts internal/relay's
+// own test files (see relayOwnMountRegistrations). And the retired guard's
+// comment promised exactly this: "when RELAY-20 mounts them for real, it owns
+// this guard and can carry such a test with the mount". The BEHAVIOURAL tests
+// that replaced the syntactic half of the old rule have to name the paths they
+// probe; sending them to internal/relay instead would put the mount's tests in a
+// package that cannot see the mount.
+//
+// It is scoped to the mount's OWN directory, not to every test file in the
+// repository. A peer-route fixture anywhere else is still refused, with the
+// remedy in the message.
+//
+// Paths are matched EXACTLY, never by suffix. A suffix match would exempt
+// anything ending in peermount.go anywhere in the tree, which is a file anyone
+// can create.
+func peerRouteMountSiteExempt(f scannedFile) bool {
+	path := filepath.ToSlash(f.file)
+	if path == peerMountFile {
+		return true
+	}
+	return filepath.ToSlash(f.dir) == peerMountDir && strings.HasSuffix(path, "_test.go")
+}
+
+// peerMountFileEscapes finds a peer route ESCAPING the exempted mount file.
+//
+// # THE EXEMPTION IS NOT A LICENCE TO HAND THE PATH OUT (security gate, RELAY-20)
+//
+// The gate DEMONSTRATED this on the first draft: a value exported from
+// peermount.go and ranged over by a SECOND file in internal/httpapi registers
+// all three peer routes UNGATED with every guard green — the naming rule sees
+// only the exempt file, and the sibling file names no path of its own. That is
+// the exact shape relayOwnMountRegistrations already closes for internal/relay,
+// and the exemption re-opened it one directory over. It is the structural twin
+// of the subpackage bridge, and it is the shape an honest agent would most
+// plausibly write, because "put the route table next to the mount" reads like
+// good hygiene.
+//
+// # IT IS STRICTER THAN THE internal/relay RULE, AND IT HAS TO BE
+//
+// relayOwnMountRegistrations only flags a return from an EXPORTED function,
+// because an unexported one cannot be reached by a wiring site in another
+// package. HERE THE DANGER IS IN THE SAME PACKAGE: every sibling file of
+// peermount.go shares its scope, so an UNEXPORTED var, const or func carries the
+// path just as far. Export status is therefore not consulted at all.
+//
+// The one legitimate shape is what the mount actually does: the path as a CALL
+// ARGUMENT to mountPeerRoute, which wraps and records it in one step. That is
+// outside every rule below, which is why this costs nothing today.
+//
+// Residual, adversarial only: a path assembled by concatenation, and an escape
+// laundered through a call this guard does not model — the same two
+// relayOwnMountRegistrations carries.
+func peerMountFileEscapes(t *testing.T, root string) []peerRouteMention {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(peerMountFile))
+	src, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Reported by the caller's sawMountSite check, which says what to do.
+			return nil
+		}
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	fset := token.NewFileSet()
+	file, perr := parser.ParseFile(fset, path, src, 0)
+	if perr != nil {
+		t.Fatalf("parsing %s: %v", path, perr)
+	}
+
+	// In THIS file the paths are reached through the relay qualifier, so the
+	// selector form is the one that matters; the bare ident and the raw string
+	// are checked too, so a local copy is caught as well.
+	namesPeerRoute := func(e ast.Expr) string {
+		switch a := e.(type) {
+		case *ast.Ident:
+			if peerRoutePathIdents[a.Name] {
+				return a.Name
+			}
+		case *ast.SelectorExpr:
+			if peerRoutePathIdents[a.Sel.Name] {
+				return a.Sel.Name
+			}
+		case *ast.BasicLit:
+			if a.Kind == token.STRING {
+				if v, uerr := strconv.Unquote(a.Value); uerr == nil && strings.HasPrefix(v, peerRoutePrefix) {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+
+	var out []peerRouteMention
+	record := func(n ast.Node, named, how string) {
+		out = append(out, peerRouteMention{
+			pos:   fset.Position(n.Pos()).String(),
+			named: named + " (" + how + ")",
+		})
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			// THE ONE PERMITTED SHAPE IS A CALL ARGUMENT TO mountPeerRoute, and
+			// this case is what makes that sentence true rather than merely
+			// asserted. The security gate demonstrated the gap: with no CallExpr
+			// case at all, ANY callee accepted a peer route silently, so swapping
+			// the three mountPeerRoute calls for a sibling file's
+			// mountPeerRouteFast — which records without gating — left every
+			// guard green.
+			callee := ""
+			switch fn := node.Fun.(type) {
+			case *ast.SelectorExpr:
+				callee = fn.Sel.Name
+			case *ast.Ident:
+				callee = fn.Name
+			}
+			if callee == peerMountFunc {
+				// The legitimate mount. Its arguments are not an escape; what
+				// makes it safe is that it wraps and records in one function,
+				// which TestPeerRoutesSetHasExactlyOneWriter pins separately.
+				return true
+			}
+			for _, arg := range node.Args {
+				if named := namesPeerRoute(arg); named != "" {
+					record(arg, named, "passed to "+callee+"(), which is not "+peerMountFunc)
+				}
+			}
+		case *ast.CompositeLit:
+			for _, elt := range node.Elts {
+				exprs := []ast.Expr{elt}
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					exprs = []ast.Expr{kv.Key, kv.Value}
+				}
+				for _, e := range exprs {
+					if named := namesPeerRoute(e); named != "" {
+						record(e, named, "carried in a composite literal")
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for _, v := range node.Values {
+				if named := namesPeerRoute(v); named != "" {
+					record(v, named, "declared as a var/const")
+				}
+			}
+		case *ast.AssignStmt:
+			for _, rhs := range node.Rhs {
+				if named := namesPeerRoute(rhs); named != "" {
+					record(rhs, named, "bound to a variable")
+				}
+			}
+			for _, lhs := range node.Lhs {
+				idx, ok := lhs.(*ast.IndexExpr)
+				if !ok {
+					continue
+				}
+				if named := namesPeerRoute(idx.Index); named != "" {
+					record(idx, named, "used as a map key")
+				}
+			}
+		case *ast.ReturnStmt:
+			// EXPORT STATUS IS NOT CONSULTED; see the doc comment.
+			for _, res := range node.Results {
+				if named := namesPeerRoute(res); named != "" {
+					record(res, named, "returned from a function")
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile is the guard that
+// survives from the
 // retired blanket ban, moved to the place the property actually lives.
 //
 // Retiring the import ban was right — the composition root has to be able to
@@ -693,11 +900,51 @@ const peerRoutePrefix = "/v1/peer/"
 //     when RELAY-20 mounts them for real, it owns this guard and can carry such
 //     a test with the mount.
 //
-// RELAY-20 is the task that mounts these behind a peer principal, and it changes
-// THIS TEST as part of that work — deliberately, with the ruling satisfied or
-// amended first. That is the same contract the old guard's comment carried, and
-// it is the whole reason a guard is allowed to fail loudly before a task starts.
-func TestRelayPeerRoutesAreNotMountedYet(t *testing.T) {
+// # RETIRED AND REPLACED BY RELAY-20 (2026-08-14), NOT DELETED
+//
+// The guard above was TestRelayPeerRoutesAreNotMountedYet, and its rule was "no
+// file outside internal/relay may name a peer route AT ALL". That rule expired
+// the moment its own exit condition was met: RELAY-20 mounted the three routes
+// behind an authenticated peer-bus principal (internal/httpapi/peermount.go),
+// authorised against MTLS-CLIENTAUTH plus RELAY-45 rather than the two tasks
+// DECISIONS.md ruling (c) names.
+//
+// THAT SUBSTITUTION IS NOT RECORDED IN DECISIONS.md. Ruling (c) still names
+// INVITE-PEERGUARD and MTLS-RELAYGUARD, and its "given up" clause still reads
+// "the handler stays unregistered until both gating tasks land"; RELAY-6
+// (0f7275b9) owes the amendment. An earlier draft of THIS COMMENT said the
+// ruling "had been amended", which was a false claim about a file this test does
+// not own — the review gate caught it here after catching the identical sentence
+// in internal/relay/doc.go, which is why it is spelled out rather than trimmed.
+// The full statement of the debt lives in doc.go; do not restate the amendment
+// as fact in either place until it exists.
+//
+// It is REPLACED rather than deleted, following RELAY-18's own precedent one
+// level down, and the replacement is NARROWER rather than absent: the paths may
+// now be named in EXACTLY ONE FILE outside this package, and nowhere else. What
+// that still buys, after the mount exists:
+//
+//   - a SECOND mount cannot appear. Serving relay.Handler at /v1/federation/x,
+//     or wiring a peer path through a route table in another file of
+//     internal/httpapi, fails here — and neither is caught by anything else,
+//     because Config and RosterConfig have no Trust field for the construction
+//     guard to miss.
+//   - cmd/agent-bus cannot mount them. The composition root (RELAY-24) supplies
+//     the handlers to httpapi.Options.Peer and never names a path, so the choice
+//     of "which handler at which path" stays where it can be reviewed once.
+//   - the exemption is a FILE, so a new file in the same package is refused with
+//     the remedy in the message.
+//
+// WHAT IT DELIBERATELY NO LONGER CHECKS: that the routes are unserved. That is
+// now a BEHAVIOURAL property with a behavioural test —
+// TestPeerRoutesRegisterOnlyWithRegistryAndTrust and its siblings in
+// internal/httpapi/peermount_relay20_test.go assert that every registered peer
+// route refuses a caller with no client certificate, with an agent bearer token,
+// and with an expired certificate, and that nothing is registered at all when
+// any link of the chain is missing. A syntactic guard cannot say any of that,
+// which is exactly why the replacement gives that half up rather than pretending
+// to keep it.
+func TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile(t *testing.T) {
 	root := repoRoot(t)
 	files := scanRepoGoFiles(t, root)
 	if len(files) == 0 {
@@ -730,20 +977,55 @@ func TestRelayPeerRoutesAreNotMountedYet(t *testing.T) {
 			"bus for a test, put it in a _test.go file, which this check exempts.",
 			m.pos, m.named)
 	}
+	// sawMountSite proves the exemption is not silently dead. If peermount.go is
+	// renamed, moved or emptied, the loop below would pass over a tree with NO
+	// mount at all and report success — a guard that stopped inspecting the one
+	// file it exists to bound.
+	var sawMountSite bool
+
 	for _, f := range files {
-		for _, m := range peerRouteMentions(f) {
-			t.Errorf("%s: %s names the peer route %s outside internal/relay.\n"+
-				"These handlers authenticate NO PEER (see internal/relay/doc.go), so serving one puts an anonymous "+
-				"POST in front of our roster, our routing table and our relay ingest — and a path can be registered "+
-				"from a file that never imports this package, which is why NAMING it is what fails here. DECISIONS.md "+
-				"(2026-08-08, FEDERATION/RELAY-6, 77d2b73) ruling (c) makes peer-principal authentication a forward "+
-				"precondition that ruling (b)'s tunnel-only deferral does NOT cover, and relay ingest additionally "+
-				"has no CrossBusTrust implementation yet (RELAY-17 owns it), so every relayed message would be "+
-				"ErrUnpeeredBus by construction. If you are writing a FAKE PEER BUS fixture or a route-absence "+
-				"probe, put it in internal/relay where those fixtures already live. RELAY-20 owns mounting these "+
-				"behind a peer principal and owns changing THIS TEST as part of that task.",
-				m.pos, f.file, m.named)
+		if peerRouteMountSiteExempt(f) {
+			// Only the MOUNT ITSELF counts as evidence the exemption is live; a
+			// test file naming the paths proves nothing about the mount.
+			if filepath.ToSlash(f.file) == peerMountFile && len(peerRouteMentions(f)) > 0 {
+				sawMountSite = true
+			}
+			continue
 		}
+		for _, m := range peerRouteMentions(f) {
+			t.Errorf("%s: %s names the peer route %s outside internal/relay and outside %s.\n"+
+				"These handlers authenticate NO PEER of their own (see internal/relay/doc.go); the PEER PRINCIPAL "+
+				"is supplied by the mount, and there is exactly ONE mount. Serving one of them anywhere else puts "+
+				"an anonymous POST in front of our roster, our routing table and our relay ingest — and a path can "+
+				"be registered from a file that never imports this package, which is why NAMING it is what fails "+
+				"here. If you need a peer route served, do it in %s, which wraps every one of them in "+
+				"(*Server).RequirePeerPrincipal in the same function that records it (mountPeerRoute). If you are "+
+				"writing a FAKE PEER BUS fixture or a route-absence probe, put it in internal/relay where those "+
+				"fixtures already live.",
+				m.pos, f.file, m.named, peerMountFile, peerMountFile)
+		}
+	}
+
+	// THE EXEMPTION IS BOUNDED, not merely granted. A path that ESCAPES the
+	// mount file into its own package is an ungated registration one file away,
+	// and the security gate demonstrated it against the first draft of this
+	// replacement.
+	for _, m := range peerMountFileEscapes(t, root) {
+		t.Errorf("%s: the exempted mount file %s lets the peer route %s ESCAPE it.\n"+
+			"Being the one permitted mount does not permit handing the path out. Every sibling file in %s shares this "+
+			"file's scope, so a route table, a returned value, a var/const or a variable binding registers these routes "+
+			"from a file that names no path at all — with every guard here green. The ONLY permitted shape is the path "+
+			"as a CALL ARGUMENT to mountPeerRoute, which wraps it in RequirePeerPrincipal and records it as a peer route "+
+			"in one step.",
+			m.pos, peerMountFile, m.named, peerMountDir)
+	}
+
+	if !sawMountSite {
+		t.Errorf("the exempted mount file %s named no peer route, so this guard's one exemption inspected nothing.\n"+
+			"Either the mount moved — in which case update peerMountFile in this file, as a reviewed line — or the "+
+			"peer surface was unmounted, in which case the behavioural tests in "+
+			"internal/httpapi/peermount_relay20_test.go should be red and this guard must not be the thing that "+
+			"quietly tolerates it.", peerMountFile)
 	}
 }
 
@@ -1004,27 +1286,154 @@ func TestPeerRouteMountGuardCanActuallyFail(t *testing.T) {
 	write(dir, "table.go", "package httpapi\n\n"+
 		"var routes = []struct{ path string }{{path: \"/v1/peer/relay\"}}\n")
 	write(dir, "comment.go", "package httpapi\n\n"+
-		"// mountD would serve /v1/peer/enroll once RELAY-20 lands. Prose only.\n"+
+		"// mountD would serve /v1/peer/enroll behind the peer principal. Prose only.\n"+
 		"func mountD() {}\n")
+	// THE EXEMPTED MOUNT ITSELF (RELAY-20). It names all three paths, exactly as
+	// the real one does, and must be exempt — otherwise the guard fails the one
+	// piece of correct work it now exists to permit.
+	//
+	// It uses the ONE legitimate shape — the path as a call argument to
+	// mountPeerRoute, which wraps and records in a single function — because
+	// peerMountFileEscapes now flags every other callee. Writing it with a bare
+	// mux.Handle would be the very escape the guard exists to catch.
+	write(dir, "peermount.go", "package httpapi\n\nimport relay \""+modulePath+"\"\n\n"+
+		"func mountAll(s *Server, mux Mux) {\n"+
+		"\ts.mountPeerRoute(mux, relay.PeerEnrollPath, nil)\n"+
+		"\ts.mountPeerRoute(mux, relay.PeerRelayPath, nil)\n"+
+		"\ts.mountPeerRoute(mux, relay.PeerRosterPath, nil)\n}\n")
+	// A DECOY at the same base name in a DIFFERENT directory. The exemption is an
+	// exact path, so this must still be flagged — a suffix match would make
+	// "create a file called peermount.go anywhere" the whole bypass.
+	write("cmd/agent-bus", "peermount.go", "package main\n\n"+
+		"func mountE(mux Mux) { mux.Handle(\"/v1/peer/enroll\", nil) }\n")
+	// The mount package's OWN test file: exempt, because a _test.go file cannot
+	// be compiled into the server binary and the behavioural tests that replaced
+	// the syntactic guard have to name the paths they probe.
+	write(dir, "peermount_relay20_test.go", "package httpapi\n\n"+
+		"func probe() string { return \"/v1/peer/relay\" }\n")
+	// A test file ELSEWHERE is NOT exempt: the relaxation is scoped to the mount's
+	// own package, not to every _test.go in the tree.
+	write("internal/store", "peerprobe_test.go", "package store\n\n"+
+		"func probe() string { return \"/v1/peer/roster\" }\n")
 
 	files := scanRepoGoFiles(t, root)
-	if len(files) != 4 {
-		t.Fatalf("parsed %d files, want 4; the synthetic tree was not scanned as written", len(files))
+	if len(files) != 8 {
+		t.Fatalf("parsed %d files, want 8; the synthetic tree was not scanned as written", len(files))
 	}
 	flagged := map[string]int{}
+	exempt := map[string]bool{}
 	for _, f := range files {
-		flagged[filepath.Base(f.file)] = len(peerRouteMentions(f))
+		flagged[filepath.ToSlash(f.file)] = len(peerRouteMentions(f))
+		exempt[filepath.ToSlash(f.file)] = peerRouteMountSiteExempt(f)
 	}
-	for _, name := range []string{"direct.go", "helper.go", "table.go"} {
+	for _, name := range []string{
+		dir + "/direct.go", dir + "/helper.go", dir + "/table.go",
+		"cmd/agent-bus/peermount.go", "internal/store/peerprobe_test.go",
+	} {
 		if flagged[name] == 0 {
 			t.Errorf("the mount guard did not flag %s; that registration shape would reach a mux unnoticed", name)
 		}
+		if exempt[name] {
+			t.Errorf("%s was treated as the exempted mount site; the exemption must be the single exact path %s "+
+				"and nothing that merely resembles it", name, peerMountFile)
+		}
 	}
-	if flagged["comment.go"] != 0 {
+	if flagged[dir+"/comment.go"] != 0 {
 		t.Errorf("the mount guard flagged comment.go, which names the path only in PROSE. A guard that fails "+
 			"correct work is a guard that gets deleted — and doc comments discussing these routes are correct work. "+
-			"(got %d findings)", flagged["comment.go"])
+			"(got %d findings)", flagged[dir+"/comment.go"])
 	}
+	if !exempt[peerMountFile] {
+		t.Errorf("%s was NOT treated as the exempted mount site, so the guard would fail the one registration it "+
+			"is now meant to permit — which is how a guard gets deleted instead of narrowed", peerMountFile)
+	}
+	if flagged[peerMountFile] == 0 {
+		t.Errorf("the synthetic %s named no peer route, so this self-check proved nothing about the exemption", peerMountFile)
+	}
+	if !exempt[dir+"/peermount_relay20_test.go"] {
+		t.Errorf("%s/peermount_relay20_test.go was not exempt; the mount's own behavioural tests must be able to name "+
+			"the paths they probe, or the guard fails the work that replaced its syntactic half", dir)
+	}
+
+	// AND THE EXEMPTION IS BOUNDED. The synthetic peermount.go above uses only
+	// the legitimate shape (a path as a call argument), so it must produce NO
+	// escape findings; each shape that hands the path to a sibling file must
+	// produce one. This is the evasion the security gate reproduced against the
+	// first draft, so its self-check is not optional.
+	t.Run("the exempted mount file may not let a path escape", func(t *testing.T) {
+		if got := peerMountFileEscapes(t, root); len(got) != 0 {
+			t.Errorf("the legitimate mount shape (path as a CALL ARGUMENT) was flagged as an escape: %v.\n"+
+				"A guard that fails the one registration it exists to permit is a guard someone deletes", got)
+		}
+
+		for _, esc := range []struct {
+			name string
+			src  string
+		}{
+			{
+				name: "an exported route table ranged over by a sibling file",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"var PeerPaths = []string{relay.PeerEnrollPath, relay.PeerRelayPath, relay.PeerRosterPath}\n",
+			},
+			{
+				// UNEXPORTED is just as bad here: a sibling file in the same
+				// package reads it. This is the case relayOwnMountRegistrations
+				// deliberately does not flag for internal/relay, and must.
+				name: "an UNEXPORTED var, which every sibling file can still read",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"var peerPaths = []string{relay.PeerEnrollPath}\n",
+			},
+			{
+				name: "returned from an unexported function",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"func enrollPath() string { return relay.PeerEnrollPath }\n",
+			},
+			{
+				name: "laundered into a local variable",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"func mount(mux Mux) { p := relay.PeerRelayPath; mux.Handle(p, nil) }\n",
+			},
+			{
+				name: "used as a map key one entry at a time",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"func fill(m map[string]int) { m[relay.PeerRosterPath] = 1 }\n",
+			},
+			{
+				name: "a const copy of the raw string",
+				src:  "package httpapi\n\nconst rosterPath = \"/v1/peer/roster\"\n",
+			},
+			{
+				// The gate's F1: with no CallExpr case, ANY callee accepted a
+				// peer route silently, so a sibling file's mountPeerRouteFast —
+				// which records the bearer-skip without gating — left every
+				// guard green.
+				name: "passed to a helper that is not mountPeerRoute",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"func mount(s *Server, mux Mux) { s.mountPeerRouteFast(mux, relay.PeerEnrollPath, nil) }\n",
+			},
+			{
+				name: "passed to a package-level helper by bare name",
+				src: "package httpapi\n\nimport relay \"" + modulePath + "\"\n\n" +
+					"func mount(mux Mux) { register(mux, relay.PeerRelayPath, nil) }\n",
+			},
+		} {
+			esc := esc
+			t.Run(esc.name, func(t *testing.T) {
+				escRoot := t.TempDir()
+				full := filepath.Join(escRoot, filepath.FromSlash(peerMountDir))
+				if err := os.MkdirAll(full, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(escRoot, filepath.FromSlash(peerMountFile)), []byte(esc.src), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				if got := peerMountFileEscapes(t, escRoot); len(got) == 0 {
+					t.Errorf("the escape guard missed %q; that shape registers three UNGATED peer routes from a "+
+						"sibling file that names no path at all, with every other guard green", esc.name)
+				}
+			})
+		}
+	})
 }
 
 // TestInPackageMountEscapeGuardCanActuallyFail is the self-check for

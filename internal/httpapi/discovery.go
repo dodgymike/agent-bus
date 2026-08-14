@@ -40,9 +40,22 @@ import (
 //
 //   - The response MUST NOT grow with bus state. It is built ONCE in New --
 //     it depends only on Identity.BusID(), which is stable for the process
-//     lifetime -- and stored on the Server; the handler writes the stored
-//     value and computes nothing. "Cannot grow with state" is thereby
-//     structural rather than a promise a later edit can quietly break.
+//     lifetime, and on ONE CONSTRUCTION-TIME BOOLEAN (see below) -- and stored
+//     on the Server; the handler writes the stored value and computes nothing.
+//     "Cannot grow with state" is thereby structural rather than a promise a
+//     later edit can quietly break.
+//
+//   - enrolment.invite_accepted IS THE SECOND INPUT, AND IT IS NOT A BREACH OF
+//     THE RULE ABOVE (INVITE-GATE). It is derived ONCE IN New from
+//     Options.Invites != nil, which is fixed for the process lifetime exactly as
+//     the bus id is, so the document is still built once and the handler still
+//     computes nothing. Nor is it the thing the static-endpoint-list rule
+//     protects: that rule exists so an anonymous caller cannot enumerate WHICH
+//     ROUTES this build serves, and this bit names no route -- /v1/enroll is
+//     served either way. A client learns it anyway the moment it presents an
+//     invite and gets 201 rather than 501, so withholding it here would buy
+//     nothing and would leave a client guessing whether to spend a single-use
+//     credential.
 //
 //   - The domain-separation prefix a session token is signed under is
 //     DELIBERATELY NOT SERVED. auth.SessionSigningContext is documented as a
@@ -88,11 +101,23 @@ type DiscoveryEndpoint struct {
 }
 
 // DiscoveryEnrolment describes what enrolment costs and yields.
+//
+// InviteRequired and InviteAccepted are two DIFFERENT questions and must not be
+// collapsed: this build ACCEPTS and redeems an invite while still accepting an
+// enrolment without one, so the honest answer is accepted=true, required=false.
 type DiscoveryEnrolment struct {
-	InviteRequired bool   `json:"invite_required"`
-	InviteNote     string `json:"invite_note"`
-	YouSupply      string `json:"you_supply"`
-	YouReceive     string `json:"you_receive"`
+	// InviteRequired reports whether an enrolment MUST carry an invite. It is
+	// false in this build, and that is the truth, not a placeholder.
+	InviteRequired bool `json:"invite_required"`
+
+	// InviteAccepted reports whether an invite PRESENTED to /v1/enroll is
+	// redeemed. Derived once in New from whether an invite store was supplied;
+	// when it is false, presenting one is answered 501 rather than ignored.
+	InviteAccepted bool `json:"invite_accepted"`
+
+	InviteNote string `json:"invite_note"`
+	YouSupply  string `json:"you_supply"`
+	YouReceive string `json:"you_receive"`
 }
 
 // DiscoverySession describes the session handshake. It never carries the
@@ -242,11 +267,25 @@ var discoveryLimitations = []string{
 	"5. SINGLE BUS ONLY. Cross-bus relay is not served yet; a recipient on another bus is a 404.",
 }
 
-// newDiscoveryResponse builds the whole document once, at construction. busID
-// is the only input because it is the only bus-specific value in the document
-// -- and it is stable for the process lifetime, which is what lets this be
-// computed once and served forever.
-func newDiscoveryResponse(busID string) DiscoveryResponse {
+// newDiscoveryResponse builds the whole document once, at construction. Its two
+// inputs are the bus id and whether this build redeems a presented invite --
+// both fixed for the process lifetime, which is what lets this be computed once
+// and served forever. See the file comment for why the second one does not
+// breach the "must not grow with bus state" rule.
+func newDiscoveryResponse(busID string, inviteAccepted bool) DiscoveryResponse {
+	// Two sentences, and both are checked against the code every time this
+	// changes: what happens to an invite you present, and what happens if you
+	// present none. NOTHING here may imply the gate is on -- enrolment without an
+	// invite is accepted by this build.
+	inviteNote := "Enrolment on this bus is currently OPEN: any caller that can reach it may enrol, with or without an invite. " +
+		"This build moreover DOES NOT REDEEM INVITES -- it was built without an invite store, so POST " + RouteEnroll +
+		" answers 501 if you present `invite_id` and `invite_secret`, rather than ignoring them and leaving you believing a single-use invite was spent. " +
+		"Invite-only enrolment is being built and will become mandatory. That is imminent, not live."
+	if inviteAccepted {
+		inviteNote = "Enrolment on this bus is currently OPEN: any caller that can reach it may enrol, and an enrolment presenting NO invite is accepted -- `invite_required` above is false and describes what is true now. " +
+			"What HAS changed: an invite presented to POST " + RouteEnroll + " as `invite_id` and `invite_secret` is genuinely REDEEMED -- single use, spent ATOMICALLY with your enrolment in one durable transaction, so it can never be spent twice nor spent on an enrolment that did not happen. " +
+			"Invite-only enrolment is being built and will become mandatory. That is imminent, not live."
+	}
 	return DiscoveryResponse{
 		Service:     "agent-bus",
 		Description: "A durable inter-agent message bus. Agents enrol, long-poll for messages, and send direct messages to each other by fully-qualified id. Nothing is acknowledged before it is durable.",
@@ -257,12 +296,14 @@ func newDiscoveryResponse(busID string) DiscoveryResponse {
 		Steps:     discoverySteps,
 		Endpoints: discoveryEndpoints,
 		Enrolment: DiscoveryEnrolment{
-			// FALSE, and it describes what is true NOW. Invite-gated enrolment is
-			// still a backlog item and POST /v1/enroll has no invite field today;
-			// claiming otherwise here would be a security claim this build cannot
-			// keep.
+			// FALSE, and it describes what is true NOW: an enrolment carrying no
+			// invite is accepted by this build. Claiming otherwise here would be a
+			// security claim this build cannot keep. It is a SEPARATE bit from
+			// InviteAccepted below, which says only that a presented invite is
+			// redeemed.
 			InviteRequired: false,
-			InviteNote:     "Enrolment on this bus is currently OPEN: any caller that can reach it may enrol. Invite-only enrolment is being built and will become mandatory, so expect /v1/enroll to begin requiring a single-use invite. That is imminent, not live.",
+			InviteAccepted: inviteAccepted,
+			InviteNote:     inviteNote,
 			YouSupply:      "A base64 (standard encoding, padded) Ed25519 public key you generated yourself. The bus stores only the public half, so it can verify your calls and can never forge them.",
 			YouReceive:     "A server-minted, fully-qualified agent id of the form `<bus-id>.<agent-id>`. You do not choose it: the `name` you send is a hint, and the server is authoritative on every id.",
 		},

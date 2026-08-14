@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -210,8 +211,67 @@ func (r *WALRoster) Apply(c wal.Committed) error {
 // Put must never hold mu across the Write — Apply takes mu from inside it. See
 // the field comments.
 func (r *WALRoster) Put(e RosterEntry) error {
+	_, err := r.put(e, RecordKind, func(e RosterEntry) (json.RawMessage, error) { return Encode(e) })
+	return err
+}
+
+// PutWithInvite records an enrolment and the invite consumption that authorised
+// it as ONE composite entry (EnrolInviteRecordKind), so the two are one
+// transaction: one prepare, one commit, two fsyncs, and no window in which an
+// agent is enrolled against an invite still marked open — or an invite is spent
+// on an enrolment that never happened.
+//
+// It follows the SAME fixed order as Put (validate outside every lock, take
+// writeMu, check attached, reject a duplicate id from memory, encode, write,
+// confirm it reached memory); the shared tail is literally the same code, in
+// put below, rather than a copy that can drift.
+//
+// # durable IS LOAD-BEARING — the caller decides an invite's fate by it
+//
+// A caller holding an invite reservation MUST NOT abort it when durable is
+// true. That rule is inherited VERBATIM from internal/invite/store.go's Redeem:
+// wal.Txn.Commit returns wal.ErrDiverged AFTER the commit record has been
+// appended and fsynced, so on that error the entry — INCLUDING the invite
+// consumption record inside it — is on stable storage and only a neighbouring
+// applier failed. Releasing the reservation there would leave memory saying
+// OPEN while disk says REDEEMED, and the next redemption attempt would be a
+// SECOND redemption of a spent invite, which is the one outcome the invite
+// package exists to prevent. Abandoning the reservation instead is fail-closed:
+// the invite stays locked until a restart rebuilds the table from the log.
+//
+// Precisely:
+//
+//   - any failure BEFORE the durable Write   -> durable == false
+//   - Write failed with wal.ErrDiverged      -> durable == TRUE (see above)
+//   - Write failed any other way             -> durable == false
+//   - Write succeeded                        -> durable == true, and the
+//     "committed durably but ABSENT from the serving roster" mis-wiring check
+//     still runs and still returns an error — with durable == true, because the
+//     record IS on disk.
+//
+// # WALRoster.Apply is deliberately NOT taught about the composite kind
+//
+// MultiplexApplier expands a composite entry and dispatches the enrolment half
+// to this roster as an ordinary RecordKind record, so there stays exactly ONE
+// insertion path. A composite reaching Apply directly means the log was opened
+// with this roster as its applier instead of the multiplexer — and that is
+// caught LOUDLY on the first invited enrolment by the confirm-it-reached-memory
+// check below, which is the same mis-wiring detector Put's doc describes.
+func (r *WALRoster) PutWithInvite(e RosterEntry, rider InviteRider) (bool, error) {
+	return r.put(e, EnrolInviteRecordKind, func(e RosterEntry) (json.RawMessage, error) {
+		return EncodeEnrolWithInvite(e, rider)
+	})
+}
+
+// put is the shared body of Put and PutWithInvite: the fixed order, the two
+// locks, the one durable write and the mis-wiring check. Only the wal.Entry.Kind
+// and the encoder differ between the two callers.
+//
+// It reports whether the entry is DURABLE — see PutWithInvite for why that
+// answer, and specifically the wal.ErrDiverged case, is load-bearing.
+func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (json.RawMessage, error)) (bool, error) {
 	if err := validateRosterEntry(e); err != nil {
-		return err
+		return false, err
 	}
 
 	r.writeMu.Lock()
@@ -221,22 +281,27 @@ func (r *WALRoster) Put(e RosterEntry) error {
 		// NOT a silent success in memory. A Put that returned nil here would be
 		// telling the caller the enrolment is durable when nothing was written,
 		// which is the exact false claim this type exists to remove.
-		return fmt.Errorf("%w: cannot record the enrolment of %q", ErrNotAttached, e.AgentID)
+		return false, fmt.Errorf("%w: cannot record the enrolment of %q", ErrNotAttached, e.AgentID)
 	}
 
 	r.mu.Lock()
 	_, dup := r.byID[e.AgentID]
 	r.mu.Unlock()
 	if dup {
-		return fmt.Errorf("%w: %q", ErrDuplicateAgentID, e.AgentID)
+		return false, fmt.Errorf("%w: %q", ErrDuplicateAgentID, e.AgentID)
 	}
 
-	body, err := Encode(e)
+	body, err := encode(e)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if _, err := r.w.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
-		return fmt.Errorf("auth: recording the enrolment of %q durably: %w", e.AgentID, err)
+	if _, err := r.w.Write(wal.Entry{Kind: kind, Body: body}); err != nil {
+		// ErrDiverged means the commit record was appended and FSYNCED before the
+		// failure: the entry is durable and only a neighbouring applier failed.
+		// Reported as durable so a caller holding an invite reservation does not
+		// release an invite the log already records as spent.
+		durable := errors.Is(err, wal.ErrDiverged)
+		return durable, fmt.Errorf("auth: recording the enrolment of %q durably: %w", e.AgentID, err)
 	}
 
 	// CONFIRM THE ENTRY REACHED MEMORY. Write's contract is "durable AND visible
@@ -263,9 +328,12 @@ func (r *WALRoster) Put(e RosterEntry) error {
 	_, applied := r.byID[e.AgentID]
 	r.mu.Unlock()
 	if !applied {
-		return fmt.Errorf("auth: the enrolment of %q committed durably but is ABSENT from the serving roster; the record is on disk and will be replayed at the next start, but this roster is not the applier of the log it was attached to (check the wal.Open Applier wiring) or the record was discarded by Apply", e.AgentID)
+		// durable is TRUE here: the record IS on disk. What failed is the serving
+		// copy, and a caller holding an invite reservation must not un-spend an
+		// invite over it.
+		return true, fmt.Errorf("auth: the enrolment of %q committed durably but is ABSENT from the serving roster; the record is on disk and will be replayed at the next start, but this roster is not the applier of the log it was attached to (check the wal.Open Applier wiring) or the record was discarded by Apply", e.AgentID)
 	}
-	return nil
+	return true, nil
 }
 
 // Get implements Roster. The returned entry is a DEEP COPY, exactly as

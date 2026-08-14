@@ -10,6 +10,7 @@ import (
 
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/hub"
+	"github.com/dodgymike/agent-bus/internal/invite"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -130,6 +131,55 @@ type Options struct {
 	// it (invariant 1 -- see auth.Options.Minter).
 	Auth *auth.Service
 
+	// Invites is the durable invite table (internal/invite). When it is non-nil,
+	// an invite PRESENTED to POST /v1/enroll is REDEEMED — atomically with the
+	// enrolment, in one wal.Entry (auth.EnrolInviteRecordKind).
+	//
+	// IT DOES NOT GATE ENROLMENT. An enrolment carrying no invite is accepted
+	// either way; requiring one (invariant 3's end state) is a separate task, and
+	// nothing in this package may be written as though the gate were on.
+	//
+	// It may be nil, and nothing here may panic on that. A nil Invites means this
+	// build DOES NOT REDEEM INVITES, and a caller that presents one is answered
+	// 501 rather than having its credential silently ignored — silently ignoring
+	// a presented credential is the worst option available, because the client
+	// then believes its single-use invite was spent when it was not. The
+	// discovery document reports the same bit as enrolment.invite_accepted.
+	Invites *invite.Store
+
+	// PeerPrincipals resolves an inbound peer bus's TLS client certificate to
+	// the one adjacent bus principal it names (RELAY-45). It is satisfied by
+	// *relay.PeerStore.
+	//
+	// It may be nil, and nothing here may panic on that. There is NO DEFAULT and
+	// there must never be one: a stand-in that resolved anything would authorise
+	// an unconfigured peer, so a nil resolver makes RequirePeerPrincipal refuse
+	// EVERY request rather than admit any.
+	//
+	// It is REQUIRED for the peer surface below: when Peer is supplied and this
+	// is nil, NO peer route is registered (RELAY-20). Mounting without it would
+	// put three routes on the wire that answer 403 to every peer — a registered,
+	// refusing surface, which advertises that this bus federates while serving
+	// nobody.
+	PeerPrincipals InboundPeerPrincipals
+
+	// Peer is the federation ingress: the three /v1/peer/ handlers plus the
+	// registry and cross-bus trust whose presence is the precondition for
+	// serving them (RELAY-20). It is satisfied by the composition root.
+	//
+	// It may be nil — every non-federating build leaves it so — in which case
+	// the peer routes are NOT REGISTERED AT ALL and 404 exactly like any other
+	// path this build does not serve. That is the same choice, for the same
+	// reason, as Auth and Hub above, and on this surface it matters more: a
+	// registered route that refuses is readable by an unauthenticated caller as
+	// "this bus federates".
+	//
+	// A PARTIAL surface is treated as no surface, loudly logged. See
+	// PeerSurface and mountPeerSurface in peermount.go for every rule this
+	// mount keeps, including why no peer path is ever added to
+	// unauthenticatedRoutes.
+	Peer *PeerSurface
+
 	// Now is the clock, overridable so tests can assert on uptime.
 	// Defaults to time.Now.
 	Now func() time.Time
@@ -148,6 +198,32 @@ type Server struct {
 	auth        *auth.Service
 	now         func() time.Time
 	handler     http.Handler
+
+	// invites is the durable invite table, or nil when this build does not
+	// redeem invites; see Options.Invites.
+	invites *invite.Store
+
+	// peerPrincipals resolves an inbound peer bus's client certificate; see
+	// Options.PeerPrincipals. A nil value means this bus can authorise no peer
+	// bus, and RequirePeerPrincipal refuses everything.
+	peerPrincipals InboundPeerPrincipals
+
+	// peer is the federation ingress, or nil when this build does not federate;
+	// see Options.Peer.
+	peer *PeerSurface
+
+	// peerRoutes is the set of patterns registered as PEER-BUS routes, written
+	// ONLY by mountPeerRoute and read-only once New returns.
+	//
+	// It is NOT a second allow-list. Membership means "this path is
+	// authenticated by the TLS client certificate rather than by a bearer
+	// token", and it is written in the same function that wraps the handler in
+	// RequirePeerPrincipal precisely so the two cannot come apart -- see
+	// mountPeerRoute, where that coupling is the whole security argument.
+	//
+	// nil on every non-federating build, which is the overwhelming majority;
+	// isPeerRoute short-circuits on that.
+	peerRoutes map[string]struct{}
 
 	// discovery is the STATIC protocol-discovery document served by
 	// GET /v1/discovery, built once in New and never mutated afterwards.
@@ -184,7 +260,14 @@ func New(opts Options) *Server {
 		durable:     opts.Durable,
 		hub:         opts.Hub,
 		auth:        opts.Auth,
+		invites:     opts.Invites,
 		now:         opts.Now,
+		// NO DEFAULT: see Options.PeerPrincipals. A nil resolver is the
+		// fail-closed state, not a gap to be filled in with a permissive one.
+		peerPrincipals: opts.PeerPrincipals,
+		// NO DEFAULT either, and for a stronger reason: a stand-in federation
+		// surface would be three unauthenticated handlers on the wire.
+		peer: opts.Peer,
 	}
 	if s.identity == nil {
 		s.identity = StaticIdentity(DefaultBusID)
@@ -203,8 +286,10 @@ func New(opts Options) *Server {
 	}
 
 	// Built AFTER the identity default is applied and BEFORE any request can
-	// be served, so the handler only ever writes a finished value.
-	s.discovery = newDiscoveryResponse(s.identity.BusID())
+	// be served, so the handler only ever writes a finished value. The second
+	// argument is ONE CONSTRUCTION-TIME BIT — whether this build redeems an
+	// invite at all — not runtime state; see discovery.go.
+	s.discovery = newDiscoveryResponse(s.identity.BusID(), s.invites != nil)
 
 	// Marshalling CANNOT fail here: every field is a string, int, bool or a
 	// slice/struct of those, with no channel, func, cycle or custom Marshaler
@@ -249,6 +334,18 @@ func New(opts Options) *Server {
 		s.route(mux, RouteMessages, s.handleMessages)
 		s.route(mux, RouteWait, s.handleWait)
 	}
+
+	// The FEDERATION ingress (RELAY-20). Registered only when Options.Peer
+	// supplies the whole chain AND Options.PeerPrincipals supplies a resolver;
+	// otherwise nothing is registered and the three /v1/peer/ paths 404 through
+	// the catch-all below, like any other path this build does not serve.
+	//
+	// These routes are NOT on unauthenticatedRoutes and must never be. They are
+	// authenticated by the TLS client certificate instead of by a bearer token,
+	// which authMiddleware honours by consulting s.isPeerRoute -- see
+	// peermount.go for the whole argument, and mountPeerRoute for why the
+	// wrapping and the recording happen in one function.
+	s.mountPeerSurface(mux)
 
 	// The catch-all (CORE-8). Registered LAST for readability only --
 	// http.ServeMux resolves by longest matching pattern, not by registration

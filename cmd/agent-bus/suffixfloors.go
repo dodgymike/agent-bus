@@ -30,8 +30,10 @@ package main
 //     records (store.RecordKind). Those are fully-qualified agent ids
 //     (invariant 2), they are server-derived, and the WAL never compacts, so
 //     they are the ids that really are durable on a legacy dir.
-//   - auth.EnrolmentSuffixesInWAL: the agent id of every enrolment record
-//     (auth.RecordKind), committed, aborted AND dangling.
+//   - auth.EnrolmentSuffixesInWAL: the agent id of every enrolment record —
+//     auth.RecordKind, and the enrolment half unwrapped from the composite
+//     auth.EnrolInviteRecordKind an INVITED enrolment writes — committed,
+//     aborted AND dangling.
 //
 // Neither half is a floor on its own — each folds only its own record kind and
 // is blind to the other's — and their union is still a LOWER BOUND, not a
@@ -371,9 +373,11 @@ func suffixBackfillExposure(rec wal.Recovered) bool {
 // messageAgentIDFloors and auth.EnrolmentSuffixesInWAL.
 //
 // Neither half is a floor alone. messageAgentIDFloors folds only
-// store.RecordKind records; auth.EnrolmentSuffixesInWAL folds only
-// auth.RecordKind ones, and its own doc comment is emphatic that sealing it by
-// itself re-mints live ids. They cover complementary halves of the record
+// store.RecordKind records; auth.EnrolmentSuffixesInWAL folds the
+// enrolment-bearing kinds — auth.RecordKind plus the composite
+// auth.EnrolInviteRecordKind, whose enrolment half it unwraps out of the
+// envelope — and its own doc comment is emphatic that sealing it by itself
+// re-mints live ids. They cover complementary halves of the record
 // stream, so the union is strictly better than either — and still only a LOWER
 // BOUND, never a complete floor. See the file header for the holes that remain
 // and openSuffixAllocator's seal-line comment for why that means a dir with
