@@ -1506,7 +1506,14 @@ func TestInviteMintValidatesItsRequest(t *testing.T) {
 // degraded in-memory mode: single-use held only in memory is decorative,
 // because a restart would forget every spent invite.
 func TestInviteNotDurableIsRefused(t *testing.T) {
-	st, err := invite.NewStore(invite.StoreOptions{BusID: testBusID})
+	// The clock is injected and pinned to newReplayFixture's base time rather
+	// than left as the default (real time.Now): the replayed record below
+	// retires SpentRetention after its ExpiresAt, and a store evaluating that
+	// window against the WALL clock would eventually — and did — start
+	// dropping the fixture out from under this test as the calendar moved
+	// past that retirement instant, long after the fixture was written.
+	clk := newTestClock()
+	st, err := invite.NewStore(invite.StoreOptions{BusID: testBusID, Now: clk.Now})
 	if err != nil {
 		t.Fatalf("invite.NewStore: %v", err)
 	}
