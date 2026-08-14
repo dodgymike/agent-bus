@@ -693,7 +693,8 @@ introduced by IDEM-11-FU-FAIRSHARE.
 Invariants 1 and 5 require that a server-minted agent id survive a restart, not just an in-memory
 process: state is held in memory for speed and REBUILT by replaying the durable store. AUTH-3 is
 that store for enrolment — `internal/auth`'s `record.go` (the on-disk shape, `Encode`/`Decode`),
-`roster.go` (`RosterEntry`, `CertBinding`, `MaxCertBindings`), `walroster.go` (`WALRoster`, the
+`roster.go` (`RosterEntry`, `CertBinding`, `MaxCertBindings`), `certbind.go` (the certificate-binding
+write check and lookup, added by `MTLS-BIND` 2026-08-14), `walroster.go` (`WALRoster`, the
 `wal.Applier` that rebuilds the roster by replay) and `floors.go` (`EnrolmentSuffixesInWAL`, an audit
 scan of the suffixes in enrolment records — NOT a suffix floor and never to be sealed into an
 allocator; see the correction below). Read `internal/auth/doc.go`'s package doc
@@ -749,7 +750,7 @@ copied from a summary):
 | `msg_pub` | `ed25519.PublicKey` | base64 standard encoding, 32 bytes | `RosterEntry.MessagingPublicKey` is empty (reserved, unpopulated) |
 | `invite_id` | `string` | verbatim | `RosterEntry.InviteID` is empty (reserved, unpopulated) |
 | `epoch` | `time.Time` | `RFC3339Nano`, UTC | never |
-| `cert_bindings` | `[]CertBinding` | array of `{"fp","bound_at","retired_at"}`, bounded to `MaxCertBindings` | `RosterEntry.CertBindings` is empty (reserved, unpopulated) |
+| `cert_bindings` | `[]CertBinding` | array of `{"fp","bound_at","retired_at"}`, bounded to `MaxCertBindings` | `RosterEntry.CertBindings` is empty — **the enrolling connection presented no client certificate, or the agent enrolled before `MTLS-BIND` (2026-08-14)**. Both are ordinary; see below |
 | `cert_bindings[].fp` | `[32]byte` | **hex** (`encoding/hex`), the fingerprint `sha256.Sum256(cert.Raw)` | never (present in every element) |
 | `cert_bindings[].bound_at` | `time.Time` | `RFC3339Nano`, UTC | never (present in every element) |
 | `cert_bindings[].retired_at` | `*time.Time` | `RFC3339Nano`, UTC | the binding is LIVE (`RetiredAt == nil`) |
@@ -759,16 +760,42 @@ The encodings match the precedents already on disk rather than being picked per 
 `RFC3339Nano` in UTC exactly as `idem.Record` writes `committed_at`; the certificate fingerprint is
 HEX, the same choice `idem` makes for its own `fp`; the public keys are BASE64 STANDARD ENCODING,
 which is what the enrolment wire format already uses for the same bytes, so an operator reading the
-log sees the same string the client sent. Every reserved field is `omitempty`, so **a record written
-today is byte-for-byte the record a pre-INVITE, pre-MTLS build would have written**, and the reserved
-keys appear on disk only once something actually populates them.
+log sees the same string the client sent. Each of the three late-arriving keys is `omitempty`, so **a
+record for an enrolment that carries none of them is byte-for-byte the record a pre-INVITE, pre-MTLS
+build would have written**, and each key appears on disk only once something actually populates it.
 
-**The reserved-but-unpopulated fields are on disk from record 1, deliberately.** `msg_pub`
-(SIGN/CRYPTO-3), `invite_id` (the INVITE epic) and `cert_bindings` (MTLS-BIND) are declared and
-encoded even though nothing writes them yet, per the ordering rule in `DECISIONS.md`'s
+**The three fields were on disk from record 1 before anything wrote them, deliberately.** `msg_pub`,
+`invite_id` and `cert_bindings` were declared and encoded while no code path populated them, per the
+ordering rule in `DECISIONS.md`'s
 2026-08-07 "ENROL-SHAPE" entry: nothing was persisted before AUTH-3, which made this the LAST MOMENT
 the durable record could be shaped without a migration — and because an agent id is bound to a
 keypair, a migration here is not a schema edit but a FORCED RE-ENROLMENT OF EVERY AGENT.
+
+**`cert_bindings` IS WRITTEN NOW — `MTLS-BIND`, `818207d`, 2026-08-14 — and it cost NO on-disk format
+change and NO migration.** This paragraph said "nothing writes them yet" until that commit made it
+false for this field. What enrolment writes is exactly ONE binding, live (`retired_at` absent), whose
+`bound_at` is the SAME instant as the record's `epoch` and `enrolled_at` — one event, three fields,
+deliberately not three clock reads (`auth.newCertBinding`). Nothing else writes the array and nothing
+retires a binding yet, so on this build a record carries **zero or one** element.
+
+**Where the fingerprint comes from is the load-bearing part: the TLS CONNECTION, never the request
+body.** `internal/httpapi`'s `WithClientCertificate` middleware reads `r.TLS.PeerCertificates[0]`,
+`enrolCertFingerprint` hands it to `auth.EnrolRequest.ClientCertFingerprint`, and `auth.Service.Enrol`
+binds that. **There is no wire field a client can set** — see `CONTRACTS-HTTP.md`'s `POST /v1/enroll`
+request body, which lists every accepted key and does not include one. A client-supplied fingerprint
+would be a claim anyone could make about anyone's certificate, and binding it would durably record a
+fact that was never established (invariants 1 and 11).
+
+**A record with NO `cert_bindings` is ORDINARY, not damaged, and needs no migration** — the operator
+question this raises. Three populations have none and all three are healthy: every agent enrolled
+before 2026-08-14; every agent that enrols over a connection presenting no client certificate (the
+listener only **requests** one, `tls.RequestClientCert`, so that is the common case today); and any
+future enrolment whose certificate was outside its own validity window, which the middleware ignores
+rather than binds. `Decode` accepts the absent key, replay stores the entry, and `auth.RecordVersion`
+is **unchanged at `1`** — the key was reserved by ENROL-SHAPE, so no build reads a record differently
+than it did before. Read empty as "this agent has no certificate to cross-check against", never as
+"this agent is unauthenticated".
+
 `cert_bindings` is `MaxCertBindings = 16`, a BOUNDED HISTORY and not a current-value field — the same
 class of bound as the applied-key table's `MaxEntries`, for the same reason (an agent rotating a
 client certificate in a loop must not grow the record without limit, and every binding is decoded off
@@ -802,6 +829,18 @@ their field and its decoder together, in one build.
   bus still starts. This is invariant 6's recovery contract (2026-08-02): recovery always reaches a
   running server, damaged records are discarded, and the absolute requirement is that every discard is
   logged — availability over retention, not silence over damage.
+- **Two live bindings for ONE fingerprint can come off disk, and the READ is what declines to pick
+  (`MTLS-BIND`, 2026-08-14).** `Put` refuses a fingerprint already live on another agent
+  (`ErrCertFingerprintBound`), but `Apply` deliberately does not run that check: refusing a record
+  that is already durable would not un-write it, it would turn a damaged log into an outage
+  (invariant 6, the same reasoning as the duplicate-id bullet above). So a log carrying two live
+  holders of one fingerprint recovers into exactly that state, and `AgentIDForCertFingerprint` then
+  answers `ErrCertBindingAmbiguous` — **naming the holders, sorted, and resolving to nobody** —
+  rather than serving one key holder as a definite agent it may not be. The ZERO fingerprint is
+  refused the same way (`ErrCertBindingUnknown`): `validateRosterEntry` checks a binding's `bound_at`
+  and `retired_at` but **not** its `fp`, so a hand-edited or damaged record carrying an all-zero one
+  decodes cleanly and is stored live, and the zero value is exactly what a caller holds when no
+  certificate was presented.
 
 > **CORRECTION (2026-08-07, same day, after the security gate).** The two paragraphs below described
 > `SuffixFloors` as the source of the startup suffix floors. **That was wrong and the function has
@@ -985,9 +1024,11 @@ bytes.
 computation so nobody invents a second, incompatible one for the same certificate. It is
 `Record.CertFingerprint [DigestSize]byte`; the ZERO value means "no certificate was bound", which is
 the only value anything writes today (`Store.Redeem`/`Redemption.Consume` accept a `Result.CertFingerprint`
-field, but nothing populates it with a real fingerprint yet). It rides on disk now, exactly as
-`auth.RosterEntry`'s reserved fields do, so `MTLS-BIND` adds a CHECK against an already-durable field
-rather than a schema change to records that already exist.
+field, but nothing populates it with a real fingerprint yet — `internal/httpapi`'s `handleEnroll`
+calls `Consume(invite.Result{AgentID, Response})` and leaves this field zero). **Still true after
+`MTLS-BIND` landed (2026-08-14):** that task bound the certificate on the AGENT record
+(`auth.RosterEntry.CertBindings`, above), not on this one, so the INVITE record still carries no
+fingerprint and still needs no schema change to start doing so.
 
 **The bounds and retention, cited from `retention.go`'s own derivations rather than restated as picked
 numbers:**

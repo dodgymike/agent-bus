@@ -8,9 +8,16 @@ below this header is unchanged from the prior single-file `CONTRACTS.md`, verbat
 
 **Every route below is reachable over `https` ONLY.** Invariant 11: the server's single listener is
 wrapped in `tls.NewListener` before it accepts a connection, TLS floor `1.2`, ALPN pinned to
-`http/1.1`, and `ClientAuth: tls.NoClientCert` — a client certificate is **not** requested or required
-yet (that is `MTLS-CLIENTAUTH`, not shipped; do not read this listener as mutual TLS). See
-`CONTRACTS-CLI.md`'s CLI-flags section for the full statement and the `server started` log line.
+`http/1.1`, and **`ClientAuth: tls.RequestClientCert`** — the listener **requests** a client
+certificate and **never requires** one (`MTLS-CLIENTAUTH`, landed 2026-08-14, `a97f854`; this line
+said `tls.NoClientCert` until 2026-08-14 and was false from that commit onward). **Do not read this
+listener as mutual TLS**: a connection presenting nothing still completes the handshake and is the
+ordinary case for every route below, and a connection presenting a certificate is **not** thereby
+authenticated as anybody — resolving a presented certificate to a principal is application-layer work
+(`### The client certificate on an agent connection`, below, and `## Peer-bus transport identity` for
+peer buses). See `CONTRACTS-CLI.md`'s CLI-flags section for the full statement, the
+`client_auth=requested` field on the `server started` log line, and why `requested` is the policy
+rather than a step towards `required`.
 
 **A plaintext request to the port never reaches any row in the table below.** `crypto/tls` fails the
 handshake before `net/http` decodes a request line, and `net/http` itself writes a bare
@@ -31,6 +38,7 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
 | `POST` | `/v1/enroll` | none | 400 | invalid `name`; invalid `public_key` (not base64, or not exactly the 32-byte Ed25519 public key size); invalid `messaging_public_key` **when present** (three checks: standard base64, exactly 32 bytes, and not equal to `public_key` — see the request-body section below); invalid `idempotency_key` (empty, over 128 bytes, or a byte outside `[A-Za-z0-9._-]`) |
 | `POST` | `/v1/enroll` | none | 409 | `idempotency_key` reused with a **different** `name`/`public_key`/`messaging_public_key` than its first use — a protocol violation, not a retry (invariant 10). Rejected and logged; **the connection is KEPT** — narrowed 2026-08-08, this row carried `Connection: close` until then (see `## Headers`) |
+| `POST` | `/v1/enroll` | none | 409 | **NEW (MTLS-BIND, 2026-08-14, `818207d`).** `{"error":"this client certificate is already bound to an agent; enrol with a fresh client keypair"}` — the client certificate presented on THIS CONNECTION is already a live binding on a **different** agent id (`auth.ErrCertFingerprintBound`). Rejected and logged at WARN; **the connection is KEPT** (invariant 10: a merely buggy client reaches this by re-enrolling without regenerating its keypair, and this route is unauthenticated so the socket identifies no principal to punish). **The body names no agent** — naming the holder would make enrolment an oracle mapping a certificate an anonymous caller possesses to an agent id on this bus; the server LOG names it. Nothing is written and **no agent-id suffix is burned** — the refusal is read BEFORE the mint and under the same `enrolMu` as the write, so it never reaches the never-reclaimed suffix floors (`Roster.Put`'s own check, after the mint, stays the authoritative one). See `### The client certificate on an agent connection` below. |
 | `POST` | `/v1/enroll` | none | 503 | the roster (default 4096 entries) or the idempotency table (default 16384 entries) is at capacity; `Retry-After: 5` |
 | `POST` | `/v1/enroll` | none | 201 | **NEW (INVITE-GATE, 2026-08-14).** Presenting a valid, unspent `invite_id`+`invite_secret` alongside a fresh enrolment redeems the invite ATOMICALLY, in the SAME `wal.Entry` as the enrolment record — one transaction, two fsyncs (see `CONTRACTS-ONDISK.md`, kind `"agent+invite"`). The 201 body is the same `EnrolResponseBody` shape as above. A legitimate retry of the invite redemption (same invite id + same idempotency key + same payload) replays the ORIGINAL 201 body verbatim with `Idempotency-Replayed: true` — sourced from the invite's own stored consumption record, not the roster's applied-key table (see `## Headers` below). **Presenting no invite at all is still accepted and still 201** — enrolment is NOT gated by this change; see the `enrolment` row of the discovery document and the "Known gaps" note below. |
 | `POST` | `/v1/enroll` | none | 400 | **NEW (INVITE-GATE, 2026-08-14).** `invite_id` and `invite_secret` presented but not both — they must arrive TOGETHER; omitting both is accepted (no invite), sending exactly one is refused rather than silently treated as "no invite", because that would leave a client believing a credential it half-sent was spent. Neither value is echoed. |
@@ -428,6 +436,19 @@ or a future build that intentionally omits the auth surface).
 | `invite_id` | string | **no — see below** | **NEW (INVITE-GATE, 2026-08-14).** The invite being redeemed, `^inv-[a-z2-7]{16,32}$` (`invite.InviteIDPattern`). Must be presented TOGETHER with `invite_secret` — one without the other is 400. Omitting both is accepted and unchanged from before this task: enrolment with no invite is still accepted (`invite_required` is `false`, `GET /v1/discovery`). |
 | `invite_secret` | string | **no — see below** | **NEW (INVITE-GATE, 2026-08-14).** The invite's plaintext bearer secret, exactly as the operator handed it out (`invite.Minted.Secret`). NEVER logged, echoed, or present in an error, on any path — the same discipline a session token gets. Whoever holds it can enrol an agent onto this bus. |
 
+**The table above is the WHOLE body, and the certificate binding is deliberately not in it (MTLS-BIND,
+2026-08-14).** The client-certificate fingerprint enrolment records is a **TRANSPORT FACT**, taken
+from `r.TLS` on the connection the request arrived over — there is no `client_cert`, no
+`cert_fingerprint` and no header a caller can set, and an unknown field is a 400 anyway. That is the
+point of it: a body-supplied fingerprint would be a claim anyone could make about anyone's
+certificate, so binding one would durably record a fact the handshake never established (invariants 1
+and 11). It is also **not part of the idempotency payload** — the same-key-different-payload check
+compares `name`, both public keys and `invite_id`, and does **not** compare the certificate, so a
+retry arriving over a different certificate replays the ORIGINAL 201 and creates NO binding for the
+certificate it presented (a replay applies nothing; there is no path by which a retry forges a
+binding). Comparing it would turn an honest client that regenerated its keypair between two attempts
+into a 409, which invariant 10 is explicit is the wrong answer for a merely buggy client.
+
 **Why two keys, with the right control named.** It is *not* that the bus could forge with the auth
 key — the bus holds only the **public** half of both keys and can forge with neither. The hazard is
 that **the bus chooses the bytes the auth key signs**: the session handshake has the server issue a
@@ -562,9 +583,11 @@ reachable only by whoever holds the token: the agent itself, or someone who obse
 **Corrected 2026-08-07 (`MTLS-LISTENER`):** the server now serves TLS ONLY (see "## Transport" above),
 so plainly sitting on the wire no longer suffices — the observer must also hold or forge the bus's
 pinned certificate, which is precisely what a caller who follows invariant 11's no-TOFU pinning refuses
-to accept from anyone else. Two things this does NOT close: `ClientAuth` is still `tls.NoClientCert`
-(`MTLS-CLIENTAUTH` has not landed), so any TCP peer that can complete the TLS handshake — not just the
-enrolled agent — can still attempt this route; and a caller that skips certificate verification (there
+to accept from anyone else. Two things this does NOT close: any TCP peer that can complete the TLS
+handshake — not just the enrolled agent — can still attempt this route, and `MTLS-CLIENTAUTH` landing
+2026-08-14 did **not** change that (**this sentence claimed `ClientAuth` was still `tls.NoClientCert`
+and was false from `a97f854` onward**), because `tls.RequestClientCert` requests a certificate and
+never requires one, and nothing on this route reads one; and a caller that skips certificate verification (there
 is no such flag in this repo's own client, `client/pin.go`, but a hand-rolled one could) is back to the
 pre-TLS threat model. The token's unguessability therefore stays load-bearing against both of those,
 and against the fact that there is still no per-agent or per-source rate limiting on this route.
@@ -645,8 +668,10 @@ routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE 
 
 ## Authentication (added 2026-08-02)
 
-AUTH-2 wires `internal/httpapi/authmw.go`'s `authMiddleware` around the WHOLE mux —
-`s.handler = LoggingMiddleware(s.log, s.authMiddleware(mux))` — folding in **AUTH-6**'s fail-open fix
+AUTH-2 wires `internal/httpapi/authmw.go`'s `authMiddleware` around the WHOLE mux — since MTLS-BIND
+(2026-08-14) the chain is
+`s.handler = LoggingMiddleware(s.log, s.WithClientCertificate(s.authMiddleware(mux)))`, and it read
+`LoggingMiddleware(s.log, s.authMiddleware(mux))` before that — folding in **AUTH-6**'s fail-open fix
 into the same change rather than as a later retrofit. The middleware is DEFAULT-DENY: every request is
 refused 401 unless its **exact** `r.URL.Path` is on the allow-list, so a route added tomorrow is
 authenticated the instant it is registered through `(*Server).route` — nobody has to remember to wrap
@@ -727,7 +752,69 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `hub.EncodeCursor(agentID, after) string` / `hub.DecodeCursor(agentID, cursor) (uint64, error)` | The cursor codec. `DecodeCursor` rejects a cursor bound to a different agent with `hub.ErrInvalidCursor`. `MaxCursorLen` is 512. |
 | `store.Message.VisibleTo(agentID string, enrolledAt time.Time) bool` | The **one** authorization boundary of the read path. Applied on all four read paths (history, the long-poll fast path, its post-registration re-read, and its wake re-read) and by the wake filter itself, always with the AUTHENTICATED principal and that agent's roster entry — never with anything taken from a cursor. A zero `enrolledAt` disables the epoch check and exists only for roster-less callers (an audit tool); it must never be reached from a request path. |
 | `hub.Result` / `hub.Batch` | What a send returns and what a read returns; see `internal/hub/hub.go` and `internal/hub/wait.go`. |
+| `ClientCertificate{Fingerprint, Leaf}` | **NEW (MTLS-BIND, 2026-08-14).** The client certificate an ORDINARY AGENT connection presented, reduced to what may be acted on. **It is a TRANSPORT FACT and authorises NOTHING** — an unenrolled stranger with a self-signed certificate reaches it exactly as an enrolled agent does. `Fingerprint` is `buscert.FingerprintOf(leaf)`; `Leaf` exists for a log line and must never yield an identity (`Subject`/`SAN`/`EKU` are chosen by whoever presented it). |
+| `ClientCertificateFromContext(ctx) (ClientCertificate, bool)` / `ClientCertFingerprintFromContext(ctx) (buscert.Fingerprint, bool)` | **NEW (MTLS-BIND, 2026-08-14).** `ok == false` means one of: not TLS, no certificate presented, or the leaf was outside its validity window — **deliberately not distinguished**, because all three mean "there is no transport identity to check against". A caller that requires a certificate must treat `false` as a REFUSAL, never as "no constraint applies". |
+| `(*Server).WithClientCertificate(next) http.Handler` | **NEW (MTLS-BIND, 2026-08-14).** The middleware that puts the above in the context, at **`ctxKey` 3** (0 request id, 1 agent principal, 2 peer principal — the value was taken from the tree, since these keys are compared by VALUE and a collision silently shadows rather than failing to compile). **It admits every request and is NOT a gate**; see `### The client certificate on an agent connection` below. |
 | `store.RecordKind` / `store.RecordVersion` | `"message"` / **`2`** (was `1`; bumped 2026-08-07 by SIGN-6, reserved from the Spec Server `store-record-version` namespace) — the `wal.Entry.Kind` discriminator and the schema version of the durable message payload. v2 adds REQUIRED `timestamp_ms` and `signature`, and **refusing v1 records at recovery is a destructive, bidirectional break** — see `CONTRACTS-ONDISK.md`. **DUR-5 consumes `store.Record`**: every field invariant 6 names is a top-level field and the only one the audit log must drop is `body`. |
+
+### The client certificate on an agent connection (MTLS-BIND, 2026-08-14, `818207d`)
+
+The listener requests a client certificate (`## Transport` above). `(*Server).WithClientCertificate`
+is what makes the presented one visible to a handler, and `POST /v1/enroll` is the one route that
+acts on it — it records the fingerprint on the agent's durable roster entry as `cert_bindings`
+(`CONTRACTS-ONDISK.md`), which is the fact invariant 11's cross-check needs and never had.
+
+**The middleware ADMITS EVERY REQUEST. It is not a gate**, and that is the decision, not an omission:
+the listener never requires a certificate, so a connection carrying none is the ordinary case —
+`/healthz`, `/v1/info`, the container's own healthcheck, and every client that has not grown a keypair
+yet. Refusing here would enforce "a certificate is mandatory" in the middleware while the transport
+says it is optional, and would take the bus's own health probe down with it.
+
+**The order of its checks is the contract** (`internal/httpapi/clientcert.go`):
+
+1. TLS or nothing (`r.TLS != nil`).
+2. A certificate must have been presented; an EMPTY `PeerCertificates` is the ordinary case.
+3. **`PeerCertificates[0]` only — never iterate the chain.** The client controls every certificate it
+   sends while `CertificateVerify` proves possession of the LEAF's key alone, so searching the chain
+   would be spoofed by anyone appending the victim's PUBLIC certificate at index 1 — and that single
+   mistake would hand an attacker the victim's agent id. Extra entries authorise nothing.
+4. **The leaf must be IN DATE, checked before the fingerprint is published.** `crypto/tls` proves
+   possession and does **not** check dates, so an expired certificate completes the handshake exactly
+   like a fresh one. It is `crypto/x509`'s verdict via the same helper `RELAY-20` uses on the peer
+   plane, never a local date comparison (invariant 9). A leaf failing this is logged at INFO with its
+   fingerprint and the request continues **without** a transport identity.
+
+A leaf that fails any step attaches **NOTHING**, rather than something marked invalid — an
+invalid-but-present value is the shape that gets read past.
+
+**It is mounted OUTSIDE `authMiddleware` on purpose**: enrolment is unauthenticated by necessity and
+is the route that CREATES the binding, so a certificate that only became visible after authentication
+could never be bound to anything (invariant 3). It is INSIDE `LoggingMiddleware` so its own lines
+carry the request id. It does not interact with `RequirePeerPrincipal` and does not need to — this
+value is not a principal, so on a peer route it merely describes the certificate that gate already
+authorised.
+
+**What enrolment does with it.** A presented, in-date certificate becomes exactly one LIVE binding on
+the new agent's roster entry; an absent one leaves the entry with none, and **that is accepted** —
+requiring a certificate here would lock out, with no migration path, every identity directory that
+holds no client keypair (`agent-busctl client-cert` generates one, and `MTLS-CLIENTCERT` is
+`in_progress`, not done). A fingerprint already live on a **different**
+agent is the 409 in `## Routes` above: refused before the mint, connection KEPT, body naming no agent.
+One certificate must never name two agents — that would let one key holder authenticate as either, at
+which point the fingerprint names nobody.
+
+> **NOT ENFORCED: invariant 11's cross-check is DESIGNED, not LIVE.** Invariant 11 requires that a
+> session token presented over a connection whose client certificate belongs to a DIFFERENT agent be
+> rejected. **No route on this build performs that check.** `auth.Service.AgentIDForClientCertificate`
+> — the seam a cross-check would call — has **no non-test caller at all** (verified by grep at
+> `818207d`, and note that `818207d`'s own commit message says the same of
+> `Roster.AgentIDForCertFingerprint`, which is **stale**: the security gate's pre-mint fix gave it one,
+> `internal/auth/service.go`'s `Enrol`, which decides the 409 above and nothing else). No request path
+> resolves a connection's certificate to a principal. Concretely: **a stolen session token is
+> replayable from any machine, and nothing detects it, on any route, authenticated or not.**
+> MTLS-BIND supplied the antecedent — the stored cert→agent fact — and nothing more; the check
+> itself is `MTLS-CROSSCHECK`, which is still open. Do not read a stored `cert_bindings` entry, or
+> this section, as evidence that a connection's certificate is checked against its token.
 
 ## Peer-bus transport identity (RELAY-45, added 2026-08-14) — NOT YET MOUNTED
 
