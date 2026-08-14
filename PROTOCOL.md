@@ -998,9 +998,13 @@ application will silently double-deliver in exactly that diamond topology; one w
 application but without loop prevention will burn unbounded traffic circulating a message around any
 cycle in the peer graph forever. Both are required, and neither is optional because the other exists.
 
-**The envelope changed for SIGN-7, and it is NOT a compatibility break.** `internal/relay` is served
-by nothing and imported by nothing, so this format is not yet on any wire and there is nothing to stay
-compatible with. Against the shape RELAY-2 first described:
+**The envelope changed for SIGN-7, and it is NOT a compatibility break.** `internal/relay` is now
+imported — `internal/httpapi/peermount.go` carries the only permitted mount site for the peer routes
+(`ed77bba`, and `internal/relay/guards_test.go` bounds it to that one file), and the offline
+operator CLI `cmd/agent-bus/peer.go` uses its `PeerStore` — but it is still **served by nothing**: no
+binary in `cmd/` constructs an `httpapi.PeerSurface`, so `mountPeerSurface` registers nothing and the
+peer paths answer 404 until RELAY-24 wires one. This format is therefore not yet on any wire and there
+is nothing to stay compatible with. Against the shape RELAY-2 first described:
 
 | Change | Field | Why |
 |---|---|---|

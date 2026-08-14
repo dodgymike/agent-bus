@@ -39,6 +39,10 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    damaged tail record is a DEFECT to fix, not a licence to narrow this invariant. When recovery
    discards a record, the sequence advances past the hole; it never rewinds. Contrast invariant 4,
    which WAS deliberately narrowed — this one was not.
+   **Enforcement point narrowed 2026-08-14 (`SIGN-1-FU-OUTOFORDER-POISON`, `DECISIONS.md`) — the
+   STORE's check, NOT this invariant:** `store.Append` no longer requires strictly-increasing
+   sequences; it enforces that no sequence is served twice and the slice stays sequence-sorted,
+   `head` uses `max` and never rewinds, and allocation is structurally independent of `store.head`.
 ### Invariant 2 — Fully-qualified agent ids
 
 2. **Every agent id is fully qualified: `<bus-id>.<agent-id>`.** That namespacing is what makes

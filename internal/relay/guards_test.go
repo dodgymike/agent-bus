@@ -909,15 +909,17 @@ func peerMountFileEscapes(t *testing.T, root string) []peerRouteMention {
 // authorised against MTLS-CLIENTAUTH plus RELAY-45 rather than the two tasks
 // DECISIONS.md ruling (c) names.
 //
-// THAT SUBSTITUTION IS NOT RECORDED IN DECISIONS.md. Ruling (c) still names
-// INVITE-PEERGUARD and MTLS-RELAYGUARD, and its "given up" clause still reads
-// "the handler stays unregistered until both gating tasks land"; RELAY-6
-// (0f7275b9) owes the amendment. An earlier draft of THIS COMMENT said the
-// ruling "had been amended", which was a false claim about a file this test does
-// not own — the review gate caught it here after catching the identical sentence
-// in internal/relay/doc.go, which is why it is spelled out rather than trimmed.
-// The full statement of the debt lives in doc.go; do not restate the amendment
-// as fact in either place until it exists.
+// THAT SUBSTITUTION IS NOW RECORDED IN DECISIONS.md, recorded at 0adf263: the
+// section "2026-08-14 — FEDERATION (RELAY-6), AMENDMENT" re-gates ruling (c) on
+// the INGRESS credential chain (MTLS-CLIENTAUTH + RELAY-45) instead of on
+// INVITE-PEERGUARD and MTLS-RELAYGUARD, which authenticate the EGRESS direction
+// and so were the wrong precondition for mounting OUR routes. Until 0adf263 this
+// paragraph recorded the debt as OPEN, and an earlier draft had asserted the
+// amendment existed BEFORE it did — a false claim about a file this test does not
+// own, caught by the review gate here and again in internal/relay/doc.go. It is
+// stated as fact now only because the entry is in DECISIONS.md at HEAD; verify it
+// is still there before relying on this line. internal/relay/doc.go still
+// describes the debt as outstanding and is owed the same correction.
 //
 // It is REPLACED rather than deleted, following RELAY-18's own precedent one
 // level down, and the replacement is NARROWER rather than absent: the paths may
