@@ -584,6 +584,51 @@ func (s *Server) handleSessionBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// INVARIANT 11'S CROSS-CHECK, BEFORE A CHALLENGE IS MINTED
+	// (MTLS-CROSSCHECK). body.AgentID is UNTRUSTED and UNVALIDATED here — it is
+	// whatever the client put in the body — and that is fine, because the check
+	// is not "is this caller that agent" (BeginSession's challenge is what proves
+	// that). It is "may a credential for the agent this request NAMES be issued
+	// over THIS connection". Running it first means no token is minted for a
+	// mismatched connection at all, rather than minted and then found unusable:
+	// a challenge is server state with a lifetime, and an unauthenticated caller
+	// must not be able to create some for an agent whose certificate it does not
+	// hold.
+	//
+	// IT DOES ADD AN ENUMERATION ORACLE, AND IT IS ACCEPTED (security gate,
+	// MTLS-CROSSCHECK). An earlier version of this comment asserted the opposite —
+	// "IT ADDS NO ENUMERATION ORACLE" — on the reasoning that this route already
+	// separates an existing agent from an unknown one, so a 403 disclosed nothing
+	// NEW about existence. That reasoning is sound and the conclusion still does
+	// not follow, because existence is not the only thing now readable. Measured,
+	// for an anonymous caller presenting NO certificate:
+	//
+	//	unknown agent          -> 404
+	//	known, NOT cert-bound  -> 200, with a live challenge token
+	//	known, cert-bound      -> 403
+	//
+	// So a 403 means precisely "this agent holds a live certificate binding", and
+	// sweeping guessable ids (<bus-id>.<name>-<n>, the bus id being public from
+	// /v1/info) maps which agents are NOT yet bound — i.e. which are still
+	// vulnerable to the token replay this task exists to stop.
+	//
+	// It is accepted rather than closed, deliberately. Collapsing the 403 into a
+	// 404 would take from an honest client the only signal that tells it to
+	// re-enrol with its current keypair rather than retry forever, and moving the
+	// gate AFTER BeginSession to equalise the shapes would reintroduce exactly the
+	// mint-then-refuse defect MTLS-BIND's security gate found on the enrolment
+	// path. What is disclosed is bounded: that an agent is not yet bound, never
+	// what any certificate is and never whose. It shrinks to nothing as agents
+	// re-enrol under MTLS-CLIENTCERT.
+	//
+	// The single fixed refusal string still does real work — it hides WHICH guard
+	// fired — and crosscheck.go's crossCheckRefusal states the same trade. The two
+	// comments must not drift apart again; that drift is what produced the false
+	// claim above. The agent id never reaches the log raw; see agentIDLogFields.
+	if !s.enforceCertBinding(w, r, body.AgentID) {
+		return
+	}
+
 	ch, err := s.auth.BeginSession(body.AgentID)
 	if err != nil {
 		// body.AgentID is untrusted and unbounded, so it is NOT logged here;
@@ -632,6 +677,36 @@ func (s *Server) handleSessionComplete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Neither the token nor the signature appears in this log line.
 		s.writeAuthError(w, r, "session complete", err)
+		return
+	}
+
+	// INVARIANT 11'S CROSS-CHECK, ON THE SERVER-SIDE AGENT ID (MTLS-CROSSCHECK).
+	//
+	// sess.AgentID comes from the COMPLETED SESSION — it is the id the server
+	// recorded when the challenge was issued, never a value from this body. There
+	// is no agent id in SessionCompleteRequestBody at all, and none may be added
+	// for this check: a client-supplied id here would let a caller choose which
+	// binding it is measured against, which is the whole attack.
+	//
+	// WHY IT RUNS AFTER CompleteSession AND NOT BEFORE. The agent id is simply not
+	// knowable before: the request carries a token and a signature, and only
+	// resolving the token yields the agent. Running after means the session is
+	// left ACTIVATED even when this refuses, and that is acceptable rather than
+	// merely unavoidable:
+	//
+	//   (a) completing a challenge requires a valid Ed25519 signature over the
+	//       SERVER-CHOSEN token under the agent's own auth private key
+	//       (invariant 3), so the caller reaching this line already IS the agent —
+	//       it is not an attacker who has activated somebody else's session; and
+	//   (b) every subsequent request bearing that token is gated by the SAME
+	//       check in authMiddleware, over the same connection or any other, so an
+	//       activated-but-refused token authorises nothing anywhere.
+	//
+	// So the residue is one live-but-useless session handle, which expires on its
+	// own. DO NOT INVENT A REVOKE PATH HERE to tidy it up: none exists in
+	// internal/auth today, and adding one under a refusal branch is how a
+	// half-built revocation surface gets its first caller. AUTH-4 owns it.
+	if !s.enforceCertBinding(w, r, sess.AgentID) {
 		return
 	}
 

@@ -414,6 +414,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// INVARIANT 11'S CROSS-CHECK, BEFORE THE PRINCIPAL IS ATTACHED
+		// (MTLS-CROSSCHECK). The token has authenticated; that proves possession
+		// of a bearer credential and nothing about which CONNECTION it arrived
+		// over. This is where the two mechanisms meet: a token presented over a
+		// client certificate belonging to a different agent is refused, and an
+		// agent that HAS a binding must present a matching certificate. It runs
+		// BEFORE the context is enriched so that no downstream handler can ever
+		// see a principal the cross-check did not accept.
+		//
+		// principal.AgentID is SERVER-MINTED -- it comes out of the roster via
+		// Authenticate, never from the request -- so agentIDLogFields will always
+		// take its valid branch on this call site. It is routed through the helper
+		// anyway because the other two call sites are not so lucky and one shared
+		// gate must be safe for the worst of them.
+		if !s.enforceCertBinding(w, r, principal.AgentID) {
+			return
+		}
+
 		s.log.Debug("request authenticated",
 			"request_id", RequestIDFromContext(r.Context()),
 			"method", r.Method,
