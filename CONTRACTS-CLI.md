@@ -228,10 +228,11 @@ load-bearing.
   stderr `WARN` is invisible to an agent that discarded stderr — invariant 7's second audience needs a
   field it can branch on.
 
-**This is the mint command's OUTPUT, not a settled wire shape.** There is deliberately no single
-packed token — no base64 blob, no bespoke encoding — because the shape `client.EnrolOptions.Invite`
-will carry is settled by `INVITE-CLIENT`, and inventing one here would be the same class of mistake as
-hand-picking a record-type number.
+**This is the mint command's OUTPUT.** There is deliberately no single packed token — no base64 blob,
+no bespoke encoding — just this JSON object, saved to a file. **Settled by `INVITE-CLIENT`
+(2026-08-14):** `client.Invite` (`client/invite.go`) is the consumer, and its json tags mirror this
+struct EXACTLY, field for field — `agent-busctl enrol --invite-file <path>` reads this JSON verbatim.
+See "Invite redemption" below.
 
 Failure shape, also on **stdout** so an agent that redirected stderr still gets a parseable answer:
 
@@ -1158,8 +1159,11 @@ retries `KindServer` only on 429/503), so there is no retry loop — but the exi
 not say "this route is deliberately unimplemented", and an agent branching on exit codes will read a
 deliberate refusal as a server fault. Recorded as a known rough edge.
 
-`enrol` flags: `--name` (required), `--invite` (**reserved, currently rejected** — see below),
-`--idempotency-key` (resume an earlier attempt), `--keep-current` (do not switch the selection).
+`enrol` flags: `--name` (required), `--invite-file <path>` (redeem an operator-minted invite; `-`
+reads it from stdin — see "Invite redemption" below), `--idempotency-key` (resume an earlier
+attempt), `--keep-current` (do not switch the selection). **`--invite` (the old, never-working flag
+that took the blob as a value) is REMOVED** (`INVITE-CLIENT`, 2026-08-14), not merely reserved — see
+below.
 
 `agents` flags: none beyond the globals.
 
@@ -1190,9 +1194,9 @@ codes without copying a switch.
 | --- | --- | --- |
 | `0` | — | Success |
 | `1` | `internal` | Unclassified/internal failure |
-| `2` | `usage` | Malformed invocation: bad flag, missing `--name`, unknown subcommand, reserved `--invite` |
-| `3` | `config` | Local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store |
-| `4` | `auth` | The bus rejected the credential (401/403), or the signature did not verify |
+| `2` | `usage` | Malformed invocation: bad flag, missing `--name`, unknown subcommand, the removed `--invite` flag |
+| `3` | `config` | Local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, or (`INVITE-CLIENT`, 2026-08-14) an `enrol --invite-file` that cannot be used — missing, wrong permissions, not a regular file, malformed JSON, or larger than `client.MaxInviteFileBytes` (64 KiB) |
+| `4` | `auth` | The bus rejected the credential (401/403), or the signature did not verify, or (`INVITE-CLIENT`, 2026-08-14) refused an invite presented to `enrol --invite-file` (403, `"kind":"auth"` — single-use/expiring/revocable, and the bus deliberately does not say which; retrying does not help) |
 | `5` | `network` | The bus could not be reached: refused, DNS, timeout, or a certificate that does not verify |
 | `6` | `server` | The bus reported a failure of its own (5xx), or a capacity refusal that survived retries |
 | `7` | `rejected` | The bus understood the request and refused it (400/404/409/413/415/422) |
@@ -1247,7 +1251,7 @@ No code changes meaning; some commands give one a more specific sense:
 
 | Command | Fields |
 | --- | --- |
-| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprints` (array, **`omitempty`** — present only when at least one certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path` |
+| `enrol` | `agent_id`, `bus_id`, `name`, `bus_url`, `bus_fingerprints` (array, **`omitempty`** — present only when at least one certificate was pinned, i.e. never for a plaintext loopback bus), `public_key`, `enrolled_at`, `replayed`, `idempotency_key`, `stored`, `store_path`, `invite_id` (**`omitempty`**, added `INVITE-CLIENT` 2026-08-14 — present only when `--invite-file` redeemed an invite; the invite's **id**, never its secret) |
 | `whoami` | the identity fields above, plus `is_current` (bool), and `session` (`agent_id`, `expires_at`, `refresh_at`, `lifetime_seconds`) with `--verify` |
 | `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
@@ -1566,6 +1570,69 @@ work (a client-made signature verifies under `internal/signing.Verify` from the 
 read the presence of `RejectionReason`, `RejectedMessage` or `KeyRing` as evidence that the read path
 enforces anything yet.
 
+### Invite redemption: `enrol --invite-file` (added 2026-08-14, `INVITE-CLIENT`)
+
+`agent-busctl enrol` now redeems an operator-minted invite. Source: `cmd/agent-busctl/enrol.go`
+(`loadInvite`), `client/invite.go` (`Invite`, `LoadInviteFile`, `ParseInvite`, `Validate`,
+`MaxInviteFileBytes`), `client/enrol.go` (`EnrolOptions.Invite`, `EnrolResult.InviteID`).
+
+```bash
+agent-busctl enrol --invite-file invite.json --name planner
+```
+
+`--invite-file -` reads the blob from **stdin**; this is REFUSED (`KindUsage`, exit `2`) when stdin
+is a terminal — invariant 7, never an interactive prompt.
+
+**`--invite <blob>` is REMOVED, not deprecated.** It never worked — it always failed at exit `2` — so
+nothing depends on it, and it is gone rather than kept accepting a value, because the value it would
+have carried is a bearer credential: argv is world-readable via `/proc/*/cmdline` and is recorded in
+shell history. **There is deliberately no flag of any name that takes the invite or its secret as a
+value.**
+
+**File requirements, checked against the OPEN file (`f.Stat`), not the path — no window between the
+check and the read:**
+
+- must be a regular file;
+- must carry no group or world permission bit (any bit in `0o077` is refused, exit `3`, naming the
+  exact `chmod 0600 <path>` to run) — the client refuses rather than silently repairing a file it does
+  not own;
+- at most `client.MaxInviteFileBytes` (64 KiB) — two orders of magnitude of headroom over a real
+  blob (a few hundred bytes), refused rather than truncated;
+- decodes as exactly one JSON object; content after it is refused (`ParseInvite`), because a file
+  holding two concatenated blobs is ambiguous about which one is redeemed;
+- unknown/extra JSON keys are **ignored on purpose** (`json.Decoder` without
+  `DisallowUnknownFields`) — forward compatibility with `agent-bus invite mint -json`, which already
+  emits operator-facing keys (`ok`, `created_at`, `label`, `transport_insecure`) this client does not
+  need and may add more.
+
+Any of the above failing is `KindConfig`, exit `3`. Malformed invite JSON is reported by offset and
+type only — **no error from this path ever quotes the file's content**, because the content is a
+bearer credential and errors are printed to terminals, piped into logs and pasted into tickets.
+
+**The blob supplies the bus address AND the certificate fingerprint, so `--bus` and
+`--bus-fingerprint` are unnecessary with `--invite-file`.** This is invariant 11: the invite is the
+trust anchor, and there is no trust-on-first-use. A `--bus` or `--bus-fingerprint` that **disagrees**
+with the invite is refused (`KindUsage`, exit `2`) rather than resolved by precedence — one of the two
+is wrong about which bus this is, and the client will not silently prefer either. A value that
+**agrees** is accepted as merely redundant.
+
+**The bus refusing the invite** (already-redeemed, expired, revoked, or simply unknown — the bus
+deliberately answers all four with the same terse `403`, so a caller cannot use the response to probe
+which invites exist) surfaces as `KindAuth`, exit `4`. Retrying does not help; the remedy is a fresh
+invite from the operator (`agent-bus invite mint`).
+
+**Enrolling with NO invite at all still works, unchanged.** The bus's `httpapi.DiscoveryEnrolment.InviteRequired`
+is deliberately `false` today (invariant 3 says that must eventually flip; it has not). Do not
+document or build on invite-only enrolment as live.
+
+**Output.** `--json` gains `invite_id` (`omitempty` — present only when an invite was redeemed); human
+output gains an `invite <id>` line. The invite **id** is a name, safe to log and to quote in a ticket.
+The invite **secret** is the credential and appears in **no** output, error or log line anywhere in
+this path — not in `EnrolResult`, not in an `*Error`, not in the on-disk `pending` enrolment record
+(which does not carry the invite at all — a KNOWN GAP; see `client/enrol.go`'s comment on
+`inviteID, inviteSecret := ...`), and not in `Invite.String()`/`GoString()`, both of which redact it
+even under `%#v`.
+
 ### Enrolment idempotency (invariant 10)
 
 The key pair is written to the store as a `pending` record **before** `/v1/enroll` is called, so a
@@ -1606,11 +1673,15 @@ a *later* retry the same logical send rather than a second message.
 
 ### In flight — what will change
 
-- **`--invite` is RESERVED and currently rejected** (exit `2`) rather than guessed. Enrolment is
-  becoming invite-only (invariant 3) and the blob will carry bus id, address, **bus-certificate
-  fingerprint** and invite secret — but the wire shape is settled by task `ENROL-SHAPE`, and
-  `/v1/enroll` is explicitly UNSTABLE until it, certificate binding and POPKEY all land. Inventing a
-  field name here would be the same mistake as hand-picking a record-type number.
+- ~~**`--invite` is RESERVED and currently rejected** (exit `2`) rather than guessed.~~ **PARTLY
+  CLOSED by `INVITE-CLIENT` (2026-08-14):** `--invite` (the flag that took the blob as a value) is now
+  REMOVED outright rather than reserved, and `enrol --invite-file <path>` redeems an invite for real —
+  see "Invite redemption" above. The wire shape this bullet was waiting on (`invite_id`/`invite_secret`
+  on `POST /v1/enroll`, `httpapi.EnrolRequestBody`) is the settled `ENROL-SHAPE` shape and is what this
+  path sends. **Still open:** enrolment is not invite-only — `httpapi.DiscoveryEnrolment.InviteRequired`
+  is still `false` (invariant 3 says that must eventually change) — and `AUTH-1-FU-POPKEY` (proof of
+  possession of the AUTH key) has not landed; do not read this bullet's closure as either of those
+  being done.
 - **TLS** (invariant 11): **the bus now serves `https`, and only `https`** (`MTLS-LISTENER`, landed
   2026-08-07 — see the top of this file). `http://` is still accepted by the client, unchanged, but
   **only to a loopback host**; that allowance is a client-side affordance for local testing, not a

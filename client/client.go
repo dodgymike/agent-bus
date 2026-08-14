@@ -157,6 +157,70 @@ func (c *Client) endpoint() (*url.URL, BusPinSet, error) {
 	return u, pins, nil
 }
 
+// endpointWith is endpoint() for a bus named by an INVITE rather than by
+// configuration.
+//
+// It takes both halves as arguments because with an invite neither can be
+// resolved from the usual places: there is no stored identity for a bus this
+// client has never joined, and --bus / --bus-fingerprint are unnecessary (the
+// invite carries both). The pin still goes through resolvePinsWith, so the
+// narrowing and disagreement rules that guard a stored accept-set apply exactly
+// as they do on the ordinary path — enrolling a SECOND agent into a store that
+// already pins this bus must not quietly widen it.
+//
+// src says which of the two the pin actually came from, and is passed through
+// rather than assumed: inviteEndpoint falls back to the FLAG's fingerprint when
+// the invite carries none, and a refusal that named the wrong source would send
+// the operator to fix a value they never set.
+//
+// endpoint() is deliberately left alone rather than generalised: it is the
+// no-invite path, and its behaviour must be byte-identical to what it was.
+func (c *Client) endpointWith(u *url.URL, pin BusFingerprint, src pinSource) (*url.URL, BusPinSet, error) {
+	pins, err := c.resolvePinsWith(u, pin, src)
+	if err != nil {
+		return nil, BusPinSet{}, err
+	}
+	return u, pins, nil
+}
+
+// pinSource says WHERE the asserted fingerprint reaching resolvePinsWith came
+// from. It changes the REFUSAL TEXT only: the refusal itself, and everything
+// that decides it, is identical on both paths.
+//
+// # Why the text has to differ, which is not a cosmetic point
+//
+// The flag remedy offers `agent-busctl pin add <fingerprint>` — correct there,
+// because the fingerprint on the command line was typed by the operator, and a
+// rollover is the ordinary reason it disagrees with the stored set.
+//
+// On the INVITE path both halves of that are false. The caller passed no flag,
+// so naming one is advice they cannot act on (invariant 7: an error names a
+// remedy that works). And under invariant 11's own threat model — "whoever can
+// substitute an invite can point an agent at a bus of their choosing" — the
+// disagreeing fingerprint is exactly the value an attacker chose, so a
+// copy-pasteable `pin add` with it already filled in turns a correct refusal
+// into a one-command defeat of the pin. The invite path therefore names the
+// INVITE as the source and offers no command that accepts its fingerprint: the
+// only safe next step is confirming out of band which certificate is genuine.
+type pinSource struct {
+	// invite is set when the fingerprint came from an invite blob rather than
+	// from --bus-fingerprint / AGENT_BUS_FINGERPRINT.
+	invite bool
+
+	// inviteID names the invite in the message, and is empty on the flag path.
+	// It has been through Invite.Validate — bounded by MaxInviteIDLen and
+	// matched against serverIDPattern — before it can reach here, so it cannot
+	// carry a control character or fill a scrollback.
+	inviteID string
+}
+
+// pinFromFlag is the ordinary source: --bus-fingerprint / AGENT_BUS_FINGERPRINT,
+// or nothing at all.
+var pinFromFlag = pinSource{}
+
+// pinFromInvite is the invite path, carrying the invite's id for the message.
+func pinFromInvite(inviteID string) pinSource { return pinSource{invite: true, inviteID: inviteID} }
+
 // resolvePins returns the SET of certificates the bus at u may present.
 //
 // The order matches every other setting (CONTRACTS-CLI.md): the explicit
@@ -182,21 +246,53 @@ func (c *Client) endpoint() (*url.URL, BusPinSet, error) {
 // A missing or unreadable identity is NOT an error here — enrolment happens
 // before any identity exists, and that is the case that most needs a pin.
 func (c *Client) resolvePins(u *url.URL) (BusPinSet, error) {
+	return c.resolvePinsWith(u, c.pin, pinFromFlag)
+}
+
+// resolvePinsWith is resolvePins with the ASSERTED fingerprint supplied by the
+// caller instead of taken from Config.BusFingerprint.
+//
+// It exists for exactly one caller: enrolment with an invite, where the trust
+// anchor is the INVITE's fingerprint rather than a flag (invariant 11 — the
+// invite carries the fingerprint so the first connection is verifiable, and
+// there is no trust-on-first-use). Everything below it is unchanged, which is
+// the point: the invite's pin is subject to the same narrowing rule and the same
+// hard refusal on disagreement with a stored set, rather than a second, weaker
+// code path that happens to be reached only when an invite is present.
+//
+// The REFUSAL is the same on both paths; only the text differs, and src decides
+// which. See pinSource for why a shared message was wrong rather than untidy.
+// Enrol refuses a flag/invite disagreement BEFORE calling this, so an invite's
+// fingerprint can only reach here alone.
+func (c *Client) resolvePinsWith(u *url.URL, pin BusFingerprint, src pinSource) (BusPinSet, error) {
 	stored, err := c.storedPins(u)
 	if err != nil {
 		return BusPinSet{}, err
 	}
 	switch {
-	case c.pin.IsZero():
+	case pin.IsZero():
 		return stored, nil
-	case stored.IsEmpty(), stored.Contains(c.pin):
-		return NewBusPinSet(c.pin), nil
+	case stored.IsEmpty(), stored.Contains(pin):
+		return NewBusPinSet(pin), nil
+	case src.invite:
+		// The INVITE disagrees with a pin this store already holds for this bus.
+		//
+		// No `pin add` here, and no other command that would accept the invite's
+		// fingerprint: see pinSource. The invite is the trust anchor, so a value
+		// arriving inside one cannot be checked against anything else in the
+		// invite — only out of band. The bus address is the invite's, so it goes
+		// through safeText like every other invite-derived value that is printed.
+		return BusPinSet{}, newError(KindUsage, "config",
+			"invite "+src.inviteID+" names certificate "+pin.String()+" but the stored identity for "+safeText(u.String(), maxDetailBytes)+" accepts "+stored.String(),
+			"these name different certificates and one of them is wrong, and the disagreement itself is the finding. The invite is the trust anchor (invariant 11): whoever can substitute one points this agent at a bus of their choosing, so an invite that disagrees with a pin you ALREADY hold for this bus is SUSPECT until it has been confirmed. "+
+				"Confirm OUT OF BAND — with the operator, not through the channel the invite arrived on — which certificate the bus is really serving; it logs `bus_cert_fingerprint=…` at startup. "+
+				"Do not widen or replace the stored pin to make this enrolment succeed: if the bus genuinely rotated, act on the fingerprint you confirmed rather than on the one the invite asserted")
 	default:
 		remedy := "these name different certificates and one of them is wrong. Confirm which is genuine OUT OF BAND (the bus logs `bus_cert_fingerprint=…` at startup) before doing anything else; " +
-			"then either drop the flag, or — if the bus is rotating and the new certificate is genuine — `agent-busctl pin add " + c.pin.String() + "` to accept it alongside the old one for the rollover. " +
+			"then either drop the flag, or — if the bus is rotating and the new certificate is genuine — `agent-busctl pin add " + pin.String() + "` to accept it alongside the old one for the rollover. " +
 			"To replace the pin outright, `agent-busctl logout` that identity and enrol again against the fingerprint you confirmed"
 		return BusPinSet{}, newError(KindUsage, "config",
-			"--bus-fingerprint says "+c.pin.String()+" but the stored identity for "+u.String()+" accepts "+stored.String(),
+			"--bus-fingerprint says "+pin.String()+" but the stored identity for "+u.String()+" accepts "+stored.String(),
 			remedy)
 	}
 }
@@ -430,8 +526,10 @@ func (c *Client) messagingKey() (ed25519.PrivateKey, error) {
 // key, minting the key on first use.
 //
 // This is the value that must reach a peer OUT OF BAND for that peer to be able
-// to verify anything this agent sends. There is no route that publishes it: no
-// messaging key is registered at enrolment and CRYPTO-4 (the server-attested key
+// to verify anything this agent sends. Since RELAY-13 this key IS registered at
+// enrolment (Enrol sends it as messaging_public_key and the bus stores it on the
+// roster entry), but there is still no route that PUBLISHES it: no endpoint
+// serves another agent's messaging key, and CRYPTO-4 (the server-attested key
 // bundle) does not exist, so until it lands the exchange is a human copying this
 // string into the peer's `agent-busctl trust`. Say so when you print it.
 func (c *Client) MessagingPublicKey() (Identity, string, error) {

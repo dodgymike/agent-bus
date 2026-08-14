@@ -186,6 +186,24 @@ type request struct {
 	// a POST without one is not, and only the call site knows which it built.
 	retryable bool
 
+	// busOverride and pinsOverride pin this ONE request to an endpoint the
+	// caller already resolved, instead of letting do() resolve it again.
+	//
+	// Set ONLY by Enrol when an invite is present, where the INVITE — not the
+	// config, and not the stored identity, which does not exist yet for a bus
+	// this client has never joined — is the trust anchor (invariant 11). They
+	// travel on the request rather than on the Client because a Client holds
+	// mutexes and a cached transport, so it cannot be shallow-copied for one
+	// call.
+	//
+	// This is NOT a way around the security seam: do() passes them to
+	// c.doer(base, pins) exactly as it would pass a resolved endpoint, so
+	// transportSecurity still runs and still refuses https-without-a-pin and
+	// http-with-one. A nil busOverride means "resolve normally", which is every
+	// other request in this package.
+	busOverride  *url.URL
+	pinsOverride BusPinSet
+
 	// maxResponse overrides maxResponseBytes for routes whose legitimate
 	// response is larger than the default bound. Zero means the default.
 	//
@@ -251,9 +269,12 @@ func transportSecurity(u *url.URL, pins BusPinSet) error {
 
 // do executes req with retries and decodes the response.
 func (c *Client) do(ctx context.Context, req request) (*response, error) {
-	base, pins, err := c.endpoint()
-	if err != nil {
-		return nil, err
+	base, pins := req.busOverride, req.pinsOverride
+	if base == nil {
+		var err error
+		if base, pins, err = c.endpoint(); err != nil {
+			return nil, err
+		}
 	}
 	doer, err := c.doer(base, pins)
 	if err != nil {

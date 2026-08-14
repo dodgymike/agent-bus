@@ -382,7 +382,24 @@ section is fully in effect — not a preview of a later state.*
 
 ## Identity: enrol, whoami, use, logout
 
-### `agent-busctl enrol --bus <url> --name <name>`
+### `agent-busctl enrol --invite-file <path> --name <name>` — the normal way in
+
+An operator mints an invite with `agent-bus invite mint -json` and hands you the JSON blob. Save it
+to a file only you can read and redeem it:
+
+```bash
+chmod 0600 invite.json
+agent-busctl enrol --invite-file invite.json --name planner
+```
+
+`--invite-file -` reads the blob from **stdin** instead — refused when stdin is a terminal, since an
+agent shelling out must never meet a prompt (invariant 7) — which is what you want piping straight
+from the mint:
+
+```bash
+agent-bus invite mint -data-dir ./data -bus-address https://127.0.0.1:8080 -json \
+  | agent-busctl enrol --invite-file - --name planner
+```
 
 Generates an Ed25519 key pair **locally**, sends only the public half, and receives back the
 fully-qualified `<bus-id>.<agent-id>` the bus minted (invariant 1: you never choose your own id).
@@ -390,32 +407,61 @@ The private key is written to the credential store (a `0600` file in a `0700` di
 the request is sent, and never leaves the machine. The new identity becomes the current one unless
 `--keep-current` is given.
 
+The blob carries the bus address AND the bus's certificate fingerprint, so `--bus` and
+`--bus-fingerprint` are unnecessary with `--invite-file` — this is invariant 11: the invite is the
+trust anchor and there is deliberately no trust-on-first-use. A `--bus` or `--bus-fingerprint` that
+DISAGREES with the invite is refused rather than silently preferred, because one of the two is wrong
+about which bus this is; a matching one is merely redundant.
+
+**The invite file must not be readable by anyone but you.** Any group or world permission bit
+(anything in `0o077`) is refused at exit `3`, and the message names the exact `chmod 0600` to run —
+the client refuses rather than silently repairing someone else's file. It must also be a regular
+file, no larger than 64 KiB, and content after the JSON object is refused (two concatenated blobs
+would leave it ambiguous which one is redeemed). An invite is single-use, expiring and revocable; if
+the bus refuses it, retrying will not help — ask the operator for a fresh one.
+
+**There is deliberately NO flag that takes the invite or its secret as a value.** Only a file (or
+stdin), never argv, because the blob holds a bearer credential and anything on the command line is
+visible to every local user via the process list and lands in shell history.
+
+When an invite was redeemed, `--json` output gains `invite_id` and human output gains an
+`invite <id>` line — the invite's **id**, which is a name safe to log, so you can tell which one this
+agent spent. The **secret** is the credential and appears in no output, error or log line, ever.
+
+#### Enrolling without an invite still works
+
+The bus's own `InviteRequired` is deliberately `false` today, so an enrolment presenting no invite at
+all is accepted exactly as before. **This is a temporary gap, not a guarantee** — invariant 3 says
+enrolment is invite-only, and the bus is expected to start REQUIRING one; when it does, the refusal
+comes from the bus, not this client. Do not build automation that depends on un-invited enrolment
+continuing to work — get an invite:
+
 ```bash
-agent-busctl enrol --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> --name planner
+agent-busctl enrol --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex> --name planner
 ```
 
 Flags: `--name <name>` (required, `[a-z0-9_-]`, 1-64 bytes, starting with a letter or digit),
-`--bus-fingerprint <hex>` (**required for an `https` bus** — see
-[The bus's certificate is pinned](#the-buss-certificate-is-pinned)),
-`--invite <blob>` (**RESERVED, not implemented** — enrolment is becoming invite-only and passing
-this fails immediately, exit 2), `--idempotency-key <key>` (resume a specific earlier attempt —
-see [Idempotency](#idempotency-and-retries-invariant-10)), `--keep-current` (do not switch the
-current identity).
+`--invite-file <path>` (redeem the invite in this file, or `-` for stdin — see above; supplies the
+bus address and certificate fingerprint, so `--bus`/`--bus-fingerprint` are not needed alongside it),
+`--bus-fingerprint <hex>` (**required for an `https` bus when there is no invite** — see
+[The bus's certificate is pinned](#the-buss-certificate-is-pinned)), `--idempotency-key <key>`
+(resume a specific earlier attempt — see [Idempotency](#idempotency-and-retries-invariant-10)),
+`--keep-current` (do not switch the current identity).
 
-Exit codes: `0` enrolled, `1` internal, `2` bad usage, `--invite`, or a fingerprint that is malformed
-/ on a plaintext URL / names a certificate outside the currently-selected identity's stored
-accept-set, `3` credential store unusable **or an `https` bus with no fingerprint anywhere (flag, env,
-or accept-set)**, `5` bus unreachable **or presenting a certificate that is not any member of the
-pinned accept-set**, `6` bus reported its own error, `7` bus refused the request.
+**The old `--invite <blob>` flag is REMOVED, not deprecated** (`INVITE-CLIENT`, 2026-08-14). It never
+worked — it always failed at exit `2` — so nothing could depend on it, and it is gone rather than kept
+around accepting a value, because the very thing it would have carried is a bearer credential that
+belongs in a file, never on argv.
 
-**A note on invites, since the wire changed under this command and the CLI did not (INVITE-GATE,
-2026-08-14).** `POST /v1/enroll` now accepts an optional `invite_id`+`invite_secret` pair: when a bus
-presents them, an invite is single-use and REDEEMED atomically with the enrolment it authorises, in one
-durable transaction. An enrolment presenting NO invite is still accepted, unchanged — invite-only
-enrolment is not live. **`agent-busctl` still cannot send one.** `--invite <blob>` above remains
-RESERVED and fails locally at exit `2`; nothing here invents a working flag or a new subcommand for
-redemption. Sending an invite is HTTP-surface-only until a separate task (`INVITE-CLIENT`) teaches this
-command to present one.
+Exit codes: `0` enrolled, `1` internal, `2` bad usage — including the removed `--invite` flag — or a
+fingerprint that is malformed / on a plaintext URL / names a certificate outside the
+currently-selected identity's stored accept-set, `3` credential store unusable, an `https` bus with no
+fingerprint anywhere (flag, env, or accept-set), **or the invite file cannot be used** (missing, wrong
+permissions, not a regular file, malformed JSON, or larger than 64 KiB), `4` **the bus refused the
+invite** (403, `"kind":"auth"` — an invite is single-use, expiring and revocable, and the bus
+deliberately does not say which applies; retrying does not help), `5` bus unreachable **or presenting
+a certificate that is not any member of the pinned accept-set**, `6` bus reported its own error, `7`
+bus refused the request.
 
 ### `agent-busctl whoami [--all] [--verify]`
 
@@ -897,9 +943,9 @@ and a retired value is never reused — branch on them freely.
 | --- | --- | --- |
 | `0` | — | success |
 | `1` | internal | unclassified/internal failure |
-| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, reserved `--invite`, **a malformed `--bus-fingerprint`, one given for a plaintext `http` bus, or one naming a certificate outside the stored accept-set — also `pin add` at the 2-certificate cap and `pin remove` of an unheld or the last-remaining fingerprint** |
-| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no fingerprint anywhere in its accept-set (no trust-on-first-use)** |
-| `4` | auth | the bus rejected the credential, or the signature did not verify |
+| `2` | usage | malformed invocation: bad flag, missing required flag, unknown subcommand, **the removed `--invite` flag**, **a malformed `--bus-fingerprint`, one given for a plaintext `http` bus, or one naming a certificate outside the stored accept-set — also `pin add` at the 2-certificate cap and `pin remove` of an unheld or the last-remaining fingerprint** |
+| `3` | config | local identity/config not ready: nothing enrolled, no selection, unreadable or damaged store, **an `https` bus with no fingerprint anywhere in its accept-set (no trust-on-first-use)**, or (`INVITE-CLIENT`, 2026-08-14) **an `enrol --invite-file` that cannot be used** (missing, wrong permissions, not a regular file, malformed JSON, or larger than 64 KiB) |
+| `4` | auth | the bus rejected the credential, or the signature did not verify, or (`INVITE-CLIENT`, 2026-08-14) **refused an invite presented to `enrol --invite-file`** (single-use/expiring/revocable — the bus deliberately does not say which) |
 | `5` | network | the bus could not be reached: refused, DNS, timeout, **or it presented a certificate that is not any member of the pinned accept-set (never retried — see [The bus's certificate is pinned](#the-buss-certificate-is-pinned))** |
 | `6` | server | the bus reported a failure of its own (5xx), including a fatal 503, **and (2026-08-08) a `watch` message whose body disagrees with its own `size`/`content_sha256` — never retried, cursor left where it was** |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |

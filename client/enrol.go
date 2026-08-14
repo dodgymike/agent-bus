@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -44,19 +45,26 @@ type EnrolOptions struct {
 	// ask for the same one.
 	Name string
 
-	// Invite is the operator-minted invite blob.
+	// Invite is the operator-minted invite blob being redeemed, or nil.
 	//
-	// RESERVED AND NOT YET IMPLEMENTED. Enrolment is becoming invite-only
-	// (invariant 3, 2026-08-02) and the blob will carry bus id, address, bus
-	// certificate fingerprint and invite secret — but the WIRE SHAPE is settled
-	// by task ENROL-SHAPE and is not settled yet, and /v1/enroll is explicitly
-	// UNSTABLE until it, certificate binding and POPKEY all land.
+	// It is the TRUST ANCHOR of this enrolment (invariant 3: enrolment is
+	// invite-only; invariant 11: the invite carries the bus's certificate
+	// fingerprint so the FIRST connection is verifiable and there is no
+	// trust-on-first-use). When it is set it supplies BOTH the bus address and
+	// the pin, so Config.BusURL and Config.BusFingerprint are unnecessary — and
+	// one that DISAGREES with the invite is refused rather than silently
+	// preferred, because one of the two is wrong about which bus this is.
 	//
-	// Setting it therefore fails FAST AND LOCALLY with a remedial error rather
-	// than inventing a field name on the wire. Inventing one would be the same
-	// class of mistake as hand-picking a record-type number: the shape is
-	// reserved, not chosen.
-	Invite string
+	// Load it with LoadInviteFile or ParseInvite; Enrol validates it either way,
+	// so an embedder that built one by hand cannot skip the checks. The secret
+	// inside it goes in the request body and NOWHERE else: not on argv, not in
+	// EnrolResult, not in an error, not in a log line.
+	//
+	// nil is still accepted, because the bus still accepts an un-invited
+	// enrolment (httpapi.DiscoveryEnrolment.InviteRequired is false today).
+	// Invariant 3 says that must change; when it does, the bus refuses, not this
+	// client.
+	Invite *Invite
 
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10). Leave
 	// it empty and Enrol mints a fresh random one.
@@ -104,6 +112,16 @@ type EnrolResult struct {
 
 	// StorePath is where it was written, when Stored.
 	StorePath string `json:"store_path,omitempty"`
+
+	// InviteID is the invite this enrolment redeemed, or "" when none was
+	// presented.
+	//
+	// The ID is a NAME, not a credential — cmd/agent-bus/invite.go says so
+	// explicitly, and the SECRET is the credential — so reporting it is
+	// provenance an operator needs: it answers "which single-use invite did this
+	// agent spend" without a log dive. The secret is NEVER reported, here or
+	// anywhere else.
+	InviteID string `json:"invite_id,omitempty"`
 }
 
 // enrolRequestBody mirrors httpapi.EnrolRequestBody. The server rejects
@@ -139,6 +157,25 @@ type enrolRequestBody struct {
 	MessagingPublicKey string `json:"messaging_public_key,omitempty"`
 
 	IdempotencyKey string `json:"idempotency_key"`
+
+	// InviteID and InviteSecret redeem an operator-minted invite
+	// (httpapi.EnrolRequestBody). They are presented TOGETHER or not at all: the
+	// bus answers half an invite with a 400, deliberately, so a client with a bug
+	// cannot walk away believing its single-use credential was spent.
+	//
+	// BOTH carry omitempty, and that is load-bearing rather than tidiness. The
+	// no-invite path must send a body BYTE-IDENTICAL to the one it sent before
+	// these fields existed, or an in-flight enrolment being retried after an
+	// upgrade becomes "same key, DIFFERENT payload" — a 409 the retry can never
+	// escape (invariant 10). The server's idempotency fingerprint covers
+	// invite_id but NOT the secret, so a resumed attempt must present the same
+	// invite; it may not present a different one.
+	InviteID string `json:"invite_id,omitempty"`
+
+	// InviteSecret is a BEARER CREDENTIAL. It appears in this struct, on the
+	// wire, and nowhere else in this package: not in EnrolResult, not in an
+	// *Error, not in a pending record on disk, and not in Invite.String.
+	InviteSecret string `json:"invite_secret,omitempty"`
 }
 
 // enrolResponseBody mirrors httpapi.EnrolResponseBody.
@@ -194,30 +231,9 @@ const idempotencyReplayedHeader = "Idempotency-Replayed"
 func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, error) {
 	const op = "enrol"
 
-	if opts.Invite != "" {
-		return EnrolResult{}, newError(KindUsage, op,
-			"invite redemption is not implemented yet",
-			"enrol without --invite for now; the invite wire shape is settled by task ENROL-SHAPE and /v1/enroll is UNSTABLE until it, certificate binding and POPKEY land")
-	}
-
 	name := strings.TrimSpace(opts.Name)
 	if err := validateAgentName(op, name); err != nil {
 		return EnrolResult{}, err
-	}
-
-	// Enrolment needs an EXPLICIT bus, and says so here rather than in the CLI.
-	//
-	// Every other operation may fall back to the selected identity's recorded
-	// URL, but enrolment by definition has no identity on the bus it is
-	// joining, so that fallback is meaningless — and letting it happen would
-	// surface as KindConfig ("no identity has been enrolled", exit 3) when the
-	// caller's actual mistake was a missing --bus (KindUsage, exit 2). Putting
-	// the check in the package means an EMBEDDING caller gets the same
-	// classification the CLI does.
-	if strings.TrimSpace(c.cfg.BusURL) == "" {
-		return EnrolResult{}, newError(KindUsage, op,
-			"no bus URL",
-			"enrolment needs an explicit bus: pass --bus <url> or set "+EnvBusURL)
 	}
 
 	// Resolve the bus URL AND its pinned fingerprint before anything is
@@ -228,10 +244,35 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 	// this bus and therefore the one that must not be trust-on-first-use. The
 	// pin has to come from the invite, before the handshake, and refusing here
 	// is what makes that true (invariant 11). Nothing is stored yet, so the pin
-	// can only be the explicit one.
-	busURL, pins, err := c.endpoint()
-	if err != nil {
-		return EnrolResult{}, err
+	// can only be the invite's or the explicit one.
+	var (
+		busURL *url.URL
+		pins   BusPinSet
+		err    error
+	)
+	if opts.Invite != nil {
+		if busURL, pins, err = c.inviteEndpoint(op, opts.Invite); err != nil {
+			return EnrolResult{}, err
+		}
+	} else {
+		// Enrolment needs an EXPLICIT bus, and says so here rather than in the
+		// CLI.
+		//
+		// Every other operation may fall back to the selected identity's
+		// recorded URL, but enrolment by definition has no identity on the bus
+		// it is joining, so that fallback is meaningless — and letting it happen
+		// would surface as KindConfig ("no identity has been enrolled", exit 3)
+		// when the caller's actual mistake was a missing --bus (KindUsage, exit
+		// 2). Putting the check in the package means an EMBEDDING caller gets
+		// the same classification the CLI does.
+		if strings.TrimSpace(c.cfg.BusURL) == "" {
+			return EnrolResult{}, newError(KindUsage, op,
+				"no bus URL",
+				"enrolment needs an explicit bus: pass --bus <url> or set "+EnvBusURL+", or redeem an invite with --invite-file <path>, which carries the address and the certificate fingerprint")
+		}
+		if busURL, pins, err = c.endpoint(); err != nil {
+			return EnrolResult{}, err
+		}
 	}
 
 	idemKey := strings.TrimSpace(opts.IdempotencyKey)
@@ -353,6 +394,35 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 	ctx, cancel := c.contextWithTimeout(ctx)
 	defer cancel()
 
+	// The invite's two values, read out ONCE and used only here.
+	//
+	// KNOWN GAP, deliberately not fixed here: pendingEnrolment does not record
+	// the invite id, so resuming with --idempotency-key and a DIFFERENT invite
+	// file is not caught locally — it is caught by the BUS, which computes its
+	// idempotency fingerprint over (name, auth key, messaging key, invite_id)
+	// and answers 409 "already used with a different payload".
+	//
+	// "Later than it could be" UNDERSTATES what late costs here, and the earlier
+	// wording said only that. The 409 is KindRejected, which lands in
+	// enrolFailed's default branch and DROPS the pending record — so the key
+	// material of the ORIGINAL attempt is destroyed by a mistake made on the
+	// retry. If that first attempt had in fact been applied by the bus, the
+	// identity it minted is now unrecoverable: the bus holds a public key whose
+	// private half no longer exists anywhere, and no further retry of that
+	// idempotency key can produce it. Recording the invite id beside the key
+	// material would close it by refusing the mismatch locally, before anything
+	// is dropped. It is a follow-up task, not this one, and the behaviour is
+	// left exactly as it is until that task decides it.
+	inviteID, inviteSecret := "", ""
+	var busOverride *url.URL
+	var pinsOverride BusPinSet
+	if opts.Invite != nil {
+		inviteID, inviteSecret = opts.Invite.InviteID, opts.Invite.InviteSecret
+		// Only on this path. Leaving the no-invite path to resolve its own
+		// endpoint inside do() keeps it byte-identical to what it was.
+		busOverride, pinsOverride = busURL, pins
+	}
+
 	var body enrolResponseBody
 	resp, err := c.do(ctx, request{
 		method: http.MethodPost,
@@ -363,11 +433,24 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 			PublicKey:          pubB64,
 			MessagingPublicKey: msgPubB64,
 			IdempotencyKey:     idemKey,
+			InviteID:           inviteID,
+			InviteSecret:       inviteSecret,
 		},
 		out: &body,
+		// The endpoint this ONE request goes to, when it came from the INVITE
+		// rather than from the config or a stored identity. Nil on the no-invite
+		// path, where do() resolves it exactly as it always has.
+		// transportSecurity still runs either way.
+		busOverride:  busOverride,
+		pinsOverride: pinsOverride,
 		// Safe to repeat: the request carries an idempotency key and the
 		// payload is byte-identical on every attempt, so the bus replays the
-		// original result rather than enrolling twice (invariant 10).
+		// original result rather than enrolling twice (invariant 10). That
+		// holds WITH an invite too, and is the reason the invite secret is
+		// absent from the server's idempotency fingerprint: a redemption whose
+		// key and payload match one already applied is invite.OutcomeReplay —
+		// the original 201 body, with Idempotency-Replayed: true — and NOT a
+		// second spend of a single-use invite.
 		retryable: true,
 	})
 	if err != nil {
@@ -436,6 +519,8 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		Identity:       cred.Identity,
 		Replayed:       strings.EqualFold(resp.Header.Get(idempotencyReplayedHeader), "true"),
 		IdempotencyKey: idemKey,
+		// The id only. The secret is not carried out of this function.
+		InviteID: inviteID,
 	}
 
 	if opts.Save {
@@ -454,6 +539,77 @@ func (c *Client) Enrol(ctx context.Context, opts EnrolOptions) (EnrolResult, err
 		c.forgetIdentity()
 	}
 	return result, nil
+}
+
+// inviteEndpoint resolves the bus and the certificate pin FROM THE INVITE.
+//
+// The invite is the trust anchor (invariant 11, DECISIONS.md E6): it carries
+// both values so the very first connection can be verified, which is what
+// removes the trust-on-first-use window. So with an invite, --bus and
+// --bus-fingerprint are unnecessary — and a supplied one that DISAGREES is
+// refused rather than resolved by precedence.
+//
+// Refusing is the same judgement resolvePins already makes about a flag that
+// disagrees with a stored pin, and it is made here for the same reason: one of
+// the two values is wrong about which bus this is, and silently preferring the
+// one that arrived on the command line is exactly how an operator is talked into
+// pointing at the wrong bus ("it did not work, so I passed the address the other
+// end gave me"). Refusing makes the disagreement visible, which is the only way
+// it gets checked out of band.
+func (c *Client) inviteEndpoint(op string, inv *Invite) (*url.URL, BusPinSet, error) {
+	if err := inv.Validate(); err != nil {
+		return nil, BusPinSet{}, err
+	}
+	u, err := inv.busURL()
+	if err != nil {
+		return nil, BusPinSet{}, err
+	}
+	// COMPARED AFTER parseBusURL, on both sides, so two spellings of the same
+	// bus — a trailing slash, an uppercase host — are not reported as a
+	// disagreement. See canonical.go.
+	if raw := strings.TrimSpace(c.cfg.BusURL); raw != "" {
+		flagged, ferr := parseBusURL(raw)
+		if ferr != nil {
+			return nil, BusPinSet{}, ferr
+		}
+		if flagged.String() != u.String() {
+			// The invite's address goes through safeText; the flag's does not
+			// need to (the caller typed it, and parseBusURL has canonicalised
+			// it). See Invite.busURL for why an invite-supplied URL is treated
+			// as hostile text.
+			return nil, BusPinSet{}, newError(KindUsage, op,
+				"--bus says "+flagged.String()+" but invite "+inv.InviteID+" is for "+safeText(u.String(), maxDetailBytes),
+				"these name different buses and one of them is wrong. The invite carries the address AND the certificate fingerprint, so drop --bus / "+EnvBusURL+" and let the invite name the bus — or, if you believe the invite is wrong, confirm it OUT OF BAND and ask the operator for a fresh one")
+		}
+	}
+
+	pin, err := inv.fingerprint()
+	if err != nil {
+		return nil, BusPinSet{}, err
+	}
+	// A flag that disagrees with the invite is refused BEFORE resolvePinsWith
+	// sees either, so the message can name both sources. An equal one is simply
+	// redundant and is allowed.
+	if !c.pin.IsZero() && !pin.IsZero() && c.pin != pin {
+		return nil, BusPinSet{}, newError(KindUsage, op,
+			"--bus-fingerprint says "+c.pin.String()+" but invite "+inv.InviteID+" names certificate "+pin.String(),
+			"these name different certificates and one of them is wrong. The invite is the trust anchor (invariant 11), so drop --bus-fingerprint / "+EnvBusFingerprint+
+				" and let the invite pin the bus — do NOT substitute a fingerprint from anywhere else; if you believe the invite is wrong, confirm the bus's `bus_cert_fingerprint=…` startup log line OUT OF BAND and ask the operator for a fresh invite")
+	}
+	src := pinFromInvite(inv.InviteID)
+	if pin.IsZero() {
+		// An invite with no fingerprint is legal ONLY for a plaintext loopback
+		// bus (Validate refuses an https invite without one). Fall through to
+		// whatever the flag said so transportSecurity gives the ordinary
+		// "pinned a plaintext URL" refusal rather than silently dropping it.
+		//
+		// The SOURCE follows the value: the pin now under test came from the
+		// flag, so a disagreement must be reported against the flag — naming the
+		// invite would send the operator to inspect a field it does not carry.
+		pin = c.pin
+		src = pinFromFlag
+	}
+	return c.endpointWith(u, pin, src)
 }
 
 // enrolFailed cleans up after a failed enrolment and improves the error.
@@ -496,6 +652,8 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err 
 		return err
 	}
 	e.IdempotencyKey = idemKey
+	annotateInviteRefusal(opts.Invite, e)
+	annotateInviteNetworkRemedy(opts.Invite, e)
 
 	if !opts.Save {
 		return e
@@ -524,6 +682,82 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, err 
 		_ = c.store.DropPending(idemKey, busURL)
 		return e
 	}
+}
+
+// annotateInviteRefusal rewrites the remedy for a bus that REFUSED the invite.
+//
+// Necessary because a refused invite arrives as HTTP 403, which statusError
+// maps to KindAuth with "the session may have expired or the bus may have
+// restarted; retry, and if it persists re-enrol with `agent-busctl enrol`" —
+// advice that is actively wrong here on every clause. There is no session
+// (enrolment is one of the three routes that has none), retrying cannot help
+// (an invite is single-use, and expiry and revocation do not reverse), and
+// "re-enrol" is what the caller was already doing.
+//
+// The server's writeInviteError deliberately answers unknown, expired, revoked,
+// already-redeemed and malformed with the SAME 403 and the same terse text, so
+// that a caller cannot use the response to probe which invites exist. This
+// remedy therefore enumerates the possibilities rather than claiming to know
+// which one applies — saying "your invite has expired" would be inventing a fact
+// the bus refused to disclose.
+//
+// Only the invite ID appears, which is a name and not a credential. The SECRET
+// is never put in an error. The id goes through safeText even so: Validate has
+// already refused anything outside serverIDPattern by the time Enrol reaches
+// here, but this function is package-level and takes any *Invite, and a
+// neutraliser that depends on a caller having validated first is one that stops
+// holding the day someone adds a second caller.
+//
+// The KindAuth classification is left alone: it is what routes this to the
+// default branch of enrolFailed, which DROPS the pending key material — correct,
+// because a refused invite will be refused identically forever, so resuming the
+// attempt has nothing to recover.
+func annotateInviteRefusal(inv *Invite, e *Error) {
+	if inv == nil || e == nil || e.Status != http.StatusForbidden {
+		return
+	}
+	// statusError's 401/403 wording is about a SESSION credential, which this
+	// route does not have. Strip it if it is there rather than prefixing it, so
+	// the line does not read "…refused invite X: the bus rejected this
+	// credential: …". A TrimPrefix that matches nothing simply leaves the
+	// message intact, which is still correct, just wordier.
+	e.Message = "the bus refused invite " + safeText(inv.InviteID, MaxInviteIDLen) + ": " +
+		strings.TrimPrefix(e.Message, "the bus rejected this credential: ")
+	e.Remedy = "an invite is single-use, expiring and revocable, so this one may already have been redeemed, may have expired, or may have been revoked — the bus deliberately does not say which. Retrying will not change it: ask the operator to mint a fresh invite (`agent-bus invite mint`) and redeem that instead"
+}
+
+// annotateInviteNetworkRemedy corrects the ONE base remedy that names a flag
+// the invite path never used.
+//
+// networkError's unreachable-bus remedy is "check --bus / AGENT_BUS_URL and
+// that the bus is running". That is right everywhere else and wrong here: with
+// --invite-file the address came from the blob, so the flag it names is one the
+// caller never passed and correcting it would fix nothing (invariant 7 — an
+// error names a remedy that WORKS). Worse, it points at the wrong artefact: if
+// the address is unreachable, the thing to check is the INVITE.
+//
+// It REPLACES only that exact base text and only for KindNetwork, because the
+// other network remedies are already correct on both paths — a timeout says
+// "raise --timeout", and a fingerprint mismatch has its own pinError wording
+// that must not be paperd over. It runs BEFORE enrolFailed composes the retry
+// clause, so the clause is still COMPOSED onto a base rather than replacing it
+// (45b2e17a / 799aea40: overwriting the base is the defect that fix removed,
+// and this must not reintroduce it by another route).
+func annotateInviteNetworkRemedy(inv *Invite, e *Error) {
+	if inv == nil || e == nil || e.Kind != KindNetwork {
+		return
+	}
+	// Coupled to networkError (transport.go) by exact text on purpose: a
+	// prefix match would also catch a future remedy that mentions --bus for a
+	// different and legitimate reason, and replacing THAT would lose real
+	// advice. If the two ever drift apart the caller keeps the old wording,
+	// which is merely inapplicable rather than wrong about the failure.
+	const busFlagRemedy = "check --bus / " + EnvBusURL + " and that the bus is running"
+	if e.Remedy != busFlagRemedy {
+		return
+	}
+	e.Remedy = "check that the bus is running and reachable at the address the invite carries. That address came from --invite-file, not from --bus / " + EnvBusURL +
+		", so there is no flag here to correct: if the address is wrong then the INVITE is wrong — confirm it out of band and ask the operator to mint a fresh one"
 }
 
 // idempotencyConflict is the LOCAL refusal of a key reused for different

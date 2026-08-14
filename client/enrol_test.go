@@ -444,27 +444,6 @@ func TestEnrolNetworkFailureLeavesPendingAndRetryReusesKey(t *testing.T) {
 	}
 }
 
-// TestEnrolInviteFailsFastLocally checks Invite fails immediately with
-// KindUsage and never reaches the network — the wire shape is not settled yet
-// (ENROL-SHAPE).
-func TestEnrolInviteFailsFastLocally(t *testing.T) {
-	doer := &countingDoer{}
-	c, err := New(Config{IdentityDir: t.TempDir(), HTTPClient: doer})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, err = c.Enrol(context.Background(), EnrolOptions{Name: "a", Invite: "x", Save: true})
-	if err == nil {
-		t.Fatalf("Enrol with --invite = nil error, want one")
-	}
-	if KindOf(err) != KindUsage {
-		t.Fatalf("KindOf(err) = %q, want %q", KindOf(err), KindUsage)
-	}
-	if got := atomic.LoadInt32(&doer.calls); got != 0 {
-		t.Fatalf("HTTP calls = %d, want 0 (Invite must fail before any request)", got)
-	}
-}
-
 // TestEnrolSameKeyCaseInsensitiveHostIsSameScope checks canonicalisation
 // OBSERVABLY: two spellings of the same bus that differ only in host case
 // ("LOCALHOST" vs "localhost") must resolve to the SAME idempotency scope. If

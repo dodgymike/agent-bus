@@ -15,6 +15,7 @@ func enrolCommand() command {
 		help: `agent-busctl enrol — join a bus and store the credential.
 
 USAGE
+  agent-busctl enrol --invite-file <path> --name <name> [flags]
   agent-busctl enrol --bus <url> --name <name> [flags]
 
 WHAT IT DOES
@@ -38,10 +39,34 @@ WHAT IT DOES
   0700 directory) BEFORE the request is sent, and never leave this machine.
   The new identity becomes the current one unless --keep-current is given.
 
-THE BUS'S CERTIFICATE — PASS IT ONCE, HERE
+THE INVITE — THE NORMAL WAY IN
+  An operator mints an invite with ` + "`agent-bus invite mint -json`" + ` and hands you
+  the JSON blob. Save it to a file readable only by you and redeem it:
+
+      chmod 0600 invite.json
+      agent-busctl enrol --invite-file invite.json --name planner
+
+  The blob carries the bus address AND the bus's certificate fingerprint, so
+  --bus and --bus-fingerprint are UNNECESSARY with --invite-file. Passing one
+  that DISAGREES with the invite is refused rather than silently preferred:
+  one of the two is wrong about which bus this is, and that is worth stopping
+  for. Passing the same value is merely redundant.
+
+  It is a FILE, not a flag value, because the blob holds a bearer credential:
+  anything on the command line is visible to every local user in the process
+  list and lands in your shell history. ` + "`--invite-file -`" + ` reads it from stdin
+  instead, which is refused when stdin is a terminal — there is no prompt.
+  A file any other local user can read (any group or world permission bit) is
+  refused too; the message names the chmod.
+
+  An invite is SINGLE-USE, expiring and revocable. If the bus refuses it you
+  cannot fix that by retrying — ask for a fresh one.
+
+THE BUS'S CERTIFICATE — IT COMES FROM THE INVITE
   Bus certificates are SELF-SIGNED and there is no certificate authority, so
   this client refuses an https bus unless it is told which certificate to
-  expect: --bus-fingerprint <64 lowercase hex>, the value the invite carries
+  expect. --invite-file supplies it. Without an invite, pass it by hand:
+  --bus-fingerprint <64 lowercase hex>, the value the invite carries
   (the bus also logs it at startup as bus_cert_fingerprint=…).
 
   There is deliberately NO trust-on-first-use. Accepting whatever certificate
@@ -67,13 +92,17 @@ THE BUS'S CERTIFICATE — PASS IT ONCE, HERE
 FLAGS
   --name <name>       the name to request. Lowercase [a-z0-9_-], 1-64 bytes,
                       starting with a letter or digit. Required.
-  --bus-fingerprint   the bus's TLS certificate fingerprint, from the invite.
-    <hex>             Required for an https bus; refused for a plaintext one,
-                      which has no certificate to check. Global flag, so it
-                      also works before the command name.
-  --invite <blob>     RESERVED, not yet implemented. Enrolment is becoming
-                      invite-only; the wire shape is still being settled, so
-                      passing this fails immediately rather than guessing it.
+  --invite-file       redeem the invite in this file. '-' reads it from stdin.
+    <path>            The blob supplies the bus address and its certificate
+                      fingerprint, so --bus and --bus-fingerprint are not
+                      needed. The file must not be group- or world-readable.
+                      There is deliberately no flag that takes the invite
+                      itself: it holds a bearer credential, and argv is public.
+  --bus-fingerprint   the bus's TLS certificate fingerprint. Not needed with
+    <hex>             --invite-file. Required for an https bus otherwise;
+                      refused for a plaintext one, which has no certificate to
+                      check. Global flag, so it also works before the command
+                      name.
   --idempotency-key   RESUME an earlier attempt. Omit it and a fresh random
                       key is generated, which is what you want unless you are
                       deliberately retrying.
@@ -93,18 +122,71 @@ RETRIES — WHAT TO DO WHEN AN ENROLMENT DOES NOT ANSWER
 EXIT CODES
   0 enrolled                    5 the bus is unreachable
   1 internal error              6 the bus reported an error of its own
-  2 bad usage, or --invite      7 the bus refused the request
-  3 the credential store is unusable
+  2 bad usage                   7 the bus refused the request
+  3 the credential store is unusable, or the invite file cannot be used
+  4 the bus rejected the credential, invite included
 `,
+		// EXIT CODE 9 IS REACHABLE HERE AND IS DELIBERATELY NOT IN THE TABLE
+		// ABOVE. A 404 on /v1/enroll maps to client.KindVersionSkew ->
+		// client.ExitVersionSkew (9) — the bus is older than this client — so the
+		// table is genuinely incomplete, and both the reviewer and test-engineer
+		// gates said so during INVITE-CLIENT.
+		//
+		// It is left out because adding the row turns
+		// TestHelpExitCodeTablesAgreeWithClientExitCodes RED: that guard checks
+		// every documented code against a CLOSED SET built in
+		// cmd/agent-busctl/cli_test.go, and the set omits client.ExitVersionSkew.
+		// The defect is therefore in the GUARD, not in this table; it predates
+		// INVITE-CLIENT, and it affects EVERY subcommand's help rather than only
+		// this one, so fixing it here would be a one-command patch to a
+		// repo-wide problem.
+		//
+		// Task INVITE-CLIENT-FU-EXIT9 carries both halves: grow the closed set,
+		// then document 9 in every help block that can produce it. Do not add
+		// the row here before the set has grown, or the build goes red.
 		run: runEnrol,
 	}
+}
+
+// loadInvite resolves --invite-file into a validated invite, or nil when the
+// flag was not given.
+//
+// '-' reads stdin, and is REFUSED when stdin is a terminal. That refusal is
+// invariant 7: an agent shelling out must never meet a prompt, and a command
+// that silently parked reading a terminal would hang a supervisor with no
+// output to explain it. The same reasoning as `send`, which announces on stderr
+// that it is reading a TTY — but an invite is a credential rather than a message
+// body, so this refuses outright instead of inviting a human to paste one in.
+func loadInvite(env *cliEnv, path string) (*client.Invite, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if path != "-" {
+		return client.LoadInviteFile(path)
+	}
+	if env.stdinIsTTY {
+		return nil, &client.Error{
+			Kind:    client.KindUsage,
+			Op:      "enrol",
+			Message: "--invite-file - reads the invite from stdin, but stdin is a terminal",
+			Remedy:  "pipe the blob in (`agent-bus invite mint -json ... | agent-busctl enrol --invite-file - --name <name>`) or save it to a 0600 file and pass that path",
+		}
+	}
+	return client.ParseInvite(env.stdin)
 }
 
 func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 	fs, diagnostics := newCommandFlagSet("enrol", env.g)
 	var (
-		name        = fs.String("name", "", "name to request")
-		invite      = fs.String("invite", "", "invite blob (reserved, not implemented)")
+		name = fs.String("name", "", "name to request")
+		// --invite-file, never --invite. There is deliberately NO flag that
+		// takes the blob or the secret ITSELF: argv is world-readable in the
+		// process list and is recorded in shell history, and the invite secret
+		// is a bearer credential that enrols an agent onto the bus. The old
+		// --invite flag is REMOVED rather than deprecated — it never did
+		// anything but return exit 2, so nothing can depend on it, and an
+		// unknown flag is still exit 2.
+		inviteFile  = fs.String("invite-file", "", "redeem the invite in this file ('-' is stdin)")
 		idemKey     = fs.String("idempotency-key", "", "reuse a key to retry an earlier attempt")
 		keepCurrent = fs.Bool("keep-current", false, "do not switch the current identity")
 	)
@@ -119,6 +201,11 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 	}
 	env.out.json = env.g.json
 
+	invite, err := loadInvite(env, *inviteFile)
+	if err != nil {
+		return err
+	}
+
 	// No bus-URL guard here on purpose: client.Enrol raises it, so an agent
 	// EMBEDDING the client gets the same KindUsage/exit-2 classification the
 	// CLI does instead of a different one. Logic that lives only in cmd/ is
@@ -130,7 +217,7 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 
 	res, err := c.Enrol(ctx, client.EnrolOptions{
 		Name:           *name,
-		Invite:         *invite,
+		Invite:         invite,
 		IdempotencyKey: *idemKey,
 		Save:           true,
 		MakeCurrent:    !*keepCurrent,
@@ -146,6 +233,19 @@ func runEnrol(ctx context.Context, env *cliEnv, args []string) error {
 		// given, at the one moment they still have it to hand.
 		writePinnedCerts(w, "  cert       ", res.BusFingerprints)
 		fmt.Fprintf(w, "  name       %s\n", res.Name)
+		if res.InviteID != "" {
+			// The ID, which is a name and safe to print. NEVER the secret.
+			//
+			// Through TerminalSafe even so. The invite is attacker-influenceable
+			// input (invariant 11: whoever can substitute the blob points this
+			// agent at a bus of their choosing), and a raw id of
+			// "\x1b[2K\ragent-busctl: verified OK" would erase this line and
+			// print a forged success line in its place. client.Invite.Validate
+			// now refuses that charset outright, so this is the second of two
+			// independent checks rather than the only one — which is what it has
+			// to be for a line that renders untrusted text to a terminal.
+			fmt.Fprintf(w, "  invite     %s\n", client.TerminalSafe(res.InviteID, false))
+		}
 		fmt.Fprintf(w, "  enrolled   %s\n", res.EnrolledAt)
 		if res.Stored {
 			fmt.Fprintf(w, "  credential %s\n", res.StorePath)
