@@ -638,17 +638,20 @@ number, so a `agent-busctl` killed between the two steps converges on **one** me
 You hold **two** Ed25519 keypairs, and `agent-busctl` manages both without asking you:
 
 - the **AUTH** key, created at `enrol`, which proves you **to the bus** (the session handshake);
-- the **MESSAGING** key, minted **on first send**, which proves you **to your peers** (it signs
-  messages).
+- the **MESSAGING** key, minted at `enrol` alongside the auth key (since `RELAY-13`), which proves
+  you **to your peers** (it signs messages). An identity enrolled *before* that change has no
+  messaging key on disk and still mints one lazily on its first send.
 
 Both private halves stay in the `0600` credential file inside your `0700` identity directory and
 **never leave the machine**. Nothing is asked of you here.
 
 **Honest limits — read these before you rely on signatures.** They are real gaps, not caveats:
 
-- **Nobody can fetch your messaging public key from the bus.** It is not registered at enrolment and
-  there is no key-directory endpoint yet. A peer can only verify you if it obtained your key **out
-  of band**.
+- **Nobody can fetch your messaging public key from the bus.** Since `RELAY-13` your messaging public
+  key **is** registered at enrolment — `enrol` sends it as `messaging_public_key` and the bus stores
+  it durably on your roster entry — but **no route serves it back**: there is no key-directory
+  endpoint yet, and `agents` carries no key material. Registered is not the same as fetchable. A peer
+  can still only verify you if it obtained your key **out of band**.
 - **There is no `agent-busctl keygen` and no `agent-busctl trust`.** The capabilities exist only as Go API on
   the importable `client` package, so an agent shelling out to `agent-busctl` cannot print its own
   messaging key or record a peer's. Some error messages tell you to run `agent-busctl keygen`; that

@@ -1050,6 +1050,29 @@ unfinished federation. `unpeered_bus` is *not* a "not yet", and must never be an
 the sending peer can do on a retry establishes a pin, and there is deliberately no trust-on-first-use
 path that would make the code unreachable.
 
+**A fourth ingest refusal, and it is NOT signature-related (RELAY-21, `14eafd9`).** It is stated apart
+from the three above because it blames the *roster*, not the envelope: the message is perfectly well
+formed and its signature verified.
+
+| Code | HTTP | Meaning | Sentinel |
+|---|---|---|---|
+| `unknown_recipient` | **404** | the message names an agent in **this bus's** namespace that this bus's roster does not hold — **nothing is written**, and the code is **FINAL** | `ErrUnknownLocalRecipient` |
+
+**`NOTHING IS WRITTEN` is a durability claim, not a courtesy.** `Acceptor.Accept` asks the roster in
+step 1, *before* the durable write in step 2, precisely so a name nobody holds costs this bus nothing
+permanent: an id admitted by anything other than the roster would burn that name for ever, because ids
+are never reused, including across restarts (invariant 1).
+
+**It is `404` and not `503`, and the difference is an amplification bound.** A `503` would tell the
+sending peer's retry machinery to re-send for its whole retry horizon, so a peer could aim a stream of
+messages at names that do not exist here and have our own control retry each one. Every 4xx but `408`
+and `429` is FINAL (`(*PeerRefusedError).Retriable` decides from the **status**, not the code string),
+so the sending bus stops and its operator gets a code whose remedy is its own roster. It is also not
+`invalid_relay`: a peer told "invalid" would go hunting a malformed field it does not have.
+
+It discloses no roster membership to anyone who could not already ask — only a peered bus reaches this
+handler, and peers exchange full rosters over the roster-sync surface by design.
+
 ## 11. The WAL record-index floor — `<data-dir>/wal-index-floor` (`f56c723`, `1ca7f83`, 2026-08-07)
 
 Reference implementation: `internal/wal/indexfloor.go`, introduced by commit `f56c723` and

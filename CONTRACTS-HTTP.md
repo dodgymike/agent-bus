@@ -790,10 +790,49 @@ recomputing it; it is public data, derivable by anyone who completes the handsha
 also has a claimed peer identity in the request body MUST cross-check it against this value, never use
 it instead** — the same invariant-11 rule the session-token cross-check enforces, applied at bus scope.
 
-**NO ROUTE USES THIS YET.** Nothing in this build mounts a peer route behind `RequirePeerPrincipal` —
-`RELAY-20` is the task that does — and nothing in a running server constructs the `*relay.PeerStore`
-this section's resolver needs (`RELAY-24` is the composition root). This section documents code that
-exists and is tested, not behaviour an operator or a peer bus can reach today.
+**THE MOUNT NOW EXISTS, BUT NO SHIPPED BINARY FEDERATES (corrected 2026-08-14 —
+`RELAY-20`, `ed77bba`).** This paragraph previously read "no route uses this yet"; that is no longer
+true. `internal/httpapi/peermount.go` registers `/v1/peer/enroll`, `/v1/peer/relay` and
+`/v1/peer/roster` behind `RequirePeerPrincipal`, and `mountPeerRoute` couples registration to
+wrapping in one function so a path can never be recorded as a peer route without the certificate gate
+around it.
+
+**Registration is conditional, and all-or-nothing.** Routes appear only when `Options.Peer` is a
+**complete** `PeerSurface` (`Enroll`, `Relay`, `Roster`, `Registry` and `Trust` all non-nil) **and**
+`Options.PeerPrincipals` is set. A partial surface, or a complete one with no resolver, registers
+**nothing** and logs an `Error` — every `/v1/peer/` path then answers as an unregistered path, because
+a registered-but-refusing surface would advertise federation while serving nobody.
+
+**Nothing in `cmd/agent-bus` constructs a `PeerSurface` or a `*relay.PeerStore` today** (`RELAY-24` is
+the composition root and is still open). So a peer bus cannot reach these routes on a server built
+from this repo's `main` — the conclusion an operator should draw is unchanged, even though the reason
+has moved from "not mounted" to "not composed".
+
+### Relay ingress: the unknown-recipient refusal (RELAY-21, `14eafd9`, added 2026-08-14)
+
+**Not reachable on a server built from this repo's `main`** — see the paragraph directly above. This
+row specifies what `POST /v1/peer/relay` answers once `RELAY-24` composes the surface; it is a
+wire-visible contract a peer bus's client already classifies (`relay.peerErrorCode`), so it is pinned
+here rather than left to the code.
+
+| Method | Path | Auth | Status | Response |
+| --- | --- | --- | --- | --- |
+| `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 404 | `{"error":"unknown_recipient"}` — the relayed message names an agent in **this bus's** namespace that this bus's roster does not hold. **Nothing is written**, and the answer is **FINAL**. `14eafd9` added both the check and this code; before it there was no production `AcceptRelay` callback, and any unclassified callback failure fell into the generic 503 bucket — so this is a **new** classification, not a changed wire answer (no build ever served the 503). |
+
+**`Nothing is written` is a durability claim.** `relay.Acceptor.Accept` asks the roster *before* the
+durable write, so a name nobody holds costs this bus nothing permanent — an id admitted by anything
+other than the roster would burn that name for ever, since ids are never reused, including across
+restarts (invariant 1).
+
+**404 rather than 503, deliberately.** A 503 would drive the sending peer's retry machinery for its
+whole retry horizon, letting a peer aim traffic at names that do not exist here and have our own
+control retry each one. Every 4xx but 408 and 429 is FINAL — `(*relay.PeerRefusedError).Retriable`
+decides from the **status**, not the error string — so the sending bus stops and its operator gets a
+code whose remedy is its own roster. The sentinel is `relay.ErrUnknownLocalRecipient`; the code
+constant is `relay.CodeUnknownRecipient`. It is deliberately **not** `invalid_relay`: the envelope is
+well formed and its signature verified, so a peer told "invalid" would hunt a malformed field it does
+not have. It leaks no roster membership to anyone who could not already ask — only a peered bus
+reaches this handler, and peers exchange full rosters over the roster-sync surface by design.
 
 ### Panic log records (added 2026-08-08 — CORE-14, CORE-6)
 

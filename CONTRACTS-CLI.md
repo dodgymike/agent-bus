@@ -1524,20 +1524,34 @@ An identity now holds **two** Ed25519 keypairs, and they are not interchangeable
 | Key | Store field | Proves | Minted |
 | --- | --- | --- | --- |
 | **AUTH** | `private_key_seed` | this agent **to the bus** — it signs `agent-bus:session-token:v1:<challenge>` at `POST /v1/session/complete` (invariant 3) | at `enrol`, before the request is sent |
-| **MESSAGING** | `messaging_key_seed` | this agent **to its PEERS** — it signs the canonical bytes of every outgoing message | **on first use**, lazily, under the store lock (`Store.EnsureMessagingKey`) |
+| **MESSAGING** | `messaging_key_seed` | this agent **to its PEERS** — it signs the canonical bytes of every outgoing message | **at `enrol`, before the request is sent** (`RELAY-13`, 2026-08-08) — minted into the `pending` record alongside the AUTH key and promoted with it. **Legacy only:** a credential enrolled before `RELAY-13`, or resumed from a `pending` record written before the field existed, has no seed and still mints one **on first use**, lazily, under the store lock (`Store.EnsureMessagingKey`) |
 
 Both private halves live in the same `0600` `identities.json` inside the `0700` store directory, and
 **neither ever leaves the machine**. `Credential.String()` redacts both.
 
 Splitting them is invariant 3's separation of concerns, not bookkeeping: the bus must be able to
-authenticate an agent without being able to speak as it. Only the AUTH public key is registered with
-the bus (at enrolment); the MESSAGING public key is registered **nowhere**, and that is the gap
-below.
+authenticate an agent without being able to speak as it. **Both public keys are now registered with
+the bus at enrolment** (`RELAY-13`, 2026-08-08) — only the private halves stay local — and the
+remaining gap is that nothing serves the MESSAGING one back.
 
-**KNOWN GAP — there is no way to publish or fetch a messaging public key through the bus.** Nothing
-registers one at enrolment (the server leaves `auth.RosterEntry.MessagingPublicKey` zero),
-`GET /v1/agents` carries no key material, and CRYPTO-4 (the server-attested key bundle) does not
-exist. `trusted-keys/` is therefore a **manually populated stopgap**: a peer's key reaches it out of
+**Which field goes where.** The seed and the wire field are different values and are easy to
+conflate:
+
+| Name | Where it lives | What it is |
+| --- | --- | --- |
+| `messaging_key_seed` | `identities.json`, on the **`pending`** record (`pendingEnrolment.MessagingKeySeed`) | the PRIVATE 32-byte seed, minted before `/v1/enroll` is called so an interrupted enrolment cannot lose it |
+| `messaging_key_seed` | `identities.json`, on the **promoted credential** (`Credential.MessagingKeySeed`) | the same seed, carried across when the pending record becomes a credential |
+| `messaging_public_key` | the **wire**, in the `POST /v1/enroll` request body (client side `client.enrolRequestBody`, unexported; server side `httpapi.EnrolRequestBody`) | the base64 PUBLIC half, **derived** from the seed above via `Credential.MessagingPublicKey()` — never a second, independently generated value |
+
+**A resumed pre-`RELAY-13` `pending` record sends NO messaging key**, deliberately: minting one at
+that point would re-present the original idempotency key with different content, which the bus
+answers with `409` (invariant 10), turning the retry of an interrupted enrolment into a permanent
+failure. Such an identity keeps a locally-minted messaging key its bus cannot attest.
+
+**KNOWN GAP — a messaging public key can be published to the bus, but not FETCHED from it.**
+Enrolment registers it (`auth.RosterEntry.MessagingPublicKey`, durable as `msg_pub`), but no route
+serves it to anyone: `GET /v1/agents` carries no key material, and CRYPTO-4 (the server-attested key
+bundle) does not exist. `trusted-keys/` is therefore a **manually populated stopgap**: a peer's key reaches it out of
 band, by a human or a deployment system. There is deliberately **no TOFU, no "trust the key the bus
 handed over", no verification-optional switch and no `--insecure`** — each would let a bus that can
 choose the verification key forge any message from any sender, which is the exact property the
