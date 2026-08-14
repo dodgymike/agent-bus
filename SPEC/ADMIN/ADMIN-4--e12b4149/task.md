@@ -59,7 +59,7 @@ _None recorded._
 
 
 - [ADMIN-3](../ADMIN-3--76bfce36/task.md) — ADMIN-3: \`agent-busadm serve\` -- loopback-only console with a capability token and an emb… (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (todo)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
 

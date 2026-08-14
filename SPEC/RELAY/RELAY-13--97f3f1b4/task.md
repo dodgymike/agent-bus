@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:42.337436+00:00 |
-| Updated | 2026-08-08T19:53:45.358961+00:00 |
+| Updated | 2026-08-14T12:34:43.255078+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 go test -race -run TestEnrolRegistersMessagingPublicKey ./internal/httpapi
 ```
+
+## Status note
+
+CODE GENUINELY LANDED (server half 61a59eb, client half f1a787c-adjacent, both gated PASS multiple rounds -- verified by reading code directly, not the description, 2026-08-14): messaging_public_key validated/stored server-side (internal/auth/service.go, internal/httpapi/auth.go), client mints+sends it (client/enrol.go:139 MessagingPublicKey field, :325/:343 derivation), CONTRACTS-HTTP.md documents the wire field, two proof tests exist and the packages build clean. BLOCKED FROM COMPLETION solely by RELAY-13-FU-DOCS (7f3a4b80, todo, deliberately held -- see its own status_note): AGENT_PROTOCOL.md and CONTRACTS-CLI.md still assert the OPPOSITE of this shipped behaviour in three places. A task is not complete until its documentation is true (CLAUDE.md) -- this is not neglect, it is a real, correctly-recorded block. Real blocks relation wired: RELAY-13-FU-DOCS blocks this task.
 
 ## Description
 
@@ -37,6 +41,7 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 > task's own field.
 
 
+- **blocked by** [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md)
 - **relates to** [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md)
 
 ## Referenced in description (derived, not authoritative)
@@ -47,6 +52,7 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 
 
 - [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md) — CRYPTO-3: Enrolment mints and registers the second (messaging) keypair, bound to the serv… (todo)
+- [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

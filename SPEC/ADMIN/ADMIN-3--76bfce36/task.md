@@ -66,7 +66,7 @@ _None recorded._
 - [ADMIN-2](../ADMIN-2--786e0de1/task.md) — ADMIN-2: client.Info/Health/Discovery + \`agent-busctl status \[--json\]\`, shipped together… (todo)
 - [ADMIN-4](../ADMIN-4--e12b4149/task.md) — ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall t… (todo)
 - [ADMIN-C2](../ADMIN-C2--d31d77ff/task.md) — ADMIN-C2: \`agent-busctl report\` -- the node reporter: allow-list check, refuse-with-reaso… (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (todo)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
 

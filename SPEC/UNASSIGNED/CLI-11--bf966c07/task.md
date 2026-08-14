@@ -55,6 +55,11 @@ CORRECTION 2026-08-14 -- OFFLINE ONLY, not "against a running bus": the original
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [CLI-11-FU-BUSIDBOUND](../CLI-11-FU-BUSIDBOUND--82f9e452/task.md) — CLI-11-FU-BUSIDBOUND: internal/ids reads the bus-id file with an unbounded os.ReadFile (todo)
+- [CLI-11-FU-LOADONLY](../CLI-11-FU-LOADONLY--b140724b/task.md) — CLI-11-FU-LOADONLY: load-only accessors for bus key material and the bus id, so a READ ca… (todo)
+- [CLI-11-FU-STATERR](../CLI-11-FU-STATERR--555967a6/task.md) — CLI-11-FU-STATERR: invite mint tells an operator to restore a file that is present but un… (todo)
+- [CLI-6-FU-FOLLOW](../../CLI/CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
+- [RELAY-13-FU-DOCS](../../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
 ---

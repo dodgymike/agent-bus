@@ -45,7 +45,7 @@ _None recorded._
 
 
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
-- [RELAY-6](../RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (in_progress)
+- [RELAY-6](../RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (todo)
 
 ---
 

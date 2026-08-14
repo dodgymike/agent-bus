@@ -5,14 +5,14 @@
 | Public id | `07824e55-2f73-4d8a-a5fd-4cf8b0936d43` |
 | Key | RELAY-11 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | hub |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:41.237493+00:00 |
-| Updated | 2026-08-08T15:56:41.237493+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T12:28:25.895633+00:00 |
+| Completed | 2026-08-14T12:28:25.895615+00:00 |
 
 ## Proof command
 
@@ -61,6 +61,7 @@ there is no overlap. Do not start RELAY-16's work here.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [06ac5885-5df4-4fab-8b51-45b37c7a38c2](../CONTRACTS-ONDISK.md-document-the-bus_path-len-1-is-recor--06ac5885/task.md) — CONTRACTS-ONDISK.md: document the bus_path\[len-1\]-is-recording-bus on-disk invariant, and… (todo)
 - [RELAY-11-FU-BUSID-ECHO](../RELAY-11-FU-BUSID-ECHO--18b3307a/task.md) — ids.ValidateBusID echoes an oversized bus id with %q and no length guard (todo)
 - [RELAY-11-FU-INGEST-LOOPGUARD](../RELAY-11-FU-INGEST-LOOPGUARD--a41c273c/task.md) — Relay ingest MUST route through relay.CheckIncomingPath before hub.publish, or a 64-hop l… (todo)
 - [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)

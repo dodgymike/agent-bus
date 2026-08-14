@@ -57,7 +57,7 @@ V8 gate remediation (2026-08-09): generation-scoped omission IDs alone are insuf
 
 
 - [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md) — RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per… (done)
-- [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (in_progress)
+- [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

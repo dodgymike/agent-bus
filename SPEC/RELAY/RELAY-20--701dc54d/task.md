@@ -44,6 +44,8 @@ NEVER a registered-503).
 - **blocked by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
 - **blocked by** [RELAY-41](../RELAY-41--05253c80/task.md)
 - **blocked by** [RELAY-45](../RELAY-45--4be32336/task.md)
+- **blocked by** [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md)
+- **blocked by** [ca356fde-0613-42cb-ac85-a629609d9c78](../../MTLS/Client-certificate-expiry-is-not-enforced-anywhere-Requi--ca356fde/task.md)
 - **blocked by** [RELAY-44](../RELAY-44--cec27a90/task.md)
 - **blocks** [RELAY-21](../RELAY-21--f5ce883e/task.md)
 - **blocks** [RELAY-23](../RELAY-23--220d36f4/task.md)
@@ -61,7 +63,7 @@ NEVER a registered-503).
 - [RELAY-18](../RELAY-18--fa5d1b0d/task.md) — RELAY-18: Retire the relay import guard deliberately, replaced by a narrower one (done)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 - [RELAY-44](../RELAY-44--cec27a90/task.md) — RELAY-44: Inbound peer-certificate binding record -- bind a presented CLIENT certificate… (superseded)
-- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (todo)
+- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -70,6 +72,7 @@ NEVER a registered-503).
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [06ac5885-5df4-4fab-8b51-45b37c7a38c2](../CONTRACTS-ONDISK.md-document-the-bus_path-len-1-is-recor--06ac5885/task.md) — CONTRACTS-ONDISK.md: document the bus_path\[len-1\]-is-recording-bus on-disk invariant, and… (todo)
 - [48223968-0f96-4ac2-8d7e-710a1a4026b8](../Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md) — Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link (todo)
 - [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-RELAYGUARD](../../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) — MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance crit… (todo)
@@ -80,8 +83,11 @@ NEVER a registered-503).
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 - [RELAY-44](../RELAY-44--cec27a90/task.md) — RELAY-44: Inbound peer-certificate binding record -- bind a presented CLIENT certificate… (superseded)
-- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (todo)
+- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (in_progress)
+- [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (todo)
+- [RELAY-45-FU-ROTATION](../RELAY-45-FU-ROTATION--ec1c1d7c/task.md) — RELAY-45-FU-ROTATION: inbound peer client-certificate binding has no rollover overlap win… (todo)
 - [RELAY-46](../RELAY-46--eb5c3312/task.md) — RELAY-46: NextHopTLSCertFingerprint should be a bounded list, not a scalar, for peer-cert… (todo)
+- [RELAY-6](../RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (todo)
 - [RELAY-9-FU-CODEGUARD](../RELAY-9-FU-CODEGUARD--1e9b54d2/task.md) — RELAY-9-FU-CODEGUARD: AST guard asserting every peer error code constant has a handler ca… (todo)
 
 ---

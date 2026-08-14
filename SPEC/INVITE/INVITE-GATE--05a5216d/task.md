@@ -5,13 +5,13 @@
 | Public id | `05a5216d-097c-4279-8a27-a0fb9479542f` |
 | Key | INVITE-GATE |
 | Epic | [INVITE](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:48.414925+00:00 |
-| Updated | 2026-08-14T11:41:59.903393+00:00 |
+| Updated | 2026-08-14T11:54:57.194359+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -96,7 +96,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 - [INVITE-REVOKE](../INVITE-REVOKE--d9def083/task.md) — INVITE-REVOKE: durably revoke an un-redeemed invite, and state what revocation does to an… (todo)
 - [INVITE-STORE](../INVITE-STORE--a9ef92de/task.md) — INVITE-STORE: durable single-use invite record (mint/lookup/consume/expire), recovered by… (done)
 - [MTLS-BIND](../../MTLS/MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (todo)
-- [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (in_progress)
+- [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (todo)
 - [e109c867-fcd2-4ddc-bc4d-55779dc5f5e1](../../PROCESS/Spec-Server-PATCH-tasks-id-rejects-the-key-field-outrigh--e109c867/task.md) — Spec Server: PATCH /tasks/{id} rejects the key field outright (422 Unknown field) -- a ke… (todo)
 
 ---

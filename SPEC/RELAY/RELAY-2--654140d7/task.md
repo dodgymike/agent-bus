@@ -64,7 +64,6 @@ A broadcast/DM whose target is (or might be, for broadcast) on a peer bus is for
 - [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
 - [RELAY-2-FU-IDEM-ROSTEROP](../../IDEM/RELAY-2-FU-IDEM-ROSTEROP--083eddd6/task.md) — RELAY-2-FU-IDEM-ROSTEROP: internal/idem has no OpRosterSync, so roster pushes borrow OpPe… (todo)
 - [RELAY-2-FU-LOOPTEST-FLAKE](../RELAY-2-FU-LOOPTEST-FLAKE--e2755619/task.md) — RELAY-2-FU-LOOPTEST-FLAKE: Unreproduced single failure of TestMessageRelay's loop subtest (todo)
-- [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (todo)
 - [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
 
 ---

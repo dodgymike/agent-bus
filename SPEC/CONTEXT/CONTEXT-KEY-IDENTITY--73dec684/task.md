@@ -58,7 +58,7 @@ _None recorded._
 
 
 - [CONTEXT-SPEC-DEPS](../CONTEXT-SPEC-DEPS--8280358d/task.md) — CONTEXT-SPEC-DEPS: Adopt and document the blocks-relation convention for task dependencies (todo)
-- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (todo)
+- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (done)
 - [RELAY-41](../../RELAY/RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

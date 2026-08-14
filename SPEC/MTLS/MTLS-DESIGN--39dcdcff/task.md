@@ -5,19 +5,19 @@
 | Public id | `39dcdcff-8fc5-4220-85d5-29bc52d8dd6f` |
 | Key | MTLS-DESIGN |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:49.554879+00:00 |
-| Updated | 2026-08-07T13:04:46.711210+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T12:37:15.095520+00:00 |
+| Completed | 2026-08-14T12:37:15.095503+00:00 |
 
 ## Proof command
 
 ```sh
-grep -q 'MTLS-DESIGN' DECISIONS.md && grep -q 'InsecureSkipVerify' DECISIONS.md && grep -qi 'rotation' DECISIONS.md && grep -qi 'fingerprint' DECISIONS.md
+grep -q '^## 2026-08-07 — MTLS-DESIGN: the consolidated certificate lifecycle' DECISIONS.md
 ```
 
 ## Status note

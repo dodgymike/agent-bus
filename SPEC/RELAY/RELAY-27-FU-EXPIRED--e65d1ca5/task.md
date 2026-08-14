@@ -46,7 +46,7 @@ _None recorded._
 
 - [RELAY-27](../RELAY-27--f417c6a0/task.md) — RELAY-27: fix internal/relay/signed.go:306 to wrap attest.Verify errors with %w, not %v (cancelled)
 - [RELAY-27](../RELAY-27--c2486740/task.md) — RELAY-27: relay error taxonomy collapses ALL FIVE attest sentinels to ErrNoSignerKey/bad_… (done)
-- [RELAY-9](../RELAY-9--06f5e347/task.md) — RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes (todo)
+- [RELAY-9](../RELAY-9--06f5e347/task.md) — RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes (done)
 
 ---
 

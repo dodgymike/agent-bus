@@ -5,13 +5,13 @@
 | Public id | `0f7275b9-c45e-41b8-9f6e-3c7b1ec6ec00` |
 | Key | RELAY-6 |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | todo |
 | Priority | P0 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:56:37.368139+00:00 |
-| Updated | 2026-08-08T16:32:49.991850+00:00 |
+| Updated | 2026-08-14T12:35:47.955530+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,7 +22,7 @@ grep -n 'every bus-to-bus link is an SSH tunnel' DECISIONS.md && grep -n 'INVITE
 
 ## Status note
 
-code complete (DECISIONS.md append), gates PASS (reviewer PASS; security CHANGES-REQUESTED then PASS after in-flight fix to ruling c), gate evidence reconciled onto this task by spec-keeper 2026-08-08 -- uncommitted, awaiting integrator
+RESET FROM in_progress TO todo 2026-08-14 (spec-keeper, per coordinator ownership sweep): status was in_progress with owner=None and lease_expires_at=None -- not held by anyone, not visible to claim-next either (todo-only pool), a dead zone. The same-day AMENDMENT REQUESTED note (this task, 09:35:06) asking whoever holds DECISIONS.md this wave to amend FEDERATION ruling (c) -- replacing the INVITE-PEERGUARD/MTLS-RELAYGUARD gate with MTLS-CLIENTAUTH+RELAY-41 (both now done) -- was never actioned; grepped DECISIONS.md, no amendment text exists. This blocks RELAY-20 (701dc54d), which cites the stale ruling as its second blocker. Genuinely open work, not a landed-but-unclosed case. Now todo and claimable.
 
 ## Description
 
@@ -74,7 +74,12 @@ Verified RED: `grep -c 'SSH tunnel\|ssh-tunnel' DECISIONS.md` -> 0.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (todo)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
+- [INVITE-PEERGUARD](../../INVITE/INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)
+- [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
+- [MTLS-RELAYGUARD](../../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) — MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance crit… (todo)
+- [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (todo)
+- [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

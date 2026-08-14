@@ -52,7 +52,7 @@ _None recorded._
 
 
 - [CONTEXT-KEY-IDENTITY](../CONTEXT-KEY-IDENTITY--73dec684/task.md) — CONTEXT-KEY-IDENTITY: Standardize task identity (public_id vs key) before SPEC/&lt;epic&gt;/&lt;ta… (todo)
-- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (todo)
+- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (done)
 - [RELAY-34](../../RELAY/RELAY-34--03fd8897/task.md) — RELAY-34: Revocation fails OPEN on a WAL discard -- a revoked pinned bus signing key can… (done)
 - [ZZ-SCRATCH-RELATIONS-A](../../ZZ-SCRATCH/ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) — ZZ-SCRATCH-RELATIONS-A: scratch task, relations-endpoint probe (spec-keeper, safe to igno… (cancelled)
 
@@ -63,8 +63,9 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [3dbbd034-d699-4184-aec8-7efe59dd5c67](../../TOOLING/Reconcile-derived-prose-references-against-real-blocks-e--3dbbd034/task.md) — Reconcile derived prose references against real blocks edges and report the ranked gap (todo)
 - [CONTEXT-KEY-IDENTITY](../CONTEXT-KEY-IDENTITY--73dec684/task.md) — CONTEXT-KEY-IDENTITY: Standardize task identity (public_id vs key) before SPEC/&lt;epic&gt;/&lt;ta… (todo)
-- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (todo)
+- [CONTEXT-SPEC-TREE](../CONTEXT-SPEC-TREE--ff15e9ff/task.md) — CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree (done)
 - [ZZ-SCRATCH-RELATIONS-A](../../ZZ-SCRATCH/ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) — ZZ-SCRATCH-RELATIONS-A: scratch task, relations-endpoint probe (spec-keeper, safe to igno… (cancelled)
 - [ZZ-SCRATCH-RELATIONS-B](../../ZZ-SCRATCH/ZZ-SCRATCH-RELATIONS-B--50b6857a/task.md) — ZZ-SCRATCH-RELATIONS-B: scratch task, relations-endpoint probe (spec-keeper, safe to igno… (cancelled)
 

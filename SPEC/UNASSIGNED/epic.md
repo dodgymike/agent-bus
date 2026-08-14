@@ -2,17 +2,20 @@
 
 [← all epics](../../SPEC.md)
 
-**4 open / 7 total.** Full records live in `SPEC/UNASSIGNED/<task>/task.md`.
+**7 open / 10 total.** Full records live in `SPEC/UNASSIGNED/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (4)
+## Open tasks (7)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 8fb219ca-1236-4058-9020-afd52a7e93f3 | WAL checkpoint follow-up: exhaustive in-operation crash-path evidence | todo | P1 | [task.md](WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md) | follow-up of [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) | [RELAY-19](../RELAY/RELAY-19--24e0bd11/task.md) [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) |
 | CLI-11 | CLI-11: export the bus signing public key from the operator CLI | todo | P1 | [task.md](CLI-11--bf966c07/task.md) | blocks [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) | [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
 | 8ef2c753-daf1-4433-86e3-4eee4ad470dc | AST guard: assert a doc comment attaches to the declaration it names (repo-wide godoc-att… | todo | P2 | [task.md](AST-guard-assert-a-doc-comment-attaches-to-the-declarati--8ef2c753/task.md) | — | [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-9-FU-CODEGUARD](../RELAY/RELAY-9-FU-CODEGUARD--1e9b54d2/task.md) |
+| CLI-11-FU-BUSIDBOUND | CLI-11-FU-BUSIDBOUND: internal/ids reads the bus-id file with an unbounded os.ReadFile | todo | P2 | [task.md](CLI-11-FU-BUSIDBOUND--82f9e452/task.md) | — | [CLI-11](CLI-11--bf966c07/task.md) |
+| CLI-11-FU-LOADONLY | CLI-11-FU-LOADONLY: load-only accessors for bus key material and the bus id, so a READ ca… | todo | P2 | [task.md](CLI-11-FU-LOADONLY--b140724b/task.md) | — | [CLI-11](CLI-11--bf966c07/task.md) |
+| CLI-11-FU-STATERR | CLI-11-FU-STATERR: invite mint tells an operator to restore a file that is present but un… | todo | P2 | [task.md](CLI-11-FU-STATERR--555967a6/task.md) | — | [CLI-11](CLI-11--bf966c07/task.md) |
 | RELAY-13-FU-KEYGEN | RELAY-13-FU-KEYGEN: 3 error-message remedy strings name the nonexistent agent-busctl keyg… | todo | P2 | [task.md](RELAY-13-FU-KEYGEN--518b18c0/task.md) | — | [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [SIGN-8](../SIGN/SIGN-8--71ef73d5/task.md) |
 
 ## Closed tasks (3) — done, cancelled, superseded

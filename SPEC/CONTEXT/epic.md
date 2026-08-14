@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**24 open / 25 total.** Full records live in `SPEC/CONTEXT/<task>/task.md`.
+**23 open / 25 total.** Full records live in `SPEC/CONTEXT/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (24)
+## Open tasks (23)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -18,7 +18,6 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CONTEXT-NOTESBLOCK | CONTEXT-NOTESBLOCK: one canonical note-journal instruction, not twelve copies (two of the… | todo | P1 | [task.md](CONTEXT-NOTESBLOCK--95b091a8/task.md) | blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md)<br>blocked by [CONTEXT-READRULE](CONTEXT-READRULE--202ad8d7/task.md)<br>blocks [CONTEXT-DONEGATE-CANON](CONTEXT-DONEGATE-CANON--b9b0c654/task.md) | [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) [CONTEXT-READRULE](CONTEXT-READRULE--202ad8d7/task.md) [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) |
 | CONTEXT-READRULE | CONTEXT-READRULE: tell agents to grep and range-read the big docs, in the one file every… | todo | P1 | [task.md](CONTEXT-READRULE--202ad8d7/task.md) | blocked by [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md)<br>blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md)<br>blocks [CONTEXT-NOTESBLOCK](CONTEXT-NOTESBLOCK--95b091a8/task.md) | [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) [CONTEXT-NOTESBLOCK](CONTEXT-NOTESBLOCK--95b091a8/task.md) [HANDOVER-DECISIONS-INDEX](../HANDOVER/HANDOVER-DECISIONS-INDEX--8cb6c2a7/task.md) |
 | CONTEXT-RESERVE-CANON | CONTEXT-RESERVE-CANON: the reservation guidance stops disagreeing with itself across four… | todo | P1 | [task.md](CONTEXT-RESERVE-CANON--3aea21a7/task.md) | blocked by [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md)<br>blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) | [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) [CONTEXT-DISPATCH-RULE](CONTEXT-DISPATCH-RULE--81bc24d6/task.md) |
-| CONTEXT-SPEC-TREE | CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree | todo | P1 | [task.md](CONTEXT-SPEC-TREE--ff15e9ff/task.md) | — | [CONTEXT-SPEC-DEPS](CONTEXT-SPEC-DEPS--8280358d/task.md) |
 | CONTEXT-AGENTDESC-TRIM | CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn… | todo | P2 | [task.md](CONTEXT-AGENTDESC-TRIM--eaea0581/task.md) | blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) | [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) [CONTEXT-NOTESBLOCK](CONTEXT-NOTESBLOCK--95b091a8/task.md) [CONTEXT-RESERVE-CANON](CONTEXT-RESERVE-CANON--3aea21a7/task.md) |
 | CONTEXT-BUDGET-WIRE | CONTEXT-BUDGET-WIRE: the byte ceilings from this whole epic become a standing, wired-in c… | todo | P2 | [task.md](CONTEXT-BUDGET-WIRE--be76c7e2/task.md) | blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md)<br>blocked by [HANDOVER-CHECK](../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) | [HANDOVER-CHECK](../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) |
 | CONTEXT-CLI-SECTIONS | CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… | todo | P2 | [task.md](CONTEXT-CLI-SECTIONS--3b4bd434/task.md) | blocked by [083c468e-7dbd-4d1f-93fc-53617e28421f](../MTLS/CONTRACTS-CLI.md-client-export-table-is-missing-the-thre--083c468e/task.md)<br>blocked by [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) | [CONTEXT-DOCCHECK](CONTEXT-DOCCHECK--b3b28f45/task.md) [MTLS-EXPIRY](../MTLS/MTLS-EXPIRY--3604af80/task.md) [CONTEXT-PLANE-TOC](CONTEXT-PLANE-TOC--463afaf6/task.md) [083c468e-7dbd-4d1f-93fc-53617e28421f](../MTLS/CONTRACTS-CLI.md-client-export-table-is-missing-the-thre--083c468e/task.md) |
@@ -35,10 +34,11 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CONTEXT-SPEC-DEPS | CONTEXT-SPEC-DEPS: Adopt and document the blocks-relation convention for task dependencies | todo | P2 | [task.md](CONTEXT-SPEC-DEPS--8280358d/task.md) | — | [ZZ-SCRATCH-RELATIONS-A](../ZZ-SCRATCH/ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) [CONTEXT-SPEC-TREE](CONTEXT-SPEC-TREE--ff15e9ff/task.md) [RELAY-34](../RELAY/RELAY-34--03fd8897/task.md) [CONTEXT-KEY-IDENTITY](CONTEXT-KEY-IDENTITY--73dec684/task.md) |
 | 73b29060-f595-4f4d-90a9-3f13d231b909 | Spec Server: warn on likely-duplicate task titles at create/claim-next time | todo | P3 | [task.md](Spec-Server-warn-on-likely-duplicate-task-titles-at-crea--73b29060/task.md) | — | [RELAY-44](../RELAY/RELAY-44--cec27a90/task.md) [RELAY-45](../RELAY/RELAY-45--4be32336/task.md) [RELAY-46](../RELAY/RELAY-46--eb5c3312/task.md) |
 
-## Closed tasks (1) — done, cancelled, superseded
+## Closed tasks (2) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| CONTEXT-SPEC-TREE | CONTEXT-SPEC-TREE: Split SPEC.md mirror into a directory tree | done | P1 | [task.md](CONTEXT-SPEC-TREE--ff15e9ff/task.md) | — | [CONTEXT-SPEC-DEPS](CONTEXT-SPEC-DEPS--8280358d/task.md) |
 | CONTEXT-CLAUDEMD-INVARIANTS-SPLIT | CONTEXT-CLAUDEMD-INVARIANTS-SPLIT: retroactively file and close the CLAUDE.md/INVARIANTS.… | done | P2 | [task.md](CONTEXT-CLAUDEMD-INVARIANTS-SPLIT--1ec63b91/task.md) | — | [CONTEXT-CLAUDE-TRIM](CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) |
 
 ## Epic description

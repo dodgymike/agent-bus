@@ -5,19 +5,19 @@
 | Public id | `47001cb4-bc0f-44f8-929e-ac51bc6d0fb3` |
 | Key | CLI-6 |
 | Epic | [CLI](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P2 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T12:44:34.429708+00:00 |
-| Updated | 2026-08-14T11:08:58.659671+00:00 |
+| Updated | 2026-08-14T12:03:46.121916+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestCLILog' ./client/... ./cmd/agent-bus-cli/... && go run ./cmd/agent-bus-cli log --help 2>&1 | grep -qi 'metadata only'
+go test -race -run 'TestCLILog' ./cmd/agent-bus/... && go run ./cmd/agent-bus log --help 2>&1 | grep -qi 'metadata only'
 ```
 
 ## Description
@@ -79,7 +79,9 @@ RELAY-25 WIDENING (2026-08-14, owner direction): the audit/log CLI output must e
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [CLI-6-FU-FOLLOW](../CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
+- [RELAY-13-FU-DOCS](../../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (todo)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [fc8cd234-d275-43a1-9cb0-d10bca4a4086](../../PROCESS/Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) — Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… (todo)
 

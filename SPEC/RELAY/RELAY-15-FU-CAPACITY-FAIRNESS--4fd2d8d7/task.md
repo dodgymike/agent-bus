@@ -49,7 +49,7 @@ Per-peer fsync reservations must prevent one peer overshooting its live share wh
 
 
 - [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) — Bound retained outbox tombstone resources without reopening replay resurrection (done)
-- [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (in_progress)
+- [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | relay-13, doc-defect, blocks-done |
 | Created | 2026-08-08T19:53:23.838687+00:00 |
-| Updated | 2026-08-08T19:53:23.838687+00:00 |
+| Updated | 2026-08-14T12:34:26.515460+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 bash -c 'set -e; ! grep -n "not registered at enrolment" AGENT_PROTOCOL.md; ! grep -n "on first use, lazily" CONTRACTS-CLI.md | grep -qi messaging; ! grep -n "no messaging key is registered at enrolment" client/client.go; grep -q messaging_public_key CONTRACTS-CLI.md' # each false/missing claim must be gone; RED today (all four match/are missing)
 ```
+
+## Status note
+
+DELIBERATELY HELD, not neglected (coordinator, 2026-08-14): unowned since github-copilot-1 died mid-task, but NOT dispatched to a replacement yet on purpose. Its two edit targets -- AGENT_PROTOCOL.md:549 and CONTRACTS-CLI.md:1070/~912 -- are BOTH currently open in other agents own working trees (the CLI-11 and CLI-6 implementers). Dispatching this task now risks either a merge collision on the same lines or this task landing a correction that CLI-11/CLI-6s own concurrent edits then silently revert or contradict. Will be dispatched once CLI-11 and CLI-6 land. WHY THIS MATTERS ENOUGH TO HOLD RATHER THAN RUN IN PARALLEL: this task exists because a task is not complete until its documentation is TRUE, and right now the agent-facing contract (AGENT_PROTOCOL.md) states the OPPOSITE of RELAY-13s shipped behaviour -- an agent reading it today would wrongly conclude its messaging key is not registered at enrolment and rely on out-of-band key exchange it does not need. That is exactly the kind of doc-contradicts-code defect this session has repeatedly found and fixed; holding briefly for a clean file-boundary is worth it here.
 
 ## Description
 
@@ -40,7 +44,7 @@ Related: RELAY-13 (97f3f1b4-8575-4f63-9196-96bfbc049510).
 > task's own field.
 
 
-_None recorded._
+- **blocks** [RELAY-13](../RELAY-13--97f3f1b4/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -49,7 +53,18 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [CLI-11](../../UNASSIGNED/CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (todo)
+- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (in_progress)
 - [CRYPTO-4](../../CRYPTO/CRYPTO-4--13f3947e/task.md) — CRYPTO-4: Key-distribution endpoint -- server-attested messaging key bundles (todo)
+- [RELAY-13](../RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
 - [RELAY-13](../RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
 
 ---

@@ -5,14 +5,14 @@
 | Public id | `06f5e347-fc8f-45d4-a65d-2af08340dd63` |
 | Key | RELAY-9 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | relay |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:39.937515+00:00 |
-| Updated | 2026-08-08T16:32:50.391997+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T12:30:49.495126+00:00 |
+| Completed | 2026-08-14T12:30:49.495110+00:00 |
 
 ## Proof command
 

@@ -62,7 +62,7 @@ _None recorded._
 - [ADMIN-4](../ADMIN-4--e12b4149/task.md) — ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall t… (todo)
 - [ADMIN-C3](../ADMIN-C3--ca0653e3/task.md) — ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST… (todo)
 - [AUTH-4](../../AUTH/AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
-- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (todo)
+- [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
 

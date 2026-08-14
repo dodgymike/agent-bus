@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**13 open / 33 total.** Full records live in `SPEC/CLI/<task>/task.md`.
+**14 open / 34 total.** Full records live in `SPEC/CLI/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (13)
+## Open tasks (14)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -17,11 +17,12 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CLI-2-FU-LEAVE | CLI-2-FU-LEAVE: Add /v1/leave and make busctl logout actually revoke | todo | P1 | [task.md](CLI-2-FU-LEAVE--df79f84f/task.md) | — | [CLI-2](CLI-2--39318208/task.md) [AUTH-4](../AUTH/AUTH-4--a853261d/task.md) |
 | DISCOVERY-DOC-FU-CLI | DISCOVERY-DOC-FU-CLI: \`agent-busctl\` subcommand that fetches and renders the bus discover… | todo | P1 | [task.md](DISCOVERY-DOC-FU-CLI--b123c098/task.md) | blocked by [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md)<br>blocks [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
 | CLI-2-FU-TLSSEAM | CLI-2-FU-TLSSEAM: The client transport is built before the identity is resolved | todo | P2 | [task.md](CLI-2-FU-TLSSEAM--e4d60d97/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
-| CLI-6 | CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… | todo | P2 | [task.md](CLI-6--47001cb4/task.md) | blocks [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) | [DUR-4-FU-TOOLING](../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) [CLI-8](CLI-8--ae4caacc/task.md) [DUR-5](../DUR/DUR-5--a7123e88/task.md) [CLI-1](CLI-1--0495d133/task.md) [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
+| CLI-6 | CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… | in_progress | P2 | [task.md](CLI-6--47001cb4/task.md) | blocks [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) | [DUR-4-FU-TOOLING](../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) [CLI-8](CLI-8--ae4caacc/task.md) [DUR-5](../DUR/DUR-5--a7123e88/task.md) [CLI-1](CLI-1--0495d133/task.md) [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
 | CLI-7 | CLI-7: peers -- relay topology and health (replaces bus-peer.sh) | todo | P2 | [task.md](CLI-7--e600bde6/task.md) | supersedes [AGENTIF-8](../AGENTIF/AGENTIF-8--3837e7fd/task.md) | [AGENTIF-8](../AGENTIF/AGENTIF-8--3837e7fd/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-8 | CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure | todo | P2 | [task.md](CLI-8--ae4caacc/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-BUSCTL-IMAGE | CLI-BUSCTL-IMAGE: Ship the busctl binary in the container image | todo | P2 | [task.md](CLI-BUSCTL-IMAGE--9be2105d/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) [DEPLOY-1](../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2](../DEPLOY/DEPLOY-2--14f8ec3b/task.md) [CLI-1-FU-BINARYNAME](CLI-1-FU-BINARYNAME--6a1eb5fa/task.md) |
 | 0b40bd0d-cf9b-47dc-ab7b-bb11a15be9eb | post-200 validation failures on send say may or may not have been applied | todo | P3 | [task.md](post-200-validation-failures-on-send-say-may-or-may-not--0b40bd0d/task.md) | — | — |
+| CLI-6-FU-FOLLOW | CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader | todo | P3 | [task.md](CLI-6-FU-FOLLOW--03a09254/task.md) | — | [CLI-6](CLI-6--47001cb4/task.md) [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) |
 | CLI-9 | CLI-9: shell completion + man/usage polish | todo | P3 | [task.md](CLI-9--93973755/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-8](CLI-8--ae4caacc/task.md) |
 
 ## Closed tasks (20) — done, cancelled, superseded

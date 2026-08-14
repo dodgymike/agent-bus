@@ -5,24 +5,24 @@
 | Public id | `4be32336-5a48-410e-a70c-62ea154a6196` |
 | Key | RELAY-45 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | critical-path, federation, mtls, security |
 | Created | 2026-08-14T11:21:59.378533+00:00 |
-| Updated | 2026-08-14T11:42:38.615541+00:00 |
+| Updated | 2026-08-14T12:41:52.192672+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh \"go test -race -run \\"TestInboundPeerPrincipalBinding|TestInboundPeerPrincipalRejectsWrongAndUnboundCert|TestInboundPeerPrincipalRouteForIsolation\\" ./internal/httpapi ./internal/relay ./cmd/agent-bus\"
+bash scripts/proof-check.sh \"go test -race -run \\"TestInboundPeerPrincipal|TestPeerClientCertBinding\\" ./internal/httpapi ./internal/relay ./cmd/agent-bus\"
 ```
 
 ## Status note
 
-SPURIOUS EDGE FLAGGED 2026-08-14 (spec-keeper, per coordinator's priority-inversion check during RELAY-25 closure computation): a real `blocks` relation exists with MTLS-RELAYGUARD as source and RELAY-45 as target (created 2026-08-14T11:26:04 by codex-1). This produces a P2-blocks-P0 priority inversion feeding the P0 epic deliverable RELAY-25, which is a real smell -- but on inspection THE EDGE ITSELF IS WRONG, not the P2 priority. Evidence, from both tasks' own descriptions, neither of which I authored: (1) MTLS-RELAYGUARD's own description states "BLOCKS: RELAY-1 (9bc9d6c4), RELAY-2 (654140d7)" -- not RELAY-45 -- and explicitly disclaims the overlap: "This task covers the outbound client credential and transport guard. It does NOT establish the inbound fingerprint -> adjacent bus principal mapping; that distinct record/lookup... is owned by RELAY-45 (4be32336), which blocks RELAY-20." (2) RELAY-45's own DEPENDENCIES section lists only MTLS-CLIENTAUTH and RELAY-41 as what it depends on -- not MTLS-RELAYGUARD. Both tasks' own prose describe them as adjacent/parallel work in the same certificate area, not a blocking dependency. CONCLUSION: the P2 priority on MTLS-RELAYGUARD is correct for its actual scope (RELAY-1/RELAY-2); the edge to RELAY-45 is the defect. There is no DELETE on the relations API, so the edge is permanent -- do not treat it as load-bearing. Anyone computing RELAY-25's critical path should disregard the MTLS-RELAYGUARD->RELAY-45 edge specifically; RELAY-45's real blockers are MTLS-CLIENTAUTH (done) and RELAY-41 (done).
+CODE-COMPLETE within this agent's file-ownership boundary (internal/relay/peerstore.go, internal/httpapi/peerprincipal.go, the Options.PeerPrincipals/Server.peerPrincipals wiring in internal/httpapi/server.go) and fully gated: security PASS; reviewer CHANGES-REQUIRED round 1, re-verified round 2 and confirmed complete within that boundary (the one blocking item, a false gate-status claim in AGENT_LOG.md, has since been fixed). What is NOT delivered is acceptance criteria 2 and 5's operator/CLI half: the CLI surface for this capability lives in cmd/agent-bus/peer.go, which was outside this task's file-ownership boundary, so no flag anywhere writes BusTrust.PeerClientTLSCertFingerprint and no CONTRACTS-CLI.md/AGENT_PROTOCOL.md entry exists for it. Invariant 7 requires a capability's CLI subcommand and AGENT_PROTOCOL.md entry to ship in the SAME task, so RELAY-45 cannot be marked done until that follow-up lands. Say plainly: NO HTTP route is mounted for this gate anywhere in the server (that is RELAY-20's job), NO server constructs a PeerStore for the HTTP layer (that is RELAY-24's job), and NO operator can currently write the inbound peer-certificate binding through any supported client -- the only path to it today is the internal relay.PutTrust Go API. Follow-up filed as RELAY-45-FU-CLI, which blocks this task's completion (and also blocks RELAY-20).
 
 ## Description
 
@@ -92,6 +92,7 @@ whoever designs the actual lookup.
 - **blocked by** [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md)
 - **blocked by** [MTLS-RELAYGUARD](../../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md)
 - **blocked by** [RELAY-41](../RELAY-41--05253c80/task.md)
+- **blocked by** [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md)
 - **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
 - **supersedes** [RELAY-44](../RELAY-44--cec27a90/task.md)
 
@@ -105,16 +106,14 @@ whoever designs the actual lookup.
 - [MTLS-BIND](../../MTLS/MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (todo)
 - [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (todo)
-- [MTLS-RELAYGUARD](../../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) — MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance crit… (todo)
 - [MTLS-RELAYGUARD-FU-BUSCERTPOOL](../../MTLS/MTLS-RELAYGUARD-FU-BUSCERTPOOL--c873482f/task.md) — MTLS-RELAYGUARD-FU-BUSCERTPOOL: relay client-cert verification must not build a CertPool… (todo)
-- [RELAY-1](../RELAY-1--9bc9d6c4/task.md) — RELAY-1: Peer enrolment + initial agent-list exchange (done)
-- [RELAY-2](../RELAY-2--654140d7/task.md) — RELAY-2: Message relay + ongoing roster sync across peers (done)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (todo)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (todo)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 - [RELAY-44](../RELAY-44--cec27a90/task.md) — RELAY-44: Inbound peer-certificate binding record -- bind a presented CLIENT certificate… (superseded)
+- [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -129,6 +128,8 @@ whoever designs the actual lookup.
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
 - [RELAY-44](../RELAY-44--cec27a90/task.md) — RELAY-44: Inbound peer-certificate binding record -- bind a presented CLIENT certificate… (superseded)
+- [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (todo)
+- [RELAY-45-FU-ROTATION](../RELAY-45-FU-ROTATION--ec1c1d7c/task.md) — RELAY-45-FU-ROTATION: inbound peer client-certificate binding has no rollover overlap win… (todo)
 - [RELAY-46](../RELAY-46--eb5c3312/task.md) — RELAY-46: NextHopTLSCertFingerprint should be a bounded list, not a scalar, for peer-cert… (todo)
 
 ---

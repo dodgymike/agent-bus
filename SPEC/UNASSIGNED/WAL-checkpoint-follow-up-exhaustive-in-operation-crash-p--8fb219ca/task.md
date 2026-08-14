@@ -45,7 +45,7 @@ Read invariants 1,4,5,6,10. Scope: internal/wal checkpoint crash/recovery tests 
 
 
 - [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) — Bound retained outbox tombstone resources without reopening replay resurrection (done)
-- [RELAY-19](../../RELAY/RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (in_progress)
+- [RELAY-19](../../RELAY/RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 - [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) — WAL foundation: authenticated multi-applier checkpoints over shared bus.wal (done)
 
 ## Referenced by other tasks (derived, not authoritative)

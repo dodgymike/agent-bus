@@ -76,7 +76,7 @@ User-directed acceptance revision (2026-08-09): accept the shipped v7 checkpoint
 
 - [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) — Bound retained outbox tombstone resources without reopening replay resurrection (done)
 - [8fb219ca-1236-4058-9020-afd52a7e93f3](../WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md) — WAL checkpoint follow-up: exhaustive in-operation crash-path evidence (todo)
-- [RELAY-19](../../RELAY/RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (in_progress)
+- [RELAY-19](../../RELAY/RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

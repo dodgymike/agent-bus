@@ -58,7 +58,7 @@ Originally flagged by the RELAY-14 security gate (P2-4); widened and re-confirme
 
 - [RELAY-14](../RELAY-14--7db695ee/task.md) — RELAY-14: internal/attest: bus-signed agent-key attestations (done)
 - [RELAY-17](../RELAY-17--817649ce/task.md) — RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope (done)
-- [RELAY-9](../RELAY-9--06f5e347/task.md) — RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes (todo)
+- [RELAY-9](../RELAY-9--06f5e347/task.md) — RELAY-9: Peer error-code allow-list admits the three SIGN-7 codes (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

@@ -40,7 +40,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-11](../RELAY-11--07824e55/task.md) — RELAY-11: store/hub can record a MULTI-HOP bus path (todo)
+- [RELAY-11](../RELAY-11--07824e55/task.md) — RELAY-11: store/hub can record a MULTI-HOP bus path (done)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (todo)
 
 ---

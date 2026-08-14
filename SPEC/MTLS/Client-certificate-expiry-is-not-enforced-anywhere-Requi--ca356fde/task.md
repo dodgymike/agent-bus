@@ -29,7 +29,7 @@ Whoever implements MTLS-CROSSCHECK (2b2af075) must EITHER (a) read the presented
 > task's own field.
 
 
-_None recorded._
+- **blocks** [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -39,7 +39,7 @@ _None recorded._
 
 
 - [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (todo)
-- [MTLS-DESIGN](../MTLS-DESIGN--39dcdcff/task.md) — MTLS-DESIGN: record the decided certificate lifecycle in DECISIONS.md -- key locations, h… (in_progress)
+- [MTLS-DESIGN](../MTLS-DESIGN--39dcdcff/task.md) — MTLS-DESIGN: record the decided certificate lifecycle in DECISIONS.md -- key locations, h… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 
 ---
