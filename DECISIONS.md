@@ -4955,3 +4955,363 @@ substituting a value on any path where the correct bytes do not already exist an
 been verified.
 
 <!-- ===== END 2026-08-14 RELAY-24-BLOCKER-HUBINGEST: relayed audit content hash ===== -->
+
+<!-- ===== BEGIN 2026-08-14 RELAY-6 amendment (feature-runner) ===== -->
+
+## 2026-08-14 — FEDERATION (RELAY-6), AMENDMENT: ruling (c) is un-gated from the wrong direction, and two premises are corrected
+
+Amends the `## 2026-08-08 — FEDERATION (RELAY-6)` section above (landed at `77d2b73`,
+`DECISIONS.md:4340-4431`). That section stands; nothing in it is deleted. This entry changes ruling
+**(c)** and clarifies ruling **(b)**. Rulings (a), (d), (e) and (f) are untouched and remain exactly
+as recorded.
+
+**THIS IS AN AMENDMENT, NOT A REVERSAL, and a later reader must not read it as the 2026-08-08
+security gate being overturned.** That gate's finding was CORRECT and REMAINS IN FORCE: an earlier
+draft of (c) was written in the present tense and would have asserted a control that does not exist,
+since, **as of `a8c367c` and until `ed77bba`**, `internal/relay.Handler` performed no authentication of
+the peer and was deliberately never registered on any mux, enforced by the guard
+`TestRelayPeerRoutesAreNotMountedYet`, which failed if any file outside the package so much as NAMED
+`PeerEnrollPath`, `PeerRelayPath`, `PeerRosterPath` or a `"/v1/peer/"` literal. **That guard is now
+RETIRED AND REPLACED, not deleted** (`internal/relay/guards_test.go:903`, RELAY-18 precedent): the
+live guard is `TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile`
+(`internal/relay/guards_test.go:947`), which permits exactly ONE file outside the package —
+`internal/httpapi/peermount.go` — to name those paths, and bounds that exemption. The tense matters
+here precisely because this section elsewhere records that the routes are now mounted; the historical
+guard is cited as history, not as a live control. The requirement the gate imposed — **no
+peer route is mounted without an authenticated peer identity** — is carried forward here unchanged
+and unweakened. What changes is only the MECHANISM named as the gate.
+
+**(c-AMENDED) The PEER PRINCIPAL is functionality and is gated on the INGRESS credential chain, not
+on the two egress/admission hardening tasks the original ruling named.**
+
+*The defect being fixed.* Ruling (c) as landed conflates two different things and gates the first on
+the second:
+
+- **(i) The peer principal** — resolving an authenticated peer identity from the connection, so that
+  `RosterUpdate.BusID` can be bound to it (`internal/relay/doc.go` gap 3, `:303` at `ed77bba`) and a
+  bus path's last hop can be checked against the sending peer (gap 6, `:343`; both summarised at
+  `:173-174`). This is **FUNCTIONALITY**. Invariant 2's unambiguous cross-bus routing
+  depends on knowing which bus a message traversed, and ruling (b) already says so in as many words:
+  "that is functionality, not hardening, and this decision does not touch it"
+  (`DECISIONS.md:4377-4378`). It is what RELAY-20 (`701dc54d`) was scoped to deliver.
+- **(ii) Peer invite redemption** (`INVITE-PEERGUARD`, `f5d91dbe`) and **relay client certificates on
+  the dialling side** (`MTLS-RELAYGUARD`, `8192c3c7`). This is **HARDENING**.
+
+The landed text turns that into a hard gate of (i) on (ii): "the handler stays unregistered until
+both gating tasks land" (`:4402-4403`) and "resolves ... once `f5d91dbe` and `8192c3c7` both land"
+(`:4404-4405`). The epic plan and the recorded ruling therefore contradict each other, and the
+contradiction is load-bearing: RELAY-20 was attempted on 2026-08-14, correctly wrote NO code, and
+named this ruling as a blocker.
+
+*Why (ii) never needed to gate (i) — this is a DIRECTION argument, and it is the whole of the
+amendment.* On `/v1/peer/{enroll,relay,roster}` **we are the SERVER**: the peer dials us. The peer
+principal on those routes therefore comes from the **INGRESS** direction — a client certificate
+arriving on the connection TO us, which we resolve and verify. `MTLS-RELAYGUARD` (`8192c3c7`)
+governs the **EGRESS** direction: our relay client presenting a certificate when we dial OUT, i.e.
+the peer authenticating US. That is a real requirement and is still owed, but it authenticates the
+wrong direction to be a precondition for mounting OUR routes. To head off an apparent contradiction:
+`MTLS-RELAYGUARD`'s own task record correctly says every relay hop is *both* a certificate-verifying
+TLS client and a TLS server. That is true, and nothing here narrows it — the point is only that the
+INGRESS half of it is what `MTLS-CLIENTAUTH` and `RELAY-45` now supply, so `MTLS-RELAYGUARD` retains
+the EGRESS half and is not a precondition of the mount. `INVITE-PEERGUARD` (`f5d91dbe`) is
+admission control over peer enrolment — also real, also still owed, and also not the thing that
+resolves an established connection to a principal. Gating (i) on either was a **category error, not
+a security judgement**.
+
+*What the amended ruling still protects — unchanged, and stated as prohibitions so it is checkable.*
+
+- Peer paths **NEVER** appear in `unauthenticatedRoutes` (`internal/httpapi/authmw.go:23` documents
+  the explicit allow-list, `:76` declares the map, and `:65-66` records that `mountPeerRoute` REFUSES
+  to register a pattern appearing in it; a golden-list test makes any addition visible in review).
+- The peer routes register **only** when the inbound peer-identity chain is present. A nil chain is
+  a **404** — never a registered-503. A registered-503 is a mounted route that says "later", and the
+  no-mount guard described above existed precisely because merely naming the path is the risk — and
+  its replacement keeps that property, narrowed to a single permitted file rather than none.
+- A session/agent credential is **never** accepted in place of a peer principal, **and a peer-bus
+  credential is never accepted in place of an agent credential**. The confusion is forbidden in both
+  directions; only one of them is the obvious one.
+
+*THE GATE, AS AMENDED — and a correction of a refuted draft.* A 2026-08-14 amendment request against
+this task proposed the replacement gate as `MTLS-CLIENTAUTH` (`cc9558a8`) **plus RELAY-41**
+(`05253c80`), on the theory that RELAY-41's `NextHopTLSCertFingerprint` hands RELAY-20 the chain
+`r.TLS.PeerCertificates[0]` → SHA-256 fingerprint → peer-store lookup → peer principal. **That chain
+is REFUTED and is NOT recorded here as the gate.** RELAY-41 has since landed (`797c538`) and its own
+field documentation states the refutation in terms, under the heading "WHICH CERTIFICATE, IN WHICH
+DIRECTION — read this before consuming it" (`internal/relay/peerstore.go:464-481` as committed in
+`ed77bba`; `:430-447` in the pre-RELAY-45 revision at `a8c367c`). The pin is
+the certificate the hop at `BaseURL` presents **when this bus dials it** — an OUTBOUND, SERVER-side
+certificate keyed to an ADDRESS — and is explicitly "NOT a source of INBOUND peer identity".
+Inverting it is unsound **by construction**: next-hop keying deliberately puts ONE fingerprint on N
+records with N DIFFERENT bus ids (`peer add -bus-id busB -url https://b:8443 -route-for busC`), so a
+fingerprint-first lookup "would resolve an inbound busB connection to busC — a peer principal spoofed
+out of entirely correct data read backwards". `BaseURL → bus id` is the same trap in the other field.
+Recording that chain would have written a spoofing vulnerability into the very decision that
+authorises the mount.
+
+The gate, as amended, is:
+
+1. **`MTLS-CLIENTAUTH` (`cc9558a8`, landed `a97f854`)** — which puts a peer's client certificate on
+   the connection where the application layer can see it, and proves possession of its key; **and**
+2. **`RELAY-45` (`4be32336`)**, which owns the **INBOUND** binding: one durable, operator-configured
+   credential keyed by the **ADJACENT bus principal**, distinct from `NextHopTLSCertFingerprint` in
+   Go name, JSON/on-disk shape, CLI flag and docs, where no lookup may read route records,
+   `base_url`, route-for destinations, signing keys, certificate CN/SAN/Subject/Issuer/SerialNumber,
+   or an attestation origin to infer the transport principal.
+
+RELAY-41 remains a **necessary sibling** — it is what lets us verify the hop we DIAL — but it is not
+part of the inbound identity chain and must never be read as if it were.
+
+*SECOND CORRECTION OF RECORD — `MTLS-CLIENTAUTH` REQUESTS a client certificate and NEVER REQUIRES
+one.* The same amendment request described it as `RequireAnyClientCert`. It is not: the listener
+pins `ClientAuth: tls.RequestClientCert` (`cmd/agent-bus/tlslisten.go:152`, rationale at `:25-66`),
+deliberately, so that agents whose identity directories predate `MTLS-CLIENTCERT`, `agent-bus
+healthcheck` and operator `/healthz` probes are not refused at the handshake. The consequence is
+load-bearing and must not be lost: **nothing is authorised at handshake time**, and a
+certificate-less client still completes the handshake and is served. The peer routes therefore get
+**no protection at all from the listener**; the PRESENCE of a client certificate must be enforced at
+the **application layer** on those routes, and its absence must fail closed before any handler
+executes. What the mode does buy — and it is the part the chain actually needs — is proof of
+possession: a client that sends a certificate must also send a `CertificateVerify`, which
+`crypto/tls` verifies in every mode. "A certificate on the connection proves its holder has the key;
+it does not prove WHO they are" (`tlslisten.go:61-63`). RELAY-45 supplies the *who*.
+
+*HOW THE CERTIFICATE MUST BE READ, because the chain is attacker-controlled.* Two rules already
+recorded at `cmd/agent-bus/tlslisten.go:261-281` are hereby part of this gate, not merely advice:
+the **fingerprint is the only identity** — never Subject, CN, SAN, Issuer or SerialNumber, every one
+of which is chosen by whoever minted a self-signed certificate, i.e. by whoever presented it; and
+**check the slice is non-empty, then index `[0]` ONLY, never iterate it**. The handshake's
+`CertificateVerify` proves possession of the LEAF's private key and nothing else, so a consumer that
+SEARCHED `PeerCertificates` for a known fingerprint would be spoofed by anyone who appended the
+victim's (public) certificate at index 1. Under `RequestClientCert` the empty slice is the MAJORITY
+case, not the exceptional one.
+
+*THIS RULING NARROWS INVARIANT 3, ON THE PEER-BUS PLANE ONLY — said plainly so a reader grepping
+"invariant 3" finds the departure.* Invariant 3 makes redeeming an invite "the ONLY way onto the bus
+— including for peer buses". Admitting an adjacent bus on an operator-installed certificate
+fingerprint instead of a redeemed invite is a narrowing of exactly that clause. It is scoped to the
+peer-bus plane and does not touch agent enrolment, it costs precisely the properties listed under
+*Given up* below, and it is restored in full when `INVITE-PEERGUARD` (`f5d91dbe`) lands. Invariant
+11 is narrowed in the same breath and for the same reason: the invite blob is invariant 11's trust
+anchor, and on this plane the operator's out-of-band channel takes its place.
+
+*THE CONSTRAINT THE AMENDMENT MUST NOT LOSE.* The next-hop pin is keyed to **the record that carries
+`-url`** — the next hop — and **never** to the record's bus id (`cmd/agent-bus/peer.go:68-75`;
+`CONTRACTS-CLI.md:461-465`, section opened at `:354`, flag rows at `:377` and `:379`, worked
+`-route-for` example at `:472-475`). The amendment request cited `CONTRACTS-CLI.md:392` for this,
+which is the unrelated `config_seq` paragraph — corrected here. For a `-route-for` entry the address
+belongs to a DIFFERENT bus than the record's bus id, so a destination-keyed pin would pin busC's
+identity against a connection terminating at busB and would break every non-adjacent hop — the whole
+A→B→C topology this section exists to serve. This is restated here not because the inbound chain uses
+that field (it must not), but because it is the exact property that makes reuse unsound, and a reader
+who loses it will reach for the pin again.
+
+- *Given up:*
+  - **Single-use, expiring, revocable PEER admission and its redemption audit.** An operator-
+    installed fingerprint binding is durable configuration, not a redeemable credential: there is no
+    expiry, no single-use property and **no online revocation of a peer link**. Withdrawing one will
+    mean an operator edit plus a restart — *will*, not *does*: **no supported client can write
+    `BusTrust.PeerClientTLSCertFingerprint` today.** RELAY-45 landed the durable record and the
+    resolver at `ed77bba`, but not the operator surface; the only path to it at the time of writing
+    is the internal `relay.PutTrust` Go API, and the CLI flag
+    plus its `CONTRACTS-CLI.md` / `AGENT_PROTOCOL.md` entries are owed by `RELAY-45-FU-CLI`
+    (`b9d645be-0849-4a62-9c50-3ab32e41fc8a`), which blocks RELAY-20. (RELAY-45 itself COMPLETED at
+    `ed77bba`; the follow-up carries only the operator surface, not the record or the resolver.)
+    Stated in the future tense on purpose: asserting an operator control that does not yet
+    exist is the exact defect the 2026-08-08 security gate caught in the original (c), and it is not
+    being repeated here. `INVITE-PEERGUARD` (`f5d91dbe`) still owes the redeemable-credential
+    properties and is **DEFERRED, not satisfied**.
+  - **The invite blob as the peer trust anchor** (a narrowing of invariant 11 on this plane). The
+    operator transfers the fingerprint out of band, so what anchors a peer link is the operator's own
+    channel between machines they control, not invariant 11's invite-integrity property.
+  - **Mutual authentication on the EGRESS dial.** Until `8192c3c7` lands we authenticate peers that
+    dial us, and peers cannot authenticate us when we dial them. Under ruling (a) — SSH tunnels the
+    operator holds both ends of — that asymmetry is bounded by the tunnel, which is exactly the
+    ground (b) already stands on.
+  - **Handshake-time rejection of an unknown peer.** Under `RequestClientCert` every refusal happens
+    after a completed handshake, in the application layer, so an unknown or unbound peer still costs
+    us a full TLS handshake before it is turned away.
+- *Reverses when (mechanical, any ONE of):*
+  - an inbound peer principal is resolved from `NextHopTLSCertFingerprint`, from `BaseURL`, from a
+    route-for destination, from a bus signing key, from an attestation origin, or from certificate
+    CN/SAN/Subject/Issuer/SerialNumber;
+  - an inbound peer principal is resolved from any certificate other than `r.TLS.PeerCertificates[0]`,
+    or by SEARCHING/iterating the presented chain for a known fingerprint;
+  - the adjacent-principal credential is keyed off a record's DESTINATION bus id rather than the
+    adjacent bus, or a record carrying `-url` loses next-hop keying;
+  - any peer path appears in `unauthenticatedRoutes`, or a peer route registers with a nil registry,
+    a nil `CrossBusTrust`, or a nil peer-identity binding — including as a registered-503;
+  - the peer routes serve while the adjacent-principal binding table is **empty or unconfigured**
+    (empty is the DEFAULT state until `RELAY-45-FU-CLI` ships an operator write path, so
+    "unconfigured therefore unenforced" is the realistic bootstrap shortcut and is forbidden);
+  - the peer routes serve a connection that presented no client certificate, or an agent session
+    credential is accepted as a peer principal, or a peer-bus credential is accepted as an agent
+    credential;
+  - ruling (a) itself reverses — any bus bound to a non-loopback interface, or a tunnel endpoint
+    shared with a non-operator.
+
+  On any ONE of these, (c)'s ORIGINAL hard gate on `f5d91dbe` and `8192c3c7` is reinstated
+  immediately and the peer routes come back down.
+
+*COROLLARY OUTSIDE THIS FILE — now discharged, and recorded so the sequencing is legible.* When this
+section was drafted, `internal/relay/doc.go` restated the ORIGINAL gate in prose ("RELAY-20 either
+lands under those two tasks or amends the ruling in `DECISIONS.md` first"), and the worry was that
+amending `DECISIONS.md` without touching `doc.go` would simply relocate the contradiction into the
+code. RELAY-20 has since rewritten that passage (`internal/relay/doc.go:94-104`), which now reads
+"RELAY-20 HAS MOUNTED THE ROUTES, AND THE RULING IT LANDED UNDER IS NOT YET WRITTEN DOWN" and names
+MTLS-CLIENTAUTH + RELAY-45 as the gate it landed against. **This entry is the text that debt points
+at**, so the two now agree rather than contradict. Note also that the original (c)'s citations
+`doc.go:154-158` and `:172-175` had DRIFTED even before that rewrite, which is why this entry cites
+the gaps by NUMBER and NAME as well as by line — line numbers in this file have now been wrong twice.
+
+*LAND-ORDER NOTE — satisfied.* This section was drafted while RELAY-45 was uncommitted, so it cites
+`peerstore.go` for both revisions; RELAY-45 has since landed at `ed77bba`, ahead of this text, so the
+`:464-481` range is the one that is live. The quoted wording is identical either way, and the stable
+anchor is the heading "WHICH CERTIFICATE, IN WHICH DIRECTION".
+
+**(b-CLARIFIED) "Does not block FEDERATION" is not "deferred", and `INVITE-GATE` is not
+deprioritised.**
+
+Ruling (b) is a statement about the FEDERATION critical path ONLY: with no reachable listener, the
+pre-auth attacker `INVITE-GATE` exists to stop cannot reach the port, so `INVITE-GATE` is not a
+blocker of relay work while every bus sits behind an operator-held SSH tunnel. It is **NOT deferred
+and NOT deprioritised (2026-08-08, user decision).** `INVITE-GATE` (`05a5216d`) remains **P0** and
+**blocks `INVITE-HARDEN` (`d250d0dd`), `INVITE-REVOKE` (`d9def083`), `INVITE-CLIENT` (`4123e25d`) and
+`INVITE-PEERGUARD` (`f5d91dbe`)** — a dependency chain recorded on each of those tasks, not implied.
+
+Stated plainly because (b)'s own wording is in tension with it: the sentence "all other security work
+is deferred until end-to-end relay is running" (`DECISIONS.md:4368-4369`) and the time-box at
+`:4384-4386` govern **scheduling against the relay critical path**, and are never authority to lower
+`INVITE-GATE`'s priority or to treat it as optional. This entry deliberately makes **no claim about
+the current state of the enrol path**: `INVITE-GATE` is in flight as this is written, and a dated
+append-only file is the wrong place to freeze a snapshot of code that is changing underneath it. Its
+own task record carries that detail, and the 2026-08-14 finding there — that nothing downstream can
+be satisfied by `INVITE-CLIENT` alone — is what establishes the dependency chain above.
+
+- *Given up:* nothing. This clarification narrows no control and authorises no shortcut; it removes
+  an ambiguity in (b)'s wording that could be read as licence to drop `INVITE-GATE`'s priority.
+- *Reverses when:* never by topology change — this is a statement about the backlog, not the
+  deployment. It is superseded when `INVITE-GATE` lands, or by an explicit, recorded user decision
+  changing its priority.
+
+### RELAY-20 mounted under this amended gate: three dispositions it forced
+
+RELAY-20 (`701dc54d`) landed at `ed77bba` and mounts `/v1/peer/{enroll,relay,roster}` behind
+RELAY-45's `RequirePeerPrincipal`. It is the first thing in this repo to authorise anything on a
+client certificate, and that first-ness forced three decisions that exist today only in code
+comments. Its reviewer blocked completion until they were recorded here, correctly: a decision that
+lives in a package comment is not a decision the next task will find.
+
+**Said first, because the backlog must not over-read the mount: the routes are mounted IN CODE and
+are served by NO RUNNING BINARY.** `cmd/agent-bus/main.go` sets neither `Options.Peer` nor
+`Options.PeerPrincipals`, so no shipped server registers this surface; wiring it is RELAY-24's.
+Nothing below describes live production behaviour.
+
+**(g) Client-certificate expiry is ENFORCED on the peer surface — `ca356fde` option (a), not (b).**
+`ca356fde-0613-42cb-ac85-a629609d9c78` required an explicit choice between (a) reading the presented
+certificate's validity window at the application layer and rejecting a connection outside it, and (b)
+declaring expiry advisory. RELAY-20 chose **(a)**, inside `RequirePeerPrincipal` and **before** the
+durable binding is consulted (`internal/httpapi/peermount.go:337-362`, `:415`;
+`internal/httpapi/peerprincipal.go:272`). The verdict comes only from `crypto/x509.Certificate.Verify`
+with the leaf as its own root — never a local `NotBefore`/`NotAfter` comparison — which is invariant 9
+applied to date arithmetic, mirroring `client/pin.go`. A nil leaf and a zero clock both REFUSE rather
+than pass. The reason it could not wait: `RequestClientCert` does no chain verification, so nothing on
+this side had ever looked at a client certificate's validity window, and without this check an
+operator-installed binding would **outlive the certificate it names** — a peer whose key material has
+aged out would authenticate indefinitely, and expiry is the only automatic leak-containment bound a
+never-revoked credential has.
+  - *Supersedes IN PLACE, without editing it:* the "Accepted, open gap" paragraph at
+    `DECISIONS.md:4560-4566`, which says "client-certificate expiry is enforced nowhere on this side".
+    That is now false **for the peer surface only**. It remains TRUE for the agent surface, and
+    `ca356fde` closes for agents only alongside `MTLS-BIND`/`MTLS-CROSSCHECK` — this ruling narrows
+    that gap, it does not close it.
+  - *Given up:* nothing on this surface. The cost is borne elsewhere: a peer bus whose certificate
+    lapses is refused with no warning window and no grace period, so certificate rotation on a peer
+    link is now an availability concern the operator must schedule.
+  - *Reverses when (mechanical):* the validity check is moved after the binding lookup, is made
+    advisory, is satisfied by a local date comparison rather than by `x509.Certificate.Verify`, or
+    grows a skew/grace allowance that is not itself recorded as a decision.
+
+**(h) Whether this bus federates is observable PRE-AUTH, accepted and bounded rather than closed.**
+An anonymous `POST /v1/peer/relay` returns **403** on a federating build (the peer gate) and **401**
+on a non-federating one (default-deny), so one unauthenticated request distinguishes the two
+(`internal/httpapi/peermount.go:64-95`). This is a genuine NEW disclosure and is out of character for
+this server, which elsewhere registers its catch-all THROUGH the same route helper so an anonymous
+caller gets 401 for known and unknown paths alike, and whose discovery document deliberately does not
+report which optional surfaces a build registered.
+  - *Why it is not closed, since both cheap fixes are worse:* answering 401 here needs a
+    `WWW-Authenticate` challenge (RFC 7235), and the only scheme this server speaks is `Bearer` —
+    which would invite a refused peer to retry with a session token, advertising precisely the
+    credential confusion this gate exists to prevent. Answering 401 only when NO certificate was
+    presented closes the no-certificate probe and nothing else, since anyone can mint a self-signed
+    certificate and probe again. Both trade a real property for a cosmetic one.
+  - *Given up:* one bit — "this bus federates". No peer id, no roster, no count, and nothing that
+    identifies a peer.
+  - *What bounds it:* ruling **(a)** — every bus-to-bus link is an SSH tunnel and no bus listens
+    publicly, so the prober must already have reached the loopback listener, which under (a)/(d)
+    means it has already authenticated to a machine the operator controls. Stated that way on
+    purpose: it is NOT true that "the pre-auth prober does not exist" — every enrolled agent on the
+    loopback listener, and anything at the far end of the tunnel, can send this request. What is true
+    is that the set of parties who can ask is bounded to parties the operator has already admitted to
+    the machine, and what they learn is one bit. This is the same ground ruling (b) stands on.
+  - *Reverses when (mechanical, any ONE of):* the triggers of ruling **(a)** — any bus bound to a
+    non-loopback interface, a tunnel endpoint shared with a non-operator, or a second local user on
+    any of the three machines; **or** the refusal stops being a single fixed 403 with no challenge,
+    so that a probe distinguishes more than the one bit; **or** the discovery document begins
+    reporting whether the peer surface is registered, which would disclose the same bit to any
+    authenticated caller without even a probe.
+
+**(i) ONE FACTOR authorises on the peer surface: the certificate alone. This narrows invariant 11.**
+Invariant 11 requires mTLS and the session token BOTH, and requires them cross-checked. On the peer
+routes the certificate alone authorises, and no bearer token is consulted. **This is a narrowing and
+is named as one** — RELAY-45's own file explicitly delegated the decision to RELAY-20 rather than
+letting a passing gate be read as a finished authorisation, so it is settled here rather than
+inferred.
+  - *Why it is not the weakening it looks like — and note this is NOT the "unsatisfiable" argument,
+    which is false.* An earlier draft of this ruling said a peer bus holds no session token and has
+    no route by which to obtain one, so a bearer requirement would be unsatisfiable. **That premise
+    is wrong and is corrected here rather than shipped**: enrolment is open to a peer bus like any
+    other client, and `internal/httpapi/peerprincipal.go:195-197` says so in terms — "a peer bus is
+    also an enrolled principal on the buses it peers with, so a peer request may well carry a valid
+    session token". A bearer requirement would therefore be **satisfiable but WRONG**, which is a
+    different and stronger objection. The real argument is CONFLATION, and this section already makes
+    it under (c-AMENDED): **a session token names an AGENT**, and an agent credential must never
+    authorise a peer route. That is why the wrapper REMOVES the agent principal rather than merely
+    ignoring it — leaving it in the context would let a peer handler pick up an agent identity and
+    act on it as if it had authorised the peer request, which is exactly "a session credential
+    accepted as a peer-bus credential".
+    Invariant 11's cross-check clause ("a session token presented over a connection whose client
+    certificate belongs to a different agent must be rejected") is answered here in its **strongest
+    available form**: there is no pair to cross-check because a peer handler never sees an agent
+    principal at all — the gate shadows it out and the auth middleware skips the bearer path — so an
+    agent credential cannot open a peer route and a peer credential cannot present as an agent.
+  - *Given up:* the revocable, time-bounded half of the credential pair, and more of it than the
+    phrase suggests. A peer link is withdrawn by an OFFLINE operator action (`RemoveTrust`'s fsynced
+    withdrawal floor, reached through the CLI under the dirlock per ruling (e)) — **not an online
+    revocation; it needs a restart**, exactly as (c-AMENDED) records. So the only automatic bound on
+    a peer's authority is its certificate's own expiry, which is why (g) had to land in the same
+    task. **And that bound is weaker than it reads: nothing caps a peer's `NotAfter`.** The window is
+    chosen by whoever minted the certificate — the credential holder — and `checkClientCertValidity`
+    accepts any window `x509` accepts, so a peer may present a hundred-year certificate and (g) will
+    pass it. Expiry is therefore an automatic bound only to the extent the peer chose to impose one
+    on itself; a real bound needs `INVITE-PEERGUARD`'s expiring admission or an operator-side maximum
+    lifetime, and neither exists today. Invariant 3's "invites are the ONLY way onto the
+    bus, including for peer buses" is also deferred here to `INVITE-PEERGUARD` (`f5d91dbe`): the
+    binding this gate reads is operator-installed, not invite-redeemed. That is the same narrowing
+    named above under (c-AMENDED), restated at the point where it is actually spent.
+  - *Reverses when (mechanical, any ONE of):* a **bus-scoped** bearer credential becomes obtainable —
+    one that names the PEER BUS rather than an agent, at which point invariant 11's pair becomes
+    constructible and applies unnarrowed (note the trigger is deliberately NOT "a peer bus can hold a
+    session token", which is already true today and is the false premise corrected above); an
+    agent principal becomes visible to any peer handler, or a peer principal to any agent handler; the
+    bearer skip stops being derived from the same function that installs the certificate gate; or
+    `INVITE-PEERGUARD` lands, which restores invariant 3 on this plane.
+
+**Correction of record, made by supersession rather than by editing.** `DECISIONS.md:4639`
+(RELAY-45's "What this task does NOT establish", heading at `:4637`) states "No route is mounted
+(`RELAY-20`)". That was
+true when written and became false at `ed77bba`. It is corrected here in place, in keeping with this
+file's append-only rule; the rest of that paragraph still holds — **no running server constructs a
+`*relay.PeerStore` for `Options.PeerPrincipals` (`RELAY-24`), and no CLI flag writes the binding
+(`RELAY-45-FU-CLI`)**, so the surface remains operator-unreachable.
+
+<!-- ===== END 2026-08-14 RELAY-6 amendment (feature-runner) ===== -->
