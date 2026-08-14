@@ -74,6 +74,15 @@ type RelayConfig struct {
 	// "have I applied this?" that could drift from the durable one. relay's job
 	// stops at computing the Scope and the Fingerprint and handing them over.
 	//
+	// THE PRODUCTION IMPLEMENTATION IS Acceptor.Accept (accept.go, RELAY-21).
+	// A wiring site builds one with NewAcceptor and assigns its Accept method
+	// here; it owns the two orderings that are not the handler's to enforce —
+	// the roster check BEFORE the durable write (finding cca64afd) and the
+	// onward hop ONLY on idem.OutcomeNew — and it delegates the applied-key
+	// table to the local bus rather than keeping one, for the reason above.
+	// Write another one only with a reason to; the two orderings are the whole
+	// of it and both are easy to get silently wrong.
+	//
 	// Required: a nil callback would make the handler validate a message and
 	// silently discard it, which looks exactly like a working relay.
 	AcceptRelay func(ctx context.Context, m RelayedMessage) (RelayAcceptance, error)
@@ -227,6 +236,13 @@ func (h *RelayHandler) Stats() RelayStats {
 //     send an operator hunting an attack on what is the ordinary day-one state of
 //     an unfinished federation.
 //
+//   - A MESSAGE NAMING A LOCAL AGENT WE DO NOT HAVE IS 404 CodeUnknownRecipient
+//     (RELAY-21), and NOTHING WAS WRITTEN for it — the callback asks the roster
+//     before the durable write precisely so that a name nobody holds costs this
+//     bus nothing permanent (finding cca64afd; see Acceptor.Accept). It is FINAL
+//     rather than a 503 so the sending bus stops retrying a message it can only
+//     fix by fixing its own roster.
+//
 //   - An idempotency VIOLATION is 409 and a Warn line, AND THAT IS THE WHOLE
 //     RESPONSE (invariant 10 as narrowed 2026-08-08). The peer is NOT
 //     disconnected: the key is its own, so this is far more likely a confused
@@ -325,6 +341,23 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	acc, err := h.acceptRelay(r.Context(), m)
 	if err != nil {
+		if errors.Is(err, ErrUnknownLocalRecipient) {
+			// 404, AND NOT 503, AND THE DIFFERENCE IS AN AMPLIFICATION BOUND.
+			// This message names an agent we do not have; nothing was written
+			// (see Acceptor.Accept). A 503 would tell the peer's retry machinery
+			// to keep re-sending it for the whole retry horizon — a peer could
+			// aim a stream of messages at names that do not exist here and have
+			// our own control retry each one, which is the amplification
+			// relayhttp's status argument exists to prevent. A 4xx is FINAL
+			// (PeerRefusedError.Retriable), so the sending bus stops and its
+			// operator gets a code whose remedy is its own roster.
+			//
+			// It does not leak roster membership to anyone who could not already
+			// ask: only a peered bus reaches this handler, and peers exchange
+			// full rosters over the roster-sync surface by design.
+			h.fail(w, http.StatusNotFound, CodeUnknownRecipient, err)
+			return
+		}
 		if errors.Is(err, ErrIdempotencyViolation) {
 			// Neither payload is echoed — invariant 10's violation case is
 			// exactly the situation where two payloads exist and neither may be

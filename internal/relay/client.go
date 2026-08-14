@@ -315,7 +315,12 @@ func peerErrorCode(buf []byte) string {
 		// every code above: without them here a peer's signature refusal is
 		// reported as "unrecognised error code" instead of the real reason
 		// (RELAY-9).
-		CodeUnsigned, CodeBadSignature, CodeUnpeeredBus:
+		CodeUnsigned, CodeBadSignature, CodeUnpeeredBus,
+		// RELAY-21's ingest refusal, for the same reason: the responder emits
+		// it whenever a message names an agent in its namespace that its roster
+		// does not hold, and an operator whose federation is mis-rostered must
+		// read that reason rather than "unrecognised error code".
+		CodeUnknownRecipient:
 		return body.Error
 	default:
 		return "unrecognised error code"

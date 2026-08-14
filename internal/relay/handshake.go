@@ -66,6 +66,14 @@ const (
 	CodeUnsigned     = "unsigned"
 	CodeBadSignature = "bad_signature"
 	CodeUnpeeredBus  = "unpeered_bus"
+
+	// CodeUnknownRecipient (404) says the envelope names an agent in OUR
+	// namespace that our roster does not hold, so NOTHING was written
+	// (ErrUnknownLocalRecipient, RELAY-21). It is its own code, and not
+	// CodeInvalidRelay, because the envelope is perfectly well formed and the
+	// remedy is a roster the sending bus can fix — a peer told "invalid_relay"
+	// would go looking for a malformed field it does not have.
+	CodeUnknownRecipient = "unknown_recipient"
 )
 
 // ErrPeerRejected is what an AcceptPeer callback returns to DECLINE a peer that

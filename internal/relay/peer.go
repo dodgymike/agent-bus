@@ -369,6 +369,12 @@ func ErrorCode(err error) string {
 		return CodeInvalidIdempotencyKey
 	case errors.Is(err, ErrIdempotencyViolation):
 		return CodeIdempotencyViolation
+	case errors.Is(err, ErrUnknownLocalRecipient):
+		// RELAY-21. Above the generic relay codes below because the envelope is
+		// NOT invalid: it is well formed, correctly signed, and addressed to
+		// somebody we do not have. The remedy lives in the sending bus's roster,
+		// not in its encoder.
+		return CodeUnknownRecipient
 
 	// Signed relay ingest (SIGN-7). These sit ABOVE ErrInvalidRelay because a
 	// signature failure is the more specific and the more serious diagnosis: a
