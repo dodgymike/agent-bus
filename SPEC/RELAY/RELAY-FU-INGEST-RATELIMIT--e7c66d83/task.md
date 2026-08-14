@@ -5,13 +5,13 @@
 | Public id | `e7c66d83-6a23-4ba5-b411-129a800e4de4` |
 | Key | RELAY-FU-INGEST-RATELIMIT |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | superseded |
 | Priority | P0 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:06:28.246023+00:00 |
-| Updated | 2026-08-14T18:06:28.246023+00:00 |
+| Updated | 2026-08-14T20:23:51.268371+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -40,6 +40,7 @@ SCOPE: design and wire a rate limit / quota / concurrency cap for the relay inge
 - **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
 - **relates to** [RELAY-FU-DOCGO-GAP7-BACKOFF](../RELAY-FU-DOCGO-GAP7-BACKOFF--8aacfd4c/task.md)
 - **relates to** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
+- **superseded by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

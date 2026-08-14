@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | vacuous-today, critical-path |
 | Created | 2026-08-08T15:56:48.063908+00:00 |
-| Updated | 2026-08-14T18:09:13.078825+00:00 |
+| Updated | 2026-08-14T20:26:03.953184+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,17 +22,26 @@ go build ./... && go test -race -run TestRelayWiringComposesRoutesWhenPeersConfi
 
 ## Status note
 
-COMPLETE SET AS OF 2026-08-14 (coordinator + spec-keeper): watermark task (SIGN-1-FU-REORDER-WATERMARK, 86c7d368) now correctly wired blocks->RELAY-24. RELAY-21's reviewer gate returned PASS -- RELAY-21 is now DONE (14eafd9), no longer a blocker. Six items remain, all wired blocks->RELAY-24: RELAY-FU-IDEM-METER-BY-PEER (8774f265, P0, raised from P1), RELAY-FU-PEERBUSID-CROSSCHECK (b2c28232, P0), RELAY-FU-ROSTER-VERSION-BOUND (b361d9e2, P0, doc.go gap 3), RELAY-FU-PEERENROLL-BUSID-BIND (12f39697, P0, doc.go gap 5 inbound twin), RELAY-FU-BUSPATH-BIND-PEER (f6a9fad0, P2, doc.go gap 6), RELAY-FU-INGEST-RATELIMIT (e7c66d83, P0), RELAY-FU-BUSPATH-OFFBYONE (97fc6038, P1).
+COMPLETE SET AS OF 2026-08-14 (coordinator + spec-keeper, corrected pass 2 -- superseded item swapped, one priority corrected, and blocker-independence made explicit because the coordinator flagged overstating this set's internal coupling): watermark task (SIGN-1-FU-REORDER-WATERMARK, 86c7d368, still todo) is wired blocks->RELAY-24. NONE OF THE ITEMS BELOW BLOCKS OR IS BLOCKED BY THE WATERMARK, AND THE WATERMARK BLOCKS NONE OF THEM -- verified against the live relations graph on both sides (86c7d368 carries exactly one outgoing edge, blocks->RELAY-24; none of the items below carry any edge to or from 86c7d368). They are independent, parallel blockers of RELAY-24 only, not a sequenced or interdependent wave. RELAY-21's reviewer gate returned PASS -- RELAY-21 is now DONE (14eafd9), no longer a blocker.
 
-JUDGEMENT CALL, recorded not silently applied (coordinator's question: separable prerequisites vs requirements OF this task's own wiring): SPLIT THE SEVEN INTO TWO GROUPS.
+Seven items remain, all wired blocks->RELAY-24, independently of each other and of the watermark:
+  - RELAY-FU-IDEM-METER-BY-PEER (8774f265, P0)
+  - RELAY-FU-PEERBUSID-CROSSCHECK (b2c28232, P0) -- umbrella over the next two
+  - RELAY-FU-ROSTER-VERSION-BOUND (b361d9e2, P2 -- DOWNGRADED from P0 2026-08-14: registry.go:396 already enforces strict monotonicity; the Version-bound-alone fix narrows a self-inflicted wedge's ceiling but is not the root-cause fix, which is the BusID-binding gap already tracked at P0 under RELAY-FU-PEERBUSID-CROSSCHECK)
+  - RELAY-FU-PEERENROLL-BUSID-BIND (12f39697, P0, doc.go gap 5 inbound twin)
+  - RELAY-FU-BUSPATH-BIND-PEER (f6a9fad0, P2, doc.go gap 6)
+  - RELAY-22 (b4e45cda, P1, wave-3 abuse-control primitive) -- REPLACES RELAY-FU-INGEST-RATELIMIT (e7c66d83): that task was a duplicate filed before RELAY-22 was found, now superseded by RELAY-22 via the native relation; RELAY-22's blocks->RELAY-24 edge added directly since the superseded task's edge no longer represents a live blocker.
+  - RELAY-FU-BUSPATH-OFFBYONE (97fc6038, P1)
 
-GROUP A -- GENUINELY SEPARABLE, correct as pure blocks prerequisites, dispatchable independently at any time: RELAY-FU-BUSPATH-OFFBYONE (97fc6038) only. It compares two ALREADY-LANDED files' boundary conditions (internal/relay/path.go, internal/hub/relayingest.go) with no dependency on the peer-identity-context machinery at all -- a pure bug fix.
+JUDGEMENT CALL, recorded not silently applied (coordinator's question: separable prerequisites vs requirements OF this task's own wiring): SPLIT INTO TWO GROUPS.
+
+GROUP A -- GENUINELY SEPARABLE, correct as pure blocks prerequisites, dispatchable independently at any time: RELAY-FU-BUSPATH-OFFBYONE (97fc6038) and RELAY-22 (b4e45cda) -- neither depends on the peer-identity-context machinery; RELAY-22 is its own wave-3 task with its own DECISIONS.md ownership.
 
 GROUP B -- SHARE ONE STRUCTURAL CONSTRAINT THAT MAKES THEM REQUIREMENTS OF THIS TASK'S OWN WIRING, NOT SEPARABLE PREREQUISITES: RELAY-FU-IDEM-METER-BY-PEER, RELAY-FU-PEERBUSID-CROSSCHECK, RELAY-FU-ROSTER-VERSION-BOUND, RELAY-FU-PEERENROLL-BUSID-BIND, RELAY-FU-BUSPATH-BIND-PEER. Confirmed structural fact (coordinator): internal/httpapi already imports internal/relay (peermount.go:115) and guards_test.go forbids the reverse, so httpapi.PeerBusIDFromContext is UNREACHABLE from internal/relay's own callback bodies without inverting the dependency or rewriting AcceptPeer/AcceptRelay/RosterConfig.Apply to take an explicit peerBusID parameter instead of reading context -- doc.go itself argues for the explicit-parameter form for the same silently-forgettable-context reason security prefers it elsewhere. That places the ACTUAL comparison/metering logic for all five at the wiring site by construction, not by preference.
 
-CAVEAT WORTH RECORDING: each of these five likely has a SEPARABLE SUB-PART that can land independently and reduce what this task itself has to write -- RELAY-FU-ROSTER-VERSION-BOUND's Version-bound-alone half (registry.go:440) is self-contained internal/relay code; RELAY-FU-PEERENROLL-BUSID-BIND's outbound half (Client.Enroll validating against the pinned cert) likewise; RELAY-FU-INGEST-RATELIMIT's core limiter data structure/algorithm can plausibly be built and unit-tested without the peer-identity wiring, only its per-peer KEYING needs this task. But the FULL closure of every one of the five needs this task's own composition code (or a signature-change PR immediately upstream of it) to actually wire httpapi.PeerBusIDFromContext through to the relay callbacks.
+CAVEAT WORTH RECORDING: each of these five likely has a SEPARABLE SUB-PART that can land independently and reduce what this task itself has to write -- RELAY-FU-ROSTER-VERSION-BOUND's Version-bound-alone half (registry.go:440) is self-contained internal/relay code; RELAY-FU-PEERENROLL-BUSID-BIND's outbound half (Client.Enroll validating against the pinned cert) likewise; RELAY-22's core limiter data structure/algorithm can plausibly be built and unit-tested without the peer-identity wiring, only its per-peer KEYING needs this task. But the FULL closure of every one of the five needs this task's own composition code (or a signature-change PR immediately upstream of it) to actually wire httpapi.PeerBusIDFromContext through to the relay callbacks.
 
-RECOMMENDATION: dispatch this task ONCE with the five Group-B items folded into its own acceptance criteria (their separable sub-parts can land beforehand to reduce scope, but their closure is this task's to deliver), rather than sequencing five separate dispatches first. RELAY-FU-BUSPATH-OFFBYONE (Group A) can be dispatched independently, any time, with no ordering dependency on this task.
+RECOMMENDATION: dispatch this task ONCE with the five Group-B items folded into its own acceptance criteria (their separable sub-parts can land beforehand to reduce scope, but their closure is this task's to deliver), rather than sequencing five separate dispatches first. RELAY-FU-BUSPATH-OFFBYONE and RELAY-22 (Group A) can be dispatched independently, any time, with no ordering dependency on this task or on each other.
 
 ## Description
 
@@ -81,6 +90,7 @@ Source: RELAY-19 file-followups brief item 3, 2026-08-14.
 - **blocked by** [RELAY-19](../RELAY-19--24e0bd11/task.md)
 - **blocked by** [RELAY-20](../RELAY-20--701dc54d/task.md)
 - **blocked by** [RELAY-21](../RELAY-21--f5ce883e/task.md)
+- **blocked by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
 - **blocked by** [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md)
 - **blocked by** [RELAY-34](../RELAY-34--03fd8897/task.md)
 - **blocked by** [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md)
@@ -108,12 +118,13 @@ Source: RELAY-19 file-followups brief item 3, 2026-08-14.
 - [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
+- [RELAY-22](../RELAY-22--b4e45cda/task.md) — RELAY-22: Choose and wire the multi-principal relay abuse-control primitive (todo)
 - [RELAY-34](../RELAY-34--03fd8897/task.md) — RELAY-34: Revocation fails OPEN on a WAL discard -- a revoked pinned bus signing key can… (done)
 - [RELAY-35](../RELAY-35--2bafb2a5/task.md) — RELAY-35: PeerStore composition-root precondition -- replay MUST run before the first wri… (todo)
 - [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (todo)
 - [RELAY-FU-BUSPATH-OFFBYONE](../RELAY-FU-BUSPATH-OFFBYONE--97fc6038/task.md) — RELAY-FU-BUSPATH-OFFBYONE: bus-path off-by-one between internal/relay/path.go:128 and int… (todo)
 - [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (todo)
-- [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (todo)
+- [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (superseded)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
 - [RELAY-FU-PEERENROLL-BUSID-BIND](../RELAY-FU-PEERENROLL-BUSID-BIND--12f39697/task.md) — internal/relay/doc.go gap 5 (inbound twin): peer B presenting its own valid certificate a… (todo)
 - [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md) — internal/relay/doc.go gap 3: RosterUpdate.BusID is not bound to the authenticated connect… (todo)
@@ -145,7 +156,7 @@ Source: RELAY-19 file-followups brief item 3, 2026-08-14.
 - [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (todo)
 - [RELAY-FU-BUSPATH-OFFBYONE](../RELAY-FU-BUSPATH-OFFBYONE--97fc6038/task.md) — RELAY-FU-BUSPATH-OFFBYONE: bus-path off-by-one between internal/relay/path.go:128 and int… (todo)
 - [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (todo)
-- [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (todo)
+- [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (superseded)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
 - [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md) — internal/relay/doc.go gap 3: RosterUpdate.BusID is not bound to the authenticated connect… (todo)
 - [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) — SIGN-1-FU-OUTOFORDER-POISON: Reserve-then-send lets mints be spent out of order, which pe… (done)

@@ -43,7 +43,9 @@ to 48223968's DECISIONS.md entry.
 - **blocked by** [RELAY-17](../RELAY-17--817649ce/task.md)
 - **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
 - **blocks** [RELAY-21](../RELAY-21--f5ce883e/task.md)
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
 - **relates to** [48223968-0f96-4ac2-8d7e-710a1a4026b8](../Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md)
+- **supersedes** [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -65,6 +67,7 @@ to 48223968's DECISIONS.md entry.
 
 
 - [48223968-0f96-4ac2-8d7e-710a1a4026b8](../Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md) — Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
 
 ---
 
