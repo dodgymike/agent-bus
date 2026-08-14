@@ -323,6 +323,11 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
       never just the index (`git diff --cached -- …`).** This applies hardest to the shared
       append-only files — `DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS*.md` — which several agents
       append to at once by design.
+    - **`MM` catches only ONE direction; a clean ` M` hides the other.** Index clean over a
+      contaminated worktree trips no status check, and the pathspec commit still takes the lot: on
+      2026-08-14 `client/client.go` sat at ` M` carrying one in-scope doc comment plus `endpointWith`
+      and `resolvePinsWith` from another agent's live, ungated task. Status is never sufficient —
+      read `git diff HEAD -- <path>` and confirm every hunk is yours.
     - **Do NOT commit work no agent has reported.** A package appearing in the tree and passing its
       tests is not a signal that it is finished — it may be mid-review, or mid-edit. Wait for the
       owning agent's report with gates COMPLETED. Committing on "it is green and it is there" has
