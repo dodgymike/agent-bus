@@ -103,6 +103,34 @@ func (r *igCompositeRoster) Put(e auth.RosterEntry) error {
 	return nil
 }
 
+// AgentIDForCertFingerprint implements auth.Roster: the same fail-closed rule
+// the shipped rosters have (see stubRoster's, in auth_test.go). This double is
+// about the INVITE-composite write path and no test here binds a certificate, so
+// in practice it answers ErrCertBindingUnknown — but it is written out rather
+// than stubbed to panic or return nil, so that a future invite test that DOES
+// carry a certificate gets the real answer instead of a lie.
+func (r *igCompositeRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var holders []string
+	for agentID, e := range r.byID {
+		for _, b := range e.CertBindings {
+			if b.RetiredAt == nil && b.Fingerprint == fp {
+				holders = append(holders, agentID)
+				break
+			}
+		}
+	}
+	switch len(holders) {
+	case 1:
+		return holders[0], nil
+	case 0:
+		return "", auth.ErrCertBindingUnknown
+	default:
+		return "", auth.ErrCertBindingAmbiguous
+	}
+}
+
 func (r *igCompositeRoster) PutWithInvite(e auth.RosterEntry, rider auth.InviteRider) (bool, error) {
 	r.mu.Lock()
 	r.composites = append(r.composites, rider)

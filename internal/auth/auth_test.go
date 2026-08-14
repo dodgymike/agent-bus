@@ -178,6 +178,41 @@ func (r *stubRoster) Put(e auth.RosterEntry) error {
 	return nil
 }
 
+// AgentIDForCertFingerprint implements auth.Roster.
+//
+// It is a REAL implementation of the fail-closed rule (unknown and ambiguous
+// both refuse, and a holder is never guessed) rather than a stub that returns
+// nothing, for the same reason Put keeps the duplicate-id refusal: this double
+// stands in for the package's VALIDATION, not for its invariants, and a double
+// that quietly resolved an ambiguous fingerprint would let a test pass over
+// behaviour the real rosters must never have.
+//
+// Unlike the shipped rosters it does NOT enforce uniqueness in Put — see the
+// type doc — which is precisely what lets a test build the ambiguous state and
+// watch this method refuse it.
+func (r *stubRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var holders []string
+	for agentID, e := range r.byID {
+		for _, b := range e.CertBindings {
+			if b.RetiredAt == nil && b.Fingerprint == fp {
+				holders = append(holders, agentID)
+				break
+			}
+		}
+	}
+	sort.Strings(holders)
+	switch len(holders) {
+	case 1:
+		return holders[0], nil
+	case 0:
+		return "", auth.ErrCertBindingUnknown
+	default:
+		return "", auth.ErrCertBindingAmbiguous
+	}
+}
+
 // Get implements auth.Roster.
 func (r *stubRoster) Get(agentID string) (auth.RosterEntry, bool) {
 	r.mu.Lock()

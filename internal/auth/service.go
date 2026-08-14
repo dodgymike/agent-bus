@@ -288,6 +288,61 @@ type EnrolRequest struct {
 	// (PutWithInvite). A roster that does not — MemoryRoster is one — makes the
 	// enrolment fail with ErrInviteNotAtomic rather than proceed: see Enrol.
 	Invite InviteRedemption
+
+	// ClientCertFingerprint is sha256 over the DER of the client certificate
+	// presented on the connection THIS ENROLMENT ARRIVED OVER, or nil when the
+	// connection presented none (MTLS-BIND, invariant 11).
+	//
+	// It is a TRANSPORT FACT, NOT A REQUEST FIELD, and the distinction is the
+	// entire value of the binding. The caller (internal/httpapi) takes it from
+	// r.TLS, where the handshake has already proved the peer holds the matching
+	// private key. It must NEVER be populated from the request body, a header or
+	// a query parameter: a client-supplied fingerprint is a claim anyone can
+	// make about anyone's certificate, and binding one would record a fact that
+	// was never established (invariant 1 — the server is authoritative, and a
+	// client-supplied identity is never trusted).
+	//
+	// It is a POINTER because absent and present-but-zero must stay
+	// distinguishable. An all-zero [32]byte is a perfectly well-formed
+	// fingerprint value, so a plain array could not say "no certificate" without
+	// also making one specific (astronomically unlikely, but a
+	// caller-controlled) digest mean it.
+	//
+	// # NIL IS ACCEPTED ON THIS BUILD, and here is the decision behind that
+	//
+	// The listener is tls.RequestClientCert (cmd/agent-bus/tlslisten.go), which
+	// REQUESTS a client certificate and never REQUIRES one, so a connection
+	// carrying none is the ORDINARY case and not an anomaly. Refusing enrolment
+	// without a certificate would invent "a client certificate is mandatory" in
+	// this layer while the transport layer says it is optional — two layers
+	// disagreeing about the same requirement, which is how a policy ends up
+	// enforced in neither. It would also lock out every client that has not yet
+	// grown a keypair (MTLS-CLIENTCERT is still open) with no migration path.
+	//
+	// So the target is PER-AGENT enforcement once bindings exist to enforce
+	// against — an agent that HAS a binding must present it — and that is a
+	// later task (MTLS-CROSSCHECK), not this one. What this field guarantees is
+	// only this: when a certificate IS presented, the binding is recorded, so
+	// the fact a cross-check needs is there. Nothing here may be read as
+	// "enrolment requires a client certificate".
+	//
+	// # IT IS DELIBERATELY *NOT* PART OF THE IDEMPOTENCY COMPARISON
+	//
+	// The same-key-different-payload check above compares the name, both public
+	// keys and the invite id, and does NOT compare this. That is on purpose and
+	// it fails in the safe direction: a replay APPLIES NOTHING, so a retry
+	// arriving over a different certificate returns the original result and
+	// creates NO binding for the certificate it presented. There is no path by
+	// which a replay forges a binding.
+	//
+	// Comparing it would convert an honest client that regenerated its keypair
+	// between two attempts into a 409 protocol violation, which invariant 10 is
+	// explicit is the wrong answer for a merely BUGGY (or merely unlucky)
+	// client. The residual is that a party holding the whole enrolment payload
+	// learns the agent id it produced — which it already knows, having sent the
+	// payload. If that trade is ever revisited it must be revisited as an
+	// idempotency decision, not by quietly adding a field here.
+	ClientCertFingerprint *[32]byte
 }
 
 // InviteRedemption is one in-flight invite redemption the enrolment it
@@ -570,6 +625,51 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		return EnrolResult{}, fmt.Errorf("%w: %d idempotency keys are remembered, the limit", ErrCapacity, s.maxIdempotencyEntries)
 	}
 
+	// THE CERTIFICATE BINDING IS CHECKED **BEFORE** THE MINT, and this placement
+	// is the whole point of the check existing here at all (MTLS-BIND, raised by
+	// the security gate).
+	//
+	// Roster.Put refuses a fingerprint already live on another agent, and that
+	// refusal remains the AUTHORITATIVE one — it is the one taken under the
+	// roster's own lock, in the same critical section as the write. But Put runs
+	// AFTER the mint, so relying on it alone meant every refused enrolment still
+	// BURNED AN AGENT ID SUFFIX. Suffix floors are never reclaimed (point 8 of
+	// the ids.NameSuffixes doc) and are rewritten and fsynced on every mint, so
+	// an attacker holding ONE enrolled certificate could loop with fresh names
+	// and grow that file without bound while the roster stayed at one agent. It
+	// is not bounded by the roster capacity check above, because a refused
+	// enrolment never reaches the roster; and it is not bounded by INVITE-GATE
+	// either, because this path aborts and releases the invite reservation, so a
+	// single invite drives the loop indefinitely.
+	//
+	// That is the exact hazard the messaging-key validation above is placed
+	// early to avoid — see its comment, which says in terms that validating
+	// after the mint "would let an anonymous caller burn one suffix per
+	// malformed request". This check was on the wrong side of that line.
+	//
+	// IT IS A READ, AND IT IS NOT A SUBSTITUTE FOR Put'S CHECK. This one is
+	// advisory: it holds enrolMu but not the roster's lock, so it cannot be the
+	// authority on a rule that must hold at the moment of the write. Put still
+	// decides. What this adds is that the OVERWHELMINGLY COMMON refusal costs
+	// nothing durable.
+	//
+	// IT FAILS CLOSED ON EVERY ANSWER THAT IS NOT "NOBODY HOLDS IT". Unknown is
+	// the only outcome that may proceed. An ambiguous binding (reachable only
+	// off disk — see certFingerprintOwner) must NOT be read as "not taken": it
+	// means the certificate resolves to nobody, which is a reason to refuse, not
+	// a licence to bind it a third time.
+	if req.ClientCertFingerprint != nil {
+		holder, err := s.roster.AgentIDForCertFingerprint(*req.ClientCertFingerprint)
+		switch {
+		case err == nil:
+			return EnrolResult{}, fmt.Errorf("%w: agent %q already holds a live binding for the client certificate on this connection", ErrCertFingerprintBound, holder)
+		case errors.Is(err, ErrCertBindingUnknown):
+			// Nobody holds it: the ordinary case, and the only one that proceeds.
+		default:
+			return EnrolResult{}, err
+		}
+	}
+
 	agentID, err := s.minter.Mint(req.Name)
 	if err != nil {
 		return EnrolResult{}, fmt.Errorf("auth: enrolling %q: %w", req.Name, err)
@@ -595,15 +695,42 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		// without rewriting EnrolledAt. See RosterEntry.Epoch.
 		Epoch:      now,
 		EnrolledAt: now,
-		// CertBindings is left ZERO and remains reserved (see RosterEntry):
-		// MTLS-BIND populates it, and nothing on this path may invent a value for
-		// it. MessagingPublicKey is no longer among the reserved fields —
-		// RELAY-13 populates it above, from the request — and neither is InviteID:
-		// INVITE-GATE populates it just below, from the redemption, so an invited
+		// CertBindings is populated just below, from the TRANSPORT rather than
+		// from the request body (MTLS-BIND). None of the reserved fields is left
+		// for a later task now: MessagingPublicKey is RELAY-13's, from the
+		// request; InviteID is INVITE-GATE's, from the redemption, so an invited
 		// enrolment records WHICH invite admitted it.
 	}
 	if req.Invite != nil {
 		entry.InviteID = req.Invite.InviteID()
+	}
+	// THE CERTIFICATE BINDING, AND IT IS SET *AFTER* THE MINT ON PURPOSE
+	// (MTLS-BIND; invariants 1 and 11).
+	//
+	// The certificate contributes a FINGERPRINT AND NOTHING ELSE. It does not
+	// influence the agent id, the name or the suffix — those were minted above,
+	// by the server, before this line runs and without ever seeing this value
+	// (invariant 1). The ordering is not decorative: it is what makes "the
+	// certificate cannot influence the id" a property of control flow rather
+	// than a claim to re-audit on every edit. Nothing below may be moved above
+	// the Mint.
+	//
+	// The fingerprint comes from the connection the enrolment arrived over, NOT
+	// from the request body, and that distinction is the whole point. A body
+	// field would be a client-supplied claim — anyone could claim anyone's
+	// fingerprint, and the binding would prove nothing. A value taken from
+	// r.TLS is a fact the TLS handshake established: the peer proved possession
+	// of that certificate's private key. internal/httpapi is the only caller and
+	// takes it from exactly there.
+	//
+	// ABSENT IS ACCEPTED, and this is a deliberate, recorded choice rather than
+	// an oversight — see EnrolRequest.ClientCertFingerprint. A nil fingerprint
+	// leaves CertBindings empty, which is the same ordinary state every agent
+	// enrolled before this task is in.
+	if req.ClientCertFingerprint != nil {
+		// ONE live binding, stamped with the SAME instant as Epoch and
+		// EnrolledAt — see newCertBinding.
+		entry.CertBindings = []CertBinding{newCertBinding(*req.ClientCertFingerprint, now)}
 	}
 
 	// Built BEFORE the write because Consume needs it: the consumption record

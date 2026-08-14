@@ -99,6 +99,40 @@ var (
 	// the bus starts anyway — invariant 6 — so it never reaches a client at all.
 	ErrInvalidRecord = errors.New("auth: invalid enrolment record")
 
+	// ErrCertFingerprintBound reports an attempt to bind a client certificate
+	// that is ALREADY live on a DIFFERENT agent id (MTLS-BIND).
+	//
+	// It is the certificate mirror of ErrDuplicateAgentID: that one keeps one
+	// agent id from naming two keypairs, this one keeps one certificate from
+	// naming two agents. Either collapse would make the identity it guards
+	// meaningless, and both fail closed — a refused enrolment is recoverable, a
+	// certificate that authenticates as two agents is not.
+	//
+	// Whether it is a client error or an internal breach depends on how it was
+	// reached, so the HTTP layer does not treat it as either: on the enrolment
+	// route it means someone presented a certificate another agent already
+	// enrolled with, which is a 409 the client can act on by generating a fresh
+	// keypair.
+	ErrCertFingerprintBound = errors.New("auth: client certificate is already bound to another agent")
+
+	// ErrCertBindingUnknown reports a client-certificate fingerprint that no
+	// enrolled agent holds a live binding for. It is the ordinary negative
+	// answer, not a malfunction: on this build most connections present no
+	// certificate at all, and one that is presented but never enrolled is simply
+	// unbound.
+	ErrCertBindingUnknown = errors.New("auth: no agent is bound to this client certificate")
+
+	// ErrCertBindingAmbiguous reports ONE client-certificate fingerprint held
+	// live by MORE THAN ONE agent, which resolves to nobody.
+	//
+	// The live enrolment path refuses to create this state
+	// (ErrCertFingerprintBound), so reaching it means the state came off DISK:
+	// recovery replays records that are already durable and must not refuse them
+	// (invariant 6). It is reported rather than resolved because picking a holder
+	// would let one key holder be served as a definite agent it may not be —
+	// precisely the credential confusion invariant 11 exists to prevent.
+	ErrCertBindingAmbiguous = errors.New("auth: this client certificate is bound to more than one agent")
+
 	// ErrNotAttached reports a durable roster asked to record an enrolment
 	// before it was bound to a WAL (WALRoster.Attach). It is a startup-SEQUENCING
 	// defect, never a client error: 500.

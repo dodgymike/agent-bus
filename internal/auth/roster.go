@@ -21,9 +21,14 @@ import (
 //
 // 16 is generous against the intended use. Rotation serves two certificates at
 // once (invariant 11), so the live set during a rollover is 2, and the rest is
-// retired history an operator can still read. Nothing populates this field yet
-// (see RosterEntry.CertBindings), so the bound exists now to be ENFORCED by
-// Decode from the first durable record, not retrofitted after one is on disk.
+// retired history an operator can still read.
+//
+// The bound was declared BEFORE anything populated the field, so that Decode
+// enforced it from the first durable record rather than having it retrofitted
+// after records were on disk. Since MTLS-BIND (2026-08-14) enrolment does
+// populate it, with exactly ONE binding per enrolment — so nothing on the
+// shipped path approaches 16, and the bound now guards the DECODE side, where
+// the input is whatever the file holds.
 const MaxCertBindings = 16
 
 // CertBinding is one client certificate bound to an agent id, with the window
@@ -63,16 +68,23 @@ type CertBinding struct {
 // agent exists; a public key is public and a certificate fingerprint is a hash
 // of a certificate the client presents on every connection.
 //
-// # Why fields nothing populates are here NOW
+// # Why fields nothing populated were declared UP FRONT — and they are populated now
 //
-// MessagingPublicKey, InviteID and CertBindings are RESERVED: no code path
-// writes them today. They are declared anyway because of the ordering rule in
-// DECISIONS.md (2026-08-07, ENROL-SHAPE). Nothing in this package was persisted
-// before AUTH-3, so this is the LAST MOMENT the durable record can be shaped
-// without a migration — and, because an agent id is bound to a keypair, a
-// migration here is not a schema edit but a FORCED RE-ENROLMENT OF EVERY AGENT.
-// Writing the record once with reserved-but-empty fields costs a few omitted
-// JSON keys; deciding it three times costs three migrations.
+// MessagingPublicKey, InviteID and CertBindings were all declared while NO code
+// path wrote them, because of the ordering rule in DECISIONS.md (2026-08-07,
+// ENROL-SHAPE). Nothing in this package was persisted before AUTH-3, so that was
+// the LAST MOMENT the durable record could be shaped without a migration — and,
+// because an agent id is bound to a keypair, a migration here is not a schema
+// edit but a FORCED RE-ENROLMENT OF EVERY AGENT. Writing the record once with
+// reserved-but-empty fields cost a few omitted JSON keys; deciding it three
+// times would have cost three migrations.
+//
+// THE BET PAID OFF AND ALL THREE ARE NOW WRITTEN, each by the task that owned
+// it, with no migration: MessagingPublicKey by RELAY-13, InviteID by
+// INVITE-GATE, CertBindings by MTLS-BIND (2026-08-14). NONE of them is reserved
+// any more. Empty remains an ordinary value for each — records written before
+// the respective task have none — so a reader must treat empty as "not
+// recorded", never as "malformed"; see each field.
 type RosterEntry struct {
 	// AgentID is the fully-qualified "<bus-id>.<name>-<n>" (invariant 2),
 	// minted by the server (invariant 1). It is the routing and authorization
@@ -101,10 +113,10 @@ type RosterEntry struct {
 	// MessagingPublicKey is the agent's second Ed25519 key, for message
 	// signing.
 	//
-	// RESERVED: NOTHING POPULATES IT YET. The SIGN epic (SIGN/CRYPTO-3) is the
-	// task that will. Until then it is always empty, and Decode therefore
-	// validates it only when it is present — empty IS the reserved state, not a
-	// malformed key.
+	// NO LONGER RESERVED: RELAY-13 populates it, from the enrolment request.
+	// It remains OPTIONAL — an enrolment that sends no messaging key is
+	// accepted and stores none — so Decode validates it only when it is
+	// present: empty is an ordinary value, not a malformed key.
 	//
 	// It is a separate field rather than a reuse of AuthPublicKey because
 	// auth/messaging key separation is already a standing distinction in this
@@ -116,10 +128,12 @@ type RosterEntry struct {
 	// answers "who authorised this agent onto the bus" (invariant 3: enrolment
 	// is invite-only).
 	//
-	// RESERVED: NOTHING POPULATES IT YET. The INVITE epic (INVITE-STORE /
-	// INVITE-GATE) is what will. Without it, revocation and audit have nothing
-	// to join on, which is why it is in the record from the first byte written
-	// rather than added once agents exist that have no value for it.
+	// NO LONGER RESERVED: INVITE-GATE populates it, from the redemption, so an
+	// invited enrolment records WHICH invite admitted it. It is EMPTY for an
+	// un-invited enrolment, which this build still accepts (invariant 3's
+	// invite-only end state is not yet enforced), and empty for every agent
+	// enrolled before the field was written — revocation and audit join on it
+	// only where it is present.
 	InviteID string
 
 	// Epoch is the enrolment epoch, the hub's id-reuse guard (hub's
@@ -137,7 +151,19 @@ type RosterEntry struct {
 	// agent id, at most MaxCertBindings of them. It is a history and not a
 	// single fingerprint — see CertBinding.
 	//
-	// RESERVED: NOTHING POPULATES IT YET. MTLS-BIND is the task that will.
+	// NO LONGER RESERVED (MTLS-BIND, 2026-08-14). Enrolment populates it with
+	// exactly ONE live binding when the enrolling connection presented a client
+	// certificate, and with NONE when it did not — see
+	// EnrolRequest.ClientCertFingerprint for why an absent certificate is still
+	// accepted on this build. Nothing else writes it, and nothing retires a
+	// binding yet, so on this build the field holds zero or one element.
+	//
+	// EMPTY IS THEREFORE STILL AN ORDINARY STATE, not a damaged record: every
+	// agent enrolled before this field was populated has none, and so does every
+	// agent that enrols over a connection carrying no certificate. A reader must
+	// treat empty as "this agent has no certificate to cross-check against",
+	// never as "this agent is unauthenticated" — those become the same thing
+	// only when a future task makes a certificate mandatory per agent.
 	CertBindings []CertBinding
 
 	// EnrolledAt is when the server accepted the enrolment.
@@ -166,14 +192,50 @@ type RosterEntry struct {
 // (AUTH-7); see the "What is durable, what is not, and what is actually WIRED"
 // section of doc.go, which is kept honest about the SHIPPED BINARY.
 type Roster interface {
-	// Put records a new enrolment. It MUST reject a duplicate AgentID with
-	// ErrDuplicateAgentID rather than overwriting: an overwrite would silently
-	// rebind a live identity to a different keypair, which is the worst outcome
-	// available on this path (invariants 1 and 3).
+	// Put records a new enrolment, and MUST refuse it on either of TWO
+	// uniqueness rules. They guard the same identity from opposite directions,
+	// and an implementation that enforces only the first is silently weaker than
+	// this interface promises.
+	//
+	//  1. A duplicate AgentID -> ErrDuplicateAgentID, rather than overwriting.
+	//     An overwrite would rebind a live identity to a different keypair,
+	//     which is the worst outcome available on this path (invariants 1
+	//     and 3). This rule keeps one AGENT ID from naming two keypairs.
+	//  2. A CertBindings fingerprint already live on a DIFFERENT agent ->
+	//     ErrCertFingerprintBound (MTLS-BIND). This rule keeps one CERTIFICATE
+	//     from naming two agents; without it a single key holder could
+	//     authenticate as either, and the fingerprint would stop naming anybody
+	//     (invariant 11). Use checkCertFingerprintUnbound, and run it in the
+	//     SAME critical section as the insert — a check-then-write split across
+	//     two lock acquisitions admits exactly the duplicate it refuses.
+	//
+	// Rule 1 is decided FIRST, so re-putting an existing agent reports the taken
+	// id rather than a certificate colliding with itself.
+	//
+	// Note for TEST DOUBLES: rule 2 is the one an in-package double is likely to
+	// omit, and omitting it is legitimate ONLY when the double exists to build a
+	// state the real rosters refuse (both doubles in this package do). A double
+	// that skips it by accident makes the enrolment path look correct while the
+	// rule is not being exercised at all.
 	Put(RosterEntry) error
 
 	// Get returns the entry for agentID and whether it was found.
 	Get(agentID string) (RosterEntry, bool)
+
+	// AgentIDForCertFingerprint resolves a client-certificate fingerprint to the
+	// ONE agent id holding it as a live binding (MTLS-BIND). It is the read half
+	// of the fact invariant 11's cross-check needs; see certbind.go.
+	//
+	// It MUST fail closed and MUST NOT guess: ErrCertBindingUnknown when no
+	// agent holds it, ErrCertBindingAmbiguous when more than one does. An
+	// implementation that returned a holder in the ambiguous case would resolve
+	// a duplicated certificate to a definite agent, which is the credential
+	// confusion the cross-check exists to prevent.
+	//
+	// The fingerprint is sha256 over the certificate's DER exactly as it
+	// arrived — internal/buscert.FingerprintOf, never a second implementation
+	// and never a re-marshalled certificate.
+	AgentIDForCertFingerprint(fp [32]byte) (string, error)
 
 	// Len reports how many agents are enrolled. It backs admission control on
 	// the unauthenticated enrolment route.
@@ -251,8 +313,22 @@ func (r *MemoryRoster) Put(e RosterEntry) error {
 	if _, ok := r.byID[e.AgentID]; ok {
 		return fmt.Errorf("%w: %q", ErrDuplicateAgentID, e.AgentID)
 	}
+	// The certificate axis of the same rule, in the SAME critical section as the
+	// id check and the insert — see checkCertFingerprintUnbound. Split across two
+	// lock acquisitions it would admit the duplicate it exists to refuse.
+	if err := checkCertFingerprintUnbound(r.byID, e); err != nil {
+		return err
+	}
 	r.byID[e.AgentID] = copyRosterEntry(e)
 	return nil
+}
+
+// AgentIDForCertFingerprint implements Roster. See certFingerprintOwner for the
+// three answers and why two of them are refusals.
+func (r *MemoryRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return certFingerprintOwner(r.byID, fp)
 }
 
 // Get implements Roster. The returned entry is a DEEP COPY, for the mirror of

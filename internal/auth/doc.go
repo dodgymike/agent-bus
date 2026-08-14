@@ -87,11 +87,20 @@
 //     package deliberately does not enforce a token on any route.
 //   - Roster is an injected interface, which is what let the WAL-backed
 //     implementation land without reshaping any caller.
-//   - RosterEntry already carries the FULL enrolment field set decided by
-//     DECISIONS.md 2026-08-07 (ENROL-SHAPE), including MessagingPublicKey,
-//     InviteID and CertBindings, which nothing populates yet. They are on disk
-//     from the first record so the SIGN, INVITE and MTLS-BIND epics do not each
-//     force a migration — and a migration here means re-enrolling every agent.
+//   - RosterEntry carries the FULL enrolment field set decided by DECISIONS.md
+//     2026-08-07 (ENROL-SHAPE), including MessagingPublicKey, InviteID and
+//     CertBindings. They were on disk from the first record so the SIGN, INVITE
+//     and MTLS epics would not each force a migration — and a migration here
+//     means re-enrolling every agent. ALL THREE ARE NOW POPULATED, none of them
+//     is reserved, and none needed a migration: MessagingPublicKey by RELAY-13,
+//     InviteID by INVITE-GATE, CertBindings by MTLS-BIND (2026-08-14), which
+//     binds the client certificate presented on the enrolling connection to the
+//     server-minted agent id.
+//   - AgentIDForCertFingerprint (Roster) and AgentIDForClientCertificate
+//     (Service) are the READ half of that binding, and the seam invariant 11's
+//     cross-check is built on: they resolve a certificate fingerprint to one
+//     agent id, or REFUSE. They decide no request themselves — making a route
+//     enforce the answer is MTLS-CROSSCHECK's task.
 //   - Revocation (AUTH-4) is a scan over the session table; see the note on
 //     Service.sessions for why no per-agent index exists.
 package auth

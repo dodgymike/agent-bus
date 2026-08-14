@@ -347,6 +347,12 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		// nil unless an invite was presented; a nil Invite is an UN-INVITED
 		// enrolment and is accepted.
 		Invite: redemption,
+		// THE BINDING (MTLS-BIND, invariant 11). Taken from the CONNECTION, via
+		// the middleware that read r.TLS — never from body, which is a
+		// client-supplied claim about a certificate anyone could name. nil when
+		// the connection presented none, or presented one that was out of date,
+		// and nil is accepted: see auth.EnrolRequest.ClientCertFingerprint.
+		ClientCertFingerprint: enrolCertFingerprint(r),
 	})
 	if err != nil {
 		// The NAME is logged, the public key is not: a name is what an operator
@@ -694,6 +700,25 @@ func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, op strin
 		// there is no principal to hold responsible — not key ownership.
 		s.log.Warn("enrolment idempotency key reused with different key material; rejected, and the connection is KEPT because this route is unauthenticated and the socket identifies no principal to punish", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "idempotency key already used with a different payload"})
+
+	case errors.Is(err, auth.ErrCertFingerprintBound):
+		// 409, and the CONNECTION IS KEPT (invariant 10's two questions: a
+		// merely buggy client reaches this line by retrying an enrolment from a
+		// machine whose certificate is already enrolled, and this route is
+		// unauthenticated so the socket identifies no principal to punish).
+		//
+		// Warn, not Debug: one client certificate presented for two agent ids is
+		// either a client re-enrolling without regenerating its keypair — the
+		// benign case, and the one an operator can fix — or someone trying to
+		// attach their certificate to a second identity. An operator should see
+		// both by default.
+		//
+		// The reply does NOT name the agent that already holds the binding. That
+		// would turn enrolment into an oracle mapping a certificate an anonymous
+		// caller possesses to an agent id on this bus; the server LOG names it,
+		// which is where an operator can act on it.
+		s.log.Warn("enrolment refused: the client certificate on this connection is already bound to another agent, and one certificate must never name two agents (invariant 11)", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "this client certificate is already bound to an agent; enrol with a fresh client keypair"})
 
 	case errors.Is(err, auth.ErrUnknownAgent), errors.Is(err, auth.ErrUnknownSession):
 		s.log.Debug("auth request rejected", kv...)

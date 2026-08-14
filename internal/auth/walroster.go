@@ -286,9 +286,21 @@ func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (js
 
 	r.mu.Lock()
 	_, dup := r.byID[e.AgentID]
+	// The certificate axis of the duplicate rule, read under the SAME mu
+	// acquisition as the id check so the two cannot see different rosters.
+	// Serialisation against a concurrent Put is writeMu's job, already held for
+	// the whole check-then-write; mu only guards the map itself.
+	certErr := checkCertFingerprintUnbound(r.byID, e)
 	r.mu.Unlock()
 	if dup {
 		return false, fmt.Errorf("%w: %q", ErrDuplicateAgentID, e.AgentID)
+	}
+	// BEFORE the encode and the write, exactly like the id check above and for
+	// the same reason: a refusal here must never burn an fsync, and must never
+	// reach Apply — where the record is already durable and the only available
+	// handling is to discard it.
+	if certErr != nil {
+		return false, certErr
 	}
 
 	body, err := encode(e)
@@ -354,6 +366,21 @@ func (r *WALRoster) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.byID)
+}
+
+// AgentIDForCertFingerprint implements Roster over the RECOVERED and live
+// roster. See certFingerprintOwner.
+//
+// This is the implementation for which the ambiguous answer is actually
+// reachable: Apply replays whatever the log holds and does not run the
+// write-side uniqueness check (it cannot usefully refuse a record that is
+// already durable — invariant 6), so a log carrying two live holders of one
+// fingerprint recovers into exactly that state and this method must decline to
+// pick one.
+func (r *WALRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return certFingerprintOwner(r.byID, fp)
 }
 
 // List implements Roster: every RECOVERED and live agent, deep-copied and

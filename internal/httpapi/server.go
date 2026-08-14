@@ -377,7 +377,20 @@ func New(opts Options) *Server {
 	// two reasons -- a 401 is a request an operator most wants in the log, and
 	// it is what puts the request id in the context, so authMiddleware's own
 	// refusal lines can be correlated with the response.
-	s.handler = LoggingMiddleware(s.log, s.authMiddleware(mux))
+	//
+	// WithClientCertificate goes BETWEEN them, and both sides of that placement
+	// are load-bearing (MTLS-BIND):
+	//
+	//   - INSIDE LoggingMiddleware, so its own log lines carry the request id.
+	//   - OUTSIDE authMiddleware, so the certificate is visible on the
+	//     UNAUTHENTICATED routes too. /v1/enroll is one of them, and it is the
+	//     route that CREATES the binding — a certificate that only became
+	//     visible after authentication could never be bound to anything, since
+	//     there is no session yet at enrolment by construction (invariant 3).
+	//
+	// It is not a gate and refuses nothing; see its doc for why absence of a
+	// client certificate is an ordinary case on this build.
+	s.handler = LoggingMiddleware(s.log, s.WithClientCertificate(s.authMiddleware(mux)))
 	return s
 }
 
