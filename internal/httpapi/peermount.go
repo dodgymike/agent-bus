@@ -40,11 +40,28 @@ package httpapi
 // # WHY A PEER ROUTE DOES NOT TAKE A BEARER TOKEN, AND WHY THAT IS NOT A HOLE
 //
 // authMiddleware is default-deny over the whole mux: anything not on the
-// allow-list needs a session token. A peer bus HAS no session token — it is not
-// an enrolled agent, it holds no Ed25519 enrolment key on our bus, and there is
-// no route through which it could obtain one. Requiring a bearer here would be
-// unsatisfiable rather than strict, which is the same reason
-// /v1/session/complete sits on the allow-list (see unauthenticatedRoutes).
+// allow-list needs a session token. This file used to argue that a peer bus
+// holds no session token of ours, carries no Ed25519 enrolment key here, and
+// could not obtain either — so that a bearer requirement would be unsatisfiable,
+// the same shape as /v1/session/complete. THAT PREMISE IS FALSE, refuted by a
+// security gate and corrected in DECISIONS.md (2026-08-14, the FEDERATION
+// AMENDMENT's ruling (i) — NOT the 2026-08-08 FEDERATION section, whose rulings
+// stop at (f); ruling (a) cited below IS 2026-08-08, so check the date, not just
+// the letter): enrolment is open to a peer bus like any other client,
+// so a peer bus is ALSO an enrolled principal on the buses it peers with and a
+// peer request may well carry a valid session token. peerprincipal.go's "THE
+// AGENT PRINCIPAL IS REMOVED" section is written on exactly that assumption.
+//
+// The true reason is CONFLATION: a session token names an AGENT, and a peer
+// route is BUS-scoped. Requiring one here would make an agent credential
+// authorise a peer route — one principal accepted as the other. So the bearer
+// requirement would be SATISFIABLE AND WRONG, which is a stronger objection than
+// unsatisfiability and points the opposite way: not "the allow-list is harmless
+// here", but "an AGENT-scoped token must never be consulted on this surface".
+// The qualifier is load-bearing rather than pedantic — ruling (i) reverses the
+// moment a BUS-SCOPED bearer credential exists, one naming the peer bus rather
+// than an agent, and at that point requiring it here becomes right rather than
+// wrong. What is banned is the conflation, not the second factor.
 //
 // So a peer route is authenticated by a DIFFERENT authenticator, not by none:
 // authMiddleware hands the request to the mux, and RequirePeerPrincipal — which
@@ -55,11 +72,24 @@ package httpapi
 // under different context keys, have different Go types, and RequirePeerPrincipal
 // SHADOWS OUT any agent principal before the handler runs.
 //
-// This is the point invariant 3's cross-check ("a session token presented over a
-// connection whose client certificate belongs to a different principal must be
-// rejected") reduces to on this surface. There is no pair to cross-check, because
-// a peer handler never sees an agent principal at all — the stronger of the two
-// available answers, and the reason it is stated here rather than left implicit.
+// This is the point INVARIANT 11's cross-check ("a session token presented over
+// a connection whose client certificate belongs to a different agent must be
+// rejected") reduces to on this surface — invariant 11, not invariant 3, which
+// this comment misattributed it to until 2026-08-14; invariant 3 governs
+// invite-only enrolment and the client-signs-a-server-token direction, and the
+// cross-check clause has never been part of it. There is no pair to cross-check
+// here, because a peer handler never sees an agent principal at all — the
+// stronger of the two available answers, and the reason it is stated here rather
+// than left implicit.
+//
+// BUT RULING (i) NAMES THAT A NARROWING OF INVARIANT 11, NOT COMPLIANCE WITH IT,
+// and this file should not claim otherwise. Invariant 11 asks for TWO factors,
+// cross-checked; ONE authorises here — the certificate. What is given up is the
+// revocable, time-bounded half: a peer link is withdrawn by an OFFLINE operator
+// action that needs a RESTART, not by online revocation, and nothing caps a peer
+// certificate's NotAfter, so even expiry bounds a peer's authority only as far as
+// the peer chose to bound itself. See RESIDUAL 2 below for the invite half of the
+// same narrowing.
 //
 // # KNOWN RESIDUAL 1: WHETHER THIS BUS FEDERATES IS OBSERVABLE PRE-AUTH
 //
@@ -86,12 +116,23 @@ package httpapi
 //
 // WHAT BOUNDS IT: DECISIONS.md (2026-08-08, FEDERATION) ruling (a) — every
 // bus-to-bus link is an SSH tunnel and no bus process listens publicly, so the
-// pre-auth prober does not exist in the deployed topology. That is the SAME
-// deferral ruling (b) buys for INVITE-GATE, and it REVERSES ON THE SAME
-// TRIGGERS: a bus bound to a non-loopback interface, a tunnel endpoint shared
-// with a non-operator, or a second local user on any of the machines. What is
-// disclosed is one bit — "this bus federates" — and no peer id, no roster and no
-// count.
+// prober must already have reached the loopback listener.
+//
+// STATED THAT WAY ON PURPOSE, because ruling (h) corrects the overstatement this
+// comment carried until 2026-08-14: that the deployed topology leaves nobody able
+// to send this probe. THE PROBER EXISTS. Every enrolled agent on the loopback
+// listener can send this request, and so can anything at the far end of the
+// tunnel — the probe needs no credential, which is what makes it PRE-auth.
+// What is bounded is the SET OF PARTIES who can ask: parties the operator has
+// already admitted to the machine. What they learn is one bit — "this bus
+// federates" — and no peer id, no roster and no count.
+//
+// That is the SAME GROUND ruling (b) STANDS ON for INVITE-GATE — ground, not a
+// deferral, which is the word (b-CLARIFIED) exists to disclaim: INVITE-GATE is
+// neither deferred nor deprioritised, it remains P0, and ruling (b) says only
+// that it does not BLOCK the federation critical path. It REVERSES ON THE SAME
+// TRIGGERS: a bus bound to a non-loopback interface, a tunnel endpoint
+// shared with a non-operator, or a second local user on any of the machines.
 //
 // # KNOWN RESIDUAL 2: THE CREDENTIAL IS OPERATOR-INSTALLED, NOT INVITE-REDEEMED
 //

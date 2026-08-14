@@ -312,14 +312,50 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		//   - the allow-list means "served with NO credential at all";
 		//   - this means "served with a credential this function cannot read".
 		//
-		// A peer bus is not an enrolled agent. It holds no session token and
-		// there is no route through which it could obtain one, so a bearer
-		// requirement here would be UNSATISFIABLE rather than strict -- the same
-		// shape as /v1/session/complete, which is on the allow-list for exactly
-		// that reason. Its credential is the TLS client certificate, and the
-		// decision belongs to RequirePeerPrincipal, which is fail-closed:
-		// no resolver, no TLS, no certificate, an unknown fingerprint, a
-		// withdrawn binding or an ambiguous one all refuse.
+		// WHY THE BEARER PATH IS SKIPPED, AND IT IS NOT BECAUSE A TOKEN COULD
+		// NEVER BE PRESENTED HERE. An earlier version of this comment argued
+		// that a peer bus is not an enrolled agent, cannot obtain a session
+		// token at all, and that a bearer requirement would therefore be
+		// unsatisfiable -- the same shape as /v1/session/complete on the
+		// allow-list above. THAT PREMISE IS FALSE. A security gate refuted it
+		// (DECISIONS.md, 2026-08-14, the FEDERATION AMENDMENT's ruling (i) --
+		// NOT the 2026-08-08 FEDERATION section, whose rulings stop at (f)) and
+		// peerprincipal.go says so in terms: enrolment is open to a peer bus
+		// like any other client, so a peer bus is ALSO an enrolled principal on
+		// the buses it peers with, and a peer request may well arrive carrying a
+		// valid session token that authMiddleware could authenticate.
+		//
+		// The true reason is CONFLATION, and it is the stronger objection: A
+		// SESSION TOKEN NAMES AN AGENT. Requiring one on a peer route would let
+		// an AGENT credential authorise a BUS-scoped route -- one principal
+		// accepted as the other, which is the confusion invariant 11 exists to
+		// prevent. A bearer requirement here would be SATISFIABLE AND WRONG,
+		// which is why the token is not consulted at all rather than consulted
+		// and found missing. Its credential is the TLS client certificate, and
+		// the decision belongs to RequirePeerPrincipal, which is fail-closed: no
+		// resolver, no TLS, no certificate, an out-of-date leaf, an unknown
+		// fingerprint, a withdrawn binding or an ambiguous one all refuse.
+		//
+		// AND SAY THE REST OF IT, because the sentence above is the half that
+		// flatters us. Invariant 11's cross-check clause is about a MISMATCHED
+		// PAIR -- a session token presented over a certificate belonging to a
+		// DIFFERENT AGENT -- and on this surface there is no pair at all: the
+		// certificate alone authorises. Ruling (i) records that as a NAMED
+		// NARROWING of invariant 11, not as compliance with it, and the cost is
+		// real: a peer's authority has no online revocation (withdrawal is an
+		// offline operator action needing a restart) and nothing caps a peer
+		// certificate's NotAfter. Do not read this arm as "invariant 11 is fully
+		// honoured on peer routes". It is narrowed here, deliberately, and the
+		// narrowing REVERSES the moment a BUS-SCOPED bearer credential exists --
+		// one naming the peer bus rather than an agent -- at which point the
+		// pair becomes constructible and the clause applies unnarrowed.
+		//
+		// SO DO NOT READ THIS AS "LIKE /v1/session/complete, ONLY MORE SO", AND
+		// DO NOT EXTEND IT BY ADDING A PEER PATH TO unauthenticatedRoutes. The
+		// allow-list means NO credential; this means a credential this function
+		// cannot read. The false premise argued for exactly that extension --
+		// the one thing two separate guards exist to prevent -- which is why it
+		// is corrected here rather than merely deleted.
 		//
 		// WHAT MAKES THIS SAFE IS THAT MEMBERSHIP IS DERIVED, NOT DECLARED.
 		// s.peerRoutes is written by exactly one function -- mountPeerRoute --
