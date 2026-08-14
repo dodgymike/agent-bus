@@ -14,6 +14,14 @@
 /.claude/settings.local.json
 /scratch/
 
+# scripts/gen-spec-mirror.sh builds the whole SPEC/ tree here and swaps it in by
+# rename, so the staging dir MUST be a sibling of SPEC/ (same filesystem) rather
+# than under /tmp. It is removed on exit, including on failure; this pattern
+# exists so a crashed run cannot leave a half-built mirror looking like tracked
+# content. SPEC.md and SPEC/ themselves ARE tracked — they are the generated
+# mirror and the server-down fallback.
+/.spec-tree.*
+
 # secrets — NEVER commit key material (CORE-10)
 #
 # This is a mechanical backstop, not a policy. Anything that stages with
@@ -110,6 +118,28 @@ cursors.json.tmp-*
 !*credentials*/
 !*-creds*/
 !*_creds*/
+#
+# ...and the same negation for the two KEY-NAME patterns above, which the
+# 2026-08-08 review missed because nothing generated directory names then.
+# `id_rsa*` and `id_ed25519*` are unanchored PREFIX patterns and they match
+# DIRECTORIES too. `scripts/gen-spec-mirror.sh` now generates one directory per
+# backlog task, named from the task's title — so a task called "id_ed25519 seed
+# import" produces `SPEC/CRYPTO/id_ed25519-seed-import--<id>/`, git declines to
+# descend into it, `!*.md` below never gets the chance to fire, and the task
+# VANISHES from the mirror while `git status --porcelain` stays perfectly clean.
+# That is the silent-drop failure this repo keeps legislating against, arriving
+# through .gitignore instead of through code. Reproduced in a throwaway repo by
+# the security gate (2026-08-14); the generator now also asks git directly, every
+# run, whether it is ignoring any file the generator just wrote.
+#
+# Cost, stated honestly and it is exactly the cost `!*credentials*/` already
+# accepts above: an extension-less FILE inside a directory whose name starts
+# with `id_rsa`/`id_ed25519` (`id_rsa.d/agent01`) becomes trackable again. A key
+# stored at such a path is NOT protected by these patterns — only keys named
+# `id_rsa*` themselves, and `*.pem`/`*.key`/`*.token`, still are. `git add -f`
+# remains the deliberate, review-visible escape hatch in the other direction.
+!id_rsa*/
+!id_ed25519*/
 #
 # DELIBERATELY NOT NEGATED — reviewed 2026-08-08 and both gates agreed:
 #   *.yml / *.yaml — YAML is a DATA format, not source. `credentials.yml`,

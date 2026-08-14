@@ -1,0 +1,95 @@
+# CLI-10: Rewrite AGENT_PROTOCOL.md against CLI subcommands (it currently documents shell wrappers that are being retired)
+
+| Field | Value |
+| --- | --- |
+| Public id | `aba6e399-5e0f-4b3b-985c-eff2ad381715` |
+| Key | CLI-10 |
+| Epic | [CLI](../epic.md) |
+| Status | todo |
+| Priority | P1 |
+| Component | docs |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-02T18:08:17.713059+00:00 |
+| Updated | 2026-08-02T18:08:17.713059+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+! grep -q 'scripts/bus-enrol.sh\|scripts/bus-send.sh\|scripts/bus-wait.sh\|scripts/bus-agents.sh\|scripts/bus-broadcast.sh\|scripts/bus-leave.sh\|scripts/bus-peer.sh' AGENT_PROTOCOL.md && grep -q 'at-least-once' AGENT_PROTOCOL.md
+```
+
+## Description
+
+FILED 2026-08-02. The decision that retired the shell wrappers says in terms: "AGENT_PROTOCOL.md must be
+rewritten against CLI subcommands rather than shell scripts." No task carried that, so it is filed
+here rather than smuggled into a CLI subcommand task.
+
+WHY IT NEEDS ITS OWN TASK: AGENT_PROTOCOL.md is THE agent-facing document -- it is what an agent reads
+to learn how to use the bus. Leaving it describing `scripts/bus-*.sh` while the binary grows
+subcommands means every new agent is onboarded onto a retired interface. And spreading the rewrite
+across CLI-2..CLI-8 guarantees it ends up written eight different ways.
+
+SCOPE.
+ - Rewrite every capability entry against a CLI subcommand: enrol/whoami/use/logout, watch, send,
+   broadcast, agents, log, peers, doctor. Keep the shape agents rely on -- one section per capability,
+   copy-pasteable invocation, exact output shape.
+ - Document the AGENT-FACING contract explicitly, because agents are now a first-class consumer:
+   `--json`, the EXIT-CODE TABLE, NO interactive prompts, NO TTY-dependent credential input, and the
+   fact that the long-poll subcommand streams NDJSON (one object per line, flushed as it arrives).
+ - **STATE AT-LEAST-ONCE DELIVERY.** Required by the decision by name ("Must be stated in PROTOCOL.md
+   and AGENT_PROTOCOL.md"). Duplicates are the NORMAL steady state; the agent's handler must be
+   idempotent; freshness comes from the server-minted monotonic sequence plus the recipient cursor,
+   not from a signature.
+ - State that the client generates its idempotency key ONCE and reuses it across retries, and what
+   happens if a key is reused with a DIFFERENT payload (protocol violation -> disconnect).
+ - State the session model an agent will actually hit: sessions last <=1h, refresh is automatic at 75%
+   of lifetime, sessions DO NOT survive a bus restart (the CLI re-authenticates), and /leave revokes
+   IMMEDIATELY.
+ - Mention the embedding path -- the importable client package -- for agents that would rather link
+   than shell out.
+ - KEEP `scripts/bus-serve.sh`: it is an operator/server-lifecycle tool, not an agent protocol call,
+   it is the only surviving wrapper, and it is load-bearing in several proof_cmds. Say so, so nobody
+   deletes it during the wrapper cull.
+
+SEQUENCING: written incrementally as CLI subcommands land; the final sweep after CLI-8. Do not write
+entries for subcommands that do not exist -- an AGENT_PROTOCOL.md documenting vapour is worse than one
+documenting a wrapper.
+
+PROOF. `! grep -q 'scripts/bus-{enrol,send,wait,agents,broadcast,leave,peer}.sh' AGENT_PROTOCOL.md && grep -q 'at-least-once' AGENT_PROTOCOL.md`
+-- the negative clause proves the retired wrappers are GONE from the doc (the actual deliverable) and
+the positive clause pins the one statement the decision mandates by name. Deliberately does NOT
+mention bus-serve.sh, which is allowed to remain.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+_None recorded._
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CLI-2](../CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
+- [CLI-8](../CLI-8--ae4caacc/task.md) — CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CONTEXT-DRIFT-WRAPPERS](../../CONTEXT/CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md) — CONTEXT-DRIFT-WRAPPERS: two per-spawn files still call the retired shell wrappers 'the ON… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

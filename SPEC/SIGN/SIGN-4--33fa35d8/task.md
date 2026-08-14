@@ -1,0 +1,66 @@
+# SIGN-4: Replay/freshness -- server-minted monotonic sequence + recipient-side cursor
+
+| Field | Value |
+| --- | --- |
+| Public id | `33fa35d8-2a1e-44ce-ae80-cf460f8e6eca` |
+| Key | SIGN-4 |
+| Epic | [SIGN](../epic.md) |
+| Status | todo |
+| Priority | P1 |
+| Component | crypto |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-02T12:59:07.533867+00:00 |
+| Updated | 2026-08-02T12:59:07.533867+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run TestReplayRejectedByCursor ./internal/...
+```
+
+## Description
+
+GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: a validly-signed message can be replayed VERBATIM by anyone who saw it once (including a malicious bus), and Ed25519 verification of a replayed message succeeds every time because nothing about the signature changes. Do not let an implementer assume signing solves this -- it does not, and the SIGN epic description says so explicitly. This task specifies and implements the defence: the bus mints a monotonic sequence number per recipient (or per conversation -- decide and document which, consistent with invariant 1: ids/sequences are server-minted, never client-supplied) INSIDE SIGN-1's signed bytes, and the recipient maintains a durable delivery cursor (highest sequence accepted so far, per sender or per conversation) that MUST only advance, never rewind (same shape as the durable-store invariants 4/5: the cursor is part of the recipient's serving state, rebuilt by replay on restart). A message whose sequence is <= the cursor is rejected as a replay BEFORE the body is handed to the calling agent, even if its signature verifies. State plainly what this does and does not cover: it defeats verbatim replay of a message already delivered; it does NOT provide encryption or hide metadata (accepted per RATCHET-2's rescope). Tests: replaying the exact same signed envelope after successful delivery is rejected; out-of-order delivery within a reasonable window is handled sanely (define the policy -- reject strictly increasing-only, or allow a bounded reorder window, and say why); a cursor is durable across a recipient-side restart (crash-injection style test per CLAUDE.md's durability discipline, since this is exactly invariant-4/5 territory even though it lives on the recipient side, not the bus's WAL).
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **relates to** [IDEM-5](../../IDEM/IDEM-5--9631dfcb/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
+- [SIGN-1](../SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)
+- [CRYPTO-12](../../CRYPTO/CRYPTO-12--eb1827ff/task.md) — CRYPTO-12: PROTOCOL.md wire format + CONTRACTS.md for the crypto surface (todo)
+- [CRYPTO-7](../../CRYPTO/CRYPTO-7--f90d7889/task.md) — CRYPTO-7: Ratchet-state durability and recovery (CRASH-INJECTION TEST REQUIRED) (deferred)
+- [IDEM-14](../../IDEM/IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
+- [IDEM-5](../../IDEM/IDEM-5--9631dfcb/task.md) — IDEM-5: Same key + DIFFERENT payload is a protocol violation -- reject, log, and disconne… (superseded)
+- [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
+- [RATCHET-5](../../RATCHET/RATCHET-5--e376433d/task.md) — RATCHET-5: Ratchet state durability vs invariants 4/5 -- the key-reuse trap (superseded)
+- [SIGN-5](../SIGN-5--5cedc580/task.md) — SIGN-5: MANDATORY negative-test suite -- prove the verifier rejects everything it must (todo)
+- [SIGN-6](../SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
+- [SIGN-7](../SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

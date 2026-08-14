@@ -1,0 +1,70 @@
+# CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every proof_cmd
+
+| Field | Value |
+| --- | --- |
+| Public id | `360a2679-b5dc-4b17-863f-fb4462764e6d` |
+| Key | _(null in the export)_ |
+| Epic | [DOCS](../epic.md) |
+| Status | done |
+| Priority | P1 |
+| Component | documentation |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-02T20:35:30.009928+00:00 |
+| Updated | 2026-08-08T10:29:49.886969+00:00 |
+| Completed | 2026-08-02T21:03:41.712245+00:00 |
+
+## Proof command
+
+```sh
+test -f CONTRACTS-HTTP.md && test -f CONTRACTS-ONDISK.md && test -f CONTRACTS-AGENT.md && test -f CONTRACTS-CLI.md && grep -q "CONTRACTS-HTTP.md" CONTRACTS.md && grep -q "CONTRACTS-ONDISK.md" CONTRACTS.md && grep -q "CONTRACTS-AGENT.md" CONTRACTS.md && grep -q "CONTRACTS-CLI.md" CONTRACTS.md && ! grep -q "^## Routes" CONTRACTS.md
+```
+
+## Status note
+
+CODE-COMPLETE, UNCOMMITTED: CONTRACTS.md split into CONTRACTS-CLI.md/CONTRACTS-HTTP.md/CONTRACTS-ONDISK.md/CONTRACTS-AGENT.md as a pure content move (verified byte-for-byte via mechanical diff), CONTRACTS.md left as an index, CLAUDE.md repo-layout+step9 updated, 7 dependent tasks'  proof_cmds retargeted and re-verified via proof-check.sh. Awaiting commit by the orchestrator; complete this task with the real commit_sha once committed.
+
+## Description
+
+Split the single CONTRACTS.md file into per-plane files (a pure content move, verbatim, no rewording) to remove a single-writer chokepoint that has caused three P0s in two consecutive triage loops. Keep CONTRACTS.md at the old path as an index. Retarget every queued task whose proof_cmd or description names CONTRACTS.md and specific line numbers, since after the split those line numbers move to different files. Update CLAUDE.md's repository-layout section and step-9 workflow instruction to say which file to update for which surface. Known affected tasks to repoint: c27f9439 (AUTH-1-FU-LISTENADDR), b0a5630b (LISTENADDR-FU-CONTRACTS, needs a proof_cmd added), 5b178dde (DUR-11-FU-CONTRACTS), 8c9b6489 (ID-2-WIRING-SEAL), c31f6999 (ID-2-WIRING-OBSERVER), 2d92b699 (AUTH-1-FU-ACTIVECAP), a24bb214 (DOCS-3).
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+_None recorded._
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-1-FU-ACTIVECAP](../../AUTH/AUTH-1-FU-ACTIVECAP--2d92b699/task.md) — AUTH-1-FU-ACTIVECAP: cap ACTIVE sessions per agent -- the one place an agent-id-keyed cap… (done)
+- [AUTH-1-FU-LISTENADDR](../../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) — AUTH-1-FU-LISTENADDR: default listen address is :8080 (all interfaces) but DECISIONS.md s… (done)
+- [DOCS-3](../DOCS-3--a24bb214/task.md) — DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table (todo)
+- [DUR-11-FU-CONTRACTS](../DUR-11-FU-CONTRACTS--5b178dde/task.md) — DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy… (todo)
+- [ID-2-WIRING-OBSERVER](../../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
+- [ID-2-WIRING-SEAL](../../ID/ID-2-WIRING-SEAL--8c9b6489/task.md) — ID-2-WIRING-SEAL: Sequence refuses to issue from an UNSEALED floor (the only half impleme… (done)
+- [LISTENADDR-FU-CONTRACTS](../LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) — LISTENADDR-FU-CONTRACTS: CONTRACTS.md CLI-flag table still shows -listen default :8080 (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CONTEXT-DRIFT-WRAPPERS](../../CONTEXT/CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md) — CONTEXT-DRIFT-WRAPPERS: two per-spawn files still call the retired shell wrappers 'the ON… (todo)
+- [DOCS-3](../DOCS-3--a24bb214/task.md) — DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table (todo)
+- [DUR-11-FU-CONTRACTS](../DUR-11-FU-CONTRACTS--5b178dde/task.md) — DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy… (todo)
+- [ID-2-WIRING-SEAL-FU-CONTRACTS](../../ID/ID-2-WIRING-SEAL-FU-CONTRACTS--9c183c8e/task.md) — ID-2-WIRING-SEAL-FU-CONTRACTS: land the Sequence seal contract rows that the file-boundar… (todo)
+- [f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78](../Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md) — Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:12… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

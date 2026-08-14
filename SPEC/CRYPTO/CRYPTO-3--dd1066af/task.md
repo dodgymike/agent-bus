@@ -1,0 +1,70 @@
+# CRYPTO-3: Enrolment mints and registers the second (messaging) keypair, bound to the server-minted id
+
+| Field | Value |
+| --- | --- |
+| Public id | `dd1066af-4a03-4d20-bdbe-25494637eea5` |
+| Key | CRYPTO-3 |
+| Epic | [CRYPTO](../epic.md) |
+| Status | todo |
+| Priority | P1 |
+| Component | auth |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-02T09:41:20.045954+00:00 |
+| Updated | 2026-08-02T13:08:02.267498+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run TestEnrolMessagingKey ./internal/auth ./internal/httpapi
+```
+
+## Description
+
+RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify via libsodium-equivalent; encryption later"): this messaging keypair is now a SIGNING identity, not an E2E-encryption identity. Algorithm: Ed25519 (crypto/ed25519, Go stdlib since 1.13 -- no toolchain bump needed; invariant 9 -- audited high-level Sign/Verify API, we implement no primitive). Extend enrolment (AUTH-1) so an agent ends up with TWO keypairs: the AUTH keypair (existing -- presented at enrolment, server-signed, used for the bearer credential on every route) and a MESSAGING (signing) identity keypair used only to sign/verify message bodies (SIGN-1/SIGN-2). The agent generates the messaging keypair LOCALLY and registers the public half at enrolment -- the private key never leaves the agent, never reaches the bus. This separation is the whole security value of the SIGN epic, stated explicitly: the bus verifies AUTH keys, but a message signature is verified by the RECIPIENT, so a compromised or malicious bus cannot forge a message from agent A. The server MUST bind the messaging public key to the fully-qualified server-minted <bus-id>.<agent-id> (invariants 1 and 2) -- a client-asserted identity is input to validate, never an identity to trust. Persist the binding in the roster (AUTH-3) so it survives recovery. Cover: re-enrolment with a different messaging key, enrolment with a malformed/wrong-length key (Ed25519 public keys are a fixed 32 bytes -- reject anything else), and an attempt to register a key against someone else's id. Do NOT ship the key-distribution endpoint here -- that is CRYPTO-4. NOT NEEDED under this rescope (drop if present in any earlier draft): X25519 DH keys, signed prekeys, one-time prekeys -- those were X3DH-specific and there is no X3DH.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **blocked by** [CRYPTO-1](../CRYPTO-1--30570fb9/task.md)
+- **blocks** [SIGN-2](../../SIGN/SIGN-2--1c183f10/task.md)
+- **blocks** [SIGN-8](../../SIGN/SIGN-8--71ef73d5/task.md)
+- **relates to** [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-1](../../AUTH/AUTH-1--54fa94c0/task.md) — AUTH-1: POST /v1/enroll -- signed credential issuance (done)
+- [AUTH-3](../../AUTH/AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (in_progress)
+- [CRYPTO-4](../CRYPTO-4--13f3947e/task.md) — CRYPTO-4: Key-distribution endpoint -- server-attested messaging key bundles (todo)
+- [SIGN-1](../../SIGN/SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
+- [SIGN-2](../../SIGN/SIGN-2--1c183f10/task.md) — SIGN-2: Sign on the send path (Ed25519 detached signature travels with the message) (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-1](../../AUTH/AUTH-1--54fa94c0/task.md) — AUTH-1: POST /v1/enroll -- signed credential issuance (done)
+- [CRYPTO-12](../CRYPTO-12--eb1827ff/task.md) — CRYPTO-12: PROTOCOL.md wire format + CONTRACTS.md for the crypto surface (todo)
+- [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
+- [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md) — RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… (done)
+- [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (todo)
+- [SIGN-1](../../SIGN/SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
+- [SIGN-2](../../SIGN/SIGN-2--1c183f10/task.md) — SIGN-2: Sign on the send path (Ed25519 detached signature travels with the message) (todo)
+- [SIGN-8](../../SIGN/SIGN-8--71ef73d5/task.md) — SIGN-8: Agent-side messaging key material -- \`agent-bus keygen\`, key file location/permis… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

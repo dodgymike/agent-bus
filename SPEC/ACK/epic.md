@@ -1,0 +1,40 @@
+# EPIC ACK — ACK: End-to-end authenticated delivery ACK/NACK
+
+[← all epics](../../SPEC.md)
+
+**12 open / 12 total.** Full records live in `SPEC/ACK/<task>/task.md`.
+
+_Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
+
+## Open tasks (12)
+
+| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
+| --- | --- | --- | --- | --- | --- | --- |
+| ACK-1 | ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine | todo | P0 | [task.md](ACK-1--e0ac42e1/task.md) | blocks [ACK-10](ACK-10--cf417e18/task.md)<br>blocks [ACK-11](ACK-11--5567f490/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md)<br>blocks [ACK-2](ACK-2--9564f953/task.md)<br>blocks [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-4](ACK-4--aeb32123/task.md)<br>+6 more (see task.md) | — |
+| ACK-12 | ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance | todo | P0 | [task.md](ACK-12--17406b3a/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-10](ACK-10--cf417e18/task.md)<br>blocked by [ACK-11](ACK-11--5567f490/task.md)<br>blocked by [ACK-5](ACK-5--5991ee1a/task.md)<br>blocked by [ACK-6](ACK-6--d3c50d33/task.md)<br>blocked by [ACK-7](ACK-7--b7bf9631/task.md)<br>+4 more (see task.md) | [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |
+| ACK-2 | ACK-2: Durable local send acceptance and ACK/NACK lifecycle record | todo | P0 | [task.md](ACK-2--9564f953/task.md) | blocked by [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md)<br>blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md)<br>blocks [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-6](ACK-6--d3c50d33/task.md)<br>blocks [ACK-7](ACK-7--b7bf9631/task.md)<br>+2 more (see task.md) | [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) |
+| ACK-3 | ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation | todo | P0 | [task.md](ACK-3--263c47fe/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-2](ACK-2--9564f953/task.md)<br>blocked by [ACK-4](ACK-4--aeb32123/task.md)<br>blocks [ACK-10](ACK-10--cf417e18/task.md)<br>blocks [ACK-5](ACK-5--5991ee1a/task.md)<br>blocks [ACK-7](ACK-7--b7bf9631/task.md)<br>+2 more (see task.md) | — |
+| ACK-4 | ACK-4: ACK/NACK authorization, anti-forgery and privacy review implementation | todo | P0 | [task.md](ACK-4--aeb32123/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocks [ACK-3](ACK-3--263c47fe/task.md) | — |
+| ACK-7 | ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling | todo | P0 | [task.md](ACK-7--b7bf9631/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-2](ACK-2--9564f953/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md)<br>blocks [ACK-8](ACK-8--bc12541b/task.md) | — |
+| ACK-8 | ACK-8: ACK/NACK restart, replay and crash-consistency recovery | todo | P0 | [task.md](ACK-8--bc12541b/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-2](ACK-2--9564f953/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocked by [ACK-7](ACK-7--b7bf9631/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | — |
+| ACK-10 | ACK-10: ACK/NACK compatibility, version negotiation and downgrade safety | todo | P1 | [task.md](ACK-10--cf417e18/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | — |
+| ACK-5 | ACK-5: Multi-hop relay ACK/NACK propagation and correlation | todo | P1 | [task.md](ACK-5--5991ee1a/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocked by [ACK-6](ACK-6--d3c50d33/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | [RELAY-19](../RELAY/RELAY-19--24e0bd11/task.md) |
+| ACK-6 | ACK-6: Recipient delivery acknowledgement boundary | todo | P1 | [task.md](ACK-6--d3c50d33/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-2](ACK-2--9564f953/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md)<br>blocks [ACK-5](ACK-5--5991ee1a/task.md) | [ACK-1](ACK-1--e0ac42e1/task.md) |
+| ACK-9 | ACK-9: Sender CLI/API acknowledgement status and observability | todo | P1 | [task.md](ACK-9--08f9987f/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-2](ACK-2--9564f953/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | — |
+| ACK-11 | ACK-11: Document ACK/NACK semantics, operations and privacy limits | todo | P2 | [task.md](ACK-11--5567f490/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | [ACK-1](ACK-1--e0ac42e1/task.md) |
+
+## Closed tasks (0) — done, cancelled, superseded
+
+_None._
+
+## Epic description
+
+Planning epic for end-to-end message acknowledgement. Assumption: the user’s “ack/ack” means ACK/NACK (positive and negative acknowledgement), not two positive ACK phases. Planning only: creating this epic implements and promises no ACK/NACK semantics.
+
+Goal: authenticated, durable, correlation-safe sender-visible terminal delivery outcome across local acceptance, relay hops, recipient acknowledgement, retries/restart and a three-bus topology. Existing federation work is reused: WAL checkpoint foundation a1cbef29, bounded tombstone follow-on 617ffe5a, RELAY-19 forwarding, and DEPLOY-3 compose acceptance remain dependencies rather than duplicated.
+
+Open decisions / risks (ACK-1 must resolve before implementation): (1) whether “delivery ACK” means durable recipient inbox receipt or explicit application consumption; (2) ACK/NACK timeout, retry horizon and terminal-record retention without reopening resurrection/resource exhaustion; (3) broadcast fan-out aggregation, partial NACKs and sender-visible quorum/recipient privacy; (4) durable NACK taxonomy—transient hop failure versus terminal policy/recipient refusal—and which details may be disclosed; (5) correlation identifiers and signatures across routed paths, anti-forgery/replay, downgraded peers and version negotiation. Any choice that weakens invariants requires a dated DECISIONS.md record.
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh`; never hand-edit._

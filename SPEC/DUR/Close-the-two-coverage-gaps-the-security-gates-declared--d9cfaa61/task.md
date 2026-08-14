@@ -1,0 +1,60 @@
+# Close the two coverage gaps the security gates declared UNVERIFIED on the seq-floor/data-dir work: the exhaustive describeLogRepair fail-open analysis and the high-floor blast-radius sweep
+
+| Field | Value |
+| --- | --- |
+| Public id | `d9cfaa61-d643-44eb-b38f-22dbd29e6692` |
+| Key | _(null in the export)_ |
+| Epic | [DUR](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | test |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-08T15:32:08.196019+00:00 |
+| Updated | 2026-08-08T15:32:08.196019+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run 'TestDescribeLogRepairArmsSurviveARestartAsDocumented|TestHighSeqFloorBlastRadius' ./cmd/agent-bus ./internal/hub
+```
+
+## Description
+
+HONEST COVERAGE RECORD, filed so these are not mistaken for verified-clean. Both security gates on be447589-6583-4d5c-a9d4-ec9d9fef0f1c dispatched sub-agents that DID NOT RETURN before the gates were asked to wrap up, and both said so explicitly rather than implying full coverage. This task carries what they could not finish.
+
+UNVERIFIED ITEM 1 -- exhaustive `describeLogRepair` fail-open analysis. cmd/agent-bus/logrepair.go now carries five arms (Quarantined, Truncated, Rewritten, LostUnidentified, and the narrow `rec.Records == 0 && rec.NextIndex > 1` emptied-log arm). Two arms have ALREADY been added and removed for permanently bricking a healthy directory (the NextIndex accounting arm and the MissingRecords arm -- both removals are documented in place at logrepair.go:106-135 and :160-175). No exhaustive analysis exists of which of the SURVIVING arms are one-shot versus durable across restart, so the per-shape claim ("TRUNCATED->ONE-SHOT, INTERIOR->ONE-SHOT, QUARANTINE->every start") rests on targeted tests rather than a sweep.
+
+UNVERIFIED ITEM 2 -- full high-floor blast-radius sweep. What a floor near `maxPlausibleSeqFloor` does to every downstream consumer was not swept. Overlaps the JSON safe-integer task; do that one first if both are picked up.
+
+ITEM 3 -- RECORDED, AND IT IS NOW STALE. One gate flagged, in its own words, as "UNVERIFIED BY ME, NOT SUSPECTED BROKEN" (preserve that distinction -- it is not a suspicion of a defect): whether `MissingRecords` in `highestIndexSeen` (cited as cmd/agent-bus/logrepair.go:81-86) can ever extend PAST the last surviving record, since if it can, that addition inflates `highestIndexSeen` and masks a real loss -- the one fail-open that would matter.
+
+    spec-keeper CHECKED THIS AT HEAD 16da89f AND IT NO LONGER APPLIES AS WRITTEN: `highestIndexSeen` HAS BEEN REMOVED. `grep -n 'highestIndexSeen|MissingRecords' cmd/agent-bus/logrepair.go` returns only COMMENTS -- :106 ("MissingRecords IS NOT COUNTED, and this is the second arm removed for the same reason on the same day") and :162 (documenting that the highestIndexSeen arm was removed 2026-08-08 because it bricked healthy directories). Neither symbol is referenced in any live code path under cmd/agent-bus. So the specific fail-open the gate could not rule out is not reachable, because the code that would have contained it is gone.
+
+    THE UNDERLYING QUESTION SURVIVES THE REMOVAL AND IS ALREADY TRACKED: distinguishing "hole because records were lost" from "hole because a reservation was burned" needs the highest index a record actually CONSUMED, which is exactly task 9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2 ("Expose on wal.Recovered the highest index a record actually CONSUMED"). logrepair.go:126-135 says so in the code. Do NOT re-file it here.
+
+PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/proof-check.sh '<proof_cmd>'` -> verdict=VACUOUS, exit 4, tests_run=0, empty_pkgs=2 ("the -run pattern matched nothing, so this command proves nothing"). This proof is VACUOUS TODAY, NOT RED, because neither named test exists -- it names the evidence that must be created. Per CLAUDE.md this task MUST NOT be completed while the proof is still VACUOUS.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **follow-up of** [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2](../Expose-on-wal.Recovered-the-highest-index-a-record-actua--9fd58deb/task.md) — Expose on wal.Recovered the highest index a record actually CONSUMED (todo)
+- [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md) — Enforce data-directory permissions at startup, and bound the message-seq floor (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

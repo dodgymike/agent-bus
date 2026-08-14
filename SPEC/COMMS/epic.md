@@ -1,0 +1,41 @@
+# EPIC COMMS — COMMS: measuring inter-agent communication quality on the bus
+
+[← all epics](../../SPEC.md)
+
+**13 open / 13 total.** Full records live in `SPEC/COMMS/<task>/task.md`.
+
+_Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
+
+## Open tasks (13)
+
+| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
+| --- | --- | --- | --- | --- | --- | --- |
+| COMMS-CONSENT | Ask consent from the non-orchestrator agents whose messages are in the corpus | todo | P1 | [task.md](COMMS-CONSENT--1ae2403b/task.md) | blocks [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md)<br>blocks [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md)<br>blocks [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md)<br>blocks [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md)<br>blocks [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) |
+| COMMS-CORPUS | Extract a real inter-agent message corpus (mechanical, not asserted) | todo | P1 | [task.md](COMMS-CORPUS--075d0c32/task.md) | blocks [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md)<br>blocks [COMMS-READER](COMMS-READER--07a4aa0c/task.md)<br>blocks [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md)<br>blocks [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md)<br>blocks [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) |
+| COMMS-TOKENS | Fix the kind=model cost channel -- make token counts real (independently justified, survi… | todo | P1 | [task.md](COMMS-TOKENS--a37a180f/task.md) | blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | — |
+| COMMS-DOC | Write up the COMMS epic findings and recommendations | todo | P2 | [task.md](COMMS-DOC--d899d622/task.md) | blocked by [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md)<br>blocked by [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md)<br>blocked by [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md)<br>blocked by [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md)<br>blocked by [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md)<br>blocked by [COMMS-TOKENS](COMMS-TOKENS--a37a180f/task.md)<br>+1 more (see task.md) | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md) [COMMS-TOKENS](COMMS-TOKENS--a37a180f/task.md) +2 more |
+| COMMS-METRICS | Define measurable message-quality metrics against the corpus, honestly denominated | todo | P2 | [task.md](COMMS-METRICS--ee18aa5f/task.md) | blocked by [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md)<br>blocked by [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) |
+| COMMS-MULTI | Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN | todo | P2 | [task.md](COMMS-MULTI--e7210d98/task.md) | blocked by [COMMS-MULTI-DESIGN](COMMS-MULTI-DESIGN--8e56075b/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | [COMMS-MULTI-DESIGN](COMMS-MULTI-DESIGN--8e56075b/task.md) |
+| COMMS-MULTI-DESIGN | Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 | todo | P2 | [task.md](COMMS-MULTI-DESIGN--8e56075b/task.md) | blocks [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md) | [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md) |
+| COMMS-READER | Build a corpus reader tool for message-exchange review | todo | P2 | [task.md](COMMS-READER--07a4aa0c/task.md) | blocked by [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) | [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-TYPES](COMMS-TYPES--f17ec5ab/task.md) |
+| COMMS-RETRACT | Determine whether message retraction needs explicit protocol marking | todo | P2 | [task.md](COMMS-RETRACT--dd4b739c/task.md) | blocked by [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md)<br>blocked by [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
+| COMMS-STRUCT | Measure whether heavy message structure pays off -- pre-registered, mechanically ordered | todo | P2 | [task.md](COMMS-STRUCT--6829b61c/task.md) | blocked by [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md)<br>blocked by [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
+| COMMS-THREAD-TRIAL | Trial threading via convention (no wire field) and measure whether it's enough | todo | P2 | [task.md](COMMS-THREAD-TRIAL--3a7705b8/task.md) | blocked by [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md)<br>blocks [COMMS-THREAD-FIELD](COMMS-THREAD-FIELD--35db4a7b/task.md) | [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md) [COMMS-THREAD-FIELD](COMMS-THREAD-FIELD--35db4a7b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
+| COMMS-TYPES | Define a message verdict-class / type taxonomy from measured corpus usage | todo | P2 | [task.md](COMMS-TYPES--f17ec5ab/task.md) | blocked by [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md)<br>blocked by [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md)<br>blocks [COMMS-DOC](COMMS-DOC--d899d622/task.md) | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
+| COMMS-THREAD-FIELD | Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… | blocked | P3 | [task.md](COMMS-THREAD-FIELD--35db4a7b/task.md) | blocked by [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) | [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md) |
+
+## Closed tasks (0) — done, cancelled, superseded
+
+_None._
+
+## Epic description
+
+Inter-agent communication over the bus: establish by measurement, not assertion, what a well-formed message between independent agents looks like -- and what the bus must support to make good communication possible -- with every recommendation carrying the observation that would retire it.
+
+SCHEDULING RULE (recorded here, applies to the whole epic): nothing in COMMS is P0, and nothing in it may be scheduled ahead of the open P0 work or the RELAY federation epic (currently the user's top priority -- ~29-32 open tasks, ~10-11 P0, measured 2026-08-08). The three P1s in this epic (COMMS-CORPUS, COMMS-TOKENS, COMMS-CONSENT) are P1 on perishability and existing-contract breakage, not on epic importance -- do not read P1 here as "ahead of RELAY P0s".
+
+See epic notes for: Finding A (broadcast 501 does not block multi-party send), Finding B (kind=model cost channel 100% unmet), corpus corrections to an earlier claim, the five measuring-the-instrument threats and their mitigations, decide-vs-measure recommendations, and the rejected A/B-testing-real-tasks proposal (flagged to the user as an open question, not a closed decision).
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh`; never hand-edit._

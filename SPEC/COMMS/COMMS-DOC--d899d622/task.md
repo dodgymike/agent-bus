@@ -1,0 +1,93 @@
+# Write up the COMMS epic findings and recommendations
+
+| Field | Value |
+| --- | --- |
+| Public id | `d899d622-e3c0-462c-8e48-5fdc0d3fd1be` |
+| Key | COMMS-DOC |
+| Epic | [COMMS](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | comms |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-08T17:12:02.157913+00:00 |
+| Updated | 2026-08-08T17:12:02.157913+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+test -f docs/comms/COMMS_FINDINGS.md && grep -qi 'retiring observation' docs/comms/COMMS_FINDINGS.md && echo FINDINGS_OK
+```
+
+## Description
+
+Synthesize the epic's measurement outputs (COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES,
+COMMS-THREAD-TRIAL, COMMS-RETRACT, COMMS-TOKENS, and COMMS-MULTI if landed) into a single
+docs/comms/COMMS_FINDINGS.md: what a well-formed inter-agent message looks like on this bus, which
+recommendations are backed by a measurement and which are decided-not-measured (per the epic's own
+adopted convention), and -- for every recommendation -- the observation that would retire it, per
+the epic description's own standing requirement. Update AGENT_PROTOCOL.md / CONTRACTS-HTTP.md if
+any wire-level change landed (COMMS-MULTI, and COMMS-THREAD-FIELD if it unblocked and shipped).
+
+Definition of done:
+  1. docs/comms/COMMS_FINDINGS.md covering: corpus corrections, Finding A/B outcomes, each measured
+     question's result (structure, threading, retraction), the token-cost-channel fix status, and
+     an explicit "retiring observation" per recommendation.
+  2. Doc updates to any CONTRACTS-*.md / AGENT_PROTOCOL.md entries affected by COMMS-MULTI or
+     COMMS-THREAD-FIELD, if either shipped.
+  3. The rejected A/B-real-backlog-tasks proposal recorded here as a still-open question flagged to
+     the user (not resolved by this doc), per the epic notes.
+
+Parallel-safety: standalone synthesis/writing task; depends on the substance of the tasks below
+existing, not on any live-bus access itself.
+
+Depends on: COMMS-METRICS, COMMS-STRUCT, COMMS-TYPES, COMMS-THREAD-TRIAL, COMMS-RETRACT,
+COMMS-TOKENS, COMMS-MULTI.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **blocked by** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
+- **blocked by** [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md)
+- **blocked by** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
+- **blocked by** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
+- **blocked by** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
+- **blocked by** [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md)
+- **blocked by** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
+- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
+- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md) — Fix the kind=model cost channel -- make token counts real (independently justified, survi… (todo)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._
