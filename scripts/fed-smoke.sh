@@ -14,7 +14,7 @@
 #   * CLI-11 must add `agent-bus key export-public --data-dir ... --json`.
 #   * INVITE-CLIENT/INVITE-GATE must make `agent-busctl enrol --invite-file ...`
 #     redeem an operator-minted JSON invite without exposing its secret in argv.
-#   * CLI-6 must add `agent-busctl log --data-dir ... --json`, with ordered
+#   * CLI-6 must add `agent-bus log --data-dir ... --json`, with ordered
 #     `bus_path` on every audit record.
 #   * RELAY-20, RELAY-21, and RELAY-24 must mount, accept, and compose the relay
 #     runtime after RELAY-41 supplies next-hop certificate pins.
@@ -116,9 +116,9 @@ cleanup() {
   stop_owned_bus "$ROOT_C" "$RUN_C" "$DATA_C" 127.0.0.1:9103
 
   if (( status == 0 )); then
-    remove_owned_root "$ROOT_A"
-    remove_owned_root "$ROOT_B"
-    remove_owned_root "$ROOT_C"
+    owns_root "$ROOT_A" && remove_owned_root "$ROOT_A"
+    owns_root "$ROOT_B" && remove_owned_root "$ROOT_B"
+    owns_root "$ROOT_C" && remove_owned_root "$ROOT_C"
   else
     note "FAILED (exit $status); stopped owned buses and preserved artifacts:"
     note "  $ROOT_A"
@@ -127,9 +127,35 @@ cleanup() {
   fi
   exit "$status"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+
+preflight() {
+  local -a stale_roots=() occupied_ports=()
+  local root port
+
+  for root in "$ROOT_A" "$ROOT_B" "$ROOT_C"; do
+    [[ ! -e "$root" && ! -L "$root" ]] || stale_roots+=("$root")
+  done
+  command -v ss >/dev/null 2>&1 ||
+    die "preflight requires ss to verify that loopback ports 9101-9103 are free"
+  for port in 9101 9102 9103; do
+    [[ -z "$(ss -H -ltn "sport = :$port")" ]] || occupied_ports+=("$port")
+  done
+
+  if (( ${#stale_roots[@]} == 0 && ${#occupied_ports[@]} == 0 )); then
+    return 0
+  fi
+  note "preflight refused to alter existing resources"
+  if (( ${#stale_roots[@]} > 0 )); then
+    note "stale smoke roots: ${stale_roots[*]}"
+    note "manual remediation: inspect them, then remove only confirmed stale roots with: rm -rf -- ${stale_roots[*]}"
+  fi
+  if (( ${#occupied_ports[@]} > 0 )); then
+    note "occupied loopback ports: ${occupied_ports[*]}"
+    note "manual remediation: identify their owners with: ss -ltnp 'sport = :9101 or sport = :9102 or sport = :9103'"
+    note "then stop those owner processes through their normal lifecycle command; this script will not kill them"
+  fi
+  die "resolve every preflight finding above, then rerun"
+}
 
 json_string() {
   local document="$1" field="$2" value=""
@@ -187,9 +213,9 @@ enrol_agent() {
 }
 
 read_audit() {
-  local data_dir="$1" output="$2" bus_name="$3"
-  "$CTL" log --data-dir "$data_dir" --json >"$output" ||
-    die "BLOCKED: CLI-6 agent-busctl log is unavailable for $bus_name"
+  local server="$1" data_dir="$2" output="$3" bus_name="$4"
+  "$server" log --data-dir "$data_dir" --json >"$output" ||
+    die "BLOCKED: CLI-6 agent-bus log is unavailable for $bus_name"
 }
 
 assert_audit_path() {
@@ -209,9 +235,78 @@ assert_audit_path() {
     die "$bus_name audit record for $message_id does not have bus_path=$expected_path"
 }
 
+classify_zero_delivery() {
+  local file="$1" message_id="$2" expected_path="$3"
+  local path_count="" message_count=""
+  path_count="$(jq -s --arg id "$message_id" --argjson path "$expected_path" '
+    [.[] | if type == "array" then .[] else . end |
+      select(.message_id == $id and .bus_path == $path)] | length
+  ' "$file" 2>/dev/null)" || return 2
+  message_count="$(jq -s --arg id "$message_id" '
+    [.[] | if type == "array" then .[] else . end |
+      select(.message_id == $id)] | length
+  ' "$file" 2>/dev/null)" || return 2
+  if (( path_count == 1 && message_count == 1 )); then
+    return 0
+  elif (( message_count > 1 )); then
+    return 3
+  fi
+  # A record without the complete path is evidence that the end-to-end relay
+  # was not established, whether the message is absent or only partially seen.
+  [[ "$message_count" =~ ^[0-9]+$ ]] || return 2
+  return 1
+}
+
+run_classifier_self_test() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' RETURN
+  printf '%s\n' '{"message_id":"m1","bus_path":["a","b","c"]}' >"$work/complete"
+  printf '%s\n%s\n' \
+    '{"message_id":"m1","bus_path":["a","b","c"]}' \
+    '{"message_id":"m1","bus_path":["a","b","c"]}' >"$work/duplicate"
+  printf '%s\n%s\n' \
+    '{"message_id":"m1","bus_path":["a","b","c"]}' \
+    '{"message_id":"m1","bus_path":["a","b"]}' >"$work/mixed-duplicate"
+  printf '%s\n' '{"message_id":"m1","bus_path":["a","b"]}' >"$work/partial"
+  printf '%s\n' '{not-json' >"$work/malformed"
+  classify_zero_delivery "$work/complete" m1 '["a","b","c"]' || die "classifier self-test: complete path"
+  if classify_zero_delivery "$work/duplicate" m1 '["a","b","c"]'; then
+    die "classifier self-test: duplicate complete paths classified as watch timeout"
+  else
+    [[ $? == 3 ]] || die "classifier self-test: duplicate path classification"
+  fi
+  if classify_zero_delivery "$work/mixed-duplicate" m1 '["a","b","c"]'; then
+    die "classifier self-test: mixed duplicate paths classified as watch timeout"
+  else
+    [[ $? == 3 ]] || die "classifier self-test: mixed duplicate classification"
+  fi
+  if classify_zero_delivery "$work/partial" m1 '["a","b","c"]'; then
+    die "classifier self-test: partial path classified as complete"
+  else
+    [[ $? == 1 ]] || die "classifier self-test: partial path classification"
+  fi
+  if classify_zero_delivery "$work/malformed" m1 '["a","b","c"]'; then
+    die "classifier self-test: malformed audit classified as complete"
+  else
+    [[ $? == 2 ]] || die "classifier self-test: malformed audit classification"
+  fi
+  note "PASS: zero-delivery audit classifier fixtures"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  command -v jq >/dev/null 2>&1 || die "jq is required for classifier self-test"
+  run_classifier_self_test
+  exit 0
+fi
+
 command -v jq >/dev/null 2>&1 || die "jq is required to validate compiled --json output"
 [[ -x "$SERVE" ]] || die "sanctioned lifecycle command is not executable: $SERVE"
 
+preflight
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 claim_root "$ROOT_A"
 claim_root "$ROOT_B"
 claim_root "$ROOT_C"
@@ -305,13 +400,38 @@ jq -e '.replayed == true' >/dev/null <<<"$send_two" || die "second send did not 
 
 watch_file="${ROOT_C}/recipient-watch.ndjson"
 note "bounded replay-watch on C; waiting for one retained logical message"
+set +e
 "$CTL" --identity "$IDENTITY_C" --as "$recipient_id" --json watch \
   --replay --no-cursor --for 15s --poll-timeout 1s >"$watch_file"
+watch_status=$?
+set -e
+[[ "$watch_status" == 0 || "$watch_status" == 8 ]] ||
+  die "recipient watch failed with exit $watch_status (expected success or bounded-timeout exit 8)"
 
 delivery_count="$(jq -s --arg id "$message_id" '[.[] | select(.message_id == $id)] | length' "$watch_file")" ||
   die "recipient watch output is not valid NDJSON"
-[[ "$delivery_count" == 1 ]] ||
+if [[ "$delivery_count" == 0 ]]; then
+  # Stabilize C's durable audit before attributing a bounded-watch miss. An
+  # exact terminal path proves relay delivery and makes this an environmental
+  # watch timeout, not a relay failure.
+  stop_owned_bus "$ROOT_A" "$RUN_A" "$DATA_A" 127.0.0.1:9101
+  stop_owned_bus "$ROOT_B" "$RUN_B" "$DATA_B" 127.0.0.1:9102
+  stop_owned_bus "$ROOT_C" "$RUN_C" "$DATA_C" 127.0.0.1:9103
+  audit_c="${ROOT_C}/audit.ndjson"
+  read_audit "$SERVER_C" "$DATA_C" "$audit_c" C
+  if classify_zero_delivery "$audit_c" "$message_id" "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]"; then
+    die "WATCH TIMEOUT/environmental: C audit contains $message_id with bus_path=[$bus_a,$bus_b,$bus_c]; relay delivery succeeded but watch observed zero deliveries"
+  else
+    case $? in
+      1) die "relay not established: C audit lacks $message_id with complete bus_path=[$bus_a,$bus_b,$bus_c]" ;;
+      2) die "unattributable zero-delivery result: C audit output is malformed" ;;
+      3) die "relay delivery invariant failed: C audit contains duplicate complete paths for $message_id" ;;
+      *) die "unattributable zero-delivery result: classifier failed unexpectedly" ;;
+    esac
+  fi
+elif [[ "$delivery_count" != 1 ]]; then
   die "recipient observed $delivery_count deliveries of $message_id; want exactly 1"
+fi
 jq -e --arg id "$message_id" --arg text "$PAYLOAD" --arg from "$sender_id" \
   --arg to "$recipient_id" \
   --argjson path "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]" \
@@ -329,9 +449,9 @@ serve_bus "$RUN_C" "$DATA_C" 127.0.0.1:9103 stop >/dev/null
 audit_a="${ROOT_A}/audit.ndjson"
 audit_b="${ROOT_B}/audit.ndjson"
 audit_c="${ROOT_C}/audit.ndjson"
-read_audit "$DATA_A" "$audit_a" A
-read_audit "$DATA_B" "$audit_b" B
-read_audit "$DATA_C" "$audit_c" C
+read_audit "$SERVER_A" "$DATA_A" "$audit_a" A
+read_audit "$SERVER_B" "$DATA_B" "$audit_b" B
+read_audit "$SERVER_C" "$DATA_C" "$audit_c" C
 
 assert_audit_path "$audit_a" A "$message_id" "[\"$bus_a\"]"
 assert_audit_path "$audit_b" B "$message_id" "[\"$bus_a\",\"$bus_b\"]"
