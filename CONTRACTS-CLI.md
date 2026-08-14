@@ -550,6 +550,329 @@ confirmed RED against a build with the `Applier` removed.
 
 ---
 
+### `agent-bus key export-public` — export this bus's SIGNING PUBLIC KEY
+
+Added 2026-08-14 by `CLI-11`. Source: `cmd/agent-bus/key.go`.
+
+```
+agent-bus key export-public -data-dir <dir> [-json]
+```
+
+It prints the **public half** of this bus's Ed25519 signing key — the value a **peer** bus pins with
+`agent-bus peer add -signing-key`, and the thing that lets that peer verify a message which
+**originated** here. Before this existed there was no compiled way to obtain the value at all: the key
+lived only inside a `0600` PKCS#8 PEM in the data directory, so the federation smoke test
+(`scripts/fed-smoke.sh`) could not take its first step, and the workaround anyone would otherwise
+reach for — scraping the PEM with `openssl` — is exactly what invariant 7 forbids.
+
+**It is a subcommand on the SERVER binary, not on `agent-busctl`,** and this was a deliberate move: the
+task was specified against `agent-busctl`. The authority it needs is **filesystem access** to the data
+directory (`DECISIONS.md` E4), not a network privilege, so it belongs beside `invite mint` and
+`peer add`. `agent-busctl` is a pure HTTP client — it imports only `client/`, touches nothing under
+`internal/`, and has no data-directory or `dirlock` plumbing; giving the network client filesystem and
+lock access to satisfy a spelling would have been a real architectural change justified by nothing.
+
+**THE BUS MUST BE STOPPED.** It takes the data directory's exclusive `dirlock`. Note the lock is *not*
+protecting a write of ours — this command writes no key material, only the `bus.lock` the lock itself
+creates. Holding it is what stops a bus **starting** against a virgin directory from minting key
+material between the presence check and the load.
+`healthcheck` is the deliberate contrast: it takes no lock, because it reads one file and asserts
+nothing about the directory's shape.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | The bus's data directory. **Never created, and neither is any part of the identity in it.** All four of `bus-id`, `bus-tls.crt`, `bus-tls.key` and `bus-signing.key` must already be present (exit `4` otherwise). |
+| `-json` | off | Emit one JSON object on **stdout**. |
+
+Both flag spellings work (`-json` and `--json`): Go's `flag` package treats them identically, so the
+`--data-dir … --json` form `scripts/fed-smoke.sh` uses is accepted as-is.
+
+**There is no flag that exports the private key, and none may be added.** The private half has exactly
+one legitimate location — its own `0600` file — and a backup of that file is the only supported way to
+copy it. A convenience flag would put it in a shell history and a CI log the first time anyone used it.
+
+#### It NEVER mints an identity — the load-bearing property
+
+`buscert.LoadOrCreate` **generates** a certificate and two private keys when the data directory holds
+**none** of the three, and there is no load-only entry point in `internal/buscert`. An *export* command
+that quietly minted would be a **federation-wide identity event triggered by a read**: the operator
+would copy a signing key no bus has ever served, pin it on a peer, and discover the fault only when a
+relayed message failed to verify — which at the peer is indistinguishable from the substitution the pin
+exists to detect. It would also leave a half-built directory that the real first start then refuses.
+
+So the material is checked **present** before it is loaded, **twice**, exactly as `invite mint` does it
+and for the same two reasons: the **pre-lock** check keeps a refusal from writing so much as a
+`bus.lock` into a mistyped directory, and the **post-lock** check is the one load-bearing for
+correctness, because between the two a concurrent process could remove a file and turn the load into a
+mint. `material.Generated()` is then refused as a last resort.
+
+All four files are required, not just `bus-signing.key`: `ids.LoadOrCreateBusID` *creates* a bus id
+when absent, and requiring the other three present is what makes `buscert`'s mint branch structurally
+unreachable rather than merely unlikely.
+
+`TestKeyExportRefusesADirectoryWithNoKeyMaterial` asserts the directory is still **empty** afterwards —
+not merely that the exit code was nonzero, because a command that minted and then failed for some later
+reason satisfies an exit-code-only test while having just created a bus identity nobody asked for.
+
+#### The encoding is MATCHED, not chosen
+
+**Standard base64 with padding — 44 characters for the 32-byte key.** That is precisely what
+`agent-bus peer add -signing-key` parses (`base64.StdEncoding.DecodeString`, `cmd/agent-bus/peer.go`)
+and what `internal/relay` writes into a `BusTrustRecord`, so the printed value pastes straight into the
+command that consumes it. **It is NOT the 64-lowercase-hex encoding used for the TLS certificate
+fingerprint.** Two 32-byte values live in this workflow and are distinguishable only by their encoding;
+confusing them installs a pin that can never verify anything and reports no error until a relayed
+message fails. `TestKeyExportBusSigningPublicKey/the_key_is_NOT_the_TLS_fingerprint_encoding` pins them
+apart. No encoding, hash or KDF is implemented here (invariant 9) — this is stdlib base64 over a key
+`crypto/ed25519` derived.
+
+#### `--json` success shape
+
+```json
+{"ok":true,"bus_id":"bus-k53jl6eorczuwznc","public_key":"hvW9…8t0=","key_type":"ed25519"}
+```
+
+`bus_id` is reported **with** the key because a peer pins the two as a pair (`peer add -bus-id X
+-signing-key Y`); a bare key invites pinning it against the wrong bus. `key_type` is `ed25519`, the only
+value today, so a consumer never infers the algorithm from the length. **There is no field for the
+private key** and the struct has none.
+
+The failure shape is `{"ok":false,"error":…,"remedy":…,"exit_code":…}` on **stdout**, so an agent that
+redirected stderr away still gets a parseable answer.
+
+#### Exit codes (`agent-bus key`)
+
+| Code | Meaning | Remedy |
+| --- | --- | --- |
+| `0` | The public key was printed. | — |
+| `1` | The export failed — unreadable file, corrupt certificate, **or an expired one**. Nothing was written. | The bus refuses to start on the same error; fix it there. |
+| `2` | Usage: bad flag, unknown subcommand, or a positional argument. | `agent-bus key export-public -h` |
+| `3` | The data directory is **locked** — a bus is running. | Stop the bus, export, start it again. The signing key does not change across a restart. |
+| `4` | No data directory, or it does not hold all four identity files, or the certificate's CommonName names a **different bus** than the `bus-id` file. **Nothing was created** — with the one carve-out below. | Start the bus once if it has **never run**; **restore the missing file from backup** if it has. |
+
+**Two carve-outs on "nothing was created",** both being races this command lost under the lock, where a
+library call wrote on the way to the refusal:
+
+- The **`material.Generated()`** backstop exits `4` precisely *because* `buscert` minted. It does **not**
+  delete what was minted (deleting key material is never this command's call), and `Generated()` is
+  **false** on the next load — so a re-run would pass every check and export the freshly minted key with
+  **exit 0 and no warning**. The operator would then pin, on a peer, a key no bus has ever served: at
+  that peer, indistinguishable from the substitution the pin exists to detect. The remedy on that branch
+  therefore says to **delete the three files by hand** before anything else.
+- The **CommonName cross-check** exits `4` when `ids.LoadOrCreateBusID` minted a bus id in the same kind
+  of window. That refusal is **persistent** — the new id disagrees with the certificate on every
+  subsequent run — so unlike the first it cannot decay into a silent success, and its remedy is to
+  **restore**, not to delete.
+
+Every other path to `4` wrote nothing at all.
+
+An unreadable-but-present **identity file** (EACCES, EIO) is exit **`1`**, not `4`, and its remedy says
+*do not restore over it until you have looked* — "I could not look at the file" is not "the file is not
+there", and telling an operator to restore a `bus-id` that is present and fine would rename the bus away
+from its own certificate. **The data directory itself is the exception:** any `stat` failure on
+`-data-dir` is exit `4`, whose message is "cannot read the data directory" and whose remedy tells nobody
+to restore anything. Folded into `CLI-11-FU-STATERR`.
+
+`-h` / `--help` print to **stdout** and exit `0`, at both `agent-bus key -h` and
+`agent-bus key export-public -h`; only errors go to stderr. An unknown subcommand and an unexpected
+positional argument are **not echoed back** — they are unvalidated argv on the way to a terminal.
+
+**Known wart, recorded rather than hidden:** an **expired TLS certificate** makes this command exit `1`,
+even though the signing key it would print is independent of the certificate. `buscert.LoadOrCreate`
+validates the certificate's date window on the way to loading the signing key, and there is no
+load-only accessor for the signing half — so an operator whose certificate has expired cannot export
+the key a peer needs in order to keep verifying messages that originated here, which is exactly when
+they need it. Fixing it means adding a load-only accessor to `internal/buscert`, which was outside this
+task's file boundary: filed as **`CLI-11-FU-LOADONLY`**, together with the matching `internal/ids` gap —
+`ids.LoadOrCreateBusID` has no `Generated()`-equivalent, so a `bus-id` file removed in the window
+between the post-lock check and that call is **minted and persisted**. The export is still refused (the
+CommonName cross-check catches it and no key is reported), but a command documented as read-only will
+have written. That is why the usage text claims only that it does not create a bus *identity*.
+
+**Private key material never reaches either stream.** There is no public-only file on disk — the public
+half is *derived* from the private key — so this command necessarily loads the secret in order to print
+the derived value. `Material.SigningPublicKey()` is the only accessor used; `SigningPrivateKey()` is
+never called in `key.go`; nothing logs the material; and every failure path names **paths**, never
+contents. `TestKeyExportNeverPrintsPrivateKeyMaterial` asserts it on **both** streams across every flag
+combination including the failure paths, searching for the seed and the full 64-byte key in base64/hex
+and for the on-disk PEM body lines. It is a test rather than a comment because a leak of this kind is
+silent.
+
+---
+
+### `agent-bus log` — read the append-only MESSAGE AUDIT TRAIL (metadata only)
+
+Added 2026-08-14 by `CLI-6`. Source: `cmd/agent-bus/auditlog.go`.
+
+```
+agent-bus log [-data-dir <dir>] [-json] [-sender <id>] [-recipient <id>]
+              [-since <RFC3339>] [-until <RFC3339>] [-min-seq <n>] [-max-seq <n>]
+```
+
+An **offline, read-only** reader for `bus.audit`. It prints **metadata and routing only** — message
+id, sequence, sender, broadcast flag or recipient list, the ordered bus path traversed, the time this
+bus accepted the message, the body's size and its SHA-256. **Message bodies are not in the file and
+cannot be recovered from it** by this command or any other (invariant 6); the content hash is what
+preserves the ability to prove *what* was sent without retaining it. The `--json` record struct has no
+body field, no `payload` and no catch-all, and the raw frame is never marshalled.
+
+**It is a subcommand on the SERVER binary, not on `agent-busctl`,** for `invite mint`'s reason
+(`DECISIONS.md` E4), restated by `peer add` and `key export-public`: the authority it needs is
+**filesystem access** to the data directory, not a network privilege. **There is no HTTP route that
+serves the audit trail and this command does not add one.**
+
+**Known mismatch, recorded rather than hidden:** `scripts/fed-smoke.sh`'s `read_audit` (line 191)
+invokes `"$CTL" log --data-dir … --json`, and `CTL` is `bin/agent-busctl` (line 55) — but the
+subcommand landed on `agent-bus`, and `agent-busctl` registers no `log` command. That call therefore
+takes its `die "BLOCKED: CLI-6 agent-busctl log is unavailable"` branch. This is a **static reading of
+both files at `a8c367c`, not an observed run** — the smoke test asserts a three-hop `bus_path` that
+nothing produces yet (below), so it does not reach that step regardless. The `jq` selectors match the
+output shape documented here; only the binary name is wrong.
+
+**THE BUS MUST BE STOPPED.** It takes the data directory's exclusive `dirlock`. It writes nothing and
+repairs nothing — the lock is what stops a read from seeing a half-written tail record and then either
+reporting a message that is not yet durable or reporting a healthy bus as damaged.
+
+**There is deliberately no `--follow`.** While this command holds the exclusive lock no bus is running,
+so nothing is appending; tailing a file nobody writes to is not a capability. A tail mode needs a
+lock-free consistent read first, which is its own decision — deferred to **`CLI-6-FU-FOLLOW`**, not
+omitted by oversight. Do not re-file it.
+
+The trail is a **superset of committed history**: a crash between the audit write and the commit write
+leaves a record for a message that never became accepted history. `prepare_index` names the WAL
+transaction, so an audit record can be paired with the WAL entry that (may have) committed it.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | The bus's data directory. It must already hold `bus.audit`; **this command never creates one** (exit `4` otherwise). Empty is a usage error. |
+| `-json` | off | Emit **NDJSON** on stdout: one object per record, one per line. |
+| `-sender <id>` | — | Only records whose sender is **exactly** this fully-qualified `<bus-id>.<agent-id>`. |
+| `-recipient <id>` | — | Only records whose recipient list **contains** this id. **A broadcast never matches** — it records no recipient list, so matching one would be a guess about a roster the trail deliberately does not hold. |
+| `-since <RFC3339>` | — | Only records with `sent_at` **>=** this instant (**inclusive**). |
+| `-until <RFC3339>` | — | Only records with `sent_at` **<** this instant (**exclusive**), so consecutive windows tile the timeline with no gap and no double-count. |
+| `-min-seq <n>` | `0` | Only records with `seq >= n` (**inclusive**). `0` means no bound. |
+| `-max-seq <n>` | `0` | Only records with `seq <= n` (**inclusive**). `0` means no bound; sequences start at 1, so `0` can never exclude a real record. |
+
+Both flag spellings work (`-json` and `--json`): Go's `flag` package treats them identically.
+
+Filter flags are validated **before anything is opened and before the lock is taken**, so a mistyped
+timestamp costs no I/O. An unparseable `-since`/`-until`, `-min-seq` above `-max-seq` (both non-zero),
+or a `-until` that is not strictly after `-since` are each exit `2`.
+
+**`bus_path` is the ORDERED traversal, oldest bus first.** Nothing sorts, dedupes or reorders it — the
+reader displays exactly what was recorded. **No running bus produces a multi-hop value today:**
+`hub.publish` has two callers (`Send`, `Broadcast`), neither sets a path, so `publish` substitutes
+`store.LocalBusPath(h.busID)` and every record a live bus writes carries a **single element — this
+bus's own id**. Multi-hop paths are validated and recordable (`internal/hub/buspath_test.go` writes
+one directly), but no relay-ingest route exists to produce one; that is `RELAY-20`/`RELAY-21`/
+`RELAY-24`. Verified at `a8c367c`.
+
+**Damage is always reported, and filters never hide it.** A frame that is not a `TypeAuditMessage`, a
+frame `wal.DecodeAudit` refuses, and a scan that stops early are each named on **stderr** with the
+path, byte offset and reason; the remaining records are still read and printed; and the command exits
+`1` — **even when a filter excluded every record**. Silence from this command therefore means the
+trail really is intact. It uses `wal.ScanAll` (strict, read-only) rather than `RepairLog` or `Replay`:
+it repairs nothing and truncates nothing.
+
+#### Exit codes (`agent-bus log`)
+
+| Code | Meaning | Remedy |
+| --- | --- | --- |
+| `0` | The **whole** trail was read and every record decoded. Still `0` when a filter matched nothing — an empty result is an answer. | — |
+| `1` | The trail is **damaged**, or could not be examined. Every readable record was still printed and every discard was named on stderr. Also covers a **zero-length** `bus.audit` (`wal` reports `file is empty: it has no <N>-byte file header`) and a `bus.audit` that is present but cannot be `stat`ed (EACCES, EIO). | Keep the file; do not truncate it by hand. For the un-`stat`able case the message says explicitly that this is **not** evidence the trail is missing or damaged — check permissions and ownership. |
+| `2` | Usage: bad flag, an unexpected positional argument, an empty `-data-dir`, or an unparseable/contradictory `-since`/`-until`/`-min-seq`/`-max-seq`. Nothing was read. | `agent-bus log -h` |
+| `3` | The data directory is **locked** by a live process, almost certainly the bus. | Stop the bus, run this, start it again. The trail is append-only, so what you see after a restart is a superset of what you would have seen now. |
+| `4` | This data directory holds **no `bus.audit`** at all — so any messages this bus routed have **no provenance record**. Also the code for a `-data-dir` that cannot be `stat`ed or is not a directory. | Expected if the bus has never accepted a message: start it, send one, stop it, retry. If it **has**, the trail is lost and must be restored from backup. This command will not create one — an empty trail written now would look exactly like a bus that never carried anything. |
+| `5` | **The trail cannot be AUTHENTICATED. Nothing was read and nothing should be believed.** A refusal *before* the scan, so **no record is printed on this path**. | Below. |
+
+`4` and `5` are deliberately distinct from `1`: "there is no trail", "the trail is broken" and "the
+readable part carries no authority in the first place" must never be reported as the same thing. `-h` /
+`--help` print the usage text to **stdout** and exit `0`; only errors go to stderr. An unexpected
+positional argument is **not echoed back** — it is unvalidated argv on its way to a terminal.
+
+**Exit `5` fires for four states, all saying the same thing — *this reader cannot vouch for these
+bytes*:**
+
+- **No `wal-mac.key` in the data directory.** Integrity here is a keyed MAC (invariant 6), so with no
+  key not one record can be authenticated. It is also a **safety** check, and this is the bug the
+  task's security gate found: `wal.ScanAll` resolves a codec, which resolves a MAC key, and `wal`'s
+  `macKeyMayBeCreated` permits **creating** one for exactly the shapes a reader is most likely to be
+  pointed at — silently, because `ScanAll` takes no logger. On a directory whose `bus.wal` is intact
+  but whose key was lost, one run of this read-only command minted a key and thereby converted
+  `wal.ErrMACKeyMissing` (remedy: restore a 64-byte file) into `wal.ErrMACKeyMismatch`, **whose
+  documented remedy is to move `bus.wal` aside**. Requiring the key to exist closes the whole class:
+  `macKeyFor` only reaches `createMACKey` when `loadMACKey` returns `ErrMACKeyMissing`.
+- **`bus.audit` does not declare on-disk format version `2`.** Version-1 frames are authenticated by an
+  **unkeyed CRC32C anyone can compute**, and `wal` will happily read a version-1 file, so records an
+  attacker authored would print under a header promising provenance, with exit `0` and an empty stderr.
+  The security gate did exactly that. Audit records have **only ever been written at version 2**
+  (`internal/wal/audit.go`), so such a file was never written by this bus.
+- **`bus.audit` does not begin with the audit magic** (`AGNTBUSA`) — not a trail this bus wrote.
+- **`bus.audit` is non-empty but shorter than the 12-byte magic+version prefix** — it claims to be
+  something and cannot be checked. (A **zero-length** file is deliberately *not* refused here: it
+  carries no header to judge and no record to misbelieve, and `wal` already reports it loudly as
+  damage — exit `1`.)
+
+A `bus.audit` that **cannot be opened at all** — `EACCES`, `EIO`, a bad mount — is deliberately **not**
+in this list: it is exit `1`, "could NOT BE EXAMINED", because exit `5` presupposes we could see the
+bytes and judge them. That split is load-bearing and must not be collapsed; see the block comment on
+`checkAuditFormatVersion` in `cmd/agent-bus/auditlog.go`.
+
+The remedy on the last three is the same: keep the file, do **not** let the bus append to it, inspect it
+out of band, and do not treat its contents as evidence.
+
+#### `--json` shape — NDJSON, one object per line
+
+One record object per line, so it streams and so a consumer can count:
+
+```json
+{"audit_index":1,"offset":12,"message_id":"bus-k53jl6eorczuwznc-42","seq":42,"sender":"bus-k53jl6eorczuwznc.agent-alpha","broadcast":false,"recipients":["bus-k53jl6eorczuwznc.agent-beta"],"bus_path":["bus-k53jl6eorczuwznc"],"sent_at":"2026-08-14T09:00:00.123456789Z","size":42,"content_sha256":"<hex>","prepare_index":7}
+```
+
+Keys, exactly: `audit_index`, `offset`, `message_id`, `seq`, `sender`, `broadcast`, `recipients`,
+`bus_path`, `sent_at`, `size`, `content_sha256`, `prepare_index`. The payload field names mirror `wal`'s
+`auditPayload` JSON tags, plus two frame-level locators the payload cannot carry: `audit_index` and
+`offset`.
+
+- `sent_at` is **RFC3339Nano, UTC**.
+- **`recipients` and `bus_path` are ALWAYS present and are NEVER `null`** — a nil slice is normalised to
+  `[]`, so a broadcast emits `"recipients":[]`. A missing key would read as "not recorded" when the
+  truth is "recorded, and empty".
+- `audit_index` is a **frame locator, not an identity**: a quarantined audit log restarts at `1`, so
+  audit indices are not unique across the lifetime of a data directory. **Join on `message_id` or
+  `seq`.**
+- `offset` is the byte offset of the record's frame header, so a damage report and a record line up
+  against the same file.
+
+**CONTRACT: no object other than a record ever carries a `message_id` key.** `scripts/fed-smoke.sh`
+(`assert_audit_path`) selects on `.message_id` and `.bus_path` and requires **exactly one** match per
+message, so a consumer counting records by `message_id` must not be corruptible by a non-record line.
+The two non-record shapes therefore omit it:
+
+```json
+{"damaged":true,"path":"./data/bus.audit","audit_index":3,"offset":512,"reason":"…","remedy":"…"}
+{"ok":false,"error":"…","remedy":"…","exit_code":5}
+```
+
+`{"damaged":true,…}` is emitted **in addition to** the stderr report, never instead of it — a human
+watching the terminal and a script parsing stdout must both learn about a discard. `audit_index` is
+omitted when the framing scan itself found the damage and there is no record to name; `remedy` is
+omitted when empty. `{"ok":false,…}` is the pre-read failure shape and goes to **stdout**, so an agent
+that redirected stderr away still gets a parseable answer.
+
+#### Human output
+
+A header naming the file and stating that bodies are not in it, then two-to-four lines per record, then
+a count. **Every client-derived string is printed `%q`-quoted** — sender, message id, each recipient and
+each bus-path element — and each element of a list is quoted *individually*, never the joined string:
+`wal` bounds these fields on emptiness and length only and imposes **no character restriction**, so a
+newline in a sender would otherwise forge a whole record line, and an ANSI escape would reach the
+terminal. The security gate produced both. An empty `bus_path` renders as `(none)` rather than as a
+blank, and a broadcast renders as `broadcast (no recipient list is recorded)`. The footer repeats that
+the trail is damaged when it is, and notes that the count covers only the records that could be read.
+
+---
+
 ## `cmd/agent-busctl` — the client
 
 Binary directory `cmd/agent-busctl`; the importable package it shells over is

@@ -192,6 +192,29 @@ func main() {
 		os.Exit(runPeerCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `agent-bus key export-public` prints this bus's SIGNING PUBLIC KEY, the
+	// value a peer bus pins with `peer add -signing-key` (CLI-11). It is on this
+	// binary for `invite mint`'s and `peer add`'s reason -- its input is
+	// filesystem access to the data directory, not a network privilege -- and it
+	// takes the same exclusive lock, so like those two it needs the bus STOPPED.
+	// It exports the PUBLIC half only and never creates key material; see
+	// cmd/agent-bus/key.go.
+	if len(os.Args) > 1 && os.Args[1] == keyCommandName {
+		os.Exit(runKeyCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
+	// `agent-bus log` prints the append-only MESSAGE AUDIT TRAIL (CLI-6):
+	// METADATA AND ROUTING ONLY — message id, sequence, sender, recipients, the
+	// ordered bus path, timestamp, size and content hash. It NEVER prints bodies,
+	// because the trail does not contain them (invariant 6). It is on this binary
+	// for `invite mint`'s reason -- its input is filesystem access to the data
+	// directory, not a network privilege -- and it takes the same exclusive lock,
+	// so like `peer` and `key` it needs the bus STOPPED. It writes nothing and
+	// repairs nothing; see cmd/agent-bus/auditlog.go.
+	if len(os.Args) > 1 && os.Args[1] == logCommandName {
+		os.Exit(runLogCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -230,6 +253,13 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 		fmt.Fprintf(out, "  %s %s add|list|remove\n"+
 			"                        configure federation: peer routes and pinned bus signing keys\n"+
 			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, peerCommandName, prog, peerCommandName)
+		fmt.Fprintf(out, "  %s %s export-public\n"+
+			"                        print this bus's SIGNING PUBLIC KEY, the value a peer pins\n"+
+			"                        (requires the bus to be STOPPED; run `%s %s export-public -h` for details)\n", prog, keyCommandName, prog, keyCommandName)
+		fmt.Fprintf(out, "  %s %s\n"+
+			"                        read the append-only message audit trail: metadata only —\n"+
+			"                        routing and provenance, never message bodies\n"+
+			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, logCommandName, prog, logCommandName)
 	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
