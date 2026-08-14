@@ -9,7 +9,7 @@
 > - `SPEC/<EPIC>/epic.md` — every task in the epic, open first, then closed
 > - `SPEC/<EPIC>/<task>/task.md` — the full record for one task
 
-**588 tasks in 28 epics — 387 open, 201 closed.**
+**594 tasks in 28 epics — 391 open, 203 closed.**
 
 | Epic | Open | Total | Summary | Tasks |
 | --- | ---: | ---: | --- | --- |
@@ -29,16 +29,16 @@
 | HANDOVER | 14 | 14 | A human -- first a maintainer, then an operator -- can read this repo, believe what it says, run it, and know… | [SPEC/HANDOVER/epic.md](SPEC/HANDOVER/epic.md) |
 | ID | 11 | 19 | Bus id (persisted, stable across restarts), monotonic sequence allocator, agent id \`&lt;bus-id&gt;.&lt;name&gt;-&lt;n&gt;\`, mes… | [SPEC/ID/epic.md](SPEC/ID/epic.md) |
 | IDEM | 19 | 32 | Every mutating operation carries a client-supplied idempotency key and is safe to retry, per invariant 10 (CL… | [SPEC/IDEM/epic.md](SPEC/IDEM/epic.md) |
-| INVITE | 17 | 27 | Invites are single-use, expiring and revocable, minted by an operator; redeeming one is the ONLY route onto t… | [SPEC/INVITE/epic.md](SPEC/INVITE/epic.md) |
+| INVITE | 18 | 28 | Invites are single-use, expiring and revocable, minted by an operator; redeeming one is the ONLY route onto t… | [SPEC/INVITE/epic.md](SPEC/INVITE/epic.md) |
 | LIVE | 15 | 15 | Planning epic for authenticated agent liveness detection and authorized status subscriptions. Assumption: use… | [SPEC/LIVE/epic.md](SPEC/LIVE/epic.md) |
 | MSG | 1 | 6 | Agent list, broadcast, DM, message history, cursor semantics. | [SPEC/MSG/epic.md](SPEC/MSG/epic.md) |
 | MTLS | 30 | 38 | Self-signed certificates, mutual TLS, no certificate authority anywhere; TLS is the required transport and th… | [SPEC/MTLS/epic.md](SPEC/MTLS/epic.md) |
 | POLL | 0 | 3 | Park a waiter, wake on new message, timeout, cursor advance, no goroutine leak on client disconnect, thunderi… | [SPEC/POLL/epic.md](SPEC/POLL/epic.md) |
 | PROCESS | 7 | 11 | Epic key reserved 2026-08-08 (reservation namespace epic-key, value 1). Work about HOW THIS PROJECT IS BUILT… | [SPEC/PROCESS/epic.md](SPEC/PROCESS/epic.md) |
 | RATCHET | 2 | 8 | Research and de-risk the Signal-style double-ratchet requirement, with one governing constraint: WE DO NOT WR… | [SPEC/RATCHET/epic.md](SPEC/RATCHET/epic.md) |
-| RELAY | 65 | 107 | Peer enrolment between buses, message relay, agent-list exchange, loop prevention via a traversed-bus path, p… | [SPEC/RELAY/epic.md](SPEC/RELAY/epic.md) |
+| RELAY | 68 | 111 | Peer enrolment between buses, message relay, agent-list exchange, loop prevention via a traversed-bus path, p… | [SPEC/RELAY/epic.md](SPEC/RELAY/epic.md) |
 | SIGN | 8 | 13 | RESCOPE, user instruction verbatim (2026-08-02): "ok, let's keep it simple and just use standard message auth… | [SPEC/SIGN/epic.md](SPEC/SIGN/epic.md) |
-| TOOLING | 10 | 14 | Epic key reserved 2026-08-08 (reservation namespace epic-key, value 2). The tooling an agent in THIS repo can… | [SPEC/TOOLING/epic.md](SPEC/TOOLING/epic.md) |
+| TOOLING | 10 | 15 | Epic key reserved 2026-08-08 (reservation namespace epic-key, value 2). The tooling an agent in THIS repo can… | [SPEC/TOOLING/epic.md](SPEC/TOOLING/epic.md) |
 | UNASSIGNED | 7 | 11 | — | [SPEC/UNASSIGNED/epic.md](SPEC/UNASSIGNED/epic.md) |
 | ZZ-SCRATCH | 0 | 2 | — | [SPEC/ZZ-SCRATCH/epic.md](SPEC/ZZ-SCRATCH/epic.md) |
 

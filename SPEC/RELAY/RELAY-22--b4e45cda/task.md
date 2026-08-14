@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:46.976714+00:00 |
-| Updated | 2026-08-08T15:56:46.976714+00:00 |
+| Updated | 2026-08-14T22:03:48.917462+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 go test -race -run TestMultiPrincipalAbusePrimitiveEnforced ./internal/relay
 ```
+
+## Status note
+
+FOLDED INTO RELAY-24 2026-08-14, per the RELAY-24 reviewer's recommendation and the coordinator's explicit call to spec-keeper. RELAY-24's own implementer report confirms this task's primitive is ALREADY DELIVERED by RELAY-24's code: peerAdmission (per-peer quota via a sliding-window applied-key count + per-peer concurrency cap of 8, no disconnect) is exactly the multi-principal abuse-control mechanism this task asks for, and relaywiring.go's own file comment claims it. Do NOT independently re-implement or re-scope this task -- it is satisfied by RELAY-24's diff. What remains, and is now RELAY-24's to deliver rather than this task's: the DECISIONS.md entry recording the primitive CHOSEN (this task was the one that owned that entry; it is absent as of 2026-08-14). Leaving this task OPEN (not completed, not superseded -- it is not a duplicate, it is being satisfied by a broader task) until RELAY-24 actually lands with that DECISIONS.md entry in place; complete this task alongside/immediately after RELAY-24, citing RELAY-24's commit as the evidence. The existing blocks->RELAY-24 relation (added earlier 2026-08-14, before this finding) should be read in that light -- not a strict sequencing dependency, but a marker that the two are the same delivery.
 
 ## Description
 
@@ -57,6 +61,7 @@ to 48223968's DECISIONS.md entry.
 - [48223968-0f96-4ac2-8d7e-710a1a4026b8](../Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md) — Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link (todo)
 - [RELAY-17](../RELAY-17--817649ce/task.md) — RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope (done)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
 - [RELAY-6](../RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (done)
 
 ## Referenced by other tasks (derived, not authoritative)

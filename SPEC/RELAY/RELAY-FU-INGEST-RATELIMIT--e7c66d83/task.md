@@ -61,7 +61,6 @@ SCOPE: design and wire a rate limit / quota / concurrency cap for the relay inge
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
 - [RELAY-FU-DOCGO-GAP7-BACKOFF](../RELAY-FU-DOCGO-GAP7-BACKOFF--8aacfd4c/task.md) — internal/relay/doc.go gap 7: a fair-share or capacity refusal from AcceptRelay becomes a… (todo)
 
 ---

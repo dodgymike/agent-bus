@@ -2,7 +2,7 @@
 
 [← all epics](../../SPEC.md)
 
-**10 open / 14 total.** Full records live in `SPEC/TOOLING/<task>/task.md`.
+**10 open / 15 total.** Full records live in `SPEC/TOOLING/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
@@ -21,12 +21,13 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | 637fca2f-0fa6-439a-b6eb-361b681cdf80 | ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known,… | todo | P3 | [task.md](ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) | — | [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) [DEPLOY-2](../DEPLOY/DEPLOY-2--14f8ec3b/task.md) [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |
 | de0fc1df-a948-4b44-95a4-4b9d01cab267 | DECISIONS.md HTML-comment section fences are imbalanced (6 BEGIN / 8 END) -- introduced b… | todo | P3 | [task.md](DECISIONS.md-HTML-comment-section-fences-are-imbalanced--de0fc1df/task.md) | — | [MTLS-CLIENTAUTH](../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) [RELAY-24-BLOCKER-HUBINGEST](../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) [RELAY-45](../RELAY/RELAY-45--4be32336/task.md) |
 
-## Closed tasks (4) — done, cancelled, superseded
+## Closed tasks (5) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 84b76d5e-fe02-4651-9828-caba3d82606b | Proof-command guard: a \`-run\` pattern that matches no test must FAIL, not pass vacuously | done | P0 | [task.md](Proof-command-guard-a-run-pattern-that-matches-no-test-m--84b76d5e/task.md) | — | [DUR-4](../DUR/DUR-4--59c36769/task.md) [DUR-6](../DUR/DUR-6--d56a997d/task.md) |
 | 9e6544a1-d606-4e65-8c43-0764ac3f0aa4 | spec-cloud.sh / task-list workflow: GET .../tasks silently truncates to the oldest 200 of… | superseded | P1 | [task.md](spec-cloud.sh-task-list-workflow-GET-...-tasks-silently--9e6544a1/task.md) | superseded by [SPEC-API-LIST-SILENT-TRUNCATION](../UNASSIGNED/SPEC-API-LIST-SILENT-TRUNCATION--82f35b73/task.md) | [SPEC-API-LIST-SILENT-TRUNCATION](../UNASSIGNED/SPEC-API-LIST-SILENT-TRUNCATION--82f35b73/task.md) |
+| TOOLING-1 | TOOLING-1: read-only linter for mechanically broken stored proof_cmd values | done | P1 | [task.md](TOOLING-1--eeb4109b/task.md) | — | — |
 | cea09b96-72db-40f1-84b4-c2e227eae1cf | proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… | done | P1 | [task.md](proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) | blocks [HANDOVER-CHECK](../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md)<br>relates to [71cdaef8-c757-4ba9-a693-a8f744070d08](proof-check.sh-runs-the-proof-against-its-OWN-script-dir--71cdaef8/task.md) | [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) [84b76d5e-fe02-4651-9828-caba3d82606b](Proof-command-guard-a-run-pattern-that-matches-no-test-m--84b76d5e/task.md) [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md) [fe0d9030-f95f-49b9-ab3b-68c96860df8a](proof-check.sh-cannot-authenticate-go-test-evidence-agai--fe0d9030/task.md) |
 | cf886bb9-1921-4b17-826b-1ce2f8ef987f | scripts/spec-cloud.sh leaks SPEC_CLOUD_PASSWORD on the \`aws\` argv (readable via /proc/*/c… | done | P2 | [task.md](scripts-spec-cloud.sh-leaks-SPEC_CLOUD_PASSWORD-on-the-a--cf886bb9/task.md) | — | [CORE-1](../CORE/CORE-1--eea035e4/task.md) |
 

@@ -2,14 +2,15 @@
 
 [← all epics](../../SPEC.md)
 
-**17 open / 27 total.** Full records live in `SPEC/INVITE/<task>/task.md`.
+**18 open / 28 total.** Full records live in `SPEC/INVITE/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (17)
+## Open tasks (18)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| INVITE-GATE-ENFORCE | INVITE-GATE-ENFORCE: enforce invite-only enrolment (P0: anonymous roster exhaustion) | in_progress | P0 | [task.md](INVITE-GATE-ENFORCE--8297d7e2/task.md) | — | [INVITE-GATE](INVITE-GATE--05a5216d/task.md) [MTLS-CROSSCHECK](../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) [RELAY-24](../RELAY/RELAY-24--e303c624/task.md) |
 | INVITE-CLIENT-FU-PRUNETTL-RACE | INVITE-CLIENT-FU-PRUNETTL-RACE: client prunePending destroys kept key material at 24h whi… | todo | P1 | [task.md](INVITE-CLIENT-FU-PRUNETTL-RACE--da0b3a39/task.md) | relates to [CONTRACTS-CLI-1632-STALE](../DOCS/CONTRACTS-CLI-1632-STALE--ae5011bf/task.md)<br>relates to [INVITE-CLIENT-FU-PENDINGINVITE](INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) | [INVITE-CLIENT-FU-PENDINGINVITE](INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) |
 | INVITE-GATE-FU-MINTAPPLIER | INVITE-GATE-FU-MINTAPPLIER: agent-bus invite mint opens the WAL without the composite exp… | todo | P1 | [task.md](INVITE-GATE-FU-MINTAPPLIER--da4bfed0/task.md) | — | [INVITE-REVOKE](INVITE-REVOKE--d9def083/task.md) |
 | INVITE-HARDEN | INVITE-HARDEN: constant-time invite-secret comparison and ONE indistinguishable failure r… | todo | P1 | [task.md](INVITE-HARDEN--d250d0dd/task.md) | — | [INVITE-GATE](INVITE-GATE--05a5216d/task.md) [0b43393e-556b-409a-938a-846be2fb4a75](EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) |

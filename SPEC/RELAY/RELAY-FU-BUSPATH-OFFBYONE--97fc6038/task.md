@@ -5,14 +5,14 @@
 | Public id | `97fc6038-c470-4bc2-90a2-678473678c69` |
 | Key | RELAY-FU-BUSPATH-OFFBYONE |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:06:28.485275+00:00 |
-| Updated | 2026-08-14T18:06:28.485275+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T21:21:21.203142+00:00 |
+| Completed | 2026-08-14T21:21:21.203124+00:00 |
 
 ## Proof command
 
@@ -58,7 +58,7 @@ SCOPE: diff the two boundary checks, determine which one is off by one (or wheth
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24-FU-RELAYHTTP-4XX](../RELAY-24-FU-RELAYHTTP-4XX--b2fb4b36/task.md) — RELAY-24-FU-RELAYHTTP-4XX: bus-path last-hop binding refusal answers a retryable 503 inst… (todo)
 - [RELAY-FU-DOCGO-GAP7-BACKOFF](../RELAY-FU-DOCGO-GAP7-BACKOFF--8aacfd4c/task.md) — internal/relay/doc.go gap 7: a fair-share or capacity refusal from AcceptRelay becomes a… (todo)
 
 ---

@@ -11,8 +11,18 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T20:58:31.061312+00:00 |
-| Updated | 2026-08-14T20:58:31.061312+00:00 |
+| Updated | 2026-08-14T21:18:49.044249+00:00 |
 | Completed | — |
+
+## Proof command
+
+```sh
+! grep -q "NOT ENFORCED: invariant 11's cross-check is DESIGNED, not LIVE" CONTRACTS-HTTP.md && grep -q 'this credential was not presented over the client certificate it is bound to' CONTRACTS-HTTP.md
+```
+
+## Status note
+
+Proof rationale: FIRST clause is the RED-before-fix half, currently RED verified at HEAD ee2da4f -- CONTRACTS-HTTP.md:831 still carries the block '**NOT ENFORCED: invariant 11's cross-check is DESIGNED, not LIVE.**', so the bare grep -q succeeds and the negated clause fails. That is exactly the property a proof must have before the fix: it can fail, and it has been observed failing. SECOND clause pins the specific new fact the doc must gain: the exact fixed refusal string the code returns ('this credential was not presented over the client certificate it is bound to'), currently absent from CONTRACTS-HTTP.md, so also RED today. Both clauses are joined with && so neither can mask the other -- the leading ! inverts only the first grep, and the conjunction means BOTH must hold: a stale-block deletion without the new row still fails, and a new row added while the false block survives still fails.
 
 ## Description
 
