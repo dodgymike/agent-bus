@@ -5,13 +5,13 @@
 | Public id | `1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T21:25:59.907505+00:00 |
-| Updated | 2026-08-07T21:25:59.907505+00:00 |
+| Updated | 2026-08-14T20:32:35.745027+00:00 |
 | Completed | — |
 
 ## Proof command

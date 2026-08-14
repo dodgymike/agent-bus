@@ -65,7 +65,7 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 
 
 - [0b43393e-556b-409a-938a-846be2fb4a75](../EPIC-invite-only-enrolment-the-root-fix-for-the-pre-auth--0b43393e/task.md) — EPIC: invite-only enrolment -- the root fix for the pre-auth attack family (needs planner… (superseded)
-- [1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa](../../AUTH/SEC-unauthenticated-enrol-permanently-bricks-the-roster--1c4d3dea/task.md) — SEC: unauthenticated enrol permanently bricks the roster -- 4096-cap fails closed forever… (todo)
+- [1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa](../../AUTH/SEC-unauthenticated-enrol-permanently-bricks-the-roster--1c4d3dea/task.md) — SEC: unauthenticated enrol permanently bricks the roster -- 4096-cap fails closed forever… (in_progress)
 - [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [ADMIN-1](../../ADMIN/ADMIN-1--db334b3c/task.md) — ADMIN-1: record the operator-console trust/transport/control rulings D1-D7 in DECISIONS.m… (blocked)
 - [ADMIN-10](../../ADMIN/ADMIN-10--958d66e8/task.md) — ADMIN-10: online invite mint from the console (BLOCKED -- ruled out for now by D6; filed… (blocked)
