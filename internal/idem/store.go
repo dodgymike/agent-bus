@@ -425,13 +425,14 @@ func (s *Store) Admit(sc Scope) error {
 // a sender the PEER ASSERTS and nobody has proved.
 //
 // STATED PRECISELY, BECAUSE THIS COMMENT'S JOB IS TO BE ACCURATE: the ingress
-// composition root exists (cmd/agent-bus/relaywiring.go, RELAY-24) but nothing
-// in a running server reaches it yet — newFederation has no production caller
-// as of HEAD 208dacd — so the exposure below is NOT live at that commit. It
-// becomes live with the wiring, and the wiring is in flight. Do not restore the
-// unconditional claim above when it lands; the whole point is that the bucket
-// key stops being proven at exactly that moment. Three consequences, all stated
-// in the callers' own docs:
+// composition root is now WIRED — cmd/agent-bus/main.go's run() calls
+// newFederation (cmd/agent-bus/relaywiring.go, RELAY-24) and mounts the peer
+// surface — so the exposure below IS LIVE, on any bus that has at least one
+// BINDABLE peer: an active trust record carrying that peer's inbound client
+// certificate fingerprint. A bus with no such binding registers no peer route
+// and never reaches this path. Do not restore the unconditional claim above;
+// the whole point is that the bucket key stops being proven the moment a peer
+// route is served. Three consequences, all stated in the callers' own docs:
 //
 //   - The bucket key on that path is an attacker-chosen label, so a peer can
 //     hold many buckets at once.

@@ -28,6 +28,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/invite"
 	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/relay"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -510,10 +511,79 @@ func run(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("creating the invite store: %w", err)
 	}
-	applier, err := auth.NewMultiplexApplier(lg, map[string]wal.Applier{
+	// The FEDERATION CONFIGURATION store, built here for the same reason as the
+	// two above: it is an applier, so it must exist before the log.
+	//
+	// IT IS BUILT WITH NO Durable, DELIBERATELY, and that is not the invite
+	// store's "it gets one in step 3" — it never gets one. Peer configuration is
+	// an OFFLINE operator action (`agent-bus peer add`, which refuses to run
+	// against a locked data directory; DECISIONS.md FEDERATION (e)), so the
+	// SERVER never records peer configuration: every mutating call on a store with
+	// no durable log fails with relay.ErrPeerNotDurable.
+	//
+	// "NEVER RECORDS PEER CONFIGURATION" IS THE EXACT CLAIM, and it is narrower
+	// than "writes nothing". PeerStore.Apply still reconciles the RELAY-34
+	// withdrawal floor while replaying, which can fsync <data-dir>/peer-withdrawal-
+	// floor — that path is gated on Dir, not on Durable. It only ever RAISES the
+	// floor, i.e. it can only widen what is treated as revoked, which is the
+	// fail-closed direction; but this comment previously said the type system
+	// forbade all writes, and it does not.
+	//
+	// Dir IS passed, and is required rather than decorative: the RELAY-34
+	// withdrawal floor lives beside the log, and a store built without it would
+	// ignore a durably recorded revocation and show a REVOKED pinned bus signing
+	// key as still pinned — fail-open on exactly the record an operator revokes
+	// in an emergency. relay.PeerStore.PinnedBusSigningKeys refuses to answer at
+	// all without it.
+	//
+	// # A STORE THAT CANNOT BE BUILT DISABLES FEDERATION; IT DOES NOT STOP THE BUS
+	//
+	// The one thing that realistically fails here is the RELAY-34 withdrawal
+	// floor: a corrupt or unreadable floor file makes NewPeerStore refuse, and
+	// that file is beside the log in every data directory, including those of the
+	// overwhelming majority of buses that federate with nobody. Returning an error
+	// here would turn damaged federation state into a TOTAL OUTAGE of messaging,
+	// enrolment and everything else — for a fault that cannot affect any of them.
+	//
+	// So it is FAIL-CLOSED AND AVAILABLE, which is the same trade invariant 6
+	// makes for a damaged log ("recovery ALWAYS reaches a running server;
+	// every discard is logged loudly and specifically"). Without a peer store this
+	// build serves NO peer route, verifies NO relayed message and authenticates NO
+	// peer bus, so a revocation we could not read cannot be disregarded — there is
+	// nothing left for it to protect.
+	appliers := map[string]wal.Applier{
 		auth.RecordKind:   authRoster,
 		invite.RecordKind: inviteStore,
-	})
+	}
+	var skippedPeerRecords *unreplayedPeerRecords
+	peerStore, err := relay.NewPeerStore(relay.PeerStoreOptions{BusID: busID, Dir: cfg.DataDir, Logger: lg})
+	if err != nil {
+		lg.Error("FEDERATION IS DISABLED FOR THIS RUN: the peer configuration store could not be built, so this bus will serve no peer route, verify no relayed message and authenticate no peer bus. Messaging and enrolment are UNAFFECTED and start normally",
+			"bus_id", busID,
+			"data_dir", cfg.DataDir,
+			"err", err.Error(),
+			"remedy", "this is usually a damaged or unreadable "+relay.PeerWithdrawalFloorFileName+" beside the log; restore it from backup and restart, then re-apply any peer configuration with `agent-bus peer add`",
+		)
+		peerStore = nil
+		// The records are still in the log, and they must not vanish from the
+		// operator's view along with the store. Counted here, reported by name and
+		// number once replay has finished (invariant 6: a discard is logged loudly
+		// AND SPECIFICALLY; an unregistered kind is otherwise passed over in
+		// complete silence by the multiplexer).
+		skippedPeerRecords = &unreplayedPeerRecords{}
+		appliers[relay.PeerRecordKind] = skippedPeerRecords
+		appliers[relay.BusTrustRecordKind] = skippedPeerRecords
+	} else {
+		// BOTH federation kinds dispatch to the ONE store, which owns both tables
+		// (routes and trust) and keys its config_seq high-water mark across them.
+		// Registering them here is what satisfies relay.PeerStoreOptions.Durable's
+		// replay-before-first-write precondition STRUCTURALLY rather than by
+		// remembering to: wal.Open does not return until the whole log has been
+		// fed to this applier, and there is no write path to race it with.
+		appliers[relay.PeerRecordKind] = peerStore
+		appliers[relay.BusTrustRecordKind] = peerStore
+	}
+	applier, err := auth.NewMultiplexApplier(lg, appliers)
 	if err != nil {
 		return fmt.Errorf("creating the write-ahead log applier: %w", err)
 	}
@@ -573,6 +643,16 @@ func run(cfg Config) error {
 	// indistinguishable from a clean start with nothing replayed. See
 	// DECISIONS.md 2026-08-02 ("Availability over retention"): the defect was
 	// never the discard, it was the silence.
+	if skippedPeerRecords != nil {
+		if n := skippedPeerRecords.Count(); n > 0 {
+			lg.Error("PEER CONFIGURATION IN THE LOG WAS NOT RESTORED: this bus has federation records on disk, and the peer store that would hold them could not be built, so they were replayed into nothing. The configuration is NOT lost from the log and returns as soon as the store can be built",
+				"bus_id", busID,
+				"records_skipped", n,
+				"remedy", "see the peer-configuration-store error above; fix it and restart",
+			)
+		}
+	}
+
 	rec := walLog.Recovered()
 	lg.Info("write-ahead log opened",
 		"data_dir", cfg.DataDir,
@@ -777,6 +857,80 @@ func run(cfg Config) error {
 		return fmt.Errorf("opening the messaging hub: %w", err)
 	}
 
+	// THE FEDERATION INGRESS (RELAY-24), assembled AFTER the hub because the
+	// relay's local half is the hub, and after the peer store has been replayed
+	// by wal.Open above.
+	//
+	// A build with no peer that could authenticate serves NO peer route at all.
+	// That is httpapi's mount rule 2 applied one level up: registering three
+	// routes that answer 403 to every caller would advertise "this bus federates"
+	// to a stranger while serving nobody, and the difference between "not
+	// configured" and "configured wrong" must be visible in OUR log rather than
+	// on the wire. The gate is the INBOUND CLIENT CERTIFICATE BINDING, not the
+	// presence of peer records: that binding is the only thing
+	// PeerStore.InboundPeerPrincipal resolves.
+	var (
+		peerSurface    *httpapi.PeerSurface
+		peerPrincipals httpapi.InboundPeerPrincipals
+	)
+	bindable := bindablePeerCount(peerStore)
+	switch {
+	case peerStore == nil:
+		// Already reported at ERROR where the store failed to build, with the
+		// remedy. Nothing to add here, and nothing below may touch the nil store.
+	case bindable > 0:
+		fed, err := newFederation(federationOptions{
+			BusID: busID,
+			Local: hubIngest{h: h},
+			Peers: peerStore,
+			// The applied-key table's own pressure line, read live. It is what
+			// makes the per-peer share a BOUND rather than a speed limit: below
+			// the line a peer over its share is denying nobody anything and is
+			// admitted, exactly as internal/idem treats its own per-agent share.
+			UnderPressure: func() bool { return h.IdempotencyStats().UnderPressure },
+			LocalAgents: func() []string {
+				agents := h.Agents()
+				out := make([]string, 0, len(agents))
+				for _, a := range agents {
+					out = append(out, a.AgentID)
+				}
+				return out
+			},
+			Logger: lg,
+		})
+		if err != nil {
+			// FATAL. An operator who has configured peering is entitled to have
+			// it work or to be told why not; starting with federation silently
+			// off is the half-outage that looks like a network problem for a day.
+			return fmt.Errorf("assembling the federation ingress: %w", err)
+		}
+		peerSurface = fed.Surface()
+		peerPrincipals = peerStore
+		lg.Info("FEDERATION INGRESS is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents; it does NOT yet forward any onward, because the egress forwarder is not wired in this build",
+			"bus_id", busID,
+			"bindable_peers", bindable,
+			"trusted_buses", len(peerStore.TrustedBuses()),
+			"configured_routes", len(peerStore.ActivePeers()),
+			"onward_relay", false,
+		)
+	case len(peerStore.TrustedBuses()) > 0 || len(peerStore.ActivePeers()) > 0:
+		// Configured, but not usable. LOUD, because from outside this is
+		// indistinguishable from a bus that was never meant to federate, and the
+		// operator has already done most of the work.
+		lg.Error("FEDERATION IS NOT SERVED although peering is configured: no adjacent bus has an INBOUND CLIENT CERTIFICATE bound to it, so no peer could authenticate and no peer route is registered",
+			"bus_id", busID,
+			"trusted_buses", len(peerStore.TrustedBuses()),
+			"configured_routes", len(peerStore.ActivePeers()),
+			"remedy", "stop the bus and run `agent-bus peer add -data-dir "+cfg.DataDir+" -bus-id <peer bus id> -signing-key <that bus's pinned Ed25519 signing key, base64> -peer-client-fingerprint <64 lowercase hex>`, once per adjacent bus. The fingerprint is sha256 of the DER of the certificate THAT peer presents AS A TLS CLIENT WHEN IT DIALS THIS BUS (inbound, keyed to -bus-id): it is NOT -tls-fingerprint, which pins the certificate the bus at -url serves to US when WE dial IT — different direction, different certificate, and neither substitutes for the other. -peer-client-fingerprint requires -signing-key in the same invocation, because the binding is written on the TRUST record; a trust record is rewritten whole, so re-state the flag every time you re-add that bus",
+		)
+	default:
+		// The ordinary case for a bus nobody has peered. One line at INFO, so an
+		// operator who expected federation can see that this build simply has no
+		// peer configuration rather than having refused it.
+		lg.Info("federation is not configured: this bus has no peer records and no peer trust records, so no peer route is registered",
+			"bus_id", busID)
+	}
+
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
 	// to every connection, so each request context descends from it: cancelling
 	// it releases handlers parked on a long-poll instead of leaving them
@@ -812,6 +966,13 @@ func run(cfg Config) error {
 		// Registers the messaging surface: /v1/agents, /v1/broadcast, /v1/send,
 		// /v1/messages and /v1/wait. Every one of them authenticates.
 		Hub: h,
+		// THE FEDERATION INGRESS. Both are nil on a build with no bindable peer,
+		// and the mount then registers nothing at all — see the switch above.
+		// They are supplied as a PAIR: a surface without the resolver would be
+		// three routes answering 403 to everyone, which mountPeerSurface refuses
+		// to register for exactly that reason.
+		Peer:           peerSurface,
+		PeerPrincipals: peerPrincipals,
 	})
 
 	// THE RESOURCE BOUNDS ON THE SERVER (CORE-9).
