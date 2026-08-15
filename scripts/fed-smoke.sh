@@ -198,10 +198,45 @@ add_route() {
   "$server" "${args[@]}" >/dev/null
 }
 
+# add_trust writes a TRUST record: the pinned bus signing key, and — for an
+# ADJACENT bus only — the INBOUND client-certificate binding.
+#
+# The optional 5th argument is that binding, and the two fingerprints here are
+# OPPOSITE DIRECTIONS. Do not collapse them (internal/relay/peerstore.go:752):
+#
+#   -tls-fingerprint          OUTBOUND, on the ROUTE record. The SERVER
+#   (see add_route)           certificate the hop at -url presents when WE dial
+#                             IT. Keyed to an ADDRESS.
+#
+#   -peer-client-fingerprint  INBOUND, on the TRUST record. The CLIENT
+#                             certificate the bus at -bus-id presents when IT
+#                             dials US. Keyed to a BUS PRINCIPAL.
+#
+# The value is the peer's own `invite mint -json` bus_cert_fingerprint, which is
+# sha256 over that bus's single leaf certificate — a bus holds exactly ONE
+# cert/key pair (internal/buscert: bus-tls.crt), so the same fingerprint is
+# correct in both roles. It comes from a compiled command, not from scraping
+# bus-tls.crt, which this script's header forbids.
+#
+# It is passed ONLY for an adjacent bus. A trust record for a bus that never
+# opens a connection to us (A<->C here, which is trust-only by design) gets a
+# signing pin and no transport binding, because binding one would assert an
+# inbound connection this topology never makes.
 add_trust() {
   local server="$1" data_dir="$2" origin_id="$3" signing_key="$4"
-  "$server" peer add -data-dir "$data_dir" -bus-id "$origin_id" \
-    -signing-key "$signing_key" -json >/dev/null
+  local args=(peer add -data-dir "$data_dir" -bus-id "$origin_id" -signing-key "$signing_key" -json)
+  # PRESENCE, NOT EMPTINESS — the same rule the CLI itself applies to this flag
+  # via fs.Visit (cmd/agent-bus/peer.go:653-676). Treating an EMPTY 5th argument
+  # as "not adjacent" is the fail-silent direction: it would write a trust record
+  # with NO transport binding while reporting success, losing an admission
+  # credential to an unset shell variable. Unreachable today (json_string dies on
+  # an empty field), but this script is the worked example operators copy.
+  if (($# >= 5)); then
+    [[ -n "$5" ]] ||
+      die "add_trust: an inbound client-certificate fingerprint was passed for $origin_id but is EMPTY; refusing to write a trust record with no transport binding"
+    args+=(-peer-client-fingerprint "$5")
+  fi
+  "$server" "${args[@]}" >/dev/null
 }
 
 enrol_agent() {
@@ -356,19 +391,23 @@ signing_c="$(export_signing_key "$SERVER_C" "$DATA_C" C)"
 
 note "configuring offline routes and trust as independent records"
 # A reaches C through B. A also pins C independently of that next-hop route.
+# B is A's only adjacent bus, so B is the only trust record here that carries an
+# inbound binding; C's is signing-only.
 add_route "$SERVER_A" "$DATA_A" "$bus_b" "$URL_B" "$fp_b" "$bus_c"
-add_trust "$SERVER_A" "$DATA_A" "$bus_b" "$signing_b"
+add_trust "$SERVER_A" "$DATA_A" "$bus_b" "$signing_b" "$fp_b"
 add_trust "$SERVER_A" "$DATA_A" "$bus_c" "$signing_c"
 
-# B is the only adjacent hop to both endpoint buses.
+# B is the only adjacent hop to both endpoint buses, so both of its trust
+# records bind an inbound client certificate.
 add_route "$SERVER_B" "$DATA_B" "$bus_a" "$URL_A" "$fp_a"
-add_trust "$SERVER_B" "$DATA_B" "$bus_a" "$signing_a"
+add_trust "$SERVER_B" "$DATA_B" "$bus_a" "$signing_a" "$fp_a"
 add_route "$SERVER_B" "$DATA_B" "$bus_c" "$URL_C" "$fp_c"
-add_trust "$SERVER_B" "$DATA_B" "$bus_c" "$signing_c"
+add_trust "$SERVER_B" "$DATA_B" "$bus_c" "$signing_c" "$fp_c"
 
-# C has a route to B but deliberately NO route to A: A is trust-only here.
+# C has a route to B but deliberately NO route to A: A is trust-only here, and
+# so is signing-only — A never dials C, so there is no inbound binding to make.
 add_route "$SERVER_C" "$DATA_C" "$bus_b" "$URL_B" "$fp_b"
-add_trust "$SERVER_C" "$DATA_C" "$bus_b" "$signing_b"
+add_trust "$SERVER_C" "$DATA_C" "$bus_b" "$signing_b" "$fp_b"
 add_trust "$SERVER_C" "$DATA_C" "$bus_a" "$signing_a"
 
 # Downstream first prevents an upstream forwarder from racing an unavailable
