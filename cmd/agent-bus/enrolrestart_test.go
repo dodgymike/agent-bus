@@ -56,6 +56,12 @@ func enrolNewAgent(t *testing.T, dataDir, addr, name string) *busAgent {
 	if err != nil {
 		t.Fatalf("generating an Ed25519 keypair: %v", err)
 	}
+	// THE INVITE. Since INVITE-GATE-ENFORCE the shipped bus is invite-only
+	// (invariant 3), so this is no longer optional and an enrolment without one
+	// is a 403. It is drawn from the pool the test minted BEFORE starting the
+	// bus — see invitepool_test.go for why it cannot be minted here.
+	inv := e2eTakeInvite(t, dataDir)
+
 	body := mustPostJSON(t, dataDir, addr, "/v1/enroll", "", map[string]string{
 		"name":       name,
 		"public_key": base64.StdEncoding.EncodeToString(pub),
@@ -63,6 +69,8 @@ func enrolNewAgent(t *testing.T, dataDir, addr, name string) *busAgent {
 		// the ORIGINAL id, which would make a restart look survivable for
 		// entirely the wrong reason.
 		"idempotency_key": fmt.Sprintf("enrol-%s-%d", name, time.Now().UnixNano()),
+		"invite_id":       inv.id,
+		"invite_secret":   inv.secret,
 	}, http.StatusCreated)
 
 	var out struct {
@@ -231,6 +239,13 @@ func listAgents(t *testing.T, dataDir, addr string, a *busAgent) map[string]agen
 // and the assertion tightens itself: it then requires the message to arrive.
 func TestTwoAgentsKeepTalkingAcrossARestartWithoutReEnrolling(t *testing.T) {
 	dir := t.TempDir()
+
+	// Two invites for the two agents, minted before the bus starts (invariant 3;
+	// invitepool_test.go). Note this test's whole point survives the gate
+	// unchanged: the agents enrol ONCE and must keep working across the restart
+	// WITHOUT re-enrolling — and therefore without needing a second invite,
+	// which is precisely what an operator needs to be true of a gated bus.
+	e2ePrepareInvites(t, dir, 2)
 
 	// --- start 1: a fresh data dir, two agents enrol ---
 	p1 := startServer(t, dir)

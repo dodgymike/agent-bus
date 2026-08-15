@@ -1,7 +1,12 @@
 package httpapi_test
 
-// INVITE-GATE, part 4: POST /v1/enroll REDEEMS an invite when one is presented,
-// and STILL ACCEPTS an enrolment carrying none.
+// INVITE-GATE, part 4: POST /v1/enroll REDEEMS an invite when one is presented.
+//
+// EVERY TEST HERE RUNS AGAINST AN UNGATED BUS (newIGBus leaves
+// auth.Options.RequireInvite false), which is what these tests were written for:
+// the REDEMPTION half, in isolation from the requirement. The ENFORCEMENT half —
+// where an enrolment carrying no invite is refused 403, as the shipped bus does
+// since INVITE-GATE-ENFORCE — lives in invitegate_enforce_test.go.
 //
 // The route is exercised through the REAL handler over a REAL *auth.Service, a
 // REAL *auth.WALRoster and a REAL *invite.Store on a real *wal.Log, because the
@@ -13,10 +18,13 @@ package httpapi_test
 // Four properties get the most attention, because each of them is the kind of
 // thing that looks fine in review and is wrong in production:
 //
-//  1. THE UN-INVITED PATH IS UNCHANGED. This build does not GATE enrolment; it
-//     redeems an invite when one is offered. Nine agents are enrolled on a live
-//     bus and the shipped client cannot present an invite at all, so a route
-//     that started refusing them is a total onboarding outage.
+//  1. THE UN-INVITED PATH IS UNCHANGED *WITH THE GATE OFF*. Redemption must not
+//     silently imply a requirement: turning the gate on is one explicit
+//     configuration bit, and with it off this route behaves exactly as it did
+//     before invites existed. (The original wording — "this build does not GATE
+//     enrolment ... the shipped client cannot present an invite at all" — was
+//     true when written and is not now: `agent-busctl enrol --invite-file`
+//     shipped in INVITE-CLIENT and the gate shipped in INVITE-GATE-ENFORCE.)
 //  2. THE REPLAY IS BYTE-IDENTICAL. A legitimate retry must parse a body it
 //     cannot distinguish from the original's, and must not consume anything a
 //     second time.
@@ -84,7 +92,17 @@ type igBus struct {
 
 // newIGBus builds the bus. withInvites=false leaves Options.Invites nil, which
 // is the "this build does not redeem invites" configuration.
+//
+// The gate (auth.Options.RequireInvite) is OFF here, so every test built on this
+// helper exercises the REDEMPTION half against an open bus, which is what they
+// were written for. The ENFORCEMENT half has its own harness: newIGBusGated,
+// in invitegate_enforce_test.go, which is this function with the gate on.
 func newIGBus(t *testing.T, withInvites bool) *igBus {
+	return newIGBusOpts(t, withInvites, false)
+}
+
+// newIGBusOpts is newIGBus with the invite gate under test control.
+func newIGBusOpts(t *testing.T, withInvites, requireInvite bool) *igBus {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -120,7 +138,7 @@ func newIGBus(t *testing.T, withInvites bool) *igBus {
 	if err != nil {
 		t.Fatalf("building the agent id minter: %v", err)
 	}
-	svc, err := auth.NewService(auth.Options{Minter: minter, Roster: roster})
+	svc, err := auth.NewService(auth.Options{Minter: minter, Roster: roster, RequireInvite: requireInvite})
 	if err != nil {
 		t.Fatalf("auth.NewService: %v", err)
 	}
@@ -168,10 +186,19 @@ func igEnrolBody(name, pubB64, key, inviteID, inviteSecret string) string {
 // 1. The un-invited path is unchanged
 // ---------------------------------------------------------------------------
 
-// TestInviteGateEnrolWithoutAnInviteIsStillAccepted is THE regression of this
-// task. InviteRequired is false and must stay false until a separate flip lands
-// alongside a client that can present an invite; until then a refusal here is a
-// 100% onboarding outage that looks exactly like a working gate.
+// TestInviteGateEnrolWithoutAnInviteIsStillAccepted is THE regression of the
+// REDEMPTION half, and it is scoped to an UNGATED bus (newIGBus leaves
+// auth.Options.RequireInvite false).
+//
+// It said "InviteRequired is false and must stay false until a separate flip
+// lands alongside a client that can present an invite". That flip HAS landed —
+// `agent-busctl enrol --invite-file` in INVITE-CLIENT, then the gate itself in
+// INVITE-GATE-ENFORCE — so this no longer describes the shipped bus, where an
+// un-invited enrolment is refused 403
+// (TestInviteGateEnrolWithoutAnInviteIsRefused403). What it still pins is that
+// redeeming an invite is not silently REQUIRED by the redemption machinery
+// itself: the requirement is one explicit configuration bit, and with it off the
+// pre-gate behaviour is exactly preserved for an embedder.
 func TestInviteGateEnrolWithoutAnInviteIsStillAccepted(t *testing.T) {
 	b := newIGBus(t, true)
 	_, _, pubB64 := newAuthKeypair(t)
@@ -181,7 +208,7 @@ func TestInviteGateEnrolWithoutAnInviteIsStillAccepted(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf(`enrol WITHOUT an invite = %d, want 201; body %s
 
-This build REDEEMS an invite when one is presented; it does not REQUIRE one.`, rec.Code, rec.Body.String())
+This bus was built WITHOUT the invite gate (auth.Options.RequireInvite false), and with it off an enrolment presenting no invite is accepted exactly as before. The GATED behaviour is TestInviteGateEnrolWithoutAnInviteIsRefused403.`, rec.Code, rec.Body.String())
 	}
 	body := decodeBody(t, rec)
 	wantKeys(t, body, "agent_id", "bus_id", "name", "enrolled_at")

@@ -82,6 +82,44 @@ type Options struct {
 	// authoritative and is always measured against this clock.
 	Now func() time.Time
 
+	// RequireInvite turns on INVITE-ONLY ENROLMENT (invariant 3): Enrol refuses
+	// any request carrying no Invite, with ErrInviteRequired.
+	//
+	// # It defaults to FALSE, and that is deliberate rather than a soft default
+	//
+	// This is the policy layer, not the composition root. Turning the gate on is
+	// the DEPLOYMENT's decision because the deployment is the only layer that
+	// knows whether an invite can actually be presented: internal/httpapi answers
+	// 501 to a presented invite when it was built with no invite store, so a
+	// service built with RequireInvite against a bus with no invite store is
+	// UNENROLLABLE — every enrolment refused for want of an invite that the same
+	// bus refuses to accept, which httpapi.New logs at ERROR when it sees the
+	// combination. cmd/agent-bus sets this true and wires an invite store
+	// unconditionally.
+	//
+	// BE HONEST ABOUT WHO THE "EMBEDDER" IS (reviewer, INVITE-GATE-ENFORCE). This
+	// package is under internal/, so it CANNOT be imported outside this module:
+	// the only consumers are cmd/agent-bus and this package's own tests. So the
+	// false default is not protecting a population of third-party embedders that
+	// does not exist. What it actually buys is narrower and still worth having:
+	// the TESTS that exercise the pre-gate behaviour keep a way to ask for it
+	// explicitly rather than by mocking, the ungated path stays reachable and
+	// therefore testable rather than rotting, and the one shipped composition
+	// states the security posture where an auditor reads it — at the composition
+	// root, in one place, rather than inheriting it silently from a library
+	// default.
+	//
+	// Read it as "the shipped bus opts IN, visibly", not as "open by default is
+	// fine".
+	//
+	// # What it does NOT do
+	//
+	// It does not validate, authenticate or authorise the invite — internal/httpapi
+	// has already proved the presented secret against the durable invite table
+	// before it builds the InviteRedemption this sees. This field decides one
+	// thing: whether an enrolment presenting NOTHING is admitted.
+	RequireInvite bool
+
 	// MaxRosterEntries bounds enrolments; 0 means DefaultMaxRosterEntries.
 	MaxRosterEntries int
 
@@ -113,6 +151,10 @@ type Service struct {
 	minter *ids.AgentIDMinter
 	roster Roster
 	now    func() time.Time
+
+	// requireInvite is invariant 3's gate. It is set once at construction and
+	// never written again, so Enrol reads it without a lock.
+	requireInvite bool
 
 	maxRosterEntries          int
 	maxIdempotencyEntries     int
@@ -202,6 +244,7 @@ func NewService(opts Options) (*Service, error) {
 		minter:                    opts.Minter,
 		roster:                    opts.Roster,
 		now:                       opts.Now,
+		requireInvite:             opts.RequireInvite,
 		maxRosterEntries:          opts.MaxRosterEntries,
 		maxIdempotencyEntries:     opts.MaxIdempotencyEntries,
 		maxSessions:               opts.MaxSessions,
@@ -229,6 +272,18 @@ func NewService(opts Options) (*Service, error) {
 	}
 	return s, nil
 }
+
+// InviteRequired reports whether this service enforces invite-only enrolment
+// (invariant 3) — that is, whether Enrol refuses a request carrying no invite.
+//
+// It exists so the HTTP layer can ADVERTISE the truth rather than a constant:
+// internal/httpapi/discovery.go serves `enrolment.invite_required` on
+// /v1/discovery, and a
+// document that claimed the gate was off while Enrol refused every un-invited
+// enrolment would send agents into a refusal loop with the bus itself telling
+// them they should have got through. It is fixed for the process lifetime, which
+// is what lets the discovery document stay precomputed.
+func (s *Service) InviteRequired() bool { return s.requireInvite }
 
 // EnrolRequest is one enrolment attempt. EVERY field is untrusted client input.
 type EnrolRequest struct {
@@ -276,13 +331,15 @@ type EnrolRequest struct {
 	// with. It is supplied by the caller (internal/httpapi), which has already
 	// verified the presented secret.
 	//
-	// NIL MEANS AN UN-INVITED ENROLMENT, AND THAT IS STILL FULLY SUPPORTED. This
-	// build REDEEMS an invite when one is presented; it does not REQUIRE one.
-	// Invariant 3's end state is invite-only enrolment, and making that flip is a
-	// SEPARATE task — nothing here may be read as "enrolment is gated". The flip
-	// cannot be made here in any case: the compiled CLI cannot yet present an
-	// invite, so requiring one would lock every enrolled agent's peers out of the
-	// bus.
+	// NIL MEANS AN UN-INVITED ENROLMENT, and whether that is accepted is decided
+	// by Options.RequireInvite — see the gate at the top of Enrol. With the gate
+	// on (invariant 3, and what cmd/agent-bus ships) a nil Invite is REFUSED with
+	// ErrInviteRequired; with it off, a nil Invite is accepted.
+	//
+	// This field's doc previously said the flip "cannot be made here in any case:
+	// the compiled CLI cannot yet present an invite". That obstacle is GONE —
+	// `agent-busctl enrol --invite-file` landed in INVITE-CLIENT — which is what
+	// made the gate implementable without locking every agent out.
 	//
 	// When it is non-nil the roster MUST support the composite write
 	// (PutWithInvite). A roster that does not — MemoryRoster is one — makes the
@@ -464,7 +521,7 @@ type EnrolResult struct {
 // NO TASK HAS BEEN FILED for it yet, so name one here when one exists. Read this
 // method as "records it when offered", never as "requires it".
 //
-// # An invite is REDEEMED when one is presented — and is NOT required
+// # An invite is REDEEMED when one is presented, and is REQUIRED when the gate is on
 //
 // When req.Invite is non-nil the enrolment record and the invite CONSUMPTION
 // record are written as ONE composite wal.Entry (EnrolInviteRecordKind, through
@@ -473,10 +530,19 @@ type EnrolResult struct {
 // never happened. A roster that cannot do that write refuses the enrolment
 // outright (ErrInviteNotAtomic) rather than splitting it into two transactions.
 //
-// req.Invite == nil is an UN-INVITED enrolment and is STILL ACCEPTED. This
-// build redeems an invite; it does not require one. Invite-only enrolment
-// (invariant 3) is a separate task and nothing here may be read as claiming the
-// gate is on.
+// req.Invite == nil is an UN-INVITED enrolment, and what happens to it depends
+// on ONE configuration bit:
+//
+//   - Options.RequireInvite TRUE — invariant 3's end state, and what
+//     cmd/agent-bus ships — it is REFUSED with ErrInviteRequired, by the first
+//     check in this method, before any lock, any table, the roster or the mint.
+//   - Options.RequireInvite FALSE — the default, for an embedder that wires no
+//     invite store — it is accepted, exactly as every build before the gate.
+//
+// This comment said in terms that an un-invited enrolment was "STILL ACCEPTED"
+// and that the gate was "a separate task". That was true of the build that
+// landed the redemption half and is no longer true: the gate exists and the
+// shipped binary turns it on.
 //
 // # The suffix is BURNED by Mint, and that is correct
 //
@@ -521,6 +587,49 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 			req.Invite.Abort()
 		}
 	}()
+
+	// THE INVITE GATE (invariant 3), AND IT IS THE FIRST CHECK IN THE METHOD.
+	//
+	// An enrolment presenting no invite is refused outright when this service is
+	// configured for invite-only enrolment. This is the enforcement half of
+	// INVITE-GATE: the redemption half — spending a PRESENTED invite atomically
+	// with the enrolment — landed first and deliberately did not require one, and
+	// every "an un-invited enrolment is still accepted" note in this file was
+	// true of that build and is not true of this one.
+	//
+	// # THE PLACEMENT IS THE FIX, not the refusal on its own
+	//
+	// It is above the validation, above the idempotency table, above admission
+	// control and above the mint, so an un-invited caller touches NOTHING: no
+	// lock is taken, no map is written, no roster slot is consumed, and — the
+	// point that matters most — NO AGENT ID SUFFIX IS BURNED. Suffix floors are
+	// never reclaimed (point 8 of the ids.NameSuffixes doc) and are rewritten and
+	// fsynced on every mint, so a gate placed after the mint would refuse the
+	// enrolment while still letting an anonymous caller drive an unbounded,
+	// fsyncing write on an unauthenticated route. That is the same reasoning the
+	// certificate-binding check below records for moving itself above the mint.
+	//
+	// This is what closes the roster-exhaustion DoS
+	// (INVITE-GATE-ENFORCE): the roster cap is 4096, nothing ever frees a slot,
+	// there is no leave route and ids are never reused (invariant 1), so ~4096
+	// anonymous enrolments exhausted the bus PERMANENTLY — not an OOM, which is
+	// why it read as bounded and safe. With the gate on, the anonymous path never
+	// reaches the roster at all.
+	//
+	// # It reads req.Invite, NOT the invite table
+	//
+	// A non-nil Invite means internal/httpapi has ALREADY proved the presented
+	// secret against the durable invite table and holds a live reservation for
+	// it. This check is therefore "was an invite redeemed", never "is this invite
+	// valid" — it must not be read as doing any verification of its own.
+	//
+	// # The connection is KEPT. See ErrInviteRequired for invariant 10's two
+	// questions answered in full; the short form is that every pre-gate client
+	// reaches this line on its first call after an operator turns the gate on,
+	// and this route is unauthenticated so the socket names no principal.
+	if s.requireInvite && req.Invite == nil {
+		return EnrolResult{}, fmt.Errorf("%w: this bus is invite-only and this enrolment presented none", ErrInviteRequired)
+	}
 
 	// Validation first, and OUTSIDE the lock: it touches no shared state, and
 	// keeping it out means a flood of malformed requests cannot serialise
@@ -744,8 +853,12 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 	}
 
 	if req.Invite == nil {
-		// THE UN-INVITED PATH, unchanged. An enrolment carrying no invite is
-		// still accepted; see EnrolRequest.Invite.
+		// THE UN-INVITED PATH. Reachable ONLY when Options.RequireInvite is
+		// false: the gate at the top of this method refuses a nil Invite
+		// outright when it is on, so on the shipped bus (invariant 3) this
+		// branch is dead and every enrolment takes the composite path below.
+		// It is kept for the embedder that wires no invite store; see
+		// EnrolRequest.Invite.
 		if err := s.roster.Put(entry); err != nil {
 			// The suffix inside agentID is spent. See the doc comment: it is not
 			// reused, and the gap it leaves is correct.

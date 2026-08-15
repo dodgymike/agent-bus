@@ -428,17 +428,44 @@ When an invite was redeemed, `--json` output gains `invite_id` and human output 
 `invite <id>` line — the invite's **id**, which is a name safe to log, so you can tell which one this
 agent spent. The **secret** is the credential and appears in no output, error or log line, ever.
 
-#### Enrolling without an invite still works
+#### Enrolling WITHOUT an invite is refused
 
-The bus's own `InviteRequired` is deliberately `false` today, so an enrolment presenting no invite at
-all is accepted exactly as before. **This is a temporary gap, not a guarantee** — invariant 3 says
-enrolment is invite-only, and the bus is expected to start REQUIRING one; when it does, the refusal
-comes from the bus, not this client. Do not build automation that depends on un-invited enrolment
-continuing to work — get an invite:
+**The bus requires an invite. An enrolment presenting none is refused `403`** (`agent-busctl` exit
+`4`), however well-formed the rest of the request is, and retrying it unchanged will never succeed.
+That is invariant 3: redeeming an operator-minted invite is the ONLY way onto the bus. The gap that
+used to be documented here — "`InviteRequired` is deliberately `false` today, so an enrolment
+presenting no invite is accepted exactly as before" — is CLOSED.
+
+The refusal comes from the BUS, not from this client: the client does not check, and will happily
+send an un-invited enrolment to a bus that accepts one. The bus states its own posture in the
+`enrolment.invite_required` field of its discovery document (`GET /v1/discovery`), and that field is
+READ from the enforcing layer, so it cannot disagree with the behaviour. There is **no `agent-busctl`
+subcommand that fetches the discovery document yet**, so today the practical answer is simply: assume
+an invite is required, because the shipped bus requires one.
+
+Already-enrolled agents are **unaffected** and never re-enrol: the gate is on enrolment, and a
+credential you already hold keeps working across restarts.
+
+**Operators — getting an agent an invite requires stopping the bus.** `agent-bus invite mint` takes
+the data directory's exclusive lock that a running bus holds (exit `3` = "a bus is running"), and an
+invite pins the bus's certificate, which only a completed start produces. So admitting a new agent
+is always:
 
 ```bash
-agent-busctl enrol --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex> --name planner
+# 1. stop the bus            2. mint            3. start it again
+agent-bus invite mint -data-dir ./data -bus-address https://127.0.0.1:8080 -ttl 1h -json > invite.json
+chmod 0600 invite.json      # it holds a bearer credential
 ```
+
+Then hand `invite.json` to the agent, which redeems it:
+
+```bash
+agent-busctl enrol --invite-file invite.json --name planner
+```
+
+A consequence worth knowing before it surprises you: a bus's **first-ever boot can enrol nobody**,
+because there is no certificate to pin until a start has completed. The first agent onto a brand new
+bus therefore costs a start, a stop, a mint and a restart.
 
 Flags: `--name <name>` (required, `[a-z0-9_-]`, 1-64 bytes, starting with a letter or digit),
 `--invite-file <path>` (redeem the invite in this file, or `-` for stdin — see above; supplies the

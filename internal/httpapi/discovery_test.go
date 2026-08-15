@@ -589,31 +589,53 @@ func TestDiscoverySessionConstantsMatchAuth(t *testing.T) {
 	})
 }
 
-// TestDiscoveryEnrolmentIsHonest pins the document to what this build actually
+// TestDiscoveryEnrolmentIsHonest pins the document to what THIS SERVER actually
 // enforces. A document that claims a control it does not have is a FALSE
 // SECURITY CLAIM -- worse than saying nothing, because a reader makes a trust
 // decision on it.
+//
+// # SCOPE, AND IT IS NARROWER THAN THE NAME SUGGESTS (INVITE-GATE-ENFORCE)
+//
+// newDiscoveryServer wires NO auth service at all, so this pins the AUTH-LESS
+// server: one that cannot enrol anybody and therefore has no gate to advertise.
+// `false` is the honest answer for it and always will be.
+//
+// It is NOT a statement about the shipped bus, and it must not be read as one.
+// It said "what this build actually enforces" and expected `false` "TODAY"
+// because invite-gating was unimplemented; INVITE-GATE-ENFORCE turned the gate
+// on, and cmd/agent-bus now advertises invite_required TRUE. The reason this
+// test did not go red with it is exactly the reason its scope had to be written
+// down: an auth-less server has nothing to enforce, so it never exercised the
+// enforcement it claimed to pin.
+//
+// THE HONESTY PROPERTY THAT MATTERS -- that the advertised bit is READ from the
+// enforcing layer (auth.Service.InviteRequired()) and cannot drift from it -- is
+// pinned over BOTH values by TestInviteGateAdvertisesInviteRequired in
+// invitegate_enforce_test.go. Keep the two together: this one covers the
+// degenerate server, that one covers the gate.
 func TestDiscoveryEnrolmentIsHonest(t *testing.T) {
 	_, body := discoveryBody(t, newDiscoveryServer(t, "bus-discovery-test"))
 	enrolment := asMap(t, "enrolment", body["enrolment"])
 
-	t.Run("invite_required is false", func(t *testing.T) {
-		// FALSE is the truthful value TODAY: invite-gated enrolment (INVITE-GATE)
-		// is still `todo` in the backlog and POST /v1/enroll has no invite field.
+	t.Run("invite_required is false on a server with no auth service", func(t *testing.T) {
+		// FALSE is the truthful value for THIS server, permanently: it has no
+		// auth service, so it enrols nobody and gates nothing. httpapi.New
+		// computes the bit as `s.auth != nil && s.auth.InviteRequired()`.
 		//
-		// WHEN INVITE-GATE LANDS, THIS TEST IS THE THING THAT MUST BE UPDATED IN
-		// THE SAME TASK -- flip the expectation to true there, in the commit that
-		// makes it true, so the document can never be ahead of the enforcement.
-		// Do not "fix" this test by loosening it.
+		// This is no longer the "flip me when the gate lands" pin it was written
+		// as -- the gate HAS landed (INVITE-GATE-ENFORCE) and a gated server
+		// advertises true, which is asserted in
+		// TestInviteGateAdvertisesInviteRequired. Do not flip this one to true:
+		// that would assert an auth-less server advertises a gate it does not
+		// have, which is the false-claim direction this test exists to prevent.
 		if got := enrolment["invite_required"]; got != false {
-			t.Fatalf("enrolment.invite_required = %#v, want false.\n"+
-				"If enrolment is genuinely invite-gated now, this is the right change -- but make it in the SAME task as the gate, never before it.\n"+
-				"If it is not, the document is making a security claim this build cannot keep.",
+			t.Fatalf("enrolment.invite_required = %#v on a server built with NO auth service, want false.\n"+
+				"A server that cannot enrol anybody must not advertise an enrolment control. If this went red because the bit stopped being read from the auth service, fix the read -- do not loosen this test.",
 				got)
 		}
 	})
 
-	t.Run("invite_note does not claim invites are live", func(t *testing.T) {
+	t.Run("invite_note does not claim invites are live on this auth-less server", func(t *testing.T) {
 		note, _ := enrolment["invite_note"].(string)
 		if strings.TrimSpace(note) == "" {
 			t.Fatal("enrolment.invite_note is empty; a reader is left to infer whether enrolment is gated")

@@ -145,6 +145,11 @@ func exitedWithin(p *serverProc, bound time.Duration) (bool, int) {
 func TestForgedSeqFloorIsRefusedRatherThanBrickingEverySend(t *testing.T) {
 	dir := t.TempDir()
 
+	// Invite-only enrolment (invariant 3), minted before the bus starts: one for
+	// the victim below, spare for the diagnostic re-enrolment in the failure
+	// branch. See invitepool_test.go.
+	e2ePrepareInvites(t, dir, 3)
+
 	// ---- 1. A bus that demonstrably WORKS, so the brick below is attributable
 	// to the forgery and not to a broken fixture.
 	proc := startServer(t, dir)

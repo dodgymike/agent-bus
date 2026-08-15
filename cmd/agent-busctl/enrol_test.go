@@ -69,6 +69,41 @@ func TestCLIEnrolEndToEnd(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
+
+	// INVITE-ONLY ENROLMENT (invariant 3, INVITE-GATE-ENFORCE). The shipped
+	// server refuses an enrolment presenting no invite, so this test must do
+	// what an operator does: run the bus once so the directory has a
+	// certificate for an invite to PIN, stop it, mint with the bus STOPPED
+	// (`invite mint` takes the exclusive dirlock a running bus holds), then
+	// start the bus this test actually uses.
+	primeCmd := exec.Command(bin, "-listen", addr, "-data-dir", dataDir, "-log-level", "error")
+	primeStderr := &syncBuffer{}
+	primeCmd.Stderr = primeStderr
+	if err := primeCmd.Start(); err != nil {
+		t.Fatalf("starting the priming agent-bus server: %v", err)
+	}
+	waitForBusCertificate(t, dataDir, primeStderr)
+	_ = primeCmd.Process.Signal(syscall.SIGTERM)
+	if err := primeCmd.Wait(); err != nil {
+		t.Fatalf("the priming server exited badly: %v\n%s", err, primeStderr.String())
+	}
+
+	mintOut, err := exec.Command(bin, "invite", "mint",
+		"-data-dir", dataDir,
+		"-bus-address", "https://"+addr,
+		"-ttl", "1h",
+		"-label", "agent-busctl end-to-end",
+		"-json").Output()
+	if err != nil {
+		t.Fatalf("`agent-bus invite mint`: %v\n%s", err, mintOut)
+	}
+	// 0600: the CLI refuses a world-readable invite file, because it holds a
+	// bearer credential.
+	invitePath := filepath.Join(t.TempDir(), "invite.json")
+	if err := os.WriteFile(invitePath, mintOut, 0o600); err != nil {
+		t.Fatalf("writing the invite file: %v", err)
+	}
+
 	serverCmd := exec.Command(bin, "-listen", addr, "-data-dir", dataDir, "-log-level", "error")
 	// A LOCKED buffer, not a bare bytes.Buffer. os/exec copies the child's
 	// stderr on its own goroutine whenever Stderr is not an *os.File, so every
@@ -113,7 +148,7 @@ func TestCLIEnrolEndToEnd(t *testing.T) {
 	// enrol
 	var enrolStdout, enrolStderr bytes.Buffer
 	code := run(ctx, []string{"--identity", identityDir, "--bus", busURL, "--bus-fingerprint", busFingerprint,
-		"enrol", "--name", "testagent", "--json"},
+		"enrol", "--name", "testagent", "--invite-file", invitePath, "--json"},
 		&enrolStdout, &enrolStderr, emptyEnv)
 	if code != client.ExitOK {
 		t.Fatalf("enrol exit = %d, want 0; stdout=%q stderr=%q server_stderr=%s",

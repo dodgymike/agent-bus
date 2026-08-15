@@ -260,7 +260,7 @@ var discoverySteps = []string{
 // this build; a reader making a trust decision needs the gaps stated, not
 // implied by their absence.
 var discoveryLimitations = []string{
-	"1. TLS IS ON, MUTUAL TLS IS NOT, AND TLS ALONE PROTECTS YOU FROM A PASSIVE OBSERVER ONLY. This bus serves https and ONLY https; there is no plaintext listener, and a plaintext request never reaches a route. But the certificate is SELF-SIGNED, there is NO certificate authority, and there is deliberately NO trust-on-first-use, so YOU MUST PIN THE BUS'S CERTIFICATE FINGERPRINT, out of band, from your invite (the bus also logs it at startup as bus_cert_fingerprint). UNTIL YOU DO, an ACTIVE on-path attacker can terminate TLS with a certificate of its own and read your session token in full -- including on THIS DOCUMENT, which is unauthenticated, and which such an attacker would be the one serving you. This document cannot bootstrap trust in itself; only the fingerprint you already hold can. A client that accepts whatever certificate turns up has verified nothing. SECOND, and separately: the bus does NOT request or require a CLIENT certificate, so TLS here authenticates the BUS to you and never you to the bus -- your session token remains the only thing proving who you are. Client-certificate authentication is being built and is not here yet.",
+	"1. TLS IS ON, MUTUAL TLS IS NOT, AND TLS ALONE PROTECTS YOU FROM A PASSIVE OBSERVER ONLY. This bus serves https and ONLY https; there is no plaintext listener, and a plaintext request never reaches a route. But the certificate is SELF-SIGNED, there is NO certificate authority, and there is deliberately NO trust-on-first-use, so YOU MUST PIN THE BUS'S CERTIFICATE FINGERPRINT, out of band, from your invite (the bus also logs it at startup as bus_cert_fingerprint). UNTIL YOU DO, an ACTIVE on-path attacker can terminate TLS with a certificate of its own and read your session token in full -- including on THIS DOCUMENT, which is unauthenticated, and which such an attacker would be the one serving you. This document cannot bootstrap trust in itself; only the fingerprint you already hold can. A client that accepts whatever certificate turns up has verified nothing. SECOND, and separately, on CLIENT certificates -- read the limit of this carefully, because it protects some callers and not others. The bus DOES request a client certificate, and does NOT require or verify one at the handshake, so a connection presenting none is still accepted and completes normally. What presenting one buys you is a BINDING: a client certificate presented at enrolment is recorded against your agent id, and a session token for a BOUND agent is refused (403) on the agent routes unless it arrives over that same certificate -- so for a bound agent the token alone is no longer enough to impersonate it. IF YOU HAVE NO BINDING YOU HAVE NONE OF THAT: an agent that enrolled without a client certificate holds a pure bearer token, and anyone who obtains it can use it from a connection presenting no certificate at all. Enrol over a client certificate if you want your token tied to a key you hold.",
 	"2. MESSAGES ARE SIGNED BUT THE BUS DOES NOT VERIFY THEM. A send must carry an Ed25519 signature and the bus enforces its SHAPE (present, strict base64, exactly 64 bytes), but it never checks it against the sender's key. That is BY DESIGN, not a gap waiting on a release: THE BUS ENFORCES SHAPE, THE RECIPIENT ENFORCES AUTHENTICITY -- a bus that verified would quietly move the trust boundary onto itself. Verification is therefore YOUR job as a recipient, and today you cannot do it either, because no endpoint distributes messaging public keys. Until one exists, treat every message as UNAUTHENTICATED and do not infer authenticity from the fact that signatures are mandatory.",
 	"3. NO END-TO-END ENCRYPTION. Message bodies are held, PERSISTED TO DISK UNENCRYPTED, and served in the clear. Anyone who can read this bus's data directory can read every message body it has stored. Only the append-only audit log omits bodies; the message store does not.",
 	"4. BROADCAST IS REFUSED. POST " + RouteBroadcast + " answers 501: the canonical signing format has no defined audience for a broadcast, and the bus refuses it rather than accept unsigned traffic.",
@@ -272,11 +272,13 @@ var discoveryLimitations = []string{
 // both fixed for the process lifetime, which is what lets this be computed once
 // and served forever. See the file comment for why the second one does not
 // breach the "must not grow with bus state" rule.
-func newDiscoveryResponse(busID string, inviteAccepted bool) DiscoveryResponse {
-	// Two sentences, and both are checked against the code every time this
-	// changes: what happens to an invite you present, and what happens if you
-	// present none. NOTHING here may imply the gate is on -- enrolment without an
-	// invite is accepted by this build.
+func newDiscoveryResponse(busID string, inviteAccepted, inviteRequired bool) DiscoveryResponse {
+	// Three sentences, and all are checked against the code every time this
+	// changes: what happens to an invite you present, what happens if you present
+	// none, and -- when the gate is on -- what a refused agent must actually DO
+	// about it. This document is the first thing an agent reads, so a note that
+	// merely refuses without naming the remedy costs a support round trip every
+	// time.
 	inviteNote := "Enrolment on this bus is currently OPEN: any caller that can reach it may enrol, with or without an invite. " +
 		"This build moreover DOES NOT REDEEM INVITES -- it was built without an invite store, so POST " + RouteEnroll +
 		" answers 501 if you present `invite_id` and `invite_secret`, rather than ignoring them and leaving you believing a single-use invite was spent. " +
@@ -285,6 +287,16 @@ func newDiscoveryResponse(busID string, inviteAccepted bool) DiscoveryResponse {
 		inviteNote = "Enrolment on this bus is currently OPEN: any caller that can reach it may enrol, and an enrolment presenting NO invite is accepted -- `invite_required` above is false and describes what is true now. " +
 			"What HAS changed: an invite presented to POST " + RouteEnroll + " as `invite_id` and `invite_secret` is genuinely REDEEMED -- single use, spent ATOMICALLY with your enrolment in one durable transaction, so it can never be spent twice nor spent on an enrolment that did not happen. " +
 			"Invite-only enrolment is being built and will become mandatory. That is imminent, not live."
+	}
+	if inviteRequired {
+		// THE GATE IS ON. Nothing in this string may soften that into "preferred"
+		// or "recommended": an agent that reads it as advice will retry an
+		// enrolment that can never succeed.
+		inviteNote = "Enrolment on this bus is INVITE-ONLY, and `invite_required` above is true (invariant 3). " +
+			"POST " + RouteEnroll + " WITHOUT `invite_id` and `invite_secret` is refused 403, always, however well-formed the rest of the request is -- there is no anonymous way onto this bus and retrying unchanged will not help. " +
+			"An invite is single-use, expiring and revocable, and is spent ATOMICALLY with the enrolment it authorises in one durable transaction, so it can never be spent twice nor spent on an enrolment that did not happen. " +
+			"TO GET ON: ask the bus operator for an invite file, then run `agent-busctl enrol --invite-file <path>`. " +
+			"Note for the operator reading this on someone's behalf: minting an invite requires the bus to be STOPPED, because `agent-bus invite mint` takes the data directory's exclusive lock that a running bus holds. Stop the bus, mint, restart. Agents already enrolled are unaffected and keep working across that restart."
 	}
 	return DiscoveryResponse{
 		Service:     "agent-bus",
@@ -296,12 +308,21 @@ func newDiscoveryResponse(busID string, inviteAccepted bool) DiscoveryResponse {
 		Steps:     discoverySteps,
 		Endpoints: discoveryEndpoints,
 		Enrolment: DiscoveryEnrolment{
-			// FALSE, and it describes what is true NOW: an enrolment carrying no
-			// invite is accepted by this build. Claiming otherwise here would be a
-			// security claim this build cannot keep. It is a SEPARATE bit from
-			// InviteAccepted below, which says only that a presented invite is
-			// redeemed.
-			InviteRequired: false,
+			// OBSERVED FROM THE ENFORCING LAYER, never a constant: it is
+			// auth.Service.InviteRequired(), the same bit Enrol's gate reads, so
+			// this field cannot drift from the behaviour it describes. It was
+			// hard-coded false while the gate did not exist; hard-coding it either
+			// way is what let advertising and enforcement disagree in the first
+			// place.
+			//
+			// It is a SEPARATE bit from InviteAccepted below, which says only that
+			// a presented invite is redeemed. The two are independent: a bus can
+			// redeem an invite without requiring one (the build before this gate),
+			// and requiring one without being able to redeem one would be an
+			// unenrollable bus -- which is why cmd/agent-bus wires the invite store
+			// unconditionally and httpapi.New warns loudly if it ever sees that
+			// combination.
+			InviteRequired: inviteRequired,
 			InviteAccepted: inviteAccepted,
 			InviteNote:     inviteNote,
 			YouSupply:      "A base64 (standard encoding, padded) Ed25519 public key you generated yourself. The bus stores only the public half, so it can verify your calls and can never forge them.",

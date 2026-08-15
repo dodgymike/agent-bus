@@ -59,6 +59,38 @@ var (
 	// second time. Server-side, retryable: 503 with Retry-After.
 	ErrCapacity = errors.New("auth: capacity limit reached")
 
+	// ErrInviteRequired reports an enrolment that presented NO invite to a
+	// service configured for invite-only enrolment (Options.RequireInvite,
+	// invariant 3). Client error: 403.
+	//
+	// # 403, not 401 and not 503
+	//
+	// 401 would be wrong: there is no authentication scheme the caller could
+	// retry under, and no credential it could present on THIS request that would
+	// change the answer. 503 would be worse — it is what ErrCapacity returns, it
+	// carries Retry-After, and it invites a client to hammer a route that will
+	// never accept it. 403 says exactly what is true: the request was understood,
+	// it is refused, and retrying it unchanged is pointless. What the caller must
+	// do is get an invite from the operator, which is not a protocol action.
+	//
+	// # It is NOT a disconnect, and this is invariant 10's two questions answered
+	//
+	// Can a merely BUGGY client reach this line? Yes, trivially and constantly:
+	// every agent built against the pre-gate bus reaches it on its first call
+	// after an operator turns the gate on, as does any client whose invite file
+	// is missing, misspelt or already spent. Does this connection carry only ONE
+	// principal's traffic? No — /v1/enroll is unauthenticated by construction
+	// (invariant 3 lists it as one of the three routes that necessarily cannot
+	// authenticate), so the socket identifies no principal to punish and on a
+	// shared address is not even necessarily the offending party's. The refusal
+	// is therefore an ordinary status code, logged, with the connection KEPT.
+	//
+	// Re-presenting a SPENT invite does not reach here at all: that is refused by
+	// internal/invite, and a re-presented invite with the same idempotency key
+	// and the same payload is a legitimate RETRY that replays the original 201
+	// (invariant 10) rather than any kind of refusal.
+	ErrInviteRequired = errors.New("auth: enrolment requires an invite")
+
 	// ErrUnknownAgent reports an agent id that is malformed, or well-formed but
 	// not in the roster. The two are deliberately not distinguished to the
 	// client: 404.

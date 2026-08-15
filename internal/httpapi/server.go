@@ -285,11 +285,41 @@ func New(opts Options) *Server {
 		s.startedAt = s.now()
 	}
 
+	// THE ADVERTISED GATE STATE IS READ FROM THE ENFORCING LAYER, not decided
+	// here. auth.Service.InviteRequired() is the same bit Enrol's gate reads, so
+	// /v1/info cannot claim enrolment is open while Enrol refuses every
+	// un-invited request — which is exactly the drift that made INVITE-GATE look
+	// finished when only its redemption half had landed.
+	//
+	// A nil Auth reports false, and that is correct rather than merely safe: with
+	// no auth service there is no enrolment on this server at all, so there is no
+	// gate to advertise.
+	inviteRequired := s.auth != nil && s.auth.InviteRequired()
+
+	// THE UNENROLLABLE COMBINATION, reported LOUDLY and at construction.
+	//
+	// A service that REQUIRES an invite, on a server built with NO invite store,
+	// can never enrol anybody: handleEnroll answers 501 to a presented invite
+	// (there is nothing to redeem it against) and Enrol refuses every request
+	// that presents none. Both halves are individually correct and the
+	// combination is a dead bus.
+	//
+	// It is a WARNING and not a refusal because New cannot fail — it returns no
+	// error, and widening that signature to catch a misconfiguration no shipped
+	// path can reach would touch every caller in the tree. cmd/agent-bus wires
+	// the invite store unconditionally, so this is reachable only by an embedder,
+	// and an embedder gets told at startup rather than by watching enrolments
+	// fail.
+	if inviteRequired && s.invites == nil {
+		s.log.Error("THIS BUS CANNOT ENROL ANYBODY: the auth service requires an invite (invariant 3) but this server was built with NO invite store, so an enrolment presenting an invite is answered 501 and an enrolment presenting none is refused 403. Wire an invite store, or build the auth service with RequireInvite disabled")
+	}
+
 	// Built AFTER the identity default is applied and BEFORE any request can
 	// be served, so the handler only ever writes a finished value. The second
-	// argument is ONE CONSTRUCTION-TIME BIT — whether this build redeems an
-	// invite at all — not runtime state; see discovery.go.
-	s.discovery = newDiscoveryResponse(s.identity.BusID(), s.invites != nil)
+	// and third arguments are CONSTRUCTION-TIME BITS — whether this build
+	// redeems an invite at all, and whether it requires one — not runtime state;
+	// see discovery.go.
+	s.discovery = newDiscoveryResponse(s.identity.BusID(), s.invites != nil, inviteRequired)
 
 	// Marshalling CANNOT fail here: every field is a string, int, bool or a
 	// slice/struct of those, with no channel, func, cycle or custom Marshaler

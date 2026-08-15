@@ -104,10 +104,18 @@ func mintSeq(t *testing.T, dataDir, addr string, a *busAgent) uint64 {
 // is a busy bus, which is many agents minting, not one agent defeating a quota.
 func seedMintedSequences(t *testing.T, dir string, mints int) (*busAgent, uint64) {
 	t.Helper()
-	proc := startServer(t, dir)
-	addr := proc.awaitServerStarted(t)
 
 	perAgent := hub.MaxOutstandingMintsPerAgent / 2
+
+	// INVITE-ONLY ENROLMENT (invariant 3): one single-use invite per agent this
+	// seeds, minted BEFORE the bus starts because minting takes the dirlock a
+	// running bus holds. The slack covers the callers that enrol a probe of
+	// their own against the same directory afterwards (seqfloorrestart_test.go's
+	// gap-probe, mustRefuseToStart's restart-probe). See invitepool_test.go.
+	e2ePrepareInvites(t, dir, mints/perAgent+4)
+
+	proc := startServer(t, dir)
+	addr := proc.awaitServerStarted(t)
 	var first *busAgent
 	var highest uint64
 	for minted := 0; minted < mints; {

@@ -42,6 +42,28 @@ const (
 	defaultPollTimeout = 30 * time.Second
 	defaultLogLevel    = "info"
 
+	// enrolmentInviteRequired turns on INVITE-ONLY ENROLMENT for the shipped
+	// server (invariant 3): an enrolment presenting no invite is refused 403.
+	//
+	// # It is a CONSTANT, and it is used TWICE on purpose
+	//
+	// It is passed to auth.Options.RequireInvite AND logged as
+	// enrolment_invite_required in the startup line, so the behaviour and the
+	// announcement of the behaviour cannot disagree. They disagreed before: the
+	// startup line hard-coded `false` beside a service that hard-coded nothing at
+	// all, and stayed false-by-construction after the gate was designed. One
+	// symbol makes that a compile-time impossibility rather than a review item.
+	//
+	// It is deliberately NOT a flag. An operator-settable "-require-invite=false"
+	// would be a documented way to reopen the anonymous enrolment route that
+	// permanently exhausts the roster (4096 slots, never reclaimed, ids never
+	// reused per invariant 1) -- the exact P0 this closes. Invariant 3 says
+	// invites are the ONLY way onto the bus; a flag that switches an invariant
+	// off is not a configuration option, it is a vulnerability with a help
+	// string. A deployment that genuinely wants open enrolment can build its own
+	// server from the packages, which is the honest way to own that decision.
+	enrolmentInviteRequired = true
+
 	// shutdownGrace bounds the drain of in-flight requests after the
 	// server-lifetime context has been cancelled.
 	//
@@ -611,15 +633,35 @@ func run(cfg Config) error {
 		return fmt.Errorf("attaching the durable invite store to the write-ahead log: %w", err)
 	}
 	// One line, at INFO, and worded so it can NEVER be read as "enrolment is
-	// gated": it is not. This build REDEEMS an invite that is presented, and
-	// still ACCEPTS an enrolment that presents none. invites_recovered is proof
-	// the table was rebuilt by the replay that just ran.
-	lg.Info("invite table recovered and REDEEMABLE: an invite presented to POST /v1/enroll is now spent atomically with the enrolment it authorises, in ONE durable transaction. ENROLMENT IS NOT GATED -- an enrolment presenting NO invite is still accepted, exactly as before; invite-only enrolment is a separate change and is not in this build",
+	// open": it is not, as of INVITE-GATE-ENFORCE. This line said the exact
+	// OPPOSITE until the gate landed -- "ENROLMENT IS NOT GATED ... an enrolment
+	// presenting NO invite is still accepted" with enrolment_invite_required
+	// false -- and it was true when written. A startup line that survives the
+	// change it describes is worse than no line: an operator who reads it takes
+	// the absence of a gate on trust and never checks.
+	//
+	// invites_recovered is proof the table was rebuilt by the replay that just
+	// ran, and it is the number that matters on a gated bus: it is how many
+	// agents can still get on.
+	lg.Info("invite table recovered and REDEEMABLE, and ENROLMENT IS NOW INVITE-ONLY (invariant 3): POST /v1/enroll presenting NO invite is refused 403, and a presented invite is spent atomically with the enrolment it authorises in ONE durable transaction. Agents already enrolled are UNAFFECTED and do not re-enrol. To admit a NEW agent you must STOP the bus, run `agent-bus invite mint`, and restart -- minting takes the data directory's exclusive lock that this process is holding",
 		"bus_id", busID,
 		"invites_recovered", inviteStore.Len(),
-		"enrolment_invite_required", false,
+		"enrolment_invite_required", enrolmentInviteRequired,
 	)
-	authSvc, err := auth.NewService(auth.Options{Minter: minter, Roster: authRoster})
+	// THE GATE IS TURNED ON HERE, at the composition root, and this is the only
+	// place in the tree that decides it (auth.Options.RequireInvite defaults
+	// false so an embedder that wires no invite store keeps working).
+	//
+	// It is safe to set unconditionally ONLY because inviteStore above is built
+	// unconditionally and is handed to httpapi as Options.Invites below. Requiring
+	// an invite on a bus with no invite store is an UNENROLLABLE bus -- 501 to a
+	// presented invite, 403 to none -- which httpapi.New logs loudly if it ever
+	// sees. Do not make one of those two conditional without the other.
+	authSvc, err := auth.NewService(auth.Options{
+		Minter:        minter,
+		Roster:        authRoster,
+		RequireInvite: enrolmentInviteRequired,
+	})
 	if err != nil {
 		return fmt.Errorf("creating the auth service: %w", err)
 	}
@@ -757,8 +799,15 @@ func run(cfg Config) error {
 		// It authenticates NO other route -- that is AUTH-2.
 		Auth: authSvc,
 		// Makes an invite PRESENTED to /v1/enroll redeemable, atomically with the
-		// enrolment. It does NOT require one: an enrolment carrying no invite is
-		// still accepted (see httpapi.Options.Invites).
+		// enrolment.
+		//
+		// IT IS REQUIRED, NOT MERELY ACCEPTED, and this comment said the opposite
+		// ("It does NOT require one: an enrolment carrying no invite is still
+		// accepted") until INVITE-GATE-ENFORCE. The requirement itself lives on
+		// authSvc above (auth.Options.RequireInvite, enrolmentInviteRequired);
+		// what this line contributes is the other half of the pair -- the store
+		// that makes a presented invite redeemable at all. Wiring one without the
+		// other yields an unenrollable bus, which httpapi.New logs loudly.
 		Invites: inviteStore,
 		// Registers the messaging surface: /v1/agents, /v1/broadcast, /v1/send,
 		// /v1/messages and /v1/wait. Every one of them authenticates.

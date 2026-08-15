@@ -276,6 +276,14 @@ func TestUncleanShutdownWithNoFloorFileStillStarts(t *testing.T) {
 	// the bus appends after it, and that interior hole is what the second
 	// removed arm mistook for loss. A test that stopped after the crash would
 	// miss it.
+	// One invite per pass below, plus slack, minted before the first start
+	// (invariant 3; see invitepool_test.go). It must happen here rather than
+	// between passes: after the first pass the bus has run and, on the killed
+	// pass, been SIGKILLed, and minting into that directory would mean opening
+	// the log for writing outside the server -- which is the one thing the
+	// dirlock exists to prevent.
+	e2ePrepareInvites(t, dir, 5)
+
 	for i, kill := range []bool{true, false, false} {
 		proc := startServer(t, dir)
 		addr := proc.awaitServerStarted(t)

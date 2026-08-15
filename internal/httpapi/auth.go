@@ -13,6 +13,7 @@ import (
 
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/idem"
+	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/invite"
 	"github.com/dodgymike/agent-bus/internal/logging"
 )
@@ -113,10 +114,12 @@ type EnrolRequestBody struct {
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10).
 	IdempotencyKey string `json:"idempotency_key"`
 
-	// InviteID is the id of the invite this enrolment redeems. OPTIONAL in this
-	// build: an enrolment carrying no invite is still accepted (see
-	// DiscoveryEnrolment.InviteRequired, which is false and says so). It must be
-	// presented TOGETHER with InviteSecret; one without the other is a 400.
+	// InviteID is the id of the invite this enrolment redeems. REQUIRED on a bus
+	// that enforces invite-only enrolment (invariant 3) — read
+	// DiscoveryEnrolment.InviteRequired from /v1/info to find out, rather than
+	// assuming either way; the bus cmd/agent-bus builds enforces it, and an
+	// enrolment presenting no invite there is refused 403. It must be presented
+	// TOGETHER with InviteSecret; one without the other is a 400.
 	//
 	// Presenting an invite to a build with no invite store is 501, never a
 	// silent success: a client must never walk away believing its single-use
@@ -132,7 +135,7 @@ type EnrolRequestBody struct {
 	// (DECISIONS.md, E6 — the invite blob is the trust anchor). internal/invite
 	// drops it the moment it has been verified.
 	//
-	// OPTIONAL, as InviteID is, and accepted rather than REQUIRED in this build.
+	// REQUIRED whenever InviteID is, and on the same condition — see InviteID.
 	InviteSecret string `json:"invite_secret"`
 }
 
@@ -358,7 +361,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		// The NAME is logged, the public key is not: a name is what an operator
 		// needs to correlate a rejected enrolment, and a key in a log line is
 		// noise at best.
-		s.writeAuthError(w, r, "enrol", err, "name", body.Name)
+		s.writeAuthError(w, r, "enrol", err, agentNameLogFields(body.Name)...)
 		return
 	}
 
@@ -572,6 +575,37 @@ func inviteIDLogFields(inviteID string) []interface{} {
 		return []interface{}{"invite_id_len", len(inviteID)}
 	}
 	return []interface{}{"invite_id", inviteID}
+}
+
+// agentNameLogFields renders the REQUESTED agent name for a log line, bounded
+// and character-restricted, exactly as inviteIDLogFields does for an invite id.
+//
+// # Why a raw name may not be logged from the enrolment path
+//
+// POST /v1/enroll is unauthenticated by construction (invariant 3) and this
+// server rate-limits nothing, so every field it echoes into a log line is a
+// write primitive an anonymous caller controls the contents and the volume of.
+// The name is bounded by the request body limit, not by anything smaller, so a
+// refused enrolment could put roughly a kilobyte of attacker-chosen bytes into
+// the operator's log — and INVITE-GATE-ENFORCE made refusals the COMMON case on
+// a gated bus, which is what turned a latent issue into a real one (raised by
+// the security gate, M1).
+//
+// ids.ValidateAgentName is the same rule Enrol validates against
+// (^[a-z0-9][a-z0-9_-]{0,63}$), so a name that passes is at most 64 bytes from a
+// safe alphabet and is exactly what an operator needs to correlate a refusal. A
+// name that fails contributes its LENGTH only: an operator can still see that
+// something malformed arrived, and learns its size, without the bytes.
+//
+// THE SAME RULE AS inviteIDLogFields, AND FOR THE SAME REASON — see that
+// helper's comment. It is stated per-field rather than centrally because the
+// hazard is per-field: a future log line that starts quoting body.Name directly
+// reopens this without touching this function.
+func agentNameLogFields(name string) []interface{} {
+	if err := ids.ValidateAgentName(name); err != nil {
+		return []interface{}{"name_len", len(name)}
+	}
+	return []interface{}{"name", name}
 }
 
 // handleSessionBegin serves POST /v1/session/begin.
@@ -794,6 +828,30 @@ func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, op strin
 		// which is where an operator can act on it.
 		s.log.Warn("enrolment refused: the client certificate on this connection is already bound to another agent, and one certificate must never name two agents (invariant 11)", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "this client certificate is already bound to an agent; enrol with a fresh client keypair"})
+
+	case errors.Is(err, auth.ErrInviteRequired):
+		// 403, and the CONNECTION IS KEPT (invariant 10's two questions are
+		// answered in full on auth.ErrInviteRequired; the short form is that
+		// every pre-gate client reaches this on its first call after the gate is
+		// turned on, and this route is unauthenticated so the socket names no
+		// principal to punish).
+		//
+		// Info, not Warn and not Debug. This is the ORDINARY refusal on an
+		// invite-only bus — an agent without an invite is the expected caller,
+		// not an anomaly — so Warn would train an operator to ignore it. But it
+		// is also the line that tells an operator "someone tried to join and
+		// could not", which is exactly what they need when an agent they meant to
+		// admit cannot get on, so it must not be invisible at the default level.
+		//
+		// The reply NAMES THE REMEDY rather than just refusing. A bare "forbidden"
+		// on an unauthenticated route leaves an agent with no idea whether it is
+		// blocked, misconfigured or unlucky; this bus's whole client story is an
+		// agent reading a message and acting on it (invariant 7), so the message
+		// says what to obtain and which flag carries it. It discloses nothing: the
+		// gate's state is already public in the discovery document's
+		// `enrolment.invite_required` (GET /v1/discovery).
+		s.log.Info("enrolment refused: this bus is invite-only and the enrolment presented no invite (invariant 3)", kv...)
+		s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "this bus is invite-only; obtain an invite from the bus operator and present it with `agent-busctl enrol --invite-file <path>`"})
 
 	case errors.Is(err, auth.ErrUnknownAgent), errors.Is(err, auth.ErrUnknownSession):
 		s.log.Debug("auth request rejected", kv...)

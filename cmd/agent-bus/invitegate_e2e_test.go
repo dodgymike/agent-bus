@@ -26,7 +26,7 @@ package main
 //	1. start on a fresh dir, stop cleanly       -- a normal data directory
 //	2. `agent-bus invite mint` (bus STOPPED)    -- the operator's real surface
 //	3. start; POST /v1/enroll WITH the invite   -- Options.Invites is wired
-//	4. an UN-INVITED enrolment still succeeds   -- the gate is NOT flipped
+//	4. an UN-INVITED enrolment is REFUSED 403   -- the gate IS on (invariant 3)
 //	5. stop, START AGAIN                        -- the composite record replays
 //	6. the agent authenticates on the SAME key  -- the enrolment half survived
 //	7. the invite is REFUSED a second time      -- the invite half survived
@@ -132,9 +132,12 @@ among its appliers, and every redemption would be refused against an empty
 table: a 100%% enrolment-by-invite outage that looks exactly like a working
 gate.`, got)
 	}
-	// And the same line must keep saying the gate is NOT on, because it is not.
-	if got := recovered["enrolment_invite_required"]; got != "false" {
-		t.Fatalf("the startup line reports enrolment_invite_required=%q, want \"false\"; this build redeems an invite, it does not require one", got)
+	// And the same line must report the gate as ON, because since
+	// INVITE-GATE-ENFORCE it is. This assertion required "false" until then, and
+	// the line itself hard-coded false; both moved together, which is the point
+	// of the shared enrolmentInviteRequired constant.
+	if got := recovered["enrolment_invite_required"]; got != "true" {
+		t.Fatalf("the startup line reports enrolment_invite_required=%q, want \"true\"; this build REQUIRES an invite (invariant 3), and an operator who reads otherwise in the startup log has been told enrolment is open when it is shut", got)
 	}
 
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -158,13 +161,24 @@ gate.`, got)
 	}
 	invitedAgent := &busAgent{id: enrolled.AgentID, priv: priv}
 
-	// --- 4. THE GATE IS NOT FLIPPED. An enrolment presenting NO invite is still
-	// accepted, on the same running bus, in the same breath. Nine agents are
-	// enrolled on a live bus and the shipped client cannot present an invite at
-	// all, so a refusal here is a total onboarding outage.
-	uninvited := enrolNewAgent(t, dataDir, secondAddr, "uninvited")
-	if uninvited.id == "" {
-		t.Fatalf("the un-invited enrolment produced no agent id")
+	// --- 4. THE GATE IS ON. An enrolment presenting NO invite is REFUSED, on the
+	// same running bus, in the same breath as the invited one that just
+	// succeeded. This step asserted the exact opposite until
+	// INVITE-GATE-ENFORCE, and the reason it could not be flipped then was that
+	// the shipped client could not present an invite at all; `agent-busctl enrol
+	// --invite-file` (INVITE-CLIENT) removed that obstacle.
+	//
+	// This is the end-to-end closure of the roster-exhaustion DoS: the anonymous
+	// call that could be repeated 4096 times to permanently exhaust the roster
+	// does not reach the roster at all.
+	status, refusal := postJSONTo(t, dataDir, secondAddr, "/v1/enroll", "",
+		igeEnrolBody("uninvited", pubB64, fmt.Sprintf("uninvited-%d", time.Now().UnixNano()), "", ""))
+	if status != http.StatusForbidden {
+		t.Fatalf("an UN-INVITED enrolment against a running gated bus returned %d, want %d.\nThis is the anonymous path that permanently exhausts the roster: 4096 of these and the bus is full for ever, because nothing frees a slot and ids are never reused (invariant 1).\nbody: %s",
+			status, http.StatusForbidden, refusal)
+	}
+	if !strings.Contains(string(refusal), "invite") {
+		t.Fatalf("the refusal body does not mention an invite, so an agent cannot act on it: %s", refusal)
 	}
 
 	// The invite is spent NOW, before any restart: a second presentation with a
@@ -188,7 +202,10 @@ gate.`, got)
 	if invitedAgent.token == "" {
 		t.Fatalf("agent %s could not authenticate after the restart; its enrolment half did not survive the composite record's replay", invitedAgent.id)
 	}
-	uninvited.authenticate(t, dataDir, thirdAddr)
+	// There is deliberately no second agent to authenticate here. Step 4 used to
+	// enrol one WITHOUT an invite and carry it across the restart; on a gated bus
+	// that enrolment is refused, so there is no such agent — which is itself the
+	// property being asserted, one frame up.
 
 	// --- 7. THE INVITE HALF SURVIVED, AND THIS IS THE POINT.
 	igeAssertInviteRefused(t, dataDir, thirdAddr, pubB64, blob, "already-spent-post-restart")

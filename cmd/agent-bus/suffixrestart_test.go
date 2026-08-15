@@ -52,6 +52,11 @@ func enrolAgent(t *testing.T, dataDir, addr, name string) string {
 	if err != nil {
 		t.Fatalf("generating an Ed25519 keypair: %v", err)
 	}
+	// THE INVITE. The shipped bus is invite-only since INVITE-GATE-ENFORCE
+	// (invariant 3); the pool is minted before the bus starts, in
+	// invitepool_test.go.
+	inv := e2eTakeInvite(t, dataDir)
+
 	reqBody, err := json.Marshal(map[string]string{
 		"name":       name,
 		"public_key": base64.StdEncoding.EncodeToString(pub),
@@ -59,6 +64,8 @@ func enrolAgent(t *testing.T, dataDir, addr, name string) string {
 		// would return the ORIGINAL id, which would make this test pass for
 		// entirely the wrong reason.
 		"idempotency_key": fmt.Sprintf("enrol-%s-%d", name, time.Now().UnixNano()),
+		"invite_id":       inv.id,
+		"invite_secret":   inv.secret,
 	})
 	if err != nil {
 		t.Fatalf("marshalling the enrol request: %v", err)
@@ -120,13 +127,29 @@ func TestRestartMintsStrictlyGreaterAgentIDSuffix(t *testing.T) {
 	dir := t.TempDir()
 	const name = "alpha"
 
-	// --- start 1: a fresh data dir ---
+	// Invite-only enrolment (invariant 3): one per enrolment below, minted
+	// before the first start. See invitepool_test.go.
+	e2ePrepareInvites(t, dir, 5)
+
+	// --- start 1: the first start THIS TEST makes ---
+	//
+	// NOT the directory's first-ever start: e2ePrepareInvites above ran one
+	// already, because an invite pins the bus certificate and there is no
+	// certificate until a start has completed. Nothing here depends on it being
+	// virgin — "alpha" has never been minted either way, so suffix 1 below is
+	// still the right expectation — but the comment used to say "a fresh data
+	// dir" and that is no longer true.
+	//
+	// THE CONSEQUENCE IS THE PRODUCT'S, NOT THE HARNESS'S: on a gated bus a
+	// first-ever boot can never enrol anyone, because minting needs the bus
+	// STOPPED and needs a certificate only a completed start produces. Admitting
+	// the first agent is therefore always start -> stop -> mint -> start.
 	p1 := startServer(t, dir)
 	addr1 := p1.awaitServerStarted(t)
 	id1 := enrolAgent(t, dir, addr1, name)
 	n1 := suffixOf(t, id1)
 	if n1 != 1 {
-		t.Fatalf("first enrolment of %q on a FRESH data dir minted %q (suffix %d), want suffix 1", name, id1, n1)
+		t.Fatalf("first enrolment of %q on this data dir minted %q (suffix %d), want suffix 1; no agent of that name has been minted here", name, id1, n1)
 	}
 	// The floor was written before the id was issued, so the file exists now --
 	// not at shutdown.
@@ -192,6 +215,11 @@ func TestLegacyDataDirDoesNotReMintAgentIDs(t *testing.T) {
 	if code := p1.awaitExit(t, shutdownTimeout); code != 0 {
 		t.Fatalf("shutdown exited %d, want 0\n%s", code, p1.stderr())
 	}
+
+	// Invite-only enrolment (invariant 3). Minted HERE, after the first start
+	// has stopped: this dir must end up looking LEGACY, and minting is a WAL
+	// write that has to happen while nothing holds the dirlock.
+	e2ePrepareInvites(t, dir, 4)
 
 	// Now make it LEGACY: agent ids durable in message records, no floors file.
 	l := openTestWAL(t, dir)
@@ -340,15 +368,16 @@ func TestServerRefusesToStartWithHistoryAndNoSuffixFloors(t *testing.T) {
 func TestFreshDataDirStartsWithoutTheBackfillOptIn(t *testing.T) {
 	dir := t.TempDir() // empty: no bus id, no log, no floors file
 
+	// --- THE CLAIM: a genuinely EMPTY directory starts with no opt-in ---
+	//
+	// This start is kept separate from the enrolment below, and the separation is
+	// forced by invite-only enrolment (invariant 3). Enrolling needs an invite;
+	// minting one needs the bus STOPPED and needs a certificate that only a
+	// completed start produces. So the fresh start cannot also be the start that
+	// enrols, and pretending otherwise would mean minting into a directory that
+	// is no longer empty — destroying the premise this test exists to check.
 	p1 := startServer(t, dir) // deliberately NO -backfill-suffix-floors
-	addr1 := p1.awaitServerStarted(t)
-
-	// It is a usable bus, not just a process that logged a banner: enrolling
-	// requires a SEALED allocator (an unsealed one refuses every NextSuffix with
-	// ErrFloorUnproven), so this proves the floors were proven, not bypassed.
-	if n := suffixOf(t, enrolAgent(t, dir, addr1, "alpha")); n != 1 {
-		t.Fatalf("first enrolment on a fresh dir minted suffix %d, want 1", n)
-	}
+	p1.awaitServerStarted(t)
 
 	p1.signal(t, syscall.SIGTERM)
 	if code := p1.awaitExit(t, shutdownTimeout); code != 0 {
@@ -359,6 +388,26 @@ func TestFreshDataDirStartsWithoutTheBackfillOptIn(t *testing.T) {
 	// be the refusal case rather than the steady state.
 	if _, err := os.Stat(filepath.Join(dir, suffixFileInDataDir)); err != nil {
 		t.Fatalf("a fresh start left no %q: %v; without it every subsequent start of this dir refuses", suffixFileInDataDir, err)
+	}
+
+	// The directory has now run once, so it has a certificate for an invite to
+	// pin. Mint against the STOPPED bus, as an operator does.
+	e2ePrepareInvites(t, dir, 3)
+
+	// --- the bus is USABLE, still with no opt-in ---
+	//
+	// Enrolling requires a SEALED allocator (an unsealed one refuses every
+	// NextSuffix with ErrFloorUnproven), so this proves the floors were proven,
+	// not bypassed. "alpha" has never been minted on this dir, so it must still
+	// be suffix 1 even though this is the second start.
+	pMint := startServer(t, dir)
+	addrMint := pMint.awaitServerStarted(t)
+	if n := suffixOf(t, enrolAgent(t, dir, addrMint, "alpha")); n != 1 {
+		t.Fatalf("first enrolment of \"alpha\" on this dir minted suffix %d, want 1", n)
+	}
+	pMint.signal(t, syscall.SIGTERM)
+	if code := pMint.awaitExit(t, shutdownTimeout); code != 0 {
+		t.Fatalf("shutdown after the first enrolment exited %d, want 0\n%s", code, pMint.stderr())
 	}
 
 	// --- the ordinary restart: still no opt-in ---

@@ -235,9 +235,14 @@ operator revoking a leaked invite otherwise has no way to find what it let in.`,
 }
 
 // TestInviteGateUninvitedEnrolmentIsUnchanged is the REGRESSION that must not
-// break. This build REDEEMS an invite; it does not REQUIRE one, and nine agents
-// on a live bus depend on that. A nil Invite must take the plain Put path
-// exactly as it did before INVITE-GATE, and must leave InviteID empty.
+// break, and it is scoped to a service built WITHOUT Options.RequireInvite.
+//
+// It said "this build REDEEMS an invite; it does not REQUIRE one, and nine
+// agents on a live bus depend on that". INVITE-GATE-ENFORCE made the shipped bus
+// require one, so what this now pins is narrower and still worth pinning: with
+// the gate OFF, a nil Invite takes the plain Put path exactly as it did before
+// INVITE-GATE and leaves InviteID empty. The already-enrolled agents it was
+// written to protect are unaffected either way — they do not re-enrol.
 func TestInviteGateUninvitedEnrolmentIsUnchanged(t *testing.T) {
 	roster := newIGCompositeRoster()
 	svc, _ := newService(t, auth.Options{Roster: roster})
