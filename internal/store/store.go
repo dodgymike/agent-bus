@@ -64,11 +64,18 @@ type Options struct {
 	// Defaults to time.Now.
 	Now func() time.Time
 
-	// Logger receives the ONE event this package now reports: an Append whose
-	// delivery POSITION is not above every position already appended
-	// (SIGN-1-FU-REORDER-WATERMARK). That cannot happen without a server bug —
-	// positions are WAL commit indices minted under the hub's write lock — so it
-	// is logged at ERROR, and the message is retained anyway.
+	// Logger receives the events this package reports, all of them faults that
+	// cannot happen without a server bug and all of them at ERROR:
+	//
+	//   - an Append whose delivery POSITION is not above every position already
+	//     appended (SIGN-1-FU-REORDER-WATERMARK). Positions are WAL commit
+	//     indices minted under the hub's write lock. The message is retained
+	//     anyway.
+	//   - an Append whose ORIGIN MESSAGE ID is already held by another retained
+	//     message — the relay applied-key memory having been lost (invariant 10).
+	//     The message is retained anyway.
+	//   - a point lookup whose index entry names a position holding no such
+	//     message: the index and the serving copy disagreeing (byIDLocked).
 	//
 	// It defaults to a logger on os.Stderr rather than to the discarding logger
 	// the rest of the repo defaults to, and that difference is deliberate:
@@ -179,6 +186,43 @@ type Store struct {
 	// the tail like any other late arrival. See Append.
 	bySeq map[uint64]string
 
+	// byID maps a retained message's LOCAL id to its Message.Pos.
+	//
+	// The value is a POSITION because Pos is what msgs is ordered by, so it is
+	// the cheapest thing to binary-search with. IT IS A LOCATOR AND NOT A SECOND
+	// DELIVERY POSITION: nothing reads it as one, no cursor is ever compared to
+	// it, and it is never handed out. If you find yourself returning this value
+	// to a caller, you are about to create the second copy of Pos that
+	// Message.Pos's doc exists to prevent.
+	//
+	// Keys are unique by invariant 1 — ids are minted by the server and never
+	// reused, including across restarts — which is why the insert in Append is
+	// unconditional and why pruneLocked deletes unconditionally.
+	//
+	// INVARIANT 1 REQUIREMENT: this index must never let a DISCARDED or PRUNED id
+	// be re-resolved, and must never make id reuse possible. It mints nothing and
+	// it rewinds nothing; it only ever mirrors what is in msgs.
+	byID map[string]uint64
+
+	// byOrigin maps an ORIGIN bus's message id to the LOCAL message id of this
+	// bus's copy. It is populated ONLY for a message whose OriginMessageID is set,
+	// i.e. one this bus ingested over a relay hop.
+	//
+	// It resolves to a LOCAL ID rather than straight to a position deliberately:
+	// the local id is this message's identity, positions are not unique (see the
+	// non-monotone branch of Append), and one hop through byID keeps a single
+	// definition of "where does this message live".
+	//
+	// # Both indexes cover the RETAINED WINDOW ONLY
+	//
+	// Exactly the narrowing bySeq documents, and the consumer is designed around
+	// it: a message retention has dropped is NOT resolvable, Store.ByID and
+	// Store.ByOriginMessageID return ok == false, and relay's resumeJob settles
+	// the job ABANDONED and says so loudly. That is the DESIGNED outcome, not an
+	// error to paper over by retaining an unbounded map keyed on every message
+	// the bus has ever held — which is the growth retention exists to stop.
+	byOrigin map[string]string
+
 	// bytes is the sum of Size() over msgs.
 	bytes int64
 
@@ -213,6 +257,24 @@ type Store struct {
 	// (see Append) and is exposed by NonMonotonicPositions so the condition is
 	// observable rather than log-only.
 	nonMonotonicPos uint64
+
+	// duplicateOriginIDs counts appends whose OriginMessageID was already held by
+	// another retained message. It is a fault counter of the same shape as
+	// nonMonotonicPos — see Append for why the message is retained anyway — and is
+	// exposed by DuplicateOriginMessageIDs.
+	duplicateOriginIDs uint64
+
+	// duplicateOriginWarned records that the duplicate-origin-id ERROR line has
+	// already been emitted in this process, so it is emitted ONCE.
+	//
+	// It throttles the LOG ONLY — duplicateOriginIDs above still counts every
+	// occurrence. The line is peer-triggerable (see Append) and relay ingest is
+	// concurrency-limited but not rate-limited, so an unthrottled line is a
+	// log-flood vector; this is the same log-once + counter shape recovery uses
+	// for the applied-key cap (hub.idemCapWarned). Nothing is DISCARDED on that
+	// branch, so invariant 6's "every discard must be logged loudly and
+	// specifically" is not weakened by it.
+	duplicateOriginWarned bool
 }
 
 // New returns an empty Store.
@@ -223,6 +285,8 @@ func New(opts Options) *Store {
 		now:      opts.Now,
 		log:      opts.Logger,
 		bySeq:    make(map[uint64]string),
+		byID:     make(map[string]uint64),
+		byOrigin: make(map[string]string),
 	}
 	if s.maxAge <= 0 {
 		s.maxAge = DefaultMaxAge
@@ -380,6 +444,81 @@ func (s *Store) Append(m Message) error {
 	}
 
 	s.bySeq[m.Seq] = m.ID
+	// The POINT LOOKUP indexes. They are pure mirrors of msgs: they mint nothing,
+	// they rewind nothing, and they resolve only what is retained (invariant 1 —
+	// see the field docs).
+	s.byID[m.ID] = m.Pos
+	if m.OriginMessageID != "" {
+		if prev, dup := s.byOrigin[m.OriginMessageID]; dup && prev != m.ID {
+			// TWO RETAINED MESSAGES CARRYING ONE ORIGIN ID. LAST WRITER WINS in the
+			// index, the message is RETAINED regardless, and the call RETURNS NIL —
+			// the same three-part resolution as the non-monotone-position branch
+			// above, but NOT for the same reason on the first point:
+			//
+			//   - IT IS PEER-TRIGGERABLE. An earlier version of this comment said
+			//     the opposite — that the origin id IS the relay ingest idempotency
+			//     key, so reaching here meant the applied-key memory for that scope
+			//     had been lost. That is FALSE and must not be restored. The scope is
+			//     the TRIPLE (sender, idem.OpRelay, origin message id) — see
+			//     idem.NewAgentScope — and on this path THE SENDER IS PEER-ASSERTED
+			//     (hub.IngestRelayed says so in its own doc). hub.relayedOrigin binds
+			//     only the BUS HALVES of the sender and the origin message id to each
+			//     other, never the agent half. So ONE peer presenting ONE origin id
+			//     under TWO different attested sender labels lands in TWO different
+			//     applied-key scopes, is admitted twice, and produces two retained
+			//     local messages carrying one OriginMessageID — with the durable
+			//     applied-key memory working perfectly. Reaching this branch is
+			//     therefore evidence about a PEER, not about invariant 10's memory.
+			//
+			//     WHAT BOUNDS IT: relay.PeerStore.AttestedSignerKey requires an
+			//     attestation over the sender label signed by the SENDER BUS's
+			//     peering-time pinned key, so a bus can only spell sender labels in a
+			//     namespace whose signing key it holds — in practice its own. The
+			//     blast radius is a peer's own agents. It is not a cross-bus forgery:
+			//     no peer can name an agent of this bus or of a third bus here.
+			//   - RETURNING AN ERROR WOULD POISON THE HUB. By the time this runs the
+			//     record is committed and fsynced (invariant 4), so a refusal orphans
+			//     it on disk and stops the bus: exactly the P0
+			//     SIGN-1-FU-OUTOFORDER-POISON fixed.
+			//   - RETURNING NIL WITHOUT RETAINING would be silent suppression of an
+			//     acknowledged message, which invariant 6 names as the actual defect.
+			//     Nor may this DISCONNECT (invariant 10): a merely buggy peer reaches
+			//     this line, and a relay ingest connection carries MANY principals.
+			//
+			// So: retain, stay up, be LOUD, and COUNT it — a log line is not
+			// queryable. THE COST, stated accurately: the older copy stops being
+			// resolvable BY ORIGIN ID (it is still resolvable by its local id, still
+			// retained and still delivered). A relay job resuming against that origin
+			// id is handed the NEWER copy, and relay.Forwarder.resumeJob RE-CHECKS the
+			// recovered message's ContentSHA256 and Size against the outbox record —
+			// so it does not quietly forward the other copy: it ABANDONS the job and
+			// that delivery never reaches the peer, logged there as abandoned.
+			//
+			// THE LOG LINE IS EMITTED ONCE PER PROCESS; THE COUNTER CARRIES EVERY
+			// OCCURRENCE. Because this is peer-triggerable and relay ingest is
+			// concurrency-limited but NOT rate-limited, an unthrottled ERROR here is a
+			// log-flood vector a peer can drive. This is the log-once + counter shape
+			// already used for recovery's applied-key cap (hub.idemCapWarned). It does
+			// NOT weaken invariant 6: nothing is DISCARDED on this branch — both
+			// messages are retained and delivered — so "every discard must be logged
+			// loudly and specifically" is not in play, and the one line that IS emitted
+			// carries the full diagnosis.
+			s.duplicateOriginIDs++
+			if !s.duplicateOriginWarned {
+				s.duplicateOriginWarned = true
+				s.log.Error("two retained messages carry the SAME origin message id, so one origin message has become two local ones. This is REACHABLE BY A PEER and is NOT by itself evidence that duplicate-suppression memory was lost: the relay-ingest applied-key scope is (sender, relay, origin message id) and the sender label is peer-asserted, so one peer can present one origin id under two sender labels within its OWN namespace (the attestation pin bounds it to that) and be admitted twice. BOTH messages are retained and delivered — refusing one would orphan a committed record and halt the bus — but the origin-id index now resolves to the NEWER copy only, so a relay job resuming against this origin id is abandoned by relay's content-hash re-check rather than forwarded. LOGGED ONCE per process to deny a peer a log-flood; the duplicate_origin_total counter (Store.DuplicateOriginMessageIDs) counts every occurrence",
+					"origin_message_id", m.OriginMessageID,
+					"previous_message_id", prev,
+					"message_id", m.ID,
+					"seq", m.Seq,
+					"pos", m.Pos,
+					"sender", m.Sender,
+					"duplicate_origin_total", s.duplicateOriginIDs,
+				)
+			}
+		}
+		s.byOrigin[m.OriginMessageID] = m.ID
+	}
 	s.bytes += int64(m.Size())
 	// Both high-water marks only ever GROW (invariant 1 — neither rewinds).
 	if m.Seq > s.head {
@@ -404,6 +543,153 @@ func (s *Store) NonMonotonicPositions() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.nonMonotonicPos
+}
+
+// DuplicateOriginMessageIDs reports how many appends have arrived carrying an
+// ORIGIN MESSAGE ID already held by another retained message.
+//
+// IT IS NOT A BARE "ALERT ON ANY VALUE" SIGNAL, and an earlier version of this
+// doc told operators that it was — that it is zero on a healthy bus because the
+// origin id IS the relay-ingest idempotency key, so any value at all meant the
+// durable applied-key memory had been lost. THAT IS WRONG: A PEER CAN DRIVE THIS
+// COUNTER. The applied-key scope is the triple (sender, relay, origin message
+// id) and the sender label is peer-asserted (hub.IngestRelayed), so one peer
+// presenting one origin id under two distinct sender labels is admitted twice
+// with the applied-key memory working perfectly — Append carries the full
+// argument. Treating it as a bare fault signal turns a peer-triggerable event
+// into a false-alarm channel.
+//
+// WHAT A NON-ZERO VALUE DOES INDICATE: at least one origin message became two
+// local ones on this bus, and the origin-id index now resolves only the newer of
+// each pair. Both copies are retained and delivered; what is lost is the older
+// copy's resolvability BY ORIGIN ID, so a relay job resuming against it is
+// ABANDONED by relay's ContentSHA256/Size re-check rather than forwarded — a
+// delivery this bus owed a peer silently does not happen.
+//
+// WHAT TO CORRELATE IT WITH:
+//   - the ONE error line Append emits (it is logged once per process, by design,
+//     because the event is peer-triggerable): it names the origin id, both local
+//     message ids and the SENDER;
+//   - the peer whose namespace that sender belongs to. The attestation pin bounds
+//     a peer to labels in its own namespace, so the sender names the culprit;
+//   - relay's abandoned-job warnings, which are where the operator-visible damage
+//     actually lands.
+//
+// A value that tracks one peer's ingest traffic is that peer duplicating or
+// double-sending. A value that moves with NO relay ingest at all is a write-path
+// or recovery bug and is the case worth paging on.
+//
+// Like NonMonotonicPositions it is kept out of Stats — Stats reports the retained
+// state an operator reads routinely — and it is exposed at all because a log line
+// is not queryable, which matters more now that the line is emitted once.
+func (s *Store) DuplicateOriginMessageIDs() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.duplicateOriginIDs
+}
+
+// ByID returns the retained message with the given LOCAL message id.
+//
+// # THIS IS NOT A READ-PATH METHOD
+//
+// IT DOES NOT APPLY Message.VisibleTo, which is THE AUTHORIZATION BOUNDARY OF
+// THE READ PATH. It is a SERVER-INTERNAL ROUTING LOOKUP for the relay resume
+// path, which runs after a restart with no client principal to filter against —
+// there is no agent id to pass and no enrolment epoch to compare, which is
+// exactly why the filter is absent rather than defaulted.
+//
+// IT MUST NEVER BE REACHED FROM A REQUEST HANDLER, AND NEVER WITH A
+// CLIENT-SUPPLIED ID. Doing so hands any authenticated agent any retained
+// message — including direct mail addressed to someone else and messages sent
+// before it enrolled — by guessing "<bus-id>-<n>", which is a trivially
+// enumerable namespace. Use Since, which filters.
+//
+// Retention is enforced first, for the reason Since gives: without it an IDLE
+// bus resolves a message that is past its retention window, which would let a
+// relay job resurrect content retention had already retired. A message that has
+// been pruned is NOT resolvable and the second return is false; that is the
+// designed outcome, and relay settles such a job as abandoned.
+//
+// The returned Message is a deep copy (see copyMessage) — never a slice aliased
+// into the serving copy.
+func (s *Store) ByID(id string) (Message, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	return s.byIDLocked(id)
+}
+
+// ByOriginMessageID returns the retained LOCAL message that corresponds to
+// originMessageID — the id the ORIGIN bus minted.
+//
+// # THIS IS NOT A READ-PATH METHOD
+//
+// The whole of ByID's warning applies here verbatim: no Message.VisibleTo, no
+// principal, server-internal relay routing only, NEVER from a request handler
+// and NEVER with a client-supplied id.
+//
+// # How it resolves, and why the fallback is sound
+//
+// A message ingested over a relay hop carries OriginMessageID and is in
+// byOrigin, so the hit path resolves the local id and then goes through exactly
+// the same lookup ByID uses.
+//
+// On a MISS it falls back to treating originMessageID as a LOCAL id. That is
+// not a guess: a local id is "<this-bus>-<seq>", and BOTH write paths —
+// Message.WithOriginMessageID and Decode — REFUSE an OriginMessageID whose bus
+// half is this bus. So no message can ever be in byOrigin under a key of this
+// bus's own shape, and the fallback therefore resolves exactly the
+// LOCALLY-ORIGINATED case, where ID already IS the origin id (Message.OriginID).
+// It cannot silently return a peer's message under a local id, or vice versa.
+//
+// That fallback is what makes the common single-hop egress path — this bus is
+// the origin, one peer downstream — recover across a restart with NO new durable
+// state at all.
+//
+// Retention applies first, and the returned Message is a deep copy, both as in
+// ByID.
+func (s *Store) ByOriginMessageID(originMessageID string) (Message, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	if local, ok := s.byOrigin[originMessageID]; ok {
+		return s.byIDLocked(local)
+	}
+	return s.byIDLocked(originMessageID)
+}
+
+// byIDLocked resolves a LOCAL message id against the serving copy. The caller
+// must hold s.mu and must have pruned.
+//
+// The scan after the binary search is REQUIRED and is not defensive padding:
+// Append's non-monotone branch admits DUPLICATE positions, so a position locates
+// a RUN of messages rather than one, and the run must be walked to find the one
+// actually asked for.
+func (s *Store) byIDLocked(id string) (Message, bool) {
+	pos, ok := s.byID[id]
+	if !ok {
+		return Message{}, false
+	}
+	i := sort.Search(len(s.msgs), func(k int) bool { return s.msgs[k].Pos >= pos })
+	for ; i < len(s.msgs) && s.msgs[i].Pos == pos; i++ {
+		if s.msgs[i].ID == id {
+			return copyMessage(s.msgs[i]), true
+		}
+	}
+	// THE INDEX AND THE SLICE DISAGREE, which is a bug in THIS package and
+	// nowhere else: both are maintained under s.mu at exactly two sites (Append
+	// and pruneLocked). It is reported loudly (invariant 6 — silence is the
+	// defect) and resolves to NOT FOUND.
+	//
+	// NEVER return a different message than the one asked for. The caller is a
+	// relay forward, so handing back the nearest neighbour would send one agent's
+	// message to another bus under another message's correlation id.
+	s.log.Error("the message-id index names a delivery position that holds no such message. The index and the serving copy have disagreed, which is a bug in package store — both are maintained under one lock in Append and pruneLocked. Reporting NOT FOUND rather than a neighbouring message",
+		"message_id", id,
+		"pos", pos,
+		"retained", len(s.msgs),
+	)
+	return Message{}, false
 }
 
 // PosHead reports the highest DELIVERY POSITION ever appended, or 0 for an empty
@@ -611,6 +897,23 @@ func (s *Store) pruneLocked() {
 	// stop.
 	for k := 0; k < drop; k++ {
 		delete(s.bySeq, s.msgs[k].Seq)
+		// The point-lookup indexes cover the retained window too, and dropping the
+		// entry here is what enforces invariant 1's requirement on them: a pruned
+		// id must never be re-resolvable.
+		delete(s.byID, s.msgs[k].ID)
+		if origin := s.msgs[k].OriginMessageID; origin != "" {
+			// ONLY IF IT STILL NAMES THE MESSAGE BEING PRUNED. byOrigin is
+			// LAST-WRITER-WINS (see Append), so an unconditional delete here would
+			// remove an entry pointing at a message that is still retained, and the
+			// survivor would silently stop being resolvable by its origin id.
+			//
+			// The guard keys on the LOCAL MESSAGE ID and must not be moved to Pos:
+			// the non-monotone branch of Append admits DUPLICATE positions, so a
+			// position is not a unique identity. The id is (invariant 1).
+			if local, ok := s.byOrigin[origin]; ok && local == s.msgs[k].ID {
+				delete(s.byOrigin, origin)
+			}
+		}
 	}
 	// msgs is ascending by Pos and drops come off the front, so the last dropped
 	// message carries the highest position retention has just removed. Guarded so

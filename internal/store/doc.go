@@ -35,6 +35,26 @@
 // One consequence is written up where it lives: the narrowed duplicate
 // DETECTION across the already-pruned region (Append's P1 and Store.bySeq).
 //
+// # THREE NOTIONS, and they must not be conflated
+//
+// A THIRD number-like field joins those two, and it is not a variant of either:
+//
+//	Seq                IDENTITY — server-minted, client-signed, spendable out of
+//	                   order.
+//	Pos                DELIVERY POSITION — the WAL commit index; what cursors
+//	                   point at, what the slice is ordered by, what Since
+//	                   binary-searches.
+//	OriginMessageID    CORRELATION KEY — which message on the ORIGIN bus this is
+//	                   a local copy of, set only on a relay ingest, empty when
+//	                   this bus is the origin (Message.OriginID).
+//
+// The correlation key takes part in NO ORDERING, NO CURSOR and NO RETENTION
+// DECISION. It is indexed for point lookup (Store.ByID, Store.ByOriginMessageID
+// — both server-internal routing lookups that do NOT apply Message.VisibleTo and
+// must never be reached from a request handler) and is otherwise inert. Adding a
+// fourth axis to the ordering of this package carelessly is how
+// SIGN-1-FU-OUTOFORDER-POISON happened.
+//
 // Nothing in this package interprets a message body. It is carried and hashed
 // as opaque bytes, which is what lets the CRYPTO epic put ciphertext there
 // without anything on this path changing.

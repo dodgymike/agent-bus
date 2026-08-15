@@ -164,6 +164,35 @@ type Message struct {
 	// ID is the fully-qualified message id "<bus-id>-<seq>" (ids.MessageID).
 	ID string
 
+	// OriginMessageID is the id the ORIGIN bus minted for this message. It is
+	// the THIRD notion on this type and it is not a variant of either of the
+	// other two — read this before adding anything that looks like it:
+	//
+	//	Seq                IDENTITY. Server-minted, client-signed, spendable out
+	//	                   of order (see Seq).
+	//	Pos                DELIVERY POSITION. The WAL commit index; what cursors
+	//	                   point at and what Store orders by (see Pos).
+	//	OriginMessageID    CORRELATION KEY. It answers "which message on the
+	//	                   ORIGIN bus is this a local copy of", and NOTHING else.
+	//
+	// IT TAKES PART IN NO ORDERING, NO CURSOR AND NO RETENTION DECISION. It is
+	// never compared, never sorted on, never used to decide what a reader may
+	// see next and never used to decide what ages out. Carelessly adding a
+	// fourth ordering axis to this type is precisely how
+	// SIGN-1-FU-OUTOFORDER-POISON happened; this field is deliberately inert.
+	//
+	// It is set ONLY when this bus INGESTED the message over a relay hop, via
+	// WithOriginMessageID. It is EMPTY when this bus is the origin — in which
+	// case ID already IS the origin id, and OriginID() is the one place that
+	// rule is written down. It is never a duplicate of ID: two fields that must
+	// agree are two fields that can disagree, which is the reason
+	// internal/relay's outbox carries one origin id rather than a bus and a
+	// sequence, and the reason Record deliberately omits Pos.
+	//
+	// It is NEVER this message's identity. This bus mints its own id and never
+	// adopts a peer's (invariant 1).
+	OriginMessageID string
+
 	// Sender is the fully-qualified "<bus-id>.<agent-id>" of the authenticated
 	// sender (invariant 2).
 	Sender string
@@ -244,6 +273,87 @@ type Message struct {
 // Size reports the body size in bytes, which is the size the audit trail
 // records and the number retention accounts against.
 func (m Message) Size() int { return len(m.Body) }
+
+// OriginID returns the id the ORIGIN bus minted for this message:
+// OriginMessageID when it is set, and ID otherwise.
+//
+// THIS IS THE ONE PLACE THE RULE IS WRITTEN DOWN. A caller that spells it out
+// itself (branching on OriginMessageID being non-empty) is a second copy of a
+// rule that can drift
+// from this one, and the drift is silent — the wrong branch still returns a
+// well-formed message id, it just names the wrong bus's message, so a relay
+// correlation would resolve to nothing and a resume would abandon a job that was
+// perfectly recoverable.
+//
+// It is a CORRELATION key, not an identity: it is not this message's id on this
+// bus and must never be served as one, stamped onto a record, or handed to a
+// client as "the message id" (invariant 1 — this bus never adopts a peer's id).
+func (m Message) OriginID() string {
+	if m.OriginMessageID != "" {
+		return m.OriginMessageID
+	}
+	return m.ID
+}
+
+// WithOriginMessageID returns a COPY of m carrying originMessageID.
+//
+// # Why a setter and not a constructor parameter
+//
+// The origin id is known to the RELAY INGEST, which builds its message through
+// NewMessageWithBusPath — a constructor with eleven parameters whose callers
+// live in another package. Adding a twelfth would touch every local send site to
+// pass "" for a field only a relay ingest can populate. This is additive
+// instead: the constructors are unchanged and the ingest path opts in.
+//
+// # What is refused, and why each refusal is load-bearing
+//
+// All refusals wrap ErrInvalidMessage.
+//
+//   - An EMPTY originMessageID. The zero value already means "this bus is the
+//     origin", so an explicit clear is not a no-op — it would ERASE provenance
+//     on a message that arrived over a hop, leaving a durable record that claims
+//     the message originated here. That claim is unfalsifiable afterwards.
+//   - An origin id that does not parse (ids.ParseMessageID). It reaches disk and
+//     a log line, and it came from a peer.
+//   - An origin id whose BUS HALF equals the bus half of m.ID. A message this
+//     bus minted is its own origin, and recording that twice creates a second
+//     copy free to disagree with the first. THIS REFUSAL IS LOAD-BEARING: it is
+//     exactly what makes Store.ByOriginMessageID's fallback to ByID sound — see
+//     the soundness argument there.
+//   - A DIFFERENT value when one is already set. A message has exactly one
+//     origin. Setting the SAME value again is idempotent and returns nil, so a
+//     retry of an ingest step is not punished (invariant 10: same key, same
+//     payload is a legitimate retry).
+//
+// The returned copy SHARES Body, Recipients and BusPath with the receiver, and
+// that is safe rather than an oversight: a Message is immutable after
+// construction — NewMessageWithBusPath copies every slice on the way in, Append
+// stores that copy, and copyMessage copies again on the way out — so no holder
+// of either value mutates the shared arrays.
+func (m Message) WithOriginMessageID(originMessageID string) (Message, error) {
+	if originMessageID == "" {
+		return Message{}, fmt.Errorf("%w: refusing to set an EMPTY origin message id on %s; the zero value already means \"this bus is the origin\", so an explicit clear would erase the provenance of a message that arrived over a relay hop", ErrInvalidMessage, m.ID)
+	}
+	originBus, _, err := ids.ParseMessageID(originMessageID)
+	if err != nil {
+		return Message{}, fmt.Errorf("%w: origin message id: %s", ErrInvalidMessage, err)
+	}
+	localBus, _, err := ids.ParseMessageID(m.ID)
+	if err != nil {
+		return Message{}, fmt.Errorf("%w: this message's own id: %s", ErrInvalidMessage, err)
+	}
+	if originBus == localBus {
+		// Both halves have parsed, so both are bounded, charset-checked bus ids
+		// and safe to echo.
+		return Message{}, fmt.Errorf("%w: origin message id %q names THIS bus (%q), but a message this bus minted is its own origin: recording that twice is a second copy of one fact, free to disagree with %s", ErrInvalidMessage, originMessageID, localBus, m.ID)
+	}
+	if m.OriginMessageID != "" && m.OriginMessageID != originMessageID {
+		return Message{}, fmt.Errorf("%w: message %s already carries origin message id %q; a message has exactly one origin and %q is a different one", ErrInvalidMessage, m.ID, m.OriginMessageID, originMessageID)
+	}
+	out := m
+	out.OriginMessageID = originMessageID
+	return out, nil
+}
 
 // VisibleTo reports whether agentID, enrolled at enrolledAt, is entitled to
 // receive this message.
@@ -343,6 +453,37 @@ type Record struct {
 	SentAtUnixNs  int64    `json:"sent_at_unix_ns"`
 	Size          int      `json:"size"`
 	ContentSHA256 string   `json:"content_sha256"`
+
+	// OriginMessageID is the id the ORIGIN bus minted, present ONLY on a message
+	// this bus ingested over a relay hop. See Message.OriginMessageID for what it
+	// is (a CORRELATION key, inert in every ordering and retention decision).
+	//
+	// # RecordVersion STAYS AT 2, and no number was reserved
+	//
+	// It is an OPTIONAL added field, which is the case this record was shaped
+	// for. RecordVersion's own doc: "Record is deliberately shaped so that the
+	// CRYPTO epic and DUR-5 can ADD optional fields without a break … and an
+	// added optional field does not move this number." The Record doc says
+	// decoding is deliberately NOT strict about unknown fields, for exactly this
+	// reason. So both directions of a rolling restart are already correct: an
+	// OLD build reading a NEW record ignores the field, and a NEW build reading
+	// an OLD record gets "" — which is not a loss of information but the RIGHT
+	// answer, because a pre-relay bus originated every message it holds.
+	//
+	// # WHY IT MUST BE DURABLE AT ALL
+	//
+	// Its only consumer is relay.Forwarder.RecoverMessage, called from exactly
+	// one place: Forwarder.Resume, which runs ONLY AFTER A RESTART. A correlation
+	// field held in memory alone would therefore be empty at precisely the moment
+	// — and the only moment — it is read. That is a trap, not an optimisation.
+	//
+	// This is the OPPOSITE case to Message.Pos, which is deliberately absent from
+	// this record: the position is DERIVABLE from where the entry sits in the log,
+	// so writing it down would be a second copy of a fact the log already states.
+	// The origin's id is derivable from NOTHING on this bus — the local id, the
+	// local sequence and the bus path all describe this bus's own view — so if it
+	// is not written here it is gone.
+	OriginMessageID string `json:"origin_message_id,omitempty"`
 
 	// IdempotencyKey is durable so the applied-key memory is part of RECOVERED
 	// STATE and not an in-memory cache (invariant 10).
@@ -598,16 +739,21 @@ func (m Message) SigningMessage() signing.Message {
 // Record renders m as the durable JSON record.
 func (m Message) Record() Record {
 	return Record{
-		V:              RecordVersion,
-		MessageID:      m.ID,
-		Seq:            m.Seq,
-		Sender:         m.Sender,
-		Broadcast:      m.Broadcast,
-		Recipients:     m.Recipients,
-		BusPath:        m.BusPath,
-		SentAtUnixNs:   m.SentAt.UTC().UnixNano(),
-		Size:           len(m.Body),
-		ContentSHA256:  m.ContentSHA256,
+		V:             RecordVersion,
+		MessageID:     m.ID,
+		Seq:           m.Seq,
+		Sender:        m.Sender,
+		Broadcast:     m.Broadcast,
+		Recipients:    m.Recipients,
+		BusPath:       m.BusPath,
+		SentAtUnixNs:  m.SentAt.UTC().UnixNano(),
+		Size:          len(m.Body),
+		ContentSHA256: m.ContentSHA256,
+
+		// Empty on a locally-originated message, where ID already IS the origin
+		// id; the `omitempty` tag keeps it off disk entirely in that case.
+		OriginMessageID: m.OriginMessageID,
+
 		IdempotencyKey: m.IdempotencyKey,
 
 		TimestampUnixMilli: m.TimestampUnixMilli,
@@ -706,6 +852,27 @@ func Decode(raw json.RawMessage) (Message, error) {
 	if len(rec.IdempotencyKey) > MaxIdempotencyKeyLen {
 		return Message{}, fmt.Errorf("%w: idempotency key is %d bytes, the limit is %d; the key is not echoed here because it is oversized", ErrInvalidMessage, len(rec.IdempotencyKey), MaxIdempotencyKeyLen)
 	}
+	// The ORIGIN MESSAGE ID is validated with EXACTLY the rule
+	// Message.WithOriginMessageID applies on the write path, and for the reason
+	// every other check here exists: this decoder is the boundary for bytes THIS
+	// PROCESS DID NOT VALIDATE — a file written by another build, damaged media,
+	// or a record handed over by a peer. Absent is legal and means "this bus is
+	// the origin"; present and naming THIS bus is not, because a message this bus
+	// minted is its own origin and a record asserting otherwise is a second copy
+	// of one fact, free to disagree with rec.MessageID. That refusal also keeps
+	// Store.ByOriginMessageID's fallback sound after a restart.
+	//
+	// Nothing beyond what ids.ParseMessageID already bounds is echoed: the parse
+	// error carries its own (bounded, or elided when oversized) rendering.
+	if rec.OriginMessageID != "" {
+		originBus, _, err := ids.ParseMessageID(rec.OriginMessageID)
+		if err != nil {
+			return Message{}, fmt.Errorf("%w: origin message id: %s", ErrInvalidMessage, err)
+		}
+		if originBus == busID {
+			return Message{}, fmt.Errorf("%w: record for %s carries origin message id %q, which names the SAME bus (%q); a message this bus minted is its own origin and the field is written only for a message ingested over a relay hop", ErrInvalidMessage, rec.MessageID, rec.OriginMessageID, busID)
+		}
+	}
 	// BusPath is VALIDATED, not merely carried, for the same reason and one
 	// more: it is echoed verbatim to every client that reads the message. An
 	// unvalidated hop list off disk is attacker-chosen content on a response
@@ -750,15 +917,21 @@ func Decode(raw json.RawMessage) (Message, error) {
 		busPath = LocalBusPath(busID)
 	}
 	return Message{
-		Seq:            rec.Seq,
-		ID:             rec.MessageID,
-		Sender:         rec.Sender,
-		Broadcast:      rec.Broadcast,
-		Recipients:     rec.Recipients,
-		BusPath:        busPath,
-		SentAt:         time.Unix(0, rec.SentAtUnixNs).UTC(),
-		Body:           rec.Body,
-		ContentSHA256:  rec.ContentSHA256,
+		Seq:           rec.Seq,
+		ID:            rec.MessageID,
+		Sender:        rec.Sender,
+		Broadcast:     rec.Broadcast,
+		Recipients:    rec.Recipients,
+		BusPath:       busPath,
+		SentAt:        time.Unix(0, rec.SentAtUnixNs).UTC(),
+		Body:          rec.Body,
+		ContentSHA256: rec.ContentSHA256,
+
+		// Empty for a locally-originated message and for every record written
+		// before this field existed; both mean "this bus is the origin", which is
+		// what OriginID() reads it as.
+		OriginMessageID: rec.OriginMessageID,
+
 		IdempotencyKey: rec.IdempotencyKey,
 
 		TimestampUnixMilli: rec.TimestampUnixMilli,
