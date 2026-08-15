@@ -17,10 +17,19 @@ These are the load-bearing invariants, stated as rules. Every change is measured
 change that weakens one needs an explicit decision recorded in `DECISIONS.md`.
 
 > **These state what MUST be true, not what IS true today.** Several are only partly enforced in
-> code: enrolment is NOT yet invite-gated (`InviteRequired: false`), the server REQUESTS but never
-> REQUIRES a client certificate (`ClientAuth: tls.RequestClientCert`, `a97f854` — one that IS
-> presented authenticates nobody by itself), recipients CANNOT verify message signatures, and enrol
-> idempotency is in-memory only. Do not build on a guarantee without checking it holds.
+> code: the server REQUESTS but never REQUIRES a client certificate
+> (`ClientAuth: tls.RequestClientCert`, `a97f854` — one that IS presented authenticates nobody by
+> itself), recipients CANNOT verify message signatures, and enrol idempotency is in-memory only.
+> Do not build on a guarantee without checking it holds.
+>
+> **Enrolment IS invite-gated as of `3cedcb7` (2026-08-15)** — `enrolmentInviteRequired = true`,
+> `cmd/agent-bus/main.go:66`. This paragraph claimed the opposite for several hours AFTER the gate
+> shipped, which is the failure it exists to warn about: a stale "not yet implemented" note is more
+> dangerous than no note, because it reads as freshly checked. Verified by forge, not by code
+> reading — 220 refused enrolments (20 via CLI, 200 raw) grew the data dir by **0 bytes**, and a
+> name refused 20 times then enrolled legitimately received suffix **1, not 21**, so the gate sits
+> ABOVE the id mint and invariant 1's never-reuse rule is never engaged.
+> **Known still-stale twin: `client/enrol.go:64` repeats the old claim.**
 
 **The REASONING lives in `INVARIANTS.md`, and you must read the relevant entry IN FULL before working
 on that plane.** The lines below are reminders, not specifications — each one is a summary of several
