@@ -16,14 +16,20 @@ package main
 // httpapi.Options.PeerPrincipals (inbound identity) and PeerSurface.Trust
 // (origin signing-key pins).
 //
-// NOT WIRED: the EGRESS. relay.Forwarder, its durable Outbox and Resume() are
-// not constructed here, so AcceptOptions.Onward is nil — the LEAF configuration
-// AcceptOptions.Onward documents as legitimate. A message this bus accepts for
-// its OWN agents is delivered; one addressed onward is made durable and carried
-// no further. That is stated as a gap rather than implied: cross-bus delivery
-// FROM this bus does not work yet, and it cannot be finished here, because the
-// local send path has no seam that hands a locally-published message to a
-// forwarder at all. Both halves belong to a paired egress task.
+// ALSO WIRED, AS OF RELAY-47: the ONWARD hop. federationOptions.Onward carries
+// the relay.Forwarder the composition root builds for the egress half, so a
+// message this bus accepts for an agent on a THIRD bus is now carried further
+// instead of stopping here. This paragraph said "NOT WIRED: the EGRESS ...
+// AcceptOptions.Onward is nil" and that was true when written; a status comment
+// that survives the change it describes is worse than none.
+//
+// NIL IS STILL LEGAL AND STILL MEANS LEAF. A bus built without a peer store has
+// no forwarder to pass, and AcceptOptions.Onward documents nil as a legitimate
+// configuration rather than an omission: such a bus accepts relayed mail for its
+// OWN agents and carries nothing further. The difference between the two is
+// reported at startup (main.go, `onward_relay`) and in the log line
+// warnIfCarriedNoFurther emits, which is the one place that can tell "leaf by
+// design" from "egress not wired".
 //
 // # THE FIVE THINGS THIS FILE OWES THAT ARE NOT "PLUMBING"
 //
@@ -187,6 +193,69 @@ const (
 	// multiplexes an entire remote bus's roster onto ONE principal, so a
 	// per-agent-shaped number applied per PEER would be 64 times too generous.
 	maxConcurrentRelayIngestsPerPeer = 8
+
+	// maxOnwardBusesPerMessage bounds the FAN-OUT of one relayed message this bus
+	// carries onward (RELAY-47). It is the second half of the per-peer bound on
+	// PEER-TRIGGERED OUTBOUND WORK, and the two multiply:
+	//
+	//	maxConcurrentRelayIngestsPerPeer × maxOnwardBusesPerMessage = 8 × 8 = 64
+	//
+	// which is relay.MaxPeers — so ONE source peer can occupy at most one
+	// federation-wide fan-out of onward copies at any instant. The in-flight slot
+	// is keyed on the AUTHENTICATED PEER (peerAdmission.enter, taken in
+	// acceptRelayFrom and held across the onward enqueue), never on the sender
+	// label inside the envelope, which a peer chooses.
+	//
+	// # WHY A BOUND IS NEEDED HERE AT ALL
+	//
+	// An onward hop is OUTBOUND work a PEER asks this bus to do, and it is not
+	// cheap: relay.Forwarder.Enqueue writes a durable outbox record per target —
+	// two fsyncs each — before it returns, on this goroutine. Without a cap, one
+	// relayed message naming store.MaxRecipients (64) recipients spread across 64
+	// buses costs 128 fsyncs, and 8 concurrent ingests from one peer cost 1024,
+	// contending with this bus's OWN agents for the same disk. That is the
+	// amplification shape RELAY-FU-IDEM-METER-BY-PEER and the SSRF this repo has
+	// already shipped both have.
+	//
+	// # IT IS COUNTED ON DESTINATION BUSES, FROM THE ENVELOPE ALONE
+	//
+	// The count is the number of DISTINCT FOREIGN BUS HALVES among the recipients,
+	// and it is an UPPER BOUND on the outbound copies — never an under-count,
+	// which is the only direction that would matter. One destination bus is at
+	// most one outbox job and one POST, even where two destinations share a next
+	// hop: relay.Registry.Route answers with the DESTINATION bus id
+	// (registry.go), Registry.PeerBaseURL then resolves that id to whatever
+	// next-hop address the operator configured for it, and
+	// relay.Forwarder.targets dedupes on the value Route returned.
+	//
+	// IT IS AN OVER-ESTIMATE TODAY, NOT ONLY HYPOTHETICALLY, and saying otherwise
+	// would license the very heuristic Enqueue's own comment forbids further
+	// down. relay.Forwarder.targets drops a destination with NO ROUTE and drops
+	// one the EGRESS SPLIT HORIZON refuses because it is already on the traversed
+	// path, and neither is a routing collapse. So counted-destinations and
+	// queued-copies routinely differ on entirely correct traffic. (A future
+	// registry that collapsed destinations onto one job would be a third cause,
+	// not the first.)
+	//
+	// It is counted HERE, from the envelope, rather than by asking the registry
+	// per recipient, because a second routing lookup beside
+	// relay.Forwarder.targets is a SECOND ROUTING AUTHORITY — the exact class of
+	// drift relayegress.go's routesToSomePeer is written to avoid. Over-estimating
+	// is the direction that refuses rather than the direction that lets a bound
+	// slip. RELAY-47-FU-FANOUT is the refinement.
+	//
+	// # WHAT A REFUSAL COSTS, STATED PLAINLY
+	//
+	// The message is already durable here and the peer has already been told 200,
+	// so a refusal DROPS the onward copy rather than back-pressuring anybody. That
+	// is the same outcome a recipient with no route already gets, and it is
+	// answered the same way: loudly and specifically, never silently (invariant
+	// 6). Refusing BEFORE the durable write instead — a 503 the peer retries —
+	// was considered and rejected for MVP: a legitimately wide message would then
+	// be retried for the whole retry horizon and never become deliverable, which
+	// is the "told to retry something it cannot fix" defect this repo has already
+	// recorded twice.
+	maxOnwardBusesPerMessage = maxConcurrentRelayIngestsPerPeer
 )
 
 // errRelayPeerBusy is the concurrency refusal; errRelayPeerQuota is the quota
@@ -553,6 +622,203 @@ func elidePeerClaim(s string) string {
 }
 
 // ---------------------------------------------------------------------------
+// The ONWARD hop: carrying a peer's message to a FURTHER bus (RELAY-47)
+// ---------------------------------------------------------------------------
+
+// onwardRelay is what relay.Acceptor is given as AcceptOptions.Onward: the
+// bounded, loud wrapper around the SAME relay.Forwarder the egress half uses.
+//
+// # IT IS A WRAPPER, NOT A SECOND FORWARDER
+//
+// relay.Forwarder already satisfies relay.OnwardForwarder outright — there is a
+// compile-time assertion saying so (internal/relay/accept.go) — so this type
+// exists for exactly two things the forwarder cannot do from where it sits:
+//
+//  1. BOUND the peer-triggered fan-out (maxOnwardBusesPerMessage).
+//  2. SAY SO when a message this bus accepted for somebody else's agents is
+//     carried no further after all. The forwarder counts its own drops, but the
+//     line an operator needs — "this specific relayed message stops here, and
+//     here is why" — belongs where the accepted message and its recipients are
+//     both in hand.
+//
+// It adds NO routing decision of its own: which peers receive a copy is
+// relay.Forwarder.targets's answer and nothing else's, and the split horizon,
+// the hop stamp and the hop limit stay entirely inside internal/relay
+// (NextHopAllowed, AppendHop). This type must never grow a second copy of any of
+// them.
+//
+// # THE MESSAGE IS PASSED THROUGH UNTOUCHED, AND THAT IS LOAD-BEARING
+//
+// relay.RelayedMessage.BusPath here is the path AS RECEIVED, WITHOUT this bus's
+// hop; Forward appends it via relay.AppendHop. The recipients, the body, the
+// signature and the ORIGIN attestation all travel verbatim — an intermediate
+// re-signs nothing and re-attests nothing (invariant 2: the sender belongs to
+// the origin bus, and attest.Sign refuses to sign a subject in anybody else's
+// namespace). Rewriting the recipient list to trim the fan-out is therefore not
+// merely undesirable, it is IMPOSSIBLE: the recipients are covered by the
+// sender's signature, so a trimmed copy would fail verification at the next hop.
+type onwardRelay struct {
+	busID string
+	next  relay.OnwardForwarder
+	log   *logging.Logger
+
+	forwardedCopies  atomic.Uint64
+	refusedFanOut    atomic.Uint64
+	carriedNoFurther atomic.Uint64
+}
+
+// The wrapper must satisfy the seam it is passed as, or the seam is fiction.
+var _ relay.OnwardForwarder = (*onwardRelay)(nil)
+
+// newOnwardRelay wraps next. It returns nil when next is nil, so that a bus with
+// no forwarder passes a genuinely nil AcceptOptions.Onward — the documented LEAF
+// configuration — rather than a non-nil interface holding a nil pointer, which
+// the acceptor would call and which would panic on a bus that does not federate
+// at all. Same trap, same shape, as hub.Options.Egress in main.go.
+func newOnwardRelay(busID string, next relay.OnwardForwarder, log *logging.Logger) *onwardRelay {
+	if next == nil {
+		return nil
+	}
+	if log == nil {
+		log = logging.New(discardWriter{}, logging.LevelError)
+	}
+	return &onwardRelay{busID: busID, next: next, log: log}
+}
+
+// Enqueue implements relay.OnwardForwarder.
+//
+// It is called by relay.Acceptor.Accept as STEP 3, and only for a NEW acceptance
+// (idem.OutcomeNew) — a duplicate is answered and forwarded nowhere, which is
+// what terminates traffic in a cyclic topology. That gate lives in the acceptor
+// and must not be repeated here: two copies of one rule are two rules that can
+// drift.
+func (o *onwardRelay) Enqueue(m relay.RelayedMessage) (int, error) {
+	if m.Broadcast {
+		// A RELAYED BROADCAST HAS NO ROSTER-CHECKABLE AUDIENCE and carries no
+		// recipient list, so the fan-out count below would be 0 and this function
+		// would return silently — a message accepted, made durable and dropped
+		// from the onward path with no line about it, which is invariant 6's
+		// silent discard exactly.
+		//
+		// Unreachable today: ValidateRelayRequest check 11a and Acceptor.Accept
+		// both refuse a relayed broadcast, because the canonical signing format
+		// has no bytes for an empty audience. It is checked HERE anyway because
+		// the day SIGN-3 defines a broadcast's signed audience, those two
+		// refusals go away and this arm becomes the one that decides — and the
+		// failure it would otherwise produce is silent rather than loud.
+		o.carriedNoFurther.Add(1)
+		o.log.Warn("a relayed BROADCAST was accepted and is being carried NO FURTHER: this build has no onward fan-out rule for a message with no recipient list",
+			"local_bus", o.busID,
+			"origin_bus", m.OriginBus,
+			"origin_message_id", m.OriginMessageID,
+			"remedy", "SIGN-3 must define a broadcast's signed audience before a relayed broadcast can be routed onward; until then a relayed broadcast is refused at ingest and this line should never appear",
+		)
+		return 0, nil
+	}
+	foreign := foreignBuses(m.Recipients, o.busID)
+	if len(foreign) == 0 {
+		// Every recipient is ours. This bus is the DESTINATION, not a hop, and
+		// there is nothing to carry — the ordinary case, and silent on purpose.
+		return 0, nil
+	}
+	if len(foreign) > maxOnwardBusesPerMessage {
+		o.refusedFanOut.Add(1)
+		o.log.Warn("a relayed message was ACCEPTED AND DURABLY RECORDED but is being carried NO FURTHER: it names recipients on more foreign buses than one relayed message may fan out to on this bus. The sending peer has been told 200 and will not retry, so those recipients will never receive it",
+			"local_bus", o.busID,
+			"origin_bus", m.OriginBus,
+			"origin_message_id", m.OriginMessageID,
+			"foreign_buses", len(foreign),
+			"fan_out_limit", maxOnwardBusesPerMessage,
+			"refused_fan_out_total", o.refusedFanOut.Load(),
+			"remedy", "an onward hop costs two fsyncs per destination peer and is work a PEER asks this bus to do, so it is bounded per message. Address the message to fewer buses, or peer the destination buses with the origin directly so no single bus carries the whole fan-out",
+		)
+		return 0, nil
+	}
+
+	queued, err := o.next.Enqueue(m)
+	if err != nil {
+		// ErrForwarderClosed — a lifecycle condition of THIS bus. The acceptor
+		// logs it and does NOT undo the acceptance; nothing to add here.
+		return queued, err
+	}
+	// WHAT IS NOT DETECTED HERE, STATED SO NOBODY READS THIS AS COMPLETE
+	// COVERAGE: a message reaching SOME of its destinations and not others.
+	// relay.Forwarder.targets counts a recipient it cannot route and moves on
+	// without a line, so a message naming one routable and one unroutable
+	// foreign bus returns queued=1 and passes through here in silence.
+	//
+	// `queued < len(foreign)` IS NOT THE MISSING TEST, and inventing it would be
+	// worse than the gap, because it FIRES ON CORRECT TRAFFIC: the EGRESS SPLIT
+	// HORIZON legitimately drops a destination bus that is already on the
+	// traversed path. A message relayed A→B naming recipients on both A and C
+	// counts two foreign buses at B and queues exactly one copy — nothing is
+	// lost, A already has it, and a detector built on that comparison would
+	// report a delivery failure on the ordinary transit case this task exists to
+	// support. (An earlier draft of this comment justified it by claiming a
+	// -route-for topology collapses destinations onto one job. It does NOT:
+	// `peer add -route-for` writes a SEPARATE peer record per destination, so two
+	// destinations behind one next hop are two jobs and two POSTs to one address
+	// — as maxOnwardBusesPerMessage's own comment says. The conclusion was right
+	// and the reason was wrong, which is the harder defect to spot.)
+	//
+	// The sound version needs the target set the forwarder actually resolved,
+	// which only the forwarder has. Filed as RELAY-50.
+	if queued == 0 {
+		// THE HONEST BAD NEWS, AND IT MUST STAY LOUD. The forwarder resolved no
+		// target: no route to the destination bus, or the split horizon refused
+		// every candidate (the message has already been where it is going), or the
+		// path is at its hop limit. Each of those is counted inside the forwarder;
+		// what is added here is WHICH MESSAGE stopped, which the forwarder's own
+		// counters cannot say.
+		o.carriedNoFurther.Add(1)
+		o.log.Warn("a relayed message was ACCEPTED AND DURABLY RECORDED but is being carried NO FURTHER: it names recipients on another bus and the cross-bus forwarder queued no copy for any of them. The sending peer has been told 200 and will not retry, so those recipients will never receive it",
+			"local_bus", o.busID,
+			"origin_bus", m.OriginBus,
+			"origin_message_id", m.OriginMessageID,
+			"foreign_buses", len(foreign),
+			"path_hops", len(m.BusPath),
+			"carried_no_further_total", o.carriedNoFurther.Load(),
+			"remedy", "onward relay IS wired on this bus, so this is a ROUTING answer rather than a missing capability: check that a peer record names the destination bus (`agent-bus peer add -bus-id <destination> -url <next hop> ...`, or -route-for on the next hop's record), that the next hop is not already on this message's traversed path, and that the path has not reached the 64-hop limit",
+		)
+		return 0, nil
+	}
+	o.forwardedCopies.Add(uint64(queued))
+	return queued, nil
+}
+
+// stats reports what this wrapper has done. It is read by tests and is the shape
+// an operator-facing counter would take; the forwarder keeps its own.
+func (o *onwardRelay) stats() (forwarded, refusedFanOut, carriedNoFurther uint64) {
+	return o.forwardedCopies.Load(), o.refusedFanOut.Load(), o.carriedNoFurther.Load()
+}
+
+// foreignBuses returns the DISTINCT bus halves among recipients that are not
+// localBusID, folded case-insensitively.
+//
+// The fold matches relay.Acceptor.unknownLocalRecipients, which treats a
+// confusable spelling of OUR bus id as OURS and refuses it: a recipient that
+// folds to us is therefore never counted as foreign here either, and the two
+// sides cannot disagree about whose namespace a name is in. A recipient that
+// does not parse is not attributed to any bus — internal/relay has already
+// refused the message if one did (ValidateRelayRequest parses every recipient),
+// so this is the direct-caller path, and counting an unparseable name as a
+// foreign destination would let it inflate the fan-out bound.
+func foreignBuses(recipients []string, localBusID string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, r := range recipients {
+		bus, _, _, err := ids.ParseAgentID(r)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(bus, localBusID) {
+			continue
+		}
+		out[strings.ToLower(bus)] = struct{}{}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // The federation object
 // ---------------------------------------------------------------------------
 
@@ -584,6 +850,25 @@ type federationOptions struct {
 	// hubIngest; it is an interface so the binding and metering rules can be
 	// driven without a durable hub.
 	Local relay.LocalIngest
+
+	// Onward is the cross-bus forwarder a RELAY-INGESTED message is handed to
+	// when it names recipients on a further bus (RELAY-47). Production passes the
+	// SAME *relay.Forwarder the egress adapter uses — one outbox, one set of peer
+	// queues, one place that decides targets.
+	//
+	// OPTIONAL, and nil is a legitimate LEAF configuration rather than a mistake:
+	// a bus with no peer store has no forwarder, accepts relayed mail for its own
+	// agents and carries nothing further. See relay.AcceptOptions.Onward, which
+	// says the same thing one layer down, and warnIfCarriedNoFurther, which is
+	// what makes the leaf case audible instead of silent.
+	//
+	// IT IS AN INTERFACE, NOT *relay.Forwarder, AND THAT MATTERS AT THE CALL
+	// SITE. A nil *relay.Forwarder assigned into an interface field is NOT nil —
+	// it is a non-nil interface holding a nil pointer, which the acceptor would
+	// dutifully call. main.go therefore assigns this from an interface-typed
+	// variable set only on the branch that actually built a forwarder, exactly as
+	// it does for hub.Options.Egress and hub.Options.RemoteRouter.
+	Onward relay.OnwardForwarder
 
 	// Peers is the durable, ALREADY-REPLAYED peer store. It serves two distinct
 	// jobs — httpapi.Options.PeerPrincipals (which bus is on this connection) and
@@ -627,6 +912,12 @@ type federation struct {
 	admission *peerAdmission
 	surface   *httpapi.PeerSurface
 	log       *logging.Logger
+
+	// onward is the wrapper handed to the acceptor, or nil on a LEAF build. It is
+	// kept here for one reason: warnIfCarriedNoFurther must say something
+	// DIFFERENT depending on which of the two this bus is, and "the egress
+	// forwarder is not wired yet" is a false statement on a bus where it is.
+	onward *onwardRelay
 
 	// mu guards rosterMemo and enrolMemo, AND IS HELD ACROSS THE REGISTRY CALL
 	// each of them guards. See applyRosterFrom for why that is not merely tidy.
@@ -717,14 +1008,25 @@ func newFederation(opts federationOptions) (*federation, error) {
 	}
 	registry := opts.Registry
 
+	// THE ONWARD SEAM (RELAY-47). newOnwardRelay returns a genuinely nil
+	// *onwardRelay when there is no forwarder, and it is assigned to an
+	// INTERFACE-typed local before it reaches AcceptOptions — a nil *onwardRelay
+	// stored straight into the interface field would be non-nil, and the
+	// acceptor's `if a.onward != nil` gate would call through it.
+	wrapped := newOnwardRelay(opts.BusID, opts.Onward, log)
+	var onward relay.OnwardForwarder
+	if wrapped != nil {
+		onward = wrapped
+	}
+
 	acceptor, err := relay.NewAcceptor(relay.AcceptOptions{
 		BusID: opts.BusID,
 		Local: opts.Local,
-		// Onward is nil: this build accepts relayed messages for its OWN agents
-		// and carries nothing further. See the file comment — the egress half is
-		// not wired here, and nil is the documented LEAF configuration rather
-		// than an omission.
-		Onward: nil,
+		// Onward carries a relay-ingested message to a FURTHER hop. It is nil
+		// exactly when this build has no cross-bus forwarder, which
+		// AcceptOptions.Onward documents as the legitimate LEAF configuration
+		// rather than an omission.
+		Onward: onward,
 		Logger: log,
 	})
 	if err != nil {
@@ -741,6 +1043,7 @@ func newFederation(opts federationOptions) (*federation, error) {
 		acceptor:   acceptor,
 		admission:  admission,
 		log:        log,
+		onward:     wrapped,
 		rosterMemo: make(map[string]rosterMemoEntry),
 		enrolMemo:  make(map[string]rosterMemoEntry),
 	}
@@ -1049,20 +1352,40 @@ func (f *federation) acceptRelayFrom(ctx context.Context, peerBusID string, m re
 }
 
 // warnIfCarriedNoFurther says out loud that a message this bus accepted for
-// SOMEBODY ELSE'S agents stops here.
+// SOMEBODY ELSE'S agents stops here BECAUSE THIS BUS IS A LEAF.
 //
-// This build wires no egress (AcceptOptions.Onward is nil), which relay
+// # IT NOW COVERS ONE OF TWO CASES, AND THE SPLIT IS THE POINT (RELAY-47)
+//
+// A bus with no cross-bus forwarder has AcceptOptions.Onward nil, which relay
 // documents as the legitimate LEAF configuration — and it is, for a bus with one
 // neighbour and no transit role. What it is NOT is silent: a peer that relays us
 // a message addressed onward gets a 200, the message is durably ours, and it is
-// then carried nowhere. The acceptor cannot say so, because a nil Onward is
-// exactly what it was told to expect; this is the one place that knows the
-// difference between "leaf by design" and "egress not wired yet".
+// then carried nowhere. That is this function.
+//
+// The OTHER case — onward relay IS wired and the message went nowhere AT ALL (no
+// route, split horizon, hop limit, a fan-out over the bound) — is reported by
+// onwardRelay.Enqueue, which is the only place that knows how many copies were
+// actually queued. This function returns immediately on such a bus, because its
+// text would otherwise assert "this build wires no onward relay" about a build
+// that does, and a startup or runtime line that survives the change it describes
+// is worse than no line at all.
+//
+// BETWEEN THEM THEY DO NOT COVER EVERYTHING, AND THE HOLE IS NAMED RATHER THAN
+// GLOSSED: a message that reaches SOME of its destination buses and not others
+// is logged by neither, because the unroutable recipient is counted inside
+// relay.Forwarder.targets without a line and this bus cannot soundly infer it
+// from the copy count. See the note in onwardRelay.Enqueue for why the obvious
+// heuristic is wrong. Neither fires when the message WAS carried onward.
 //
 // It is a WARN and it fires per message on purpose: a bus doing real transit will
 // make this loud enough to notice, which is the intent. A bus that only ever
 // receives mail for its own agents never emits it at all.
 func (f *federation) warnIfCarriedNoFurther(m relay.RelayedMessage) {
+	if f.onward != nil {
+		// Onward relay is wired. Whether this particular message was carried is
+		// onwardRelay.Enqueue's answer, and it has already said so.
+		return
+	}
 	foreign := 0
 	for _, r := range m.Recipients {
 		if bus, _, _, err := ids.ParseAgentID(r); err == nil && !strings.EqualFold(bus, f.busID) {
@@ -1077,7 +1400,7 @@ func (f *federation) warnIfCarriedNoFurther(m relay.RelayedMessage) {
 		"origin_bus", m.OriginBus,
 		"origin_message_id", m.OriginMessageID,
 		"foreign_recipients", foreign,
-		"remedy", "this build accepts relayed mail for its OWN agents only; onward relay needs the egress forwarder, which is not wired yet",
+		"remedy", "this bus has no cross-bus forwarder, so it accepts relayed mail for its OWN agents only. A forwarder is built only when the data directory holds peer configuration: run `agent-bus peer add` for the next hop, then restart. Onward relay is wired as soon as one exists",
 	)
 }
 

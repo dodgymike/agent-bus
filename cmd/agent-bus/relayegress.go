@@ -221,8 +221,22 @@ func (e *relayEgress) Forward(m store.Message) {
 	//
 	// Carrying an ingested message further is relay.AcceptOptions.Onward's job,
 	// which is a different seam with a different envelope. Declining here is
-	// therefore the LEAF configuration newFederation already documents, not a
-	// gap: nothing is lost that this seam was ever asked to carry.
+	// therefore CORRECT ROUTING, not a gap: nothing is lost that this seam was
+	// ever asked to carry.
+	//
+	// THAT SEAM IS NOW WIRED (RELAY-47), which makes this line MORE load-bearing
+	// rather than less, and it must not be "relaxed" to enable onward relay. Until
+	// RELAY-47 the two behaviours were indistinguishable from outside — a
+	// relay-ingested message went nowhere either way — so this check could be
+	// misread as the thing that made the bus a leaf. It is not, and loosening it
+	// now would forward every ingested message TWICE: once correctly through
+	// AcceptOptions.Onward, carrying the origin's attestation and the traversed
+	// path, and once from here as a NEW message claiming this bus as its origin.
+	// The second copy would fail closed anyway (attest.Sign refuses a subject in
+	// another bus's namespace, invariant 2), so what a relaxation actually buys is
+	// a Warn line per relayed message about an envelope that must never have been
+	// built. See warnIfCarriedNoFurther and onwardRelay.Enqueue for where the
+	// ingested message's onward journey IS reported.
 	//
 	// # THE GATE IS THE BUS PATH, BECAUSE THAT IS THE FIELD PRODUCTION SETS
 	//

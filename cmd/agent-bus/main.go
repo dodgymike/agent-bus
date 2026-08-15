@@ -895,6 +895,15 @@ func run(cfg Config) error {
 		remoteRouter hub.RemoteRouter
 		hubEgress    hub.Egress
 
+		// onwardForwarder is the SAME forwarder, seen through the seam the relay
+		// INGRESS uses to carry a peer's message to a further hop (RELAY-47). It
+		// is interface-typed for the identical reason as the two above, and the
+		// trap is identical: assigning a nil *relay.Forwarder into it would
+		// produce a non-nil interface holding a nil pointer, and relay.Acceptor's
+		// `if a.onward != nil` gate would then call through it on a bus that does
+		// not federate at all.
+		onwardForwarder relay.OnwardForwarder
+
 		relayRegistry  *relay.Registry
 		relayForwarder *relay.Forwarder
 		egressAdapter  *relayEgress
@@ -980,11 +989,37 @@ func run(cfg Config) error {
 					return relay.RelayedMessage{}, false, nil
 				}
 				if m.OriginMessageID != "" {
-					// A RELAYED-IN message. Unreachable today -- relayEgress.Forward
-					// declines those, so no outbox job can name one -- and checked
-					// anyway because the alternative is silent: envelope() would
-					// claim THIS bus as the origin of somebody else's message and
-					// mint an attestation for an agent in their namespace.
+					// A RELAYED-IN message: this bus cannot rebuild an ORIGIN
+					// envelope for somebody else's message, because envelope()
+					// would claim THIS bus as the origin and mint an attestation
+					// for an agent in their namespace (invariant 2).
+					//
+					// THE REASON THIS IS UNREACHABLE CHANGED AT RELAY-47, AND THE
+					// OLD REASON IS NOW FALSE. It read "Unreachable today --
+					// relayEgress.Forward declines those, so no outbox job can name
+					// one". An outbox job CAN name one now: onward relay enqueues a
+					// relay-ingested message under the ORIGIN bus's message id
+					// (relay.Forwarder.Enqueue -> OutboxJob.OriginMessageID). What
+					// keeps this line unreached is something else entirely, and it
+					// is worse rather than better: NOTHING in this build ever sets
+					// store.Message.OriginMessageID, so Store.byOrigin is empty, the
+					// ByOriginMessageID lookup above MISSES, and Resume settles the
+					// job ABANDONED at the !ok arm before ever reaching here.
+					//
+					// So a pending ONWARD hop does not survive a restart. It is
+					// logged loudly by the forwarder (invariant 6 holds), and the
+					// obligation is destroyed rather than retried -- the peer was
+					// told 200 and will not resend. Locally-originated hops are
+					// unaffected: their ids ARE this bus's, so the fallback in
+					// ByOriginMessageID resolves them.
+					//
+					// FIXING IT IS NOT A COMMENT AWAY, which is why this stays a
+					// filed follow-up rather than a patch here: store.Message has no
+					// OriginAttestation field, and RelayRequest.OriginAttestation is
+					// REQUIRED and is verified by the next hop, so a relayed-in
+					// envelope is unbuildable from durable state by construction.
+					// The live path works only because the in-memory RelayedMessage
+					// still carries the origin's attestation.
 					return relay.RelayedMessage{}, false, fmt.Errorf("message %q was relayed to this bus rather than originated here, so this bus cannot rebuild an origin envelope for it", originMessageID)
 				}
 				// ONE ENVELOPE BUILDER, REUSED. The live forward path and this
@@ -1040,6 +1075,12 @@ func run(cfg Config) error {
 		}
 		remoteRouter = relayRegistry
 		hubEgress = egressAdapter
+		// THE THIRD CONSUMER OF THE ONE FORWARDER (RELAY-47). The egress adapter
+		// above carries messages this bus ORIGINATED; this seam carries messages
+		// it RECEIVED from a peer and owes to a further hop. They are two callers
+		// of one Enqueue, deliberately: one outbox, one set of per-peer queues,
+		// one place that resolves targets and applies the split horizon.
+		onwardForwarder = relayForwarder
 	}
 
 	// The messaging core, built HERE rather than inside internal/httpapi (which
@@ -1225,7 +1266,14 @@ func run(cfg Config) error {
 			// one and unknown on the other.
 			Registry: relayRegistry,
 			Local:    hubIngest{h: h},
-			Peers:    peerStore,
+			// THE ONWARD SEAM (RELAY-47). Nil on a bus with no peer store, which
+			// is the documented LEAF configuration; non-nil here means a message
+			// this bus accepts for a THIRD bus's agents is carried further rather
+			// than stopping. It is the same *relay.Forwarder the egress adapter
+			// holds, reached through an interface-typed variable so a
+			// non-federated build passes a genuinely nil seam.
+			Onward: onwardForwarder,
+			Peers:  peerStore,
 			// The applied-key table's own pressure line, read live. It is what
 			// makes the per-peer share a BOUND rather than a speed limit: below
 			// the line a peer over its share is denying nobody anything and is
@@ -1266,27 +1314,62 @@ func run(cfg Config) error {
 		//                           different operational state from a bus that
 		//                           has no forwarder. Reporting only the first
 		//                           would make the two look identical.
-		//   onward_relay            still FALSE, and it is a NARROWER claim than
-		//                           it looks. "Onward" here is the RELAY sense --
-		//                           carrying a message that arrived FROM a peer to
-		//                           a FURTHER hop (relay.AcceptOptions.Onward,
-		//                           which is nil). The egress adapter deliberately
-		//                           forwards only messages ORIGINATED HERE
-		//                           (relayegress.go declines when m.BusPath[0] is
-		//                           not this bus, which is true of every
-		//                           locally-originated message and false of every
-		//                           relay-ingested one), so this bus is still a
-		//                           LEAF in a multi-hop topology. Do not let a
-		//                           future rewording blur these two meanings of
-		//                           "forward".
-		lg.Info("FEDERATION is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents, and it FORWARDS messages its own agents originate to agents on a peer bus, durably through the relay outbox. It does NOT carry a message RECEIVED from one peer onward to a further hop -- multi-hop onward relay is not implemented, so this bus is a leaf",
+		//   onward_relay            TRUE as of RELAY-47, and it is a NARROWER
+		//                           claim than it looks. "Onward" here is the
+		//                           RELAY sense -- carrying a message that arrived
+		//                           FROM a peer to a FURTHER hop
+		//                           (relay.AcceptOptions.Onward). It is a
+		//                           DIFFERENT seam from egress_forwarder_wired
+		//                           above, which is about messages ORIGINATED
+		//                           HERE, and the two are reported apart because
+		//                           they can differ: a build could have a
+		//                           forwarder and no onward wiring, which is
+		//                           exactly what this bus was until RELAY-47. Do
+		//                           not let a future rewording blur these two
+		//                           meanings of "forward".
+		//
+		//                           It reports the WIRING, not a routing promise
+		//                           and not a durability promise, and both limits
+		//                           are stated rather than left to be discovered:
+		//
+		//                           A message with no route to its destination
+		//                           bus, one whose next hop is already on its
+		//                           traversed path, or one at the 64-hop limit is
+		//                           carried no further. onwardRelay.Enqueue logs
+		//                           the message that reaches NO peer at all. A
+		//                           message that reaches SOME of its destinations
+		//                           and not others is NOT individually logged --
+		//                           relay.Forwarder.targets counts a no-route
+		//                           recipient without a line, and "queued fewer
+		//                           copies than destinations" is not a sound
+		//                           detector, because the egress split horizon
+		//                           legitimately drops a destination already on
+		//                           the traversed path: an A->B relay naming
+		//                           recipients on both A and C counts two foreign
+		//                           buses at B and correctly queues one copy.
+		//                           Filed as RELAY-50 rather than papered over
+		//                           with a heuristic that fires on correct
+		//                           traffic.
+		//
+		//                           And an onward hop is NOT re-offered after a
+		//                           restart: the outbox record survives, but the
+		//                           envelope cannot be rebuilt from durable state
+		//                           (see RecoverMessage above), so Resume settles
+		//                           it abandoned. Locally-originated hops DO
+		//                           resume.
+		//
+		// This line said "It does NOT carry a message RECEIVED from one peer
+		// onward to a further hop -- multi-hop onward relay is not implemented, so
+		// this bus is a leaf", with onward_relay=false, and that was true when
+		// written. It is corrected rather than deleted.
+		lg.Info("FEDERATION is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents, it FORWARDS messages its own agents originate to agents on a peer bus through the durable relay outbox, and it CARRIES a message received from one peer onward to a further hop when the destination routes to a different peer. THE ONWARD HOP IS NOT YET CRASH-SAFE and is the one part of that sentence not covered by the outbox: a hop still owed when this bus stops is settled ABANDONED at the next start rather than re-offered, because an intermediate cannot rebuild the origin's signed envelope from durable state. A message with no route, one whose next hop has already seen it, or one at the traversed-path limit is carried no further; one that reaches no peer at all is logged individually, one that reaches only some of its destinations is not",
 			"bus_id", busID,
 			"bindable_peers", bindable,
 			"trusted_buses", len(peerStore.TrustedBuses()),
 			"configured_routes", len(peerStore.ActivePeers()),
 			"egress_forwarder_wired", relayForwarder != nil,
 			"peers_seeded", peersSeeded,
-			"onward_relay", false,
+			"onward_relay", onwardForwarder != nil,
 		)
 	case len(peerStore.TrustedBuses()) > 0 || len(peerStore.ActivePeers()) > 0:
 		// Configured, but not usable. LOUD, because from outside this is

@@ -3979,3 +3979,121 @@ does NOT state the gates passed.**
 other agents on this task per the brief and are not touched by this entry.
 
 Nothing here is committed. `SPEC.md`/`SPEC/` not edited by this entry's author.
+
+## 2026-08-15 — `RELAY-47` (`dd69c4d3-b129-450c-aa3b-0457a1e299f2`): ONWARD RELAY wired — A→B→C delivers (`feature-runner`)
+
+**An intermediate bus now carries a peer's message to a THIRD bus.** `relay.AcceptOptions.Onward` was
+nil in production, so every bus was a leaf: a relayed message addressed onward was made durable,
+acknowledged 200, and carried nowhere. It is now the `*relay.Forwarder` the egress half already
+builds, reached through a bounded wrapper.
+
+Invariants read in full before writing code: **2** (fully-qualified ids; an intermediate re-attests
+nothing), **6** (a discard is logged loudly and specifically, never silently), **10** (idempotency and
+the traversed path are COMPLEMENTS; re-forward only on `idem.OutcomeNew`), **11** (mTLS, address-keyed
+pinning, no plaintext).
+
+**Changed** — `cmd/agent-bus/relaywiring.go` (`federationOptions.Onward`; the `onwardRelay` wrapper;
+`maxOnwardBusesPerMessage`; `foreignBuses`; `warnIfCarriedNoFurther` split), `cmd/agent-bus/main.go`
+(passes the forwarder through an interface-typed variable; the `FEDERATION is served` line now reports
+`onward_relay=true` and no longer says "this bus is a leaf"), `cmd/agent-bus/relayegress.go` (comment
+only), `cmd/agent-bus/relayonward_relay47_test.go` (new), `CONTRACTS-HTTP.md`.
+
+**The brief's second wiring change was NOT made, on purpose.** Both the task and the orchestrator said
+to relax `relayegress.go`'s `BusPath[0]` originated-here check, "the single line that makes this bus a
+leaf". It is not: that line guards `hub.Egress`, which builds a NEW envelope claiming THIS bus as
+origin. Relaxing it would forward every ingested message twice — once correctly through
+`AcceptOptions.Onward` and once as a fabricated local origin that `attest.Sign` refuses outright
+(invariant 2) — so the only thing it would buy is a Warn line per relayed message. The task's own
+"the other seam is not a gate to fix" paragraph says the same thing; the two halves of the description
+contradicted each other and the second is right. The check is unchanged and its comment now says why.
+
+**The loop guards were proved load-bearing by MUTATION, not by inspection.** With the leaf property
+gone, `internal/relay/path.go` is what stands between a cyclic federation and unbounded circulation.
+The new ring test builds three real federations and measures the exact number of relay steps:
+
+- stub out `relay.NextHopAllowed` → RED: "the ring performed 6 relay steps, want 4" plus "the ingress
+  backstop dropped 2 copies in a CORRECT ring".
+- stub out `relay.CheckIncomingPath` → RED in three subtests.
+
+The FIRST draft of that fixture was **green under mutation** — an ordinary routing filter masked the
+split horizon — and the fixture was corrected (the origin now holds a recipient too, so B and C have a
+routing reason to send back to A and only the horizon stops them). A guard test that has never been
+observed failing is not evidence.
+
+**Two findings came out of the ring test rather than out of review.** `checkPeerIsLastHop` refuses a
+peer that strips itself from the path it forwards, so a liar's best move is to keep the origin first
+and itself last and delete the middle; and with the ingress backstop mutated out, the origin is still
+protected by the acceptor's invariant-2 refusal of a sender in its own namespace.
+
+**Bound on peer-triggered outbound work:** at most 8 distinct foreign destination buses per relayed
+message, which with the existing per-peer in-flight ingest cap of 8 holds one authenticated peer to 64
+onward copies in flight. Over-wide messages are dropped, loudly, with a remedy — refusing before the
+durable write would tell a peer to retry something it cannot fix.
+
+**Evidence.** `go test -race -count=1 ./cmd/agent-bus/` → `ok ... 409.449s`. In a clean `git archive
+HEAD` overlay carrying only the four changed files, the overlay's own
+`bash scripts/proof-check.sh 'go test -race -count=1 -run TestOnwardRelay ./cmd/agent-bus'` reported
+`verdict=PASS class=test exit=0 tests_run=11 top_level=6 skipped=0 failed=0 empty_pkgs=0`.
+
+**`scripts/fed-smoke.sh` now achieves the real thing and STILL EXITS 1, for a reason that is not this
+change.** C's audit holds exactly one record with the complete `bus_path=[A,B,C]`, C's recipient agent
+actually received the message, A/B/C hold one record each (the idempotent retry created no second
+copy), and B logged zero "carried NO FURTHER". The script fails because it asserts the SAME
+`message_id` string in all three audits, and each bus mints its own id — invariant 1, a bus never
+adopts a peer's. The assertion is unsatisfiable as written. `fed-smoke.sh` belongs to `RELAY-25`
+(in progress with another agent) and was NOT touched; the defect is filed as `RELAY-25-FU-CORRELATION`
+(`3f009222-e31e-404a-9c77-3e7966741b82`), which carries both candidate fixes. RELAY-47's stored
+`proof_cmd` is that script, so it CANNOT go green until that task lands — the code-level proof used
+instead is quoted above.
+
+**Known limits, recorded rather than rounded up:**
+- A pending onward hop is NOT re-offered after a restart. The outbox record survives, but an
+  intermediate does not retain the origin attestation and `store.Message.OriginMessageID` is never set
+  on an ingested message, so `Resume` cannot rebuild the envelope and abandons the job (logged).
+  Locally-originated hops are unaffected. Filed as `RELAY-48`
+  (`9887b0eb-8e8a-45d9-8a10-bd3161f720e2`, P1), which records that setting `OriginMessageID` alone is
+  NOT a safe fix — it makes `RecoverMessage`'s guard fire and return an error instead of rebuilding.
+- The fan-out bound counts DESTINATION buses from the envelope rather than the next hops the forwarder
+  resolves. It is an UPPER BOUND, never an under-count — one destination is at most one outbox job and
+  one POST, even where two destinations share a next hop (`peer add -route-for` writes a SEPARATE peer
+  record per destination, so they do not collapse). It over-estimates TODAY rather than only
+  hypothetically: the forwarder drops a destination with no route, and one the split horizon refuses
+  because it is already on the traversed path. Refinement filed as `RELAY-47-FU-FANOUT`
+  (`1cbdcc37-365b-422a-9c27-1a3f12b30a67`).
+- A message reaching SOME of its destinations and not others is NOT individually logged: the
+  forwarder counts an unroutable recipient without a line, and `queued < len(foreign)` is NOT a sound
+  detector — the split horizon legitimately drops a destination already on the traversed path, so it
+  would fire on correct transit traffic. Filed as `RELAY-50`
+  (`c4a1bd15-f993-40bf-90e9-13d48a8ab2c6`).
+- Onward relay puts MORE work under the hub's global write lock (two fsyncs per destination). The
+  cost was already filed against the egress path and is NOT re-filed here.
+
+`AGENT_PROTOCOL.md`, `CONTRACTS-AGENT.md`, `CONTRACTS-ONDISK.md` and `DECISIONS.md` carried another
+agent's uncommitted edits and were NOT touched; the text they need is in this task's report instead.
+Nothing here is committed, and `SPEC.md`/`SPEC/` were not edited by this entry's author.
+
+**Gate outcomes for `RELAY-47`, recorded because "dispatched" is not a status.** Reviewer and security
+BOTH returned CHANGES-REQUIRED on the first pass and BOTH re-verified afterwards: security **PASS**,
+reviewer PASS on all five original findings with two text-only items raised by the fixes themselves,
+both then corrected (see below). Between them they produced, and this entry records rather than
+rounds up:
+
+- The **crash-safety** finding, which security raised as its only P1 and which the reviewer confirmed
+  with a live crash+restart harness over the real wal/outbox/hub/forwarder: `pending=1 → requeued=0 →
+  state=abandoned`, every time. Documented in code, in `CONTRACTS-HTTP.md` and above; filed as
+  `RELAY-48`.
+- **Another agent's uncommitted text had entered `cmd/agent-bus/relaywiring.go`** and was swept into
+  this task's staged content by `git add`. The reviewer caught it. The hunk — a rewrite of doc item 1
+  asserting the applied-key store "coalesces foreign fairness accounting by the verified, case-folded
+  sender bus half" — describes UNCOMMITTED `internal/idem` work and was reverted here to HEAD's
+  wording, with the text preserved verbatim in this task's handoff report so its author can re-apply
+  it in their own commit. `git status` could not have caught this: the file showed `M ` (staged,
+  worktree clean) precisely BECAUSE the contaminated worktree had been staged. Only reading
+  `git diff HEAD` hunk by hunk finds it.
+- A comment justifying why `queued < len(foreign)` is not a sound partial-delivery detector gave the
+  **right conclusion for a false reason** (it claimed `-route-for` collapses destinations onto one
+  job; it does not). Corrected in all three places to the real reason — the split horizon
+  legitimately drops a destination already on the traversed path.
+- Three "filed as a follow-up" phrases were written **before** the follow-ups existed. The reviewer
+  refused to close on that, correctly: a dated claim that something is filed is either true or it is
+  a lie in the log. All are now real tasks and are named by key above.
