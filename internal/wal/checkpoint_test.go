@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -870,6 +871,107 @@ func TestCheckpointV7SignalCrashAndRecoveryObservability(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, tc.fn)
+	}
+}
+
+// TestCheckpointSupportedReportsTheOPENNotTheTYPE pins the distinction that
+// wedged cross-bus egress (RELAY-24-BLOCKER-EGRESS), and it is a distinction no
+// type assertion can make.
+//
+// *Log ALWAYS has a Checkpoint method, so `x.(interface{ Checkpoint() error })`
+// succeeds on EVERY log — including one opened with no MultiApplier, where
+// Checkpoint returns "checkpoint requires a MultiApplier" unconditionally and can
+// never succeed. relay.Outbox read that successful assertion as "this log can
+// checkpoint", deferred reclaiming swept records until a publication that could
+// never happen, and therefore stopped accepting work for a peer for the life of
+// the process.
+//
+// The FIRST row is the composition root's own wiring: cmd/agent-bus opens the
+// log with an Applier and NO Checkpoints. It is the row the defect lived in, and
+// it is why "false" here is the production answer rather than a corner case.
+//
+// Each row asserts three things together, because only the three together
+// distinguish the property from the type:
+//
+//	the type assertion succeeds either way   (the trap)
+//	CheckpointSupported() reports the OPEN   (the fix)
+//	Checkpoint() itself agrees with it       (the fix means what it says)
+func TestCheckpointSupportedReportsTheOPENNotTheTYPE(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T, dir string) *Log
+		want bool
+		why  string
+	}{
+		{
+			name: "opened the way cmd/agent-bus opens it: an Applier and no Checkpoints",
+			open: func(t *testing.T, dir string) *Log {
+				t.Helper()
+				l, err := Open(LogOptions{Dir: dir, Applier: &testApplier{}})
+				if err != nil {
+					t.Fatalf("Open(Applier, no Checkpoints): %v", err)
+				}
+				return l
+			},
+			want: false,
+			why:  "this is the composition root's literal call. A participant that treats this log as checkpointable defers its reclaim forever",
+		},
+		{
+			name: "opened with no applier at all",
+			open: func(t *testing.T, dir string) *Log {
+				t.Helper()
+				l, err := Open(LogOptions{Dir: dir})
+				if err != nil {
+					t.Fatalf("Open(bare): %v", err)
+				}
+				return l
+			},
+			want: false,
+			why:  "a bare log is no more checkpointable than an appliered one; the capability comes from Checkpoints and from nowhere else",
+		},
+		{
+			name: "opened WITH LogOptions.Checkpoints",
+			open: func(t *testing.T, dir string) *Log {
+				t.Helper()
+				m, _, _ := testRegistry(t)
+				l, err := Open(LogOptions{Dir: dir, Checkpoints: m})
+				if err != nil {
+					t.Fatalf("Open(Checkpoints): %v", err)
+				}
+				return l
+			},
+			want: true,
+			why:  "there is a dispatcher to publish through, so a participant may legitimately defer to the next checkpoint",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := tc.open(t, t.TempDir())
+			t.Cleanup(func() { _ = l.Close() })
+
+			// THE TRAP, asserted so it cannot quietly stop being one. If this ever
+			// fails, the type assertion has become discriminating and the comment
+			// on CheckpointSupported needs rewriting rather than deleting.
+			if _, ok := interface{}(l).(interface{ Checkpoint() error }); !ok {
+				t.Fatalf("*Log no longer satisfies interface{ Checkpoint() error }; the whole reason CheckpointSupported exists is that this assertion succeeds on every log")
+			}
+
+			if got := l.CheckpointSupported(); got != tc.want {
+				t.Fatalf("CheckpointSupported() = %v, want %v.\n  why it matters: %s", got, tc.want, tc.why)
+			}
+
+			// AND THE METHOD AGREES. A CheckpointSupported that answered
+			// independently of what Checkpoint actually does would be a second
+			// answer that can drift from the first — the exact shape of the bug.
+			err := l.Checkpoint()
+			switch {
+			case tc.want && err != nil:
+				t.Fatalf("CheckpointSupported() reported true but Checkpoint() = %v, want a published generation", err)
+			case !tc.want && err == nil:
+				t.Fatalf("CheckpointSupported() reported false but Checkpoint() succeeded; the property and the method disagree")
+			case !tc.want && !strings.Contains(err.Error(), "requires a MultiApplier"):
+				t.Fatalf("Checkpoint() on an unsupported log = %v, want the \"requires a MultiApplier\" refusal that makes the deferral permanent", err)
+			}
+		})
 	}
 }
 

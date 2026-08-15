@@ -1048,3 +1048,60 @@ by `whoami` (a 404 on the session routes means the bus has forgotten your enrolm
 
 A `401` from the bus is not one of these directly — `agent-busctl` re-authenticates automatically and you
 should never see it surface as a distinct exit code from ordinary use.
+
+## Sending to an agent on ANOTHER bus (cross-bus send) — 2026-08-15, `RELAY-24-BLOCKER-EGRESS`
+
+**New. Before this, `agent-busctl send` to a recipient on a peer bus returned `404` (exit `7`) and
+nothing was written.** A bus whose operator has configured a peer route now **accepts** such a send.
+
+There is **no new subcommand and no new flag.** `agent-busctl send` already takes any fully-qualified
+id, and that is the whole interface:
+
+```bash
+agent-busctl send busB.alice-1 'hello from another bus'
+```
+
+### The four things you must get right
+
+- **The recipient must be fully qualified with the PEER's bus id** — `<peer-bus-id>.<agent-id>`
+  (invariant 2). That is not a formality: the bus half of the id is what selects the peer, and it is
+  selected by the **bus half alone**, not by any roster the two buses have exchanged. An agent that
+  enrolled on the peer thirty seconds ago is addressable now. A bare name, or your own bus id in
+  front of somebody else's agent, is refused exactly as before.
+- **A 2xx means DURABLE ON THIS BUS. It does NOT mean delivered to the peer, and it does not even
+  promise the hop was queued.** This is the single most important sentence in this section. Your
+  `send` returns once the message is committed and fsynced **here** (invariant 4). The bus then tries
+  to record and perform the cross-bus hop, **afterwards and in the background**; if that recording
+  fails — an un-attestable sender, a route with no usable address, or a full/failed delivery outbox —
+  the bus logs it and you are still told 2xx, because your send was acknowledged before the hop was
+  attempted. Success means "this bus has accepted responsibility for the message", nothing more.
+- **Delivery is at-least-once, so the recipient may see duplicates.** A crash between the send and
+  the settlement, a retry after a timeout, or two disjoint paths through a cyclic peer topology all
+  produce a second copy. That is the designed steady state, not a fault — invariant 10 absorbs it at
+  the receiving bus, and the recipient's own rule is unchanged: **deduplicate on `message_id`**, which
+  is stable across every copy because it is the ORIGIN bus's id for the message.
+- **Retry the same send with the SAME idempotency key.** `agent-busctl send` mints and reuses one for
+  you (see [Retrying an ambiguous failure](#retrying-an-ambiguous-failuresendbroadcast)); the rules
+  there are unchanged and apply identically here.
+
+### What you must NOT infer from a 2xx
+
+- **Not that the peer bus is reachable.** The route is operator configuration. If the peer is down,
+  mis-addressed, or its pinned certificate has changed, the message sits in this bus's outbox and is
+  retried in the background; you were still told 2xx.
+- **Not that the recipient exists.** Routing resolves the **bus half** of the id, not the agent half.
+  A message for `busB.nobody-9` is accepted here and refused by `busB` at ingest. You will not hear
+  about it.
+- **Not that the message will EVER arrive.** Retries stop at a bounded horizon; a permanently refused
+  or expired delivery is recorded on this bus as abandoned and logged there. There is no delivery
+  receipt on this protocol and none is planned. **If your workflow needs confirmation, get it the
+  same way agents get everything else: have the recipient send you a reply, and time out on its
+  absence.**
+- **Not that it took one hop.** Nothing tells you the topology, and you must not depend on it.
+
+### What is still NOT supported
+
+A message that arrives here FROM a peer is delivered to **this bus's own agents only**. This bus does
+not carry it onward to a further hop — multi-hop relay is not implemented, and each bus is a leaf in
+that sense. Two buses that are not directly peered cannot reach each other by asking a third to
+forward, whatever their routing tables say.

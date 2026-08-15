@@ -117,6 +117,34 @@ type DurableLog interface {
 // implements wal.Applier.
 type ReplayFunc func(fn func(wal.Committed) error) (wal.Recovered, error)
 
+// Egress hands a message this bus has just made durable to the cross-bus
+// forwarder (RELAY-24-BLOCKER-EGRESS).
+//
+// It is OPTIONAL. Nil means this bus is not federated and behaves EXACTLY as it
+// did before this seam existed — the same equivalence RemoteRouter states about
+// itself, and for the same reason: a seam lands before anything is wired to it,
+// and the non-federated bus must not be able to tell the difference.
+//
+// # IT MUST NOT BLOCK, AND IT MUST NOT FAIL A SEND
+//
+// Forward is called on the send path with writeMu held, AFTER the message is
+// durable and after local readers have been woken. It has no return value on
+// purpose: there is no outcome it could report that publish would be allowed to
+// act on. The local send was already acknowledged by its OWN durable write
+// (invariant 4), so a peer's queue, a peer's health and a peer's absence are all
+// separate, best-effort-plus-outbox concerns that may never gate or fail the ack.
+// relay.Forwarder.Enqueue satisfies this structurally: every queue send there is
+// a non-blocking select with a default arm, so a slow or dead peer cannot make a
+// local send slow.
+//
+// An implementation MUST be safe for concurrent use.
+type Egress interface {
+	// Forward offers m to the cross-bus egress path. It must return promptly and
+	// must not panic; the hub guards against both, but a guard is a backstop and
+	// not a licence.
+	Forward(m store.Message)
+}
+
 // Options configures Open.
 type Options struct {
 	// BusID is this bus's server-minted id. REQUIRED: every message id and
@@ -166,6 +194,18 @@ type Options struct {
 	// It never overrides the roster: see RemoteRouter and Hub.routeRemote for why
 	// an id in THIS bus's namespace is never offered to it.
 	RemoteRouter RemoteRouter
+
+	// Egress is the OPTIONAL cross-bus forwarding seam (see the Egress type).
+	// Nil is the correct value for a bus that is not federated, and is
+	// behaviourally identical to the bus before the seam existed.
+	//
+	// It is the PEER of RemoteRouter and the two belong to one another: the
+	// router admits a recipient behind a peer bus, this carries the message
+	// there. RemoteRouter's own "DO NOT INJECT A ROUTER EARLY" note is the
+	// binding half of that pairing — a router wired without an Egress accepts
+	// messages it has no way to deliver, which is worse than the honest 404 it
+	// replaced.
+	Egress Egress
 
 	// Durable is the two-phase write path. When nil the hub serves reads and
 	// refuses every send with ErrNotDurable — invariant 4 has no "best effort"
@@ -316,18 +356,39 @@ type Hub struct {
 	//
 	// writeMu -> waitMu (the wake) and writeMu -> the store's own lock.
 	//
-	// The ROSTER's lock is deliberately NOT in that chain: publish validates the
-	// sender and the recipients BEFORE it takes writeMu, so the two are never
-	// held together at all. That is the strongest position available and it is
-	// worth keeping — but it is also why Enrolled's TOCTOU note matters, so read
-	// that before moving the roster check inside the lock to "tidy this up".
-	// Since AUTH-7 that lock belongs to an INJECTED RosterSource, so this
-	// package cannot even see it; nothing here may hold writeMu across a call
-	// into the roster.
+	// The roster is validated BEFORE writeMu is taken — publish checks the
+	// sender and the recipients first — and that remains the position on the
+	// ADMISSION path. It is why Enrolled's TOCTOU note matters, so read that
+	// before moving the roster check inside the lock to "tidy this up".
 	//
-	// Nothing takes writeMu while holding waitMu, the roster's lock or the store
-	// lock, so there is no cycle. The read paths (History, Wait, Agents) never
-	// take writeMu at all, which is what keeps a long poll off the fsync path.
+	// # THE EGRESS SEAM DOES READ A ROSTER UNDER writeMu (2026-08-15)
+	//
+	// An earlier version of this note said "nothing here may hold writeMu across
+	// a call into the roster", and forwardOnward now does exactly that: it is
+	// called at the end of publish, with writeMu held, and the injected
+	// hub.Egress implementation (cmd/agent-bus's relayEgress) reads the
+	// enrolment roster to find the sender's messaging public key. On the shipped
+	// wiring that is auth.WALRoster.Get, which takes an EXCLUSIVE sync.Mutex —
+	// the same object this package sees through the injected RosterSource. The
+	// prohibition was silently false, and a false comment about lock order is
+	// how the next deadlock gets written, so it is corrected rather than left.
+	//
+	// WHY IT IS SAFE, which is a different claim from "it does not happen":
+	// writeMu -> roster is now a real edge, and it is safe only while there is no
+	// edge back. There is not. The roster's own lock is held ONLY across its own
+	// map operations; auth.WALRoster's durable writes go to the wal.Log, which
+	// knows nothing about the hub, and no roster path calls into this package at
+	// all. So the order is total — writeMu -> {waitMu, store lock, roster lock} —
+	// with nothing taking writeMu while holding any of the three.
+	//
+	// THE RULE THAT REPLACES THE OLD ONE: an Egress implementation may take a
+	// lock that is a LEAF with respect to the hub, and may not take one that
+	// anything reachable from the hub's own lock could be waiting on. It must
+	// also not block — see forwardOnward, which states what "does not block"
+	// does and does not cover.
+	//
+	// The read paths (History, Wait, Agents) never take writeMu at all, which is
+	// what keeps a long poll off the fsync path.
 	writeMu sync.Mutex
 
 	// idem is the durable applied-key table (IDEM-11). It is keyed on the
@@ -427,6 +488,11 @@ type Hub struct {
 	// through routeRemote, which is where the invariants on its answer live.
 	router RemoteRouter
 
+	// egress is the OPTIONAL cross-bus forwarding seam. Nil on a non-federated
+	// bus. Set once in Open, never replaced; it is called only through
+	// forwardOnward, which is where the guarantees about it live.
+	egress Egress
+
 	// recovered holds every agent id named as a sender or a recipient by a
 	// message replayed from disk at startup. It is written only during Open and
 	// read-only afterwards, so it needs no lock.
@@ -506,6 +572,7 @@ func Open(o Options) (*Hub, error) {
 		pollTimeout:    o.PollTimeout,
 		roster:         o.Roster,
 		router:         o.RemoteRouter,
+		egress:         o.Egress,
 		recovered:      make(map[string]struct{}),
 		waiters:        make(map[*waiter]struct{}),
 		waitersByAgent: make(map[string]int),
@@ -1825,7 +1892,86 @@ func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 	// copy, so a waiter woken now cannot observe something a crash would take
 	// back (POLL-2).
 	h.notify(m)
+
+	// LAST OF ALL, and only for a federated bus: hand the message to the
+	// cross-bus egress path. See forwardOnward for every guarantee this line
+	// rests on, and for the ONE hole it deliberately leaves open.
+	h.forwardOnward(m)
 	return result, idem.OutcomeNew, nil
+}
+
+// forwardOnward offers a message this bus has just committed to the OPTIONAL
+// cross-bus egress seam. It is a no-op on a bus with no Egress wired.
+//
+// # WHY IT IS HERE, AT THE VERY END
+//
+// The message is durable AND it is in the serving copy AND local waiters have
+// been woken. Everything the local send promised has already happened, so
+// nothing below this line can take any of it back:
+//
+//   - INVARIANT 4. The local send is acknowledged by its OWN durable write. The
+//     forward is a separate best-effort-plus-outbox concern and can never gate,
+//     delay or fail that ack. Moving this call ABOVE the durable write would
+//     forward a message that might not survive a crash; moving it above notify
+//     would let a peer observe a message before a local reader does.
+//
+//   - A SLOW OR DEAD PEER CANNOT SLOW A LOCAL SEND. That is structural rather
+//     than conventional: relay.Forwarder.Enqueue is non-blocking by
+//     construction (every queue send is a select with a default arm), so there
+//     is no way for this call to end up waiting on a network peer even though
+//     writeMu is held across it.
+//
+//     THAT CLAIM IS ABOUT PEERS AND IS NOT A CLAIM ABOUT DISK, and the two have
+//     been confused here before. Enqueue writes a DURABLE OUTBOX RECORD per
+//     target before it returns — two fsyncs each, through the same wal.Log this
+//     send just committed through — so this call is bounded by the local disk,
+//     serially, under the global write lock. For a directed send that is one
+//     target. For a BROADCAST it is every configured peer:
+//     relay.Registry.BroadcastTargets returns them all regardless of who the
+//     recipients are, so at relay.MaxPeers (64) a single broadcast is up to 128
+//     serial fsyncs with writeMu held, repeatable by any enrolled local agent.
+//
+//     That is LATENT rather than live today — /v1/broadcast answers 501, and a
+//     relayed broadcast is refused at the far end (relay.ErrUnsignable) — and it
+//     is written down here rather than fixed here, because backpressure or
+//     batching on this path is a design change, not a tidy-up. Anyone enabling
+//     broadcast must deal with it first.
+//
+//   - A MISBEHAVING IMPLEMENTATION CANNOT TAKE THE SEND DOWN. A panic here would
+//     otherwise unwind through publish holding writeMu, killing the process for
+//     a message that is already committed and already delivered locally. It is
+//     recovered and logged at ERROR instead: the local send stands, the forward
+//     is lost, and the loss is loud (invariant 6).
+//
+// # THE HOLE, NAMED HONESTLY RATHER THAN HIDDEN
+//
+// The durable outbox record for this forward is written in a SECOND wal
+// transaction, inside relay.Forwarder.Enqueue, and NOT in the message's own
+// wal.Entry. A crash in the window between the message's commit and the outbox
+// enqueue therefore leaves the message durable and delivered locally with the
+// forward simply UN-OWED: there is no record of it, so no restart recovers it.
+//
+// That is a bounded AT-MOST-ONCE window on the CROSS-BUS HOP ONLY. The local
+// message is never at risk, and the cross-bus hop is at-least-once everywhere
+// else. Folding the outbox record into this message's own wal.Entry would close
+// it, and would also change RELAY-15's one-record-one-job shape — so it is
+// deliberately NOT done here, and this comment exists so the next reader finds a
+// decision rather than an oversight.
+func (h *Hub) forwardOnward(m store.Message) {
+	if h.egress == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			h.log.Error("PANIC in the cross-bus egress seam; this message is durable and was delivered to local readers, but it will NOT be forwarded to any peer and no restart brings that forward back",
+				"message_id", m.ID,
+				"seq", m.Seq,
+				"sender", m.Sender,
+				"panic", fmt.Sprint(r),
+			)
+		}
+	}()
+	h.egress.Forward(m)
 }
 
 // IdempotencyStats reports the observable state of the applied-key table: how

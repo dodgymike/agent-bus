@@ -555,7 +555,33 @@ func run(cfg Config) error {
 		auth.RecordKind:   authRoster,
 		invite.RecordKind: inviteStore,
 	}
-	var skippedPeerRecords *unreplayedPeerRecords
+	// The RELAY DELIVERY OUTBOX is the third applier of this shape, and it is
+	// registered here for the reason the other two are: it is an applier, so it
+	// must exist before the log (RELAY-24-BLOCKER-EGRESS item (d)).
+	//
+	// Until this line, relay.OutboxRecordKind was in NO applier map at all.
+	// auth.MultiplexApplier stays SILENT about kinds it does not own — which is
+	// what keeps message and seqfloor records from being read as damage — so an
+	// outbox record in the log was passed over without a word. That is exactly
+	// the silent discard invariant 6 rates as the defect: the record IS the durable
+	// proof that this bus owes a peer a delivery, and a replay that skips it
+	// cannot tell "nothing is owed" from "I did not look".
+	//
+	// It is built with NO Durable and receives its log in the third step below,
+	// following invite.Store: replay must finish before the first live enqueue,
+	// and until Attach every mutating call refuses with ErrOutboxNotDurable.
+	//
+	// IT IS GATED ON THE PEER STORE, on the same conditional as the other two
+	// federation kinds. A bus with no peer store serves no peer route, verifies
+	// no relayed message and can dial nobody, so it can never forward: an outbox
+	// for it would be dead weight AND a table nothing could ever drain. On that
+	// path the records are counted by skippedPeerRecords and reported by name and
+	// number after replay, exactly as the peer and trust kinds are — visible
+	// rather than silent.
+	var (
+		skippedPeerRecords *unreplayedPeerRecords
+		relayOutbox        *relay.Outbox
+	)
 	peerStore, err := relay.NewPeerStore(relay.PeerStoreOptions{BusID: busID, Dir: cfg.DataDir, Logger: lg})
 	if err != nil {
 		lg.Error("FEDERATION IS DISABLED FOR THIS RUN: the peer configuration store could not be built, so this bus will serve no peer route, verify no relayed message and authenticate no peer bus. Messaging and enrolment are UNAFFECTED and start normally",
@@ -573,6 +599,7 @@ func run(cfg Config) error {
 		skippedPeerRecords = &unreplayedPeerRecords{}
 		appliers[relay.PeerRecordKind] = skippedPeerRecords
 		appliers[relay.BusTrustRecordKind] = skippedPeerRecords
+		appliers[relay.OutboxRecordKind] = skippedPeerRecords
 	} else {
 		// BOTH federation kinds dispatch to the ONE store, which owns both tables
 		// (routes and trust) and keys its config_seq high-water mark across them.
@@ -582,6 +609,19 @@ func run(cfg Config) error {
 		// fed to this applier, and there is no write path to race it with.
 		appliers[relay.PeerRecordKind] = peerStore
 		appliers[relay.BusTrustRecordKind] = peerStore
+
+		relayOutbox, err = relay.NewOutbox(relay.OutboxOptions{BusID: busID, Logger: lg})
+		if err != nil {
+			// FATAL, and NOT the same trade the peer store above makes. That one
+			// degrades to "federation is disabled" because a damaged withdrawal
+			// floor must never take messaging down with it. This constructor
+			// validates only its own bounds against this bus's id -- there is no
+			// operator file behind it to be damaged -- so a failure here is a
+			// WIRING fault in this build, and starting without the applier would
+			// silently skip every outbox record in the log.
+			return fmt.Errorf("creating the relay delivery outbox: %w", err)
+		}
+		appliers[relay.OutboxRecordKind] = relayOutbox
 	}
 	applier, err := auth.NewMultiplexApplier(lg, appliers)
 	if err != nil {
@@ -644,11 +684,21 @@ func run(cfg Config) error {
 	// DECISIONS.md 2026-08-02 ("Availability over retention"): the defect was
 	// never the discard, it was the silence.
 	if skippedPeerRecords != nil {
-		if n := skippedPeerRecords.Count(); n > 0 {
-			lg.Error("PEER CONFIGURATION IN THE LOG WAS NOT RESTORED: this bus has federation records on disk, and the peer store that would hold them could not be built, so they were replayed into nothing. The configuration is NOT lost from the log and returns as soon as the store can be built",
+		// TWO LINES, NOT ONE, BECAUSE THE TWO REMEDIES ARE DIFFERENT. See
+		// unreplayedPeerRecords: configuration comes back on the next start,
+		// an owed delivery does not come back at all.
+		if n := skippedPeerRecords.ConfigCount(); n > 0 {
+			lg.Error("FEDERATION CONFIGURATION IN THE LOG WAS NOT RESTORED: this bus has peer-route or peer-trust records on disk, and the peer store that would hold them could not be built, so they were replayed into nothing. Nothing is lost FROM THE LOG: every one of these records returns intact as soon as the store can be built",
 				"bus_id", busID,
-				"records_skipped", n,
+				"config_records_skipped", n,
 				"remedy", "see the peer-configuration-store error above; fix it and restart",
+			)
+		}
+		if n := skippedPeerRecords.OutboxCount(); n > 0 {
+			lg.Error("CROSS-BUS DELIVERIES THIS BUS OWED A PEER WERE NOT RESTORED: relay delivery-outbox records are on disk, and the outbox that would hold them could not be built because the peer store failed, so they were replayed into nothing. THIS IS NOT THE SAME AS THE CONFIGURATION ABOVE: nothing in this run owes those deliveries, so they will not be retried and no peer will receive them until they are re-sent by their original senders (invariant 6 -- the discard is recorded here rather than passed over in silence)",
+				"bus_id", busID,
+				"outbox_records_skipped", n,
+				"remedy", "fix the peer-configuration-store error above and restart, which restores the outbox table from the same records; deliveries whose retry horizon has since passed are gone and must be re-sent by the originating agents",
 			)
 		}
 	}
@@ -711,6 +761,24 @@ func run(cfg Config) error {
 	// forget which invites were spent.
 	if err := inviteStore.Attach(walLog); err != nil {
 		return fmt.Errorf("attaching the durable invite store to the write-ahead log: %w", err)
+	}
+	// The same third step for the relay delivery outbox, on the builds that have
+	// one. FATAL for the same reason: an outbox with no log reports deliveries as
+	// owed while nothing reaches disk (ErrOutboxNotDurable), and a relay hop
+	// remembered only in memory evaporates on the crash it exists to survive.
+	//
+	// IT IS ENQUEUED INTO. This comment said "NOTHING ENQUEUES INTO IT IN THIS
+	// BUILD" until the forwarder was constructed below: the relay.Forwarder built
+	// in the egress block takes this outbox, so every cross-bus delivery is
+	// written here as `pending` and FSYNCED BEFORE it is offered to any peer
+	// queue, and settled `delivered`/`abandoned` when its outcome is known. The
+	// three-step order is what makes that legal -- replay ran inside wal.Open
+	// above, this line makes the table writable, and the first live enqueue
+	// cannot happen until the hub is serving, which is after both.
+	if relayOutbox != nil {
+		if err := relayOutbox.Attach(walLog); err != nil {
+			return fmt.Errorf("attaching the durable relay delivery outbox to the write-ahead log: %w", err)
+		}
 	}
 	// One line, at INFO, and worded so it can NEVER be read as "enrolment is
 	// open": it is not, as of INVITE-GATE-ENFORCE. This line said the exact
@@ -801,6 +869,179 @@ func run(cfg Config) error {
 		"sessions_durable", false,
 	)
 
+	// -----------------------------------------------------------------------
+	// THE FEDERATION EGRESS (RELAY-24-BLOCKER-EGRESS)
+	// -----------------------------------------------------------------------
+	//
+	// Built BEFORE the hub because hub.Open takes BOTH halves of it: the
+	// RemoteRouter that admits a recipient behind a peer bus, and the Egress that
+	// carries the committed message there. The ingress (newFederation, below the
+	// hub) is assembled from the SAME registry, passed in — see
+	// federationOptions.Registry for why a second table would be a defect.
+	//
+	// h IS DECLARED HERE AND ASSIGNED BELOW, and two closures in this block are
+	// LATE-BOUND over it (the relay client's local roster, and the forwarder's
+	// RecoverMessage). That ordering dependency is load-bearing and is stated at
+	// each closure: both are called only after hub.Open has returned.
+	var (
+		h *hub.Hub
+
+		// remoteRouter and hubEgress are INTERFACE-typed on purpose. Declaring
+		// them as *relay.Registry / *relayEgress and handing the nil pointer to
+		// hub.Options on a non-federated build would produce a NON-NIL interface
+		// holding a nil pointer -- hub.forwardOnward would then call Forward on
+		// it and panic, on a bus that is not federated at all. The nil-interface
+		// checks in the hub are only meaningful if the value really is nil.
+		remoteRouter hub.RemoteRouter
+		hubEgress    hub.Egress
+
+		relayRegistry  *relay.Registry
+		relayForwarder *relay.Forwarder
+		egressAdapter  *relayEgress
+	)
+	// Gated on the peer store, exactly as the ingress and the outbox are: with no
+	// peer store this bus can authenticate no peer, verify no relayed message and
+	// hold no route, so an egress path for it would be a forwarder with nowhere
+	// to send. relayOutbox is non-nil on precisely this branch.
+	if peerStore != nil {
+		relayRegistry, err = relay.NewRegistry(relay.RegistryOptions{BusID: busID, Logger: lg})
+		if err != nil {
+			// FATAL: this constructor validates only this bus's own id, so a
+			// failure is a wiring fault in this build, not operator data.
+			return fmt.Errorf("creating the peer routing table: %w", err)
+		}
+
+		// THE OUTBOUND, PINNED, MUTUAL-TLS CLIENT. See relaydial.go: the pin is
+		// resolved by the ADDRESS being dialled, an address with no configured
+		// pin is REFUSED rather than dialled unverified, and the one permitted
+		// InsecureSkipVerify in this tree (client/pin.go) is reused rather than
+		// copied -- this adds ZERO new occurrences of it (invariant 11,
+		// DECISIONS.md 2026-08-15).
+		//
+		// ourLeaf is the bus's OWN certificate. buscert mints one leaf carrying
+		// both ServerAuth and ClientAuth and DECISIONS.md rules "one identity,
+		// both directions", so what this bus SERVES is what it PRESENTS when it
+		// dials a peer.
+		ourLeaf := busMaterial.TLSCertificate()
+		peerHTTP := newPinnedPeerHTTPClient(newPeerPinsByAddress(peerStore.ActivePeers(), lg), &ourLeaf, lg)
+
+		relayClient, err := relay.NewClient(relay.ClientConfig{
+			BusID: busID,
+			// LATE-BOUND over h, which is assigned by hub.Open below. It is only
+			// ever called from Client.Enroll -- an OPERATOR-initiated handshake,
+			// long after startup -- never from the relay POST the forwarder makes.
+			// A refactor that calls it earlier breaks this silently, so the check
+			// is explicit rather than a nil dereference.
+			LocalRoster: func() []string {
+				if h == nil {
+					return nil
+				}
+				agents := h.Agents()
+				out := make([]string, 0, len(agents))
+				for _, a := range agents {
+					out = append(out, a.AgentID)
+				}
+				return out
+			},
+			HTTPClient: peerHTTP,
+			Logger:     lg,
+		})
+		if err != nil {
+			return fmt.Errorf("creating the peer relay client: %w", err)
+		}
+
+		relayForwarder, err = relay.NewForwarder(relay.ForwarderOptions{
+			BusID:    busID,
+			Registry: relayRegistry,
+			Client:   relayClient,
+			// THE REGISTRY'S OWN METHOD, not a closure over it. PeerBaseURL is
+			// called from every per-peer worker goroutine on every attempt and
+			// MUST be safe for concurrent use; the method takes the registry's
+			// RLock and its own doc names itself as the intended value here.
+			PeerBaseURL: relayRegistry.PeerBaseURL,
+			// The durable delivery table, replayed by wal.Open above and made
+			// writable by Attach. Supplying it makes RecoverMessage REQUIRED --
+			// NewForwarder refuses one without the other, in both directions.
+			Outbox: relayOutbox,
+			// LATE-BOUND over h AND over egressAdapter, both assigned below. It is
+			// called ONLY from Resume(), which this function calls after both
+			// assignments -- see the Resume call site. A refactor that moves
+			// Resume earlier breaks this silently, which is why the guard below
+			// reports rather than dereferences nil.
+			RecoverMessage: func(originMessageID string) (relay.RelayedMessage, bool, error) {
+				if h == nil || egressAdapter == nil {
+					return relay.RelayedMessage{}, false, errors.New("the hub and the egress adapter are not constructed yet; Resume ran before the wiring completed, which is a startup-ordering fault in this build")
+				}
+				m, ok := h.Store().ByOriginMessageID(originMessageID)
+				if !ok {
+					// "No such message" -- a settled, ABANDONED job per
+					// ForwarderOptions.RecoverMessage. Not an error: the message
+					// aged out of the retained window, which is ordinary.
+					return relay.RelayedMessage{}, false, nil
+				}
+				if m.OriginMessageID != "" {
+					// A RELAYED-IN message. Unreachable today -- relayEgress.Forward
+					// declines those, so no outbox job can name one -- and checked
+					// anyway because the alternative is silent: envelope() would
+					// claim THIS bus as the origin of somebody else's message and
+					// mint an attestation for an agent in their namespace.
+					return relay.RelayedMessage{}, false, fmt.Errorf("message %q was relayed to this bus rather than originated here, so this bus cannot rebuild an origin envelope for it", originMessageID)
+				}
+				// ONE ENVELOPE BUILDER, REUSED. The live forward path and this
+				// recovery path must not be two constructions that could disagree
+				// about what goes on the wire.
+				env, err := egressAdapter.envelope(m)
+				if err != nil {
+					return relay.RelayedMessage{}, false, err
+				}
+				return env, true, nil
+			},
+			Logger: lg,
+		})
+		if err != nil {
+			return fmt.Errorf("creating the cross-bus relay forwarder: %w", err)
+		}
+		// REGISTERED AFTER the WAL's own deferred Close, so LIFO runs this one
+		// FIRST. That order is required, not tidy: the forwarder writes delivery
+		// settlements THROUGH the WAL, so a settlement landing after walLog.Close
+		// would fail, and one landing after the data-directory lock was released
+		// would be a write into a directory another server may already own. Same
+		// reasoning as the walLog.Close defer above, one layer out.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			if err := relayForwarder.Close(ctx); err != nil {
+				lg.Warn("the cross-bus relay forwarder did not drain within the shutdown grace period; in-flight peer requests were cancelled. Anything still owed stays PENDING in the durable outbox and is re-offered after the next start",
+					"grace", shutdownGrace.String(), "err", err.Error())
+				return
+			}
+			lg.Debug("cross-bus relay forwarder closed", "bus_id", busID)
+		}()
+
+		egressAdapter, err = newRelayEgress(relayEgressOptions{
+			BusID: busID,
+			// The BUS SIGNING key, which mints the origin attestation. It is NOT
+			// the TLS key and the two are never conflated.
+			SigningKey: busMaterial.SigningPrivateKey(),
+			// The LIVE roster, read through on every forward: an agent that
+			// re-keys must be attested under its new key.
+			Roster:    authRoster,
+			Forwarder: relayForwarder,
+			// THE SAME REGISTRY THE FORWARDER ROUTES ON, and it must stay the
+			// same instance: the adapter reads it ONLY as a conservative gate on
+			// whether to mint an attestation at all (relayEgress.routesToSomePeer),
+			// and that gate's safety rests on being a superset of what
+			// relay.Forwarder.targets will decide from the same table.
+			Router: relayRegistry,
+			Logger: lg,
+		})
+		if err != nil {
+			return fmt.Errorf("assembling the cross-bus egress adapter: %w", err)
+		}
+		remoteRouter = relayRegistry
+		hubEgress = egressAdapter
+	}
+
 	// The messaging core, built HERE rather than inside internal/httpapi (which
 	// used to construct one for itself; see httpapi.Options.Hub). This is the
 	// composition root, so it is the one place that can hold the durable log, the
@@ -830,7 +1071,7 @@ func run(cfg Config) error {
 	// directory the WAL, the bus id and the agent-suffix floors live in, and it is
 	// already created and LOCKED above -- the hub must never be handed a directory
 	// another process may be writing.
-	h, err := hub.Open(hub.Options{
+	h, err = hub.Open(hub.Options{
 		BusID:   busID,
 		DataDir: cfg.DataDir,
 		Durable: walLog,
@@ -849,12 +1090,109 @@ func run(cfg Config) error {
 		Roster:      hubRoster{roster: authRoster},
 		Logger:      lg,
 		PollTimeout: cfg.PollTimeout,
+
+		// THE EGRESS PAIR (RELAY-24-BLOCKER-EGRESS). Both are nil on a bus with
+		// no peer store, and a nil pair is behaviourally identical to the bus
+		// before either seam existed: every recipient this bus does not hold is
+		// refused with the honest 404 it always got.
+		//
+		// RemoteRouter WAS DELIBERATELY LEFT UNWIRED until now. hub.RemoteRouter's
+		// "DO NOT INJECT A ROUTER EARLY" note makes it a PRECONDITION that no
+		// router may be wired until the egress path that carries an admitted
+		// message onward exists and is DURABLE -- a router wired sooner does not
+		// make a bus federated, it makes it accept messages it has no way to
+		// deliver, silently, having removed the 404 that was protecting the
+		// client. That precondition is MET as of this build: the forwarder is
+		// constructed above, its outbox is the durable relay delivery table
+		// replayed by wal.Open and attached before this line, and the Egress
+		// below is what carries an admitted message to it.
+		RemoteRouter: remoteRouter,
+		Egress:       hubEgress,
 	})
 	if err != nil {
 		// FATAL. A bus that cannot rebuild its message store must not serve one
 		// (invariant 5), and a bus that starts with no messaging is the silent
 		// half-outage AUTH-7 exists to make impossible.
 		return fmt.Errorf("opening the messaging hub: %w", err)
+	}
+
+	// STAGE 2 OF THE THREE-STAGE STARTUP ORDERING: peer-store replay (done, by
+	// wal.Open) -> REGISTRY RESTORE (here) -> forwarder Resume (next).
+	//
+	// # AN EMPTY ROSTER IS THE CORRECT VALUE, NOT A STUB
+	//
+	// Each peer is seeded with Agents: nil, and that is not "we will fill it in
+	// later". Registry.Route resolves by the BUS HALF of a fully-qualified id and
+	// NEVER by roster membership -- the Registry doc says so in as many words,
+	// and it is invariant 2 doing its job: "<bus-id>.<agent-id>" NAMES ITS OWN
+	// OWNER. Roster membership is a DISCOVERY and LISTING convenience, exposed
+	// separately as Knows, and a routing table that required it would drop every
+	// message to an agent that enrolled on a peer since our last sync.
+	//
+	// So a peer whose roster we have never exchanged is ROUTABLE the moment its
+	// address is configured. The roster arrives later, if ever, through the
+	// handshake (Registry.UpsertPeer, which preserves the base URL set here).
+	//
+	// The ADDRESS is operator configuration by design -- SetPeerBaseURL's own doc
+	// -- never something a peer asserts about itself, so it comes from the
+	// durable peer store and from nowhere else.
+	//
+	// peersSeeded is hoisted out of the block because the federation summary
+	// below reports it: "the forwarder is wired" and "there is a peer to forward
+	// to" are DIFFERENT states, and an operator must be able to tell them apart.
+	var peersSeeded int
+	if relayRegistry != nil {
+		var seeded, refused int
+		for _, rec := range peerStore.ActivePeers() {
+			if err := relayRegistry.UpsertPeer(relay.PeerRoster{BusID: rec.BusID, Agents: nil}); err != nil {
+				// NOT FATAL, and named. One unroutable peer must not stop the
+				// others being seeded, but a peer silently absent from the routing
+				// table is a send to it answering 404 with nothing to explain why.
+				refused++
+				lg.Error("a configured peer could NOT be seeded into the routing table, so no message will be routed to it",
+					"peer_bus", rec.BusID, "err", err.Error())
+				continue
+			}
+			if err := relayRegistry.SetPeerBaseURL(rec.BusID, rec.BaseURL); err != nil {
+				refused++
+				lg.Error("a configured peer was seeded into the routing table but its base URL was refused, so it is routable and undialable: messages for it will be accepted, recorded in the durable outbox and never sent",
+					"peer_bus", rec.BusID, "base_url", rec.BaseURL, "err", err.Error())
+				continue
+			}
+			seeded++
+		}
+		peersSeeded = seeded
+		lg.Info("peer routing table seeded from the durable peer configuration; each peer is routable by the BUS HALF of a recipient id, with an empty roster until a handshake exchanges one",
+			"bus_id", busID, "peers_seeded", seeded, "peers_refused", refused)
+	}
+
+	// STAGE 3: re-offer the deliveries this bus still owed when it last stopped.
+	//
+	// AFTER THE SEED AND BEFORE THE SERVER SERVES, and both halves matter.
+	// Resume resolves every recovered job through PeerBaseURL, so a Resume
+	// against an empty registry sees EVERY peer as unknown and takes the
+	// no-route arm for the whole backlog. That arm is fail-safe by design (the
+	// jobs stay durably owed rather than being abandoned), but relying on it
+	// would mean a bus that re-offers nothing on every boot and says so only at
+	// Warn. Resuming before serving is what keeps a live Enqueue from racing the
+	// pass and double-queueing a job.
+	//
+	// LOGGED AT INFO ALWAYS, INCLUDING ZERO. "Nothing was owed" and "the resume
+	// never ran" are the two states an operator most needs to tell apart, and a
+	// line that only appears when the number is non-zero cannot distinguish them.
+	if relayForwarder != nil {
+		resumed, err := relayForwarder.Resume()
+		if err != nil {
+			// NOT FATAL: nothing is lost. Every job that was not re-offered is
+			// still PENDING in the durable outbox and is re-offered after the next
+			// start. Refusing to serve messaging over it would be a much larger
+			// outage than the one being reported.
+			lg.Error("the relay delivery outbox could NOT be fully resumed; deliveries this bus still owed have not all been re-offered. They remain durably owed and return after the next start",
+				"bus_id", busID, "re_offered", resumed, "err", err.Error())
+		} else {
+			lg.Info("relay delivery outbox resumed: deliveries this bus still owed at its last shutdown are back on their peers' queues",
+				"bus_id", busID, "re_offered", resumed)
+		}
 	}
 
 	// THE FEDERATION INGRESS (RELAY-24), assembled AFTER the hub because the
@@ -881,8 +1219,13 @@ func run(cfg Config) error {
 	case bindable > 0:
 		fed, err := newFederation(federationOptions{
 			BusID: busID,
-			Local: hubIngest{h: h},
-			Peers: peerStore,
+			// THE SAME registry the hub routes on and the forwarder dials
+			// through, built above. See federationOptions.Registry: a second
+			// table here would leave a peer that had just handshaked routable on
+			// one and unknown on the other.
+			Registry: relayRegistry,
+			Local:    hubIngest{h: h},
+			Peers:    peerStore,
 			// The applied-key table's own pressure line, read live. It is what
 			// makes the per-peer share a BOUND rather than a speed limit: below
 			// the line a peer over its share is denying nobody anything and is
@@ -906,21 +1249,62 @@ func run(cfg Config) error {
 		}
 		peerSurface = fed.Surface()
 		peerPrincipals = peerStore
-		lg.Info("FEDERATION INGRESS is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents; it does NOT yet forward any onward, because the egress forwarder is not wired in this build",
+		// THIS LINE SAID SOMETHING FALSE UNTIL RELAY-24-BLOCKER-EGRESS. It read
+		// "it does NOT yet forward any onward, because the egress forwarder is
+		// not wired in this build", with onward_relay=false, and that was true
+		// when written -- the forwarder had no production caller at all. It is
+		// corrected rather than deleted, and it now reports THREE separate facts
+		// that an operator must not have to infer from one another:
+		//
+		//   egress_forwarder_wired  a locally-originated message addressed to an
+		//                           agent on a peer bus is accepted, recorded in
+		//                           the durable outbox and sent. Wired says the
+		//                           MACHINERY exists.
+		//   peers_seeded            how many peers it can actually reach. A bus
+		//                           with a wired forwarder and ZERO seeded peers
+		//                           forwards NOTHING, and that is a completely
+		//                           different operational state from a bus that
+		//                           has no forwarder. Reporting only the first
+		//                           would make the two look identical.
+		//   onward_relay            still FALSE, and it is a NARROWER claim than
+		//                           it looks. "Onward" here is the RELAY sense --
+		//                           carrying a message that arrived FROM a peer to
+		//                           a FURTHER hop (relay.AcceptOptions.Onward,
+		//                           which is nil). The egress adapter deliberately
+		//                           forwards only messages ORIGINATED HERE
+		//                           (relayegress.go declines when m.BusPath[0] is
+		//                           not this bus, which is true of every
+		//                           locally-originated message and false of every
+		//                           relay-ingested one), so this bus is still a
+		//                           LEAF in a multi-hop topology. Do not let a
+		//                           future rewording blur these two meanings of
+		//                           "forward".
+		lg.Info("FEDERATION is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents, and it FORWARDS messages its own agents originate to agents on a peer bus, durably through the relay outbox. It does NOT carry a message RECEIVED from one peer onward to a further hop -- multi-hop onward relay is not implemented, so this bus is a leaf",
 			"bus_id", busID,
 			"bindable_peers", bindable,
 			"trusted_buses", len(peerStore.TrustedBuses()),
 			"configured_routes", len(peerStore.ActivePeers()),
+			"egress_forwarder_wired", relayForwarder != nil,
+			"peers_seeded", peersSeeded,
 			"onward_relay", false,
 		)
 	case len(peerStore.TrustedBuses()) > 0 || len(peerStore.ActivePeers()) > 0:
 		// Configured, but not usable. LOUD, because from outside this is
 		// indistinguishable from a bus that was never meant to federate, and the
 		// operator has already done most of the work.
-		lg.Error("FEDERATION IS NOT SERVED although peering is configured: no adjacent bus has an INBOUND CLIENT CERTIFICATE bound to it, so no peer could authenticate and no peer route is registered",
+		// INGRESS ONLY. The clause naming egress was added with the forwarder
+		// (RELAY-24-BLOCKER-EGRESS): the two directions are configured by
+		// DIFFERENT records and now genuinely fail independently, so an operator
+		// reading this line must not conclude that outbound forwarding is off as
+		// well. It is not -- the peers seeded above are dialable, and messages to
+		// them are accepted, recorded and sent -- and saying only half of that
+		// would send an operator hunting for the wrong fault.
+		lg.Error("FEDERATION INGRESS IS NOT SERVED although peering is configured: no adjacent bus has an INBOUND CLIENT CERTIFICATE bound to it, so no peer could authenticate and no peer HTTP route is registered. EGRESS IS UNAFFECTED and is reported by the two egress fields on this line: outbound forwarding is configured by the peer ROUTE record (-url and -tls-fingerprint), inbound authentication by the peer TRUST record (-peer-client-fingerprint), and they fail independently",
 			"bus_id", busID,
 			"trusted_buses", len(peerStore.TrustedBuses()),
 			"configured_routes", len(peerStore.ActivePeers()),
+			"egress_forwarder_wired", relayForwarder != nil,
+			"peers_seeded", peersSeeded,
 			"remedy", "stop the bus and run `agent-bus peer add -data-dir "+cfg.DataDir+" -bus-id <peer bus id> -signing-key <that bus's pinned Ed25519 signing key, base64> -peer-client-fingerprint <64 lowercase hex>`, once per adjacent bus. The fingerprint is sha256 of the DER of the certificate THAT peer presents AS A TLS CLIENT WHEN IT DIALS THIS BUS (inbound, keyed to -bus-id): it is NOT -tls-fingerprint, which pins the certificate the bus at -url serves to US when WE dial IT — different direction, different certificate, and neither substitutes for the other. -peer-client-fingerprint requires -signing-key in the same invocation, because the binding is written on the TRUST record; a trust record is rewritten whole, so re-state the flag every time you re-add that bus",
 		)
 	default:

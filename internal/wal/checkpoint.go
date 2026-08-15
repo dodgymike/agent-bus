@@ -196,6 +196,30 @@ func sortedKinds(p CheckpointParticipant) []string {
 	return k
 }
 
+// CheckpointSupported reports whether Checkpoint can do anything at all on this
+// log — that is, whether it was opened with LogOptions.Checkpoints.
+//
+// IT EXISTS BECAUSE "HAS A Checkpoint METHOD" IS NOT THE SAME QUESTION, AND A
+// CALLER THAT CONFLATED THE TWO WEDGED ITSELF. *Log always has the method, so a
+// `x.(interface{ Checkpoint() error })` type assertion succeeds on EVERY log,
+// including one opened with no MultiApplier — where Checkpoint returns
+// "checkpoint requires a MultiApplier" unconditionally and can never succeed.
+// A participant that defers reclaiming state "until the next checkpoint
+// publishes" therefore deferred it FOREVER (RELAY-24-BLOCKER-EGRESS: the relay
+// outbox stopped accepting work for a peer after its per-peer retained limit,
+// for the life of the process, on the composition root's own wiring).
+//
+// The capability is a PROPERTY OF THE OPEN, not of the type: it is fixed by
+// LogOptions at Open and never changes afterwards, so a caller may cache the
+// answer. It says nothing about whether a checkpoint would SUCCEED — a diverged
+// log, a snapshot error or a disk failure can still fail one; it says only that
+// there is a dispatcher to publish through.
+func (l *Log) CheckpointSupported() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.checkpoints != nil
+}
+
 // Checkpoint publishes an immutable generation at one shared committed index.
 func (l *Log) Checkpoint() error {
 	l.mu.Lock()

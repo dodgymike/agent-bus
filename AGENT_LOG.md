@@ -3911,3 +3911,71 @@ guard tests fall OUTSIDE its narrow proof:
 
 **No `SPEC.md`/`SPEC/` edit, no `.go` file touched, and nothing committed by this entry's author** —
 per the brief, `integrator` owns the code commit for the parent task separately.
+
+## 2026-08-15 — `RELAY-24-BLOCKER-EGRESS` (implementer) — egress wired end to end; gates re-verifying
+
+*(Corrected in place — the paragraph originally written here, mid-task, said the network hop was
+still blocked and `/v1/send` to a peer still 404s. Both went stale within the same task; corrected
+rather than left beneath a contradiction. Nothing described below has been committed.)*
+
+Invariants read IN FULL before writing code: **1** (server-authoritative ids, never reused), **2**
+(fully-qualified agent ids), **4** (nothing acknowledged before durable, and its 2026-08-02
+narrowing), **6** (metadata-only log; recovery always reaches a running server; every discard loud
+and specific), **9** (never write our own crypto), **10** (idempotency everywhere; the three cases
+that must not be collapsed; the two questions before any disconnect), **11** (TLS required, mutual,
+self-signed, no TOFU; the `InsecureSkipVerify` narrowing and its AST guard).
+
+**Landed: a locally-published message can now reach a peer bus through the product, with no
+hand-written HTTP anywhere.** `hub.Egress` + `hub.Options.Egress`, called from `Hub.forwardOnward`
+as the LAST statement of `Hub.publish` — after durability, after the serving copy, after local
+waiters wake — panic-recovered so a misbehaving implementation cannot take a send down.
+`relay.Outbox.Attach(OutboxDurableLog)`, modelled on `invite.Store.Attach`, registers the outbox as
+a WAL applier before `wal.Open` and hands it the log afterwards; `relay.OutboxRecordKind` is now in
+the applier map (task item (d)). `cmd/agent-bus/relayegress.go` (new) turns a `store.Message` into a
+`relay.RelayedMessage` and mints the origin attestation with `attest.Sign` — its first production
+caller — with `epoch = uint64(entry.Epoch.UnixMilli())` (clamped at 0) and
+`notAfter = issuedAt + relay.RetryHorizonCeiling` (24h, `idem.PeerOutageBudget`), margined by the
+verifier's own 5-minute `attest.ClockSkewAllowance`. `cmd/agent-bus/relaydial.go` (new) is an
+address-keyed pinned outbound TLS dialler: it adds ZERO new `InsecureSkipVerify` occurrences —
+`client/pin.go` gained a thin exported `PinnedTLSConfig` wrapper over its existing unexported one, so
+the single sanctioned occurrence stays inside the one file the AST guard scans (invariant 11).
+
+**Composition root:** Registry moved out of `newFederation`, seeded from the operator's durable peer
+configuration (`peerStore.ActivePeers()`) with an EMPTY roster — correct, because `Registry.Route`
+resolves by the BUS HALF of the id, never by roster membership. `hub.Options.RemoteRouter` AND
+`Egress` are now both wired, so `/v1/send` to a peer's agent is ACCEPTED rather than 404.
+`Forwarder.Resume()` runs after the seed and before serving (the mandated three-stage ordering);
+`Forwarder.Close` runs before `walLog.Close`.
+
+**Two P0s the security gate proved on the first pass, both fixed:**
+1. `*wal.Log` satisfies `interface{ Checkpoint() error }` while `Checkpoint()` can never succeed
+   without `LogOptions.Checkpoints`, so the outbox deferred reclaiming retained records forever and
+   cross-bus egress to a peer WEDGED PERMANENTLY at the per-peer retained limit (measured: 256, then
+   `ErrOutboxCapacity` for the life of the process, tombstones 48h past a 24h window). Fixed with
+   `internal/wal/checkpoint.go`'s new `func (l *Log) CheckpointSupported() bool`.
+2. The re-attest gate `m.OriginMessageID != ""` was DEAD CODE — nothing sets that field in
+   production — so the only thing stopping this bus from signing a foreign agent's message as its
+   own was accidental (a roster miss plus `attest.Sign`'s cross-namespace refusal). Now gated on
+   `m.BusPath[0]` not being this bus, with the accidental defences kept and documented as the
+   SECOND line, not the only one.
+
+**Gates: reviewer and security both returned CHANGES-REQUIRED on the first pass** (3 P1s across the
+two; 2 critical + 2 high + 3 medium including the two P0s above), and every finding was fixed with
+RED-before evidence. **Re-verification of both was still in flight at the time of this entry — this
+does NOT state the gates passed.**
+
+**Known limits, recorded rather than rounded up:**
+- Onward MULTI-HOP relay is deliberately NOT implemented — the adapter forwards only
+  locally-originated messages.
+- A crash between the message's own commit and the outbox enqueue loses the FORWARD (never the
+  message) — the outbox record is a SECOND wal transaction. Bounded at-most-once on the cross-bus hop
+  only.
+- The outbound peer HANDSHAKE is still unwired, so roster DISCOVERY and federated listing do not
+  work; directed sends and broadcast fan-out do, because routing is by bus prefix.
+- Broadcast egress can cost up to 128 serial fsyncs under the hub's global write lock; latent while
+  `/v1/broadcast` is 501.
+
+`AGENT_PROTOCOL.md`, `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md` and `CONTRACTS-AGENT.md` are owned by
+other agents on this task per the brief and are not touched by this entry.
+
+Nothing here is committed. `SPEC.md`/`SPEC/` not edited by this entry's author.

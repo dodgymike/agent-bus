@@ -104,12 +104,26 @@ func newWiringPeerStore(t *testing.T) *relay.PeerStore {
 	return store
 }
 
+// newWiringRegistry builds the routing table newFederation now takes rather than
+// constructs (RELAY-24-BLOCKER-EGRESS). Production shares ONE registry between
+// the ingress assembled here and the egress forwarder built before the hub; a
+// test that only exercises the ingress still has to supply one.
+func newWiringRegistry(t *testing.T) *relay.Registry {
+	t.Helper()
+	reg, err := relay.NewRegistry(relay.RegistryOptions{BusID: wiringLocalBus})
+	if err != nil {
+		t.Fatalf("relay.NewRegistry: %v", err)
+	}
+	return reg
+}
+
 // newWiringFederation assembles a federation with a stub local bus. share and
 // concurrent are the admission bounds; 0 means the production default.
 func newWiringFederation(t *testing.T, local relay.LocalIngest, share, concurrent int) *federation {
 	t.Helper()
 	fed, err := newFederation(federationOptions{
 		BusID:                wiringLocalBus,
+		Registry:             newWiringRegistry(t),
 		Local:                local,
 		Peers:                newWiringPeerStore(t),
 		LocalAgents:          func() []string { return nil },
@@ -170,6 +184,7 @@ func TestRelayWiringComposesRoutesWhenPeersConfigured(t *testing.T) {
 	store := newWiringPeerStore(t)
 	fed, err := newFederation(federationOptions{
 		BusID:       wiringLocalBus,
+		Registry:    newWiringRegistry(t),
 		Local:       &stubIngest{},
 		Peers:       store,
 		LocalAgents: func() []string { return nil },
@@ -240,6 +255,7 @@ func TestFederationRefusesAnIncompleteWiring(t *testing.T) {
 	full := func() federationOptions {
 		return federationOptions{
 			BusID:       wiringLocalBus,
+			Registry:    newWiringRegistry(t),
 			Local:       &stubIngest{},
 			Peers:       newWiringPeerStore(t),
 			LocalAgents: func() []string { return nil },
@@ -250,6 +266,9 @@ func TestFederationRefusesAnIncompleteWiring(t *testing.T) {
 		break_ func(*federationOptions)
 	}{
 		{"no local bus", func(o *federationOptions) { o.Local = nil }},
+		// A nil registry is a construction error and NOT a "build one for me":
+		// the caller owns the table because the egress half reads the same one.
+		{"no registry", func(o *federationOptions) { o.Registry = nil }},
 		{"no peer store", func(o *federationOptions) { o.Peers = nil }},
 		{"no local roster", func(o *federationOptions) { o.LocalAgents = nil }},
 		{"invalid bus id", func(o *federationOptions) { o.BusID = "" }},
@@ -941,6 +960,7 @@ func TestTransitMessageIsAcknowledgedLoudly(t *testing.T) {
 	local := &stubIngest{enrolled: map[string]bool{to: true}, outcome: idem.OutcomeNew}
 	fed, err := newFederation(federationOptions{
 		BusID:         wiringLocalBus,
+		Registry:      newWiringRegistry(t),
 		Local:         local,
 		Peers:         newWiringPeerStore(t),
 		LocalAgents:   func() []string { return nil },
@@ -999,13 +1019,32 @@ func TestPeerAdmissionChargeSliceIsBoundedByTheShare(t *testing.T) {
 // silent discard invariant 6 forbids.
 func TestUnreplayedPeerRecordsAreCounted(t *testing.T) {
 	u := &unreplayedPeerRecords{}
-	for _, kind := range []string{relay.PeerRecordKind, relay.BusTrustRecordKind, "message", "agent"} {
+	// relay.OutboxRecordKind is in this list because main.go REGISTERS this
+	// applier for it. Until 2026-08-15 it did not appear in Apply's switch, so an
+	// outbox record — a delivery this bus OWED a peer — was passed over counting
+	// NOTHING, in the very type written to stop that being silent. The old
+	// assertion (want 2, over the two config kinds) could not catch it.
+	for _, kind := range []string{
+		relay.PeerRecordKind, relay.BusTrustRecordKind,
+		relay.OutboxRecordKind, relay.OutboxRecordKind,
+		"message", "agent",
+	} {
 		if err := u.Apply(wal.Committed{Entry: wal.Entry{Kind: kind}}); err != nil {
 			t.Fatalf("Apply(%s) returned %v; a non-nil error here would poison the log over records this build merely does not serve", kind, err)
 		}
 	}
-	if got := u.Count(); got != 2 {
-		t.Fatalf("counted %d skipped federation records, want 2 (the other two kinds belong to other appliers and must not be counted)", got)
+	if got := u.ConfigCount(); got != 2 {
+		t.Fatalf("counted %d skipped peer-CONFIGURATION records, want 2 (the message and agent kinds belong to other appliers and must not be counted)", got)
+	}
+	// The two halves are separate because the REMEDIES are: configuration comes
+	// back intact on the next start, an owed cross-bus delivery does not come
+	// back at all. Rolling them into one number tells an operator "restart and it
+	// returns" about the half where that is false.
+	if got := u.OutboxCount(); got != 2 {
+		t.Fatalf("counted %d skipped relay delivery-OUTBOX records, want 2.\n\nmain.go registers this applier for relay.OutboxRecordKind. A record it does not count is a delivery this bus owed a peer, discarded in complete silence — which invariant 6 rates as the actual defect, not the discard itself.", got)
+	}
+	if got := u.Count(); got != 4 {
+		t.Fatalf("counted %d skipped federation records in total, want 4", got)
 	}
 }
 

@@ -818,6 +818,66 @@ type OutboxDurableLog interface {
 
 type outboxCheckpointer interface{ Checkpoint() error }
 
+// outboxCheckpointCapable is the SECOND question, and it is not the same as the
+// first. See outboxCheckpointReclaims.
+type outboxCheckpointCapable interface{ CheckpointSupported() bool }
+
+// outboxCheckpointReclaims reports whether a retention drop may be DEFERRED to a
+// checkpoint — i.e. whether a checkpoint can actually run on this log.
+//
+// # THIS IS NOT "DOES THE LOG HAVE A Checkpoint METHOD", AND THE DIFFERENCE
+// # WEDGED CROSS-BUS EGRESS
+//
+// sweepLocked used to ask `_, ok := ob.durable.(outboxCheckpointer)`. *wal.Log
+// HAS Checkpoint, so that assertion succeeds the instant the composition root
+// calls Attach(walLog) — and on that branch a swept record is only MARKED
+// expired: it stays in ob.jobs and stays CHARGED against retainedByPeer, because
+// only del() decrements those counters and only a successful Checkpoint calls
+// del() (see Checkpoint). But main.go opens the log with no wal.Checkpoints, so
+// wal.Log.Checkpoint returns "checkpoint requires a MultiApplier"
+// UNCONDITIONALLY, and Outbox.Checkpoint has no production caller to call it
+// with anyway. The deferral therefore never resolved: after MaxRetainedPerPeer
+// lifecycle records to one peer, every further Enqueue for that peer returned
+// ErrOutboxCapacity ("retains N lifecycle records against its fair limit of N")
+// FOR THE LIFE OF THE PROCESS, with every one of those records provably past its
+// retention window. One enrolled local agent could disable cross-bus egress to a
+// peer permanently.
+//
+// Asking the capability question instead restores the pre-Attach behaviour on a
+// log that cannot checkpoint — drop the record and reclaim its capacity, exactly
+// as the replay path does (durable is nil there) — while keeping the deferral on
+// a log that CAN, where it is load-bearing: a record dropped from memory before
+// the snapshot publishes would be resurrected by tail replay after a crash, and
+// the charge is what keeps the in-memory bound honest about what disk still
+// holds.
+//
+// A log that does not implement outboxCheckpointCapable but does implement
+// outboxCheckpointer is taken at its word (true): that is the conservative
+// direction — it retains rather than drops — and it keeps existing test doubles
+// that model a working checkpointer behaving as they did.
+//
+// # IT IS ANSWERED ONCE, OUTSIDE mu, AND CACHED — WHICH IS NOT AN OPTIMISATION
+//
+// The answer is fixed at the log's Open (wal.LogOptions.Checkpoints) and can
+// never change afterwards, so caching it is free. Asking it LAZILY is not: the
+// only caller is sweepLocked, which runs with ob.mu held, and
+// wal.Log.CheckpointSupported takes the LOG's mutex — while wal.Log.Write holds
+// that same mutex across the Apply that calls Outbox.Apply, which takes ob.mu.
+// That is a lock-order inversion (ob.mu -> log.mu vs log.mu -> ob.mu) and it
+// deadlocks a live forward against a concurrent sweep. It was measured doing
+// exactly that. Nothing in this file may call INTO the durable log while holding
+// mu; see durableLog, which exists for the same reason.
+func outboxCheckpointReclaims(d OutboxDurableLog) bool {
+	cp, ok := d.(outboxCheckpointer)
+	if !ok {
+		return false
+	}
+	if probe, ok := cp.(outboxCheckpointCapable); ok {
+		return probe.CheckpointSupported()
+	}
+	return true
+}
+
 // OutboxOptions configures NewOutbox. Every zero value means "the derived
 // default", so a caller with no opinion gets the derivation rather than an
 // accidental zero window.
@@ -940,6 +1000,13 @@ type Outbox struct {
 	retainedWriteJobs    int
 	retainedWriteBytes   int
 	retainedWritesByPeer map[string]int
+	// checkpointReclaims caches outboxCheckpointReclaims(durable): whether a
+	// swept record may be left charged for a checkpoint to reclaim, or must be
+	// dropped here and now. Written by NewOutbox and by Attach (both under mu,
+	// both having computed the value BEFORE taking it — see
+	// outboxCheckpointReclaims for the deadlock that forbids asking lazily), read
+	// by sweepLocked.
+	checkpointReclaims bool
 	// expired records are omitted from the next snapshot but remain charged and
 	// present until checkpoint publication succeeds.
 	expired             map[string]struct{}
@@ -959,6 +1026,7 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 	ob := &Outbox{
 		busID:                o.BusID,
 		durable:              o.Durable,
+		checkpointReclaims:   outboxCheckpointReclaims(o.Durable),
 		log:                  o.Logger,
 		now:                  o.Now,
 		maxJobs:              o.MaxJobs,
@@ -1041,6 +1109,65 @@ func NewOutbox(o OutboxOptions) (*Outbox, error) {
 	return ob, nil
 }
 
+// Attach binds the outbox to the durable log it writes through. It must be
+// called EXACTLY ONCE, after wal.Open has returned.
+//
+// It exists for the same chicken-and-egg reason invite.Store.Attach does, and is
+// modelled on it deliberately: wal.Open needs the APPLIER before the *wal.Log
+// exists (replay runs inside Open and hands every committed entry to the applier
+// before Open returns), so this outbox must be constructible first and be given
+// its log afterwards. The ordering is three steps and is not optional:
+//
+//	ob, err := relay.NewOutbox(relay.OutboxOptions{BusID: id, Logger: lg})  // 1. applier first
+//	log, err := wal.Open(... Applier: <ob registered for OutboxRecordKind>) // 2. replay fills ob
+//	err = ob.Attach(log)                                                   // 3. now it can write
+//
+// Between steps 1 and 3 the table can be READ and REBUILT but not WRITTEN: every
+// mutating method returns ErrOutboxNotDurable. That is the correct order —
+// recovery must finish before the first live enqueue or settlement, which is the
+// same precondition Apply's doc states.
+//
+// A nil log is an ERROR rather than a silent no-op: it would leave the outbox in
+// the exact false-durability state ErrOutboxNotDurable exists to refuse. A SECOND
+// call is an ERROR and changes nothing, for the reason invite.Store.Attach gives:
+// two logs mean two distinct durable histories behind one in-memory table, and
+// whichever won the race would silently own the deliveries the other had already
+// acknowledged.
+func (ob *Outbox) Attach(d OutboxDurableLog) error {
+	if d == nil {
+		return fmt.Errorf("relay: attaching the outbox durable log: it must not be nil; an outbox with no log would report deliveries as owed while nothing reached disk, and a relay hop remembered only in memory evaporates on the crash it exists to survive (%w)", ErrOutboxNotDurable)
+	}
+	// ASKED BEFORE THE LOCK IS TAKEN, DELIBERATELY. It may call into the log
+	// (wal.Log.CheckpointSupported takes the log's own mutex), and this package
+	// must never do that while holding mu — see outboxCheckpointReclaims.
+	reclaims := outboxCheckpointReclaims(d)
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	if ob.durable != nil {
+		return errors.New("relay: attaching the outbox durable log: already attached; an outbox is bound to exactly one durable log, and a second would give one in-memory delivery table two durable histories")
+	}
+	ob.durable = d
+	ob.checkpointReclaims = reclaims
+	return nil
+}
+
+// durableLog reads the attached log under the lock.
+//
+// It is a method rather than a bare field read because Attach can now WRITE
+// ob.durable after construction: an unsynchronised read from Enqueue, Settle or
+// Checkpoint would be a data race with it (and a race here is a P0 — concurrency
+// is the product). Every one of those captures the value ONCE and uses the
+// captured local for both its nil check and its later Write, so it cannot check
+// one log and write to another.
+//
+// sweepLocked reads ob.durable DIRECTLY rather than through this method, and
+// must: it already holds mu, so calling this would self-deadlock.
+func (ob *Outbox) durableLog() OutboxDurableLog {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	return ob.durable
+}
+
 // OutboxJob is a request to remember one delivery durably.
 //
 // It is deliberately the ROUTING FACTS ONLY — see the file comment for why the
@@ -1094,7 +1221,11 @@ type OutboxJob struct {
 // re-queueing a delivered message is the resurrection that turns at-least-once
 // into at-least-twice.
 func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
-	if ob.durable == nil {
+	// CAPTURED ONCE. Attach may write ob.durable after construction, so the log
+	// checked here is the same object written to below by construction rather
+	// than by hoping the field did not move in between. See durableLog.
+	durable := ob.durableLog()
+	if durable == nil {
 		return OutboxRecord{}, ErrOutboxNotDurable
 	}
 	// The destination is checked against OUR id before anything else: a job
@@ -1220,7 +1351,7 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 		ob.mu.Unlock()
 	}()
 
-	if _, err := ob.durable.Write(wal.Entry{Kind: OutboxRecordKind, Body: body}); err != nil {
+	if _, err := durable.Write(wal.Entry{Kind: OutboxRecordKind, Body: body}); err != nil {
 		// NOTHING was acknowledged and nothing is in memory.
 		return OutboxRecord{}, fmt.Errorf("relay: writing the outbox record for job %s: %w", canon.JobID, err)
 	}
@@ -1238,7 +1369,9 @@ func (ob *Outbox) Enqueue(job OutboxJob) (OutboxRecord, error) {
 // and writes nothing; one that contradicts it is ErrOutboxSettled and the FIRST
 // settlement stands.
 func (ob *Outbox) Settle(jobID string, state OutboxState, reason string) (OutboxRecord, error) {
-	if ob.durable == nil {
+	// Captured once, for the reason Enqueue states.
+	durable := ob.durableLog()
+	if durable == nil {
 		return OutboxRecord{}, ErrOutboxNotDurable
 	}
 	if !state.Terminal() {
@@ -1322,7 +1455,7 @@ func (ob *Outbox) Settle(jobID string, state OutboxState, reason string) (Outbox
 	if err != nil {
 		return OutboxRecord{}, err
 	}
-	if _, err := ob.durable.Write(wal.Entry{Kind: OutboxRecordKind, Body: body}); err != nil {
+	if _, err := durable.Write(wal.Entry{Kind: OutboxRecordKind, Body: body}); err != nil {
 		return OutboxRecord{}, fmt.Errorf("relay: writing the %s record for job %s: %w", state, canon.JobID, err)
 	}
 	ob.foldIn(canon, "settle")
@@ -1915,7 +2048,10 @@ func (ob *Outbox) upsertLocked(r OutboxRecord, now time.Time, source string) err
 //
 // The caller must hold mu.
 func (ob *Outbox) sweepLocked(now time.Time) {
-	_, checkpointed := ob.durable.(outboxCheckpointer)
+	// NOT a bare type assertion for Checkpoint — see outboxCheckpointReclaims for
+	// why that question is the wrong one, what it wedged, and why the answer is
+	// cached rather than asked here.
+	checkpointed := ob.checkpointReclaims
 	for id, r := range ob.jobs {
 		if _, already := ob.expired[id]; already {
 			continue
@@ -2081,7 +2217,9 @@ func (ob *Outbox) Restore(snapshot []byte, highWater uint64) error {
 // retention. Any failure, including a poisoned/ambiguous WAL handoff, leaves
 // the serving table and all reservations intact.
 func (ob *Outbox) Checkpoint() error {
-	cp, ok := ob.durable.(outboxCheckpointer)
+	// Read through the accessor: Attach may write ob.durable after construction,
+	// and this call is made without mu held.
+	cp, ok := ob.durableLog().(outboxCheckpointer)
 	if !ok {
 		return errors.New("relay: outbox durable log does not support checkpoints")
 	}

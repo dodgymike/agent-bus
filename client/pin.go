@@ -274,6 +274,65 @@ func pinnedTLSConfig(pins BusPinSet, clientCert *tls.Certificate) *tls.Config {
 	}
 }
 
+// PinnedTLSConfig is the EXPORTED form of pinnedTLSConfig, and it exists so that
+// a second copy of that literal never has to be written anywhere else
+// (RELAY-24-BLOCKER-EGRESS, DECISIONS.md 2026-08-15).
+//
+// # WHY IT IS HERE AND NOT IN THE PACKAGE THAT NEEDED IT
+//
+// The bus-to-bus egress path has the SAME problem this file already solves: it
+// dials a self-signed peer with no CA anywhere and a 32-byte pin
+// (relay.PeerRecord.NextHopTLSCertFingerprint), so crypto/tls leaves it the one
+// arrangement above — disable the default chain check, supply
+// VerifyPeerCertificate. Growing a second pinned dialler in internal/relay would
+// put a SECOND copy of the literal below in a directory guard_test.go does not
+// scan, which invariant 11 names by name as strictly worse than one loud,
+// reviewed occurrence. Exporting the existing one adds ZERO new occurrences and
+// keeps invariant 11's text literally true.
+//
+// The consumer, cmd/agent-bus, is NOT the unscanned direction — internal/relay
+// is. That package has a guard of its own (scanPlaintextListener, in
+// cmd/agent-bus/tlslisten_test.go) which is STRICTER than this one: it bans the
+// identifier outright in every non-test file there, with no paired-callback
+// exception, so the resolution could not have been written inline at the call
+// site even if invariant 11 had allowed a second occurrence.
+//
+// (This comment deliberately does not spell the banned identifier: the guard
+// COUNTS occurrences in this file rather than uses, so naming it in prose here
+// is itself a failure — which is exactly the point of counting.)
+//
+// That is exactly why the client package is NOT under internal/ (invariant 7):
+// it is importable, so the server's composition root can reuse it.
+//
+// # WHAT THE CALLER STILL OWNS
+//
+// EVERYTHING ABOUT WHICH PINS APPLY. This function verifies the peer against the
+// set it is handed and nothing else, so a caller that dials several peers must
+// hand it the pins for THE PEER IT IS DIALLING — see cmd/agent-bus/relaydial.go,
+// where the set is resolved by ADDRESS at dial time. Passing the union of every
+// peer's pins would make peer A's certificate acceptable when dialling peer B,
+// which is a cross-peer confusion hole and not a convenience.
+//
+// An EMPTY set is refused inside the callback, on every connection, so a caller
+// that resolves no pin gets a failed handshake rather than an unverified one.
+// It should still fail CLOSED before dialling — a refusal that names the address
+// is far more useful than a handshake error — but the safety does not depend on
+// it doing so.
+//
+// clientCert is what this end PRESENTS (the other half of mutual TLS); nil means
+// present nothing.
+//
+// # SESSION RESUMPTION IS STILL DISABLED, AND THAT IS LOAD-BEARING
+//
+// The returned config sets NO ClientSessionCache, so every connection performs a
+// full handshake and VerifyPeerCertificate runs on every one. crypto/tls does
+// NOT re-verify certificates on a RESUMED handshake, so a caller that adds a
+// cache to the returned config — it is a plain *tls.Config and nothing stops it
+// — would silently bypass BOTH the pin check and the expiry check. Do not.
+func PinnedTLSConfig(pins BusPinSet, clientCert *tls.Certificate) *tls.Config {
+	return pinnedTLSConfig(pins, clientCert)
+}
+
 // pinVerifier adapts verifyPinnedBusCertificate to crypto/tls's callback shape.
 //
 // pins is captured BY VALUE, and BusPinSet's slice is never mutated in place

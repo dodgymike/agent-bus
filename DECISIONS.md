@@ -5645,3 +5645,455 @@ Also filed from this task's security round, for completeness of the record: a pr
 introduce it), `RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY` (`6e13a7d9-6ff0-49bb-a102-6ee1b69e9b51`, P1).
 
 <!-- ===== END 2026-08-15 RELAY-24-FU-STOREMSGLOOKUP ===== -->
+
+<!-- ===== BEGIN 2026-08-15 RELAY-24-BLOCKER-EGRESS (partial: seams only) ===== -->
+
+## 2026-08-15 — RELAY-24-BLOCKER-EGRESS: the egress seams, and the one decision that is NOT mine
+
+This task was to give the bus the ability to FORWARD a locally-published message to a peer, end to
+end. Four of its five parts landed; the fifth is BLOCKED on a security decision recorded below, so
+**nothing about cross-bus forwarding is live in this build** and no document in this repo may claim
+otherwise until the blocker is settled.
+
+### Decision 1 — `hub.Options.Egress`: the forward is called LAST, and it can never fail a send
+
+`internal/hub` gains an OPTIONAL `Egress` interface (`Forward(store.Message)`, no return value) and
+`Hub.publish` calls it at the very end, after the durable write, after `store.Append` and after
+`h.notify(m)` — through `forwardOnward`, which recovers a panic and logs it at ERROR.
+
+It has NO return value on purpose. There is no outcome the seam could report that `publish` would be
+allowed to act on: the local send is acknowledged by its OWN durable write (invariant 4), so a peer's
+queue, a peer's health and a peer's absence are separate best-effort-plus-outbox concerns. It is
+called with `writeMu` held, which is safe only because `relay.Forwarder.Enqueue` is non-blocking BY
+CONSTRUCTION (every queue send is a select with a default arm) — that structural property, not a
+convention, is what keeps "a slow or dead peer never slows a local send" true from inside the write
+lock. Nil `Egress` is behaviourally identical to the bus before the seam existed.
+
+**The hole is named, not hidden.** The outbox record for a forward is written in a SECOND wal
+transaction (inside `Forwarder.Enqueue`), not in the message's own `wal.Entry`. A crash between the
+message commit and the outbox enqueue leaves the message durable and delivered locally with the
+forward simply UN-OWED — no record, so no restart recovers it. That is a bounded AT-MOST-ONCE window
+on the CROSS-BUS HOP ONLY; the local message is never at risk. Folding the outbox record into the
+message's own entry would close it and would also change RELAY-15's one-record-one-job shape, so it
+is deliberately NOT done here.
+
+**`RemoteRouter` is still NOT wired**, and that is the same decision, not an omission.
+`hub.RemoteRouter`'s own doc forbids injecting a router before the egress path exists: a wired router
+with nowhere to send accepts messages it cannot deliver, having removed the truthful 404 that was
+protecting the client. `/v1/send` to a peer's agent therefore still answers `404 unknown recipient`
+on this build.
+
+> **THIS PARAGRAPH IS SUPERSEDED — see "the outbound-TLS blocker, resolved" below, same date.** The
+> router IS wired and `/v1/send` to an agent on a seeded peer is **accepted (201)**, not 404. The
+> paragraph is left in place per this file's append-only rule; it is flagged here rather than only in
+> the superseding section because a reader grepping for "404" lands on this line first, and two live
+> same-day answers to one question is worse than either answer alone.
+
+### Decision 2 — the origin attestation's `KeyEpoch` is the enrolment epoch in Unix MILLISECONDS
+
+`attest.Attestation.KeyEpoch` is an unvalidated `uint64` whose only requirement is that the ORIGIN
+bus assigns it. `auth.RosterEntry.Epoch` is a `time.Time` documented as bumpable on a future re-key.
+`uint64(entry.Epoch.UnixMilli())` is therefore monotone per re-key by construction, needs no second
+counter, no durable record of its own and no reconciliation after a restart.
+
+A zero or pre-1970 epoch is recorded as **0**, not cast: `uint64` of a negative `int64` wraps to a
+value near 2^64 — an epoch no later re-key could ever exceed, i.e. a monotonicity inversion produced
+by a cast.
+
+`NotAfter` is `issuedAt + relay.RetryHorizonCeiling` (which IS `idem.PeerOutageBudget`), because
+`attest.Sign`'s own doc REQUIRES it be derived from the maximum relay retry window rather than a
+plausible constant: an intermediate forwards verbatim and cannot re-mint. It contains **no** allowance
+for clock skew between buses, and none was invented: `attest.Verify` applies its own
+`ClockSkewAllowance` (5 minutes) on the verifying side, which is the only end that knows how far its
+clock has drifted.
+
+**An agent with NO messaging public key cannot be attested, and that is a legitimate state**
+(`auth.RosterEntry.MessagingPublicKey` is optional at enrolment). Its message is not forwarded. No
+key is fabricated, no unattested envelope is sent, and the LOCAL SEND IS NOT FAILED: the forward is
+dropped, and logged at WARN naming the agent and the remedy (invariant 6).
+
+### Decision 3 — the egress envelope's `BusPath` is EMPTY, and that is the value, not an omission
+
+`relay.RelayedMessage.BusPath` is the path AS RECEIVED, NOT including this bus; `Forward(localBusID)`
+appends our hop via `AppendHop`, whose doc names an empty input path as the ONE legal empty case,
+meaning "this bus is the ORIGIN". `store.Message.BusPath` on a locally-originated message is
+`store.LocalBusPath(busID)` — our own hop ALREADY in it — so copying it across would hand `AppendHop`
+a path it is already on, and EVERY forward would return `ErrRelayLoop` and be dropped, on a bus whose
+logs would say "loop" about a message that had never left.
+
+Relatedly, the adapter forwards **only locally-originated** messages (`m.OriginMessageID == ""`).
+`hub.publish` serves relay INGEST too, and rebuilding an ingested message here would claim OUR bus as
+its origin, try to attest an agent in someone else's namespace (`attest.Sign` refuses that outright)
+and erase the traversed path. Carrying an ingested message further is
+`relay.AcceptOptions.Onward`'s job — a different seam — and `nil` there remains the documented LEAF
+configuration.
+
+### Decision 4 — the `"outbox"` WAL kind is registered as an applier (task item (d))
+
+See `CONTRACTS-ONDISK.md`. It was in no applier map, so replay passed over it in silence. It is now
+registered on the same conditional as the other federation kinds, with `unreplayedPeerRecords`
+counting it on the path where no peer store could be built. `relay.Outbox.Attach` is new, modelled on
+`invite.Store.Attach`.
+
+### BLOCKED, and escalated rather than decided: the OUTBOUND peer TLS pin (invariant 11)
+
+`relay.Forwarder` cannot be constructed without a `relay.Client`, which REQUIRES an `*http.Client`
+carrying the link's mutual-TLS material. The peer's identity is pinned by
+`relay.PeerRecord.NextHopTLSCertFingerprint` — 32 bytes, address-keyed, outbound — over a SELF-SIGNED
+certificate with no CA and no trust-on-first-use (invariant 11). There are exactly three ways to
+check that pin in `crypto/tls`, and today none of them is available here:
+
+1. `RootCAs`. Impossible: we hold a fingerprint, not the certificate, so no `x509.CertPool` can be
+   built. (`cmd/agent-bus/healthcheck.go` CAN use `RootCAs` — it reads the certificate FILE.)
+2. `VerifyConnection` / `VerifyPeerCertificate` alone. Impossible: default chain verification runs
+   first and fails, because there is no root to chain to.
+3. `InsecureSkipVerify: true` paired with `VerifyPeerCertificate` — the ONE supported way, and the
+   one invariant 11 permits **in exactly one file, `client/pin.go`, exactly once**.
+
+Adding a second occurrence in `cmd/agent-bus/` would be worse than it looks: the AST guard in
+`client/guard_test.go` walks only `client/` and `cmd/agent-busctl/`, so the new occurrence would be
+BOTH a second one AND an UNSCANNED one — precisely the "pushed into a package the guard does not
+scan" outcome invariant 11 names as strictly worse than one loud, reviewed hole.
+
+**No such literal was added.** The two candidate resolutions — export the existing pinned transport
+from `client/`, or grow a pinned dialler inside `internal/relay` and widen the AST guard to cover it
+— both change where verification policy may live, which needs an explicit dated decision here and is
+not the implementer's to take. Until it lands: `relay.NewForwarder`, `relay.NewClient` and
+`Forwarder.Resume` still have zero production callers, the Registry is still built inside
+`newFederation`, no peer is seeded into it, and the startup line still truthfully reports
+`onward_relay=false`.
+
+<!-- ===== END 2026-08-15 RELAY-24-BLOCKER-EGRESS ===== -->
+
+<!-- ===== BEGIN 2026-08-15 RELAY-24-BLOCKER-EGRESS (resolution: outbound pinned TLS) ===== -->
+
+## 2026-08-15 — RELAY-24-BLOCKER-EGRESS: the outbound-TLS blocker, resolved
+
+**This section SUPERSEDES TWO NAMED PARTS of the section immediately above** — and they are named
+exactly, because an earlier wording pointed at a "Decision 5 — BLOCKED" heading that does not exist
+in this file, and then blessed "everything else" as unchanged while one of the parts it blessed was
+false:
+
+1. **"BLOCKED, and escalated rather than decided: the OUTBOUND peer TLS pin (invariant 11)"** — its
+   closing heading. It correctly refused to write a second `InsecureSkipVerify`-shaped literal and
+   listed two candidate resolutions; the first is taken here. Its closing paragraph is no longer
+   true: the forwarder HAS production callers, the Registry is built at the composition root, peers
+   ARE seeded into it, and the startup line no longer says the forwarder is unwired.
+2. **The `RemoteRouter` paragraph under "Decision 1"**, which says `/v1/send` to a peer's agent
+   "still answers `404 unknown recipient` on this build". It does not: the router is wired and such a
+   send is **accepted (201)**. There is one live answer to that question and it is this one.
+
+Everything else that section records — the `Egress` seam, `forwardOnward`, `Outbox.Attach`, the
+applier registration, the envelope mapping, the `KeyEpoch` derivation, the empty `BusPath` — stands
+unchanged and is still the reasoning for those pieces.
+
+### Decision — export `client.PinnedTLSConfig` rather than write a second pinned dialler
+
+`client/pin.go` gains one exported wrapper over the `pinnedTLSConfig` it already had:
+
+```go
+func PinnedTLSConfig(pins BusPinSet, clientCert *tls.Certificate) *tls.Config
+```
+
+**It adds ZERO new occurrences of the banned literal, and that is the entire point.** The literal
+stays in one file, once, in one composite literal beside `VerifyPeerCertificate`, inside the scope
+`client/guard_test.go` walks. Invariant 11's text remains literally true rather than "true in
+spirit", and the AST guard keeps enforcing it mechanically — including the counting rule that fails
+if the identifier is so much as NAMED in prose in that file, which it caught during this task.
+
+The rejected alternative was a pinned dialler in `internal/relay`. It fails on invariant 11's own
+words: `client/guard_test.go:22` walks only `.` and `../cmd/agent-busctl`, so that occurrence would
+be BOTH a second one AND an unscanned one — "pushed into a package the guard does not scan", which
+the invariant names as strictly worse than one loud, reviewed hole. Widening the guard to a third
+root was possible but strictly more change for strictly less containment.
+
+`client/` is deliberately NOT under `internal/` (invariant 7, so an agent can EMBED it), which is
+exactly what makes this import legal from the server's composition root. That property was put there
+for a different reason and paid for itself here.
+
+**What the export does NOT do:** it takes no position on WHICH pins apply. It verifies against the
+set it is handed, refuses an empty set inside the callback, and sets no `ClientSessionCache` — so
+`VerifyPeerCertificate` runs on every connection. `crypto/tls` does not re-verify certificates on a
+RESUMED handshake, so a caller that adds a cache to the returned config silently bypasses both the
+pin check and the expiry check; the doc comment says so at the export, because the returned value is
+an ordinary `*tls.Config` and nothing structurally prevents it.
+
+### Decision — the outbound pin is resolved BY ADDRESS, at dial time, and an unpinned address FAILS CLOSED
+
+`relay.Client` holds ONE `*http.Client` for ALL peers, while every peer route has its OWN
+`NextHopTLSCertFingerprint`. The obvious wiring — put every peer's pin into one `BusPinSet` on one
+`tls.Config` — is a **cross-peer confusion hole**: peer A's certificate would be accepted when
+dialling peer B, out of entirely correct data combined wrongly, and every "does the peer connect?"
+test would still pass. It was not done.
+
+`NextHopTLSCertFingerprint` is the OUTBOUND, **address-keyed** pin — it names the certificate served
+by whatever answers at the record's `BaseURL`, which for a non-adjacent destination is a DIFFERENT
+bus from the record's `BusID`. (Its mirror image, `BusTrustRecord.PeerClientTLSCertFingerprint`, is
+INBOUND and bus-principal-keyed. Conflating the two is a refuted design that appears to work.) So
+the resolution follows the field: `cmd/agent-bus/relaydial.go` builds a map from **dial address** to
+`client.BusPinSet` out of the durable peer routes, and `http.Transport.DialTLSContext` looks the
+address up, builds `client.PinnedTLSConfig(thatSet, ourLeaf)`, and hands it to `tls.Client` +
+`HandshakeContext`.
+
+- **An address with NO configured pin is REFUSED before a socket is opened**, with an error naming
+  the address and the remedy, and an ERROR line at startup naming every such address. There is no
+  fall-through to an unpinned or default config: that fall-through is exactly how a pinning layer
+  comes to be present in the code and absent on the wire.
+- **The value is a SET, not one fingerprint**, for two legitimate reasons: rotation serves two
+  certificates for one bus (invariant 11, which `BusPinSet` was built to model), and N route records
+  with N different destinations can share ONE next hop and therefore one address. This is a
+  deliberate, narrow departure from `PeerRecord`'s advice to "read each record's own pin rather than
+  caching one per address": a consumer that knows which record it is acting for should follow that
+  advice, and `DialTLSContext` structurally does not — it is given an address and nothing else.
+  Divergent pins at one address are unioned and reported at **WARN**, not silently merged and not
+  fatally refused: refusing would take a whole federation down over one stale record. The union
+  never widens what is accepted at any OTHER address, which is the property that matters.
+- **`ourLeaf` is the bus's own serving certificate.** `internal/buscert` mints ONE leaf carrying both
+  `ServerAuth` and `ClientAuth`, and "one identity, both directions" is already decided in this file,
+  so there is no second key and no second identity for a peer to bind.
+- **No proxy.** A proxied https connection is established with `CONNECT` and bypasses
+  `DialTLSContext` entirely, taking the pin with it. `Transport.Proxy` is nil, explicitly.
+
+### Decision — `RemoteRouter` is wired NOW, and the precondition that gated it is met
+
+`hub.RemoteRouter`'s "DO NOT INJECT A ROUTER EARLY" note makes it a precondition that no router may
+be wired until the egress path carrying an admitted message onward exists and is DURABLE. It was
+correctly left unwired while that was untrue. It is now true — the forwarder is constructed, its
+outbox is the durable relay delivery table replayed by `wal.Open` and attached before the hub opens —
+so the router is wired, and `POST /v1/send` to an agent on a seeded peer changes from an honest 404
+into an accepted, durable, forwarded message.
+
+The registry moved OUT of `newFederation` and into the composition root for a structural reason: the
+same table is read by the egress half (hub admission, and the forwarder's address resolution), which
+is wired BEFORE the hub, while the ingress is assembled after it. A registry built inside
+`newFederation` would be a SECOND table — the handshake would populate one and the forwarder would
+route on the other. `newFederation` keeps its validation posture: a nil registry is a construction
+error naming what is missing.
+
+Peers are seeded with `Agents: nil`, and an empty roster is the CORRECT value rather than a stub:
+`Registry.Route` resolves by the BUS HALF of an id and never by roster membership, roster membership
+is the separate `Knows` discovery convenience, and the address is operator configuration by design.
+A peer whose roster we have never exchanged is routable, which is the documented design.
+
+`Forwarder.Resume()` runs AFTER the seed and BEFORE the server serves — the third stage of the
+mandated three-stage ordering. Seeding first is not cosmetic: `Resume` resolves every recovered job
+through `PeerBaseURL`, so against an empty registry it takes the no-route arm for the entire
+backlog. `Forwarder.Close` is registered so LIFO runs it BEFORE `walLog.Close` and before the
+data-directory lock is released, because settlements are written THROUGH the WAL.
+
+### What is still NOT true, stated so no document drifts into claiming it
+
+**Multi-hop onward relay does not exist.** `relay.AcceptOptions.Onward` is still nil and the egress
+adapter forwards only messages this bus ORIGINATED (`m.OriginMessageID == ""`). "This bus forwards to
+a peer" and "this bus relays a message onward" are different claims; only the first is now true, and
+the startup line reports them as separate fields (`egress_forwarder_wired`, `peers_seeded`,
+`onward_relay`) precisely so an operator cannot read one as the other.
+
+<!-- ===== END 2026-08-15 RELAY-24-BLOCKER-EGRESS (resolution) ===== -->
+
+<!-- ===== BEGIN 2026-08-15 RELAY-24-BLOCKER-EGRESS (gate findings) ===== -->
+
+## 2026-08-15 — RELAY-24-BLOCKER-EGRESS: the reviewer and security gate findings
+
+The two sections above landed the egress path. Both gates returned CHANGES-REQUIRED against it. These
+are the decisions taken to close them; the sections above stand except where named.
+
+### Decision — a swept outbox record is reclaimed unless a checkpoint can ACTUALLY run
+
+**This closes a wedge that disabled cross-bus egress permanently, and the shape of the mistake is the
+reusable part: "has the method" is not "can do the thing".**
+
+`Outbox.sweepLocked` decided whether to `del()` a record or merely mark it `expired` (charged, and
+reclaimed later by a successful `Checkpoint`) with `_, ok := ob.durable.(outboxCheckpointer)`.
+`*wal.Log` HAS `Checkpoint() error`, so that assertion succeeded the instant the composition root ran
+`relayOutbox.Attach(walLog)` — but `main.go` opens the log with **no** `wal.LogOptions.Checkpoints`
+(deliberately: the checkpoint dispatcher is not wired here), so `wal.Log.Checkpoint` returns
+`"wal: checkpoint requires a MultiApplier"` unconditionally, and `Outbox.Checkpoint` has no
+production caller to call it with anyway. Only `del()` decrements `retainedByPeer`, so the deferral
+never resolved. Measured on the shipped wiring: after `MaxRetainedPerPeer` (256) lifecycle records to
+one peer, **every** further `Enqueue` for that peer returned `ErrOutboxCapacity` for the life of the
+process, with the clock 48 h past a 24 h retention window and every record still charged. Any
+enrolled local agent could silently disable cross-bus egress to a peer.
+
+**The fix is the smaller of the two candidates.** Passing `Checkpoints` to `wal.Open` was rejected:
+it wires the checkpoint dispatcher for the whole server — every participant, snapshot, generation and
+recovery path — to fix a capacity accounting bug, and `main.go` documents that dispatcher as
+deliberately unwired. Instead `internal/wal` gains one read accessor,
+`func (l *Log) CheckpointSupported() bool`, and the outbox asks THAT:
+
+- the capability is a property of the OPEN (`LogOptions.Checkpoints`), fixed and immutable, so the
+  answer is computed once in `NewOutbox`/`Attach` and cached;
+- a log implementing `Checkpoint` but not `CheckpointSupported` is taken at its word (`true`) — the
+  conservative direction, since it retains rather than drops, and it leaves existing test doubles
+  unchanged;
+- with no checkpointer the sweep drops and reclaims, which is exactly what the replay path already
+  did (`durable` is nil during replay) and what a bus did before `Attach` existed.
+
+**The answer is CACHED for a correctness reason, not a performance one, and this is the trap.** The
+only caller is `sweepLocked`, which holds `ob.mu`; `wal.Log.CheckpointSupported` takes the LOG's
+mutex; and `wal.Log.Write` holds that same mutex across the `Apply` that takes `ob.mu`. Asking the
+question lazily is a lock-order inversion (`ob.mu -> log.mu` against `log.mu -> ob.mu`) and it
+deadlocked a live forward against a concurrent sweep — observed, as a hung test, during this fix.
+Nothing in `internal/relay/outbox.go` may call into the durable log while holding `mu`.
+
+Proved by a crash-shaped capacity test on the production wiring
+(`TestLocalMessageForPeerRecipientReachesForwarder/cross-bus egress is NOT wedged…`): `wal.Open`
+verbatim from `main.go`, `Attach(walLog)`, fill a peer's retained share, assert the bound IS
+enforced, advance the clock past retention, assert the share comes back. It is RED against the old
+one-line predicate.
+
+### Decision — the "do not re-forward an ingested message" gate reads the BUS PATH, not `OriginMessageID`
+
+The stated control was `if m.OriginMessageID != "" { return }` in `relayEgress.Forward`. It was
+**dead code**: nothing in this build sets `store.Message.OriginMessageID`
+(`Message.WithOriginMessageID` has no non-test caller tree-wide, and the origin id rides on hub's
+internal `publishRequest` for the audit content hash alone). Every relay-ingested message therefore
+reached `envelope()` and `attest()`, and failed closed only by ACCIDENT — on the roster miss, with
+`attest.Sign`'s `subjectBus != busID` refusal behind it. Deleting the gate left the whole suite green,
+including the subtest whose own failure text named it.
+
+The gate is now `m.BusPath[0]` not being this bus, which every message carries by construction:
+`store.NewMessage` writes `LocalBusPath(busID)` for a local send, and `store.NewMessageWithBusPath`
+writes the received path with our hop APPENDED for an ingest — where `hub.relayedBusPath` has already
+refused an empty path and refused any path this bus already appears in. An empty path is
+structurally unproducible and is DECLINED rather than assumed local, because forwarding it would
+assert a provenance nobody recorded.
+
+The accidental defences are KEPT as defence in depth and are now documented as the SECOND line, not
+the first. The `OriginMessageID` check is kept as a belt and labelled as one — it cannot fire today
+and the comment says so.
+
+**Verified by deletion:** removing the bus-path gate from a scratch copy turns
+`TestLocalMessageForPeerRecipientReachesForwarder/a message this bus INGESTED from a peer is never
+re-forwarded` RED. The assertion that carries it is that the adapter LOGGED NOTHING — the only
+observable difference between "declined at the gate" and "reached the attestation and fell over on a
+roster miss".
+
+### Decision — a conservative routing PRE-CHECK before minting the attestation, and why it is not a second routing authority
+
+`relayEgress.Forward` built the envelope — `envelope()` → `attest()` → `attest.Sign` — BEFORE any
+routing decision, so a purely LOCAL send with zero remote recipients still minted a full ed25519
+attestation under the hub's global `writeMu`. Measured at 29.2 µs/op.
+
+`relayEgress.routesToSomePeer` now gates the mint. It is deliberately a **strict superset** of
+`relay.Forwarder.targets`, so a disagreement can only ever cost an unnecessary MINT, never a skipped
+forward:
+
+- it reads the **same `*relay.Registry` instance** the forwarder routes on (the composition root
+  passes one table; the adapter now REQUIRES it, and refuses to construct without one);
+- it **omits the split-horizon filter** (`NextHopAllowed`), which can only ever REMOVE targets.
+
+`relayegress.go`'s "ONE CALL, NO SECOND ROUTING DECISION" comment argued against exactly this, and
+has been reconciled rather than left contradicting the code: the argument holds for a pre-check that
+could answer NO where the forwarder answers YES, which is the shape this one is built to exclude.
+The forwarder remains the only routing authority — every message that passes is routed again, from
+scratch, by `Enqueue`, and every drop is counted there.
+
+### Decision — the outbound pin union is capped at `client.MaxBusPins`, and over that the address is REFUSED
+
+`newPeerPinsByAddress` built its per-address accept-set with `client.NewBusPinSet`, which is
+documented as explicitly **not** enforcing `MaxBusPins` ("construction is not the operator act; growth
+is"). Feeding it N route records therefore bypassed the bound. `client/pinset.go` gives the reason the
+bound exists: an unbounded, never-pruned accept-set degenerates into "accept every certificate this
+bus has ever had", so a key compromised two rotations ago is honoured forever with nothing looking
+wrong. This is reachable in the intended topology — N destinations routed through ONE adjacent hop
+share one address — not theoretical. The previous defence recorded here ("the union never widens what
+is accepted at any OTHER address") is true and sidesteps the bound rather than addressing it.
+
+**The real bound, recorded:** at most `client.MaxBusPins` (**2**) distinct next-hop certificates may
+be configured for one dial address. Two is the width of a rollover (invariant 11), not headroom. A
+third is not a rollover, it is stale configuration, and the address is **refused** — it is not added
+to the pin table, so nothing is forwarded through it and every dial to it fails closed, exactly as an
+unpinned address does. It is **not truncated** to the first two: truncation would decide on the
+operator's behalf, silently, which certificate stops being trusted, which is precisely what
+`MaxBusPins`'s own doc refuses to do. The refusal is logged at ERROR with the address, the count and
+the remedy, and it suppresses the "no pin configured" line for that address so the operator is not
+sent the opposite way.
+
+### Decision — the hub's documented lock order is CORRECTED, not restored
+
+`internal/hub/hub.go`'s `writeMu` note said "nothing here may hold `writeMu` across a call into the
+roster". `forwardOnward` now does: it runs at the end of `publish` with `writeMu` held, and the
+injected `hub.Egress` reads the enrolment roster for the sender's messaging public key —
+`auth.WALRoster.Get`, an exclusive `sync.Mutex`, the same object the hub sees through its injected
+`RosterSource`.
+
+The note is corrected rather than the code restructured. Moving the roster read off the lock would
+mean either snapshotting the roster (which would attest a re-keyed agent under its OLD key for the
+life of the process — the exact thing the live read exists to prevent) or deferring the whole forward
+to a goroutine (which changes the seam's ordering guarantees relative to `notify`). Neither is worth
+it for a latent inversion with no cycle: the roster's lock is held only across its own map
+operations, `auth.WALRoster`'s durable writes go to the WAL, and no roster path calls into
+`internal/hub` at all. So the order is total — `writeMu -> {waitMu, store lock, roster lock}` — with
+nothing taking `writeMu` while holding any of the three.
+
+**The rule that replaces the old prohibition:** an `Egress` implementation may take a lock that is a
+LEAF with respect to the hub, and may not take one that anything reachable from the hub's own lock
+could be waiting on.
+
+### Correction — "never blocks" is a claim about PEERS, not about DISK
+
+`relayegress.go` said `Forward` "NEVER BLOCKS", unqualified. `hub.forwardOnward` states the
+defensible version — never *waits on a network peer*, structurally, because every queue send in
+`relay.Forwarder.Enqueue` is a `select` with a default arm. The two wordings now match, and the
+distinction is written down where it was missing: `Enqueue` writes a durable outbox record per
+target, **two fsyncs each**, before it returns, under `writeMu`.
+
+For a directed send that is one target. For a **broadcast** it is every configured peer —
+`Registry.BroadcastTargets` returns them all regardless of recipients — so at `relay.MaxPeers` (64) a
+single broadcast is up to **128 serial fsyncs** with the global write lock held, repeatable by any
+local agent. That is LATENT today (`/v1/broadcast` answers 501, and a relayed broadcast is refused at
+the far end with `ErrUnsignable`) and is deliberately **documented rather than fixed here**:
+backpressure or batching on this path is a design change, not a tidy-up, and anyone enabling
+broadcast must deal with it first. Filed as a follow-up.
+
+### Correction — an unreplayed OUTBOX record is now COUNTED, and reported apart from configuration
+
+`main.go` registers `unreplayedPeerRecords` for `relay.OutboxRecordKind` as well as the two
+configuration kinds, but its `Apply` switch matched only the latter two — so on the no-peer-store
+path an outbox record, a delivery this bus OWED a peer, was passed over counting **nothing**. That is
+the silent discard invariant 6 rates as the actual defect, in the type written to prevent it, while
+`main.go`, `CONTRACTS-ONDISK.md` and this file each asserted it WAS counted.
+
+The switch now counts it, and the two halves are counted and reported **separately**, on their own
+ERROR lines, because the remedies differ: peer-route and bus-trust records are configuration and
+return intact once the store can be built; an outbox record names a delivery nothing in this run
+owes, which no restart re-owes if its retry horizon has since passed.
+
+### Correction — `cmd/agent-bus` is NOT an unscanned package (three comments)
+
+`cmd/agent-bus/relaydial.go`, `cmd/agent-bus/relayegress.go` and `client/pin.go` all justified
+exporting `client.PinnedTLSConfig` on the grounds that writing the pinned literal in `cmd/agent-bus`
+would be an UNSCANNED second occurrence. The conclusion is right; the stated reason was wrong and
+would mislead the next reader into thinking that directory is unguarded. `cmd/agent-bus` has a guard
+of its own — `scanPlaintextListener` (`cmd/agent-bus/tlslisten_test.go`, driven by
+`TestCmdHasNoPlaintextListener`) — which is STRICTER than `client/guard_test.go`: it parses every
+non-test `.go` file there and bans the identifier OUTRIGHT, with no paired-`VerifyPeerCertificate`
+exception. Injecting one into `relaydial.go` fails that test. The genuinely unscanned direction is
+`internal/relay`, which is what the export avoids. All three comments now say so.
+
+### Decision — `Enqueue` racing an unresumed outbox is ABSORBED, not refused, and this is a decision, not a discovery
+
+The task's own description proposed the cheapest fix for a genuine hazard: a live `Enqueue` that runs
+before `Forwarder.Resume` has re-offered a still-pending job from the last run can hand out a second
+copy of that job, so a message already pending for a peer may be sent twice. The cheapest fix would
+have made `Enqueue` refuse until `Resume` has run.
+
+**That fix is deliberately NOT taken, and `internal/relay/forward.go` is UNMODIFIED by this task** —
+the behaviour described here predates `RELAY-24-BLOCKER-EGRESS` (last touched by RELAY-19, `4113d24`)
+and was previously recorded only in two code comments (`forward.go`'s "FORWARDING BEFORE Resume IS A
+WIRING BUG" block above `Enqueue`, and `resumeJob`'s no-route arm), not in this file. It is written
+down here because the reviewer gate on this task examined it and returned the same verdict: refusing
+converts a startup-ordering MISTAKE into a TOTAL forwarding OUTAGE — no message from this bus reaches
+any peer until an operator notices and re-runs `Resume` — whereas the duplicate a refusal would have
+prevented is exactly what invariant 10's applied-key check absorbs at the RECEIVING bus. Recoverable
+beats irreversible, the same trade `resumeJob`'s no-route arm already makes for a job whose peer is
+unknown at Resume time.
+
+What is not acceptable is the race being invisible: `Enqueue` emits a one-shot `Warn` — "relay
+forwarding started BEFORE Resume: deliveries still owed from the last run have not been re-offered
+yet, so a message already pending for a peer may be sent twice" — the first time it fires, rather than
+per message, so a per-send line cannot bury it. The test that exercises this path in this codebase
+therefore characterises PRE-EXISTING behaviour, not new behaviour introduced by this task.
+
+<!-- ===== END 2026-08-15 RELAY-24-BLOCKER-EGRESS (gate findings) ===== -->

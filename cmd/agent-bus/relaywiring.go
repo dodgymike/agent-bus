@@ -563,6 +563,23 @@ type federationOptions struct {
 	// BusID is THIS bus's server-minted id (invariant 1).
 	BusID string
 
+	// Registry is the ONE routing table this bus has, and it is now CONSTRUCTED
+	// BY THE CALLER and passed in rather than built here
+	// (RELAY-24-BLOCKER-EGRESS).
+	//
+	// It moved for a structural reason, not a stylistic one: the same table is
+	// read by the EGRESS half — hub.Options.RemoteRouter answers "is this
+	// recipient behind a peer", and relay.Forwarder resolves the peer's address
+	// through Registry.PeerBaseURL — and both of those are wired BEFORE the hub
+	// exists, while this ingress is assembled after it. A registry built in here
+	// would be a SECOND table: the handshake would populate one, the forwarder
+	// would route on the other, and a peer that had just handshaked would still
+	// be unroutable. Two routing tables that can disagree is precisely the class
+	// of bug this repo keeps finding.
+	//
+	// REQUIRED, and nil is a construction error like every other missing piece.
+	Registry *relay.Registry
+
 	// Local is the local bus behind the relay ingress. Production passes
 	// hubIngest; it is an interface so the binding and metering rules can be
 	// driven without a durable hub.
@@ -695,11 +712,11 @@ func newFederation(opts federationOptions) (*federation, error) {
 	if opts.LocalAgents == nil {
 		return nil, errors.New("relay wiring: federationOptions.LocalAgents is required; \"this bus has no agents\" and \"nobody wired the roster up\" must not look identical to a federating peer")
 	}
-
-	registry, err := relay.NewRegistry(relay.RegistryOptions{BusID: opts.BusID, Logger: log})
-	if err != nil {
-		return nil, fmt.Errorf("relay wiring: %w", err)
+	if opts.Registry == nil {
+		return nil, errors.New("relay wiring: federationOptions.Registry is required; it is the ONE routing table, shared with the egress forwarder and with the hub's remote-recipient admission, and building a second one here would leave a peer that had just handshaked routable on one table and unknown on the other")
 	}
+	registry := opts.Registry
+
 	acceptor, err := relay.NewAcceptor(relay.AcceptOptions{
 		BusID: opts.BusID,
 		Local: opts.Local,
@@ -1077,7 +1094,25 @@ func (f *federation) warnIfCarriedNoFurther(m relay.RelayedMessage) {
 //
 // It applies NOTHING. That is the point: on this path there is no store to apply
 // to, and the alternative to counting is not applying-anyway, it is silence.
-type unreplayedPeerRecords struct{ n atomic.Uint64 }
+//
+// # THE TWO COUNTS ARE SEPARATE BECAUSE THE REMEDIES ARE DIFFERENT
+//
+// main.go registers this for THREE kinds, not two. Peer and bus-trust records are
+// CONFIGURATION: nothing is lost, they are still in the log, and they return in
+// full as soon as the store can be built. An OUTBOX record is a DELIVERY THIS BUS
+// OWED A PEER — a message it accepted responsibility for — and one replayed into
+// nothing is not owed by anything in this run, whatever happens next. Rolling
+// both into one number would tell an operator "restart and it comes back" about
+// the half where that is not true, so they are counted and reported apart.
+//
+// (Until 2026-08-15 the outbox kind was registered here and matched by NOTHING in
+// the switch below, so it was passed over counting nothing at all — the silent
+// discard invariant 6 rates as the actual defect, in the file written to prevent
+// it. Three documents asserted it WAS counted.)
+type unreplayedPeerRecords struct {
+	config atomic.Uint64
+	outbox atomic.Uint64
+}
 
 // Apply implements wal.Applier. It runs during recovery and on any live commit,
 // and never fails — a non-nil error here would poison the log (wal.ErrDiverged)
@@ -1085,13 +1120,25 @@ type unreplayedPeerRecords struct{ n atomic.Uint64 }
 func (u *unreplayedPeerRecords) Apply(c wal.Committed) error {
 	switch c.Entry.Kind {
 	case relay.PeerRecordKind, relay.BusTrustRecordKind:
-		u.n.Add(1)
+		u.config.Add(1)
+	case relay.OutboxRecordKind:
+		u.outbox.Add(1)
 	}
 	return nil
 }
 
-// Count reports how many federation records were passed over.
-func (u *unreplayedPeerRecords) Count() uint64 { return u.n.Load() }
+// Count reports how many federation records were passed over, of every kind.
+func (u *unreplayedPeerRecords) Count() uint64 { return u.config.Load() + u.outbox.Load() }
+
+// ConfigCount reports the CONFIGURATION half: peer routes and bus trust. These
+// are recoverable — the records are still in the log and return intact once the
+// peer store can be built.
+func (u *unreplayedPeerRecords) ConfigCount() uint64 { return u.config.Load() }
+
+// OutboxCount reports the DELIVERY half: cross-bus hops this bus owed a peer.
+// These are NOT recoverable by this run — nothing owes them — which is why they
+// are reported separately from the configuration count.
+func (u *unreplayedPeerRecords) OutboxCount() uint64 { return u.outbox.Load() }
 
 // ---------------------------------------------------------------------------
 // Whether this build federates at all

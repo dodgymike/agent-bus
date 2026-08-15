@@ -1515,12 +1515,30 @@ horizon are one bound, not two, and anyone raising either MUST move both togethe
 
 Asserted by `go test -race -run TestPeerRetryBackoffHorizonStaysInsideTheOutageBudget ./internal/relay`.
 
-**Not yet reachable.** `internal/relay` is NOT registered on any mux (`TestHandshakeHandlerIsNotWiredIntoAnyMux`)
-— it is gated behind INVITE-PEERGUARD and MTLS-RELAYGUARD, so none of this is live/observable from a
-running bus yet. The forwarder's queue is still in memory, but RELAY-15 added the durable outbox
-described below; composition with the forwarder remains RELAY-19. Until that wiring lands,
-cross-bus delivery remains BEST EFFORT from a running server even though the durable mechanism now
-exists as a library.
+**And the forwarder is now wired, not merely built.** An earlier draft of this paragraph said
+"composition with the forwarder remains RELAY-19" and cited `TestHandshakeHandlerIsNotWiredIntoAnyMux`
+as evidence that cross-bus delivery was best effort — **that test no longer exists**, and both halves
+of the claim are false by `RELAY-24-BLOCKER-EGRESS`: `relay.Forwarder` is constructed at the
+composition root, `hub.Options.Egress` hands it every locally-originated message, and a durable outbox
+is attached to the WAL (see the section above and the one below). So cross-bus delivery from a running
+server is no longer best effort in the sense this paragraph used to mean.
+
+The remaining limits, stated precisely rather than replaced with a new overclaim:
+
+- **Onward multi-hop relay is deliberately not implemented.** The egress adapter forwards only
+  messages ORIGINATED on this bus (`cmd/agent-bus/relayegress.go` declines when the first entry of the
+  message's bus path is not this bus); a message this bus ingested from a peer is never re-forwarded
+  to a further hop, so a federated bus is still a leaf.
+- **A crash between a message's own commit and its outbox enqueue loses the FORWARD, never the
+  message.** The outbox record is written in a SECOND `wal` transaction, after the message's own
+  commit has already been acknowledged (invariant 4) — so the message itself always survives such a
+  crash, and the bounded loss is confined to the cross-bus hop: on the next start nothing durable
+  records that a peer was owed a copy, and the forward is not retried.
+- **The outbound peer handshake is still unwired.** Nothing in this build calls `relay.Client.Enroll`,
+  so roster discovery and federated listing do not work: a peer's agent roster is never fetched. This
+  does not stop directed sends or broadcast fan-out, because `Registry.Route` and
+  `Registry.BroadcastTargets` resolve a recipient by the BUS half of its id and never consult a
+  roster.
 
 ## The durable relay outbox record and capacity contract (RELAY-15, corrected by RELAY-15-FU-CAPACITY-FAIRNESS, 2026-08-08)
 
@@ -2319,3 +2337,44 @@ With no published checkpoint generation, `bus.wal` is explicit legacy generation
 CRC32C WALs still take the established authenticated migration to WAL frame version 2 before their
 first checkpoint; v2 `bus.wal` is replayed normally. The first explicit `Checkpoint` publishes
 generation one, after which recovery uses authenticated generations and their bounded tails.
+
+## The `"outbox"` record is now REPLAYED AT STARTUP — it was silently skipped (`RELAY-24-BLOCKER-EGRESS`, 2026-08-15)
+
+`relay.OutboxRecordKind = "outbox"` (documented above, RELAY-15) has existed on disk since RELAY-15
+but was **in no applier map**. `auth.MultiplexApplier` is deliberately silent about kinds it does not
+own — which is what keeps `"message"` and `"seqfloor"` records from being read as damage — so an
+outbox record in the WAL was passed over by startup **without a word**. That is the silent discard
+invariant 6 rates as the actual defect: the record IS the durable proof that this bus owes a peer a
+delivery, and a replay that skips it cannot tell "nothing is owed" from "I did not look".
+
+`cmd/agent-bus/main.go` now registers it, on the SAME conditional as the two other federation kinds:
+
+| peer store | `appliers["outbox"]` | effect at startup |
+| --- | --- | --- |
+| built | `*relay.Outbox` (constructed with **no** `Durable`, before `wal.Open`) | replay rebuilds the delivery table; `Outbox.Attach(walLog)` afterwards makes it writable |
+| **not** built (`relay.NewPeerStore` failed) | `*unreplayedPeerRecords` | records are COUNTED and reported at `ERROR` after replay, never silently dropped — and on **their own line**, separate from the peer-route/bus-trust count, because the remedies differ: configuration returns intact on the next start, a cross-bus delivery this bus owed does not return at all |
+
+The three-step order is `invite.Store`'s, and is not optional: **construct the applier → `wal.Open`
+(replay fills it) → `Attach(log)`**. Between steps 1 and 3 the table can be read and rebuilt but not
+written; every mutating call refuses with `relay.ErrOutboxNotDurable`. `relay.Outbox.Attach` is new
+and is modelled on `invite.Store.Attach` — nil log refused, second attach refused, and the durable
+log read through an accessor so `Attach` cannot race `Enqueue`/`Settle`/`Checkpoint`.
+
+**What this does NOT change.** No record format moved: no `record-type` reservation, no
+`ondisk-format-version` bump, and the JSON record documented in the RELAY-15 section above is
+byte-identical.
+
+**And `cmd/agent-bus` DOES write these records on this build.** An earlier draft of this paragraph
+said "the forwarder that would is still not constructed" — written while the outbound-TLS blocker was
+open, and false by the time it landed in the same change. `relay.Forwarder` is constructed at the
+composition root, `hub.Options.Egress` hands it every locally-originated message, and
+`Forwarder.Enqueue` writes one `pending` record per peer target before it returns, settling it
+`delivered` or `abandoned` afterwards. A bus running this build both replays the table **and** adds
+to it.
+
+**Retention actually reclaims capacity.** A settled record is retired by `Outbox.sweepLocked` once it
+is past `SettledRetention`, and the per-peer retained charge is released with it. That is only true
+because the sweep asks whether a checkpoint **can run** (`wal.Log.CheckpointSupported`, i.e. whether
+the log was opened with `Checkpoints`) rather than whether the log merely *has* a `Checkpoint`
+method: `wal.Open` here is called with **no** `Checkpoints`, so deferring the reclaim to a checkpoint
+would defer it for ever. See `DECISIONS.md` 2026-08-15.
