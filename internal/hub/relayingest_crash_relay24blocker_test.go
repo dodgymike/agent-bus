@@ -51,6 +51,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/store"
+	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
 const (
@@ -79,6 +80,11 @@ const (
 	// the real publish path built — is fsynced, and the process dies with no
 	// COMMIT record ever written.
 	relayCrashDanglingPrepare = "relay-dangling-prepare"
+
+	// relayCrashPeerBuckets commits two relayed messages whose origin bus differs
+	// only by case, then dies immediately after the second commit fsync. Recovery
+	// must rebuild one canonical foreign-peer bucket from those durable records.
+	relayCrashPeerBuckets = "relay-peer-buckets-post-second-commit"
 )
 
 // The fixture the child and the parent must agree on BYTE FOR BYTE. The parent
@@ -131,6 +137,23 @@ func relayCrashRequest(t *testing.T) hub.RelayedIngestRequest {
 	}
 }
 
+func relayCrashPeerBucketRequest(t *testing.T, originBus, agent string, seq uint64) hub.RelayedIngestRequest {
+	t.Helper()
+	origin, err := ids.MessageID(originBus, seq)
+	if err != nil {
+		t.Fatalf("ids.MessageID(%q, %d): %v", originBus, seq, err)
+	}
+	return hub.RelayedIngestRequest{
+		Sender:             agentID(t, originBus, agent),
+		Recipients:         []string{agentID(t, testBusID, relayCrashLocalAgent)},
+		Body:               []byte("peer bucket crash fixture " + originBus + agent),
+		OriginMessageID:    origin,
+		BusPath:            []string{originBus, relayCrashMiddleBus},
+		TimestampUnixMilli: fixtureTimestampMs,
+		Signature:          fixtureSignature(),
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The child
 // ---------------------------------------------------------------------------
@@ -176,9 +199,47 @@ func TestRelayIngestCrashChild(t *testing.T) {
 		res, err := h.IngestRelayed(context.Background(), req)
 		t.Fatalf("child: IngestRelayed returned (%+v, %v) but the durable log kills this process the instant the prepare is fsynced; the crash was never injected", res, err)
 
+	case relayCrashPeerBuckets:
+		h := newHubOverDurable(t, &killAfterMessageCount{l: lg, remaining: 2}, lg, testBusID, relayCrashLocalAgent)
+		for _, peerReq := range []hub.RelayedIngestRequest{
+			relayCrashPeerBucketRequest(t, "BUSPEER", "first", 11),
+			relayCrashPeerBucketRequest(t, "buspeer", "second", 12),
+		} {
+			if _, err := h.IngestRelayed(context.Background(), peerReq); err != nil {
+				t.Fatalf("child: IngestRelayed before injected kill: %v", err)
+			}
+		}
+		t.Fatal("child: both relayed ingests returned; second committed message did not SIGKILL")
+
 	default:
 		t.Fatalf("child: unknown crash point %q", point)
 	}
+}
+
+// killAfterMessageCount delegates every write to the real WAL and SIGKILLs
+// only after remaining committed message transactions. Sequence-floor writes
+// pass through without consuming the count.
+type killAfterMessageCount struct {
+	l         *wal.Log
+	remaining int
+}
+
+func (k *killAfterMessageCount) Write(e wal.Entry) (wal.Committed, error) {
+	c, err := k.l.Write(e)
+	if err != nil {
+		return wal.Committed{}, err
+	}
+	if passThroughSeqFloor(e) {
+		return c, nil
+	}
+	if len(e.Idem) == 0 {
+		return wal.Committed{}, errors.New("child: committed peer-bucket fixture has no applied-key record")
+	}
+	k.remaining--
+	if k.remaining == 0 {
+		killSelf()
+	}
+	return c, nil
 }
 
 // runRelayIngestCrashChild re-execs this test binary at the given crash point
@@ -385,6 +446,20 @@ func TestRelayIngestCrashPostCommitRetryReportsOutcomeRetry(t *testing.T) {
 	if replayedAgain.ID != original.ID || !relayCrashSamePath(replayedAgain.BusPath, relayCrashRecordedPath) {
 		t.Fatalf("after the retry the durable record is %s with path %v, want the original %s with path %v",
 			replayedAgain.ID, replayedAgain.BusPath, original.ID, relayCrashRecordedPath)
+	}
+}
+
+// TestRelayIngestCrashRecoversCanonicalPeerBucket proves the peer-bucket
+// denominator is rebuilt from real WAL bytes after an uncatchable process kill.
+func TestRelayIngestCrashRecoversCanonicalPeerBucket(t *testing.T) {
+	dir := t.TempDir()
+	runRelayIngestCrashChild(t, relayCrashPeerBuckets, dir)
+
+	lg := openTestLog(t, dir, true)
+	h := newHubOverDurable(t, lg, lg, testBusID, relayCrashLocalAgent)
+	st := h.IdempotencyStats()
+	if st.Count != 2 || st.Agents != 1 {
+		t.Fatalf("after SIGKILL recovery Stats=%+v, want two durable relayed keys charged to one case-folded peer-bus denominator bucket", st)
 	}
 }
 

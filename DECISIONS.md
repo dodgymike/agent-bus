@@ -6097,3 +6097,27 @@ per message, so a per-send line cannot bury it. The test that exercises this pat
 therefore characterises PRE-EXISTING behaviour, not new behaviour introduced by this task.
 
 <!-- ===== END 2026-08-15 RELAY-24-BLOCKER-EGRESS (gate findings) ===== -->
+
+## 2026-08-15 — RELAY-FU-IDEM-METER-BY-PEER: foreign applied keys share a bus bucket
+
+The applied-key table's fair-share denominator counts identity buckets. A relaying peer controls
+the origin-agent label, so counting each foreign fully-qualified agent separately lets one
+authenticated peer manufacture 32,766 buckets and reduce an honest local agent's share to two
+while half the table remains free. This survives restart because the same labels are durable.
+
+The store now requires its local BusID at the production composition root. It parses every
+non-enrol agent ID and derives accounting as follows: a local agent retains its complete
+fully-qualified ID, while every foreign agent is charged to the lower-cased bus half. The original
+full agent ID remains the idempotency lookup scope; only fairness accounting is coalesced. Recovery
+derives the same bucket from the persisted agent ID, so live and rebuilt denominators cannot drift.
+Malformed IDs fail closed. This bound depends on relay validation continuing to pin the sender bus
+to the authenticated peer's allowed origin bus; parsing alone proves syntax, not authority.
+
+The deliberate fairness trade is per-bus rather than per-foreign-agent isolation. An honest peer
+with one hundred agents receives the same foreign share as a peer with one agent, and one busy or
+hostile agent behind that peer can temporarily consume its peers' shared allowance for the
+retention window. That collateral effect is preferable to allowing a peer-controlled label set to
+shrink every local agent's allowance without bound. Metering only the authenticated peer at the
+HTTP wiring layer was rejected as insufficient: it can attribute resource use but does not change
+the applied-key table's poisoned label denominator. Treating `OpRelay` as identity was also
+rejected because an operation name authenticates nobody.

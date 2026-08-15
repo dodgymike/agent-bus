@@ -2,8 +2,11 @@ package idem
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
 // Outcome is what a Lookup found. THE THREE-WAY SPLIT IS THE LOAD-BEARING PART
@@ -180,6 +183,13 @@ type Store struct {
 	// here at all — see admitAgentLocked for why.
 	byAgent map[string]int
 
+	// localBusID enables peer-safe fair-share metering. Local callers retain
+	// their fully-qualified agent bucket; foreign callers share the canonical
+	// bus half of their persisted agent id. Empty is legacy mode for callers
+	// that have not yet supplied the local identity.
+	localBusID string
+	buckets    map[Scope]string
+
 	// order is the same scopes in INSERTION order. Records are remembered in
 	// COMMIT order on both the live path and the replay path, so this slice is
 	// sorted by CommittedAt by construction, and expiry is a pop from the front
@@ -199,6 +209,7 @@ func NewStore(o StoreOptions) *Store {
 		now:        o.Now,
 		records:    make(map[Scope]Record),
 		byAgent:    make(map[string]int),
+		buckets:    make(map[Scope]string),
 	}
 	if s.window <= 0 {
 		s.window = RetentionWindow
@@ -210,6 +221,19 @@ func NewStore(o StoreOptions) *Store {
 		s.now = time.Now
 	}
 	return s
+}
+
+// NewStoreForBus builds an applied-key table whose fair-share accounting is
+// safe for relayed senders. localBusID is required and validated; an empty or
+// malformed identity fails closed rather than collapsing all local agents into
+// one foreign bucket.
+func NewStoreForBus(localBusID string, o StoreOptions) (*Store, error) {
+	if err := ids.ValidateBusID(localBusID); err != nil {
+		return nil, fmt.Errorf("building peer-metered idempotency store: invalid local bus id: %w", err)
+	}
+	s := NewStore(o)
+	s.localBusID = strings.ToLower(localBusID)
+	return s, nil
 }
 
 // Lookup answers the only question the write path asks: has this exact
@@ -346,6 +370,10 @@ func (s *Store) remember(r Record, enforceShare bool) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
+	bucket, err := s.bucket(sc)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Expiry runs BEFORE the duplicate check, not after: a record already past
@@ -366,14 +394,15 @@ func (s *Store) remember(r Record, enforceShare bool) error {
 		return fmt.Errorf("%w: %d applied keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second effect", ErrCapacity, s.maxEntries)
 	}
 	if enforceShare {
-		if err := s.admitAgentLocked(sc); err != nil {
+		if err := s.admitAgentLocked(sc, bucket); err != nil {
 			return err
 		}
 	}
 	s.records[sc] = r
 	s.order = append(s.order, sc)
 	if !sc.enrolBusWide {
-		s.byAgent[sc.agent]++
+		s.byAgent[bucket]++
+		s.buckets[sc] = bucket
 	}
 	return nil
 }
@@ -393,13 +422,17 @@ func (s *Store) remember(r Record, enforceShare bool) error {
 // both) can be admitted here and refused there. That is the safe direction: the
 // authoritative check is the one inside Remember.
 func (s *Store) Admit(sc Scope) error {
+	bucket, err := s.bucket(sc)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked(s.now())
 	if len(s.records) >= s.maxEntries {
 		return fmt.Errorf("%w: %d applied keys are remembered, the limit; nothing is evicted, because evicting a key turns the next retry of it into a second effect", ErrCapacity, s.maxEntries)
 	}
-	return s.admitAgentLocked(sc)
+	return s.admitAgentLocked(sc, bucket)
 }
 
 // admitAgentLocked is the PER-AGENT FAIR SHARE (IDEM-11-FU-FAIRSHARE). The
@@ -469,14 +502,14 @@ func (s *Store) Admit(sc Scope) error {
 //     carries is a DIFFERENT fix and needs NO on-disk change: Record.Agent is
 //     already persisted and Record.Scope() rebuilds it on the recovery path, so
 //     the bucket key is a pure function of persisted data plus this bus's own
-//     id. It is not done here because it changes production admission on a P0
-//     path and first needs: a CASE-FOLDED key (ids.BusIDPattern permits
-//     uppercase, so an un-folded key hands one pinned peer 2^n buckets and
-//     reinstates the very attack); a FAIL-CLOSED BusID option (defaulting it to
-//     "" collapses every local agent into one bucket); the relay-side pinning
-//     that makes the bound a bound written down as a dependency; and a
-//     DECISIONS.md entry for the fairness trade, since a peer bus's whole agent
-//     population would then share ONE bucket.
+//     id. NewStoreForBus implements that derivation with a CASE-FOLDED foreign
+//     key (ids.BusIDPattern permits uppercase), and fails closed unless the
+//     local BusID is valid (defaulting it to "" would collapse every local
+//     agent into one bucket). NewStore remains the legacy constructor so this
+//     leaf change is additive while composition files are held; production is
+//     not protected until the hub is migrated to NewStoreForBus. The
+//     relay-side pinning remains what makes the resulting peer-bus bound a
+//     security bound rather than merely a syntactic grouping.
 //
 // That distinction is not theoretical — this project got it wrong once already.
 // auth.BeginSession's removed MaxPendingPerAgent cap was keyed on an agentID
@@ -514,7 +547,7 @@ func (s *Store) Admit(sc Scope) error {
 // the two concrete cases (a backwards clock; a log written before the fair share
 // existed) that would otherwise make replay stricter than the run that accepted
 // the record.
-func (s *Store) admitAgentLocked(sc Scope) error {
+func (s *Store) admitAgentLocked(sc Scope, bucket string) error {
 	if sc.enrolBusWide {
 		return nil
 	}
@@ -522,7 +555,7 @@ func (s *Store) admitAgentLocked(sc Scope) error {
 		return nil
 	}
 	share := s.fairShareLocked()
-	held := s.byAgent[sc.agent]
+	held := s.byAgent[bucket]
 	if held < share {
 		return nil
 	}
@@ -531,8 +564,35 @@ func (s *Store) admitAgentLocked(sc Scope) error {
 	// abusive client from a merely busy one FROM THE LOG LINE ALONE. Modelled on
 	// auth.CompleteSession's per-agent active-session refusal, down to spelling
 	// out that nothing is evicted to make room.
-	return newAgentQuotaError("agent %q holds %d of the %d applied keys retained by %d agents, at its fair share of %d while the table is under pressure (the share is the %d-entry limit divided by %d agents plus one, so an agent that has not yet arrived still has room); one of its OWN keys must age out of the retention window before another is admitted, and none is evicted to make room, because evicting a key turns the next retry of it into a second effect",
-		sc.agent, held, len(s.records), len(s.byAgent), share, s.maxEntries, len(s.byAgent))
+	subject := "local agent"
+	possessive := "that agent's"
+	if bucket != sc.agent {
+		subject = "foreign peer bus"
+		possessive = "that peer bus's"
+	}
+	return newAgentQuotaError("%s bucket %q holds %d of the %d applied keys retained by %d identity buckets, at its fair share of %d while the table is under pressure (the share is the %d-entry limit divided by %d identity buckets plus one, so an identity that has not yet arrived still has room); one of %s keys must age out of the retention window before another is admitted, and none is evicted to make room, because evicting a key turns the next retry of it into a second effect",
+		subject, bucket, held, len(s.records), len(s.byAgent), share, s.maxEntries, len(s.byAgent), possessive)
+}
+
+// bucket derives the accounting identity from the same persisted Scope on the
+// live and recovery paths. It never changes Scope itself: lookup and duplicate
+// detection remain scoped to the original full agent id.
+func (s *Store) bucket(sc Scope) (string, error) {
+	if sc.enrolBusWide {
+		return "", nil
+	}
+	if s.localBusID == "" {
+		return sc.agent, nil
+	}
+	busID, _, _, err := ids.ParseAgentID(sc.agent)
+	if err != nil {
+		return "", fmt.Errorf("invalid fully-qualified agent id: %w", err)
+	}
+	canonicalBusID := strings.ToLower(busID)
+	if canonicalBusID == s.localBusID {
+		return sc.agent, nil
+	}
+	return canonicalBusID, nil
 }
 
 // pressureLineLocked is the fill level at which the fair share starts being
@@ -612,11 +672,13 @@ func (s *Store) expireLocked(now time.Time) {
 		// accumulate one entry per agent that has ever sent. records and byAgent
 		// must never drift; this is the only place either shrinks.
 		if sc := s.order[drop]; !sc.enrolBusWide {
-			if n := s.byAgent[sc.agent] - 1; n > 0 {
-				s.byAgent[sc.agent] = n
+			bucket := s.buckets[sc]
+			if n := s.byAgent[bucket] - 1; n > 0 {
+				s.byAgent[bucket] = n
 			} else {
-				delete(s.byAgent, sc.agent)
+				delete(s.byAgent, bucket)
 			}
+			delete(s.buckets, sc)
 		}
 		s.expired++
 		drop++

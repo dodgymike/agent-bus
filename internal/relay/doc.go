@@ -311,14 +311,22 @@
 //     collateral damage no longer extends to every other request on the honest
 //     peer's connection.
 //
-//  2. THE APPLIED-KEY TABLE MUST BE METERED BY THE AUTHENTICATED PEER, NOT BY
-//     THE ASSERTED ORIGIN SENDER. RelayedMessage.Scope() keys internal/idem on
-//     m.Sender, which is peer-asserted. internal/idem's admitAgentLocked
-//     documents at length that its per-agent fair share is safe ONLY because
-//     the agent id is a PROVEN identity, and cites auth.BeginSession's removed
-//     MaxPendingPerAgent as the same bug. OpRelay reintroduces that shape:
-//     roughly 32.7k forged relays attributed to one named remote agent take it
-//     to its share and lock it out, while consuming half the bus-wide table.
+//  2. CLOSED BY RELAY-FU-IDEM-METER-BY-PEER (2026-08-15), WITH A DEPENDENCY.
+//     The applied-key lookup scope remains the complete m.Sender, but fair-share
+//     accounting now coalesces every foreign sender under its case-folded bus
+//     half. Before that change, one authenticated peer could assert ~32.7k
+//     distinct agent labels below the pressure line, poison the denominator,
+//     and reduce an honest LOCAL agent's share to two while half the table was
+//     still free; recovery rebuilt the poisoned denominator from durable labels.
+//
+//     The bound is NOT supplied by parsing. It depends on this package refusing
+//     an unpinned origin and binding Sender's bus half to OriginBus and the
+//     authenticated peer's allowed origin, with the traversed path checked at
+//     the composition boundary. Bypassing those checks makes the set of foreign
+//     bus buckets attacker-controlled again. The deliberate fairness cost is
+//     that every agent behind one foreign bus shares one allowance; a busy agent
+//     can starve an honest bus-mate until its keys age out. Metering only at the
+//     HTTP wiring layer can attribute use, but cannot repair idem's denominator.
 //
 //  3. RosterUpdate.BusID MUST BE BOUND TO THE AUTHENTICATED CONNECTION. Nothing
 //     here checks that the peer on the wire IS the bus the update describes.

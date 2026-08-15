@@ -595,7 +595,11 @@ func Open(o Options) (*Hub, error) {
 	// Built after h.now is normalised so the applied-key table and the message
 	// store read the SAME clock: two clocks would let a test (or a future
 	// injected clock) expire messages and keys against different "now"s.
-	h.idem = idem.NewStore(idem.StoreOptions{Now: h.now, MaxEntries: o.MaxIdempotencyEntries})
+	var err error
+	h.idem, err = idem.NewStoreForBus(o.BusID, idem.StoreOptions{Now: h.now, MaxEntries: o.MaxIdempotencyEntries})
+	if err != nil {
+		return nil, fmt.Errorf("hub: open idempotency store: %w", err)
+	}
 	// Read the bound BACK from the store rather than re-deriving the 0-means-
 	// default rule here: one place decides what the bound is, and the refusals
 	// below then quote the bound actually in force instead of the constant.

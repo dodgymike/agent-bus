@@ -723,7 +723,7 @@ after which every OTHER agent's mutating operations were refused with `ErrCapaci
 
 ```
 under pressure : retained >= maxEntries/2          (idem.PressureLine, for the default 65536 bound)
-fair share      : maxEntries / (agents + 1)          agents = distinct agents holding >= 1 record
+fair share      : maxEntries / (buckets + 1)        buckets = local agents plus foreign bus halves
 admission       : not under pressure                     -> admit
                   under pressure and held >= fair share  -> refuse (idem.ErrAgentQuota / hub.ErrAgentQuota)
                   otherwise                                -> admit
@@ -734,11 +734,28 @@ table's FREE space stops exceeding its USED space (a derived crossover, not a ch
 **Below the pressure line, nothing changes**: a bus that never approaches its cap sees no behaviour
 difference from this rule at all.
 
-The `+1` in the divisor is the agent that has not arrived yet. With a divisor of `agents`, a lone
-agent's share would be the whole table, so the exact attack the rule exists to close — one agent,
+The `+1` in the divisor is the identity bucket that has not arrived yet. With no phantom bucket, a
+lone identity's share would be the whole table, so the exact attack the rule exists to close — one agent,
 acting alone, filling the table before any victim holds a single record — would pass straight through:
 the victim cannot be counted in a bucket it holds nothing in, precisely because it is the one being
 starved. The phantom slot reserves its room before it exists.
+
+**Foreign senders are counted by bus, not by asserted agent label**
+(`RELAY-FU-IDEM-METER-BY-PEER`, 2026-08-15). A local sender keeps its complete fully-qualified agent
+id as its bucket; every foreign sender is assigned to the case-folded bus half of that id. The
+record's lookup scope remains the complete agent id, so duplicate detection and result replay do not
+become bus-wide. This is accounting only: an honest hundred-agent foreign bus receives the same
+share as a one-agent bus, and one busy or hostile agent can consume its bus-mates' shared allowance
+until keys age out. The trade prevents a peer from manufacturing an unbounded fair-share divisor by
+asserting fresh agent labels.
+
+This is a bound only because relay ingress separately binds `Sender`'s bus half to `OriginBus`, pins
+that origin to the authenticated peer, and validates the traversed path. Parsing a fully-qualified id
+proves syntax, not authority; a future ingress path that bypasses those checks invalidates the bound.
+The production hub therefore constructs the store with a required, validated local BusID and fails
+startup on an empty or malformed value. No relay-specific principal was added to the stored record:
+recovery re-derives the same local-agent or foreign-bus bucket from the already-persisted full agent
+id, preserving the live denominator without an on-disk format change.
 
 **The cost, stated plainly:** a SOLE agent on a bus can now hold at most `maxEntries/2` = 32768 applied
 keys instead of 65536, halving its sustained throughput ceiling (~0.36 -> ~0.18 accepted mutating
@@ -762,10 +779,11 @@ real hazard rather than a tidiness argument: a clock stepping backwards makes th
 a SUPERSET of what was live (the safe direction for expiry's own predicate, the unsafe one here), and a
 log written BEFORE this change can already hold one agent above the new share, so the FIRST restart
 after upgrading would otherwise drop that agent's already-accepted keys. Both are exercised by
-`TestReplayNeverRefusesWhatTheLivePathAccepted` (`internal/hub/idem_quota_test.go`). `byAgent` counters
-ARE rebuilt during recovery, so an agent recovered above its own share stays frozen — refused until its
-own keys age out — exactly as it would have been pre-restart; only the ADJUDICATION at replay time is
-skipped, not the bookkeeping.
+`TestReplayNeverRefusesWhatTheLivePathAccepted` (`internal/hub/idem_quota_test.go`). Fair-share
+counters ARE rebuilt during recovery, using the same complete local-agent or case-folded foreign-bus
+bucket as the live path. An identity bucket recovered above its share therefore stays frozen —
+refused until its keys age out — exactly as it would have been pre-restart; only the ADJUDICATION at
+replay time is skipped, not the bookkeeping.
 
 **Error surface:** `idem.ErrAgentQuota` and `hub.ErrAgentQuota` (`internal/idem/errors.go`,
 `internal/hub/errors.go`). `go.mod` pins go 1.19 (no multi-`%w`), so each package's refusal is a small
