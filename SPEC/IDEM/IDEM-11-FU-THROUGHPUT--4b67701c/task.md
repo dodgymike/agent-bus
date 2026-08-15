@@ -39,7 +39,7 @@ _None recorded._
 
 
 - [CORE-5](../../CORE/CORE-5--06c5b1f5/task.md) — CORE-5: Observability: metrics/inspect endpoint (follow-up) (superseded)
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
 - [IDEM-11-FU-FAIRSHARE](../IDEM-11-FU-FAIRSHARE--5abec835/task.md) — IDEM-11-FU-FAIRSHARE: applied-key capacity is bus-wide fail-closed with no per-agent shar… (done)
 
 ---

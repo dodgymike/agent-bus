@@ -53,6 +53,7 @@ _None recorded._
 - [DEPLOY-1](../DEPLOY-1--fa0c5a4e/task.md) — DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image (done)
 - [DEPLOY-5](../DEPLOY-5--259a6a55/task.md) — DEPLOY-5: container build/test check (CI or make/script target) (todo)
 - [HANDOVER-README](../../HANDOVER/HANDOVER-README--1dc9cf90/task.md) — HANDOVER-README: README stops telling a human things that are false (todo)
+- [TUI-2](../../TUI/TUI-2--4b669f76/task.md) — TUI-2: DECIDE the TUI rendering dependency — this would be the project's FIRST third-part… (todo)
 
 ---
 

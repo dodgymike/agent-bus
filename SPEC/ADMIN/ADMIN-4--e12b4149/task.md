@@ -74,6 +74,7 @@ _None recorded._
 - [ADMIN-7](../ADMIN-7--2147523d/task.md) — ADMIN-7: audit view in the console, for a CO-LOCATED bus only (D5) (todo)
 - [ADMIN-9](../ADMIN-9--8bb10db2/task.md) — ADMIN-9: the console enrols by redeeming an invite blob (BLOCKED on INVITE-GATE) (blocked)
 - [ADMIN-C3](../ADMIN-C3--ca0653e3/task.md) — ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST… (todo)
+- [TUI-4](../../TUI/TUI-4--11898d9b/task.md) — TUI-4: the read-only MONITOR view — renders LIVE/ADMIN data, re-specifies none of it (todo)
 
 ---
 

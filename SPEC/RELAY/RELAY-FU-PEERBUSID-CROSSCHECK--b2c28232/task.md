@@ -11,13 +11,13 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:06:28.005942+00:00 |
-| Updated | 2026-08-14T18:06:28.005942+00:00 |
+| Updated | 2026-08-15T14:50:26.780339+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-grep -rn 'PeerBusIDFromContext' --include=*.go . | grep -v _test.go | grep -v 'func PeerBusIDFromContext' | wc -l | grep -qv '^0$'
+go test -race -count=1 -run 'TestPeerEnrolBusIDIsBoundToTheConnection|TestRosterUpdateBusIDIsBoundToTheConnection|TestRelayBusPathLastHopIsBoundToTheConnection' ./cmd/agent-bus
 ```
 
 ## Description
@@ -55,7 +55,7 @@ STRUCTURAL FACT FOR WHOEVER DISPATCHES THIS (settles a question asked twice, per
 
 - [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (todo)
 - [RELAY-FU-PEERENROLL-BUSID-BIND](../RELAY-FU-PEERENROLL-BUSID-BIND--12f39697/task.md) — internal/relay/doc.go gap 5 (inbound twin): peer B presenting its own valid certificate a… (todo)
 - [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md) — internal/relay/doc.go gap 3: RosterUpdate.BusID is not bound to the authenticated connect… (todo)

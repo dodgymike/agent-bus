@@ -31,7 +31,7 @@ Raised by the security gate on RELAY-11 (2026-08-08). Duplicate-hop / loop detec
 > task's own field.
 
 
-_None recorded._
+- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

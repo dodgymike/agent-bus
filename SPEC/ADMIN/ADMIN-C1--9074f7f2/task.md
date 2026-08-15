@@ -73,6 +73,7 @@ _None recorded._
 
 
 - [ADMIN-C2](../ADMIN-C2--d31d77ff/task.md) — ADMIN-C2: \`agent-busctl report\` -- the node reporter: allow-list check, refuse-with-reaso… (todo)
+- [TUI-1](../../TUI/TUI-1--3ea68265/task.md) — TUI-1: DECIDE whether the terminal interface REPLACES ADMIN's browser console (D1) or com… (todo)
 
 ---
 

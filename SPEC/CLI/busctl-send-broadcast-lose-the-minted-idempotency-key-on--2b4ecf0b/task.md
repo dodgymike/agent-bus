@@ -44,7 +44,7 @@ cmd/busctl/send.go discarded the client-minted idempotency key when Send/Broadca
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-18](../../IDEM/IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (in_progress)
+- [IDEM-18](../../IDEM/IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
 
 ---
 

@@ -33,7 +33,7 @@ Export something like `client.TerminalSafe(s string, keepNewlines bool) string`,
 > task's own field.
 
 
-_None recorded._
+- **relates to** [TUI-5](../../TUI/TUI-5--b2a44ce9/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -43,6 +43,15 @@ _None recorded._
 
 
 - [CLI-3](../CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [TUI-5](../../TUI/TUI-5--b2a44ce9/task.md) — TUI-5: the human as a bus PARTICIPANT — read and send messages as a person (message bodie… (todo)
 
 ---
 

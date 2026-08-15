@@ -36,6 +36,16 @@ Offer authorized subscribe/watch/status APIs and compiled agent-busctl support w
 - **blocked by** [LIVE-7](../LIVE-7--09bc72d0/task.md)
 - **blocks** [LIVE-14](../LIVE-14--d4e8063c/task.md)
 - **blocks** [LIVE-15](../LIVE-15--c9e65431/task.md)
+- **relates to** [TUI-4](../../TUI/TUI-4--11898d9b/task.md)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [TUI-4](../../TUI/TUI-4--11898d9b/task.md) — TUI-4: the read-only MONITOR view — renders LIVE/ADMIN data, re-specifies none of it (todo)
 
 ---
 

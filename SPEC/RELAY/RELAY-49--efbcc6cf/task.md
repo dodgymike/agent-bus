@@ -1,0 +1,87 @@
+# RELAY-49: the egress split horizon is applied to the DESTINATION bus, not to the NEXT HOP -- a peer can provoke up to 8 POSTs back at its own address
+
+| Field | Value |
+| --- | --- |
+| Public id | `efbcc6cf-27df-40a3-9183-ad618c1fc126` |
+| Key | RELAY-49 |
+| Epic | [RELAY](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | relay |
+| Section | backlog |
+| Tags | relay, split-horizon, amplification, from-review, relay-47-followup |
+| Created | 2026-08-15T12:55:07.791398+00:00 |
+| Updated | 2026-08-15T12:55:07.791398+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run TestEgressSplitHorizonUsesResolvedNextHopNotDestination ./internal/relay
+```
+
+## Description
+
+Filed 2026-08-15 by spec-keeper on behalf of the RELAY-47 feature-runner. Found by the RELAY-47 review/security gates; OUT OF BOUNDS for RELAY-47, whose boundary did not include the split-horizon predicate.
+
+== THE BUG ==
+
+internal/relay/forward.go:1052 tests:
+
+    NextHopAllowed(m.BusPath, peerBusID)
+
+where `peerBusID` is what `Registry.Route` answered -- i.e. the **RECIPIENT'S OWN bus half** (internal/relay/registry.go:495-509). The ADDRESS actually dialled is resolved SEPARATELY, by `PeerBaseURL`. For a `-route-for` record those two are DIFFERENT BUSES BY CONSTRUCTION: that is the entire point of `-route-for`.
+
+Consequence: a message arriving from B, addressed to C, on a bus whose route to C goes THROUGH B, passes the split horizon (because the check asks about C, which is not in the bus path) and is then POSTed straight back at **B's address** (which is in the bus path, and is exactly what a split horizon exists to prevent).
+
+== BLAST RADIUS (measured, bounded) ==
+
+It TERMINATES in one bounce: B's `CheckIncomingPath` loop-drops the message and settles it without retry. So this is NOT an unbounded loop and NOT a federation-wide amplifier. What it IS: per inbound message a peer can provoke up to **8 full-size POSTs back at itself plus 16 fsyncs** on this bus. RELAY-47's fan-out bound (`maxOnwardBusesPerMessage = 8`) does not constrain it, because that bound counts DESTINATION bus halves, not distinct resolved next-hop addresses (see RELAY-47-FU-FANOUT, which is the same misalignment seen from the counting side).
+
+== FIX ==
+
+Apply the split horizon to the **resolved next hop** -- the bus id that owns the base URL about to be dialled -- not to the destination bus half. Both values are available inside `relay.Forwarder.targets`; the destination check may stay as an additional condition, but it must not be the only one. Entirely within `internal/relay`.
+
+== PROOF ==
+
+    go test -race -run TestEgressSplitHorizonUsesResolvedNextHopNotDestination ./internal/relay
+
+Table-driven, with the `-route-for` topology as a case: bus path [A,B], destination C, route to C is via B. Assert ZERO POSTs are attempted at B's address. Confirm the test is RED before the fix (it is the whole point -- a test that passes on the current code is testing the wrong predicate).
+
+RELATES: RELAY-47, RELAY-47-FU-FANOUT, RELAY-42 (Registry busID case handling), RELAY-3 (loop prevention via traversed bus path).
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **follow-up of** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
+- **relates to** [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-3](../RELAY-3--e944edda/task.md) — RELAY-3: Loop prevention via traversed-bus path (done)
+- [RELAY-42](../RELAY-42--61c00e9f/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (cancelled)
+- [RELAY-42](../RELAY-42--e13e6b0d/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (todo)
+- [RELAY-47](../RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
+- [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md) — RELAY-47-FU-FANOUT: refine the onward fan-out bound -- maxOnwardBusesPerMessage counts DE… (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md) — RELAY-47-FU-FANOUT: refine the onward fan-out bound -- maxOnwardBusesPerMessage counts DE… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

@@ -5,19 +5,19 @@
 | Public id | `85ae8b32-3a46-4e85-bdfe-ea29730670fb` |
 | Key | RELAY-24-BLOCKER-EGRESS |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:01:19.181797+00:00 |
-| Updated | 2026-08-14T22:01:19.181797+00:00 |
-| Completed | — |
+| Updated | 2026-08-15T13:47:14.817481+00:00 |
+| Completed | 2026-08-15T13:47:14.817463+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run TestLocalMessageForPeerRecipientReachesForwarder|TestForwarderResumeOrderingSurvivesCrash ./cmd/agent-bus/... ./internal/hub/... ./internal/relay/...'
+bash scripts/proof-check.sh 'go test -race -run "TestLocalMessageForPeerRecipientReachesForwarder|TestForwarderResumeOrderingSurvivesCrash" ./cmd/agent-bus/... ./internal/hub/... ./internal/relay/...'
 ```
 
 ## Description
@@ -45,8 +45,22 @@ Blocks RELAY-25 (10491a01). Blocked by RELAY-24-FU-STOREMSGLOOKUP (the store pre
 > task's own field.
 
 
+- **blocked by** [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md)
+- **blocked by** [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md)
 - **blocked by** [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md)
 - **blocks** [RELAY-25](../RELAY-25--10491a01/task.md)
+- **relates to** [0f8c5332-1236-4e22-a249-72119401003f](../../PROCESS/Spec-Server-API-gap-no-relation-delete-endpoint-wrong-bl--0f8c5332/task.md)
+- **relates to** [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC](../RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC--2d3224f0/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD](../RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD--40d412fc/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING](../RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING--5c465133/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD](../RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD--65773db7/task.md)
+- **relates to** [6f82180f-8f57-473d-bd87-30f6d9d9695d](../PROTOCOL.md-599-cites-a-deleted-test-TestHandshakeHandle--6f82180f/task.md)
+- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
+- **relates to** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING](../RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING--d92abfe9/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE](../RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE--dca8ac10/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -55,9 +69,9 @@ Blocks RELAY-25 (10491a01). Blocked by RELAY-24-FU-STOREMSGLOOKUP (the store pre
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
-- [RELAY-24-BLOCKER-PEERCERTFLAG](../RELAY-24-BLOCKER-PEERCERTFLAG--0e6b5a49/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG: agent-bus peer add has no flag to bind a peer's inbound cl… (in_progress)
-- [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (in_progress)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
+- [RELAY-24-BLOCKER-PEERCERTFLAG](../RELAY-24-BLOCKER-PEERCERTFLAG--0e6b5a49/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG: agent-bus peer add has no flag to bind a peer's inbound cl… (done)
+- [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (done)
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -67,8 +81,22 @@ Blocks RELAY-25 (10491a01). Blocked by RELAY-24-FU-STOREMSGLOOKUP (the store pre
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
-- [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (in_progress)
+- [0f8c5332-1236-4e22-a249-72119401003f](../../PROCESS/Spec-Server-API-gap-no-relation-delete-endpoint-wrong-bl--0f8c5332/task.md) — Spec Server API gap: no relation-delete endpoint -- wrong blocks/relates/supersedes/follo… (todo)
+- [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md) — Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- un… (todo)
+- [6f82180f-8f57-473d-bd87-30f6d9d9695d](../PROTOCOL.md-599-cites-a-deleted-test-TestHandshakeHandle--6f82180f/task.md) — PROTOCOL.md:599 cites a deleted test (TestHandshakeHandlerIsNotWiredIntoAnyMux) as a live… (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
+- [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md) — RELAY-24-BLOCKER-EGRESS-ATTEST: no bus can ISSUE an origin attestation for its own agents… (done)
+- [RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC](../RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC--2d3224f0/task.md) — RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC: Broadcast egress fsync amplification -- MUST b… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING](../RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING--d92abfe9/task.md) — RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING: Outbox.Checkpoint has no production caller -… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md) — RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE: three-bus federation smoke test (fed-smoke.sh, both… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE](../RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE--dca8ac10/task.md) — RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE: hub.go lock-order comment omits log.mu and ob.m… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD](../RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD--40d412fc/task.md) — RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD: unthrottled WARN + full ed25519 mint under the hub's… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING](../RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING--5c465133/task.md) — RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING: no-route drop log line does not spell out inva… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD](../RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD--65773db7/task.md) — RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD: AST guard gap over the new outbound dial pa… (todo)
+- [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) — RELAY-24-BLOCKER-EGRESS-HANDSHAKE: this bus never DIALS a peer, so its relay Registry nev… (todo)
+- [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (done)
+- [RELAY-25-FU-INBOUNDBIND](../RELAY-25-FU-INBOUNDBIND--336c3b76/task.md) — RELAY-25-FU-INBOUNDBIND: fed-smoke.sh never binds each peer's INBOUND client-certificate… (done)
+- [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
 
 ---
 

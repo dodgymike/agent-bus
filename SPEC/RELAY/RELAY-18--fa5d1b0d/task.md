@@ -60,6 +60,7 @@ this task does not touch invariant-10 disconnect semantics.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [6f82180f-8f57-473d-bd87-30f6d9d9695d](../PROTOCOL.md-599-cites-a-deleted-test-TestHandshakeHandle--6f82180f/task.md) — PROTOCOL.md:599 cites a deleted test (TestHandshakeHandlerIsNotWiredIntoAnyMux) as a live… (todo)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 
 ---

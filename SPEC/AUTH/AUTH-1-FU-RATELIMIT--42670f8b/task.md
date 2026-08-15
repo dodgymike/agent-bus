@@ -51,6 +51,7 @@ _None recorded._
 
 - [AUTH-1-FU-ACTIVECAP-DOCS](../AUTH-1-FU-ACTIVECAP-DOCS--27a811c9/task.md) — AUTH-1-FU-ACTIVECAP-DOCS: document the per-agent ACTIVE-session cap in CONTRACTS-HTTP.md… (todo)
 - [AUTH-2-FU-RATELIMIT](../AUTH-2-FU-RATELIMIT--504caef3/task.md) — AUTH-2-FU-RATELIMIT: Rate-limit the unauthenticated routes and the 401 path (superseded)
+- [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md) — INVITE-GATE-ENFORCE-FU-CLIENTREMEDY: fix client/enrol.go remedy text for the no-invite 403 (todo)
 
 ---
 

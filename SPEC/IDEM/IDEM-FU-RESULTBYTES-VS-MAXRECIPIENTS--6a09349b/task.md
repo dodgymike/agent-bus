@@ -43,6 +43,7 @@ PROOF NOTE: the stored proof_cmd names the rewritten test plus an idem-side boun
 > task's own field.
 
 
+- **relates to** [CONV-IDEM](../../CONV/CONV-IDEM--aae5f71e/task.md)
 - **relates to** [RELAY-24-BLOCKER-HUBINGEST](../../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md)
 
 ## Referenced in description (derived, not authoritative)
@@ -53,6 +54,15 @@ PROOF NOTE: the stored proof_cmd names the rewritten test plus an idem-side boun
 
 
 - [RELAY-24-BLOCKER-HUBINGEST](../../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CONV-IDEM](../../CONV/CONV-IDEM--aae5f71e/task.md) — CONV-IDEM: conversation create + membership change idempotency -- three cases, NOT collap… (todo)
 
 ---
 

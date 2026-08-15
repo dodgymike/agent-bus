@@ -5,13 +5,13 @@
 | Public id | `8e2c4de3-5752-4d4c-a321-778cb6daa6e1` |
 | Key | IDEM-11 |
 | Epic | [IDEM](../epic.md) |
-| Status | in_progress |
+| Status | todo |
 | Priority | P0 |
 | Component | core |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T13:10:34.566117+00:00 |
-| Updated | 2026-08-07T12:12:14.265836+00:00 |
+| Updated | 2026-08-14T23:02:19.621427+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,7 +22,13 @@ go test -race -run TestIdemCrash ./internal/hub/
 
 ## Status note
 
-LEFT OPEN, NOT completed -- reviewer's own explicit ruling (2026-08-03) was PASS-WITH-NITS on the CODE but 'IDEM-11 must NOT be flipped to done yet' pending the mandated DECISIONS.md/CONTRACTS-HTTP.md paper trail, which the task's own description required twice and which still contradicts shipped code as of this pass. Of the three named follow-ups: IDEM-11-FU-FAIRSHARE (5abec835) is DONE, closing the P1 security finding -- that debt is resolved. IDEM-11-FU-PAPERTRAIL (c416a458) is still TODO and is the live blocker: DECISIONS.md:706-708 still says keys 'fail closed' with 'retention 1 day or 1 GB', the OPPOSITE of the shipped bounded-window/50h10m22s/65536-entry behaviour, and CONTRACTS-HTTP.md:164 still documents the deleted message-retention coupling (both verified unchanged in committed HEAD this pass). IDEM-11-FU-DOWNGRADE (84f5ad57) is still TODO, P1 (downgraded from an initial P0 the reviewer self-corrected), needs a USER decision on reserving ondisk-format-version=3 vs recording an explicit accepted-skew decision. Fixed the doubled proof_cmd (proof-check wrapping proof-check) to the bare inner command; re-ran it directly: verdict=PASS class=test exit=0 tests_run=4 top_level=4 skipped=1 failed=0 (the 1 skip is the standard crash-child harness, expected).
+RESET in_progress -> todo, 2026-08-14 (spec-keeper, on the feature-runner's audit). WHY THE RESET MATTERS MORE THAN THE STATUS: this task was sitting in_progress with owner=None, which makes it INVISIBLE to claim-next -- the exact RELAY-6 failure mode that hid a blocker for six days. Nobody was working it and nobody could be handed it. It is now claimable again.
+
+STATE OF THE WORK. CODE IS COMPLETE AND PROVEN: the feature-runner re-ran the stored proof in a clean `git archive HEAD` overlay at HEAD 208dacd -- `go test -race -run TestIdemCrash ./internal/hub/` -> proof-check verdict=PASS class=test exit=0 tests_run=4 top_level=4 skipped=1 failed=0.
+
+THE SOLE REMAINING WORK IS THE DOCUMENTATION PAPER TRAIL, and it is a REAL blocker, not bookkeeping: the reviewer ruled explicitly on 2026-08-03 that IDEM-11 must NOT be flipped to done until it lands. DECISIONS.md:706-708 still says applied keys "fail closed" with "retention 1 day or 1 GB" -- the OPPOSITE of the shipped bounded-window / 50h10m22s / 65536-entry behaviour -- and CONTRACTS-HTTP.md:164 still documents a coupling that was DELETED. Completing this task today would put a false claim in the backlog on top of docs that already contradict shipped code.
+
+OVERLAP, DELIBERATE: that same work is separately tracked as IDEM-11-FU-PAPERTRAIL (c416a458-0bde-4a9b-8818-5dfe11efb48e, P1, todo). The two are not independent. WHOEVER CLAIMS EITHER ONE SHOULD CLOSE BOTH TOGETHER -- do not fix the docs under the follow-up and leave this task open, and do not close this task while the follow-up still describes live contradictions. Of the three originally-named follow-ups, IDEM-11-FU-FAIRSHARE (5abec835) is DONE and that debt is resolved.
 
 ## Description
 
@@ -39,7 +45,7 @@ PRIORITY P0 (escalated from the epic default of P1): every other IDEM task's cor
 > task's own field.
 
 
-_None recorded._
+- **blocked by** [IDEM-11-FU-PAPERTRAIL](../../DOCS/IDEM-11-FU-PAPERTRAIL--c416a458/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -54,16 +60,16 @@ _None recorded._
 - [DUR-3](../../DUR/DUR-3--d8a991ea/task.md) — DUR-3: Replay/recovery on start (done)
 - [DUR-7](../../DUR/DUR-7--ba6739e6/task.md) — DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) (todo)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
-- [IDEM-11-FU-DOWNGRADE](../../DUR/IDEM-11-FU-DOWNGRADE--84f5ad57/task.md) — IDEM-11-FU-DOWNGRADE: an old binary SILENTLY DISCARDS acknowledged writes after IDEM-11 -… (todo)
 - [IDEM-11-FU-FAIRSHARE](../IDEM-11-FU-FAIRSHARE--5abec835/task.md) — IDEM-11-FU-FAIRSHARE: applied-key capacity is bus-wide fail-closed with no per-agent shar… (done)
 - [IDEM-11-FU-PAPERTRAIL](../../DOCS/IDEM-11-FU-PAPERTRAIL--c416a458/task.md) — IDEM-11-FU-PAPERTRAIL: DECISIONS.md and CONTRACTS-HTTP.md state the OPPOSITE of what IDEM… (todo)
 - [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (todo)
 - [IDEM-15](../IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
-- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (in_progress)
+- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
 - [IDEM-2](../IDEM-2--1c6a5ef1/task.md) — IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the e… (superseded)
 - [IDEM-3](../IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 - [RELAY-4](../../RELAY/RELAY-4--5ac738b4/task.md) — RELAY-4: Peer-down retry/backoff (done)
+- [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md) — RELAY-6: Record the FEDERATION deployment assumptions (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -87,8 +93,8 @@ _None recorded._
 - [IDEM-14](../IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
 - [IDEM-15](../IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
-- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (in_progress)
-- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (in_progress)
+- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
+- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
 - [IDEM-2](../IDEM-2--1c6a5ef1/task.md) — IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the e… (superseded)
 - [IDEM-3](../IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 - [MSG-5](../../MSG/MSG-5--9d125bc6/task.md) — MSG-5: Messaging durability integration test (done)

@@ -5,14 +5,14 @@
 | Public id | `8b1e85fd-e4db-43eb-b665-1b429fe66e98` |
 | Key | IDEM-17 |
 | Epic | [IDEM](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | test |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T13:10:36.069349+00:00 |
-| Updated | 2026-08-07T20:33:25.865455+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T23:01:45.721617+00:00 |
+| Completed | 2026-08-14T23:01:45.721601+00:00 |
 
 ## Proof command
 
@@ -47,7 +47,7 @@ _None recorded._
 - [DUR-2](../../DUR/DUR-2--4132b879/task.md) — DUR-2: Two-phase prepare-&gt;commit write path (done)
 - [DUR-3](../../DUR/DUR-3--d8a991ea/task.md) — DUR-3: Replay/recovery on start (done)
 - [DUR-6](../../DUR/DUR-6--d56a997d/task.md) — DUR-6: Crash-injection test suite for the write path (done)
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -63,7 +63,7 @@ _None recorded._
 - [IDEM-17-FU-CHILDNONCE](../IDEM-17-FU-CHILDNONCE--8b392400/task.md) — Per-run nonce to gate crash-injection self-SIGKILL children (repo-wide) (todo)
 - [IDEM-17-FU-CROSSAGENT](../IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) — Crash-injection coverage for cross-agent applied-key isolation across recovery (todo)
 - [IDEM-17-FU-PLACEMENT](../IDEM-17-FU-PLACEMENT--998e1c19/task.md) — Decide crash-suite package placement: internal/idem vs internal/hub (todo)
-- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (in_progress)
+- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
 - [IDEM-8](../IDEM-8--d1ecfc75/task.md) — IDEM-8: Proof suite -- a retried send produces exactly one message, including across a cr… (superseded)
 - [MSG-5](../../MSG/MSG-5--9d125bc6/task.md) — MSG-5: Messaging durability integration test (done)
 

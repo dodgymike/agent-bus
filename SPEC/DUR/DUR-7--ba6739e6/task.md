@@ -42,7 +42,7 @@ _None recorded._
 
 - [2a961fcc-426d-4c98-bc63-eb236367fd85](../Startup-scans-the-WAL-twice-soon-three-times-bound-the-c--2a961fcc/task.md) — Startup scans the WAL twice (soon three times) -- bound the cost (todo)
 - [DUR-9](../DUR-9--8234db61/task.md) — DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose… (done)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
 - [IDEM-3](../../IDEM/IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 
 ---

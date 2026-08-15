@@ -5,14 +5,14 @@
 | Public id | `d7a0e7c4-6ea8-4fa7-8db5-c8044dce3a8d` |
 | Key | _(null in the export)_ |
 | Epic | [INVITE](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | invite |
 | Section | backlog |
 | Tags | flaky-time-bomb, pristine-head-red |
 | Created | 2026-08-14T10:05:10.981220+00:00 |
-| Updated | 2026-08-14T10:05:10.981220+00:00 |
-| Completed | — |
+| Updated | 2026-08-14T23:04:38.079642+00:00 |
+| Completed | 2026-08-14T23:04:38.079625+00:00 |
 
 ## Proof command
 
@@ -45,7 +45,7 @@ Why this matters beyond one test (stated by the requester and worth keeping in t
 > task's own field.
 
 
-_None recorded._
+- **relates to** [INVITE-FU-STORE-TEST-RED-ON-MAIN](../INVITE-FU-STORE-TEST-RED-ON-MAIN--fb7be1d6/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

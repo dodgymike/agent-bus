@@ -2,13 +2,15 @@
 
 [← all epics](../../SPEC.md)
 
-**0 open / 3 total.** Full records live in `SPEC/POLL/<task>/task.md`.
+**1 open / 4 total.** Full records live in `SPEC/POLL/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (0)
+## Open tasks (1)
 
-_None._
+| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
+| --- | --- | --- | --- | --- | --- | --- |
+| POLL-CONCURRENT-WAITERS | POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… | todo | P1 | [task.md](POLL-CONCURRENT-WAITERS--f6268dab/task.md) | — | [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) [POLL-1](POLL-1--1b0635b9/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) |
 
 ## Closed tasks (3) — done, cancelled, superseded
 

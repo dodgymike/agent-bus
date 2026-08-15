@@ -53,7 +53,7 @@ SEQUENCING (epic-wide, operator-decided): must not start before INVITE-GATE (05a
 > task's own field.
 
 
-_None recorded._
+- **relates to** [TUI-1](../../TUI/TUI-1--3ea68265/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -77,6 +77,7 @@ _None recorded._
 
 - [ADMIN-4](../ADMIN-4--e12b4149/task.md) — ADMIN-4: N buses from a config file, polled concurrently -- one hung bus must not stall t… (todo)
 - [ADMIN-9](../ADMIN-9--8bb10db2/task.md) — ADMIN-9: the console enrols by redeeming an invite blob (BLOCKED on INVITE-GATE) (blocked)
+- [TUI-1](../../TUI/TUI-1--3ea68265/task.md) — TUI-1: DECIDE whether the terminal interface REPLACES ADMIN's browser console (D1) or com… (todo)
 
 ---
 

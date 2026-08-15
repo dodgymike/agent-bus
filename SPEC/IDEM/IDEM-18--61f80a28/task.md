@@ -5,13 +5,13 @@
 | Public id | `61f80a28-b177-4224-be5d-dce0418bfd2f` |
 | Key | IDEM-18 |
 | Epic | [IDEM](../epic.md) |
-| Status | in_progress |
+| Status | todo |
 | Priority | P1 |
 | Component | agentif |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T13:17:45.425457+00:00 |
-| Updated | 2026-08-07T18:09:10.680861+00:00 |
+| Updated | 2026-08-14T23:02:31.320403+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -23,6 +23,12 @@ go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/...
 ## Status note
 
 NOT DONE (bookkeeping reconciliation pass, 2026-08-07). The old proof_cmd was unrunnable: scripts/bus-send.sh does not exist (ls scripts/ shows only bus-serve.sh) and has not existed since the 2026-08-02 CLI/AGENTIF epic merge decision replaced scripts/bus-*.sh wrappers with the busctl CLI + client package -- this task title (Wrappers generate the idempotency key ONCE...) is stale terminology for that same reason, and an earlier note on this task already said so (2026-08-02 spec-keeper). What IS true and proven on the CLI side: client/messages.go mints the idempotency key once and reuses it across every transport retry (go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/busctl/... -- PASS, verified this pass), and, since 9accb65 (2026-08-07), an ambiguous send/broadcast failure now carries that key forward instead of losing it (CLI-4, 2b4ecf0b, done). What remains missing and blocks this task under invariant 7 (a feature is not done without its protocol-doc entry): AGENT_PROTOCOL.md has ZERO mentions of idempotency (grep -c -i idempot AGENT_PROTOCOL.md = 0) and is itself stale -- it still documents scripts/bus-*.sh as (not yet shipped) rather than describing busctl at all. PROTOCOL.md already mentions idempotency (3 hits) and CONTRACTS-CLI.md documents the send/broadcast idempotency contract in full, but AGENT_PROTOCOL.md, the primary agent-facing usage doc, does not. Remaining work: rewrite AGENT_PROTOCOL.md against busctl send/broadcast --idempotency-key (not shell wrappers), documenting that the key is minted once and reused across retries and that it now survives an ambiguous failure. Left in_progress; do not complete on the CLI tests alone.
+
+--- APPENDED 2026-08-14 (spec-keeper, on the feature-runner's audit). Everything above remains ACCURATE and is retained deliberately. Two changes to the RECORD, none to the work:
+
+(1) STALE OWNER CLEARED, status reset in_progress -> todo. The stored owner was the generic slug 'feature-runner', which names NOBODY: the feature-runner on this pass did not claim this task and confirms no agent is on it. Left as-was it was neither being worked nor claimable. It is now claimable.
+
+(2) SCOPE CONFIRMED for whoever picks it up: the remaining half is DOC + CLI SURFACE, not server code -- a rewrite of AGENT_PROTOCOL.md against `busctl send/broadcast --idempotency-key` (not the retired scripts/bus-*.sh wrappers) plus the CLI surface that delivers it. That is entirely outside the internal/idem boundary the feature-runner works within, which is why this pass audited it and left the work untouched rather than half-doing it.
 
 ## Description
 
@@ -48,11 +54,11 @@ GATED on IDEM-10 (key contract) and IDEM-12 (idempotent send/broadcast). Filed 2
 - [2b4ecf0b-7f01-436b-8135-811ff4963a0e](../../CLI/busctl-send-broadcast-lose-the-minted-idempotency-key-on--2b4ecf0b/task.md) — busctl send/broadcast lose the minted idempotency key on an ambiguous failure (done)
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
 - [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (todo)
 - [IDEM-14](../IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
-- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (in_progress)
+- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -63,7 +69,7 @@ GATED on IDEM-10 (key contract) and IDEM-12 (idempotent send/broadcast). Filed 2
 
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
 - [IDEM-9](../IDEM-9--b0dc4a12/task.md) — IDEM-9: Wrappers generate the key ONCE and reuse it on retry, + AGENT_PROTOCOL.md / PROTO… (superseded)
 
 ---

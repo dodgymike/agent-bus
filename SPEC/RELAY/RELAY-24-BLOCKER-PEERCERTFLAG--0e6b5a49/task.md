@@ -5,20 +5,24 @@
 | Public id | `0e6b5a49-74be-432e-ab1e-485847a84fd0` |
 | Key | RELAY-24-BLOCKER-PEERCERTFLAG |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:00:22.363350+00:00 |
-| Updated | 2026-08-14T22:06:34.821261+00:00 |
-| Completed | — |
+| Updated | 2026-08-15T13:47:14.440401+00:00 |
+| Completed | 2026-08-15T13:47:14.440382+00:00 |
 
 ## Proof command
 
 ```sh
 bash scripts/proof-check.sh 'go test -race -run TestPeerAddBindsInboundClientCertFingerprint ./cmd/agent-bus'
 ```
+
+## Status note
+
+CODE-COMPLETE, NOT YET COMMITTED. Reviewer PASS (2 LOW prose findings fixed and re-verified), security PASS (no P0/P1, 2 P2 follow-ups filed). Proof in a clean git-archive-HEAD overlay with only cmd/agent-bus/peer.go + cmd/agent-bus/peerclientcert_test.go: "proof-check: verdict=PASS class=test exit=0 tests_run=1 top_level=1 skipped=0 failed=0 empty_pkgs=0". Awaiting coordinated commit; complete with commit_sha then.
 
 ## Description
 
@@ -50,7 +54,7 @@ Relation: blocks RELAY-25 (10491a01) directly -- RELAY-24 itself is code-complet
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -60,8 +64,12 @@ Relation: blocks RELAY-25 (10491a01) directly -- RELAY-24 itself is code-complet
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
-- [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
+- [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (done)
+- [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md) — RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE: three-bus federation smoke test (fed-smoke.sh, both… (todo)
+- [RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE](../RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE--002f4875/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE: a binding with no route satisfies the mount… (todo)
+- [RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS](../RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS--b64e2675/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS: no cross-namespace uniqueness between agent cli… (todo)
+- [RELAY-25-FU-INBOUNDBIND](../RELAY-25-FU-INBOUNDBIND--336c3b76/task.md) — RELAY-25-FU-INBOUNDBIND: fed-smoke.sh never binds each peer's INBOUND client-certificate… (done)
 
 ---
 

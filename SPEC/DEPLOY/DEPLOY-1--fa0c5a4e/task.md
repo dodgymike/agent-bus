@@ -59,7 +59,9 @@ _None recorded._
 - [DEPLOY-2](../DEPLOY-2--14f8ec3b/task.md) — DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck (done)
 - [DEPLOY-4](../DEPLOY-4--48b5d5b4/task.md) — DEPLOY-4: Go toolchain pin -- go.mod + builder image (no longer crypto-gated) (todo)
 - [DEPLOY-5](../DEPLOY-5--259a6a55/task.md) — DEPLOY-5: container build/test check (CI or make/script target) (todo)
+- [DEPLOY-6](../DEPLOY-6--e12b75cd/task.md) — DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook (done)
 - [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [ORCH-6](../../ORCH/ORCH-6--6cfe7288/task.md) — ORCH-6: STANDALONE — verify and document what DEPLOY already ships; do NOT rebuild it (todo)
 - [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md) — RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../../MTLS/EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 

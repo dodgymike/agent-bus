@@ -49,7 +49,7 @@ Acceptance: whoever wires a RemoteRouter must, in the same task, either (a) demo
 - [RELAY-15](../RELAY-15--663be37c/task.md) — RELAY-15: Durable outbox record + replay (part 1 of 2) (done)
 - [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
 - [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 
 ---
 

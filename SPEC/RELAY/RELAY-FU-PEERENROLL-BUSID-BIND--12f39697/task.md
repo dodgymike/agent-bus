@@ -11,13 +11,13 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:06:27.766032+00:00 |
-| Updated | 2026-08-14T18:06:27.766032+00:00 |
+| Updated | 2026-08-15T14:50:26.564572+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-go test -race -run TestPeerEnrollBusIDBoundToConnection ./internal/relay
+go test -race -count=1 -run TestPeerEnrolBusIDIsBoundToTheConnection ./cmd/agent-bus
 ```
 
 ## Description

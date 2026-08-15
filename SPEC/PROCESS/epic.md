@@ -2,14 +2,15 @@
 
 [← all epics](../../SPEC.md)
 
-**7 open / 11 total.** Full records live in `SPEC/PROCESS/<task>/task.md`.
+**9 open / 13 total.** Full records live in `SPEC/PROCESS/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (7)
+## Open tasks (9)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| 0fb4d032-efff-4815-ac2b-4b8f1682ba08 | Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- un… | todo | P2 | [task.md](Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md) | relates to [RELAY-24-BLOCKER-EGRESS](../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) | [ACK-3](../ACK/ACK-3--263c47fe/task.md) [ACK-4](../ACK/ACK-4--aeb32123/task.md) [LIVE-3](../LIVE/LIVE-3--c5c0a210/task.md) [AGENTIF-10](../AGENTIF/AGENTIF-10--1e837ac9/task.md) [RELAY-24-BLOCKER-EGRESS](../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) |
 | 2582f548-6493-439c-ba71-7f5cf73650fc | Spec Server /export (both format=markdown and format=json) silently drops the commits\[\] a… | todo | P2 | [task.md](Spec-Server-export-both-format-markdown-and-format-json--2582f548/task.md) | — | [MTLS-PIN](../MTLS/MTLS-PIN--8c46dc93/task.md) [e109c867-fcd2-4ddc-bc4d-55779dc5f5e1](Spec-Server-PATCH-tasks-id-rejects-the-key-field-outrigh--e109c867/task.md) |
 | 6fd8c8c5-b653-4d35-af83-8c9d1b82dedd | Correct stale wave label AUTH-7 to its real task identity across code and docs | todo | P2 | [task.md](Correct-stale-wave-label-AUTH-7-to-its-real-task-identit--6fd8c8c5/task.md) | — | [MSG-FU-ROSTERSOURCE](../AUTH/MSG-FU-ROSTERSOURCE--fa26036c/task.md) |
 | 932fe938-0e42-42d8-802d-ff018cb6c955 | Audit stored proof_cmds for the subtest-skip vacuous shape (parent-PASS/hidden-child-SKIP… | todo | P2 | [task.md](Audit-stored-proof_cmds-for-the-subtest-skip-vacuous-sha--932fe938/task.md) | — | [PROOF-CHECK-FU-RECURSION](../TOOLING/PROOF-CHECK-FU-RECURSION--69eb6f56/task.md) [ID-2-WIRING-SEAL](../ID/ID-2-WIRING-SEAL--8c9b6489/task.md) [CLI-2](../CLI/CLI-2--39318208/task.md) [cea09b96-72db-40f1-84b4-c2e227eae1cf](../TOOLING/proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) [fc8cd234-d275-43a1-9cb0-d10bca4a4086](Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](../TOOLING/Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md) |
@@ -17,6 +18,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | cbfb7d88-1bb0-4ade-b1d1-f287b4c0c179 | Triage dispatched two concurrent agents with overlapping ownership of CONTRACTS-CLI.md | todo | P2 | [task.md](Triage-dispatched-two-concurrent-agents-with-overlapping--cbfb7d88/task.md) | — | [INVITE-MINT](../INVITE/INVITE-MINT--1d0d0e60/task.md) [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
 | e109c867-fcd2-4ddc-bc4d-55779dc5f5e1 | Spec Server: PATCH /tasks/{id} rejects the key field outright (422 Unknown field) -- a ke… | todo | P2 | [task.md](Spec-Server-PATCH-tasks-id-rejects-the-key-field-outrigh--e109c867/task.md) | — | [CLI-1-FU-BINARYNAME](../CLI/CLI-1-FU-BINARYNAME--6a1eb5fa/task.md) [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) [MTLS-BUSCERT](../MTLS/MTLS-BUSCERT--93f0dc19/task.md) [e36661b0-687e-465e-b72f-e33245088e38](../UNASSIGNED/keypatch-probe-spec-keeper-bug-repro-safe-to-cancel--e36661b0/task.md) |
 | fc8cd234-d275-43a1-9cb0-d10bca4a4086 | Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… | todo | P2 | [task.md](Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) | — | [ZZ-LOCKTEST](../UNASSIGNED/ZZ-LOCKTEST--e091e451/task.md) [CLI-1](../CLI/CLI-1--0495d133/task.md) [CLI-2](../CLI/CLI-2--39318208/task.md) [CLI-3](../CLI/CLI-3--6e70abe5/task.md) [CLI-4](../CLI/CLI-4--137465b9/task.md) [CLI-5](../CLI/CLI-5--86dea094/task.md) +15 more |
+| 0f8c5332-1236-4e22-a249-72119401003f | Spec Server API gap: no relation-delete endpoint -- wrong blocks/relates/supersedes/follo… | todo | P3 | [task.md](Spec-Server-API-gap-no-relation-delete-endpoint-wrong-bl--0f8c5332/task.md) | relates to [RELAY-24-BLOCKER-EGRESS](../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) | [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY/RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md) [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY/RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) [RELAY-24-BLOCKER-EGRESS](../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) |
 
 ## Closed tasks (4) — done, cancelled, superseded
 

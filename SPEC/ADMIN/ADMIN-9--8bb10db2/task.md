@@ -74,6 +74,7 @@ _None recorded._
 
 
 - [ADMIN-1](../ADMIN-1--db334b3c/task.md) — ADMIN-1: record the operator-console trust/transport/control rulings D1-D7 in DECISIONS.m… (blocked)
+- [TUI-1](../../TUI/TUI-1--3ea68265/task.md) — TUI-1: DECIDE whether the terminal interface REPLACES ADMIN's browser console (D1) or com… (todo)
 
 ---
 

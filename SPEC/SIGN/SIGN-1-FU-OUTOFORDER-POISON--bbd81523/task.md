@@ -57,7 +57,7 @@ PROOF NOTE: the stored proof_cmd names a regression test this task MUST WRITE (b
 
 
 - [RELAY-17](../../RELAY/RELAY-17--817649ce/task.md) — RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope (done)
-- [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-24-BLOCKER-HUBINGEST](../../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [SIGN-1](../SIGN-1--43fd21ae/task.md) — SIGN-1: Canonical signing format for messages (Ed25519 detached signatures) (done)
@@ -71,6 +71,7 @@ PROOF NOTE: the stored proof_cmd names a regression test this task MUST WRITE (b
 
 - [4c97d561-e81f-40a6-a1fe-3c9976d790f1](../../DOCS/INVARIANTS.md-invariant-1-s-entry-has-no-pointer-to-the--4c97d561/task.md) — INVARIANTS.md invariant 1's entry has no pointer to the 2026-08-14 SIGN-1-FU-OUTOFORDER-P… (todo)
 - [RELAY-24-BLOCKER-HUBINGEST](../../RELAY/RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
+- [RELAY-24-FU-STOREMSGLOOKUP-DOCS](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP-DOCS--e02aa062/task.md) — RELAY-24-FU-STOREMSGLOOKUP-DOCS: CONTRACTS-ONDISK.md + DECISIONS.md + AGENT_LOG.md entrie… (done)
 - [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (superseded)
 - [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (todo)
 - [SIGN-1-FU-STORE-LOGGER](../SIGN-1-FU-STORE-LOGGER--50081b3c/task.md) — SIGN-1-FU-STORE-LOGGER: pass the hub's configured logger into store.New so the invariant-… (todo)

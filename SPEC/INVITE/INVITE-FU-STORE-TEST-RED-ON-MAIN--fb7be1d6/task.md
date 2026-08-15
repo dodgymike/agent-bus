@@ -41,7 +41,7 @@ PROOF NOTE: unusually, the stored proof_cmd names a test that ALREADY EXISTS and
 > task's own field.
 
 
-_None recorded._
+- **relates to** [d7a0e7c4-6ea8-4fa7-8db5-c8044dce3a8d](../TestInviteNotDurableIsRefused-is-a-time-bomb-hardcoded-2--d7a0e7c4/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

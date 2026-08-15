@@ -33,7 +33,7 @@ Two committed documents now assert things that are FALSE since INVITE-CLIENT lan
 > task's own field.
 
 
-_None recorded._
+- **relates to** [CONTEXT-STALE-NOTYET](../../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

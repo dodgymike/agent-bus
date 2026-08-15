@@ -79,6 +79,7 @@ Depends on: nothing. Blocks COMMS-MULTI.
 
 
 - [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
+- [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md) — CONV-MULTI-CLI: expose multi-recipient send through the CLI -- COMMS-MULTI owns the handl… (todo)
 
 ---
 

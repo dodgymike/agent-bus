@@ -55,6 +55,7 @@ Depends on: COMMS-THREAD-TRIAL (hard blocker -- filed with status=blocked).
 
 
 - **blocked by** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
+- **relates to** [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -76,6 +77,7 @@ Depends on: COMMS-THREAD-TRIAL (hard blocker -- filed with status=blocked).
 
 - [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
 - [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (todo)
 
 ---
 

@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T21:14:37.905096+00:00 |
-| Updated | 2026-08-14T22:01:57.642525+00:00 |
+| Updated | 2026-08-14T22:57:33.243814+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,7 +22,7 @@ go test -race -run "TestInviteGate" ./internal/auth/ ./internal/httpapi/ ./cmd/a
 
 ## Status note
 
-Code complete in the working tree, NOT committed. Gates (reviewer, security) dispatched. Two things the orchestrator must resolve before commit: (a) cmd/agent-bus/main.go simultaneously carries another agent's uncommitted RELAY-24 peer-store wiring, so this task's main.go edits cannot be committed by pathspec without sweeping that work in; (b) cmd/agent-busctl/enrol_test.go (TestCLIEnrolEndToEnd) now fails because it enrols anonymously against the real server binary -- that file is OUTSIDE this task's boundary and needs either a boundary widening or a paired task.
+Code complete, gates COMPLETED and re-verified (reviewer + security both re-ran and confirmed every code finding fixed). NOT committed. Index holds exactly this task's 20 files and is verified in isolation: build+vet clean, proof-check verdict=PASS tests_run=109 top_level=54 skipped=1 failed=0. COMMIT INSTRUCTION: commit from the INDEX with a bare git commit and NO pathspec. cmd/agent-bus/main.go and AGENT_PROTOCOL.md are both MM/contested -- their worktree copies carry other agents' in-flight RELAY-24 work, and the index has been set to HEAD+only-this-tasks-edits via git hash-object/update-index. A pathspec commit would take the worktree and ship RELAY-24 under this title. Blocked from done until CONTRACTS-HTTP.md lands (CLAUDE.md step 9) -- see INVITE-GATE-ENFORCE-FU-CONTRACTS (df04ed54-837c-44ef-a969-764cb374ae52), recorded as a blocking relation on this task.
 
 ## Description
 
@@ -60,7 +60,7 @@ OPERATIONAL CONSEQUENCE TO DOCUMENT (CONTRACTS-CLI.md / AGENT_PROTOCOL.md as app
 > task's own field.
 
 
-_None recorded._
+- **blocked by** [INVITE-GATE-ENFORCE-FU-CONTRACTS](../INVITE-GATE-ENFORCE-FU-CONTRACTS--df04ed54/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -70,8 +70,26 @@ _None recorded._
 
 
 - [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
+- [INVITE-GATE-ENFORCE-FU-CONTRACTS](../INVITE-GATE-ENFORCE-FU-CONTRACTS--df04ed54/task.md) — INVITE-GATE-ENFORCE-FU-CONTRACTS: update CONTRACTS-HTTP.md/CONTRACTS-ONDISK.md to reflect… (todo)
 - [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
-- [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [INVITE-GATE-ENFORCE-FU-BUSCTLTEST](../INVITE-GATE-ENFORCE-FU-BUSCTLTEST--837631a4/task.md) — INVITE-GATE-ENFORCE-FU-BUSCTLTEST: fix TestCLIEnrolEndToEnd, now RED once the gate lands (todo)
+- [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md) — INVITE-GATE-ENFORCE-FU-CLIENTREMEDY: fix client/enrol.go remedy text for the no-invite 403 (todo)
+- [INVITE-GATE-ENFORCE-FU-CONTRACTS](../INVITE-GATE-ENFORCE-FU-CONTRACTS--df04ed54/task.md) — INVITE-GATE-ENFORCE-FU-CONTRACTS: update CONTRACTS-HTTP.md/CONTRACTS-ONDISK.md to reflect… (todo)
+- [INVITE-GATE-ENFORCE-FU-DECISIONS](../INVITE-GATE-ENFORCE-FU-DECISIONS--a02d0684/task.md) — INVITE-GATE-ENFORCE-FU-DECISIONS: add dated DECISIONS.md entry superseding the invite_req… (todo)
+- [INVITE-GATE-ENFORCE-FU-DISCOVERCMD](../INVITE-GATE-ENFORCE-FU-DISCOVERCMD--4873518e/task.md) — INVITE-GATE-ENFORCE-FU-DISCOVERCMD: add an agent-busctl subcommand to fetch the discovery… (todo)
+- [INVITE-GATE-ENFORCE-FU-INVITEDOCS](../INVITE-GATE-ENFORCE-FU-INVITEDOCS--47c7bae9/task.md) — INVITE-GATE-ENFORCE-FU-INVITEDOCS: correct internal/invite doc comments now the gate is e… (todo)
+- [INVITE-GATE-ENFORCE-FU-OPERATORHINTS](../INVITE-GATE-ENFORCE-FU-OPERATORHINTS--2b654b83/task.md) — INVITE-GATE-ENFORCE-FU-OPERATORHINTS: fix README.md and bus-serve.sh operator hints that… (todo)
+- [INVMINT-3](../../INVMINT/INVMINT-3--8555e659/task.md) — INVMINT-3: the invite-mint HTTP route on the running bus (NOT /v1/mint, which is message-… (todo)
+- [ORCH-1](../../ORCH/ORCH-1--e22449ec/task.md) — ORCH-1: DECIDE the network posture for sidecar/k8s — CONSENT-GATED, and the compose ratio… (todo)
 
 ---
 

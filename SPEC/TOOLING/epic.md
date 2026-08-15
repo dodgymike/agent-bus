@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**10 open / 15 total.** Full records live in `SPEC/TOOLING/<task>/task.md`.
+**11 open / 16 total.** Full records live in `SPEC/TOOLING/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (10)
+## Open tasks (11)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -16,6 +16,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | aa2dfd79-9bc5-4e0a-925a-824168b710be | scripts/spec-cloud.sh: Cognito bearer token is on curl's argv, readable via /proc/*/cmdli… | todo | P1 | [task.md](scripts-spec-cloud.sh-Cognito-bearer-token-is-on-curl-s--aa2dfd79/task.md) | — | [CONTEXT-SPEC-TREE](../CONTEXT/CONTEXT-SPEC-TREE--ff15e9ff/task.md) |
 | DISCOVERY-DOC-FU-GITIGNORE | DISCOVERY-DOC-FU-GITIGNORE: stale untracked busctl binary at repo root is not gitignored | todo | P2 | [task.md](DISCOVERY-DOC-FU-GITIGNORE--9047f6a7/task.md) | — | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
 | PROOF-CHECK-FU-RECURSION | PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes wh… | todo | P2 | [task.md](PROOF-CHECK-FU-RECURSION--69eb6f56/task.md) | — | [84b76d5e-fe02-4651-9828-caba3d82606b](Proof-command-guard-a-run-pattern-that-matches-no-test-m--84b76d5e/task.md) |
+| TOOLING-2 | TOOLING-2: make docs/THREE-BUS-DOCKER.md's bash blocks a repeatable executable check | todo | P2 | [task.md](TOOLING-2--87d9e8d1/task.md) | — | [DEPLOY-6](../DEPLOY/DEPLOY-6--e12b75cd/task.md) |
 | fe0d9030-f95f-49b9-ab3b-68c96860df8a | proof-check.sh cannot authenticate go test evidence against adversarial TestMain output | todo | P2 | [task.md](proof-check.sh-cannot-authenticate-go-test-evidence-agai--fe0d9030/task.md) | — | [cea09b96-72db-40f1-84b4-c2e227eae1cf](proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) |
 | 3dbbd034-d699-4184-aec8-7efe59dd5c67 | Reconcile derived prose references against real blocks edges and report the ranked gap | todo | P3 | [task.md](Reconcile-derived-prose-references-against-real-blocks-e--3dbbd034/task.md) | — | [CONTEXT-SPEC-DEPS](../CONTEXT/CONTEXT-SPEC-DEPS--8280358d/task.md) |
 | 637fca2f-0fa6-439a-b6eb-361b681cdf80 | ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known,… | todo | P3 | [task.md](ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) | — | [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) [DEPLOY-2](../DEPLOY/DEPLOY-2--14f8ec3b/task.md) [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |

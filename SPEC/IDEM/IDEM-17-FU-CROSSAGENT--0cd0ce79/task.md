@@ -11,14 +11,30 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T20:33:53.464104+00:00 |
-| Updated | 2026-08-07T20:33:53.464104+00:00 |
+| Updated | 2026-08-14T23:03:20.600642+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-TBD by implementer -- e.g. go test -race -count=1 -run TestIdemCrashInjectionRestartCrossAgentKeyIsolation ./internal/idem/
+go test -race -count=1 -run TestIdemCrashInjectionRestartCrossAgentKeyIsolation ./internal/idem/
 ```
+
+## Status note
+
+CODE-COMPLETE, NOT COMMITTED (feature-runner, 2026-08-14). Do NOT complete until the integrator's commit lands; complete with that sha.
+
+WHAT IT CLOSES: the security gate's P2-4, a post-restart cross-agent applied-key oracle.
+
+SHAPE: a table test with two rows differing ONLY in payload. Row 1 holds every field publishFingerprint hashes -- op, recipient list, body, but NOT the sender -- equal to the crashed agent's, which is why agent B sends to itself.
+
+SIX GUARDS, EACH MUTATION-TESTED RED ALONE ON A DISTINCT LINE (this is the evidence, not the passing run): collapsed scope -> :1308 (Replayed / the oracle, row 1) and :1302 (ErrIdempotencyKeyReused, row 2 -- which proves the two rows are two BRANCHES and not one); Recover made a no-op -> :1279 (the vacuity guard); cross-agent evict -> :1322 (Count); collapsed denominator -> :1331 (Stats().Agents, added on the security gate's recommendation, and it fires while Count stays GREEN); cross-agent result overwrite -> :1341 (agent A's retry survival).
+
+PROOF: run in a clean `git archive HEAD` overlay carrying ONLY the feature-runner's four internal/idem files -- proof-check verdict=PASS class=test exit=0 tests_run=3 top_level=1 skipped=0 failed=0 empty_pkgs=0. Whole package: verdict=PASS tests_run=94 top_level=26 skipped=2 failed=0.
+
+GATES BOTH COMPLETED: reviewer PASS (PASS-WITH-NITS; all three nits fixed and RE-VERIFIED PASS by the same reviewer). security PASS (UPGRADED from CHANGES-REQUESTED after its one blocking finding was fixed and RE-VERIFIED by the same gate).
+
+FILES: internal/idem/crashinjection_test.go (test-only) plus the comment-only internal/idem/store.go, errors.go, scope.go shared with RELAY-FU-IDEM-METER-BY-PEER's residue.
 
 ## Description
 
@@ -31,7 +47,7 @@ No crash test proves the applied-key scope's CROSS-AGENT isolation survives reco
 > task's own field.
 
 
-_None recorded._
+- **relates to** [ff38f871-988a-4f2c-aa9a-febee4f3b15a](../../DOCS/AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -40,7 +56,17 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (in_progress)
+- [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
+- [RELAY-FU-IDEM-METER-BY-PEER](../../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ff38f871-988a-4f2c-aa9a-febee4f3b15a](../../DOCS/AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md) — AGENT_LOG entry + skipped-doc-gate justification for the 2026-08-14 internal/idem comment… (todo)
 
 ---
 

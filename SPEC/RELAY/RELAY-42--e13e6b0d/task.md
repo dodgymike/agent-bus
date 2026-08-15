@@ -56,6 +56,7 @@ _None recorded._
 
 
 - [RELAY-42](../RELAY-42--61c00e9f/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (cancelled)
+- [RELAY-49](../RELAY-49--efbcc6cf/task.md) — RELAY-49: the egress split horizon is applied to the DESTINATION bus, not to the NEXT HOP… (todo)
 
 ---
 

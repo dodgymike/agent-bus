@@ -40,6 +40,7 @@ SECURITY CROSS-REFERENCE (2026-08-14): relay mutual-TLS verification is fingerpr
 
 
 - **blocks** [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md)
+- **relates to** [RELAY-25-FU-CERTSHOW](../../RELAY/RELAY-25-FU-CERTSHOW--9c6813dc/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -73,6 +74,7 @@ SECURITY CROSS-REFERENCE (2026-08-14): relay mutual-TLS verification is fingerpr
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-RELAYGUARD-FU-BUSCERTPOOL](../MTLS-RELAYGUARD-FU-BUSCERTPOOL--c873482f/task.md) — MTLS-RELAYGUARD-FU-BUSCERTPOOL: relay client-cert verification must not build a CertPool… (todo)
 - [RELAY-2](../../RELAY/RELAY-2--654140d7/task.md) — RELAY-2: Message relay + ongoing roster sync across peers (done)
+- [RELAY-25-FU-CERTSHOW](../../RELAY/RELAY-25-FU-CERTSHOW--9c6813dc/task.md) — RELAY-25-FU-CERTSHOW: no read-only command exposes a bus's own TLS certificate fingerprint (todo)
 - [RELAY-3](../../RELAY/RELAY-3--e944edda/task.md) — RELAY-3: Loop prevention via traversed-bus path (done)
 - [RELAY-4](../../RELAY/RELAY-4--5ac738b4/task.md) — RELAY-4: Peer-down retry/backoff (done)
 - [RELAY-5](../../RELAY/RELAY-5--f3a31e10/task.md) — RELAY-5: Relay crash/loop integration test (done)

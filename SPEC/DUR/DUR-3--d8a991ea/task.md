@@ -48,8 +48,8 @@ _None recorded._
 - [CRYPTO-7](../../CRYPTO/CRYPTO-7--f90d7889/task.md) — CRYPTO-7: Ratchet-state durability and recovery (CRASH-INJECTION TEST REQUIRED) (deferred)
 - [DUR-9](../DUR-9--8234db61/task.md) — DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose… (done)
 - [IDEM-10](../../IDEM/IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (in_progress)
-- [IDEM-17](../../IDEM/IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (in_progress)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-17](../../IDEM/IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
 - [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](../../TOOLING/Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md) — Conjunction-masking vacuous-proof family: filtered-clause proof_cmds hidden by an unfilte… (todo)
 - [bd3cc650-da3f-483d-a48d-321ab2a8d1dd](../CONTRACTS.md-55-is-stale-says-no-WAL-record-types-wire-v--bd3cc650/task.md) — CONTRACTS.md:55 is stale -- says no WAL record types/wire version exist yet, false as of… (todo)
 

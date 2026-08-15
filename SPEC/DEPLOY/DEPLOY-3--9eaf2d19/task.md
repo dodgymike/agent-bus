@@ -34,6 +34,7 @@ A second Compose profile/override (e.g. docker-compose.multi.yml or a `relay` pr
 - **blocks** [ACK-12](../../ACK/ACK-12--17406b3a/task.md)
 - **blocks** [ART-18](../../ART/ART-18--ef028209/task.md)
 - **blocks** [LIVE-15](../../LIVE/LIVE-15--c9e65431/task.md)
+- **relates to** [ORCH-5](../../ORCH/ORCH-5--c4634621/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -56,6 +57,7 @@ A second Compose profile/override (e.g. docker-compose.multi.yml or a `relay` pr
 - [ACK-12](../../ACK/ACK-12--17406b3a/task.md) — ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance (todo)
 - [ART-18](../../ART/ART-18--ef028209/task.md) — ART-18: Single-bus and three-bus artifact failure/restart/partition acceptance (todo)
 - [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) — DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… (done)
+- [DEPLOY-6](../DEPLOY-6--e12b75cd/task.md) — DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook (done)
 - [LIVE-15](../../LIVE/LIVE-15--c9e65431/task.md) — LIVE-15: Single- and multi-bus liveness subscription acceptance (todo)
 - [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
 

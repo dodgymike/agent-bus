@@ -31,7 +31,7 @@ Forwarder.targets (internal/relay/forward.go:641) fans every LOCAL broadcast out
 > task's own field.
 
 
-_None recorded._
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC](../RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC--2d3224f0/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -41,6 +41,16 @@ _None recorded._
 
 
 - [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC](../RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC--2d3224f0/task.md) — RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC: Broadcast egress fsync amplification -- MUST b… (todo)
+- [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) — RELAY-24-BLOCKER-EGRESS-HANDSHAKE: this bus never DIALS a peer, so its relay Registry nev… (todo)
 
 ---
 

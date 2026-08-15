@@ -74,6 +74,8 @@ _None recorded._
 - [ADMIN-3](../ADMIN-3--76bfce36/task.md) — ADMIN-3: \`agent-busadm serve\` -- loopback-only console with a capability token and an emb… (todo)
 - [ADMIN-8](../ADMIN-8--7f550309/task.md) — ADMIN-8: GET /v1/status -- authenticated, in-process counters, exhaustive field-set pin,… (todo)
 - [ADMIN-C3](../ADMIN-C3--ca0653e3/task.md) — ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST… (todo)
+- [TUI-1](../../TUI/TUI-1--3ea68265/task.md) — TUI-1: DECIDE whether the terminal interface REPLACES ADMIN's browser console (D1) or com… (todo)
+- [TUI-4](../../TUI/TUI-4--11898d9b/task.md) — TUI-4: the read-only MONITOR view — renders LIVE/ADMIN data, re-specifies none of it (todo)
 
 ---
 

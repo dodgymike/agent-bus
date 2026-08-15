@@ -74,12 +74,12 @@ paths).
 - [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md) — RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per… (done)
 - [RELAY-15-FU-SWEEP-TOMBSTONE](../RELAY-15-FU-SWEEP-TOMBSTONE--da1ba9b7/task.md) — RELAY-15-FU-SWEEP-TOMBSTONE: Horizon-swept outbox jobs leave no durable abandonment record (todo)
 - [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (todo)
-- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (todo)
+- [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-42](../RELAY-42--61c00e9f/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (cancelled)
 - [RELAY-42](../RELAY-42--e13e6b0d/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (todo)
 - [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) — WAL foundation: authenticated multi-applier checkpoints over shared bus.wal (done)
 - [c6207571-8994-42c4-8f88-91292a259955](../RELAY-19-residual-outbox-record-covers-body-hash-size-bu--c6207571/task.md) — RELAY-19 residual: outbox record covers body hash+size but not sender/recipients/origin b… (todo)
-- [d7a0e7c4-6ea8-4fa7-8db5-c8044dce3a8d](../../INVITE/TestInviteNotDurableIsRefused-is-a-time-bomb-hardcoded-2--d7a0e7c4/task.md) — TestInviteNotDurableIsRefused is a time-bomb: hardcoded 2026-08-07 fixture date now falls… (todo)
+- [d7a0e7c4-6ea8-4fa7-8db5-c8044dce3a8d](../../INVITE/TestInviteNotDurableIsRefused-is-a-time-bomb-hardcoded-2--d7a0e7c4/task.md) — TestInviteNotDurableIsRefused is a time-bomb: hardcoded 2026-08-07 fixture date now falls… (done)
 - [eb47af9d-5342-4944-87e8-94f5e2399e8f](../RELAY-19-reviewer-P2s-deliberately-not-applied-preserved--eb47af9d/task.md) — RELAY-19 reviewer P2s deliberately not applied (preserved an md5-pinned PASS) -- apply th… (todo)
 
 ---

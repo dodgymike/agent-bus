@@ -53,6 +53,7 @@ Define precise semantics: local acceptance vs peer-hop receipt vs recipient deli
 
 - [ACK-11](../ACK-11--5567f490/task.md) — ACK-11: Document ACK/NACK semantics, operations and privacy limits (todo)
 - [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (todo)
+- [RELAY-47](../../RELAY/RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
 
 ---
 

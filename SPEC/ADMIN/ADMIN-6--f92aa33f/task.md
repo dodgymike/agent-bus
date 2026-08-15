@@ -73,6 +73,7 @@ _None recorded._
 
 - [ADMIN-5](../ADMIN-5--fc0b4a88/task.md) — ADMIN-5: roster + live flow view from the console's OWN long-poll (/v1/wait) -- metadata… (todo)
 - [ADMIN-7](../ADMIN-7--2147523d/task.md) — ADMIN-7: audit view in the console, for a CO-LOCATED bus only (D5) (todo)
+- [TUI-1](../../TUI/TUI-1--3ea68265/task.md) — TUI-1: DECIDE whether the terminal interface REPLACES ADMIN's browser console (D1) or com… (todo)
 
 ---
 

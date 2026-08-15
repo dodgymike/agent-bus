@@ -58,6 +58,7 @@ Every relayed message carries the list of bus ids it has already traversed; a bu
 - [CRYPTO-9](../../CRYPTO/CRYPTO-9--0a4562fc/task.md) — CRYPTO-9: Cross-bus relay of encrypted messages -- what an intermediate bus can and canno… (deferred)
 - [IDEM-15](../../IDEM/IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-7](../../IDEM/IDEM-7--1c490a08/task.md) — IDEM-7: Exactly-once application on the relay path -- dedupe on the ORIGIN's identity, co… (superseded)
+- [RELAY-49](../RELAY-49--efbcc6cf/task.md) — RELAY-49: the egress split horizon is applied to the DESTINATION bus, not to the NEXT HOP… (todo)
 - [RELAY-5](../RELAY-5--f3a31e10/task.md) — RELAY-5: Relay crash/loop integration test (done)
 - [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
 

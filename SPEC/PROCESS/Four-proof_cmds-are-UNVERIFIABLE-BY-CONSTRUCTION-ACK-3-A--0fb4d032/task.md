@@ -1,0 +1,65 @@
+# Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- unquoted regex/quoting splits as a shell pipeline
+
+| Field | Value |
+| --- | --- |
+| Public id | `0fb4d032-efff-4815-ac2b-4b8f1682ba08` |
+| Key | _(null in the export)_ |
+| Epic | [PROCESS](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | process |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-15T10:15:02.273084+00:00 |
+| Updated | 2026-08-15T10:15:02.273084+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+bash -c 'fail=0; for id in ACK-3 ACK-4 LIVE-3 AGENTIF-10; do v=$(bash scripts/proof-check.sh --task "$id" 2>&1 | tail -1); printf "%s: %s\n" "$id" "$v"; case "$v" in *verdict=FAIL*) fail=1;; esac; done; exit $fail'
+```
+
+## Description
+
+P2, one task covering all four. Each of these four `todo` tasks stores a proof_cmd that CANNOT PASS FOR ANY IMPLEMENTATION, confirmed by actually running scripts/proof-check.sh --task <id> against each, not by inspection:
+
+- ACK-3 (263c47fe-0675-4b6a-b842-8c8b909f35b7): `bash scripts/proof-check.sh 'go test -race -run ^TestRelayHopAckNack(Authentication|Correlation)$ ./internal/relay'`
+- ACK-4 (aeb32123-6c20-4c56-813b-a2bdcef51553): `bash scripts/proof-check.sh 'go test -race -run ^TestAck(RejectsForgery|RejectsReplay|DoesNotLeakRecipientState)$ ./internal/relay'`
+- LIVE-3 (c5c0a210-b3b0-4323-bec7-0318a7005105): `bash scripts/proof-check.sh 'go test -race -run ^TestHeartbeat(Authentication|Replay)$ ./internal/auth'`
+
+In all three of these, the outer single-quoting protects the string from the CALLING shell, but proof-check.sh's own inner `bash -c "$CMD"` (used to actually execute the go test invocation) re-parses the unescaped `(`, `|`, `)` in the -run regex as shell metacharacters -- a subshell-and-pipe, not a literal regex. Verified by direct execution: all three report inner class=prose, "not valid shell syntax", which propagates to the outer wrapper as verdict=FAIL exit=3 -- for ANY implementation, since the test named inside can never even be reached.
+
+- AGENTIF-10 (1e837ac9-3405-47ee-898a-10df5b541a5c): a differently-broken outer-quoting pattern -- the stored proof_cmd contains literal backslash-escaped quotes (`\\"go test ... \\\\"Test...\\\\" ...\\"`) that, once the shell processes the backslash escapes, leave the inner go test invocation wrapped in stray literal double-quote characters. Verified by direct execution: inner class=unrunnable ("segment 1 starts with '\"go', which is not an executable command here"), propagating to outer verdict=FAIL exit=3.
+
+The fix in every case is to quote the -run regex correctly, exactly as was just done for RELAY-24-BLOCKER-EGRESS's own proof_cmd -- e.g. `bash scripts/proof-check.sh 'go test -race -run "^TestFoo(A|B)$" ./internal/pkg'` so the inner bash -c sees the parens/pipe as protected literal text, not shell syntax.
+
+This is the failure mode this repo has hit repeatedly (CLAUDE.md's own "Verify -- and tell the truth" section exists because of it): a proof_cmd nobody has RUN looks identical to a working one until someone actually executes it. The remedy each time is the same -- run the repaired proof through proof-check.sh and quote its verdict, not just store a command and assume it works. After repair, expect VACUOUS (not PASS) on all four until their tests are actually written -- that is correct and expected, the point of this task is only to stop them being permanently UNVERIFIABLE/FAIL.
+
+Do NOT touch any other field on these four tasks -- title, priority, description, relations are untouched; only the proof_cmd string changes.
+
+## Relations (authoritative)
+
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
+
+
+- **relates to** [RELAY-24-BLOCKER-EGRESS](../../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (todo)
+- [ACK-4](../../ACK/ACK-4--aeb32123/task.md) — ACK-4: ACK/NACK authorization, anti-forgery and privacy review implementation (todo)
+- [AGENTIF-10](../../AGENTIF/AGENTIF-10--1e837ac9/task.md) — AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop (todo)
+- [LIVE-3](../../LIVE/LIVE-3--c5c0a210/task.md) — LIVE-3: Authenticated heartbeat request/response and replay resistance (todo)
+- [RELAY-24-BLOCKER-EGRESS](../../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._
