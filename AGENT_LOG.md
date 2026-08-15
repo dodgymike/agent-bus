@@ -3834,3 +3834,80 @@ consistent with the claim, but the specific total (552) and the filed id `82f35b
 confirmed — that id 404s against the live Spec Server, so it is reported here as unverified rather
 than restated as fact.
 boundary and was deliberately not touched.
+
+## 2026-08-15 — RELAY-24-FU-STOREMSGLOOKUP (`c6530638-7cca-4404-bc61-88ca6c2d30b9`): docs closed (`documentation`)
+
+Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation (this entry,
+task `e02aa062-a0ec-48b6-9f39-eeee64801580`). Code was committed separately by `integrator`; this
+entry logs only the documentation follow-up, which the reviewer made a completion condition for the
+parent task.
+
+**Code surface documented (not shipped by this entry):** `internal/store` gained a point lookup by
+local message id, a correlation-key lookup by origin message id, and the field that backs both —
+`Message.OriginMessageID`, `Message.OriginID()`, `Message.WithOriginMessageID()`,
+`Record.OriginMessageID` (JSON `origin_message_id,omitempty`), `Store.ByID()`,
+`Store.ByOriginMessageID()`, `Store.DuplicateOriginMessageIDs()`. No existing exported signature
+changed. This is internal wiring for `relay.Forwarder`, reachable from no HTTP route, CLI subcommand
+or `AGENT_PROTOCOL.md` entry today — invariant 7 does not apply because nothing agent-facing shipped.
+
+**Documentation updated:** `CONTRACTS-ONDISK.md` (new section, "`OriginMessageID` — the relay
+correlation key": the field, the explicit no-version-bump ruling and why bumping would have been
+destructive, both compatibility directions, and operator impact — rebuild only, no migration);
+`DECISIONS.md` (new dated section, two decisions: the no-version-bump ruling with its "reserving a
+number would have been the destructive choice here" meta-point, and the duplicate-`OriginMessageID`
+resolution — last-writer-wins, retained, peer-triggerable, with the log-once-per-process throttle's
+known unconditional-throttle limitation filed as `RELAY-24-FU-STOREMSGLOOKUP-THROTTLE`,
+`cc7a463e-9804-41d4-8c5c-4d0e66efe2a0`, P3).
+
+**Invariants read in full before writing:** 1 (server-authoritative, never-reused ids — bears on
+whether `byID`/`byOrigin` mint or rewind anything; they do neither, and a pruned or discarded id is
+never re-resolvable through them, which is the property `CONTRACTS-ONDISK.md` and `DECISIONS.md`
+both state), 4 (nothing acknowledged before durable, and its 2026-08-02 narrowing — the reason a
+duplicate origin id is retained and returns nil rather than erroring after the fsync), 6 (log is
+metadata/routing only; every discard logged loudly — bears on whether `OriginMessageID` belongs in
+the audit log at all; it does not, it lives only in the message record), 10 (idempotency and the
+three-case split — the duplicate-origin resolution is a peer-reachable event, not a protocol
+violation, and correctly does not disconnect anything).
+
+**Gates on the parent task, restated here because they are the completion evidence this follow-up
+exists to unblock:** reviewer PASS (all 8 ruled questions clean, including the version-bump question
+answered explicitly); security round 1 CHANGES-REQUESTED with two BLOCKING findings — M1, a code
+comment in `internal/store/store.go` asserted the duplicate-origin branch was "not client-reachable
+in the ordinary sense," which was FALSE (the relay applied-key scope is the triple `(sender,
+idem.OpRelay, origin message id)` and the sender label is peer-asserted, so one peer can reach it
+twice under two attested sender labels in its own namespace); M2, `Store.ByID`/`ByOriginMessageID`
+bypass `Message.VisibleTo` (the read path's authorization boundary) and were guarded only by a doc
+comment, one selector-chain away from an accidental unauthorized read
+(`s.hub.Store().ByID(clientSuppliedID)` compiles from any `internal/httpapi` handler). Both fixed —
+M1's comments corrected to state the true reachability, consequence and operator-facing counter
+semantics; M2 closed with an AST guard (`internal/store/guard_relay24fu_test.go`) barring the two
+lookup methods from `internal/httpapi`, `client/` and `cmd/agent-busctl`, proven red by injected
+violations in all three directories — and RE-VERIFIED PASS by the same security gate.
+
+**Proof result — the task's OWN stored `proof_cmd`, re-run by the integrator from a clean
+`git archive HEAD` overlay through the overlay's own `proof-check.sh`:**
+`verdict=PASS class=test exit=0 tests_run=17 top_level=2 skipped=0 failed=0`.
+This matches the reviewer's independently-recorded `tests_run=17 top_level=2` exactly.
+The whole `internal/store` package was also run, since this task's crash-injection and AST
+guard tests fall OUTSIDE its narrow proof:
+`verdict=PASS class=test exit=0 tests_run=169 top_level=30 skipped=0 failed=0`.
+
+> **Correction, recorded rather than quietly amended.** This entry first cited
+> `tests_run=2386 top_level=598 skipped=40` as the proof result. That is the FULL-SUITE
+> figure across store/hub/wal/relay/httpapi, not this proof's — the orchestrator relayed it
+> to the documentation agent as if it were the task's own verdict. Caught by the integrator,
+> which re-ran the stored `proof_cmd` and got 17. Noted because a proof figure inflated by
+> two orders of magnitude reads as much stronger evidence than the task actually has, and the
+> narrow number is the one that can be falsified.
+>
+> Separately, this task's stored `proof_cmd` had ALSO been broken until shortly before the
+> commit: an unquoted `|` was re-parsed as a shell pipe, giving `verdict=UNVERIFIABLE`
+> (exit 3) — it could never have passed. Corrected to the double-quoted `-run` form.
+
+**Defect found, not fixed, filed rather than silently repeated:** `store.copyMessage` deep-copies
+`Body`, `Recipients` and `BusPath` but not `Signature` (also a `[]byte`), pre-existing on the live
+`Since` read path and widened by the two new lookups. Filed as
+`RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY` (`6e13a7d9-6ff0-49bb-a102-6ee1b69e9b51`, P1).
+
+**No `SPEC.md`/`SPEC/` edit, no `.go` file touched, and nothing committed by this entry's author** —
+per the brief, `integrator` owns the code commit for the parent task separately.

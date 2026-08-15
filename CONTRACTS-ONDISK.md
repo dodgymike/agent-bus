@@ -407,6 +407,56 @@ the applier boundary today is a composite entry expanded to several appliers
 ever may. `store.Append` enforces the rule directly — a position at or below the highest already
 appended is logged at ERROR as an invariant-1 incident.
 
+## `OriginMessageID` — the relay correlation key (`RELAY-24-FU-STOREMSGLOOKUP`, added 2026-08-15)
+
+`store.Record` gains one new field: **`origin_message_id`**, Go tag `json:"origin_message_id,omitempty"`
+(`internal/store/message.go`). It is the CORRELATION KEY linking a message this bus retains back to
+the message id it carried on the bus that originated it — set only on a message ingested over a
+relay hop; empty (and therefore absent from the JSON, via `omitempty`) on a message this bus
+originated itself, which is every record any build wrote before this change.
+
+**This is a third, deliberately distinct notion from `Seq` and `Pos`** (see "The DELIVERY POSITION,
+and why it is not on disk" above, which lays out the same distinction between those two).
+`OriginMessageID` takes part in **no ordering, no cursor and no retention decision** — it is not
+compared, sorted or binary-searched on anywhere; it exists purely so a relayed message can be looked
+up again after a restart, by `Store.ByID` (local id → message) and `Store.ByOriginMessageID` (origin
+id → local message, falling back to `ByID` for the locally-originated case where `ID` already **is**
+the origin id). `Store.ByID`'s value is a `Pos` used strictly as a LOCATOR into the retained-window
+index, never as a second delivery position.
+
+**`store.RecordVersion` DELIBERATELY STAYS AT 2. No number was reserved from the Spec Server
+`ondisk-format-version` namespace for this change, and that is not an oversight:**
+
+> `RecordVersion`'s own doc says an added OPTIONAL field does not move it, and `Record` decoding is
+> non-strict about unknown fields. Bumping to 3 would have been **actively harmful**: `Record.Decode`
+> does an EXACT version match, so it would discard all existing message history on upgrade.
+
+A future maintainer who sees a new field with no version bump and "fixes" it by reserving one and
+bumping `RecordVersion` would make every existing data directory's history undecodable at the next
+start — `Decode` refuses on `rec.V != RecordVersion` with no back-compat tolerance for a lower
+number. See `DECISIONS.md`, 2026-08-15, for the full ruling (the reviewer considered and rejected
+the bump).
+
+**Compatibility, both directions, and it is the reason the field is safe to ship this way:**
+- An OLD build reading a NEW record simply never sees the field (non-strict unknown-field decoding)
+  and serves the message normally — it only loses the relay correlation, which it has no use for
+  anyway.
+- A NEW build reading an OLD record gets `OriginMessageID == ""`, which is the CORRECT answer, not a
+  loss: a pre-relay bus originated everything it holds, so "no recorded origin" and "this bus is the
+  origin" coincide exactly.
+
+**Operator impact: rebuild the binary. No re-enrolment, no migration, no new file.** The field rides
+inside the existing message record — same PREPARE frame, same fsync, same `bus.wal` — so there is
+nothing to migrate and no new on-disk file is introduced by this change.
+
+**Duplicate origin ids are resolved last-writer-wins, not refused, and the resolution is
+peer-triggerable — see `DECISIONS.md`, 2026-08-15, for the full reasoning and the known throttle
+limitation** (`RELAY-24-FU-STOREMSGLOOKUP-THROTTLE`). In outline: `store.Append` retains BOTH
+messages (refusing after the record is already fsynced would orphan committed data, invariant 4),
+points the `byOrigin` index at the newer one, and counts every occurrence in the exported
+`Store.DuplicateOriginMessageIDs() uint64`, while the operator-facing log line itself is emitted at
+most once per process.
+
 ## The write-ahead log at startup (added 2026-08-02)
 
 `cmd/agent-bus`'s `run()` now opens `internal/wal` with

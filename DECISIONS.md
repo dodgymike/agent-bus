@@ -5573,3 +5573,75 @@ the non-monotone-position fault). It is amended to read:
 > was deleted, and `internal/store` now emits a single ERROR line, on the non-monotone-position fault.
 
 <!-- ===== END 2026-08-14 SIGN-1-FU-REORDER-WATERMARK ===== -->
+
+<!-- ===== BEGIN 2026-08-15 RELAY-24-FU-STOREMSGLOOKUP ===== -->
+
+## 2026-08-15 — RELAY-24-FU-STOREMSGLOOKUP: no version bump for `origin_message_id`, and duplicate-origin-id resolution
+
+Spec Server task `c6530638-7cca-4404-bc61-88ca6c2d30b9` (P1), documentation follow-up
+`e02aa062-a0ec-48b6-9f39-eeee64801580`. `internal/store` gained a point lookup by local message id
+(`Store.ByID`) and a correlation-key lookup by origin message id (`Store.ByOriginMessageID`), backing
+the new `Message.OriginMessageID` / `Record.OriginMessageID` field so `relay.Forwarder` can resume a
+relayed message after a restart. Full surface and on-disk shape are in `CONTRACTS-ONDISK.md`,
+"`OriginMessageID` — the relay correlation key"; this entry records the two decisions the reviewer
+and security ruled on, not the surface itself.
+
+### Decision 1 — `store.RecordVersion` stays at 2; reserving a number would have been the destructive choice
+
+`origin_message_id` is an additive, `omitempty` field on `store.Record`. The reviewer considered and
+explicitly rejected bumping `RecordVersion` to 3 and reserving that number from the Spec Server
+`ondisk-format-version` namespace. The reasoning, stated in the reviewer's own ruling and restated
+here because a future maintainer will otherwise "fix" this destructively:
+
+> `RecordVersion`'s own doc says an added OPTIONAL field does not move it, and `Record` decoding is
+> non-strict about unknown fields. Bumping to 3 would have been **actively harmful**: `Record.Decode`
+> does an EXACT version match, so it would discard all existing message history on upgrade.
+
+**The meta-point worth recording on its own:** the standing rule in this repo (`CLAUDE.md`, "Parallel-
+agent coordination") is that a record-type number or format version is **always reserved, never
+hand-picked**, precisely so two agents working in parallel cannot collide on the same number. This is
+a case where following that rule to the letter — reserving a number and bumping `RecordVersion` for
+this field — would itself have been the destructive act, because `Decode`'s exact-version match turns
+any bump into a silent history-discarding event for every existing data directory on upgrade. The
+rule is about **collision avoidance for numbers that must move**; it was never a mandate that every
+schema-adjacent change moves a number. Reserving one here would have "won" the coordination protocol
+while losing the data it exists to protect. No reservation was taken, `RecordVersion` is unchanged at
+2, and the reviewer's PASS explicitly ruled on this point (see the task's `kind=response` notes,
+2026-08-14, question 4).
+
+### Decision 2 — a duplicate `OriginMessageID` is resolved last-writer-wins, retained, never refused; it is peer-triggerable
+
+Two distinct messages can arrive carrying the SAME `OriginMessageID` — concretely, one peer bus
+presenting one origin message id under two different attested sender labels within its own
+namespace, because the relay-ingest applied-key scope is the triple `(sender, idem.OpRelay, origin
+message id)` (`idem.NewAgentScope`) and `hub.relayedOrigin` binds only the BUS halves of sender and
+origin id, never the agent half — so the same origin id can be admitted twice under two agent labels
+the same peer bus controls. `relay.PeerStore.AttestedSignerKey` bounds the blast radius to that
+peer's OWN namespace; it cannot forge another origin bus's correlation.
+
+**Resolution:** `store.Append` retains BOTH messages (refusing after the record is already fsynced
+would orphan a committed record — invariant 4, and the same reasoning as
+`SIGN-1-FU-OUTOFORDER-POISON`'s non-monotone-position branch), points the `byOrigin` index at the
+NEWER message only, so the older copy becomes unresolvable by origin id (still resolvable by its own
+local id via `Store.ByID`), logs the event, and unconditionally increments the exported counter
+`Store.DuplicateOriginMessageIDs() uint64` — every occurrence is counted, whether or not it is logged.
+Nothing is refused, nothing disconnects (invariant 10: this is reachable by a merely buggy or
+adversarial-within-its-own-namespace peer, not a protocol violation against a shared connection).
+
+**Known limitation, filed rather than fixed: `RELAY-24-FU-STOREMSGLOOKUP-THROTTLE`
+(`cc7a463e-9804-41d4-8c5c-4d0e66efe2a0`, P3).** The operator-facing ERROR log line is throttled to
+once per process (mirroring `hub.idemCapWarned`'s existing shape), but the throttle is
+**unconditional** — it is not scoped per origin bus or per time window. A peer can therefore burn the
+single log line early with one duplicate, after which a later, genuinely write-path- or
+recovery-caused duplicate (the case this diagnostic exists to catch) produces no log line at all. The
+counter (`DuplicateOriginMessageIDs`) still moves on every occurrence regardless of the log throttle,
+so it remains the source of truth for operators correlating this condition; the log line is a
+convenience, not the guarantee. This was accepted as a P3 rather than blocking, because the counter
+is unaffected and the log-line loss is a diagnostics gap, not a data-loss or authorization gap.
+
+Also filed from this task's security round, for completeness of the record: a pre-existing defect in
+`store.copyMessage` (deep-copies `Body`, `Recipients` and `BusPath` but not `Signature`, also a
+`[]byte`, on the live `Since` read path — the two new lookups widen an existing gap rather than
+introduce it), `RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY` (`6e13a7d9-6ff0-49bb-a102-6ee1b69e9b51`, P1).
+
+<!-- ===== END 2026-08-15 RELAY-24-FU-STOREMSGLOOKUP ===== -->
