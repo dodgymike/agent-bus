@@ -20,12 +20,22 @@
 # SECURITY CONSTRAINT -- READ BEFORE TOUCHING `command:` OR ADDING `ports:`.
 #
 # This service is deliberately UNREACHABLE from outside its own container.
-# `command:` below repeats the binary's own loopback-only default
-# (-listen=127.0.0.1:8080) rather than omitting the flag, specifically so the
+# `command:` below sets -listen=127.0.0.1:8080 explicitly, specifically so the
 # constraint is visible here and not just inherited silently. No `ports:`
 # section is declared: publishing 127.0.0.1:8080 would map nothing, because
 # a published port connects to the CONTAINER's interface, and this process
 # never binds it -- only its own loopback, inside its own network namespace.
+#
+# NOTE, 2026-08-15 (DEPLOY-6): that flag is now an OVERRIDE, not a repetition.
+# The image's own CMD is -listen=:8080, because the paragraph immediately above
+# describes exactly what went wrong for anyone who DID want a reachable bus:
+# `docker run -p 8080:8080 agent-bus` published a port that forwarded into the
+# namespace and found nothing listening. The BINARY's default is still
+# 127.0.0.1:8080 (invariant 11) and is unchanged. This service keeps the
+# loopback bind on purpose, for the reasons stated here, and because the line
+# is explicit it is unaffected by the image change. A host-reachable multi-bus
+# setup is docs/THREE-BUS-DOCKER.md, not this file.
+#
 # WHY, UPDATED 2026-08-07 (MTLS-LISTENER). The original reason written here
 # was that enrolment and session material crossed the wire in CLEARTEXT. That
 # is no longer true: the bus serves TLS and ONLY TLS, and refuses to start
@@ -97,8 +107,11 @@ services:
     restart: unless-stopped
 
     # No new configuration surface: every flag here already exists on the
-    # binary (see `agent-bus -h` / cmd/agent-bus/main.go). -listen is repeated
-    # at its own default deliberately -- see the constraint above.
+    # binary (see `agent-bus -h` / cmd/agent-bus/main.go). -listen is set
+    # EXPLICITLY here, and since 2026-08-15 that is an OVERRIDE of the image's
+    # CMD (-listen=:8080), not a repetition of a default -- see the NOTE in the
+    # constraint above. It still matches the BINARY's default; it no longer
+    # matches the IMAGE's, which is exactly why it must stay written out.
     command:
       - "-listen=127.0.0.1:8080"
       - "-data-dir=/data"

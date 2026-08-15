@@ -304,6 +304,38 @@ disabling verification outright.
 
 ---
 
+### Container image (`Dockerfile`) — CONTRACT (`DEPLOY-6`, 2026-08-15)
+
+The image is a deployment surface with its own defaults, and **one of them deliberately differs from
+the binary's**. Operator runbook: `docs/THREE-BUS-DOCKER.md`.
+
+| Image property | Value | Notes |
+| --- | --- | --- |
+| `ENTRYPOINT` | `/usr/local/bin/agent-bus` | the server. Append flags on the `docker run` line to override `CMD`. |
+| `CMD` | `["-listen=:8080","-data-dir=/data","-log-level=info"]` | **`-listen` is `:8080`, NOT the binary's `127.0.0.1:8080`.** See below. |
+| binaries shipped | `/usr/local/bin/agent-bus` **and** `/usr/local/bin/agent-busctl` | invariant 7 — an image with no client ships a bus no agent can enrol with. Reach the client with `--entrypoint /usr/local/bin/agent-busctl`. |
+| `/data` | `agentbus:agentbus`, `0700`, declared `VOLUME` | bus id, TLS cert + keys, signing key, WAL + MAC key, invite table, peer config. |
+| `/identity` | `agentbus:agentbus`, `0700`, **not** a declared `VOLUME` | mount point for an *agent's* identity dir (`agent-busctl --identity`). Pre-created so a fresh named volume inherits non-root ownership; not declared `VOLUME` so a plain server run does not create a stray anonymous volume. |
+| user | `USER agentbus:agentbus` — the account is created with a fixed `uid`/`gid` of `10001` | the NAMES are what the `USER` line and the image config record; the numbers are pinned at `adduser`/`addgroup` time so a volume's owner is stable and predictable across rebuilds. |
+| `EXPOSE` | `8080` | documentation only; publishing is `docker run -p` / compose `ports:`. |
+
+**`-listen=:8080` in the image is not a narrowing of invariant 11's loopback default.** The default in
+`cmd/agent-bus/main.go` is unchanged and stays `127.0.0.1:8080`; a bare `agent-bus` on a host still
+binds loopback. What differs is one image's `CMD`, because a container has a stronger isolation
+primitive than the interface a process binds: the **network namespace**. `:8080` inside an
+unpublished namespace is not reachable from off the host. It IS reachable from the host itself, at
+the container's bridge address — `-p` governs off-host reach, not host-to-container reach — so on a
+shared machine treat local users as able to reach the bus regardless of `-p`. The previous value made
+`docker run -p 8080:8080` publish a port that forwarded into the namespace and found nothing
+listening — the bus started, reported itself healthy to its own in-namespace probe, and was
+reachable by no one. Full reasoning: `DECISIONS.md` 2026-08-15 (DEPLOY-6), and the comment block
+above the `CMD` line itself.
+
+**`docker-compose.yml` is unaffected**: its `command:` sets `-listen=127.0.0.1:8080` explicitly, so
+that service stays deliberately unreachable from outside its container, as its own header documents.
+
+---
+
 ### `agent-bus peer add|list|remove` — the operator's federation configuration
 
 Added 2026-08-08 by `RELAY-12`. Source: `cmd/agent-bus/peer.go`. Durable records:

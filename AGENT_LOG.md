@@ -4168,3 +4168,147 @@ Verification: `git status --porcelain -- CONTRACTS-ONDISK.md CONTRACTS-CLI.md DE
 AGENT_LOG.md` clean before edits; `grep -n "Onward multi-hop relay is deliberately not implemented"
 CONTRACTS-ONDISK.md` and `grep -n "No running bus produces a multi-hop value today"
 CONTRACTS-CLI.md` both matched pre-fix (RED, observed) and neither matches post-fix.
+
+## 2026-08-15 — `DEPLOY-6` (`e12b75cd-c17e-4f73-b4b5-0b04dd868455`): a container image that actually runs, plus the three-bus runbook (`feature-runner`)
+
+**Task, one sentence.** Make `docker run -t <image>` produce a usable bus, and write
+`docs/THREE-BUS-DOCKER.md` — an operator runbook for a federated A↔B↔C setup including
+initialisation.
+
+**Invariants read in full before starting:** 3 (invite-only enrolment; sessions are opaque,
+in-memory, non-durable handles), 6 (append-only log is metadata and routing only), 11 (TLS required,
+mutual, self-signed, no CA and no TOFU, loopback default stays, never disable verification).
+
+**Environment note.** The snap-packaged `docker` CLI on this box is broken — the wrapper cannot
+create its user data directory because `/home/mike` is a symlink into `/mnt/sdb4`, so every
+invocation exits 1 before reaching the daemon. The daemon itself is healthy (29.6.1, API 1.55) and
+answers on `/var/run/docker.sock`. Worked around with the upstream static client extracted to
+`/tmp/dockerbin/docker/docker`; nothing in the repo depends on that. **Everything below was actually
+executed** — no claim here is static reasoning about a build that was not run.
+
+### Finding that preceded the task as briefed: the image did not build at all
+
+`docker build .` at `d5018a6` fails in the builder stage:
+`cmd/agent-bus/relaydial.go:66:2: no required module provides package
+github.com/dodgymike/agent-bus/client`. The stage copies `go.mod`, `cmd/` and `internal/` only, and
+`client/` is at the module root because invariant 7 forbids it living under `internal/`. One
+`COPY client/ ./client/` fixes it. Nothing in CI builds this image, which is why it rotted silently.
+
+### The briefed blocker, confirmed and fixed at the image layer
+
+`CMD` was `-listen=127.0.0.1:8080` — the container binds its OWN namespace's loopback, so
+`docker run -p …` publishes a port with nothing behind it. Changed to `-listen=:8080`;
+`defaultListen` in `cmd/agent-bus/main.go` is untouched, and `docker-compose.yml` sets the loopback
+bind explicitly in `command:` so that service is unaffected (re-verified: `compose up -d --build`
+still reports `healthy`). Reasoning is stated at length above the `CMD` line, in `CONTRACTS-CLI.md`
+and in `DECISIONS.md`: the container's network NAMESPACE is the isolation boundary that loopback
+provides for a bare process, so this is a change of layer, not a narrowing of invariant 11.
+
+RED/GREEN, two otherwise identical images both published to host loopback, probed with
+`agent-bus healthcheck` (real x509 verification against the bus's own certificate — not `curl -k`,
+which invariant 11 forbids even as a diagnostic):
+
+```
+old CMD  agent-bus healthcheck … -addr=127.0.0.1:18098  ->  read: connection reset by peer   exit 1
+new CMD  agent-bus healthcheck … -addr=127.0.0.1:18087  ->  ok https://127.0.0.1:18087/healthz exit 0
+```
+
+### Also changed, and why it is not scope creep
+
+`agent-busctl` is now built and shipped in the runtime image, and `/identity` is pre-created
+`agentbus:agentbus 0700` (not declared `VOLUME`). Deliverable (b) is unreachable without them: an
+image with no client ships a bus no agent can enrol with unless the operator has a Go toolchain,
+which contradicts both the ask and invariant 7. A named volume mounted onto a path absent from the
+image is created `root:root 0755`, which the non-root user cannot write its private key into.
+
+### Three-bus runbook — verified end to end, containers only
+
+Three buses on a user-defined bridge network, A↔B↔C, A and C NOT peered. An agent on A sent to an
+agent on C; C's watch returned the message and each bus's audit recorded the path as it saw it:
+`bus-a [A]`, `bus-b [A,B]`, `bus-c [A,B,C]`.
+
+**Two corrections to the brief this task was given**, both established by running the thing:
+
+1. **`-route-for <C>` on A was missing from the brief and is load-bearing.** Withdrawing exactly
+   that one route record (`peer remove -bus-id <C> -route`, leaving trust intact) and retrying the
+   send returns `{"ok":false,"error":"send: the bus refused the request: unknown recipient",
+   "status":404,"exit_code":7}`. Trust says whose messages you accept, not where to send them.
+2. **There is no way to revoke an invite.** `agent-bus invite` has exactly one subcommand, `mint`;
+   `internal/invite` supports revocation in the store and invariant 3 requires it, but the operator
+   surface is unbuilt (`cmd/agent-bus/invite.go:646` says so: "revoke it (INVITE-REVOKE) once that
+   surface exists"). TTL is therefore the only control, which changes the pool-minting advice.
+
+Confirmed rather than assumed: `key export-public` IS a read-only source for the signing key, while
+`invite mint` remains the only compiled source of `bus_cert_fingerprint` (`RELAY-25-FU-CERTSHOW`);
+the CLI does refuse a `0664` invite file with an explicit remedy, and `--invite-file -` avoids the
+question entirely by reading the blob from stdin; and the three-bus `message_id` correlation gap is
+real — sender saw `bus-t4yr4qzepvv7zjd6-11` on A, recipient saw `bus-rupqkacueu6qce45-9` on C. The
+runbook states that `scripts/fed-smoke.sh` exits 1 for that reason and must not be read as a green
+check.
+
+An environment trap worth recording because the error message points the wrong way: on this
+snap-packaged daemon, `/tmp` inside the daemon is **not** the host's `/tmp`, so `-v /tmp/x:/identity`
+mounts an EMPTY directory and the CLI correctly reports "no invite file at /identity/invite.json"
+for a file plainly visible on the host. The runbook recommends named volumes and stdin invites.
+
+### Verification
+
+`git status --porcelain -- Dockerfile docker-compose.yml CONTRACTS-CLI.md` was clean before editing;
+`git diff HEAD` on each was re-read hunk by hunk afterwards to confirm no concurrent agent's text was
+swept in (`CONTRACTS-CLI.md`: 30 insertions, 0 deletions). No Go files changed;
+`"$(go env GOROOT)/bin/gofmt" -l .` printed EMPTY output, `go build ./...` and `go vet ./...` clean.
+
+Proof run in a clean overlay of `HEAD` plus only the files this task owns, using the OVERLAY's
+`scripts/proof-check.sh`:
+
+```
+proof-check: verdict=PASS class=file-assertion,build exit=0 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0
+```
+
+The proof builds the image, publishes it to host loopback, and probes it from a container in the
+HOST network namespace reading the bus's own certificate from its data volume — image-only, verified
+TLS, and observed RED against the pre-fix `CMD` (`connection reset by peer`, exit 1) before being
+observed GREEN.
+
+### `DEPLOY-6` — gate round 2 (same task, appended 2026-08-15)
+
+Both gates returned **CHANGES-REQUIRED** on the first pass and **both independently found the same
+P1/HIGH**, which the author had also just found by re-reading: the runbook's `ctl()` helper placed
+`docker run`'s `-v` AFTER the image name, so it became argv for `agent-busctl`
+(`flag provided but not defined: -v`, exit 2) and the identity volume was never mounted. Four call
+sites were dead. The security tail is worth keeping: the *obvious* wrong fix — deleting the `-v` —
+writes the agent's Ed25519 private key into the container's writable layer instead of a named volume.
+
+**The systemic fix matters more than the typo.** Part 3 of the runbook is now EXTRACTED FROM THE
+MARKDOWN AND EXECUTED VERBATIM (every ```bash block from §3.1 to §3.9 piped to bash) rather than
+transcribed by hand into a test script. That is what caught it, and it is the only way a documented
+command and an executed command are the same object. Exits 0; `bus_path` `[A]`, `[A,B]`, `[A,B,C]`.
+The "Verification status" header was re-scoped to claim exactly that, rather than the broader "every
+command below was executed", which the gates correctly showed was false for those four lines.
+
+Security MEDIUM, applied in three places (Dockerfile `CMD` comment, runbook §1, `DECISIONS.md`): the
+residual-risk statement credited the invite gate without saying how narrow it is. **The gate bounds
+who can BECOME an agent and nothing else** — the routes that necessarily cannot authenticate have no
+rate limiting at all (`AUTH-1-FU-RATELIMIT`), and two consequences are documented in our own code:
+`internal/auth/session.go` states an anonymous flooder can fill the session table and deny session
+establishment until entries expire (and says that must not be read as fixed), and `handleSessionBegin`
+answers distinguishably for unknown / known-unbound / bound agents, an enumeration oracle once the bus
+id is read from the public `/v1/info`. Neither is introduced here; publishing the port is what makes
+them reachable, and this is the document read before choosing a `-p` spelling.
+
+Security LOWs: the invite-pool example now runs `( umask 077; … > invites.ndjson )` instead of
+`chmod 0600`-ing after the loop, and the runbook says not to `export` a variable holding an invite
+blob. Reviewer P2s 1-5 applied: compose's `-listen` comment now says OVERRIDE rather than
+"repeated at its own default"; `CONTRACTS-CLI.md`'s user row says `USER agentbus:agentbus` with
+uid/gid pinned at `adduser` time rather than implying a numeric `USER` line; the certificate-SAN
+claim is scoped to the image's wildcard bind; §3.9 now says `log` REFUSES against a running bus
+(exit 3) rather than merely reading a stale file, and §2's fact 2 was generalised to name
+`invite mint`, `peer add`, `key export-public` and `log` — **verified directly: all three exit 3
+against a running bus, and `healthcheck` exits 0**; and §2's pool example address now matches §1's.
+
+Overlay proof re-run against the final files, HEAD's `scripts/proof-check.sh`:
+`proof-check: verdict=PASS class=file-assertion,build exit=0 tests_run=0 top_level=0 skipped=0 failed=0 empty_pkgs=0`
+
+Deliberately NOT fixed here, filed instead: the reviewer noted `CLAUDE.md` still states enrolment is
+not yet invite-gated (`InviteRequired: false`), which is stale at HEAD. `CLAUDE.md` is configuration
+and outside this task's file boundary.

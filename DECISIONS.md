@@ -6180,3 +6180,196 @@ horizon, `relay.CheckIncomingPath`'s ingress backstop) and the fan-out bound abo
 mutation — stubbing each guard out independently turns a three-bus ring test RED — not by inspection
 alone, per this project's rule that "the code looks right" is not evidence for a durability or
 loop-safety claim.
+
+## 2026-08-15 — DEPLOY-6: the container CMD binds `:8080`, and the image was unbuildable
+
+Two deliverables: an image a bare `docker run -t` starts usefully, and `docs/THREE-BUS-DOCKER.md`,
+an operator runbook for a federated A↔B↔C setup. Three decisions came out of it.
+
+### 1. The image did not build at all, and had not for some time
+
+Before any design question could be asked, `docker build .` failed at `d5018a6`:
+
+```
+cmd/agent-bus/relaydial.go:66:2: no required module provides package
+  github.com/dodgymike/agent-bus/client
+```
+
+The builder stage copies `go.mod`, `cmd/` and `internal/` — and nothing else. That was complete when
+DEPLOY-1 wrote it. It stopped being complete the moment `cmd/agent-bus` began importing
+`github.com/dodgymike/agent-bus/client` for relay certificate pinning, because **`client/` cannot
+live under `internal/`** — invariant 7 requires an agent to be able to embed it, so it sits at the
+module root and is the one first-party tree that neither existing `COPY` line covers. The fix is one
+`COPY client/ ./client/`, but the lesson is worth recording: **the Dockerfile enumerates the source
+tree, so invariant 7's placement rule has a build-system consequence.** Any future package placed at
+the module root for the same reason needs a `COPY` line, and nothing detects the omission except a
+build. Nothing in CI builds this image today — filed as a follow-up.
+
+### 2. `CMD` binds `:8080`; the BINARY's loopback default is untouched
+
+The image's `CMD` was `-listen=127.0.0.1:8080`, repeating the binary's default. Inside a container
+that is not a conservative choice, it is a broken one: the process binds the loopback interface of
+its **own network namespace**, so `docker run -p 8080:8080 agent-bus` publishes a port that forwards
+into the namespace and finds nothing listening. The bus starts, passes its own in-namespace
+`HEALTHCHECK`, reports healthy, and is reachable by nobody. Observed directly — two otherwise
+identical images, both published to host loopback:
+
+```
+old CMD (127.0.0.1:8080): ... read: connection reset by peer          -> probe exit 1
+new CMD (:8080):          ok https://127.0.0.1:18087/healthz          -> probe exit 0
+```
+
+(The probe is `agent-bus healthcheck` against the container's own certificate — a real x509
+verification, not `curl -k`. Invariant 11 forbids disabling verification to make something work, and
+that applies to a diagnostic as much as to the product.)
+
+**Why this does not narrow invariant 11.** Invariant 11 keeps `-listen 127.0.0.1:8080` because it
+"bounds exposure, it does not replace TLS". That is a claim about **reachability**, expressed in the
+only isolation primitive a bare process has: the interface it binds. A container has a stronger
+primitive. The network namespace is the boundary, and `:8080` in an unpublished namespace is
+reachable by strictly nobody outside it — the same property loopback buys on a host. So the change
+is made **at the layer that knows it is in a namespace**, and `defaultListen` in
+`cmd/agent-bus/main.go` is deliberately unchanged. A bare `agent-bus` on a host still binds loopback,
+and `docker-compose.yml` still sets `-listen=127.0.0.1:8080` explicitly in its `command:`, so that
+service is unaffected and stays deliberately unreachable.
+
+**What actually moved is who owns the exposure decision**, and that is stated in the Dockerfile
+rather than left implicit: no `-p` means container-network only; `-p 127.0.0.1:8080:8080` adds host
+loopback; `-p 8080:8080` adds the LAN, through iptables rules Docker inserts itself, bypassing a host
+firewall. The thing bounding a published port is **not** mTLS — the listener only
+`RequestClientCert`s, so a presented certificate authenticates nobody — it is the **invite gate**
+(invariant 3, `3cedcb7`): an un-invited `POST /v1/enroll` is refused 403. That is the honest
+statement of the residual risk, and it is why this is defensible where it would not have been before
+invite-only enrolment landed.
+
+### 3. The image ships `agent-busctl` too, and pre-creates `/identity`
+
+An image containing only the server ships a bus **no agent can enrol with** unless the operator also
+has a Go toolchain — which contradicts both the ask ("just `docker run`") and invariant 7, under
+which the compiled CLI *is* the client and an agent never hand-writes HTTP. So the builder produces
+both binaries and the runtime stage carries both. Reached with
+`--entrypoint /usr/local/bin/agent-busctl`.
+
+`/identity` is pre-created `agentbus:agentbus 0700` for the same reason `/data` is: a named volume
+mounted onto a path that does not exist in the image is created `root:root 0755` by Docker, and the
+non-root user cannot write its Ed25519 private key there. It is deliberately **not** declared
+`VOLUME` — the server never touches it, and a `VOLUME` line would make every plain
+`docker run agent-bus` create a stray anonymous volume.
+
+A named volume is also the portable answer to a trap found the hard way here: on a snap-packaged
+Docker daemon, `/tmp` **inside the daemon is not the host's `/tmp`**, so `-v /tmp/x:/identity` mounts
+an empty directory and the CLI reports "no invite file" for a file plainly visible on the host. The
+runbook recommends named volumes, and `--invite-file -` (stdin) over an invite file entirely — which
+also keeps the bearer secret out of `argv` and off disk.
+
+### Verified end to end, in containers only
+
+Three buses on a user-defined bridge network, A↔B↔C, A and C not peered. A message from an agent on A
+reached an agent on C, and each bus's audit recorded the path as it saw it:
+
+```
+bus-a  bus_path=[A]
+bus-b  bus_path=[A,B]
+bus-c  bus_path=[A,B,C]
+```
+
+Two findings that corrected the brief this task was given:
+
+- **`-route-for <C>` on A is load-bearing and was not in the brief.** Trust says whose messages you
+  accept; it does not say where to send them. Withdrawing exactly that one route record and retrying
+  the send returns `{"ok":false,"error":"send: the bus refused the request: unknown recipient",
+  "status":404,"exit_code":7}`. A runbook omitting it produces a setup that looks configured and
+  cannot deliver.
+- **`agent-bus invite` has exactly one subcommand, `mint`. There is no revoke.** `internal/invite`
+  supports revocation in the store and invariant 3 requires it, but the operator surface is unbuilt
+  (the code says so itself: "revoke it (INVITE-REVOKE) once that surface exists"). Until it lands,
+  **TTL is the only control over a minted invite**, which changes the advice on minting a pool: mint
+  short and mint what you will use, rather than a standing pool nobody can withdraw.
+
+The three-bus `message_id` correlation gap was also confirmed rather than taken on trust: the sender
+saw `bus-t4yr4qzepvv7zjd6-11` on A and the recipient saw `bus-rupqkacueu6qce45-9` on C — the same
+message, two ids, because every bus is authoritative on its own (invariant 1). `scripts/fed-smoke.sh`
+asserts they are equal and therefore cannot pass; that is a defect in the test
+(`RELAY-25-FU-CORRELATION`), and the runbook says so rather than presenting the script as a green
+check. Correlate on `content_sha256` + `bus_path`, both stable end to end.
+
+## 2026-08-15 — DEPLOY-6: security gate findings, and what changed because of them
+
+The security gate returned **CHANGES-REQUESTED** on the entry above. It confirmed the invariant-11
+reasoning in code rather than in prose — `defaultListen` at `cmd/agent-bus/main.go:41` unchanged with
+an empty diff, `docker-compose.yml`'s explicit loopback `command:` unaffected, `InsecureSkipVerify`
+still exactly once in `client/pin.go:260` paired with `VerifyPeerCertificate`, and the invite gate
+genuinely wired (`enrolmentInviteRequired = true` → `ErrInviteRequired` → 403, covered by
+`TestInviteGateEnrolWithoutAnInviteIsRefused403`). Four findings, all applied:
+
+**The residual-risk statement was incomplete everywhere it appeared**, and this is the one worth
+recording as a decision rather than a fix. All three copies said the thing bounding a published port
+is the enrolment gate. That is true and it is not sufficient: **the gate bounds who can BECOME an
+agent and bounds nothing else.** The routes that necessarily cannot authenticate — enrolment,
+session begin, session complete, `/healthz`, `/v1/info` — have **no rate limiting at all**
+(`AUTH-1-FU-RATELIMIT`, open). Two consequences are documented in our own code rather than
+hypothesised: `internal/auth/session.go` states that an anonymous flooder can fill the session table
+to `maxSessions` and deny session establishment to everyone until entries expire, and explicitly says
+that must not be read as fixed; and `handleSessionBegin` answers distinguishably for an unknown agent
+(404), a known-but-unbound one (200 + live challenge) and a bound one (403), which is an agent
+enumeration oracle once the bus id is read from the public `/v1/info`.
+
+Neither is introduced by containerising the bus. **But this is the change that makes them reachable,
+and this is the document somebody reads before typing `-p 8080:8080`** — so understating it here
+would be understating it at the exact moment it matters. Now stated in full in the Dockerfile's `CMD`
+comment and in `docs/THREE-BUS-DOCKER.md` §1, which recommends `-p 127.0.0.1:8080:8080` plus a tunnel,
+or no `-p` at all.
+
+**The runbook's `ctl()` helper was broken**, found independently by the author and by the gate: it
+placed `-v` after the image name, so the identity volume was never mounted and `agent-busctl` was
+handed a flag it does not define (`flag provided but not defined: -v`, exit 2). The security tail is
+worth keeping: the *obvious* wrong fix — deleting the `-v` — writes the agent's Ed25519 private key
+into the container's writable layer instead of a named volume, which is harmless under `--rm` and
+recoverable via `docker commit`/`export`/`cp` without it. Fixed by taking the volume as `$1` and
+placing it before the image name, with a comment explaining the ordering. **Part 3 of the runbook is now
+extracted from the markdown and executed verbatim** rather than transcribed by hand, which is what
+caught it; a documented command that has never been run as written is not a verified command.
+
+Two smaller fixes: the invite-pool example now runs `( umask 077; … > invites.ndjson )` instead of
+`chmod 0600`-ing afterwards, which left ten bearer credentials world-readable for the length of the
+loop; and the runbook now says explicitly not to `export` a variable holding an invite blob, since an
+exported variable is readable from every child's environment and surfaces under `set -x`.
+
+### Addendum — DEPLOY-6 gate round 2: both gates PASS, two late corrections
+
+Reviewer and security both returned **PASS** on re-verification. The reviewer re-cleared the P1 with
+its OWN extractor (independent of the author's), running Part 3's nine bash blocks verbatim three
+times from a torn-down state and observing `bus_path` `[A]`/`[A,B]`/`[A,B,C]`. Security re-verified
+the key-material claim concretely: `docker diff` on a non-`--rm` busctl container is **empty**, so
+the agent's private key lands on the named volume and nothing reaches the writable layer.
+
+Two late LOW findings were nevertheless real errors of fact in security-relevant advice, and are
+fixed rather than deferred:
+
+**"No `-p`" is not an isolation boundary on Linux.** All three copies said an unpublished container
+port is reachable only from the same docker network. It is not: the host owns an interface on the
+docker bridge and routes that subnet, so a local user can reach the container's bridge address
+directly. Confirmed independently — a probe from the host to an unpublished bus at
+`https://172.20.0.2:8080/healthz` **completed its TLS handshake**, failing only on hostname
+verification (`certificate is valid for 127.0.0.1, ::1, not 172.20.0.2`), which is a name check, not
+a reachability failure; an agent verifying by pinned fingerprint would have connected. This mattered
+because "no `-p`" is the option the runbook *recommends*, and the DoS and enumeration surface it
+honestly documents is therefore reachable by any local user on a shared host. `-p` governs
+reachability from OFF the host; it does not hide the container from the host itself.
+
+**The unauthenticated route list is six, not five.** All three copies enumerated invariant 3's list —
+enrolment, session begin, session complete, `/healthz`, `/v1/info` — but `internal/httpapi/authmw.go`'s
+`unauthenticatedRoutes` also contains `RouteDiscovery` (`/v1/discovery`), which is unauthenticated,
+unrate-limited, and carries `bus_id` and `invite_required`. The doc now cites the allow-list in code
+as the authority rather than restating the invariant's prose, which is the difference that would have
+prevented the error.
+
+Also corrected: this record previously said "the whole runbook is now extracted and executed
+verbatim". Only **Part 3** is — §1's `docker run -t` is a foreground blocking command that cannot sit
+in an extracted script. The operator-facing header was already scoped correctly; the rationale record
+was not, and the reviewer flagged it as the same class of over-broad verification claim that produced
+the original P1.
+
+Finally, the follow-up filed for `CLAUDE.md`'s stale "enrolment is NOT invite-gated" claim is
+**unnecessary**: it was already corrected at HEAD by `aade191`, and the round-1 finding was written
+against a stale snapshot. `DOCS-4` should close as already-done rather than being worked.
