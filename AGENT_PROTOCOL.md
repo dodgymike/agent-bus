@@ -124,6 +124,7 @@ keys** it pins — is configured with a subcommand on the **server** binary:
 ```
 agent-bus peer add    -data-dir <dir> -bus-id <busID> [-url <https origin>]
                       [-tls-fingerprint <64 lowercase hex>]
+                      [-peer-client-fingerprint <64 lowercase hex>]
                       [-signing-key <base64> ...] [-route-for <busID> ...] [-json]
 agent-bus peer list   [-data-dir <dir>] [-json]
 agent-bus peer remove -data-dir <dir> -bus-id <busID> (-route | -trust | -route -trust) [-json]
@@ -149,10 +150,32 @@ the route, below):
   never to the record's own bus id: `peer add -bus-id busB -url X -tls-fingerprint fpB -route-for
   busC` writes `fpB` — busB's certificate, the next hop's — onto **both** the busB and busC route
   records, so the busC record legitimately carries busB's fingerprint alongside `bus_id: busC`. It
-  pins an **outbound server** certificate only; it is **not** a source of inbound peer identity, and
-  nothing yet verifies a live connection against it (`RELAY-20`/`RELAY-24` land that). Omitting the
+  pins an **outbound server** certificate only and is **not** a source of inbound peer identity — but
+  a live connection **is** now verified against it (`9701611`, `RELAY-24-BLOCKER-EGRESS`): every
+  outbound peer connection resolves its pin **by dial address** and verifies the handshake against
+  that address's pins alone, and an address with **no** configured pin is refused **before the socket
+  is opened** rather than dialled unverified (there is no CA and no trust-on-first-use to fall back
+  on, invariant 11). A route configured without this flag therefore forwards **nothing**. Omitting the
   flag on an already-pinned hop, or passing it an empty value, is **refused before any write** rather
   than silently erasing the pin — full semantics in `CONTRACTS-CLI.md`/`CONTRACTS-ONDISK.md`.
+- an optional **inbound client-certificate binding on the TRUST record**
+  (`-peer-client-fingerprint`, `RELAY-24-BLOCKER-PEERCERTFLAG`) — the OPPOSITE direction from
+  `-tls-fingerprint`: the certificate the bus at `-bus-id` presents **as a TLS client when it dials
+  this bus**, as 64 lowercase hex. It is keyed to the **bus principal**, not an address, and is unique
+  across the whole trust table — binding a fingerprint another bus already holds is refused by the
+  store, atomically, before anything is written. It requires `-signing-key` in the same invocation (a
+  trust record is never written without at least one pinned signing key, so the flag alone would bind
+  nothing) and lands on `bustrust`, not on the route record. **This is what `-tls-fingerprint`'s note
+  above calls "not a source of inbound peer identity" — this flag now is one.** It is what makes a
+  peer **bindable**: `bindablePeerCount` (`cmd/agent-bus/relaywiring.go`) counts trust records carrying
+  this binding, and the `/v1/peer/*` ingress `RELAY-24` registers (`7095231`) refuses to mount when
+  that count is `0` — before this flag no shipped command could raise it above `0`. **Federation is now
+  live** (`RELAY-24`, and `RELAY-24-BLOCKER-EGRESS` for the outbound half): a running bus with at least
+  one bindable peer serves the peer routes, so this flag is no longer configuration for a surface that
+  nothing mounts — it is the binding that inbound peer traffic is authenticated against. Omitting the
+  flag on an already-bound bus, or passing it an empty value, is likewise **refused before any write**
+  rather than silently erasing the binding — full semantics, including the exact exit codes, in
+  `CONTRACTS-CLI.md`.
 
 ### Where the pinned signing key comes from: `agent-bus key export-public`
 
@@ -190,12 +213,14 @@ try to obtain one another way. In particular:
 Exit codes: `0` ok · `1` failed · `2` usage · `3` the bus is running, stop it · `4` no identity in that
 data directory, nothing created.
 
-**Nothing about your own workflow changes, and no federated traffic flows yet.** Remote agents are
-still named `<bus-id>.<agent-id>` (invariant 2) — that is what makes a cross-bus id unambiguous — but
-the relay handler is registered on no listener and the peer configuration is not yet read by a running
-bus (`RELAY-24` wires it). If you are told a peer exists and a send to an agent on it fails, that is
-the current state of the epic and not a fault in your client: `agent-busctl` has no peering command,
-and it needs none.
+**Nothing about your own workflow changes, and federated traffic now flows.** Remote agents are still
+named `<bus-id>.<agent-id>` (invariant 2) — that is what makes a cross-bus id unambiguous — and as of
+`RELAY-24` (`7095231`) the peer routes ARE registered on a running bus and the peer configuration IS
+read at startup. See [Sending to an agent on ANOTHER bus](#sending-to-an-agent-on-another-bus-cross-bus-send--2026-08-15-relay-24-blocker-egress)
+for what a `send` to a peer's agent does and — just as important — what its 2xx does not promise. If a
+send to an agent on a configured peer still fails, that is operator configuration (an unrouted bus, an
+unpinned address, an untrusted signing key) and not a fault in your client: `agent-busctl` has no
+peering command, and it needs none.
 
 ## The audit trail: `agent-bus log` is an OPERATOR command, not yours
 
@@ -222,10 +247,13 @@ operator asks you about a message you sent, you know what they can see and what 
   other. That is deliberate (invariant 6), so the trail stays compatible with end-to-end encrypted
   payloads. **The trail is not a way to get a message back**: if you needed the body, you needed to
   keep it. The content hash is what still lets someone prove *what* was sent.
-- **`bus_path` is the ordered traversal, oldest bus first** — never sorted, never deduped. Today every
-  record a running bus writes carries a **single** element, this bus's own id: nothing produces a
-  multi-hop path yet (the relay ingest path is `RELAY-20`/`RELAY-21`/`RELAY-24`). If you are shown a
-  one-element path for a message you believe was relayed, that is the current state of the epic.
+- **`bus_path` is the ordered traversal, oldest bus first** — never sorted, never deduped. **A running
+  bus DOES produce a multi-hop value, and has since `RELAY-24` wired relay ingest (2026-08-15).** A
+  message you originated still carries a **single** element, this bus's own id; but a message that
+  arrived here from a peer carries every bus it has actually traversed, because the ingest path
+  appends this bus's own hop to the path the message arrived with — and since `RELAY-47` wired onward
+  forwarding, that can now be more than one further hop beyond the sender's own bus. If you are shown
+  a one-element path for a message you believe was relayed, it was **originated here**, not relayed.
 - **The trail is a superset of what was delivered.** A crash between the audit write and the commit
   write can leave a record for a message that never became accepted history, so a record in it is not
   by itself proof that anyone received the message. `prepare_index` is what pairs it with the
@@ -1099,9 +1127,28 @@ agent-busctl send busB.alice-1 'hello from another bus'
   absence.**
 - **Not that it took one hop.** Nothing tells you the topology, and you must not depend on it.
 
-### What is still NOT supported
+### Multi-hop works — but a hop in flight does not survive a restart
 
-A message that arrives here FROM a peer is delivered to **this bus's own agents only**. This bus does
-not carry it onward to a further hop — multi-hop relay is not implemented, and each bus is a leaf in
-that sense. Two buses that are not directly peered cannot reach each other by asking a third to
-forward, whatever their routing tables say.
+**A message that arrives here FROM a peer IS carried onward to a further hop** when its destination
+routes to a different peer (`RELAY-47`, `d5018a6`, 2026-08-15). `A → B → C` delivers, proven against
+running buses: an agent on `busA` sends, an agent on `busC` receives, and `busC`'s audit trail holds
+one record whose `bus_path` is `[busA, busB, busC]` in order. Two buses that are not directly peered
+therefore **can** reach each other through a third — provided the operator configured it, which means
+a static next-hop route (`-route-for`) on every bus along the way plus the origin bus's signing key
+pinned as trust at the destination. A bus with no peer store forwards nothing onward, but that is a
+**leaf deployment**, not a limit of the build; an operator can tell the two apart from the
+`onward_relay=true`/`false` field the server logs at startup.
+
+**What you must still not assume: a multi-hop message can be lost at an intermediate restart.** This
+is the one part of cross-bus delivery the durable outbox does not yet cover (`RELAY-48`, open). If an
+intermediate bus stops while it still owes an onward hop, that hop is settled **abandoned** at the
+next start rather than re-offered — an intermediate cannot rebuild the origin bus's signed envelope
+from its own durable state. The loss is logged loudly there (invariant 6), but **nothing tells you**:
+your `send` was acknowledged on your own bus long before, and the intermediate already returned a 200
+to the bus upstream of it. Hops that a bus **originated itself** do resume normally; it is only the
+carried-onward hop that does not.
+
+So the rule from ["What you must NOT infer from a 2xx"](#what-you-must-not-infer-from-a-2xx) is not
+softened by multi-hop working — it is exactly why it is written that way. **If your workflow needs
+confirmation that a message arrived, have the recipient reply and time out on its absence.** That is
+more important across two hops than one, not less.
