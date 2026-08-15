@@ -411,14 +411,71 @@ func (s *Store) Admit(sc Scope) error {
 // costs — are in retention.go. What belongs HERE are the two properties that
 // make the rule safe to apply at this point in the code:
 //
-// # 1. The cap is keyed on the AGENT ID, and that is safe here for ONE specific
-// reason
+// # 1. The cap is keyed on the AGENT ID, which is safe for ONE specific reason —
+// and there is now ONE PATH WHERE THAT REASON DOES NOT HOLD
 //
-// A Record only exists because an authenticated, server-minted, fully-qualified
-// "<bus-id>.<agent-id>" (invariant 2) performed a mutating operation. The key of
-// this bucket is therefore a PROVEN IDENTITY, not an attacker-chosen label: a
-// flooder cannot make its keys land in a victim's bucket, it can only fill its
-// own, so a refusal at the share is always SELF-INFLICTED.
+// On every LOCAL write path a Record only exists because an authenticated,
+// server-minted, fully-qualified "<bus-id>.<agent-id>" (invariant 2) performed a
+// mutating operation. The key of this bucket is therefore a PROVEN IDENTITY, not
+// an attacker-chosen label: a flooder cannot make its keys land in a victim's
+// bucket, it can only fill its own, so a refusal at the share is SELF-INFLICTED.
+//
+// THE RELAY INGEST PATH IS THE EXCEPTION, AND THIS COMMENT USED TO DENY IT
+// EXISTED. hub.IngestRelayed (internal/hub/relayingest.go) builds its scope from
+// a sender the PEER ASSERTS and nobody has proved.
+//
+// STATED PRECISELY, BECAUSE THIS COMMENT'S JOB IS TO BE ACCURATE: the ingress
+// composition root exists (cmd/agent-bus/relaywiring.go, RELAY-24) but nothing
+// in a running server reaches it yet — newFederation has no production caller
+// as of HEAD 208dacd — so the exposure below is NOT live at that commit. It
+// becomes live with the wiring, and the wiring is in flight. Do not restore the
+// unconditional claim above when it lands; the whole point is that the bucket
+// key stops being proven at exactly that moment. Three consequences, all stated
+// in the callers' own docs:
+//
+//   - The bucket key on that path is an attacker-chosen label, so a peer can
+//     hold many buckets at once.
+//   - The DENOMINATOR below (len(byAgent)+1) counts those labels, so a peer
+//     inventing names SHRINKS the share every honest local agent gets. A refusal
+//     at the share is then NOT self-inflicted — which is the exact property the
+//     paragraph above claims, and it is why the claim had to be narrowed rather
+//     than left standing with a caveat bolted on.
+//   - cmd/agent-bus/relaywiring.go's peerAdmission meters that path by the
+//     AUTHENTICATED PEER, which is the one identity a relayed request DOES
+//     prove. That stops any one peer taking another peer's room. NAME THE
+//     QUANTITY WHEN QUOTING ITS BOUND, because two different numbers are both
+//     true of it: a peer's CHARGED share under pressure is
+//     MaxEntries/(relay.MaxPeers+1) = 1008, while the LIVE ENTRIES a peer can
+//     hold are bounded only by the pressure line (~32768), since below that line
+//     peerAdmission admits without charging — exactly as this function admits
+//     without adjudicating. That is why a peer can REACH the line under many
+//     distinct labels before meeting any refusal, and why peer traffic alone can
+//     still end in global ErrCapacity. The peer meter narrows who is
+//     responsible; it does not eliminate the exhaustion.
+//
+// The remaining half is tracked as RELAY-FU-IDEM-METER-BY-PEER (P0). TWO
+// DIFFERENT FIXES ARE OFTEN CONFLATED HERE, and only the first is impossible in
+// this package:
+//
+//   - Metering by the AUTHENTICATED PEER cannot be done here. This store is
+//     handed a scope, not a connection, so the peer principal must be supplied
+//     by the caller AND PERSISTED with the record — otherwise every bucket
+//     reverts to its asserted label at the next recovery, because Recover
+//     rebuilds byAgent from the decoded records. Record is the on-disk shape and
+//     DecodeRecord refuses unknown fields, so adding that principal is an
+//     on-disk format change, not a local edit.
+//   - Metering a FOREIGN sender by the VERIFIED BUS HALF of the id it already
+//     carries is a DIFFERENT fix and needs NO on-disk change: Record.Agent is
+//     already persisted and Record.Scope() rebuilds it on the recovery path, so
+//     the bucket key is a pure function of persisted data plus this bus's own
+//     id. It is not done here because it changes production admission on a P0
+//     path and first needs: a CASE-FOLDED key (ids.BusIDPattern permits
+//     uppercase, so an un-folded key hands one pinned peer 2^n buckets and
+//     reinstates the very attack); a FAIL-CLOSED BusID option (defaulting it to
+//     "" collapses every local agent into one bucket); the relay-side pinning
+//     that makes the bound a bound written down as a dependency; and a
+//     DECISIONS.md entry for the fairness trade, since a peer bus's whole agent
+//     population would then share ONE bucket.
 //
 // That distinction is not theoretical — this project got it wrong once already.
 // auth.BeginSession's removed MaxPendingPerAgent cap was keyed on an agentID

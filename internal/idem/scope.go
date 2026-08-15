@@ -86,6 +86,14 @@ func (s Scope) EnrolBusWide() bool { return s.enrolBusWide }
 // EMPTY agent id, because an empty agent is indistinguishable from "no agent
 // at all", i.e. exactly the key-only lookup this type exists to prevent.
 //
+// "PROVEN" IS A CALLER OBLIGATION THIS CONSTRUCTOR CANNOT ENFORCE, and one
+// caller does not meet it: hub.IngestRelayed passes a PEER-ASSERTED sender.
+// That is not merely a naming concern — the agent component is also the
+// per-agent fair share's bucket key and its denominator, so an unproven id here
+// is an unproven bucket there. See Store.admitAgentLocked, which carries the
+// full narrowing and the tracking task; do not restore a blanket "the agent id
+// is always proven" claim to either place.
+//
 // op must be one of the Operation constants and must not be OpEnrol: enrol
 // has no authenticated caller yet (doc.go point 4), so its Scope is always
 // built by NewEnrolScope, never this one.

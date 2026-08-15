@@ -69,10 +69,19 @@ var (
 	//
 	// It is a DIFFERENT FACT from ErrCapacity and that is exactly why it is a
 	// separate sentinel: the table is NOT full, every other agent is completely
-	// unaffected, and the refusal is SELF-INFLICTED by the agent it names. An
-	// operator reading ErrCapacity should reach for the bus's global bound; an
-	// operator reading ErrAgentQuota should reach for the one client named in
-	// the message. Collapsing the two would send them to the wrong place.
+	// unaffected, and on a bus with no federated peers the refusal is
+	// SELF-INFLICTED by the agent it names. An operator reading ErrCapacity
+	// should reach for the bus's global bound; an operator reading ErrAgentQuota
+	// should reach for the one client named in the message. Collapsing the two
+	// would send them to the wrong place.
+	//
+	// ON A BUS WITH RELAY INGRESS WIRED, "SELF-INFLICTED" IS NOT SAFE TO ASSUME,
+	// and an operator acting on it would blame the wrong client. The share's
+	// denominator counts asserted sender labels on the relay path, so a peer
+	// inventing names shrinks the share and an HONEST local agent can be the one
+	// that meets it. Read this sentinel as "who hit the share", never as "who
+	// caused it". Store.admitAgentLocked carries the full narrowing and the
+	// tracking task.
 	//
 	// Like ErrCapacity it fails CLOSED and evicts NOTHING — see agentQuotaError
 	// and Store.Remember.
