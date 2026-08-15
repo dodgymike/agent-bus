@@ -8,8 +8,9 @@
 # NAT/keepalive behaviour, latency against RetryHorizonCeiling, or certificate
 # pinning across a real tunnel. RELAY-25-FU-REALHOST owns that proof.
 #
-# This script intentionally describes the supported surface as it SHOULD be and
-# therefore cannot pass yet. It fails loudly at the first unavailable step:
+# This script describes the supported surface and fails loudly at the first
+# unavailable step. Each of the steps below has since landed; the list is kept
+# because it names the compiled command each stage depends on:
 #
 #   * CLI-11 must add `agent-bus key export-public --data-dir ... --json`.
 #   * INVITE-CLIENT/INVITE-GATE must make `agent-busctl enrol --invite-file ...`
@@ -253,33 +254,109 @@ read_audit() {
     die "BLOCKED: CLI-6 agent-bus log is unavailable for $bus_name"
 }
 
-assert_audit_path() {
-  local file="$1" bus_name="$2" message_id="$3" expected_path="$4"
-  local total_count="" path_count=""
-  total_count="$(jq -s --arg id "$message_id" '
+# ---------------------------------------------------------------------------
+# CROSS-BUS CORRELATION -- READ THIS BEFORE CHANGING AN ASSERTION BELOW.
+#
+# A MESSAGE ID IS NOT A CROSS-BUS CORRELATOR. Every bus MINTS ITS OWN ids and
+# never adopts a peer's (invariant 1), so one logical message is `bus-A-11` on
+# A, `bus-B-11` on B and `bus-C-9` on C. Asserting that the SAME id string
+# appears in all three audits is UNSATISFIABLE BY CONSTRUCTION, not merely
+# unmet: it asserts an invariant VIOLATION. This script made exactly that
+# assertion and could never pass, which is the whole of
+# RELAY-25-FU-CORRELATION. Do not reintroduce it.
+#
+# What IS stable across hops is the audit record's `content_sha256`. Per
+# PROTOCOL.md 8.6 it is the SHA-256 over the CANONICAL SIGNING BYTES -- the
+# exact bytes the sender's Ed25519 signature covers -- and internal/hub/audit.go
+# hashes a RELAYED message under the ORIGIN's assignment (see `signedAs`, gated
+# on req.relayed), so A, B and C all record the digest of the message AS A
+# MINTED IT AND THE SENDER SIGNED IT.
+#
+# WHAT THIS CORRELATOR PROVES: the record on B and on C is the audit of the very
+# bytes the sender signed on A. The canonical bytes cover the origin message id,
+# the origin sequence, the sender, the recipient SET, the sender's timestamp and
+# the body, so a relay that carried a different message, a different audience or
+# a different body yields a different digest and matches NOTHING.
+#
+# WHAT IT DOES NOT PROVE, stated so it is known rather than assumed:
+#   * It is a CORRELATION KEY, not a signature check. This script never verifies
+#     the Ed25519 signature, so it shows B and C recorded the same signed BYTES,
+#     not that those bytes were validly signed. SIGN-6 owns receive-path
+#     verification.
+#   * It cannot distinguish two BYTE-IDENTICAL logical messages. This run sends
+#     ONE payload under ONE idempotency key, and the "exactly one record" counts
+#     below are what make a second copy visible.
+#   * A digest is not an ORDERING. The ordered `bus_path` assertions are what
+#     prove the A->B->C traversal; the digest only says WHICH message.
+#
+# THE TWO `content_sha256` FIELDS IN THIS SYSTEM ARE DIFFERENT HASHES AND MUST
+# NEVER BE COMPARED TO EACH OTHER. The AUDIT's is the canonical signing digest;
+# the one on `agent-busctl watch` output is store.ContentHash(body) -- the BARE
+# BODY. Both are 64 lowercase hex characters, so mixing them would fail silently
+# at the shell with no type error anywhere. The watch stream is therefore
+# correlated on its OWN terms (body text plus audience plus path), never against
+# an audit digest.
+# ---------------------------------------------------------------------------
+
+# audit_origin_digest returns the canonical content digest the ORIGIN bus
+# recorded for the message it minted as $message_id.
+#
+# This is the ONLY place a message id is used to find a record, and it is sound
+# precisely because it is applied to THE BUS THAT MINTED THAT ID. The digest it
+# returns is what every downstream bus is then correlated by.
+audit_origin_digest() {
+  local file="$1" bus_name="$2" message_id="$3" summary="" count=""
+  summary="$(jq -s --arg id "$message_id" '
     [.[] | if type == "array" then .[] else . end |
-      select(.message_id == $id)] | length
+      select(.message_id == $id) | .content_sha256 | strings |
+      select(test("^[0-9a-f]{64}$"))] | unique
+    | {count: length, digest: (.[0] // "")}
   ' "$file")" || die "$bus_name audit output is not valid JSON/NDJSON"
-  [[ "$total_count" == 1 ]] ||
-    die "$bus_name audit has $total_count total records for $message_id; want exactly 1"
-  path_count="$(jq -s --arg id "$message_id" --argjson path "$expected_path" '
-    [.[] | if type == "array" then .[] else . end |
-      select(.message_id == $id and .bus_path == $path)] | length
-  ' "$file")" || die "$bus_name audit output is not valid JSON/NDJSON"
-  [[ "$path_count" == 1 ]] ||
-    die "$bus_name audit record for $message_id does not have bus_path=$expected_path"
+  count="$(jq -r '.count' <<<"$summary")"
+  [[ "$count" == 1 ]] ||
+    die "$bus_name audit holds $count distinct canonical content digests for the message it minted as $message_id; want exactly 1"
+  json_string "$summary" digest
 }
 
+# assert_audit_hop asserts, on ONE bus, the property this smoke test exists to
+# prove: that this bus's audit holds EXACTLY ONE record of the correlated
+# logical message, that it names the right sender and audience, and that its
+# ORDERED bus_path is exactly the hops traversed so far.
+#
+# It deliberately does NOT constrain the LOCAL message id: that id is this bus's
+# own mint and differs on every bus (invariant 1). Correlation is by digest.
+assert_audit_hop() {
+  local file="$1" bus_name="$2" digest="$3" sender="$4" recipient="$5" expected_path="$6"
+  local total_count="" match_count=""
+  total_count="$(jq -s --arg d "$digest" '
+    [.[] | if type == "array" then .[] else . end |
+      select(.content_sha256 == $d)] | length
+  ' "$file")" || die "$bus_name audit output is not valid JSON/NDJSON"
+  [[ "$total_count" == 1 ]] ||
+    die "$bus_name audit holds $total_count records correlated to content digest $digest; want exactly 1 (more than one means the logical message was DUPLICATED on this bus)"
+  match_count="$(jq -s --arg d "$digest" --arg from "$sender" --arg to "$recipient" \
+    --argjson path "$expected_path" '
+    [.[] | if type == "array" then .[] else . end |
+      select(.content_sha256 == $d and .sender == $from and .broadcast == false
+        and .recipients == [$to] and .bus_path == $path)] | length
+  ' "$file")" || die "$bus_name audit output is not valid JSON/NDJSON"
+  [[ "$match_count" == 1 ]] ||
+    die "$bus_name audit record for content digest $digest is wrong: want sender=$sender recipients=[$recipient] broadcast=false bus_path=$expected_path; got $(jq -c -s --arg d "$digest" '[.[] | if type == "array" then .[] else . end | select(.content_sha256 == $d) | {message_id, sender, broadcast, recipients, bus_path}]' "$file")"
+}
+
+# classify_zero_delivery attributes a bounded-watch miss, correlating C's audit
+# by the ORIGIN's canonical content digest -- never by the origin's message id,
+# which C never adopts (invariant 1; see the correlation note above).
 classify_zero_delivery() {
-  local file="$1" message_id="$2" expected_path="$3"
+  local file="$1" digest="$2" expected_path="$3"
   local path_count="" message_count=""
-  path_count="$(jq -s --arg id "$message_id" --argjson path "$expected_path" '
+  path_count="$(jq -s --arg d "$digest" --argjson path "$expected_path" '
     [.[] | if type == "array" then .[] else . end |
-      select(.message_id == $id and .bus_path == $path)] | length
+      select(.content_sha256 == $d and .bus_path == $path)] | length
   ' "$file" 2>/dev/null)" || return 2
-  message_count="$(jq -s --arg id "$message_id" '
+  message_count="$(jq -s --arg d "$digest" '
     [.[] | if type == "array" then .[] else . end |
-      select(.message_id == $id)] | length
+      select(.content_sha256 == $d)] | length
   ' "$file" 2>/dev/null)" || return 2
   if (( path_count == 1 && message_count == 1 )); then
     return 0
@@ -292,41 +369,176 @@ classify_zero_delivery() {
   return 1
 }
 
+# audit_row renders one audit record in the shape `agent-bus log --json` emits,
+# so the self-test fixtures below are the real shape rather than an approximation
+# of it.
+audit_row() {
+  local id="$1" sender="$2" recipients="$3" broadcast="$4" path="$5" digest="$6"
+  jq -nc --arg id "$id" --arg sender "$sender" --argjson recipients "$recipients" \
+    --argjson broadcast "$broadcast" --argjson path "$path" --arg digest "$digest" \
+    '{message_id:$id, seq:1, sender:$sender, broadcast:$broadcast,
+      recipients:$recipients, bus_path:$path, sent_at:"2026-08-15T00:00:00Z",
+      size:18, content_sha256:$digest}'
+}
+
+# assert_hop_rejects runs assert_audit_hop in a SUBSHELL, so its die() is caught
+# instead of ending this process, and REQUIRES it to fail.
+#
+# This is what keeps the correlation assertions falsifiable. Every fixture it is
+# given below is a shape a genuinely broken relay would produce, and an
+# assertion that accepted one would be worse than the unsatisfiable id
+# comparison it replaced -- that one at least failed honestly.
+assert_hop_rejects() {
+  local label="$1"
+  shift
+  if (assert_audit_hop "$@") >/dev/null 2>&1; then
+    die "self-test: assert_audit_hop ACCEPTED a broken fixture ($label); the assertion cannot fail and proves nothing"
+  fi
+}
+
+assert_hop_accepts() {
+  local label="$1"
+  shift
+  (assert_audit_hop "$@") >/dev/null 2>&1 ||
+    die "self-test: assert_audit_hop REJECTED the correct fixture ($label)"
+}
+
 run_classifier_self_test() {
   local work
   work="$(mktemp -d)"
   trap 'rm -rf -- "$work"' RETURN
-  printf '%s\n' '{"message_id":"m1","bus_path":["a","b","c"]}' >"$work/complete"
-  printf '%s\n%s\n' \
-    '{"message_id":"m1","bus_path":["a","b","c"]}' \
-    '{"message_id":"m1","bus_path":["a","b","c"]}' >"$work/duplicate"
-  printf '%s\n%s\n' \
-    '{"message_id":"m1","bus_path":["a","b","c"]}' \
-    '{"message_id":"m1","bus_path":["a","b"]}' >"$work/mixed-duplicate"
-  printf '%s\n' '{"message_id":"m1","bus_path":["a","b"]}' >"$work/partial"
+
+  # Two distinct, well-formed canonical digests: D1 is the logical message under
+  # test, D2 is any other message that happens to share the bus.
+  local d1="1111111111111111111111111111111111111111111111111111111111111111"
+  local d2="2222222222222222222222222222222222222222222222222222222222222222"
+  local from="bus-a.sender" to="bus-c.recipient"
+  local full='["a","b","c"]' short='["a","b"]'
+
+  # --- zero-delivery classifier, correlated by content digest ---------------
+  audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1" >"$work/complete"
+  {
+    audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1"
+    audit_row m-c-10 "$from" "[\"$to\"]" false "$full" "$d1"
+  } >"$work/duplicate"
+  {
+    audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1"
+    audit_row m-c-10 "$from" "[\"$to\"]" false "$short" "$d1"
+  } >"$work/mixed-duplicate"
+  audit_row m-c-9 "$from" "[\"$to\"]" false "$short" "$d1" >"$work/partial"
   printf '%s\n' '{not-json' >"$work/malformed"
-  classify_zero_delivery "$work/complete" m1 '["a","b","c"]' || die "classifier self-test: complete path"
-  if classify_zero_delivery "$work/duplicate" m1 '["a","b","c"]'; then
+
+  classify_zero_delivery "$work/complete" "$d1" "$full" || die "classifier self-test: complete path"
+  if classify_zero_delivery "$work/duplicate" "$d1" "$full"; then
     die "classifier self-test: duplicate complete paths classified as watch timeout"
   else
     [[ $? == 3 ]] || die "classifier self-test: duplicate path classification"
   fi
-  if classify_zero_delivery "$work/mixed-duplicate" m1 '["a","b","c"]'; then
+  if classify_zero_delivery "$work/mixed-duplicate" "$d1" "$full"; then
     die "classifier self-test: mixed duplicate paths classified as watch timeout"
   else
     [[ $? == 3 ]] || die "classifier self-test: mixed duplicate classification"
   fi
-  if classify_zero_delivery "$work/partial" m1 '["a","b","c"]'; then
+  if classify_zero_delivery "$work/partial" "$d1" "$full"; then
     die "classifier self-test: partial path classified as complete"
   else
     [[ $? == 1 ]] || die "classifier self-test: partial path classification"
   fi
-  if classify_zero_delivery "$work/malformed" m1 '["a","b","c"]'; then
+  if classify_zero_delivery "$work/malformed" "$d1" "$full"; then
     die "classifier self-test: malformed audit classified as complete"
   else
     [[ $? == 2 ]] || die "classifier self-test: malformed audit classification"
   fi
   note "PASS: zero-delivery audit classifier fixtures"
+
+  # --- audit_origin_digest -------------------------------------------------
+  # It resolves the correlator from the ORIGIN bus by the id that bus minted,
+  # and must refuse anything ambiguous rather than return a guess.
+  audit_row m-a-11 "$from" "[\"$to\"]" false '["a"]' "$d1" >"$work/origin-one"
+  {
+    audit_row m-a-11 "$from" "[\"$to\"]" false '["a"]' "$d1"
+    audit_row m-a-11 "$from" "[\"$to\"]" false '["a"]' "$d2"
+  } >"$work/origin-ambiguous"
+  audit_row m-a-12 "$from" "[\"$to\"]" false '["a"]' "$d1" >"$work/origin-absent"
+
+  [[ "$(audit_origin_digest "$work/origin-one" A m-a-11)" == "$d1" ]] ||
+    die "self-test: audit_origin_digest did not return the recorded digest"
+  if (audit_origin_digest "$work/origin-ambiguous" A m-a-11) >/dev/null 2>&1; then
+    die "self-test: audit_origin_digest accepted TWO different digests for one minted id"
+  fi
+  if (audit_origin_digest "$work/origin-absent" A m-a-11) >/dev/null 2>&1; then
+    die "self-test: audit_origin_digest invented a digest for a message the origin never recorded"
+  fi
+  note "PASS: origin-digest resolution fixtures"
+
+  # --- assert_audit_hop ----------------------------------------------------
+  # The correct terminal shape, then every way a broken relay can deviate.
+  audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1" >"$work/hop-good"
+  assert_hop_accepts "correct three-hop terminal record" \
+    "$work/hop-good" C "$d1" "$from" "$to" "$full"
+
+  # A relay that never delivered: C's audit holds only OTHER traffic. This is
+  # the case the replaced assertion could never distinguish from a working one,
+  # because it was looking for an id C is forbidden to hold.
+  audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d2" >"$work/hop-absent"
+  assert_hop_rejects "message absent from C" \
+    "$work/hop-absent" C "$d1" "$from" "$to" "$full"
+
+  # An empty audit at C.
+  : >"$work/hop-empty"
+  assert_hop_rejects "C audit empty" \
+    "$work/hop-empty" C "$d1" "$from" "$to" "$full"
+
+  # Truncated traversal: the message reached C but the recorded path is short,
+  # so the three-hop claim this epic makes is unproven.
+  audit_row m-c-9 "$from" "[\"$to\"]" false "$short" "$d1" >"$work/hop-short"
+  assert_hop_rejects "bus_path truncated to two hops" \
+    "$work/hop-short" C "$d1" "$from" "$to" "$full"
+
+  # Out-of-order traversal: the same three buses, wrong order. bus_path is an
+  # ORDERED list and a set comparison would pass this.
+  audit_row m-c-9 "$from" "[\"$to\"]" false '["b","a","c"]' "$d1" >"$work/hop-misordered"
+  assert_hop_rejects "bus_path out of order" \
+    "$work/hop-misordered" C "$d1" "$from" "$to" "$full"
+
+  # Duplicated: one logical message became two records on C.
+  {
+    audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1"
+    audit_row m-c-10 "$from" "[\"$to\"]" false "$full" "$d1"
+  } >"$work/hop-duplicate"
+  assert_hop_rejects "logical message duplicated on C" \
+    "$work/hop-duplicate" C "$d1" "$from" "$to" "$full"
+
+  # Duplicated with ONE well-formed copy: exactly one record satisfies the full
+  # predicate, so only the correlated-record COUNT can catch this. It is what
+  # makes that count load-bearing rather than redundant, and it is the shape a
+  # relay that delivered twice by two different paths would leave.
+  {
+    audit_row m-c-9 "$from" "[\"$to\"]" false "$full" "$d1"
+    audit_row m-c-10 "$from" "[\"$to\"]" false "$short" "$d1"
+  } >"$work/hop-duplicate-mixed"
+  assert_hop_rejects "logical message duplicated on C with one partial path" \
+    "$work/hop-duplicate-mixed" C "$d1" "$from" "$to" "$full"
+
+  # Misdelivered or misattributed.
+  audit_row m-c-9 "$from" '["bus-c.someone-else"]' false "$full" "$d1" >"$work/hop-wrong-to"
+  assert_hop_rejects "wrong recipient" \
+    "$work/hop-wrong-to" C "$d1" "$from" "$to" "$full"
+  audit_row m-c-9 "bus-a.someone-else" "[\"$to\"]" false "$full" "$d1" >"$work/hop-wrong-from"
+  assert_hop_rejects "wrong sender" \
+    "$work/hop-wrong-from" C "$d1" "$from" "$to" "$full"
+  # A broadcast carries the flag AND an empty recipient list -- wal's
+  # AuditRecord.validate REQUIRES that pairing -- so this fixture is caught by
+  # the recipients comparison whether or not the flag is also checked. The
+  # `broadcast == false` clause in assert_audit_hop is therefore deliberate
+  # defence in depth that NO legal fixture can make independently load-bearing:
+  # a record with broadcast=true AND a non-empty recipient list is a shape the
+  # writer refuses to produce. Do not "prove" it with an illegal fixture.
+  audit_row m-c-9 "$from" '[]' true "$full" "$d1" >"$work/hop-broadcast"
+  assert_hop_rejects "directed message recorded as a broadcast" \
+    "$work/hop-broadcast" C "$d1" "$from" "$to" "$full"
+
+  note "PASS: three-hop audit correlation fixtures"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -447,7 +659,15 @@ set -e
 [[ "$watch_status" == 0 || "$watch_status" == 8 ]] ||
   die "recipient watch failed with exit $watch_status (expected success or bounded-timeout exit 8)"
 
-delivery_count="$(jq -s --arg id "$message_id" '[.[] | select(.message_id == $id)] | length' "$watch_file")" ||
+# The recipient's stream is on C, so every record carries C's OWN minted id, not
+# the id A returned to the sender (invariant 1). Correlate the delivery by what
+# is actually stable on this surface: the body the sender sent, the sender's
+# fully-qualified id, and the audience. `--replay --no-cursor` means a second
+# copy of the logical message WOULD appear here, so this count is the
+# exactly-once check for the recipient-visible surface.
+delivery_count="$(jq -s --arg text "$PAYLOAD" --arg from "$sender_id" --arg to "$recipient_id" '
+  [.[] | select(.text == $text and .from == $from and .broadcast == false and .to == [$to])] | length
+' "$watch_file")" ||
   die "recipient watch output is not valid NDJSON"
 if [[ "$delivery_count" == 0 ]]; then
   # Stabilize C's durable audit before attributing a bounded-watch miss. An
@@ -456,25 +676,34 @@ if [[ "$delivery_count" == 0 ]]; then
   stop_owned_bus "$ROOT_A" "$RUN_A" "$DATA_A" 127.0.0.1:9101
   stop_owned_bus "$ROOT_B" "$RUN_B" "$DATA_B" 127.0.0.1:9102
   stop_owned_bus "$ROOT_C" "$RUN_C" "$DATA_C" 127.0.0.1:9103
+  audit_a="${ROOT_A}/audit.ndjson"
   audit_c="${ROOT_C}/audit.ndjson"
+  # A's OWN audit supplies the correlator: the canonical digest it recorded for
+  # the id it minted. Reading A is not optional here -- without it there is
+  # nothing to look for in C.
+  read_audit "$SERVER_A" "$DATA_A" "$audit_a" A
   read_audit "$SERVER_C" "$DATA_C" "$audit_c" C
-  if classify_zero_delivery "$audit_c" "$message_id" "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]"; then
-    die "WATCH TIMEOUT/environmental: C audit contains $message_id with bus_path=[$bus_a,$bus_b,$bus_c]; relay delivery succeeded but watch observed zero deliveries"
+  origin_digest="$(audit_origin_digest "$audit_a" A "$message_id")"
+  if classify_zero_delivery "$audit_c" "$origin_digest" "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]"; then
+    die "WATCH TIMEOUT/environmental: C audit contains content digest $origin_digest with bus_path=[$bus_a,$bus_b,$bus_c]; relay delivery succeeded but watch observed zero deliveries"
   else
     case $? in
-      1) die "relay not established: C audit lacks $message_id with complete bus_path=[$bus_a,$bus_b,$bus_c]" ;;
+      1) die "relay not established: C audit lacks content digest $origin_digest with complete bus_path=[$bus_a,$bus_b,$bus_c]" ;;
       2) die "unattributable zero-delivery result: C audit output is malformed" ;;
-      3) die "relay delivery invariant failed: C audit contains duplicate complete paths for $message_id" ;;
+      3) die "relay delivery invariant failed: C audit contains duplicate complete paths for content digest $origin_digest" ;;
       *) die "unattributable zero-delivery result: classifier failed unexpectedly" ;;
     esac
   fi
 elif [[ "$delivery_count" != 1 ]]; then
-  die "recipient observed $delivery_count deliveries of $message_id; want exactly 1"
+  die "recipient observed $delivery_count deliveries of the logical message; want exactly 1"
 fi
-jq -e --arg id "$message_id" --arg text "$PAYLOAD" --arg from "$sender_id" \
+# FAIL-CLOSED: `jq -e` exits 4 when select() yields NO output at all, so a
+# recipient record that matches nothing fails here rather than passing quietly.
+# Do not rewrite this as a grep/echo pipeline.
+jq -e --arg text "$PAYLOAD" --arg from "$sender_id" \
   --arg to "$recipient_id" \
   --argjson path "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]" \
-  'select(.message_id == $id and .text == $text and .from == $from and
+  'select(.text == $text and .from == $from and
     .broadcast == false and .to == [$to] and .bus_path == $path)' \
   "$watch_file" >/dev/null ||
   die "recipient message identity, audience, body, or three-hop bus_path is wrong"
@@ -492,8 +721,14 @@ read_audit "$SERVER_A" "$DATA_A" "$audit_a" A
 read_audit "$SERVER_B" "$DATA_B" "$audit_b" B
 read_audit "$SERVER_C" "$DATA_C" "$audit_c" C
 
-assert_audit_path "$audit_a" A "$message_id" "[\"$bus_a\"]"
-assert_audit_path "$audit_b" B "$message_id" "[\"$bus_a\",\"$bus_b\"]"
-assert_audit_path "$audit_c" C "$message_id" "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]"
+# A minted the message, so A -- and ONLY A -- is asserted by the id A returned
+# to the sender. That record's canonical content digest is then the correlator
+# for the two downstream buses, each of which minted an id of its own.
+origin_digest="$(audit_origin_digest "$audit_a" A "$message_id")"
 
-note "PASS: $message_id delivered exactly once over $bus_a -> $bus_b -> $bus_c"
+assert_audit_hop "$audit_a" A "$origin_digest" "$sender_id" "$recipient_id" "[\"$bus_a\"]"
+assert_audit_hop "$audit_b" B "$origin_digest" "$sender_id" "$recipient_id" "[\"$bus_a\",\"$bus_b\"]"
+assert_audit_hop "$audit_c" C "$origin_digest" "$sender_id" "$recipient_id" "[\"$bus_a\",\"$bus_b\",\"$bus_c\"]"
+
+note "PASS: one logical message (origin id $message_id, content digest $origin_digest)"
+note "PASS: delivered exactly once over $bus_a -> $bus_b -> $bus_c"
