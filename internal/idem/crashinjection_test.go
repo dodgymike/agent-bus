@@ -216,22 +216,44 @@ func openCrashHub(t *testing.T, durable hub.DurableLog, lg *wal.Log) *hub.Hub {
 	return h
 }
 
-// freshSendRequest is the client's FIRST attempt: a reservation is taken and the
-// assignment it returns is what the client signs (SIGN-1's reserve-then-send).
+// freshSendRequest is the client's FIRST attempt from the default fixture agent
+// to the default fixture recipient under crashKey: a reservation is taken and
+// the assignment it returns is what the client signs (SIGN-1's
+// reserve-then-send).
 //
-// A mint failure is deliberately not fatal here — a caller may be exercising a
-// path that is supposed to refuse — so a refused reservation yields the zero
-// SignedMint and lets the publish return the error the client would see.
+// The mint-failure behaviour is freshSendRequestFrom's and is documented there.
 func freshSendRequest(t *testing.T, h *hub.Hub, body []byte) hub.SendRequest {
 	t.Helper()
-	sender := crashAgentID(t, crashSenderName)
+	return freshSendRequestFrom(t, h, crashSenderName, crashRecipientName, crashKey, body)
+}
+
+// freshSendRequestFrom is freshSendRequest with the SENDER, the recipient and
+// the key all chosen by the caller.
+//
+// It exists for the cross-agent isolation test, which needs a SECOND agent to
+// present the FIRST agent's key. The scope is the (agent, op, key) tuple, so
+// "the same key from a different agent" is only expressible if the sender is a
+// parameter — and holding the key constant while varying the agent is exactly
+// what makes a cross-agent oracle detectable.
+//
+// The mint is taken under the given sender, not merely claimed: a reservation
+// belongs to the agent that took it, so borrowing another agent's assignment
+// would be refused for that reason and would prove nothing about the
+// applied-key scope.
+//
+// A mint failure is deliberately not fatal — a caller may be exercising a path
+// that is supposed to refuse — so a refused reservation yields the zero
+// SignedMint and lets the publish return the error the client would see.
+func freshSendRequestFrom(t *testing.T, h *hub.Hub, fromName, toName, key string, body []byte) hub.SendRequest {
+	t.Helper()
+	sender := crashAgentID(t, fromName)
 	req := hub.SendRequest{
 		Sender:         sender,
-		To:             crashAgentID(t, crashRecipientName),
+		To:             crashAgentID(t, toName),
 		Body:           body,
-		IdempotencyKey: crashKey,
+		IdempotencyKey: key,
 	}
-	if m, err := h.Mint(hub.MintRequest{Sender: sender, Op: "send", IdempotencyKey: crashKey}); err == nil {
+	if m, err := h.Mint(hub.MintRequest{Sender: sender, Op: "send", IdempotencyKey: key}); err == nil {
 		req.SignedMint = hub.SignedMint{
 			MessageID:          m.MessageID,
 			Seq:                m.Seq,
@@ -1160,6 +1182,168 @@ func TestIdemCrashInjectionRestartKeyReuseIsStillTheViolation(t *testing.T) {
 	}
 	if !again.Replayed || again.MessageID != original.ID {
 		t.Fatalf("the honest retry after a refused key-reuse returned %+v, want the original %s replayed", again, original.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-agent isolation survives recovery: no oracle in the rebuilt table
+// ---------------------------------------------------------------------------
+
+// TestIdemCrashInjectionRestartCrossAgentKeyIsolation proves the applied-key
+// scope's AGENT component survives a crash — that the table rebuilt from disk
+// still answers "have I applied this?" per (agent, op, key) and not per (op,
+// key).
+//
+// The in-memory half of this is already covered (idem_test.go, store_test.go).
+// What was NOT covered is the half that only a restart can reach: the scope is
+// rebuilt by DECODING each record and re-running its constructor
+// (Record.Scope), so a recovery that dropped, defaulted or transposed the agent
+// field would collapse every agent's keys into one namespace — and every
+// in-memory test would keep passing, because none of them ever decodes a
+// record.
+//
+// # WHAT A COLLAPSED SCOPE WOULD ACTUALLY DO, AND WHY EITHER OUTCOME IS A LEAK
+//
+// Agent A's key is durable and A never got its acknowledgement. Agent B — a
+// different, legitimate agent that has never used this key — now presents it.
+// If the recovered scope had lost its agent component, B meets one of two
+// answers, and B's PAYLOAD FINGERPRINT decides which:
+//
+//   - Fingerprint EQUAL to A's: B is answered A's result. B is handed A's
+//     message id and sequence for a message it did not send, and its own send
+//     never happens — a cross-agent oracle AND a silently dropped message.
+//   - Fingerprint DIFFERENT from A's: B is told ErrIdempotencyKeyReused. B is
+//     accused of a protocol violation over a key it has never used, and the
+//     refusal itself discloses that somebody else holds that key.
+//
+// Both rows are asserted because they are DIFFERENT BRANCHES, not two spellings
+// of one: only the first can reach the "answered with A's result" assertions,
+// and only the second can reach the violation assertion. Verified by mutation —
+// collapsing the scope's agent component turns row 1 into a Replayed answer
+// carrying A's message id and row 2 into ErrIdempotencyKeyReused.
+//
+// # WHY B SENDS TO ITSELF IN THE FIRST ROW, WHICH IS OTHERWISE ODD
+//
+// publishFingerprint (internal/hub) hashes the OP, the RECIPIENT LIST and the
+// BODY — and NOT the sender. So making B's fingerprint equal A's requires B to
+// send to A's recipient with A's body, and B IS that recipient. The self-send
+// is not the point of the row; it is the only way to hold every hashed field
+// equal while changing the one field under test, the sending agent. Without it
+// the recipient list differs, the fingerprints differ, and row 1 silently
+// degenerates into a second copy of row 2 — which is exactly what the first
+// draft of this test did, and the mutation run is what exposed it.
+//
+// The two rows therefore differ in EXACTLY ONE input: the body.
+//
+// B's send must simply be APPLIED AS NEW in both cases: a new id, a new
+// sequence, Replayed false, no error. And A's own honest retry must still be
+// answered afterwards — B's insertion must not evict or overwrite the record A
+// is still depending on, which is the same fail-closed property the key-reuse
+// test pins from the other side.
+func TestIdemCrashInjectionRestartCrossAgentKeyIsolation(t *testing.T) {
+	tests := []struct {
+		name string
+		// body is what the SECOND agent sends under the first agent's key. It is
+		// the ONLY field that varies between the rows: every other input to the
+		// payload fingerprint (the op and the recipient list) is held equal to
+		// the crashed agent's, so the row name describes the whole difference.
+		body []byte
+	}{
+		{
+			name: "fingerprint identical to the crashed agent's: must not be answered with its result",
+			body: crashBody,
+		},
+		{
+			name: "a different payload: must not be accused of reusing a key it has never used",
+			body: crashOtherBody,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			// Agent A's send is committed and fsynced, and the process dies before
+			// the ack. Its applied-key record is on stable storage and A is still
+			// holding an unanswered request.
+			runRestartCrashChild(t, crashPostCommitPreAck, dir)
+			original := mustDecodeOnly(t, dir)
+
+			lg := openCrashLog(t, dir, true)
+			h := openCrashHub(t, lg, lg)
+
+			// The table really was rebuilt from disk — otherwise every assertion
+			// below would pass against an empty table, which is the vacuous way
+			// this test could look green while proving nothing.
+			if got := h.IdempotencyStats().Count; got != 1 {
+				t.Fatalf("after recovery the applied-key table holds %d records, want exactly 1 (agent A's): the rest of this test asserts B is NOT answered from that record, so an empty table here would make it vacuous", got)
+			}
+			if original.Sender != crashAgentID(t, crashSenderName) {
+				t.Fatalf("the recovered message was sent by %q, want %q: this test's whole premise is that the durable record belongs to a DIFFERENT agent than the one that sends next", original.Sender, crashAgentID(t, crashSenderName))
+			}
+
+			// Agent B presents A's key. B is enrolled, takes its OWN reservation,
+			// and has never used this key. B sends to A's RECIPIENT (which is B
+			// itself) so that the recipient list — a hashed field — is held equal
+			// to A's; see the self-send note in this test's doc comment.
+			req := freshSendRequestFrom(t, h, crashRecipientName, crashRecipientName, original.IdempotencyKey, tc.body)
+
+			// The row's premise, asserted rather than assumed: every hashed field
+			// except the body is equal to the crashed record's. If this drifts,
+			// row 1 stops being the "identical fingerprint" branch and quietly
+			// becomes a duplicate of row 2 — a degeneration that leaves the
+			// oracle assertions below unreachable while the test still passes.
+			if len(original.Recipients) != 1 || req.To != original.Recipients[0] {
+				t.Fatalf("agent B is sending to %q but the crashed message's recipients are %v: the payload fingerprint hashes the recipient list, so the rows only differ by BODY if this holds", req.To, original.Recipients)
+			}
+
+			res, err := h.Send(req)
+			if errors.Is(err, hub.ErrIdempotencyKeyReused) {
+				t.Fatalf("agent B presenting agent A's key after recovery was refused with ErrIdempotencyKeyReused (%v): the applied-key scope is the (agent, op, key) tuple, so B has never used this key and has violated nothing; a violation here means the recovered scope lost its AGENT component and B is being adjudicated against A's fingerprint", err)
+			}
+			if err != nil {
+				t.Fatalf("agent B presenting agent A's key after recovery returned err = %v, want the send to be applied as a NEW operation: B is a different agent and this is its first use of the key", err)
+			}
+			if res.Replayed {
+				t.Fatalf("agent B's send was reported Replayed = true: B was answered from agent A's recovered record, which hands B a message id and sequence for a message it never sent AND silently drops the message it did send")
+			}
+			if res.MessageID == original.ID {
+				t.Fatalf("agent B's send returned agent A's message id %s: the recovered applied-key table answered across agents", res.MessageID)
+			}
+			if res.Seq == original.Seq {
+				t.Fatalf("agent B's send returned agent A's sequence %d: two different messages must never share a sequence (invariant 1)", res.Seq)
+			}
+
+			// Two distinct effects, both durable.
+			if got := len(committedMessagesIn(t, dir)); got != 2 {
+				t.Fatalf("the durable log holds %d committed MESSAGE entries, want 2: agent A's recovered message and agent B's new one", got)
+			}
+			if got := h.IdempotencyStats().Count; got != 2 {
+				t.Fatalf("the applied-key table holds %d records, want 2: the same key under two agents is two scopes, not one", got)
+			}
+			// The DENOMINATOR is a separate plane from the record set, and a
+			// recovery can keep the two scopes distinct while still collapsing the
+			// per-agent counters they feed. Count alone would not notice: it reads
+			// the records map, and the fair share reads byAgent. A collapsed
+			// denominator is not cosmetic — it is what decides every later
+			// admission, so it is asserted in its own right.
+			if got := h.IdempotencyStats().Agents; got != 2 {
+				t.Fatalf("the applied-key table's per-agent counters cover %d agents, want 2: the two records survived recovery as distinct scopes but the fair-share DENOMINATOR they feed was collapsed, so the share every later admission is judged against is wrong even though the table looks correct", got)
+			}
+
+			// A's record survived B's insertion. A is STILL retrying the
+			// acknowledgement it lost in the crash, and must still be answered.
+			again, err := h.Send(verbatimReplayOf(original, crashBody))
+			if err != nil {
+				t.Fatalf("agent A's honest retry AFTER agent B used the same key returned err = %v, want A's original result: B's insertion must not disturb the record A depends on", err)
+			}
+			if !again.Replayed || again.MessageID != original.ID || again.Seq != original.Seq {
+				t.Fatalf("agent A's retry returned %+v, want the original %s / seq %d replayed", again, original.ID, original.Seq)
+			}
+			if err := h.Poisoned(); err != nil {
+				t.Fatalf("the hub is poisoned after a cross-agent key collision across recovery: %v", err)
+			}
+		})
 	}
 }
 
