@@ -4097,3 +4097,74 @@ rounds up:
 - Three "filed as a follow-up" phrases were written **before** the follow-ups existed. The reviewer
   refused to close on that, correctly: a dated claim that something is filed is either true or it is
   a lie in the log. All are now real tasks and are named by key above.
+
+## 2026-08-15 — `RELAY-47-FU-DOCS` (`6f7281e8-91cd-4b50-a5ac-e031041eb5ad`): the doc debt `RELAY-47` could not discharge (`documentation`)
+
+Invariants read in full: 2 (fully-qualified ids — carried unaffected by this change), 6 (metadata-only
+log, every discard logged loudly), 10 (idempotency, loop guards as a complement not a substitute).
+None is weakened by a doc-only change; named because the change describes them.
+
+**Fixed the two of three false locations that were editable.** `CONTRACTS-ONDISK.md:1546` ("Onward
+multi-hop relay is deliberately not implemented") replaced with the current contract, including the
+still-true limitation (`RELAY-48`, not crash-safe) and an explicit note that
+`cmd/agent-bus/relayegress.go:259` is UNCHANGED and correctly so — it guards a different seam
+(`hub.Egress`) from the one onward relay uses (`relay.AcceptOptions.Onward`), and relaxing it would
+double-forward. `DECISIONS.md` gained a new dated section (`## 2026-08-15 — RELAY-47: onward relay
+wiring, and the seam deliberately left untouched`) recording the wiring decision, the
+`maxOnwardBusesPerMessage = 8` bound and its upper-bound-not-exact-count correction, the deliberate
+non-relaxation of `relayegress.go:259`, and the operator's 200-is-fine ruling — appended rather than
+editing the existing `RELAY-24-BLOCKER-EGRESS` section's now-superseded "Multi-hop onward relay does
+not exist" claim, per this file's append-only convention; the new entry says explicitly that it
+supersedes the old one.
+
+**A FOURTH stale location was found by grep, not named in the task:** `CONTRACTS-CLI.md:808`, "No
+running bus produces a multi-hop value today". False independent of `RELAY-47` — `hub.IngestRelayed`
+(`internal/hub/relayingest.go`) has appended this bus's own hop to a relayed message's `bus_path`
+since `RELAY-21`/`RELAY-24` landed, so a two-hop record already existed before onward forwarding was
+wired; `RELAY-47` extends the same true fact to more than one further hop. Fixed in the same style —
+what is true today, dated, without an incidental "not implemented" left standing.
+
+**`AGENT_PROTOCOL.md:244` and `:1122` were NOT edited.** `git status --porcelain -- AGENT_PROTOCOL.md`
+showed ` M` (worktree dirty, index clean); `git diff HEAD -- AGENT_PROTOCOL.md` is another agent's
+live, unrelated `-peer-client-fingerprint` documentation (`RELAY-24-BLOCKER-PEERCERTFLAG`), not a
+relay-onward edit. Editing the file risks a pathspec commit shipping that agent's unreviewed text
+under this task's title — the exact trap this file already warns about. The replacement text is
+recorded verbatim in this task's `kind=report` note for whoever commits next once the file is clean:
+line 244's "nothing produces a multi-hop path yet" clause and line 1122's "multi-hop relay is not
+implemented, and each bus is a leaf" paragraph both need the same correction applied to
+`CONTRACTS-ONDISK.md` and `CONTRACTS-CLI.md` here. `CONTRACTS-AGENT.md` was checked and left alone
+too — its live diff is unrelated `scripts/doc-check.sh` documentation (`CONTEXT-DOCCHECK`), and it
+carries no relay-onward staleness of its own.
+
+**The rescued text at `/tmp/claude-1000/rescued/codex-relaywiring-item1.txt`** (the applied-key store
+"coalesces foreign fairness accounting by the verified, case-folded sender bus half") was NOT applied.
+Its subject — `cmd/agent-bus/relaywiring.go`'s doc item 1 — is a `.go` file outside this task's remit
+(only `internal/relay/doc.go` comment edits were in scope, and that file's one `leaf` hit is an
+unrelated slice-index comment). The underlying claim is independently CONFIRMED true and already
+documented: `internal/idem/store.go`'s `bucket` function does the case-folded coalescing, and
+`DECISIONS.md`'s `## 2026-08-15 — RELAY-FU-IDEM-METER-BY-PEER` section (committed at `72d6f5d`, ahead
+of this task) states it in the same words. `relaywiring.go`'s doc item 1 itself still carries the
+conservative, reverted wording ("METERED BY THE PROVEN PEER... See `peerAdmission`") — not false, just
+narrower than what shipped — and is left for whoever next touches that file rather than edited here.
+
+**A proof_cmd defect found while verifying, reported rather than silently worked around.** The stored
+proof —
+`bash -c 'set -e; ! grep -q "..." CONTRACTS-ONDISK.md; ! grep -q "..." AGENT_PROTOCOL.md; ! grep -q
+"..." AGENT_PROTOCOL.md; grep -q onward CONTRACTS-ONDISK.md; echo DOCS_OK'` — relies on `set -e` to
+abort on a match, but bash does **not** apply `set -e` to a command led by `!`: a negated command's
+failure is invisible to `set -e` by design. Verified directly: `bash -c 'set -e; ! grep -q root
+/etc/passwd; echo REACHED'` prints `REACHED` despite the match. Consequence: the two
+`AGENT_PROTOCOL.md` clauses in this proof gate NOTHING — the script's exit code and `DOCS_OK` output
+depend ENTIRELY on the final, non-negated `grep -q onward CONTRACTS-ONDISK.md`. Before this task's
+edit, that command failed (no lowercase `onward` existed in `CONTRACTS-ONDISK.md`), so the proof
+correctly reported RED — but for the wrong reason, and it will now report `DOCS_OK` regardless of
+whether `AGENT_PROTOCOL.md`'s stale sentences are ever fixed. This does **not** mean the task can be
+marked done on this proof: `AGENT_PROTOCOL.md`'s two locations are still false and still unedited, for
+the contested-file reason above, independent of the proof bug. Flagged for `spec-keeper` to correct
+the stored `proof_cmd` (drop the `!` pattern, e.g. `grep -qL ... || { echo STILL_STALE; exit 1; }` per
+clause) before this task is completed.
+
+Verification: `git status --porcelain -- CONTRACTS-ONDISK.md CONTRACTS-CLI.md DECISIONS.md
+AGENT_LOG.md` clean before edits; `grep -n "Onward multi-hop relay is deliberately not implemented"
+CONTRACTS-ONDISK.md` and `grep -n "No running bus produces a multi-hop value today"
+CONTRACTS-CLI.md` both matched pre-fix (RED, observed) and neither matches post-fix.

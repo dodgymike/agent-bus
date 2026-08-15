@@ -6121,3 +6121,62 @@ shrink every local agent's allowance without bound. Metering only the authentica
 HTTP wiring layer was rejected as insufficient: it can attribute resource use but does not change
 the applied-key table's poisoned label denominator. Treating `OpRelay` as identity was also
 rejected because an operation name authenticates nobody.
+
+## 2026-08-15 — RELAY-47: onward relay wiring, and the seam deliberately left untouched
+
+**`relay.AcceptOptions.Onward` is now the SAME `*relay.Forwarder` the egress half already builds**,
+passed through `federationOptions.Onward` in `cmd/agent-bus/relaywiring.go`. `relay.Forwarder` already
+satisfied the `OnwardForwarder` interface the acceptor calls through (compile-time assertion,
+`internal/relay/accept.go`); the only wiring change is that the composition root now hands it over
+instead of leaving the field `nil`. It is assigned through an **interface-typed** local rather than a
+bare `*relay.Forwarder`, because a `nil` concrete pointer assigned straight into an interface value is
+NOT a `nil` interface — the acceptor's `Onward != nil` check would pass and it would call through a nil
+receiver. `nil` remains a legitimate LEAF configuration (a bus with no peer store has nothing to
+forward with); the two states are distinguished at startup by `onward_relay=true`/`false`, not by
+whether the field is set.
+
+**This SUPERSEDES the "What is still NOT true" note in the 2026-08-15 RELAY-24-BLOCKER-EGRESS section
+above** ("Multi-hop onward relay does not exist... `relay.AcceptOptions.Onward` is still nil"). That
+was accurate when written and is not edited here — DECISIONS.md is append-only — but a reader relying
+on it now would be wrong; this entry is the current word.
+
+**The task's own brief asked for a second change that was NOT made, deliberately: relaxing
+`cmd/agent-bus/relayegress.go`'s `BusPath[0]`-originated-here check.** That line guards `hub.Egress`,
+which builds a NEW envelope claiming THIS bus as the origin. `hub.publish` calls it for relay-ingested
+messages too (for the audit content hash), so relaxing the check would forward every ingested message
+TWICE — once correctly through `AcceptOptions.Onward`, and once as a fabricated local origin, which
+`attest.Sign` refuses outright on the sender-namespace check (invariant 2), buying nothing but a Warn
+line per relayed message. The brief's own text partly agreed with this in a separate paragraph, so the
+description was self-contradictory; the reviewer gate concurred. The check is unchanged, and its
+comment now records why relaxing it would be wrong rather than merely that it is unchanged.
+
+**`maxOnwardBusesPerMessage = 8` (`cmd/agent-bus/relaywiring.go`).** An onward hop is outbound work a
+PEER can trigger on this bus — two durable fsyncs per destination before the ingest that requested it
+even returns — so it is bounded the same way locally-triggered fan-out already is, not left uncapped.
+Combined with the pre-existing per-peer in-flight ingest cap of 8 (`RELAY-22`), one authenticated peer
+can hold at most 64 onward copies in flight, measured at ≤16 fsyncs and ≤8 outbound POSTs per inbound
+relayed message. The count is taken from the envelope's **recipients** (distinct foreign bus halves),
+not from the forwarder's resolved next hops, so it is an **upper bound on outbound copies, never an
+under-count** — it can overcount today, on entirely correct traffic, whenever the egress split horizon
+drops a destination already on the traversed path or the registry has no route for one; a first draft
+of this reasoning claimed the two were exactly equal and was corrected during review before landing
+(`RELAY-47-FU-FANOUT` tracks tightening the count to next hops instead of destinations).
+
+**The 200 for `POST /v1/peer/relay` is UNCHANGED, by explicit operator ruling, and that is a decision,
+not an oversight.** It was proposed that a message accepted and durably recorded but carried no
+further should be reported differently, or refused at ingest instead of accepted. The operator
+overruled that: durable-acceptance and delivered-to-recipient are different facts, the second will be
+reported asynchronously once epic `ACK` (end-to-end delivery ACK/NACK) lands, and nothing here should
+change ahead of that or block on it. `CONTRACTS-HTTP.md`'s "Onward relay" section states the 200's
+meaning positively rather than as an open question.
+
+**Known limitation, not fixed here: a pending onward hop does not survive a restart.** `store.Message`
+carries no field for the origin bus's attestation, so an ingested-but-not-yet-forwarded envelope cannot
+be rebuilt from durable state — at boot, `Forwarder.resumeJob` cannot resolve it and abandons the job
+(logged at WARN; invariant 6 is satisfied, invariant 4 is not violated — the message genuinely is
+durable on this bus, only the forwarding obligation is lost). Filed as `RELAY-48`. Loop prevention
+(`relay.AppendHop`'s hop-count and repeat-visit refusals, `relay.NextHopAllowed`'s egress split
+horizon, `relay.CheckIncomingPath`'s ingress backstop) and the fan-out bound above were proved by
+mutation — stubbing each guard out independently turns a three-bus ring test RED — not by inspection
+alone, per this project's rule that "the code looks right" is not evidence for a durability or
+loop-safety claim.

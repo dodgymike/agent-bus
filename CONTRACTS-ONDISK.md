@@ -1543,10 +1543,21 @@ server is no longer best effort in the sense this paragraph used to mean.
 
 The remaining limits, stated precisely rather than replaced with a new overclaim:
 
-- **Onward multi-hop relay is deliberately not implemented.** The egress adapter forwards only
-  messages ORIGINATED on this bus (`cmd/agent-bus/relayegress.go` declines when the first entry of the
-  message's bus path is not this bus); a message this bus ingested from a peer is never re-forwarded
-  to a further hop, so a federated bus is still a leaf.
+- **Onward multi-hop relay is now implemented (`RELAY-47`, 2026-08-15).** An intermediate bus DOES
+  now carry a message it ingested from a peer to a FURTHER hop when a recipient is on a bus that is
+  neither this one nor the sender's — `A→B→C` delivers, proven against running buses. Full contract
+  (fan-out bound, loop control, what a 200 still means) is in `CONTRACTS-HTTP.md`'s "Onward relay"
+  section. `cmd/agent-bus/relayegress.go`'s `BusPath[0]`-originated-here check is **UNCHANGED and
+  still correct**: it still declines to re-forward a relay-ingested message through `hub.Egress`,
+  because that seam builds a NEW envelope claiming this bus as origin and `hub.publish` already calls
+  it for relay ingest too — relaxing it would forward every ingested message TWICE. Onward relay is
+  wired through a separate seam, `relay.AcceptOptions.Onward`, not through that check. `nil` there is
+  still a legitimate LEAF configuration (no peer store, nothing to forward with), not a limitation of
+  the build — startup reports `onward_relay=true`/`false` accordingly. **Not yet crash-safe**: a
+  pending onward hop is durably ABANDONED, not resumed, if this bus restarts before delivering it —
+  the intermediate does not retain the origin bus's attestation, so the envelope cannot be rebuilt
+  from durable state (`store.Message` has no `OriginAttestation` field); the loss is logged loudly at
+  WARN (invariant 6), and the locally-originated case is unaffected. Filed as `RELAY-48`.
 - **A crash between a message's own commit and its outbox enqueue loses the FORWARD, never the
   message.** The outbox record is written in a SECOND `wal` transaction, after the message's own
   commit has already been acknowledged (invariant 4) — so the message itself always survives such a

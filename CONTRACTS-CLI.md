@@ -805,12 +805,14 @@ timestamp costs no I/O. An unparseable `-since`/`-until`, `-min-seq` above `-max
 or a `-until` that is not strictly after `-since` are each exit `2`.
 
 **`bus_path` is the ORDERED traversal, oldest bus first.** Nothing sorts, dedupes or reorders it — the
-reader displays exactly what was recorded. **No running bus produces a multi-hop value today:**
-`hub.publish` has two callers (`Send`, `Broadcast`), neither sets a path, so `publish` substitutes
-`store.LocalBusPath(h.busID)` and every record a live bus writes carries a **single element — this
-bus's own id**. Multi-hop paths are validated and recordable (`internal/hub/buspath_test.go` writes
-one directly), but no relay-ingest route exists to produce one; that is `RELAY-20`/`RELAY-21`/
-`RELAY-24`. Verified at `a8c367c`.
+reader displays exactly what was recorded. **A running bus DOES produce a multi-hop value, and has
+since `RELAY-24` wired relay ingest (2026-08-15).** A locally-originated send or broadcast
+still carries a single element — `hub.publish`'s `Send`/`Broadcast` callers set no path, so `publish`
+substitutes `store.LocalBusPath(h.busID)` — but `hub.IngestRelayed` appends this bus's own hop to the
+path the message arrived with (`internal/hub/relayingest.go`), so any relayed record's `bus_path`
+carries every bus it has actually traversed, and — since `RELAY-47` wired onward forwarding — that can
+now be more than one further hop beyond the sender's own bus. `internal/hub/buspath_test.go` covers
+the shape directly.
 
 **Damage is always reported, and filters never hide it.** A frame that is not a `TypeAuditMessage`, a
 frame `wal.DecodeAudit` refuses, and a scan that stops early are each named on **stderr** with the
