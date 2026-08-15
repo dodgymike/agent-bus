@@ -1,4 +1,9 @@
 // INVITE-HARDEN's structural regression guard for the invite-secret comparison.
+// LOAD-BEARING: selector identity is resolved from each file's imports; dot
+// imports, local shadowing of sensitive comparator qualifiers or VerifySecret,
+// and comparator selectors on receivers whose identity cannot be proven all
+// fail closed. Parentheses and generic-instantiation wrappers around callees
+// are normalized before those decisions.
 //
 // It is an AST guard rather than a behavioural test, and it follows the
 // precedent set by client/guard_test.go: the failure it exists to catch is
@@ -169,21 +174,22 @@ func (a *analysis) importPath(pos token.Pos, local string) string {
 // not feel like writing your own crypto. Treating all of subtle.* as safe let
 // that mutant stay green.
 func (a *analysis) safeComparator(fun ast.Expr) bool {
+	fun = unwrapCallFun(fun)
 	switch f := fun.(type) {
 	case *ast.Ident:
 		return f.Name == "VerifySecret"
 	case *ast.SelectorExpr:
 		pkg, ok := f.X.(*ast.Ident)
 		if !ok {
-			return f.Sel.Name == "VerifySecret"
+			return false
 		}
-		switch pkg.Name {
-		case "subtle":
-			return a.importPath(f.Pos(), "subtle") == "crypto/subtle" && f.Sel.Name == "ConstantTimeCompare"
-		case "hmac":
-			return a.importPath(f.Pos(), "hmac") == "crypto/hmac" && f.Sel.Name == "Equal"
+		switch a.importPath(f.Pos(), pkg.Name) {
+		case "crypto/subtle":
+			return f.Sel.Name == "ConstantTimeCompare"
+		case "crypto/hmac":
+			return f.Sel.Name == "Equal"
 		}
-		return f.Sel.Name == "VerifySecret"
+		return false
 	}
 	return false
 }
@@ -204,31 +210,64 @@ func (a *analysis) safeComparator(fun ast.Expr) bool {
 //     `ok &= subtle.ConstantTimeByteEq(got[i], stored[i])` — is caught as well
 //     as the `== 0` spelling.
 func (a *analysis) disallowedCall(fun ast.Expr) (string, bool) {
-	pkg, name := funcName(fun)
-	if bannedComparators[pkg][name] {
-		return pkg + "." + name + " on invite-secret material", true
-	}
+	fun = unwrapCallFun(fun)
 	sel, ok := fun.(*ast.SelectorExpr)
 	if !ok {
 		return "", false
 	}
-	if id, isID := sel.X.(*ast.Ident); !isID || (id.Name != "subtle" && id.Name != "hmac") {
-		return "", false
-	}
-	want := map[string]string{"subtle": "crypto/subtle", "hmac": "crypto/hmac"}[pkg]
-	if got := a.importPath(fun.Pos(), pkg); got != want {
-		if got == "" {
-			return "a call to `" + pkg + "." + name + "` in a file that does not import " + want, true
+	id, ok := sel.X.(*ast.Ident)
+	if !ok {
+		if sel.Sel.Name == "VerifySecret" || sel.Sel.Name == "Equal" || sel.Sel.Name == "ConstantTimeCompare" {
+			return "sensitive comparator selector " + sel.Sel.Name + " has a composed receiver whose package identity cannot be proven", true
 		}
-		return "a call to `" + pkg + "." + name + "`, where `" + pkg + "` is bound to " + got + ", NOT " + want, true
-	}
-	if pkg == "subtle" && name != "ConstantTimeCompare" {
-		return "subtle." + name + " used on credential material; the only approved comparison is subtle.ConstantTimeCompare", true
-	}
-	if pkg == "hmac" && name == "Equal" {
 		return "", false
+	}
+	path, name := a.importPath(fun.Pos(), id.Name), sel.Sel.Name
+	if bannedComparators[path][name] {
+		return path + "." + name + " on invite-secret material", true
+	}
+	if path == "crypto/subtle" && name != "ConstantTimeCompare" {
+		return id.Name + "." + name + " used on credential material; the only approved comparison is crypto/subtle.ConstantTimeCompare", true
+	}
+	if path == "crypto/hmac" && name == "Equal" {
+		return "", false
+	}
+	if name == "VerifySecret" {
+		return "selector-form VerifySecret is not the package-local approved wrapper", true
+	}
+	if name == "ConstantTimeCompare" && path != "crypto/subtle" {
+		return "a call to `" + id.Name + ".ConstantTimeCompare`, where `" + id.Name + "` is bound to " + path + ", not crypto/subtle", true
+	}
+	if name == "Equal" && path != "crypto/hmac" {
+		return "a call to `" + id.Name + ".Equal`, where `" + id.Name + "` is not the approved crypto/hmac comparator", true
+	}
+	// A familiar crypto qualifier bound to an impostor package must be called
+	// out explicitly; otherwise the surrounding == happens to catch only the
+	// common integer-returning spelling and a bool-returning Equal stays green.
+	if (id.Name == "subtle" && path != "crypto/subtle") || (id.Name == "hmac" && path != "crypto/hmac") {
+		return "a call to `" + id.Name + "." + name + "`, where `" + id.Name + "` is bound to " + path + ", not the approved crypto package", true
 	}
 	return "", false
+}
+
+// unwrapCallFun removes syntax-only wrappers around a callee. Parentheses and
+// generic instantiation do not change the function being called; classifying
+// their outer AST nodes would let `(bytes.Equal)(...)` and
+// `slices.Equal[[]byte](...)` bypass selector policy while compiling to the
+// same calls.
+func unwrapCallFun(fun ast.Expr) ast.Expr {
+	for {
+		switch f := fun.(type) {
+		case *ast.ParenExpr:
+			fun = f.X
+		case *ast.IndexExpr:
+			fun = f.X
+		case *ast.IndexListExpr:
+			fun = f.X
+		default:
+			return fun
+		}
+	}
 }
 
 func funcName(fun ast.Expr) (pkg, name string) {
@@ -334,6 +373,137 @@ type analysis struct {
 	// while the IDENTICAL code written as a func declaration is one of the
 	// self-tests below.
 	taint map[ast.Decl]map[string]bool
+}
+
+var sensitiveComparatorPackages = map[string]bool{
+	"bytes": true, "strings": true, "reflect": true, "slices": true,
+	"crypto/subtle": true, "crypto/hmac": true,
+}
+
+// structuralImportFindings fails closed on two cases a selector-only analysis
+// cannot resolve safely: dot-imported comparator packages, and a local binding
+// that shadows an imported sensitive qualifier. The shadow rule examines real
+// binding contexts (function receivers/parameters/results/type parameters,
+// var/const names, := and range :=) and is deliberately file-wide. Ordinary
+// struct/interface field names are not bindings and therefore are not flagged.
+// Go's lexical scopes are more precise, but a security guard is better served
+// by refusing the rare ambiguous spelling than by guessing which `ct` a
+// selector denotes without go/types.
+func (a *analysis) structuralImportFindings(file string, f *ast.File) []finding {
+	var out []finding
+	bindings := importBindings(f)
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err == nil && sensitiveComparatorPackages[path] && imp.Name != nil && imp.Name.Name == "." {
+			out = append(out, finding{file: file, pos: imp.Pos(), expr: render(a.fset, imp.Path), what: "dot import of sensitive comparator package " + path})
+		}
+	}
+	for local, path := range bindings {
+		if local == "_" || local == "." || !sensitiveComparatorPackages[path] {
+			continue
+		}
+		reportFields := func(fields ...*ast.FieldList) {
+			for _, list := range fields {
+				if list == nil {
+					continue
+				}
+				for _, field := range list.List {
+					for _, id := range field.Names {
+						if id.Name == local {
+							out = append(out, finding{file: file, pos: id.Pos(), expr: local, what: "function binding shadows sensitive import " + path})
+						}
+					}
+				}
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				reportFields(x.Recv, x.Type.TypeParams, x.Type.Params, x.Type.Results)
+			case *ast.FuncLit:
+				reportFields(x.Type.TypeParams, x.Type.Params, x.Type.Results)
+			case *ast.ValueSpec:
+				for _, id := range x.Names {
+					if id.Name == local {
+						out = append(out, finding{file: file, pos: id.Pos(), expr: local, what: "local declaration shadows sensitive import " + path})
+					}
+				}
+			case *ast.AssignStmt:
+				if x.Tok == token.DEFINE {
+					for _, lhs := range x.Lhs {
+						if id, ok := lhs.(*ast.Ident); ok && id.Name == local {
+							out = append(out, finding{file: file, pos: id.Pos(), expr: local, what: "short declaration shadows sensitive import " + path})
+						}
+					}
+				}
+			case *ast.RangeStmt:
+				if x.Tok == token.DEFINE {
+					for _, e := range []ast.Expr{x.Key, x.Value} {
+						if id, ok := e.(*ast.Ident); ok && id.Name == local {
+							out = append(out, finding{file: file, pos: id.Pos(), expr: local, what: "range declaration shadows sensitive import " + path})
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// structuralVerifySecretFindings protects the one bare identifier that
+// safeComparator trusts. The package-level function declaration is allowed;
+// every lexical binding of the same spelling fails closed, because syntax-only
+// analysis cannot otherwise prove a call resolves to that function.
+func (a *analysis) structuralVerifySecretFindings(file string, f *ast.File) []finding {
+	var out []finding
+	report := func(id *ast.Ident, what string) {
+		if id != nil && id.Name == "VerifySecret" {
+			out = append(out, finding{file: file, pos: id.Pos(), expr: id.Name, what: what + " shadows the approved package-level VerifySecret"})
+		}
+	}
+	reportFields := func(fields ...*ast.FieldList) {
+		for _, list := range fields {
+			if list == nil {
+				continue
+			}
+			for _, field := range list.List {
+				for _, id := range field.Names {
+					report(id, "function binding")
+				}
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncDecl:
+			reportFields(x.Recv, x.Type.TypeParams, x.Type.Params, x.Type.Results)
+		case *ast.FuncLit:
+			reportFields(x.Type.TypeParams, x.Type.Params, x.Type.Results)
+		case *ast.ValueSpec:
+			for _, id := range x.Names {
+				report(id, "value declaration")
+			}
+		case *ast.AssignStmt:
+			if x.Tok == token.DEFINE {
+				for _, lhs := range x.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						report(id, "short declaration")
+					}
+				}
+			}
+		case *ast.RangeStmt:
+			if x.Tok == token.DEFINE {
+				for _, e := range []ast.Expr{x.Key, x.Value} {
+					if id, ok := e.(*ast.Ident); ok {
+						report(id, "range declaration")
+					}
+				}
+			}
+		}
+		return true
+	})
+	return out
 }
 
 func newAnalysis(t *testing.T, fset *token.FileSet, files map[string]*ast.File) *analysis {
@@ -623,6 +793,8 @@ func (a *analysis) derived(e ast.Expr, tainted map[string]bool, throughCalls boo
 func (a *analysis) findings() []finding {
 	var out []finding
 	for _, name := range a.names {
+		out = append(out, a.structuralImportFindings(name, a.files[name])...)
+		out = append(out, a.structuralVerifySecretFindings(name, a.files[name])...)
 		for _, d := range a.files[name].Decls {
 			// EVERY top-level declaration is scanned with ITS OWN computed
 			// taint, a var/const block exactly like a func declaration. The
@@ -800,6 +972,10 @@ var allowedComparisons = map[string]string{
 //     strings.EqualFold, reflect.DeepEqual or slices.Equal, outside a small
 //     commented allowlist of non-credential comparisons. Taint follows values
 //     through slices, indexes, conversions and INTO package-local helpers;
+//     sensitive comparator imports may be aliased, but may not be dot-imported
+//     or shadowed by a lexical binding (ordinary struct fields are allowed).
+//     The trusted bare VerifySecret name may not be rebound locally, and a
+//     sensitive selector on a composed receiver fails closed;
 //     see the KNOWN LIMITATIONS on guardNoUnsafeCredentialComparison for what it
 //     still does not see;
 //   - guard 3: Store.Begin's VerifySecret gate precedes EVERY invite-state
@@ -830,6 +1006,17 @@ func TestInviteSecretComparedInConstantTime(t *testing.T) {
 
 	t.Run("guard1_VerifySecretUsesConstantTimeCompare", func(t *testing.T) {
 		guardVerifySecretUsesSubtle(t, fset, files)
+	})
+	t.Run("guard1_ParenthesizedApprovedComparator", func(t *testing.T) {
+		mutantSet := token.NewFileSet()
+		mutant, err := parser.ParseFile(mutantSet, "wrapped.go", `package invite
+import ct "crypto/subtle"
+func VerifySecret(a, b []byte) bool { return (ct.ConstantTimeCompare)(a, b) == 1 }
+`, 0)
+		if err != nil {
+			t.Fatalf("parsing guard1 wrapped-call control: %v", err)
+		}
+		guardVerifySecretUsesSubtle(t, mutantSet, map[string]*ast.File{"wrapped.go": mutant})
 	})
 	t.Run("guard2_NoByteAtATimeCredentialComparison", func(t *testing.T) {
 		guardNoUnsafeCredentialComparison(t, fset, files)
@@ -868,20 +1055,24 @@ func guardVerifySecretUsesSubtle(t *testing.T, fset *token.FileSet, files map[st
 			"If it was renamed, moved or split, this guard must move with it — a guard pointing at a function that no longer exists passes forever.", found)
 	}
 
-	// The identifier `subtle` in the declaring file must be crypto/subtle.
+	// Resolve the qualifier in the declaring file; aliases are permitted, but
+	// the path behind the selector must be exactly crypto/subtle.
 	//
 	// This resolves ONLY the declaring file — which is all guard 1 can claim.
 	// The same importBindings helper is applied per-file by guard 2's
 	// safeComparator, so a second file binding `subtle` to an impostor and
 	// comparing there is caught THERE; before that existed this comment
 	// over-promised, and a mutant proved it.
-	subtlePath := importBindings(declAST)["subtle"]
-	if subtlePath != "crypto/subtle" {
-		if subtlePath == "" {
-			t.Errorf("%s declares VerifySecret but does not import \"crypto/subtle\". Invariant 9: the comparison of a bearer credential must use crypto/subtle.ConstantTimeCompare, never a hand-rolled or 'adapted' one.", declFile)
-		} else {
-			t.Errorf("%s binds the identifier `subtle` to %q, not \"crypto/subtle\". A local package spelled `subtle` would satisfy a name-only check while comparing however it likes — invariant 9 forbids exactly that.", declFile, subtlePath)
+	bindings := importBindings(declAST)
+	var subtleQualifier string
+	for local, path := range bindings {
+		if path == "crypto/subtle" {
+			subtleQualifier = local
+			break
 		}
+	}
+	if subtleQualifier == "" {
+		t.Errorf("%s declares VerifySecret but does not import \"crypto/subtle\" under a usable qualifier. Invariant 9: the comparison of a bearer credential must use crypto/subtle.ConstantTimeCompare, never a hand-rolled or 'adapted' one.", declFile)
 	}
 
 	var calls int
@@ -890,12 +1081,12 @@ func guardVerifySecretUsesSubtle(t *testing.T, fset *token.FileSet, files map[st
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		sel, ok := unwrapCallFun(call.Fun).(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
 		pkg, ok := sel.X.(*ast.Ident)
-		if ok && pkg.Name == "subtle" && sel.Sel.Name == "ConstantTimeCompare" {
+		if ok && pkg.Name == subtleQualifier && bindings[pkg.Name] == "crypto/subtle" && sel.Sel.Name == "ConstantTimeCompare" {
 			calls++
 		}
 		return true
@@ -978,9 +1169,12 @@ func guardVerifySecretUsesSubtle(t *testing.T, fset *token.FileSet, files map[st
 //     Found by the reviewer; closing it needs go/types, which this guard
 //     deliberately does not depend on.
 //
-//   - IMPORT RESOLUTION IS PER-FILE AND SYNTACTIC. `subtle` and `hmac` are
-//     checked against the importing file's own bindings, which closes the
-//     impostor-package hole, but nothing here understands build tags, so a file
+//   - IMPORT RESOLUTION IS PER-FILE AND SYNTACTIC. Every sensitive comparator
+//     selector is checked against the importing file's own bindings. Dot
+//     imports and any file containing a function/local binding that shadows
+//     such an import fail closed (conservatively, without scope analysis);
+//     ordinary struct/interface fields are not treated as bindings. Nothing
+//     here understands build tags, so a file
 //     excluded from this build is still parsed and a file included by a tag
 //     this guard cannot evaluate is treated the same as any other.
 //
@@ -1007,6 +1201,7 @@ func f(presented string, stored [32]byte) bool {
 	return true
 }`, true)
 	assertDetects(t, "bytes.Equal on a digest", `package p
+import "bytes"
 func f(req RedeemRequest, cur Record) bool {
 	return bytes.Equal([]byte(req.Secret), cur.SecretDigest[:])
 }`, true)
@@ -1019,6 +1214,7 @@ func digestsEqual(a, b [DigestSize]byte) bool { return a == b }`, true)
 	// detector hole, once closed, is exactly the thing a later simplification
 	// reopens.
 	assertDetects(t, "digest laundered through a []byte helper (reviewer's bypass)", `package p
+import "bytes"
 func eq(a, b []byte) bool { return bytes.Equal(a, b) }
 func verifySecret2(p string, stored [DigestSize]byte) bool {
 	got := HashSecret(p)
@@ -1037,11 +1233,13 @@ func f(presented string, stored [32]byte) bool {
 	return false
 }`, true)
 	assertDetects(t, "reflect.DeepEqual on a digest (security's bypass)", `package p
+import "reflect"
 func f(presented string, stored [32]byte) bool {
 	got := HashSecret(presented)
 	return reflect.DeepEqual(got[:], stored[:])
 }`, true)
 	assertDetects(t, "slices.Equal on a digest (security's bypass)", `package p
+import "slices"
 func f(presented string, stored [32]byte) bool {
 	got := HashSecret(presented)
 	return slices.Equal(got[:], stored[:])
@@ -1073,6 +1271,160 @@ func verifySecretFast(presented string, stored [32]byte) bool {
 	got := HashSecret(presented)
 	return subtle.ConstantTimeCompare(got[:], stored[:]) == 1
 }`, true)
+
+	// Qualifiers are local spelling, not identity. These mutants prove the
+	// detector resolves every selector through that file's import table: aliases
+	// cannot hide a banned comparator, and aliases of the approved packages do
+	// not create false positives.
+	for _, tc := range []struct {
+		name, path, call string
+	}{
+		{"aliased bytes.Equal", "bytes", "cmp.Equal(got[:], stored[:])"},
+		{"aliased strings.Compare", "strings", "cmp.Compare(string(got[:]), string(stored[:]))"},
+		{"aliased reflect.DeepEqual", "reflect", "cmp.DeepEqual(got, stored)"},
+		{"aliased slices.Equal", "slices", "cmp.Equal(got[:], stored[:])"},
+	} {
+		assertDetects(t, tc.name, "package p\nimport cmp \""+tc.path+"\"\nfunc f(presented string, stored [32]byte) bool { got := HashSecret(presented); return "+tc.call+" }", true)
+	}
+	assertDetects(t, "aliased crypto/subtle.ConstantTimeCompare", `package p
+import ct "crypto/subtle"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return ct.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, false)
+	assertDetects(t, "aliased crypto/hmac.Equal", `package p
+import mac "crypto/hmac"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return mac.Equal(got[:], stored[:])
+}`, false)
+	assertDetects(t, "aliased disallowed crypto/subtle function", `package p
+import ct "crypto/subtle"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return ct.ConstantTimeByteEq(got[0], stored[0]) == 1
+}`, true)
+	for _, path := range []string{"bytes", "strings", "reflect", "slices", "crypto/subtle", "crypto/hmac"} {
+		assertDetects(t, "dot import of "+path, "package p\nimport . \""+path+"\"\nfunc f() bool { return true }", true)
+	}
+	assertDetects(t, "blank import is uncallable", `package p
+import _ "crypto/subtle"
+func f() bool { return true }`, false)
+	assertDetects(t, "impostor ConstantTimeCompare behind an unfamiliar alias", `package p
+import ct "example.com/impostor"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return ct.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, true)
+	assertDetects(t, "impostor Equal behind an unfamiliar alias", `package p
+import mac "example.com/impostor"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return mac.Equal(got[:], stored[:])
+}`, true)
+	// A selector's spelling alone cannot distinguish the imported package from
+	// a same-named local. These two mutants used to be blessed by
+	// safeComparator even though they call attacker-defined fields.
+	assertDetects(t, "crypto/subtle alias shadowed by local object", `package p
+import ct "crypto/subtle"
+func f(presented string, stored [32]byte) bool {
+	ct := struct{ ConstantTimeCompare func([]byte, []byte) int }{}
+	got := HashSecret(presented)
+	return ct.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, true)
+	assertDetects(t, "crypto/hmac alias shadowed by parameter", `package p
+import mac "crypto/hmac"
+func f(mac struct{ Equal func([]byte, []byte) bool }, presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return mac.Equal(got[:], stored[:])
+}`, true)
+	assertDetects(t, "crypto/subtle alias shadowed by receiver", `package p
+import ct "crypto/subtle"
+type T struct{}
+func (ct T) f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return ct.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, true)
+	assertDetects(t, "crypto/hmac alias shadowed by named result", `package p
+import mac "crypto/hmac"
+func f(presented string, stored [32]byte) (mac bool) {
+	got := HashSecret(presented)
+	return mac.Equal(got[:], stored[:])
+}`, true)
+	assertDetects(t, "ordinary struct field may share a sensitive alias name", `package p
+import ct "crypto/subtle"
+type holder struct { ct int }
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return ct.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, false)
+	assertDetects(t, "imported object VerifySecret impostor", `package p
+import evil "example.com/evil"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return evil.VerifySecret(got[:], stored[:])
+}`, true)
+	assertDetects(t, "local object VerifySecret impostor", `package p
+func f(presented string, stored [32]byte) bool {
+	evil := struct{ VerifySecret func([]byte, []byte) bool }{}
+	got := HashSecret(presented)
+	return evil.VerifySecret(got[:], stored[:])
+}`, true)
+	assertDetects(t, "bare VerifySecret shadowed by short declaration", `package p
+func f(presented string, stored [32]byte) bool {
+	VerifySecret := func([]byte, []byte) bool { return true }
+	got := HashSecret(presented)
+	return VerifySecret(got[:], stored[:])
+}`, true)
+	assertDetects(t, "VerifySecret on call receiver", `package p
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return factory().VerifySecret(got[:], stored[:])
+}`, true)
+	assertDetects(t, "VerifySecret on chained receiver", `package p
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return holder.evil.VerifySecret(got[:], stored[:])
+}`, true)
+	assertDetects(t, "Equal on composed receiver", `package p
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return factory().Equal(got[:], stored[:])
+}`, true)
+	assertDetects(t, "ConstantTimeCompare on composed receiver", `package p
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return holder.cmp.ConstantTimeCompare(got[:], stored[:]) == 1
+}`, true)
+	assertDetects(t, "parenthesized bytes.Equal", `package p
+import "bytes"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return (bytes.Equal)(got[:], stored[:])
+}`, true)
+	assertDetects(t, "generic slices.Equal instantiation", `package p
+import "slices"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return slices.Equal[[]byte](got[:], stored[:])
+}`, true)
+	assertDetects(t, "parenthesized selector VerifySecret impostor", `package p
+import evil "example.com/evil"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return (evil.VerifySecret)(got[:], stored[:])
+}`, true)
+	assertDetects(t, "parenthesized approved crypto/subtle comparator", `package p
+import ct "crypto/subtle"
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return (ct.ConstantTimeCompare)(got[:], stored[:]) == 1
+}`, false)
+	assertDetects(t, "parenthesized approved bare VerifySecret", `package p
+func f(presented string, stored [32]byte) bool {
+	got := HashSecret(presented)
+	return (VerifySecret)(got[:], stored[:])
+}`, false)
 
 	// A constant-time PRIMITIVE assembled into a comparison that is not: the
 	// loop returns at the first differing byte, so the trip count leaks the
