@@ -7,20 +7,28 @@ import "errors"
 // diagnostic detail for an operator and is free to change. This is the
 // convention internal/auth and internal/idem already follow.
 //
-// # THE SENTINELS ARE DELIBERATELY DISTINCT, AND THE HTTP LAYER MUST COLLAPSE
-// # THEM
+// # THE SENTINELS ARE DELIBERATELY DISTINCT, AND THE HTTP LAYER COLLAPSES THEM
 //
 // An operator needs to know WHICH failure occurred — "the invite expired" and
 // "that secret is wrong" require completely different responses — so this
 // package keeps them apart. A CLIENT must not learn the difference: the set of
 // answers below is an oracle for "does invite X exist" and "is invite X still
-// live", which is exactly what an attacker enumerating invite ids wants.
+// live", which is exactly what an attacker enumerating invite ids wants. That
+// split is why the collapse belongs at the boundary and not here: collapsing
+// them in this package would take the specific sentinel away from the operator
+// too.
 //
-// Collapsing them into ONE indistinguishable response on the wire is
-// INVITE-HARDEN's task, not this one. Until it lands, any handler built on this
-// package MUST map every one of ErrUnknownInvite, ErrExpired, ErrRevoked,
-// ErrAlreadyRedeemed and ErrInvalidInviteID to the SAME status and the SAME
-// body, and log the specific sentinel server-side only.
+// THAT COLLAPSE HAS LANDED (INVITE-HARDEN, 2026-08-14). It lives in
+// httpapi.writeInviteError, which maps every one of ErrUnknownInvite,
+// ErrExpired, ErrRevoked, ErrAlreadyRedeemed and ErrInvalidInviteID to ONE
+// status and ONE body — 403 {"error":"invite not accepted"} — and logs the
+// specific sentinel server-side only. It is asserted byte-for-byte across eight
+// rows by httpapi.TestInviteGateEveryInviteRefusalIsIndistinguishable.
+//
+// ANY OTHER HANDLER BUILT ON THIS PACKAGE MUST DO THE SAME. The obligation is
+// on the boundary, not on this package, and it does not transfer by itself to a
+// second route or a second transport: a new caller that maps these sentinels
+// one-to-one reinstates the oracle with every test still green.
 var (
 	// ErrInvalidInviteID reports an invite id that fails ValidateInviteID:
 	// empty, over MaxInviteIDLen bytes, or not matching InviteIDPattern. The

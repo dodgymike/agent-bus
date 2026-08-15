@@ -120,8 +120,17 @@ const (
 	// still plausibly be retrying with it.
 	//
 	// It costs retention, not safety. A retained expired or revoked record is
-	// still REFUSED (Store.Begin checks the state and the clock before it checks
-	// anything else); what the record buys is the ability to say WHY. The
+	// still REFUSED — but note the ORDER, because it is the opposite of what an
+	// author would assume and a guard now enforces it: Store.Begin verifies the
+	// SECRET FIRST, and every state or clock refusal (ErrRedemptionInFlight,
+	// ErrKeyReuse, ErrExpired, ErrRevoked, ErrAlreadyRedeemed) is raised strictly
+	// AFTER that gate. Checking the clock or the state first would be a refusal
+	// either way and would look like a cheap short-circuit, while handing a
+	// caller holding NO secret the ability to tell "expired" from "revoked" from
+	// "no such invite" — an enumeration oracle over the bus's admission tickets.
+	// A non-holder must not be able to distinguish invite states at all; only the
+	// holder, who already knows them, ever sees one. What the retained record
+	// buys is the ability to say WHY to THAT holder and to the operator log. The
 	// capacity consequence is stated plainly: with MaxTTL of 7 days plus this
 	// window, the table holds every invite minted in the last ~9.1 days, capped
 	// at MaxInvites — about 900 invites a day sustained, for a resource an

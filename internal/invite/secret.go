@@ -87,8 +87,14 @@ func HashSecret(secret string) [DigestSize]byte {
 // this package's distinct sentinels (errors.go) tell an operator — and
 // therefore, if a handler is careless, a client — which failure occurred.
 // Store.Begin narrows the first by comparing against a per-store dummy digest
-// for an unknown id, so the hash-and-compare work happens either way; the
-// second is INVITE-HARDEN's to close at the HTTP layer.
+// for an unknown id, so the hash-and-compare work happens either way.
+//
+// THE SECOND HAS LANDED, at the HTTP boundary (INVITE-HARDEN, 2026-08-14):
+// httpapi.writeInviteError maps ErrUnknownInvite, ErrExpired, ErrRevoked,
+// ErrAlreadyRedeemed and ErrInvalidInviteID to ONE status and ONE body, logging
+// the specific sentinel server-side only. The obligation sits on the boundary,
+// not on this package, so a SECOND handler built on these sentinels owes the
+// same collapse — see errors.go.
 func VerifySecret(presented string, stored [DigestSize]byte) bool {
 	got := HashSecret(presented)
 	return subtle.ConstantTimeCompare(got[:], stored[:]) == 1

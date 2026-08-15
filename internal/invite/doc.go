@@ -145,12 +145,18 @@
 //
 // # 7. What this package does NOT do
 //
-//   - IT DOES NOT COLLAPSE ITS ERRORS. The sentinels in errors.go are distinct
-//     because an operator needs to know which failure occurred. A CLIENT must
-//     not: the set of answers is an oracle for "does this invite exist and is
-//     it live". THE HTTP LAYER MUST COLLAPSE THEM into one indistinguishable
-//     response — that is INVITE-HARDEN's task, and until it lands any handler
-//     built on this package must do it itself.
+//   - IT DOES NOT COLLAPSE ITS ERRORS, AND IT MUST NOT. The sentinels in
+//     errors.go are distinct because an operator needs to know which failure
+//     occurred. A CLIENT must not: the set of answers is an oracle for "does
+//     this invite exist and is it live". THE COLLAPSE THEREFORE BELONGS AT THE
+//     HTTP BOUNDARY, and it has landed there — httpapi.writeInviteError maps
+//     ErrUnknownInvite, ErrExpired, ErrRevoked, ErrAlreadyRedeemed and
+//     ErrInvalidInviteID to one status and one body, 403
+//     {"error":"invite not accepted"}, logging the specific sentinel
+//     server-side only (INVITE-HARDEN, 2026-08-14; asserted byte-for-byte by
+//     httpapi.TestInviteGateEveryInviteRefusalIsIndistinguishable). Any OTHER
+//     handler built on this package owes the same collapse; the obligation does
+//     not travel with the sentinels.
 //   - IT DOES NOT CLOSE EVERY TIMING SIDE CHANNEL. Store.Begin compares against
 //     a per-store dummy digest for an unknown id, so the hash-and-compare work
 //     is identical either way; a map lookup and the distinct sentinels above
