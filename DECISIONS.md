@@ -6355,6 +6355,67 @@ followed a planted symlink; the world-readable file was overwritten by the same 
 about it; and the "0 handshakes" figure in the docs was impossible from a cold store — the honest
 number is one per hour.
 
+## 2026-08-16 — Operator rulings: ADMIN D6 and D1 are OVERRULED; an operator principal is next
+
+Three standing positions were changed by the operator on 2026-08-16, in response to a direct question
+listing what was blocked and on whom. Recorded here as REVERSALS rather than left to contradict the
+originals silently — each names what it overrules, so a reader who finds the old ruling first is
+carried forward instead of acting on it.
+
+### 1. ONLINE INVITE MINT IS NOW ALLOWED — overrules ADMIN **D6 "NO ONLINE INVITE MINT"**
+
+D6 required the bus to be STOPPED to mint an invite, because minting appends to the write-ahead log
+and takes the data directory's exclusive lock that a running bus holds. Operator ruling: *"I am
+changing that ruling to allow online invite mint."* The `INVMINT` epic is unblocked.
+
+**What this buys, concretely.** On 2026-08-15/16 the live bus was stopped **eight times** in one
+session, purely to mint. Every stop invalidates every agent's bearer token and forces all of them
+through the handshake again — the whole roster is disturbed to admit one member. The pre-mint-a-pool
+workaround exists and works, but it trades a security property for convenience: spare invites sit on
+disk unspent, and **there is no way to recall one**, because `invite revoke` is documented in three
+places and implemented in none (`DOCS-11`).
+
+**What this does NOT authorise.** An online mint route needs an OPERATOR PRINCIPAL to authorise it.
+It must NOT ship as "any authenticated agent may mint an invite" — that would let any enrolled agent
+admit arbitrary new agents, which is strictly worse than the bus-stop it replaces. See ruling 3;
+that dependency is the reason it is being tackled first.
+
+### 2. THE TUI IS WANTED — overrules ADMIN **D1**
+
+D1 ruled that the browser console on loopback with no TLS was the deliberate operator surface.
+Operator ruling: *"I want the TUI."* The `TUI` epic is unblocked.
+
+Note the design tension this inherits rather than resolves: D1's console is unauthenticated because
+it binds loopback only. A terminal UI that administrates, monitors and instructs agents is a far more
+capable surface, and the same "loopback is the boundary" argument does NOT carry — that reasoning was
+already found false on Linux once this session, when a probe to an unpublished container's
+`172.20.0.2:8080` completed a TLS handshake. The TUI's authorisation model is an open question for
+its epic, not something D1's reversal settles.
+
+### 3. AN OPERATOR PRINCIPAL IS THE NEXT PIECE OF WORK
+
+Operator ruling: *"Yes, that's what I want to tackle next."*
+
+agent-bus today has NO admin/operator identity. Every authenticated caller is an enrolled agent, so
+"operator-only" has nothing to authorise against. That single gap now blocks **four** things:
+
+  - `AUTH-7` — an operator clearing one agent's sessions
+  - `INVMINT` — the online mint above, which is otherwise a self-service enrolment hole
+  - `INVMINT-2` — as recorded
+  - the admin arm of `CONV` — "only the channel creator may change the recipient list, **or an
+    admin**", which was answered by the operator and cannot be built
+
+The recurring shape is worth naming: **every "an operator can do X" feature has been filed, designed
+and then stalled at the same missing noun.** It is not four problems.
+
+### Still OPEN, deliberately not decided here
+
+`CONV` versus `COMMS-THREAD-FIELD`. The latter was filed `blocked` ON PURPOSE so a wire-level
+`thread_id` could not be added un-measured; `CONV` is strictly heavier — it needs that field PLUS a
+durable record type, a mint path, membership state, a recipient-change event and relay semantics for
+all of it. Approving `CONV` would silently answer a question someone deliberately left open, so it
+is left open here too, awaiting an explicit ruling.
+
 ## Removed on 2026-08-16 — superseded, refuted or overtaken
 
 `DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED

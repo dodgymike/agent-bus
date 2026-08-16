@@ -129,14 +129,6 @@ func (c *Client) sessionFilePath(agentID string) (string, error) {
 	return filepath.Join(c.store.Dir(), name), nil
 }
 
-// loadPersistedSession reads a session previously written for cred.
-//
-// Every failure returns (nil, false): a session is a cache, and the correct
-// response to a missing, stale, malformed or mis-bound file is to hand back
-// nothing and let the caller run the handshake. The ONE thing it does loudly is
-// warn when the file is readable by other users — that is not a cache miss, it
-// is a credential that may already have been read, and staying silent about it
-// would be the failure mode the mode check exists to prevent.
 // busURL is the bus this client will ACTUALLY talk to, canonicalised. It is
 // resolved through resolveBusURL — NOT read off the credential — because
 // --bus / AGENT_BUS_URL overrides the credential's recorded URL (transport.go
@@ -152,6 +144,14 @@ func (c *Client) busURL() (string, bool) {
 	return u.String(), true
 }
 
+// loadPersistedSession reads a session previously written for cred.
+//
+// Every failure returns (nil, false): a session is a cache, and the correct
+// response to a missing, stale, malformed or mis-bound file is to hand back
+// nothing and let the caller run the handshake. The ONE thing it does loudly is
+// warn when the file is readable by other users — that is not a cache miss, it
+// is a credential that may already have been read, and staying silent about it
+// would be the failure mode the mode check exists to prevent.
 func (c *Client) loadPersistedSession(cred Credential) (*session, bool) {
 	path, err := c.sessionFilePath(cred.AgentID)
 	if err != nil {
