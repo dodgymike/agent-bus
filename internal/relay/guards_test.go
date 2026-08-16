@@ -598,6 +598,12 @@ var peerRoutePathIdents = map[string]bool{
 	"PeerEnrollPath": true,
 	"PeerRelayPath":  true,
 	"PeerRosterPath": true,
+	// ACK-3. A FOURTH peer surface, and it is added here in the same change that
+	// declares the constant: a peer path constant this map does not name is a
+	// path anybody may register anywhere, which is precisely the property this
+	// guard exists to hold. The "/v1/peer/" prefix rule below already covers the
+	// LITERAL, but not a reference to the constant by name.
+	"PeerAckPath": true,
 }
 
 // peerRoutePrefix is the value half of the same rule. All three constants live

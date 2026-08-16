@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/idem"
@@ -117,6 +118,33 @@ func newWiringRegistry(t *testing.T) *relay.Registry {
 	return reg
 }
 
+// newWiringOutbox builds the durable per-hop obligation table newFederation now
+// requires (ACK-3). Production shares ONE outbox between the egress forwarder
+// that WRITES an obligation and the ACK route that BINDS an acknowledgement to
+// it (ACK-CONTRACT.md §6.2); a test that only exercises the ingress still has to
+// supply one, for the same reason it has to supply a registry.
+//
+// It is deliberately NOT attached to a WAL here. An unattached outbox refuses
+// every mutating call with ErrOutboxNotDurable and answers Lookup with "no such
+// job", which is exactly the state these tests want: they exercise the relay
+// ingress, and an ACK against a bus that owes nothing is correctly refused.
+func newWiringOutbox(t *testing.T, busID string) *relay.Outbox {
+	t.Helper()
+	ob, err := relay.NewOutbox(relay.OutboxOptions{BusID: busID})
+	if err != nil {
+		t.Fatalf("relay.NewOutbox(%s): %v", busID, err)
+	}
+	return ob
+}
+
+// newWiringAckStore builds the durable delivery lifecycle table newFederation
+// now requires (ACK-3), likewise unattached: with no durable log every Settle
+// refuses with ack.ErrNotDurable, which these tests never reach.
+func newWiringAckStore(t *testing.T) *ack.Store {
+	t.Helper()
+	return ack.NewStore(ack.Options{})
+}
+
 // newWiringFederation assembles a federation with a stub local bus. share and
 // concurrent are the admission bounds; 0 means the production default.
 func newWiringFederation(t *testing.T, local relay.LocalIngest, share, concurrent int) *federation {
@@ -126,6 +154,8 @@ func newWiringFederation(t *testing.T, local relay.LocalIngest, share, concurren
 		Registry:             newWiringRegistry(t),
 		Local:                local,
 		Peers:                newWiringPeerStore(t),
+		Outbox:               newWiringOutbox(t, wiringLocalBus),
+		AckLifecycle:         newWiringAckStore(t),
 		LocalAgents:          func() []string { return nil },
 		AppliedKeyShare:      share,
 		MaxConcurrentPerPeer: concurrent,
@@ -183,11 +213,13 @@ func localAgent(t *testing.T, name string) string {
 func TestRelayWiringComposesRoutesWhenPeersConfigured(t *testing.T) {
 	store := newWiringPeerStore(t)
 	fed, err := newFederation(federationOptions{
-		BusID:       wiringLocalBus,
-		Registry:    newWiringRegistry(t),
-		Local:       &stubIngest{},
-		Peers:       store,
-		LocalAgents: func() []string { return nil },
+		BusID:        wiringLocalBus,
+		Registry:     newWiringRegistry(t),
+		Local:        &stubIngest{},
+		Peers:        store,
+		Outbox:       newWiringOutbox(t, wiringLocalBus),
+		AckLifecycle: newWiringAckStore(t),
+		LocalAgents:  func() []string { return nil },
 	})
 	if err != nil {
 		t.Fatalf("newFederation: %v", err)
@@ -200,10 +232,10 @@ func TestRelayWiringComposesRoutesWhenPeersConfigured(t *testing.T) {
 	// all. Naming them here means a future field added to PeerSurface and left
 	// unset by newFederation fails HERE rather than as an unexplained 404.
 	if surface.Enroll == nil || surface.Relay == nil || surface.Roster == nil ||
-		surface.Registry == nil || surface.Trust == nil {
-		t.Fatalf("incomplete PeerSurface: enroll=%v relay=%v roster=%v registry=%v trust=%v",
+		surface.Ack == nil || surface.Registry == nil || surface.Trust == nil {
+		t.Fatalf("incomplete PeerSurface: enroll=%v relay=%v roster=%v ack=%v registry=%v trust=%v",
 			surface.Enroll != nil, surface.Relay != nil, surface.Roster != nil,
-			surface.Registry != nil, surface.Trust != nil)
+			surface.Ack != nil, surface.Registry != nil, surface.Trust != nil)
 	}
 
 	newServer := func(peer *httpapi.PeerSurface, principals httpapi.InboundPeerPrincipals) *httpapi.Server {
@@ -217,8 +249,12 @@ func TestRelayWiringComposesRoutesWhenPeersConfigured(t *testing.T) {
 
 	srv := newServer(surface, store)
 	routes := srv.PeerRoutes()
-	if len(routes) != 3 {
-		t.Fatalf("PeerRoutes() = %v (%d routes), want 3 registered peer routes", routes, len(routes))
+	// FOUR since ACK-3 added the peer acknowledgement ingest. The count is
+	// asserted rather than the set, deliberately: this file may not name a peer
+	// path (see the file header), so the number is the only handle it has, and a
+	// route that appears without a mount review makes it fail here.
+	if len(routes) != 4 {
+		t.Fatalf("PeerRoutes() = %v (%d routes), want 4 registered peer routes", routes, len(routes))
 	}
 
 	// GATED, not merely present. An anonymous caller over plain HTTP presents no
@@ -254,11 +290,13 @@ func TestRelayWiringComposesRoutesWhenPeersConfigured(t *testing.T) {
 func TestFederationRefusesAnIncompleteWiring(t *testing.T) {
 	full := func() federationOptions {
 		return federationOptions{
-			BusID:       wiringLocalBus,
-			Registry:    newWiringRegistry(t),
-			Local:       &stubIngest{},
-			Peers:       newWiringPeerStore(t),
-			LocalAgents: func() []string { return nil },
+			BusID:        wiringLocalBus,
+			Registry:     newWiringRegistry(t),
+			Local:        &stubIngest{},
+			Peers:        newWiringPeerStore(t),
+			Outbox:       newWiringOutbox(t, wiringLocalBus),
+			AckLifecycle: newWiringAckStore(t),
+			LocalAgents:  func() []string { return nil },
 		}
 	}
 	for _, tc := range []struct {
@@ -270,6 +308,13 @@ func TestFederationRefusesAnIncompleteWiring(t *testing.T) {
 		// the caller owns the table because the egress half reads the same one.
 		{"no registry", func(o *federationOptions) { o.Registry = nil }},
 		{"no peer store", func(o *federationOptions) { o.Peers = nil }},
+		// ACK-3. Both are REQUIRED for the same reason every PeerSurface field is:
+		// an ACK route with no obligation table binds nothing and refuses every
+		// acknowledgement, and one with no lifecycle table answers 200 while
+		// recording nothing. Both failures look exactly like a working surface
+		// from outside, which is why they must fail at startup.
+		{"no outbox", func(o *federationOptions) { o.Outbox = nil }},
+		{"no ack lifecycle table", func(o *federationOptions) { o.AckLifecycle = nil }},
 		{"no local roster", func(o *federationOptions) { o.LocalAgents = nil }},
 		{"invalid bus id", func(o *federationOptions) { o.BusID = "" }},
 		{"negative admission bound", func(o *federationOptions) { o.MaxConcurrentPerPeer = -1 }},
@@ -963,6 +1008,8 @@ func TestTransitMessageIsAcknowledgedLoudly(t *testing.T) {
 		Registry:      newWiringRegistry(t),
 		Local:         local,
 		Peers:         newWiringPeerStore(t),
+		Outbox:        newWiringOutbox(t, wiringLocalBus),
+		AckLifecycle:  newWiringAckStore(t),
 		LocalAgents:   func() []string { return nil },
 		Logger:        logging.New(&logs, logging.LevelDebug),
 		UnderPressure: func() bool { return false },

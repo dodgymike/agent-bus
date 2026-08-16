@@ -320,7 +320,15 @@ func peerErrorCode(buf []byte) string {
 		// it whenever a message names an agent in its namespace that its roster
 		// does not hold, and an operator whose federation is mis-rostered must
 		// read that reason rather than "unrecognised error code".
-		CodeUnknownRecipient:
+		CodeUnknownRecipient,
+		// ACK-3's version refusal, and this one matters MORE than most: it is
+		// emitted precisely during a PARTIAL ROLLOUT, when the two buses run
+		// different binaries, and failJSON puts only the code on the wire — so
+		// this string IS the entire diagnosis the sending operator ever gets.
+		// Omitted from this list it would arrive as "unrecognised error code",
+		// which is the one message guaranteed to send them looking in the wrong
+		// place. A security gate caught the omission (ACK-3, 2026-08-16).
+		CodeUnsupportedAckVersion:
 		return body.Error
 	default:
 		return "unrecognised error code"

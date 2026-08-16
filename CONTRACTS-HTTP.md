@@ -1048,8 +1048,9 @@ wrapping in one function so a path can never be recorded as a peer route without
 around it.
 
 **Registration is conditional, and all-or-nothing.** Routes appear only when `Options.Peer` is a
-**complete** `PeerSurface` (`Enroll`, `Relay`, `Roster`, `Registry` and `Trust` all non-nil) **and**
-`Options.PeerPrincipals` is set. A partial surface, or a complete one with no resolver, registers
+**complete** `PeerSurface` (`Enroll`, `Relay`, `Roster`, `Ack`, `Registry` and `Trust` all non-nil —
+`Ack` was added by `ACK-3` on 2026-08-16, and a build supplying the other five registers **nothing**)
+**and** `Options.PeerPrincipals` is set. A partial surface, or a complete one with no resolver, registers
 **nothing** and logs an `Error` — every `/v1/peer/` path then answers as an unregistered path, because
 a registered-but-refusing surface would advertise federation while serving nobody.
 
@@ -1175,3 +1176,156 @@ rather than left for someone to discover by testing it. `net/http.Server.Disable
 would route it through the mux like everything else, but it is go1.20+ and this module is pinned to
 go1.19 (see `CLAUDE.md`, "Runtime target") — not fixable here without a version bump recorded in
 `DECISIONS.md` first.
+
+## A FOURTH peer route: `POST /v1/peer/ack` — peer-hop delivery ACK/NACK (`ACK-3`, added 2026-08-16)
+
+The peer surface is now **four** routes, not three. `internal/httpapi/peermount.go` registers
+`/v1/peer/ack` through the same `mountPeerRoute` that registers the other three, so it is recorded as
+a peer route and wrapped in `RequirePeerPrincipal` in one function and cannot become one without the
+other. `httpapi.PeerSurface` gained a required `Ack *relay.AckHandler` field; a surface missing it
+registers **nothing at all**, exactly like a surface missing `Relay`.
+
+The route carries ONE terminal delivery outcome for ONE `(correlation key, recipient)` pair. It is
+specified by `ACK-CONTRACT.md` §9; the paragraphs below are the wire contract.
+
+### The frame
+
+`Content-Type: application/json`. There is **no idempotency-key header** on this route, unlike
+`/v1/peer/relay`: an ACK creates no applied-key entry, and its idempotency is the durable ACK record's
+own `(correlation key, recipient)` row plus the absorbing-terminal rule over it.
+
+```json
+{ "protocol_version": 1,
+  "correlation_key":  "<origin-bus>-<seq>",
+  "recipient":        "<bus-id>.<agent-id>",
+  "outcome":          "delivered" | "refused" | "undeliverable",
+  "class":            "<one of the twelve closed classes>",
+  "emitted_at":       1700000000000,
+  "attestation":      { "signature": "<base64, exactly 64 bytes>" } }
+```
+
+**`protocol_version` spends the ALREADY-RESERVED `relay-wire-version = 1` and reserves nothing new.**
+See `CONTRACTS-ONDISK.md`, "Record types / wire protocol versions". The JSON key is
+`protocol_version` and **must never be `version`** — `RosterUpdate` already owns `version` on a
+neighbouring peer envelope and that one is a monotonic *roster epoch*, not a format number.
+`ACK-CONTRACT.md` §9.2 sketches the field as `wire_version`; **the sketch is superseded**, because a
+single reserved version spelled two different ways on two frames of one protocol is how a future
+negotiation task ends up writing two parsers.
+
+**Reading rules.** A **missing** `protocol_version` reads as **1** — the only backward-compatible
+read, and exact, since version 1 *is* this format. An **unrecognised** version is **REFUSED, never
+defaulted**: `400 {"error":"unsupported_ack_version"}`. The stakes are higher than for an outbox row
+because this frame carries a TERMINAL outcome and terminal is absorbing, so a frame read under the
+wrong rules could durably settle a message in a way that can never be revisited.
+
+**`class` is present IFF `outcome` is a negative terminal, and the two halves of the closed set are
+enforced in BOTH directions:** `refused` takes one of the three *recipient-emitted* classes,
+`undeliverable` one of the nine *bus-emitted* ones, and `delivered` takes none. That is an
+anti-forgery check, not tidiness — without it a peer sends `outcome=refused, class=no_route` and this
+bus records its own routing failure as the recipient's decision.
+
+**`attestation` is present IFF the outcome is recipient-sourced** (`delivered`, `refused`) and
+forbidden on `undeliverable`. It is checked for **SHAPE ONLY** — present, and exactly
+`signing.SignatureSize` (64) bytes. **No bus verifies it and no bus may claim to**; nothing
+distributes agents' messaging public keys, so it is end-to-end unverifiable by anybody today,
+including the sender. An `{"attestation":{"signature":""}}` is refused rather than read as absent.
+
+**`emitted_at` is required and positive, and is NEVER persisted.** It is provenance for the operator
+log. The durable record's `accepted_at`/`settled_at` are this bus's own clock, and `emitted_at` takes
+part in no comparison — two acknowledgements are compared on outcome and class alone, so a peer
+re-sending the same settlement a second later is a retry rather than a violation.
+
+**There is NO free-text field, and no field whose length a remote party chooses.** The request cap is
+therefore derived exactly rather than guessed: **`MaxAckBytes` = 4 KiB**, against a widest legal frame
+of ~560 bytes. It is deliberately three orders of magnitude below `MaxRelayBytes` (256 KiB), because
+an ACK has no body and no recipient list and sharing the relay's cap would let an ACK-shaped stream
+cost far more than an ACK can legally cost.
+
+**THERE IS NO FIELD NAMING A BUS, AND ONE MUST NEVER BE ADDED.** See "Where the peer bus id comes
+from" below. The decoder sets `DisallowUnknownFields`, so a peer that invents one is refused 400.
+
+### Status codes
+
+| Situation | Answer |
+| --- | --- |
+| Accepted | **200** `{"accepted":true,"duplicate":false}` |
+| Idempotent replay — same pair, SAME outcome and class | **200** `{"accepted":true,"duplicate":true}`. The original result stands, **nothing is re-applied**, nobody is disconnected. |
+| No obligation binds this peer to this key, **or** no ACK row exists for that `(key, recipient)` | **409** `{"error":"idempotency_violation"}` |
+| A DIFFERENT terminal outcome is already recorded | **409** `{"error":"idempotency_violation"}` |
+| Malformed frame, unrecognised outcome or class, wrong class half, wrong attestation shape, missing `emitted_at`, malformed id | **400** `{"error":"invalid_request"}` |
+| Unrecognised `protocol_version` | **400** `{"error":"unsupported_ack_version"}` |
+| This peer is at its in-flight limit on this bus | **503** `{"error":"unavailable"}` |
+| The durable write failed, or the lifecycle table has no log attached | **503** `{"error":"unavailable"}` |
+| Not an authorised peer bus | **403**, from `RequirePeerPrincipal`'s one fixed refusal |
+| Not `POST` / not JSON / over `MaxAckBytes` | **405** / **415** / **413** |
+
+**The two 409 rows share one code DELIBERATELY, and that must not be "fixed".** "No obligation binds
+you to this key", "we owe it to a different peer", "the key names a third bus", "the row was swept"
+and "there is no ACK row for that recipient" are **byte-identical on the wire**. Distinguishing them
+would hand any peered bus an oracle for *"did bus A send message K to bus B"*, and by extension for
+which agents exist and are being written to. It is the deliberate analogue of the
+`409 no-matching-reservation` indistinguishability invariant 10 preserves. The causes are told apart
+**only in the operator log**, through one redaction point that elides every id a remote party chose
+the bytes of.
+
+**A metered refusal is 503 and NOT 4xx, and that choice is load-bearing.**
+`relay.PeerRefusedError.Retriable` treats every 4xx except 408/429 as **FINAL**, so a throttled
+acknowledgement answered 4xx would be **abandoned** by the sender and the recipient's decision would
+never reach the origin. Nothing durable is written for a metered refusal, so retrying is correct.
+
+**NO refusal on this route closes a connection** (`ACK-CONTRACT.md` §12, invariant 10). A peer link
+multiplexes an entire remote bus's roster, and a merely buggy peer reaches every refusal here
+trivially.
+
+### Where the peer bus id comes from — the one thing to get right
+
+`relay.AuthorizePeerAck` authorises `DeriveJobID(peerBusID, correlationKey)`: it settles the frame
+against an outbox job **this bus durably wrote to that peer**. So whoever controls `peerBusID`
+controls whose obligations they may settle.
+
+**It is `httpapi.PeerPrincipal.BusID` — the bus id `RequirePeerPrincipal` resolved from the TLS
+CLIENT CERTIFICATE — and it is never read from the request.** That is structural rather than
+documented:
+
+1. the frame declares **no field** a bus id could be read from, and the decoder rejects an invented
+   one;
+2. `*relay.AckHandler` is deliberately **not an `http.Handler`** — it exposes
+   `ServeAuthenticated(w, r, peerBusID)` — so it cannot be handed to a mux at all, and "forgot the
+   principal" is a compile error rather than a silent forgery hole;
+3. the only adapter that supplies the parameter is `internal/httpapi/peermount.go`'s `servePeerAck`,
+   where the sole source of a bus id in scope is `PeerPrincipalFromContext`.
+
+The binding does **not** require the correlation key's bus half to equal the acknowledging peer. In an
+A→B→C chain, C's outcome reaches A **via B** and the key's bus half is A's; a "bus half must equal the
+peer" rule would be wrong and would break multi-hop.
+
+### Rate limiting, and the decision that is NOT taken here
+
+`relay.AuthorizePeerAck` reaches `Outbox.Lookup`, which takes the outbox's **exclusive mutex** and
+runs an O(n) sweep — the same mutex `Enqueue` and `Settle` need. The route therefore meters **before
+the body is read** and long before that call, keyed on the authenticated peer.
+
+**It reuses the meter that already exists** — `cmd/agent-bus`'s `peerAdmission.enter`, the
+per-authenticated-peer in-flight bound `RELAY-22` built for relay ingest — through an
+interface-shaped `AckConfig.Admit` seam. `ACK-CONTRACT.md` §16 Q3 asks whether this surface needs its
+own limit and defers the answer to the open task `48223968` ("Choose the abuse-control primitive for a
+MULTI-PRINCIPAL relay link"). **This route does not answer it**; when that task rules, the ruling
+lands in one place and both peer routes inherit it. The *concurrency* half is used and the *quota*
+half is not: the quota counts applied-key entries and an ACK creates none.
+
+### Not reachable without federation
+
+Like the other three, this route exists only on a build that composes a complete `PeerSurface` with an
+inbound principal resolver. `cmd/agent-bus/relaywiring.go` now also requires a `*relay.Outbox` and a
+`*ack.Store`; a federating build missing either **fails at startup** rather than serving a route that
+could bind nothing or record nothing.
+
+### Rollout ordering — receivers before senders
+
+`POST /v1/peer/ack` is a **new route**. A peer running a binary from before this change answers
+**404**, and `PeerRefusedError.Retriable` treats 404 as **FINAL** — so an acknowledgement sent to a
+not-yet-upgraded peer is **abandoned, not retried**. Upgrade every bus that might be acknowledged
+before any bus starts emitting. Nothing in this build emits one yet (`ACK-5` owns emission and lands
+after), so the ordering is satisfiable rather than merely stated. This is the same hazard family as
+`RELAY-51`, which is **not** fixed here and is not made worse: the frame ships complete and versioned,
+so the first task needing a new field has a version to bump.

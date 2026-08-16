@@ -196,6 +196,24 @@ type PeerSurface struct {
 	// Roster answers POST /v1/peer/roster: the ongoing roster sync.
 	Roster *relay.RosterHandler
 
+	// Ack answers POST /v1/peer/ack: peer-hop delivery ACK/NACK ingest (ACK-3).
+	//
+	// ITS TYPE IS NOT http.Handler AND THAT IS DELIBERATE. *relay.AckHandler has
+	// no ServeHTTP; it has ServeAuthenticated(w, r, peerBusID), and the peer bus
+	// id it takes MUST be the one RequirePeerPrincipal resolved from the TLS
+	// client certificate. relay.AuthorizePeerAck's anti-forgery rule authorises
+	// DeriveJobID(peerBusID, correlationKey), so a peerBusID sourced from
+	// anywhere a remote party can influence would authorise the NAME A PEER CHOSE
+	// rather than the peer that sent the frame — and every guard in
+	// internal/relay/ack.go would become decorative while every positive test
+	// still passed.
+	//
+	// Making the field a non-http.Handler is what turns that from a comment into
+	// a compile error: this route cannot be handed to mountPeerRoute directly,
+	// so somebody must write servePeerAck below, and at that point the ONLY
+	// source of a bus id in scope is PeerPrincipalFromContext.
+	Ack *relay.AckHandler
+
 	// Registry is the peer roster and routing table the handlers' callbacks
 	// mutate. Required; see the type doc for why it is named here.
 	Registry *relay.Registry
@@ -224,6 +242,9 @@ func (p *PeerSurface) missingParts() []string {
 	}
 	if p.Roster == nil {
 		missing = append(missing, "Roster")
+	}
+	if p.Ack == nil {
+		missing = append(missing, "Ack")
 	}
 	if p.Registry == nil {
 		missing = append(missing, "Registry")
@@ -304,6 +325,52 @@ func (s *Server) mountPeerSurface(mux *http.ServeMux) {
 	s.mountPeerRoute(mux, relay.PeerEnrollPath, s.peer.Enroll)
 	s.mountPeerRoute(mux, relay.PeerRelayPath, s.peer.Relay)
 	s.mountPeerRoute(mux, relay.PeerRosterPath, s.peer.Roster)
+	s.mountPeerRoute(mux, relay.PeerAckPath, http.HandlerFunc(s.servePeerAck))
+}
+
+// servePeerAck is THE ONE PLACE the authenticated peer principal meets the ACK
+// handler, and the only place a peer bus id is supplied to
+// relay.AuthorizePeerAck's binding rule.
+//
+// # THE BUS ID COMES FROM THE CERTIFICATE. IT MUST NEVER COME FROM THE REQUEST
+//
+// principal.BusID is what RequirePeerPrincipal resolved by looking the presented
+// client certificate's fingerprint up in the durable peer binding. It is the ONE
+// identity on this surface that was proved rather than asserted.
+//
+// A version of this function that read the bus id from anywhere else — a frame
+// field, a header, a query parameter — would still compile, still pass every
+// positive test, and would silently authorise any peer to settle any other
+// peer's obligations. relay's ACK frame carries no bus-id field precisely so
+// there is nothing here to reach for; a header would have to be invented on
+// purpose. If you are editing this line, that is what you are editing.
+//
+// # AND IT IS DELIBERATELY THE ONLY THING THIS FUNCTION DOES
+//
+// Nothing is validated, decoded, logged or decided here. Everything else belongs
+// to relay.AckHandler, which owns the wire vocabulary and the status mapping, so
+// that this adapter cannot acquire a second, drifting copy of any rule. Its
+// entire content is "read the proved identity, hand it over".
+func (s *Server) servePeerAck(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PeerPrincipalFromContext(r.Context())
+	if !ok {
+		// UNREACHABLE: mountPeerRoute wraps this in RequirePeerPrincipal, which
+		// is fail-closed and refuses before the handler runs. Refused rather than
+		// passed with an empty id, because an empty peer id derives a job id
+		// nobody owns — every legitimate acknowledgement would be refused with the
+		// uniform answer and the surface would look exactly like a working
+		// anti-forgery rule while settling nothing.
+		//
+		// It answers the SAME fixed refusal as every other case in that gate, so
+		// an anonymous caller cannot tell a mis-wired build from an unbound
+		// certificate.
+		s.log.Error("REFUSING a peer acknowledgement: the request reached the ACK route with no peer principal in its context, which means RequirePeerPrincipal did not run. The route is being served WITHOUT its authenticator",
+			"remedy", "mount it only through mountPeerRoute; nothing may be inserted between the gate and this handler",
+		)
+		s.writePeerForbidden(w, r)
+		return
+	}
+	s.peer.Ack.ServeAuthenticated(w, r, principal.BusID)
 }
 
 // mountPeerRoute registers ONE peer route behind the peer principal and records

@@ -131,6 +131,7 @@ reachable from the network, and nothing here should be wired into `internal/http
 | `PeerEnrollPath` | `/v1/peer/enroll` | RELAY-1's handshake (already unregistered; listed here for completeness) |
 | `PeerRelayPath` | `/v1/peer/relay` | RELAY-2's message relay ingress |
 | `PeerRosterPath` | `/v1/peer/roster` | RELAY-2's ongoing roster sync ingress |
+| `PeerAckPath` | `/v1/peer/ack` | ACK-3's peer-hop delivery ACK/NACK ingest (added 2026-08-16) |
 
 **`RelayRequest`** — the body one bus POSTs to another at `PeerRelayPath`. Every field is untrusted
 peer input; nothing here proves the sending bus is entitled to speak for `origin_bus`.
@@ -354,3 +355,27 @@ and CRYPTO-4 does not exist, so a recipient can obtain a sender's messaging publ
 band; recipient-side verification is not yet wired into `client.Read`; and `agent-busctl` has no `keygen`
 or `trust` subcommand. Signing works end to end and the signature is carried and returned. Automatic
 verification on receive does not happen yet.
+
+
+## `/v1/peer/ack` — the FOURTH peer route, and it IS served (`ACK-3`, added 2026-08-16)
+
+The section above says "nothing below is reachable today" and that no route should be wired into
+`internal/httpapi`. **Both statements were overtaken by `RELAY-20`/`RELAY-24` and are left in place
+only because they are that section's own history**; the live contract for the peer surface is in
+`CONTRACTS-HTTP.md`, which now documents four mounted routes.
+
+`ACK-3` adds `relay.PeerAckPath` = `/v1/peer/ack`, mounted through the one permitted mount site
+(`internal/httpapi/peermount.go`). `httpapi.PeerSurface` gained a required `Ack *relay.AckHandler`
+field; a build supplying the other five fields registers **nothing at all**.
+
+**No `agent-busctl` subcommand is owed by this task, and that is the standing precedent rather than a
+skipped step.** Invariant 7 requires a CLI subcommand for every AGENT-FACING capability in the same
+task. `/v1/peer/ack` is bus-to-bus, exactly like the three peer routes above, none of which has one.
+`ACK-CONTRACT.md` §9.1 states the requirement over a table that mixes the two agent-plane ACK routes
+(`POST /v1/ack`, `GET /v1/ack/{key}` — `ACK-6` and `ACK-9`) with this peer route; **it is over-broad
+as written and should be narrowed to the two agent-plane rows.** Those two ship their subcommands with
+their own tasks.
+
+The wire shape, the status table, the versioning rules and the rollout ordering are in
+`CONTRACTS-HTTP.md`, "A FOURTH peer route". The reserved version it spends is in
+`CONTRACTS-ONDISK.md`, "`relay-wire-version = 1` IS NOW SPENT".

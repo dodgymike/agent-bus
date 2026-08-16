@@ -47,6 +47,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/relay"
+	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
 const (
@@ -83,6 +84,14 @@ type pmReached struct {
 	peerBusID string
 	sawPeer   bool
 	sawAgent  bool
+
+	// ackCalls and ackPeerBusID record what the ACK route was told the
+	// AUTHENTICATED peer bus was (ACK-3). It is a separate pair from peerBusID
+	// above because the ACK route reaches its principal by a different path — a
+	// Go parameter supplied by servePeerAck, rather than a context lookup inside
+	// the handler — and the two must not be able to cover for each other.
+	ackCalls     int
+	ackPeerBusID string
 }
 
 func pmSurface(t *testing.T, reached *pmReached) *PeerSurface {
@@ -130,10 +139,42 @@ func pmSurface(t *testing.T, reached *pmReached) *PeerSurface {
 		t.Fatalf("relay.NewRosterHandler: %v", err)
 	}
 
+	// ACK-3. The obligation table is a REAL *relay.Outbox over a null durable
+	// log, holding ONE obligation: this bus owes pmRemoteBus a copy of
+	// pmAckCorrelationKey and owes NOBODY ELSE ANYTHING. That single asymmetry is
+	// what makes TestPeerAckBindsToTheCertificateResolvedBus able to tell the
+	// authenticated peer apart from any other name a request might carry.
+	outbox, err := relay.NewOutbox(relay.OutboxOptions{BusID: pmLocalBus, Durable: pmNullDurable{}})
+	if err != nil {
+		t.Fatalf("relay.NewOutbox: %v", err)
+	}
+	if _, err := outbox.Enqueue(relay.OutboxJob{
+		PeerBusID:       pmRemoteBus,
+		OriginMessageID: pmAckCorrelationKey,
+		Size:            5,
+		ContentSHA256:   strings.Repeat("ab", 32),
+	}); err != nil {
+		t.Fatalf("outbox.Enqueue: %v", err)
+	}
+	ackIngest, err := relay.NewAckHandler(relay.AckConfig{
+		BusID:       pmLocalBus,
+		Obligations: outbox,
+		Admit:       func(string) (func(), error) { return func() {}, nil },
+		SettleAck: func(_ context.Context, s relay.SettledAck) (relay.AckSettlement, error) {
+			reached.ackCalls++
+			reached.ackPeerBusID = s.PeerBusID
+			return relay.AckSettlement{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("relay.NewAckHandler: %v", err)
+	}
+
 	return &PeerSurface{
 		Enroll:   enroll,
 		Relay:    relayIngest,
 		Roster:   roster,
+		Ack:      ackIngest,
 		Registry: registry,
 		Trust:    trust,
 	}
@@ -191,7 +232,7 @@ func pmEnrolRequest(certs []*x509.Certificate) *http.Request {
 
 // pmPeerPaths is the surface under test, spelled through the constants so a
 // path rename cannot leave this file asserting on a route nobody serves.
-var pmPeerPaths = []string{relay.PeerEnrollPath, relay.PeerRelayPath, relay.PeerRosterPath}
+var pmPeerPaths = []string{relay.PeerEnrollPath, relay.PeerRelayPath, relay.PeerRosterPath, relay.PeerAckPath}
 
 // TestPeerRoutesRegisterOnlyWithRegistryAndTrust is this task's proof command.
 //
@@ -273,6 +314,21 @@ func TestPeerRoutesRegisterOnlyWithRegistryAndTrust(t *testing.T) {
 			surface: func(t *testing.T) *PeerSurface {
 				s := full(t)
 				s.Roster = nil
+				return s
+			},
+			resolver: func() InboundPeerPrincipals { return &pmResolver{} },
+			want:     false,
+		},
+		{
+			// ACK-3. A surface missing the acknowledgement ingest registers
+			// NOTHING, including the three routes that ARE present — "every field
+			// or none" — because a bus that accepts a peering it can carry
+			// messages for but cannot acknowledge is exactly the half-working
+			// federation PeerSurface's doc refuses.
+			name: "no ack handler",
+			surface: func(t *testing.T) *PeerSurface {
+				s := full(t)
+				s.Ack = nil
 				return s
 			},
 			resolver: func() InboundPeerPrincipals { return &pmResolver{} },
@@ -1081,5 +1137,158 @@ func TestEveryRecordedPeerRouteIsActuallyGated(t *testing.T) {
 		if reached.calls != 0 {
 			t.Errorf("POST %s reached the federation handler with no credential", path)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ACK-3 — the peer bus id the binding rule uses comes from the CERTIFICATE
+// ---------------------------------------------------------------------------
+
+// pmAckCorrelationKey is the ONE correlation key pmSurface's outbox holds an
+// obligation for, and it is owed to pmRemoteBus and to nobody else.
+const pmAckCorrelationKey = pmRemoteBus + "-1"
+
+// pmNullDurable is an OutboxDurableLog that accepts every write without a disk.
+// The outbox needs one to enqueue at all; the ACK tests care about what the
+// table SAYS, not about how it got there — internal/relay's own tests cover the
+// durability.
+type pmNullDurable struct{}
+
+func (pmNullDurable) Write(wal.Entry) (wal.Committed, error) { return wal.Committed{}, nil }
+
+// pmAckRequest is a well-formed peer ACK for pmAckCorrelationKey. extraHeaders
+// lets a test add a header an attacker might hope the mount reads.
+func pmAckRequest(t *testing.T, certs []*x509.Certificate, extraHeaders map[string]string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(relay.PeerAckRequest{
+		ProtocolVersion:    relay.AckWireVersion,
+		CorrelationKey:     pmAckCorrelationKey,
+		Recipient:          pmLocalBus + ".bravo-1",
+		Outcome:            "undeliverable",
+		Class:              "no_route",
+		EmittedAtUnixMilli: 1_700_000_000_000,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, relay.PeerAckPath, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+	if certs != nil {
+		req.TLS = &tls.ConnectionState{PeerCertificates: certs}
+	}
+	return req
+}
+
+// TestPeerAckBindsToTheCertificateResolvedBus is THE test for ACK-3's central
+// constraint, and it is written to go RED for the one edit that would silently
+// destroy the whole anti-forgery plane.
+//
+// relay.AuthorizePeerAck authorises DeriveJobID(peerBusID, correlationKey). The
+// bus id it is given therefore decides WHOSE obligations a caller may settle. It
+// must be the one RequirePeerPrincipal resolved from the presented CLIENT
+// CERTIFICATE, and it must not be anything a request can carry.
+//
+// The frame has no field for it (internal/relay/ackframe.go, asserted there by
+// reflection over the struct). This test covers the OTHER door: a header. A
+// mount that read `X-Peer-Bus` — or any other request-supplied value — would
+// still compile, would still pass every positive test in this file, and would let
+// any peered bus settle any other peer's obligations.
+//
+// The asymmetry that makes it decidable: pmSurface's outbox owes pmRemoteBus one
+// message and owes the OTHER bus nothing at all.
+func TestPeerAckBindsToTheCertificateResolvedBus(t *testing.T) {
+	const otherBus = "bus-mount-other"
+
+	remoteCert := pmCert(t, pmRemoteBus)
+	otherCert := pmCert(t, otherBus)
+	res := &pmResolver{bound: map[buscert.Fingerprint]string{
+		buscert.FingerprintOf(remoteCert): pmRemoteBus,
+		buscert.FingerprintOf(otherCert):  otherBus,
+	}}
+
+	// 1. THE OWED PEER SUCCEEDS, and the id that reached the binding rule is the
+	//    certificate-resolved one. Without this arm a mount that refused
+	//    everything would pass arm 2.
+	var reached pmReached
+	srv, _ := pmServer(t, pmSurface(t, &reached), res, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, pmAckRequest(t, []*x509.Certificate{remoteCert}, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the peer this bus owes got %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if reached.ackCalls != 1 {
+		t.Fatalf("the ACK settle ran %d time(s), want exactly 1", reached.ackCalls)
+	}
+	if reached.ackPeerBusID != pmRemoteBus {
+		t.Fatalf("the ACK route was told the peer was %q, want the certificate-resolved %q", reached.ackPeerBusID, pmRemoteBus)
+	}
+
+	// 2. THE FORGERY. A DIFFERENT, legitimately bound and legitimately
+	//    authenticated peer presents a BYTE-IDENTICAL body and asks to settle the
+	//    obligation this bus owes pmRemoteBus. It must be refused, and nothing
+	//    may reach the durable settle.
+	var forged pmReached
+	srv2, _ := pmServer(t, pmSurface(t, &forged), res, nil)
+	rec2 := httptest.NewRecorder()
+	srv2.ServeHTTP(rec2, pmAckRequest(t, []*x509.Certificate{otherCert}, nil))
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("a peer settling ANOTHER peer's obligation got %d, want %d", rec2.Code, http.StatusConflict)
+	}
+	if forged.ackCalls != 0 {
+		t.Fatalf("a cross-route forgery reached the durable settle (peer recorded as %q); the mount is not supplying the certificate-resolved bus id",
+			forged.ackPeerBusID)
+	}
+
+	// 3. AND THE SAME FORGERY WITH EVERY HEADER AN ATTACKER MIGHT HOPE IS READ.
+	//    This is the mutation target: a mount that honoured any of these would
+	//    turn arm 2 into a 200.
+	for _, header := range []string{"X-Peer-Bus", "X-Peer-Bus-Id", "X-Bus-Id", "X-Forwarded-Bus", "Peer-Bus"} {
+		var probed pmReached
+		srv3, _ := pmServer(t, pmSurface(t, &probed), res, nil)
+		rec3 := httptest.NewRecorder()
+		srv3.ServeHTTP(rec3, pmAckRequest(t, []*x509.Certificate{otherCert}, map[string]string{header: pmRemoteBus}))
+		if rec3.Code != http.StatusConflict {
+			t.Errorf("%s: a peer naming another bus in a header got %d, want %d — the peer bus id must come from the CERTIFICATE and from nothing a request carries",
+				header, rec3.Code, http.StatusConflict)
+		}
+		if probed.ackCalls != 0 {
+			t.Errorf("%s: the header was honoured and the settle ran as %q", header, probed.ackPeerBusID)
+		}
+	}
+
+	// 3b. AND THE FAIL-CLOSED BRANCH, reached by calling servePeerAck DIRECTLY
+	//     with no principal in the context. It is unreachable through the mux —
+	//     mountPeerRoute always wraps it in RequirePeerPrincipal — which is
+	//     exactly why it needs asserting here: a branch nothing exercises is a
+	//     branch that can be deleted or inverted with every test still green, and
+	//     an empty peer id would derive a job id nobody owns, refusing every
+	//     legitimate acknowledgement while LOOKING like a working guard.
+	var direct pmReached
+	srvD, _ := pmServer(t, pmSurface(t, &direct), res, nil)
+	recD := httptest.NewRecorder()
+	srvD.servePeerAck(recD, pmAckRequest(t, []*x509.Certificate{remoteCert}, nil))
+	if recD.Code != http.StatusForbidden {
+		t.Errorf("servePeerAck with NO peer principal in the context = %d, want 403; it must fail closed rather than hand the handler an empty bus id",
+			recD.Code)
+	}
+	if direct.ackCalls != 0 {
+		t.Errorf("servePeerAck ran the ACK handler with no principal, as peer %q", direct.ackPeerBusID)
+	}
+
+	// 4. NO CERTIFICATE AT ALL is 403 from the gate, and the ACK handler never
+	//    runs. Without this the route could be gated by nothing and arms 1-3
+	//    would still read as expected.
+	var anon pmReached
+	srv4, _ := pmServer(t, pmSurface(t, &anon), res, nil)
+	rec4 := httptest.NewRecorder()
+	srv4.ServeHTTP(rec4, pmAckRequest(t, nil, nil))
+	if rec4.Code != http.StatusForbidden {
+		t.Errorf("an anonymous ACK got %d, want 403", rec4.Code)
+	}
+	if anon.ackCalls != 0 {
+		t.Error("the ACK settle ran for a caller that presented no certificate")
 	}
 }

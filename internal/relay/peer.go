@@ -400,6 +400,16 @@ func ErrorCode(err error) string {
 	case errors.Is(err, ErrInvalidAckFrame):
 		return CodeInvalidRequest
 
+	// The ACK frame's wire version (ACK-3) is checked before anything else in
+	// ValidatePeerAckRequest, and it is mapped BESIDE the ACK codes here for the
+	// same reason RELAY-23 maps the envelope's first: if the two buses do not
+	// agree on the format, every other diagnosis is an answer to a question we
+	// could not read. It must not fall through to CodeInvalidRequest, which
+	// would send the far-end operator looking for a malformed field instead of
+	// at the older of the two binaries.
+	case errors.Is(err, ErrUnsupportedAckVersion):
+		return CodeUnsupportedAckVersion
+
 	// Signed relay ingest (SIGN-7). These sit ABOVE ErrInvalidRelay because a
 	// signature failure is the more specific and the more serious diagnosis: a
 	// peer told "invalid_relay" would go looking for a malformed field, when the

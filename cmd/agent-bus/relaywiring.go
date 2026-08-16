@@ -70,6 +70,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/hub"
@@ -881,6 +882,27 @@ type federationOptions struct {
 	// reply. Called once per handshake, so it must be safe for concurrent use.
 	LocalAgents func() []string
 
+	// Outbox is THE SAME durable per-hop obligation table the egress forwarder
+	// writes to (relay.Forwarder.Enqueue), and it is required for federation.
+	//
+	// It is the ANTI-FORGERY CORE of the ACK plane (ACK-CONTRACT.md §6.2): a
+	// peer-hop acknowledgement from peer P is authoritative for correlation key K
+	// if and only if DeriveJobID(P, K) names a job THIS BUS DURABLY WROTE. That
+	// is computable from this table and from nothing else — a second source of
+	// obligations would be a second answer to "did we owe this?", and the two
+	// could disagree.
+	Outbox *relay.Outbox
+
+	// AckLifecycle is the durable sender-visible delivery lifecycle table
+	// (ACK-2). A peer-hop acknowledgement settles a row in it, AFTER the
+	// obligation binding above has authorised the peer to speak about the key.
+	//
+	// Required for federation for the same reason Outbox is: an ACK route that
+	// authorised a settlement and then had nowhere to record it would answer 200
+	// to a peer while recording nothing, which is exactly the "silently discard"
+	// shape every other required callback in this file exists to prevent.
+	AckLifecycle *ack.Store
+
 	// Logger is optional; nil discards.
 	Logger *logging.Logger
 
@@ -912,6 +934,13 @@ type federation struct {
 	admission *peerAdmission
 	surface   *httpapi.PeerSurface
 	log       *logging.Logger
+
+	// acks is the durable sender-visible delivery lifecycle table a peer-hop
+	// acknowledgement settles a row in (ACK-2). It is reached only from
+	// settleAck, and only after relay.AuthorizePeerAck has bound the frame to an
+	// obligation this bus wrote: ack.Store.Settle takes NO PRINCIPAL and says so
+	// in its own doc, so the authorization it cannot do is owed by every caller.
+	acks *ack.Store
 
 	// onward is the wrapper handed to the acceptor, or nil on a LEAF build. It is
 	// kept here for one reason: warnIfCarriedNoFurther must say something
@@ -1006,6 +1035,12 @@ func newFederation(opts federationOptions) (*federation, error) {
 	if opts.Registry == nil {
 		return nil, errors.New("relay wiring: federationOptions.Registry is required; it is the ONE routing table, shared with the egress forwarder and with the hub's remote-recipient admission, and building a second one here would leave a peer that had just handshaked routable on one table and unknown on the other")
 	}
+	if opts.Outbox == nil {
+		return nil, errors.New("relay wiring: federationOptions.Outbox is required; it is the durable per-hop obligation table the ACK plane's anti-forgery rule is computed from (ACK-CONTRACT.md §6.2), and a federation without it could bind no acknowledgement to anything this bus actually wrote")
+	}
+	if opts.AckLifecycle == nil {
+		return nil, errors.New("relay wiring: federationOptions.AckLifecycle is required; a peer acknowledgement route with nowhere durable to record an outcome would answer 200 to a peer and record nothing, which is indistinguishable from working")
+	}
 	registry := opts.Registry
 
 	// THE ONWARD SEAM (RELAY-47). newOnwardRelay returns a genuinely nil
@@ -1042,6 +1077,7 @@ func newFederation(opts federationOptions) (*federation, error) {
 		registry:   registry,
 		acceptor:   acceptor,
 		admission:  admission,
+		acks:       opts.AckLifecycle,
 		log:        log,
 		onward:     wrapped,
 		rosterMemo: make(map[string]rosterMemoEntry),
@@ -1075,6 +1111,35 @@ func newFederation(opts federationOptions) (*federation, error) {
 		return nil, fmt.Errorf("relay wiring: %w", err)
 	}
 
+	ackIngest, err := relay.NewAckHandler(relay.AckConfig{
+		BusID: opts.BusID,
+		// The SAME table the forwarder wrote the obligation to. relay.AckHandler
+		// refuses a nil one at construction, so a federating build that reached
+		// here without an outbox fails loudly rather than serving a route that
+		// refuses every acknowledgement.
+		Obligations: opts.Outbox,
+		// THE METER, AND IT IS THE EXISTING ONE. peerAdmission.enter is the
+		// per-authenticated-peer in-flight bound RELAY-22 already built for relay
+		// ingest, keyed on the same certificate-resolved principal. ACK-3
+		// deliberately forks no second abuse-control scheme: the open decision is
+		// 48223968 ("Choose the abuse-control primitive for a MULTI-PRINCIPAL
+		// relay link"), and when it rules, it rules HERE, in one place, and both
+		// peer routes inherit it.
+		//
+		// The QUOTA half (reserve) is deliberately NOT taken: it counts
+		// applied-key entries and an acknowledgement creates none, so charging
+		// one would meter this route against a table it does not touch. The
+		// CONCURRENCY half is the one that bounds the actual harm — contention on
+		// the outbox's exclusive mutex, which is a function of how many
+		// acknowledgements are IN FLIGHT rather than of how many arrive per hour.
+		Admit:     f.admission.enter,
+		SettleAck: f.settleAck,
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("relay wiring: %w", err)
+	}
+
 	// EVERY FIELD, OR NONE. httpapi.PeerSurface treats a partial surface as "this
 	// build does not federate" and registers nothing, so an omission here is a
 	// silent outage rather than a compile error — which is why the struct is
@@ -1083,6 +1148,7 @@ func newFederation(opts federationOptions) (*federation, error) {
 		Enroll:   enroll,
 		Relay:    relayIngest,
 		Roster:   roster,
+		Ack:      ackIngest,
 		Registry: registry,
 		Trust:    opts.Peers,
 	}
@@ -1500,3 +1566,185 @@ func bindablePeerCount(store *relay.PeerStore) int {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// ---------------------------------------------------------------------------
+// The peer acknowledgement callback (ACK-3)
+// ---------------------------------------------------------------------------
+
+// settleAck is relay.AckConfig.SettleAck: it makes an ALREADY-AUTHORIZED
+// peer-hop terminal outcome durable, and reports whether it was a duplicate.
+//
+// # WHAT HAS ALREADY HAPPENED BY THE TIME THIS IS CALLED, AND WHAT HAS NOT
+//
+// HAS: the frame arrived behind RequirePeerPrincipal (layer 1 — WHICH BUS), its
+// version, outcome, class and attestation shape were validated against the
+// closed sets, and relay.AuthorizePeerAck bound it to an outbox job THIS BUS
+// DURABLY WROTE TO THAT PEER for that correlation key (layer 2 — §6.2).
+//
+// HAS NOT: anything has been verified cryptographically. No bus verifies a
+// recipient attestation and none may claim to; the label travelling into the
+// record says `recipient_signature_unverified` for exactly that reason.
+//
+// # THE TWO HALVES OF AUTHORIZATION ARE CONJUNCTIVE, AND THIS IS THE SECOND
+//
+// The job binding proves the PEER may speak about the KEY. It cannot prove the
+// peer may settle THIS RECIPIENT, because an outbox record carries no recipient
+// — it is (peer, origin message id) and nothing else identifying. The second
+// half is ack.Store's own: a row exists only for a recipient THE SENDER NAMED,
+// so a legitimately-bound peer settling on behalf of an agent that was never
+// addressed finds no row. ErrNoRecord is therefore translated into relay's
+// UNIFORM refusal below — not into a distinguishable "no such recipient", which
+// would disclose which recipients a message named.
+//
+// # INVARIANT 4 IS SATISFIED BY ack.Store.Settle AND NOT BY THIS FUNCTION
+//
+// Settle writes through the same durable.Write(wal.Entry{...}) path with the
+// applied-key record riding in the SAME prepare payload as the effect, one
+// fsync. This function adds no ordering of its own, and must not: a second,
+// separately ordered write here would leave exactly the window invariant 10
+// exists to close.
+func (f *federation) settleAck(_ context.Context, s relay.SettledAck) (relay.AckSettlement, error) {
+	state, class, attested, err := ackVocabulary(s.Ack)
+	if err != nil {
+		// OUR bug, not the peer's: the frame passed relay's closed-set validation
+		// and this bus could not map it onto the durable vocabulary. Answered as a
+		// plain error (503 "not now"), never as a 4xx blaming the sender, and
+		// logged loudly — this is the drift the two parallel vocabularies exist to
+		// be caught by.
+		f.log.Error("REFUSING to record a peer acknowledgement: its outcome or class passed the wire vocabulary and could not be mapped onto the DURABLE one. The two spellings of the closed set have drifted; nothing was written",
+			"local_bus", f.busID, "peer_bus", s.PeerBusID, "err", err.Error())
+		return relay.AckSettlement{}, err
+	}
+
+	// READ-THEN-SETTLE, and the read is ADVISORY. ack.Store.Settle re-decides
+	// under its own lock and is the authority; this read exists only to tell an
+	// APPLY from a REPLAY for the `duplicate` field, which relay.DecideAck is the
+	// single spelling of (invariant 10's three cases).
+	//
+	// A race here can only mislabel a replay as an apply or the reverse, never
+	// change what is recorded: Settle absorbs a byte-identical retry and refuses
+	// a different terminal whatever this read saw. Deciding it here INSTEAD of in
+	// Settle would be the defect — two answers to "have I applied this?", one of
+	// them not under the lock that matters.
+	incoming := s.Ack.Terminal()
+	prior, hasPrior := f.priorTerminal(s.Ack.CorrelationKey, s.Ack.Recipient)
+	decision, err := relay.DecideAck(prior, hasPrior, incoming)
+	if err != nil {
+		// DecideAck returns AckConflict with ErrAckOutcomeConflict; the handler
+		// maps that to 409 reject-and-log and DOES NOT DISCONNECT (§12).
+		return relay.AckSettlement{}, err
+	}
+	if decision == relay.AckReplay {
+		// Invariant 10's FIRST case: return the ORIGINAL result, RE-APPLY
+		// NOTHING. No durable write is attempted at all, which is what makes
+		// "re-apply nothing" structural rather than a promise Settle keeps.
+		return relay.AckSettlement{Duplicate: true}, nil
+	}
+
+	switch err := f.acks.Settle(s.Ack.CorrelationKey, s.Ack.Recipient, state, class, attested); {
+	case err == nil:
+		return relay.AckSettlement{Duplicate: false}, nil
+
+	case errors.Is(err, ack.ErrNoRecord):
+		// §8.2's "(none)" row. Translated into relay's UNIFORM refusal so that a
+		// key we never held, a key held for a DIFFERENT recipient, and a key that
+		// has been swept are byte-identical on the wire. Told apart only in the
+		// log, by the handler's own redaction point.
+		return relay.AckSettlement{}, relay.ErrAckNotBound
+
+	case errors.Is(err, ack.ErrTerminal):
+		// The advisory read above lost a race with another transition. Still
+		// invariant 10's second case and still reject-and-log: the FIRST terminal
+		// stands. Re-spelled as relay's sentinel so the handler's one status
+		// mapping covers both the raced and the unraced path.
+		return relay.AckSettlement{}, fmt.Errorf("%w: %v", relay.ErrAckOutcomeConflict, err)
+
+	default:
+		// Everything else — ErrNotDurable, a WAL failure, ErrConcurrentTransition
+		// — is "not now" (503) and NOTHING WAS WRITTEN. A correct peer retries and
+		// the terminal outcome is not lost.
+		return relay.AckSettlement{}, err
+	}
+}
+
+// priorTerminal reports the TERMINAL outcome already recorded for this pair, if
+// any.
+//
+// hasPrior is false for a row that exists but is still `accepted` or
+// `in_flight`: relay.DecideAck's contract is "no TERMINAL outcome is recorded
+// YET", not "the pair is unknown". A non-terminal row is a pair this bus is
+// waiting on, and the incoming frame is the first terminal for it.
+func (f *federation) priorTerminal(correlationKey, recipient string) (relay.AckTerminal, bool) {
+	rec, ok := f.acks.Lookup(correlationKey, recipient)
+	if !ok || !rec.State.Terminal() {
+		return relay.AckTerminal{}, false
+	}
+	outcome, err := relay.ParseAckOutcome(rec.State.String())
+	if err != nil {
+		// A durable state that is terminal but is not one of the three wire
+		// outcomes cannot exist — ack.State's terminal set IS those three. Treated
+		// as "no prior" would let a conflicting terminal overwrite it, so it is
+		// reported as a prior that matches nothing and Settle's own absorbing
+		// check refuses the write.
+		return relay.AckTerminal{Outcome: 0}, true
+	}
+	var class relay.AckClass
+	if rec.Class != "" {
+		if class, err = relay.ParseAckClass(string(rec.Class)); err != nil {
+			return relay.AckTerminal{Outcome: outcome}, true
+		}
+	}
+	return relay.AckTerminal{Outcome: outcome, Class: class}, true
+}
+
+// ackVocabulary maps relay's WIRE spellings of the closed ACK sets onto
+// internal/ack's DURABLE ones.
+//
+// # THIS FUNCTION EXISTS BECAUSE TWO PACKAGES DECLARE ONE CLOSED SET, AND THAT
+// # IS A KNOWN DUPLICATION, NOT A DESIGN
+//
+// internal/relay/ack.go (ACK-4) and internal/ack/state.go (ACK-2) were written
+// concurrently and each declares its own spelling of the twelve classes, the
+// three terminal outcomes and the two attestation labels. ack.go records the
+// sequencing reason and says a follow-up must collapse them. Until that lands,
+// THIS is the one place the two meet, and it is deliberately in the composition
+// root rather than in either package — putting it in one of them would make that
+// package the owner of the other's vocabulary and quietly settle which one
+// survives.
+//
+// # IT IS TOTAL AND IT FAILS CLOSED
+//
+// Both mappings go through the WIRE SPELLING — the string both sides already
+// agree to put on disk and on the network — rather than through a numeric table
+// somebody maintains. That is the only mapping that cannot silently rot: if a
+// constant is renamed on either side, this returns an error and the
+// acknowledgement is refused with "not now", instead of being recorded as some
+// other outcome. A default arm that guessed would write a TERMINAL state, and
+// terminal is ABSORBING — it could never afterwards be corrected.
+func ackVocabulary(v relay.ValidatedPeerAck) (ack.State, ack.Class, ack.Attestation, error) {
+	state, err := ack.ParseState(v.Outcome.String())
+	if err != nil {
+		return 0, "", "", fmt.Errorf("mapping acknowledgement outcome onto the durable vocabulary: %w", err)
+	}
+	if !state.Terminal() {
+		// Unreachable: relay.AckOutcome has only the three terminal members. It is
+		// checked because a non-terminal state reaching Settle would be refused
+		// there anyway, and being refused HERE names the drift instead of the
+		// symptom.
+		return 0, "", "", fmt.Errorf("acknowledgement outcome %s mapped onto the non-terminal durable state %s; the wire and durable vocabularies have drifted", v.Outcome, state)
+	}
+
+	var class ack.Class
+	if v.Class != 0 {
+		class = ack.Class(v.Class.String())
+		if !class.BusEmitted() && !class.RecipientEmitted() {
+			return 0, "", "", fmt.Errorf("acknowledgement class %s is in the wire vocabulary and not in the durable one; the two closed sets have drifted", v.Class)
+		}
+	}
+
+	attested := ack.Attestation(v.Attestation.String())
+	if !attested.Valid() {
+		return 0, "", "", fmt.Errorf("acknowledgement attestation %s is in the wire vocabulary and not in the durable one; the two closed sets have drifted", v.Attestation)
+	}
+	return state, class, attested, nil
+}

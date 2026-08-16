@@ -119,6 +119,8 @@ func onwardFederation(t *testing.T, busID string, local relay.LocalIngest, fwd r
 		Local:         local,
 		Onward:        fwd,
 		Peers:         peers,
+		Outbox:        newWiringOutbox(t, busID),
+		AckLifecycle:  newWiringAckStore(t),
 		LocalAgents:   func() []string { return nil },
 		Logger:        logging.New(logs, logging.LevelDebug),
 		UnderPressure: func() bool { return false },

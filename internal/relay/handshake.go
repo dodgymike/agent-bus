@@ -74,6 +74,35 @@ const (
 	// remedy is a roster the sending bus can fix — a peer told "invalid_relay"
 	// would go looking for a malformed field it does not have.
 	CodeUnknownRecipient = "unknown_recipient"
+
+	// CodeUnsupportedAckVersion (400) says the ACK frame declares an
+	// acknowledgement wire-protocol version this bus does not implement
+	// (ErrUnsupportedAckVersion, ACK-3). Nothing was read beyond the version
+	// itself: an unrecognised version is refused, never defaulted.
+	//
+	// It is its own code for the same reason CodeUnknownRecipient is: the frame
+	// is not malformed, and the remedy is not in the sender's encoder. The remedy
+	// is that one of the two buses is running an older binary — an OPERATOR
+	// action at whichever end is behind — and since failJSON puts only this code
+	// on the wire, a code pointing at a malformed field would be the entire, and
+	// entirely wrong, diagnosis the far-end operator ever sees.
+	//
+	// IT IS FINAL. Resending identical bytes cannot change the verdict, and a
+	// 4xx tells the sending bus to stop rather than spend its whole horizon
+	// re-offering a frame the far end can never read.
+	//
+	// # WHY IT NAMES THE ACK FRAME RATHER THAN "the relay wire version"
+	//
+	// RELAY-23 adds the SAME field to the relay envelope, spending the SAME
+	// reserved relay-wire-version = 1, and brings its own
+	// CodeUnsupportedRelayVersion. That work was unmerged when this constant
+	// landed, so sharing its name would have been a duplicate declaration git
+	// could not flag — two files, one package, no textual conflict, and a build
+	// that breaks only after the merge. Two codes also happen to be the more
+	// useful answer: a peer operator reads WHICH FRAME the far end could not
+	// parse, rather than having to guess. A follow-up may collapse them if an
+	// operator would rather read one string.
+	CodeUnsupportedAckVersion = "unsupported_ack_version"
 )
 
 // ErrPeerRejected is what an AcceptPeer callback returns to DECLINE a peer that

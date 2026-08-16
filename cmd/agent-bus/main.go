@@ -1312,8 +1312,10 @@ func run(cfg Config) error {
 			// than stopping. It is the same *relay.Forwarder the egress adapter
 			// holds, reached through an interface-typed variable so a
 			// non-federated build passes a genuinely nil seam.
-			Onward: onwardForwarder,
-			Peers:  peerStore,
+			Onward:       onwardForwarder,
+			Peers:        peerStore,
+			Outbox:       relayOutbox,
+			AckLifecycle: ackStore,
 			// The applied-key table's own pressure line, read live. It is what
 			// makes the per-peer share a BOUND rather than a speed limit: below
 			// the line a peer over its share is denying nobody anything and is
