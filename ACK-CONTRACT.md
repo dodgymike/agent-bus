@@ -736,12 +736,24 @@ than none:
 
 Reuse `DEPLOY-3`'s Compose topology and `scripts/fed-smoke.sh`; **do not build a parallel harness.**
 
-**A landmine to avoid repeating:** `fed-smoke.sh` currently asserts the **same `message_id` string**
-appears in A's, B's and C's audits — **unsatisfiable by construction** under invariant 1, and it is
-the only reason the script exits 1 (`RELAY-25-FU-CORRELATION`, in_progress; observed ids for one
-logical message were `bus-A-11`, `bus-B-11`, `bus-C-9`). **`ACK-12` MUST correlate on the
-correlation key (§3), never on the local `message_id`.** This contract's choice of key is exactly
-what makes that assertion writable.
+**CORRECTED 2026-08-16 — the "landmine" this section originally described DOES NOT EXIST, and the
+original text is preserved nowhere because it was simply wrong.** It claimed `fed-smoke.sh` asserts
+the same `message_id` across A's, B's and C's audits and that this is the only reason the script
+exits 1. Checked against the script at HEAD: **it correlates on the audit record's
+`content_sha256`**, and its own CROSS-BUS CORRELATION block (`scripts/fed-smoke.sh:257-268`) already
+explains that a message id is not a cross-bus correlator and says **"Do not reintroduce it."** The
+script exits **0**. `message_id` appears only as a per-bus selector against the bus that MINTED it.
+
+The claim was refuted on the `ACK-1` task journal the day this document was written; the correction
+did not reach the document until now, which is precisely the stale-note failure mode
+(`CONTEXT-STALE-NOTYET`) this repo has spent the day removing — a reader sees the file, not the
+journal.
+
+**What survives, and it is the part that matters:** `ACK-12` MUST correlate on the correlation key
+(§3), never on a local `message_id`, because under invariant 1 each bus mints its own id and they
+are not equal across hops. `fed-smoke.sh` already does the equivalent for message bodies. This
+contract's choice of key is what makes an ACK-level assertion writable in the same style. **Do not
+"fix" `fed-smoke.sh`** — it is correct.
 
 Minimum assertions: local acceptance is durable and distinct from hop receipt; a hop ACK does **not**
 move the sender-visible state (§8.2 note 3); a recipient ACK propagates A←B←C and lands terminal
