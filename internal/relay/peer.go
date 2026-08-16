@@ -346,7 +346,10 @@ func ValidatePeerEnrollResponse(localBusID string, resp PeerEnrollResponse) (Pee
 // that another one wraps has to be tested before its wrapper, or the more
 // useful code is shadowed by the vaguer one. TestErrorCodeIsStable pins every
 // mapping, so a reordering that changes an answer fails there rather than in a
-// peer operator's logs.
+// peer operator's logs — EXCEPT the three acknowledgement-plane arms below,
+// which are pinned in ack_test.go beside the privacy reasoning that decides
+// them, because two of them share a code deliberately and a reader changing that
+// needs the argument in front of them, not a bare expectation in another file.
 func ErrorCode(err error) string {
 	switch {
 	case err == nil:
@@ -375,6 +378,27 @@ func ErrorCode(err error) string {
 		// somebody we do not have. The remedy lives in the sending bus's roster,
 		// not in its encoder.
 		return CodeUnknownRecipient
+
+	// The acknowledgement plane (ACK-4). It EXTENDS THIS VOCABULARY rather than
+	// starting a second one — a peer operator reads one list.
+	//
+	// ErrAckNotBound and ErrAckOutcomeConflict deliberately share ONE code, and
+	// that is a privacy decision rather than laziness. "No obligation binds you
+	// to this key" and "this key already settled differently" are both answered
+	// 409/idempotency_violation, so a peer cannot tell an unknown key from one
+	// it is not entitled to settle from one that is already terminal. Splitting
+	// them would hand any peered bus an oracle for "did bus A send message K to
+	// bus B" — see ErrAckNotBound's doc, and the 409 no-matching-reservation
+	// indistinguishability invariant 10 preserves for the same reason.
+	//
+	// ErrInvalidAckFrame is NOT folded in with them: a malformed field is
+	// decidable by the sender from its own bytes without asking us, so 400
+	// leaks nothing and collapsing it would only make an honest peer's encoder
+	// bug undebuggable.
+	case errors.Is(err, ErrAckNotBound), errors.Is(err, ErrAckOutcomeConflict):
+		return CodeIdempotencyViolation
+	case errors.Is(err, ErrInvalidAckFrame):
+		return CodeInvalidRequest
 
 	// Signed relay ingest (SIGN-7). These sit ABOVE ErrInvalidRelay because a
 	// signature failure is the more specific and the more serious diagnosis: a
