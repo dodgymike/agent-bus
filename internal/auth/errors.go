@@ -184,5 +184,104 @@ var (
 	// It exists rather than a silent in-memory success because succeeding here
 	// would acknowledge an enrolment that never reached disk — the exact false
 	// durability claim WALRoster exists to remove (invariant 4).
+	//
+	// It is shared by OperatorRegistry.Add and .Revoke, which make the identical
+	// claim about the identical hazard.
 	ErrNotAttached = errors.New("auth: durable roster is not attached to a write-ahead log")
+
+	// ---------------------------------------------------------------------
+	// The OPERATOR/ADMIN PRINCIPAL sentinels (AUTH-10).
+	//
+	// They are SEPARATE FROM THE AGENT SENTINELS ABOVE and must stay separate,
+	// for the reason OperatorPrincipal is a separate type: if an admin route
+	// reused AGENT authentication, an AGENT credential would authorise minting
+	// the credentials that CREATE AGENTS — any enrolled agent could mint itself
+	// an unlimited supply of new identities, collapsing invariant 3. A caller
+	// that matched ErrUnknownAgent to decide an ADMIN question would be one
+	// errors.Is away from the same confusion, so the two planes do not share a
+	// sentinel anywhere the answer differs.
+	//
+	// The three that DO stay shared are shared on purpose, because the fact
+	// being reported is identical on both planes and the remedy is identical
+	// too: ErrUnknownSession (a token that is unknown, expired or in the wrong
+	// state), ErrBadSignature, ErrInvalidPublicKey and ErrCapacity.
+	// ---------------------------------------------------------------------
+
+	// ErrUnknownOperator reports an operator id that is malformed, or
+	// well-formed but not in the registry. The two are deliberately not
+	// distinguished: 404.
+	//
+	// EVERY AGENT ID REACHES THIS, and that is the point rather than a side
+	// effect — an agent id cannot parse as an operator id (ParseOperatorID), so
+	// an enrolled agent asking for an operator challenge is refused before the
+	// registry is consulted at all.
+	ErrUnknownOperator = errors.New("auth: unknown operator")
+
+	// ErrOperatorRevoked reports an operator that exists and has been revoked.
+	//
+	// It is DISTINCT from ErrUnknownOperator because the two are distinguishable
+	// anyway to the only party that can reach them — the holder of that
+	// operator's certificate private key, who necessarily knows the principal
+	// existed — and because an operator who has been revoked and is told
+	// "unknown" will waste an incident re-checking their id.
+	ErrOperatorRevoked = errors.New("auth: operator is revoked")
+
+	// ErrOperatorCertMismatch reports invariant 11's cross-check FAILING: the
+	// client certificate on this connection is not the one bound to the operator
+	// the request names. It also covers the absent certificate (the zero
+	// fingerprint), which names nobody and is never a pass.
+	//
+	// This is the sentinel that says the two credentials disagree — mTLS proves
+	// which key holder is on the connection, the session token is the revocable
+	// application credential, and a token presented over somebody else's
+	// connection is stronger evidence of theft than either mechanism alone can
+	// produce.
+	ErrOperatorCertMismatch = errors.New("auth: the presented client certificate does not belong to this operator")
+
+	// ErrOperatorCertUnknown reports a client-certificate fingerprint that no
+	// LIVE operator holds. It is the ordinary negative answer, not a
+	// malfunction: almost every connection to this bus is an agent's.
+	ErrOperatorCertUnknown = errors.New("auth: no operator is bound to this client certificate")
+
+	// ErrOperatorCertAmbiguous reports ONE client-certificate fingerprint held
+	// LIVE by MORE THAN ONE operator, which resolves to nobody.
+	//
+	// OperatorRegistry.Add refuses to create this state, so reaching it means it
+	// came off DISK: Apply replays records that are already durable and must not
+	// refuse them (invariant 6). It is reported rather than resolved because
+	// picking a holder would serve one key holder as a definite ADMIN it may not
+	// be — the credential confusion invariant 11 exists to prevent, on the plane
+	// where it is most expensive.
+	ErrOperatorCertAmbiguous = errors.New("auth: this client certificate is bound to more than one operator")
+
+	// ErrOperatorCertBound reports an attempt to bind a client certificate that
+	// is ALREADY live on a DIFFERENT operator. It is the operator-plane mirror
+	// of ErrCertFingerprintBound: that one keeps one certificate from naming two
+	// agents, this one keeps it from naming two operators.
+	ErrOperatorCertBound = errors.New("auth: client certificate is already bound to another operator")
+
+	// ErrDuplicateOperatorID reports an attempt to register an operator id that
+	// is already present. Operator ids are never reused (invariant 1), and the
+	// suffix is 16 characters of base32 over crypto/rand, so this is either an
+	// astronomically unlikely collision or a replayed command — and in both
+	// cases refusing is right, because overwriting would rebind a live ADMIN
+	// identity to a different keypair.
+	ErrDuplicateOperatorID = errors.New("auth: operator id already registered")
+
+	// ErrInvalidOperatorRecord reports a durable operator record that is
+	// malformed: unparseable JSON, a schema version this build does not
+	// understand, an id that does not parse, a name that disagrees with the id,
+	// the ZERO certificate fingerprint (which is the absence of a certificate),
+	// an oversized label, or a revocation with no instant or no reason.
+	//
+	// Like ErrInvalidRecord it is raised in BOTH directions and means different
+	// things either way: on the way OUT it is a bug and the operation fails with
+	// nothing written; on the way IN it is CORRUPTION, and the record is
+	// discarded loudly and the bus starts anyway (invariant 6).
+	ErrInvalidOperatorRecord = errors.New("auth: invalid operator record")
+
+	// ErrInvalidOperatorName reports a requested operator name that
+	// ValidateOperatorName rejected: empty, oversized, or outside
+	// OperatorNamePattern. Client error: 400.
+	ErrInvalidOperatorName = errors.New("auth: invalid operator name")
 )

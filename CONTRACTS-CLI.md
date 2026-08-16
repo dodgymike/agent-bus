@@ -952,6 +952,169 @@ the trail is damaged when it is, and notes that the count covers only the record
 
 ---
 
+### `agent-bus operator keygen|add|list|revoke` — the OPERATOR/ADMIN principal (`AUTH-10`, 2026-08-16)
+
+An **operator** is a bus-scoped identity that is **not an enrolled agent**. It exists so that
+operator-only capabilities can be authorised against something an AGENT credential can never satisfy:
+if an admin route reused agent authentication, an agent credential would authorise minting the
+credentials that CREATE AGENTS, and any enrolled agent could mint itself an unlimited supply of new
+identities — invariant 3, collapsed. The principal is therefore distinct **in KIND**: its own id
+namespace, its own durable record, its own session table and its own Go principal type
+(`auth.OperatorPrincipal`, which an `auth.Principal` cannot satisfy at compile time).
+
+```
+agent-bus operator keygen -identity-dir <dir> [-json]
+agent-bus operator add    -data-dir <dir> -name <name> -auth-pub <base64>
+                          -cert-fingerprint <64 hex> [-label <text>] [-json] [-log-level <lvl>]
+agent-bus operator list   [-data-dir <dir>] [-all] [-json] [-log-level <lvl>]
+agent-bus operator revoke -data-dir <dir> -id <operator-id> -reason <text> [-json] [-log-level <lvl>]
+```
+
+It is on the **server** binary, not `agent-busctl` — the minting authority is filesystem access to the
+data directory (`DECISIONS.md` E4, the same model as `invite mint` and `peer`), so no new
+network-reachable privilege is introduced, and an admin capability does not go on the agent surface.
+
+**`add`, `list` and `revoke` require the bus to be STOPPED** — they take the data directory's exclusive
+`dirlock`. `keygen` touches no data directory at all.
+
+#### `keygen` and `add` are separate on purpose
+
+`keygen` runs on the **operator's** machine. It writes a TLS client certificate through
+`client.LoadOrCreateClientCertificate` (`<identity-dir>/client-tls/`) and an Ed25519 session-signing
+keypair at `<identity-dir>/operator-auth-key.pem` (PKCS#8 PEM, **0600**, in a **0700** directory), and
+prints only the two PUBLIC values `add` consumes: the base64 auth public key and the certificate
+fingerprint. **The private keys never leave that machine and the bus never generates them.** Existing
+material is **loaded, never overwritten** — regenerating either half would silently invalidate an
+operator record the bus already holds while looking like a no-op. A damaged file is an error, not a
+regeneration.
+
+#### `-cert-fingerprint` is MANDATORY, unlike an agent's certificate binding
+
+`RosterEntry.CertBindings` may legitimately be empty; an operator's fingerprint may not. Invariant 11's
+session/certificate cross-check can only be applied **unnarrowed** if there is always a pair to
+cross-check, and an operator with no fingerprint would silently degrade to a bearer token alone. `add`
+also **refuses a fingerprint already live-bound to an enrolled AGENT** (and to another operator): one
+certificate must never name both, or the collapse above is reachable through the transport instead of
+through a permission flag.
+
+#### There is no `-operator-id` flag, and none may be added
+
+The server is authoritative on every id (invariant 1). Ids are `op:<bus-id>.<name>-<suffix>`, where the
+suffix is 16 characters of lowercase base32 over 10 bytes of `crypto/rand` — the same construction
+`ids.GenerateBusID` and `invite.GenerateInviteID` use. **Revoking does not free an id**; adding an
+operator under a previously-used *name* mints a new suffix and is a **different principal**.
+
+#### Revocation
+
+`revoke` **appends** a record (invariant 6: no in-place edits, no deletions) and requires `-reason`
+(invariant 6: an operator action must be attributable). **Re-revoking is a legitimate retry**
+(invariant 10): it returns the ORIGINAL record, writes nothing, and reports `"unchanged":true`.
+`list` hides revoked operators; `list -all` shows them with the instant and the reason.
+
+> **Revocation reaches a RUNNING bus only after a restart, TODAY** — a property of this build, not of
+> revocation. There is no online admin route yet, so this offline command is the only writer. *Inside* a
+> running server a revocation is refused at the very next request with no restart, because
+> `OperatorService.Authenticate` re-reads the registry on every call and `OperatorRegistry.Revoke` drops
+> the operator's live sessions synchronously.
+
+#### Flags — CONTRACT
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | The bus's data directory, for `add`/`list`/`revoke`. **Never created**, and neither is any part of the bus identity in it — it must already hold the `bus-id` file (exit `4` otherwise, with nothing written, not even `bus.lock`). Takes the directory's exclusive `dirlock`, so **the bus must be stopped**. |
+| `-identity-dir` | *(none — REQUIRED)* | `keygen` only, and the **operator's own machine**, not the bus host. Receives `client-tls/` (via `client.LoadOrCreateClientCertificate`) and `operator-auth-key.pem`. Created `0700`; an existing directory looser than that is **tightened to `0700` and the change is warned about**, naming both modes. Existing material is LOADED, never overwritten. |
+| `-name` | *(none — REQUIRED)* | `add` only. Matches `^[a-z0-9][a-z0-9_-]{0,63}$`. It is the human half of the minted id, **not** the id: the same name added twice yields two different principals. |
+| `-auth-pub` | *(none — REQUIRED)* | `add` only. The operator's Ed25519 **session-signing public key**, standard base64, exactly 32 bytes decoded. Printed by `keygen`. Distinct from the TLS key — see the two-keys note above. |
+| `-cert-fingerprint` | *(none — REQUIRED)* | `add` only. 64 lowercase hex = SHA-256 over the operator's client-certificate DER. **Mandatory**, unlike an agent's binding; refused if already live on an enrolled agent or another operator. |
+| `-id` | *(none — REQUIRED)* | `revoke` only. The full `op:<bus-id>.<name>-<suffix>`. An agent id is refused — the namespaces are structurally disjoint. |
+| `-reason` | *(none — REQUIRED)* | `revoke` only. **Required, not optional**: invariant 6 wants an operator action attributable, and an unattributed revocation is the one an incident review cannot reconstruct. Durable, and rendered with `%q` in human output so a control-sequence-bearing reason cannot reach a terminal. |
+| `-label` | *(empty)* | `add` only. An operator note recorded on the principal. Shown by `list`; it authorises nothing. |
+| `-all` | off | `list` only. Include REVOKED operators, with the revocation instant and reason. |
+| `-json` | off | *(all four)* Emit one JSON object on **stdout** — for success **and** failure, so a caller that discarded stderr still gets a parseable answer. |
+| `-log-level` | `warn` | *(`add`, `list`, `revoke` — NOT `keygen`)* Severity floor for recovery/durability lines on stderr (`debug`, `info`, `warn`, `error`). `keygen` opens no log and has neither this nor `-data-dir`. |
+
+**There is no `-operator-id` flag and none may be added** — see above; `MintOperatorID` has no
+parameter for one, which makes it structural rather than a rule this file has to remember.
+
+#### Exit codes (`agent-bus operator`) — CONTRACT
+
+> **NOT REACHABLE FROM `argv` TODAY (2026-08-16) — read this before scripting against the table.**
+> `cmd/agent-bus/main.go` does not dispatch `os.Args[1] == "operator"`, so **every** surface documented
+> in this section falls through to the server's flag parser and is refused as an unexpected argument —
+> including `operator revoke`, the only revocation mechanism in the design. The codes below are the
+> contract the implementation already satisfies (`runOperatorCommand` is exercised by
+> `cmd/agent-bus/operator_test.go`); they are not yet the codes a command run at a prompt returns,
+> because the command does not run. Task `AUTH-10-WIRING` (P0) carries the dispatch, and "Wiring
+> status" below carries the second gap.
+
+Numbered to **match** `invite` and `peer`, so an operator scripting against all three needs one table.
+
+| Code | Meaning | Remedy |
+|---|---|---|
+| `0` | Success. | — |
+| `1` | The command failed. | Read the message. |
+| `2` | Usage: bad flag, unknown subcommand, positional argument, invalid `-name`/`-auth-pub`/`-cert-fingerprint`/`-id`, or a missing required flag (including `-reason` on `revoke`). Nothing is written. | `agent-bus operator -h` |
+| `3` | The data directory is locked — a bus is running. | Stop the bus, run the command, start it again. |
+| `4` | The data directory does not hold a usable bus identity (missing, not a directory, or no `bus-id` file). **Nothing is written**, including no `bus.lock`. | Start the bus once if it has never run; restore `bus-id` from backup if it has. |
+| `5` | The named operator is not registered. | `agent-bus operator list -all` |
+
+#### `--json` shapes — CONTRACT
+
+Success and failure **both** go to **stdout**, so an agent that redirected stderr away still gets a
+parseable answer, and `ok` is the one field to branch on.
+
+```json
+{"ok":true,"identity_dir":"…","cert_path":"…","cert_key_path":"…","auth_key_path":"…",
+ "auth_pub":"<base64 std>","cert_fingerprint":"<64 hex>","created_cert":true,"created_auth_key":true,
+ "warnings":["…"]}
+
+{"ok":true,"bus_id":"bus-…","operators":[
+  {"operator_id":"op:bus-….ops-<16 base32>","name":"ops","auth_pub":"<base64 std>",
+   "cert_fingerprint":"<64 hex>","label":"…","created_at":"<RFC3339Nano>",
+   "revoked_at":"<RFC3339Nano>","revoked_reason":"…"}],"unchanged":false,"warnings":["…"]}
+
+{"ok":false,"error":"…","remedy":"…","exit_code":3}
+```
+
+`label`, `revoked_at`, `revoked_reason`, `unchanged` and `warnings` are omitted when empty/false. **No
+secret is ever printed by any of these** — every value crossing the boundary is a public key or a digest.
+
+**`warnings` is a REQUIRED read, not decoration**, and it is in the JSON document rather than only on
+stderr so an agent running with `2>/dev/null` still sees it (the rule `inviteBlob.TransportInsecure`
+follows). What it carries today:
+
+| Command | Warning |
+|---|---|
+| `keygen` | The identity directory was **loose** (any bit in `0o077`): it is tightened to `0700` and the mode it *was* is named, because directory **write** permission is enough for another local user to REPLACE `operator-auth-key.pem` — the file's `0600` protects its contents, not which key is there. If the chmod fails, the warning says so and the command still succeeds. |
+| `keygen` | **Existing material was REUSED** (`created_cert:false`): nothing was regenerated. Check the directory belongs to an operator and to nobody else — pointing `-identity-dir` at an **agent's** directory binds one certificate to both planes, which `add` then refuses. |
+| `keygen` | The certificate is outside its validity window. |
+| `add` | The fingerprint was held by a **REVOKED** operator. A revoked binding constrains nothing, so the add SUCCEEDS and the new operator is live on the same certificate — right after an administrative revocation, wrong if the laptop was stolen. The warning names the revoked operator id, instant and reason. |
+
+#### Wiring status — READ THIS BEFORE ASSUMING ANY OF THE ABOVE RUNS
+
+**Two separate gaps, and the second makes the whole section above unreachable:**
+
+1. **`main.go` does not DISPATCH the subcommand.** `cmd/agent-bus/main.go` does not test
+   `os.Args[1] == "operator"` the way it does for `invite` and `peer`, so `agent-bus operator …` falls
+   through to **server flag parsing** and never reaches `runOperatorCommand`. **Everything documented in
+   this section — `keygen`, `add`, `list`, `revoke`, the flags, the exit codes and the `--json` shapes —
+   is therefore CODE-COMPLETE AND NOT REACHABLE FROM `argv`.** That includes `operator revoke`, which is
+   the only revocation mechanism in the design: today an operator record can be written only by a Go
+   caller, so a bus with a live operator has **no shipped way to revoke it from a shell**. Do not read
+   the exit-code table as an operational contract until this line is gone.
+2. **`main.go` does not register `auth.OperatorRecordKind`** in its applier map, and
+   `auth.MultiplexApplier` is silent about kinds it does not own — so an operator record in the WAL is
+   passed over at **server** replay without a word. The `operator` subcommands themselves are
+   unaffected: they open the log with their own applier map, which registers the operator registry, the
+   enrolment roster **and** the invite store (the last so a composite `agent+invite` record's rider has
+   an applier — without it every gated enrolment made the multiplexer log a **false** "invite may be
+   REDEEMABLE AGAIN" at ERROR on a command that writes nothing to the invite plane).
+
+Nothing on the wire consumes an `OperatorPrincipal` yet; `AUTH-7`, `INVMINT` and `CONV-AUTHZ-ADMIN` are
+the consumers.
+
+---
+
 ## `cmd/agent-busctl` — the client
 
 Binary directory `cmd/agent-busctl`; the importable package it shells over is
