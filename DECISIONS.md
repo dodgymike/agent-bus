@@ -6416,6 +6416,67 @@ durable record type, a mint path, membership state, a recipient-change event and
 all of it. Approving `CONV` would silently answer a question someone deliberately left open, so it
 is left open here too, awaiting an explicit ruling.
 
+## 2026-08-16 — RELAY-48: the origin attestation is carried on `store.Record`, not on the outbox record
+
+**The decision:** a relay-ingested message's origin attestation is persisted as an OPTIONAL field on
+`store.Record`, alongside the message it attests. It is NOT added to `relay.OutboxRecord`.
+
+### Why the question exists at all
+
+`RELAY-48` — a pending onward hop is durably abandoned at restart — looked like a one-line fix:
+nothing calls `store.Message.WithOriginMessageID`, so `Store.byOrigin` is permanently empty, so
+`Resume` cannot re-find a relay-ingested message. Add the writer, done.
+
+**That fix is a trap, and the task record already said so.** With `OriginMessageID` set,
+`ByOriginMessageID` starts HITTING — and control then reaches `cmd/agent-bus/main.go:1017`, which
+refuses because this bus *cannot rebuild an origin envelope*: `store.Message` has no attestation
+field (`grep Attestation internal/store/*.go` is empty), while `ValidateRelayRequest` REQUIRES one
+(`internal/relay/message.go:674` → `internal/relay/signed.go:403`). The abandonment moves; it does
+not go away. So the real blocker was never the writer — it was that a relayed-in envelope is
+**unbuildable from durable state**.
+
+### Why `store.Record` and not the outbox record
+
+**One copy, next to the thing it is about.** The attestation attests THE MESSAGE. The outbox record
+is per-HOP, so putting it there stores one copy per pending hop of a fact that belongs to the
+message — a second, third and fourth copy free to disagree with each other and with the original.
+That is the precise reasoning `internal/store/message.go:437` gives for refusing a `Pos` field on
+`store.Record`: it *"would create a second copy free to disagree with the first"*. The `Seq` vs `Pos`
+vs `OriginMessageID` conflation has caused **three** defects in this codebase for exactly this shape
+of mistake. We are not adding a fourth.
+
+**It is also the cheaper half of the trade, and that is a tiebreak, not the reason.** An optional
+field on `store.Record` keeps `RecordVersion` at 2 under that type's own documented rule
+(`message.go:461-471`), so no `POST /reservations` value is spent. Putting it on the outbox record is
+on-disk surface and would need a reserved number. Had the correctness argument pointed the other way
+we would have spent the number.
+
+### What this does NOT decide
+
+It does not decide the field's encoding, its size bound, or whether an absent attestation is legal on
+an ORIGINATED message — it must be, since this bus mints no attestation for its own traffic, so the
+field is optional by construction and its absence is meaningful rather than an error.
+
+### The writer placement, recorded because it is a silent-no-op hazard
+
+The write must happen between `store.NewMessageWithBusPath` and `m.Encode()` —
+`internal/hub/hub.go:1757-1761` at `6d1cd8f`. `Message.Record()` is the only thing that carries the
+value to disk and `Encode()`'s output becomes the WAL entry body, so **anywhere after `Encode()` is a
+silent no-op**: `h.store.Append(m)` still populates `byOrigin` in the LIVE process, so a late writer
+passes every non-restart test and fails only after a crash. Any test for this must restart, or it
+cannot distinguish a correct fix from a broken one.
+
+Placing it in that window moves neither hash: `SigningMessage()` omits `OriginMessageID`
+(`message.go:728`), and `auditContentHash` derives from `SigningMessage` (`internal/hub/audit.go:169`).
+
+### Correction to the task record
+
+`RELAY-48` says the fix touches `internal/relay`. **It does not need to.** The attestation is already
+in hand one layer up: `cmd/agent-bus/relaywiring.go:125` receives the full `relay.RelayedMessage`,
+attestation included, and builds the hub request at `:126`. The pass-through is a `cmd/agent-bus`
+change, so the real boundary is `internal/store` + `internal/hub` + `cmd/agent-bus` — and the epic's
+`internal/relay` work does not collide with it.
+
 ## Removed on 2026-08-16 — superseded, refuted or overtaken
 
 `DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED
