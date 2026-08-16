@@ -83,11 +83,32 @@ const Retention = idem.PeerOutageBudget
 // The expiry term is NOT decoration and was added after it was pointed out as
 // missing: sweepLocked's queue holds one entry per (row, anchor) — a composite
 // key plus a time.Time, and at most two per row — so it is real per-row memory
-// that the budget has to charge. It fits inside the existing 1 KiB rounding with
-// room to spare, so the bound did not move; what moved is whether the derivation
-// accounts for everything it claims to. MaxEntries is presented as DERIVED
-// rather than picked, and a derivation missing a term is a number that was
-// picked.
+// that the budget has to charge. MaxEntries is presented as DERIVED rather than
+// picked, and a derivation missing a term is a number that was picked.
+//
+// # The term the rounding does NOT cover, stated rather than glossed
+//
+// The line above charges 2 LIVE entries per row (2 x 56 B = 112 B). Since
+// IDEM-19 the queue also carries a DEAD PREFIX of popped, zeroed slots,
+// compacted only once it reaches the size of the live suffix (Store.expiryHead,
+// compactExpiryLocked). The ALLOCATION can therefore approach twice the live
+// size — up to ~4 slots per row, ~224 B — which takes the worst case to ~1085 B
+// and PAST the 1 KiB rounding, i.e. ~67.8 MiB against the 64 MiB budget, an
+// overshoot of ~3.8 MiB.
+//
+// MaxRecordBytes is deliberately NOT changed for it, for the same reason its
+// internal/idem twin is not: the constant divides MaxRetainedBytes to produce
+// MaxEntries, which is pinned by test and is the documented cap — moving it is a
+// cross-package change, not a comment correction. The dead prefix is bounded
+// strictly below the live count, so the overshoot cannot grow past the figure
+// above.
+//
+// This paragraph exists because the sentence at the top of this block claims
+// every term is a bound the code actually holds to, and because the previous
+// wording here — "it fits inside the existing 1 KiB rounding with room to spare"
+// — became false the moment the compaction was deferred. A stale bound that
+// reads as freshly checked is the defect class IDEM-19 was filed against; it
+// would be absurd to leave one inside the fix for it.
 //
 // The arithmetic is checked by TestMaxRecordBytesBoundsWorstCase, which builds
 // the LARGEST record the validators admit and asserts its encoded size fits —

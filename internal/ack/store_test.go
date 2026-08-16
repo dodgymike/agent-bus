@@ -770,7 +770,13 @@ func TestSweepIsNotOccupancyLinear(t *testing.T) {
 		t.Fatalf("Accept at 5000 rows: %v", err)
 	}
 	s.mu.Lock()
-	atFiveThousand, retained, queued := s.sweptEntries, len(s.records), len(s.expiry)
+	// queued counts LIVE entries: expiry carries a dead prefix of popped,
+	// zeroed slots (Store.expiryHead), and the "at most 2 per row" bound below
+	// is a statement about entries the sweep can still reach, not about the
+	// allocation holding them. Nothing has been popped at this point in the
+	// test, so head is 0 and the two agree — subtracting it keeps the assertion
+	// true of what it claims if that ever stops being the case.
+	atFiveThousand, retained, queued := s.sweptEntries, len(s.records), len(s.expiry)-s.expiryHead
 	s.mu.Unlock()
 
 	if atThousand != 0 || atFiveThousand != 0 {
@@ -794,7 +800,12 @@ func TestSweepIsNotOccupancyLinear(t *testing.T) {
 		t.Fatalf("the table holds %d rows past the retention window, want 0", n)
 	}
 	s.mu.Lock()
+	// A fully-drained queue releases its backing array outright, so this checks
+	// the whole slice rather than the live region: len 0 and head 0 both.
 	leftover := len(s.expiry)
+	if s.expiryHead != 0 {
+		t.Errorf("the expiry queue head is %d after everything was swept, want 0: a drained queue must reset its front, not keep an offset into a released array", s.expiryHead)
+	}
 	s.mu.Unlock()
 	if leftover != 0 {
 		t.Fatalf("the expiry queue holds %d entries after everything was swept, want 0: a queue that never shrinks is the leak the sweep exists to prevent", leftover)
@@ -841,7 +852,11 @@ func TestSettleRequeuesTheTerminalAnchor(t *testing.T) {
 		}
 	}
 	s2.mu.Lock()
-	queued := len(s2.expiry)
+	// LIVE entries, for the same reason as in TestSweepIsNotOccupancyLinear:
+	// the assertion below is about entries the sweep can still reach, not about
+	// the allocation holding them. Nothing has expired on s2, so head is 0 and
+	// the two agree today.
+	queued := len(s2.expiry) - s2.expiryHead
 	s2.mu.Unlock()
 	if queued != 1 {
 		t.Fatalf("the expiry queue holds %d entries after one accept and five in-flight transitions, want 1: only a state change that MOVES THE ANCHOR may re-queue", queued)

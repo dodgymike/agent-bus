@@ -62,7 +62,45 @@ type Store struct {
 	// deadline, popped from the front. It is what makes sweepLocked O(expired)
 	// rather than O(retained) — see sweepLocked for why that distinction is a
 	// denial-of-service question here and not a style one.
+	//
+	// THE LIVE REGION IS expiry[expiryHead:], NOT expiry. Slots before the head
+	// are already popped and have been ZEROED. Every reader must start at the
+	// head; there are exactly three (sweepLocked, compactExpiryLocked, and
+	// pushExpiryLocked's append), all in this file.
 	expiry []expiryEntry
+
+	// expiryHead is the index of the oldest un-popped entry in expiry. It is
+	// what makes the sweep cost what it POPPED rather than what it RETAINED
+	// (IDEM-19).
+	//
+	// # Why this is needed when the pop loop was already O(expired)
+	//
+	// The loop below was always O(expired) — it pops from the front and stops at
+	// the first live entry. The cost was in what followed it: the whole
+	// surviving tail was copied into a fresh backing array on every sweep that
+	// popped even ONE entry, which made the sweep O(retained) and put the
+	// package's own capitalised "IT IS O(EXPIRED), NOT O(RETAINED)" claim at
+	// odds with its code.
+	//
+	// TestSweepIsNotOccupancyLinear did not catch it because it asserts
+	// sweptEntries == 0 — it exercises only the case where NOTHING has expired,
+	// where the loop breaks immediately and `drop == 0` returns before reaching
+	// the copy. sweptEntries counts POPS, and the copy is not a pop. The
+	// expensive shape is STAGGERED deadlines: pop a few, find the next live,
+	// copy the rest, repeat. MEASURED on this queue in clean overlays of HEAD,
+	// by BenchmarkAckSweepDrainStaggered: draining a staggered 65536-row table
+	// took 51.00s before this change and 29.08ms after (1754x). The SETTLED
+	// shape, where every row carries two queue entries, went 11.59s -> 7.62ms.
+	//
+	// That matters more here than in internal/idem because of WHERE it runs.
+	// Every exported entry point sweeps, and one production Accept sweeps THREE
+	// times (its own, Apply's during the live wal write, and foldIn's), all
+	// inside Hub.publish with the GLOBAL WRITE LOCK held — so every writer on
+	// the bus pays, not just the caller. And this queue holds up to two entries
+	// per row — bounded at 2*maxEntries (131072) LIVE entries, with the dead
+	// prefix below allowing an allocation of up to twice that — so one sweep
+	// could copy twice what internal/idem's did.
+	expiryHead int
 
 	// bySender counts retained rows per SENDER — the principal charged for the
 	// row, because the sender is who caused it to exist and who alone may read
@@ -867,9 +905,30 @@ func (s *Store) delLocked(k key) {
 //
 // # IT IS O(EXPIRED), NOT O(RETAINED), AND THAT IS A CORRECTNESS PROPERTY HERE
 //
-// It pops expired entries off the FRONT of an ordered queue and STOPS at the
-// first live one — internal/idem's expireLocked, which §11.2 says to mirror
-// exactly.
+// TWO mechanisms are required for that claim, and for a while this comment named
+// only the first — which made it a claim the code did not deliver:
+//
+//  1. It pops expired entries off the FRONT of an ordered queue and STOPS at the
+//     first live one, rather than ranging the map (internal/idem's expireLocked,
+//     which §11.2 says to mirror exactly).
+//  2. It COMPACTS THE QUEUE ONLY WHEN THE DEAD PREFIX HAS GROWN TO THE SIZE OF
+//     THE LIVE SUFFIX (compactExpiryLocked). Without this, every sweep that
+//     popped even one entry copied the whole surviving tail, and the sweep was
+//     O(retained) no matter how good the pop loop was.
+//
+// Point 2 was missing until IDEM-19, and the gap is instructive rather than
+// embarrassing: TestSweepIsNotOccupancyLinear was written to guard exactly this
+// property and PASSED throughout, because it asserts sweptEntries == 0 and so
+// only ever exercises the case where NOTHING expired — where the loop breaks at
+// once and `drop == 0` returns before the copy is reached. sweptEntries counts
+// POPS; the copy is not a pop. Draining a staggered 65536-row table measured
+// 51.00s before the fix and 29.08ms after (BenchmarkAckSweepDrainStaggered, in
+// clean overlays of HEAD). The machine-independent part is the CURVE:
+// quadrupling the retained set multiplied the drain by ~15-17x before and ~4x
+// after.
+//
+// So: do not restore an unconditional compaction here, and do not judge this
+// property by reading the pop loop alone.
 //
 // An earlier revision ranged the whole map instead. That is not a style
 // difference, because of WHERE this runs: every exported entry point sweeps, and
@@ -888,7 +947,14 @@ func (s *Store) delLocked(k key) {
 // One entry per (row, anchor). A row is pushed when it is inserted (deadline
 // AcceptedAt+retention) and pushed AGAIN when it settles, because settling moves
 // the anchor to SettledAt (§11). Anchors only ever move LATER, so a row has at
-// most two entries and the queue stays bounded at 2*maxEntries.
+// most two entries and the queue stays bounded at 2*maxEntries LIVE entries.
+//
+// That bound is on LIVE entries, not on the allocation: since IDEM-19 the slice
+// also carries a dead prefix of popped, zeroed slots, bounded strictly below the
+// live suffix (expiryHead, compactExpiryLocked), so len(expiry) can be up to
+// twice the live count. The distinction is stated here because this is the doc a
+// reader reaches first, and an unqualified "bounded at 2*maxEntries" would be a
+// bound the code no longer holds to.
 //
 // Nothing is ever removed from the middle — that would be the O(n) this exists
 // to avoid. A popped entry is therefore only a HINT that a row MIGHT be
@@ -910,9 +976,9 @@ func (s *Store) delLocked(k key) {
 //
 // The caller must hold mu.
 func (s *Store) sweepLocked(now time.Time) {
-	drop := 0
-	for drop < len(s.expiry) {
-		e := s.expiry[drop]
+	start := s.expiryHead
+	for s.expiryHead < len(s.expiry) {
+		e := s.expiry[s.expiryHead]
 		if now.Before(e.deadline) {
 			// The queue is ordered, so the first live entry proves every entry
 			// behind it is live too.
@@ -926,19 +992,70 @@ func (s *Store) sweepLocked(now time.Time) {
 			// else: re-anchored by a settle, and the later entry is behind this
 			// one. Dropping this stale entry is the whole point of the hint.
 		}
-		drop++
+		s.expiryHead++
 	}
-	if drop == 0 {
+	if s.expiryHead == start {
 		return
 	}
-	// COMPACTED INTO A FRESH BACKING ARRAY rather than resliding s.expiry[drop:].
-	// Resliding keeps the original array alive with every dropped key still
-	// referenced by it, so the memory the sweep was supposed to release is never
-	// released — the same retain-forever trap internal/idem's expireLocked calls
-	// out.
-	kept := make([]expiryEntry, len(s.expiry)-drop)
-	copy(kept, s.expiry[drop:])
+	// ZERO EVERY SLOT JUST VACATED, before deciding whether to compact.
+	//
+	// This is the half of the old "compact into a fresh array" that was load
+	// bearing, and it is kept in full. Advancing an index alone would leave the
+	// backing array still referencing every popped entry — and an expiryEntry
+	// holds a key, which is two strings — so the memory the sweep was supposed
+	// to release would not be released: the same retain-forever trap
+	// internal/idem's expireLocked calls out. Zeroing drops those references
+	// NOW, on the same O(popped) pass, whenever the array is next compacted.
+	for i := start; i < s.expiryHead; i++ {
+		s.expiry[i] = expiryEntry{}
+	}
+	s.compactExpiryLocked()
+}
+
+// compactExpiryLocked reclaims the dead prefix of the expiry queue, but only
+// once it has grown to at least the size of the live suffix. The caller holds
+// mu.
+//
+// # Why the copy is CONDITIONAL, when it used to be unconditional
+//
+// Copying the survivors on every sweep is what made this O(retained) despite the
+// front-popped queue, and it cost 51.00s to drain a staggered 65536-row table
+// against 29.08ms for this form. Deferring until head >= live means each copy
+// moves at most as many entries as there have been POPS since the previous copy
+// — the head resets to 0 here, so the prefix must be rebuilt from scratch before
+// another copy is due — which is amortised O(1) per popped entry.
+//
+// # The two bounds that keep "defer the copy" from meaning "leak"
+//
+//   - Wasted CAPACITY is bounded: the dead prefix is never allowed to exceed the
+//     live suffix, so the queue's length stays under twice its live size, and
+//     the live size is itself bounded at 2*maxEntries by §11's one-entry-per-
+//     (row, anchor) rule. The documented 2*maxEntries bound is therefore a bound
+//     on LIVE entries; the allocation may be up to twice that transiently, which
+//     is stated here rather than left for a reader to discover.
+//   - Wasted MEMORY is zero regardless: sweepLocked zeroes each vacated slot as
+//     it goes, so a dead slot holds no key and pins no string.
+//
+// A fully-drained queue releases its array outright rather than keeping a
+// peak-sized allocation alive on a bus that has gone quiet — up to 2*maxEntries
+// live entries, and up to twice that in slots once the dead prefix is counted.
+func (s *Store) compactExpiryLocked() {
+	live := len(s.expiry) - s.expiryHead
+	if live == 0 {
+		s.expiry = nil
+		s.expiryHead = 0
+		return
+	}
+	if s.expiryHead < live {
+		return
+	}
+	// A FRESH backing array, exactly as the unconditional form used: the old one
+	// is dropped whole, so nothing about which memory is reachable changes —
+	// only how often this runs.
+	kept := make([]expiryEntry, live)
+	copy(kept, s.expiry[s.expiryHead:])
 	s.expiry = kept
+	s.expiryHead = 0
 }
 
 // pushExpiryLocked queues r's current retention deadline. The caller holds mu.

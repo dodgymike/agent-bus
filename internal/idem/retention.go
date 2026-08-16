@@ -94,6 +94,28 @@ const (
 //	                                            -------
 //	                                            ~1014 B  ->  rounded up to 1 KiB
 //
+// # The one term this rounding does NOT cover, stated rather than glossed
+//
+// IDEM-19 made expiry's compaction amortised: the order slice now carries a
+// DEAD PREFIX of evicted slots, compacted only once it reaches the size of the
+// live suffix (Store.head, compactOrderLocked). So worst case there is up to
+// ONE EXTRA order-slice element per retained record — a Scope, 56 B on amd64 —
+// on top of the ~150 B line above, taking the true worst case to ~1070 B and
+// past the 1 KiB rounding.
+//
+// MaxRecordBytes is deliberately NOT changed for it. That constant divides
+// MaxRetainedBytes to produce MaxEntries, which is 65536, is pinned by
+// TestMemoryBoundDerivation, is what hub.MaxIdempotencyEntries is defined as,
+// and is written down in CONTRACTS-HTTP.md — moving it is a cross-package
+// change, not a comment correction. The honest statement of the residual is
+// therefore: the table's worst case is ~67 MiB rather than the 64 MiB budget,
+// an overshoot of ~3.5 MiB (65536 * 56 B), and the dead prefix is bounded
+// strictly below the retained count so it cannot grow past that.
+//
+// This paragraph exists because the sentence above it claims every term is a
+// bound the code actually holds to. It was briefly untrue, which is the exact
+// failure mode that claim was written to prevent.
+//
 // # The throughput consequence, stated without softening
 //
 // MaxEntries records over RetentionWindow is

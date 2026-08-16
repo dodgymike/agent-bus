@@ -194,7 +194,44 @@ type Store struct {
 	// COMMIT order on both the live path and the replay path, so this slice is
 	// sorted by CommittedAt by construction, and expiry is a pop from the front
 	// rather than a scan of the whole table.
+	//
+	// THE LIVE REGION IS order[head:], NOT order. Slots before head are already
+	// evicted and have been ZEROED (see expireLocked): head is a queue front,
+	// and every reader of this slice must start at it. There are exactly FOUR
+	// readers — expireLocked, compactOrderLocked, remember's append, and Stats'
+	// oldest-record probe — and a fifth that forgot the offset would report an
+	// evicted scope as the oldest retained record. order is unexported and
+	// nothing outside this file touches it, so that enumeration is closed and
+	// can be re-checked by grepping this package for ".order".
 	order []Scope
+
+	// head is the index of the oldest LIVE entry in order. It exists so a sweep
+	// costs what it EVICTED rather than what it RETAINED (IDEM-19).
+	//
+	// # Why an index, when popping the front already looked amortised
+	//
+	// The loop below always popped from the front and stopped at the first live
+	// record, so the SCAN was already O(evicted). The cost was entirely in what
+	// followed it: the whole surviving tail was copied into a fresh backing
+	// array on every call that evicted even ONE record. That made a sweep
+	// O(retained), and because every mutating operation sweeps first (see this
+	// type's doc), the bus paid it per send. Draining a full 65536-entry table
+	// with STAGGERED deadlines — one eviction per sweep, which is what a busy
+	// bus produces naturally, with no attacker involved — is then quadratic:
+	// MEASURED, in clean overlays of HEAD, by BenchmarkExpireDrainStaggered:
+	// 62.70s before, 57.11ms after — 1098x. The originating ACK-2 security-gate
+	// finding recorded 48.4s against 32ms on its own box; both are the same
+	// defect and the same shape, and the wall clock differs because the machine
+	// does. What is machine-INDEPENDENT, and therefore what the regression test
+	// actually asserts, is the CURVE: before, quadrupling the retained set
+	// multiplied the drain by ~14-24x; after, by ~4x.
+	//
+	// head makes the pop O(1) and defers the copy until the dead prefix has
+	// grown to at least the size of the live suffix (compactOrderLocked), so
+	// each compaction copies no more elements than there were evictions since
+	// the previous one: amortised O(1) per eviction, and wasted capacity
+	// bounded to under one live-set's worth.
+	head int
 
 	// expired counts evictions cumulatively, for Stats. It is what makes the
 	// bound observable instead of assumed.
@@ -652,26 +689,26 @@ func (s *Store) Expire() {
 // is a DOUBLE-APPLY, which invariant 10 exists to prevent and which nothing
 // downstream can undo.
 func (s *Store) expireLocked(now time.Time) {
-	drop := 0
-	for drop < len(s.order) {
-		r, ok := s.records[s.order[drop]]
+	start := s.head
+	for s.head < len(s.order) {
+		r, ok := s.records[s.order[s.head]]
 		if !ok {
 			// Defensive: an order entry with no record cannot happen (only this
 			// function removes records, and it removes both together), but if it
 			// ever did, leaving it would pin the front of the queue forever.
-			drop++
+			s.head++
 			continue
 		}
 		if now.Sub(r.CommittedAt) <= s.window {
 			break
 		}
-		delete(s.records, s.order[drop])
+		delete(s.records, s.order[s.head])
 		// The per-agent counter is decremented in the SAME critical section as
 		// the map delete, from the SAME Scope that keyed the increment in
 		// Remember, and the entry is removed at zero so the map does not
 		// accumulate one entry per agent that has ever sent. records and byAgent
 		// must never drift; this is the only place either shrinks.
-		if sc := s.order[drop]; !sc.enrolBusWide {
+		if sc := s.order[s.head]; !sc.enrolBusWide {
 			bucket := s.buckets[sc]
 			if n := s.byAgent[bucket] - 1; n > 0 {
 				s.byAgent[bucket] = n
@@ -681,19 +718,68 @@ func (s *Store) expireLocked(now time.Time) {
 			delete(s.buckets, sc)
 		}
 		s.expired++
-		drop++
+		s.head++
 	}
-	if drop == 0 {
+	if s.head == start {
 		return
 	}
-	// COMPACT INTO A FRESH BACKING ARRAY rather than resliding s.order[drop:].
-	// Resliding keeps the original array alive with every evicted Scope still
-	// referenced by it, so the memory the eviction was supposed to release is
-	// never released — the retain-forever bug internal/wal/replay.go's comment
-	// describes.
-	kept := make([]Scope, len(s.order)-drop)
-	copy(kept, s.order[drop:])
+	// ZERO EVERY SLOT JUST VACATED, before deciding whether to compact.
+	//
+	// This is the half of the old "compact into a fresh array" that was load
+	// bearing, and it is kept in full. Advancing an index alone would leave the
+	// backing array still referencing every evicted Scope — and a Scope holds
+	// two strings — so the memory the eviction was supposed to release would
+	// not be released: the retain-forever bug internal/wal/replay.go's comment
+	// describes. Zeroing drops those references NOW, on the same O(evicted)
+	// pass, independently of when the array is next compacted.
+	for i := start; i < s.head; i++ {
+		s.order[i] = Scope{}
+	}
+	s.compactOrderLocked()
+}
+
+// compactOrderLocked reclaims the dead prefix of order, but only once it has
+// grown to at least the size of the live suffix. The caller must hold mu for
+// writing.
+//
+// # Why the copy is CONDITIONAL, when it used to be unconditional
+//
+// Copying the survivors on every sweep is what made expiry O(retained) and cost
+// the bus 62.70s to drain a staggered 65536-entry table, against 57.11ms for
+// the amortised form (IDEM-19; see the field comment on Store.head). Deferring it
+// until head >= live means each copy moves at most as many elements as there
+// have been evictions since the previous copy — head resets to 0 here, so the
+// prefix must be rebuilt from scratch before another copy is due — which is
+// amortised O(1) per eviction.
+//
+// # The two bounds this holds, so "defer the copy" does not become "leak"
+//
+//   - Wasted CAPACITY is bounded: the dead prefix is never allowed to exceed
+//     the live suffix, so order's length stays under twice the retained count,
+//     and the retained count is itself capped at maxEntries.
+//   - Wasted MEMORY is already zero regardless: expireLocked zeroes each vacated
+//     slot as it goes, so a dead slot holds no Scope and pins no string. The
+//     prefix costs address space, not the records it used to name.
+//
+// The fully-drained case releases the array outright rather than keeping a
+// maxEntries-sized allocation alive on a bus that has gone quiet.
+func (s *Store) compactOrderLocked() {
+	live := len(s.order) - s.head
+	if live == 0 {
+		s.order = nil
+		s.head = 0
+		return
+	}
+	if s.head < live {
+		return
+	}
+	// A FRESH backing array, exactly as the unconditional form used: the old one
+	// is dropped whole, so nothing about which memory is reachable changes — only
+	// how often this runs.
+	kept := make([]Scope, live)
+	copy(kept, s.order[s.head:])
 	s.order = kept
+	s.head = 0
 }
 
 // Stats is the observable state of the applied-key table (task point (g)). It
@@ -763,8 +849,12 @@ func (s *Store) Stats() Stats {
 		Share:         s.fairShareLocked(),
 		UnderPressure: len(s.records) >= s.pressureLineLocked(),
 	}
-	if len(s.order) > 0 {
-		if r, ok := s.records[s.order[0]]; ok {
+	// order[head], not order[0]: the slots before head are evicted and zeroed,
+	// so the oldest RETAINED record is at the queue front, not at the array
+	// start. Reading index 0 here would look up a zero Scope, miss, and silently
+	// report no oldest age at all whenever a compaction was outstanding.
+	if s.head < len(s.order) {
+		if r, ok := s.records[s.order[s.head]]; ok {
 			st.Oldest = r.CommittedAt
 			st.OldestAge = now.Sub(r.CommittedAt)
 		}
