@@ -101,6 +101,13 @@ runtime `WARN`, not just a doc comment, so a production misuse is visible in the
 either goes away or is explicitly re-scoped as a documented production override with its own
 decision entry — it must not silently keep meaning "test-only" while being used in production.
 
+> CORRECTED 2026-08-16: neither happened, and the decision below still stands exactly as written. `-bus-id` is
+still registered on the server binary with the usage string `"TEST-ONLY: force the bus id"`
+(`cmd/agent-bus/main.go:295`), alongside `-listen`, `-data-dir`, `-poll-timeout`, `-log-level` and
+`-backfill-suffix-floors`. The real bus id does now come from `internal/ids`
+(`ids.LoadOrCreateBusID`, `cmd/agent-bus/main.go:424`), so the flag is an override of a real value
+rather than of a placeholder.
+
 ---
 
 ## 2026-08-02 — Inbound `X-Request-Id` is untrusted
@@ -519,6 +526,14 @@ next-index high-water mark — and rebuilds no application state, because none e
 - Consequence: nobody may read "replay ran" as "state was restored" until the store exists. The log
   line reports counts of what the DISK contained, not of what memory absorbed.
 
+  > CORRECTED 2026-08-16: the Applier is NO LONGER NIL and `internal/store` is no longer a stub — it is a full
+  package, and `cmd/agent-bus/main.go:626-630` passes `auth.NewMultiplexApplier(lg, appliers)` into
+  `wal.Open`. Decision 3's REASONING is what survives and is worth keeping: never invent a no-op
+  placeholder Applier, because it makes the code look like it recovers state while recovering nothing.
+  Its factual premise is spent. Decisions 1, 2, 4 and 5 are all still true: `wal.Open` is called from
+  `run()` (`main.go:630`) after `dirlock.Acquire` (`:405`), and `httpapi.DurableLog` is still exactly
+  one method (`internal/httpapi/server.go:38-42`).
+
 **Decision 4 — the HTTP layer holds the log as `httpapi.DurableLog`, a ONE-METHOD interface
 (`Write(wal.Entry) (wal.Committed, error)`), not as a `*wal.Log`.**
 
@@ -580,6 +595,13 @@ So:
 - **Revocation is now time-bounded, not immediate.** `POST /v1/leave` and any future revoke must
   invalidate *outstanding sessions*, not merely stop new ones. Without that, a revoked or compromised
   agent stays live for up to an hour. This must be explicit in AUTH-4 and tested.
+
+  > CORRECTED 2026-08-16: `POST /v1/leave` STILL DOES NOT EXIST. No such route is registered anywhere in
+  `internal/httpapi`, and both `client/client.go:675` and `cmd/agent-busctl/logout.go:22` say so in
+  terms; `agent-busctl logout` is a purely LOCAL credential wipe. AUTH-4's revocation surface is
+  unbuilt. What the design did buy is real but narrower: `authMiddleware` never caches an
+  `Authenticate` result, so a session removed from the table stops working on the NEXT request
+  (`internal/httpapi/authmw.go:237-241`).
 - **Expiry needs a clock-skew policy.** Server-side expiry is authoritative; the client must refresh
   early rather than at the boundary, and the server must reject an expired token even if the client
   believes it is valid. Say what the tolerance is rather than leaving it implicit.
@@ -599,6 +621,14 @@ So:
 **Open, deliberately not decided here:** the token's format and whether it carries claims or is an
 opaque server-side handle; whether sessions persist across restart; the exact skew tolerance; and
 whether one binary serves both agents and humans.
+
+> CORRECTED 2026-08-16: three of these four are settled elsewhere in this file and none is still open as
+written. The token is an OPAQUE SERVER-SIDE HANDLE, not a claims token (2026-08-02, "Sixteen open
+questions settled", §4–7; `auth.SessionLifetime = time.Hour`, `internal/auth/session.go:24`). The
+skew rule is "server expiry is authoritative, the client refreshes at 75% of lifetime" (same entry).
+One binary serves both audiences (2026-08-02, "The Go CLI replaces the shell wrappers";
+`cmd/agent-busctl`). The session-persistence question is answered in its own dated entries and is
+deliberately not restated here.
 
 ---
 
@@ -695,6 +725,14 @@ against a remote client but not against an attacker who already has data-directo
 - **Sessions do NOT survive restart.** Expire them; the CLI re-authenticates.
 - **Revocation is immediate.** `/leave` invalidates outstanding sessions at once — not at the
   ≤1h expiry.
+
+  > CORRECTED 2026-08-16: `/v1/leave` was never built (see the correction on the AUTH-1 entry above), so
+  "revocation is immediate" is a property of the session TABLE, not of any operator-reachable route,
+  and it is bounded rather than instant. `authMiddleware` resolves against live session state on every
+  request with no cache (`internal/httpapi/authmw.go:237-241`) — but the check runs ONCE, at
+  admission, so a long poll admitted the instant before a revoke runs to the end of its timeout, up to
+  `hub.MaxPollTimeout` (5 minutes), and an agent may hold up to `hub.MaxWaitersPerAgent` (32) of them.
+  Closing that is the still-open task `AUTH-2-FU-POLLEXPIRY` (`internal/httpapi/authmw.go:275-297`).
 - **Tokens are opaque server-side handles**, not signed claims. This is what makes immediate
   revocation possible; stateless claims cannot be revoked.
 - **Clock skew**: server expiry is authoritative; the client refreshes at 75% of lifetime.
@@ -714,6 +752,17 @@ against a remote client but not against an attacker who already has data-directo
 - **Relay auth is bi-directional and uses the same scheme as clients.** A node is **either a client
   endpoint or a relay, never both** — that exclusivity is a routing and trust simplification and
   should be enforced, not merely documented.
+
+  > CORRECTED 2026-08-16 — THE EXCLUSIVITY CLAUSE IS REFUTED, and it was never enforced. Every bus is BOTH a
+  client endpoint and a relay: `internal/httpapi/peermount.go` mounts `/v1/peer/{enroll,relay,roster}`
+  on the SAME mux that serves the agent routes, `cmd/agent-bus/main.go:1441-1442` wires `Peer` and
+  `PeerPrincipals` on a shipped server, and the three-bus run verified in containers on 2026-08-15
+  (DEPLOY-6) has an agent enrolled on bus A while A also forwards to B. Nor is the scheme the same: a
+  peer authenticates by TLS client-certificate fingerprint ALONE and never by a session token
+  (2026-08-14, RELAY-6 AMENDMENT ruling (i), which names that as a narrowing of invariant 11). The
+  other half of the bullet — relay auth is bi-directional — is still OWED on the egress side
+  (`MTLS-RELAYGUARD`): we authenticate peers that dial us, and peers cannot yet authenticate us when
+  we dial them.
 - **Encryption is revisited later, once the bus works.**
 
 ### 15–16. Process
@@ -737,6 +786,14 @@ sits between `LoggingMiddleware` and the mux, so authentication is what happens 
 on `unauthenticatedRoutes`. Forgetting now means **401, not open**. Opening a route up requires a
 deliberate, visible, reviewable edit to a five-entry map — and a second edit to the golden list in
 `TestEveryRouteRequiresAuth`, which is the point: two signatures to widen the anonymous surface.
+
+> CORRECTED 2026-08-16: the map has SIX entries, not five — `/healthz`, `/v1/info`, `RouteDiscovery`
+(`/v1/discovery`), `RouteEnroll`, `RouteSessionBegin`, `RouteSessionComplete`
+(`internal/httpapi/authmw.go:76-83`). `/v1/discovery` was added by the 2026-08-07 DISCOVERY-DOC
+decision below. The two-signatures property is intact: the golden list is still there
+(`internal/httpapi/authmw_test.go:549,629-635`). Anyone enumerating invariant 3's five
+unauthenticated routes from prose is one short — cite the allow-list in code, not the invariant's
+wording.
 
 **Decision 2 — matching is EXACT string equality on `r.URL.Path`.** No prefix match, no path
 cleaning, no trailing-slash tolerance. `//healthz`, `/healthz/`, `/HEALTHZ` and `/v1/info/` are all
@@ -914,163 +971,13 @@ a bus deliberately exposed on a real interface needs both.
 2. Whether plaintext is permitted *anywhere*, including tests and local development, or truly never.
 3. Whether relay peers use mutual TLS in addition to the session-token scheme.
 
----
-
-## 2026-08-02 — The message sequence high-water mark lives in the WAL message body, read via a replay-time PREPARE observer (ID-2-WIRING-SCHEMA)
-
-**Context.** `ids.Resume(floor)` requires the highest sequence EVER WRITTEN TO DISK — committed,
-aborted **and dangling** — because a fsynced PREPARE burns its number forever even if the process
-dies before the COMMIT (`internal/ids/sequence.go:87-122`). Nothing in the durability layer can
-supply that value today:
-
-- the sequence lives inside the caller-written `wal.Entry.Body`, and `wal` deliberately does not
-  interpret `Kind` or `Body` (`internal/wal/log.go:72-73`);
-- `wal.Replay` hands its callback **committed** entries only;
-- `wal.Recovered` carries no message-sequence high-water mark at all. `Recovered.NextIndex` is the
-  WAL **record** index (`replay.go:399-403`) — incremented by commits and aborts too, shared by every
-  record type. It is a different counter and the two are not interchangeable.
-
-So the floor could not be derived until it was decided WHERE the number lives. That is this decision.
-`ID2_WIRING_DEEPDIVE.md` §3.5/§4.2/§4.4 ranked the options and prototyped each; this entry settles
-the fork it left open.
-
-**Decision.** **Option A′.**
-
-1. **The message sequence is a top-level, cleartext field of the WAL message body**:
-   for `wal.Entry{Kind: "message"}`, `Body` is a JSON **object** carrying `"seq": <uint64, non-zero>`
-   at the top level, readable by the server without any key. This is the ONLY field ID-2-WIRING
-   commits the MSG epic to; everything else about the message body — sender, recipients, timestamp,
-   content hash, idempotency key, signature, any future envelope — stays open for MSG/SIGN/IDEM to
-   design.
-2. **The WAL offers every PREPARE to an observer during the replay pass that already happens**, and
-   the **application** decodes `seq` out of the body. `wal` still does not interpret `Body`; the
-   decode lives in the caller's callback, so `log.go:72-73`'s promise survives intact.
-3. **No on-disk format change. No `ondisk-format-version` value is consumed by this decision.**
-
-**Why A′ — the evidence, not the aesthetics.**
-
-- **`Replay` already decodes every PREPARE.** `internal/wal/replay.go:129-131` calls `DecodePrepare`
-  on every PREPARE record — committed, aborted and dangling alike — because a prepare payload that
-  does not decode means the file no longer says what it recorded. The decoded `Entry` is then thrown
-  away unless the entry later commits. A′ hands that already-materialised value to the application
-  instead of discarding it. The floor therefore costs **zero additional passes and zero additional
-  decodes**.
-- **It removes a third startup scan before it is ever added.** Option A (a caller-side `ScanAll` +
-  body decode) yields the identical number but adds a full third scan of the WAL at startup, directly
-  aggravating the already-filed `2a961fcc` — *"Startup scans the WAL twice (soon three times) — bound
-  the cost"*. That task's "(soon three times)" anticipated exactly this. A′ makes it moot.
-- **The deepdive proved it yields the right floor from a dangling prepare in one pass**
-  (`ID2_WIRING_DEEPDIVE.md` §4.2, `one-pass floor = 100 (records=100 applied=99 dangling=1)`,
-  `proof-check: verdict=PASS`), at a measured cost of ~16 lines in `replay.go` with
-  `./internal/wal` staying fully green.
-
-**The §4.4 disproof test — RUN, and it does NOT fire.**
-
-The deepdive made its recommendation conditional and named the test that would overturn it:
-
-> *"if a CRYPTO task specifies that `wal.Entry.Body` for `Kind=="message"` is a bare opaque blob
-> rather than an envelope, A′ is disproven and B wins."*
-
-The deep-diver explicitly did not read the CRYPTO epic task bodies and flagged that as a bounded gap
-(§0). This task read all of them. **No such task exists, and the live ones say the opposite:**
-
-- Every task that would have made the body opaque — CRYPTO-5 (X3DH), CRYPTO-6 (Double Ratchet on the
-  DM path), CRYPTO-7 (ratchet durability), CRYPTO-8 (broadcast AEAD), CRYPTO-9 (encrypted relay) — is
-  **`deferred`**.
-- **CRYPTO-11** (`todo`): *"there is no ciphertext — bodies travel in cleartext with a detached
-  Ed25519 signature"*, and the plaintext-vs-ciphertext question *"is now moot and must not be
-  re-opened"*.
-- **CRYPTO-12** (`todo`): *"State PLAINLY in PROTOCOL.md that message bodies are NOT encrypted — any
-  relaying/intermediate bus and any party with WAL/disk access can read every message body; this is a
-  deliberate, user-approved property, not an oversight."*
-- This is not merely a backlog state, it is **already a recorded decision**: *"2026-08-02 — Message
-  auth/integrity only (libsodium-style signatures); encryption deferred"* above, on direct user
-  instruction — *"No encryption, no X3DH, no Double Ratchet, no forward secrecy for now. The ratchet
-  direction in `CRYPTO_DEEPDIVE.md` is superseded — its recommendation must not be actioned."*
-
-**And the test does not fire even in the world where encryption returns.** Three independent reasons,
-which is what makes A′ safe rather than merely currently-convenient:
-
-1. **Even the superseded maximal-encryption design kept an envelope.** `CRYPTO_DEEPDIVE.md:725`
-   describes the change as *"changes the shape of every message body from plaintext to
-   `{ciphertext, ratchet_header, …}`"* — a JSON object with named fields, with the ciphertext confined
-   to one of them. That is an envelope, not a bare blob.
-2. **A bare opaque blob is not a representable value at the WAL layer.** `Entry.Body` MUST be valid
-   JSON — `log.go:80-87` documents it, `canonicalBody` (`log.go:555-573`) enforces it via
-   `json.Compact`, and `Write` rejects invalid JSON with `ErrInvalidBody`. Ciphertext can only ever
-   reach the WAL as a *field inside a JSON object*, which is precisely the shape A′ needs.
-3. **Two other epics independently require the server to read `seq` out of the body.** DUR-5's audit
-   record is *"message id, **sequence**, sender, recipient(s), bus path traversed, timestamp, size,
-   and a content hash"* — the server cannot write that record without reading the sequence. SIGN-4's
-   recipient cursor is built on the same server-minted monotonic sequence. And per invariant 1 the
-   server MINTS the sequence in the first place. A world in which the bus cannot read `seq` out of its
-   own durable record is self-contradictory: DUR-5 and SIGN-4 would break in it too. **The sequence is
-   routing metadata, not content** — the same line invariant 6 already draws for the audit log.
-
-**Options rejected, and why.**
-
-- **Option B — promote the sequence to a WAL-level field** (`Entry.Seq` / `preparePayload.Seq`,
-  `Recovered.HighestSequence`). Architecturally the cleanest: `wal` would compute the floor itself and
-  no caller could get it wrong. **Rejected on price, not on principle.** It is an **on-disk format
-  change** and the deepdive proved the break rather than assuming it: `log.go:671` calls
-  `dec.DisallowUnknownFields()`, so an older binary meeting a newer log fails with
-  `prepare payload does not decode: json: unknown field "seq"` and **refuses to start**. Fail-safe,
-  but a hard downgrade break — and the on-disk `FormatVersion` would still say `1`, so the operator
-  gets `corrupt at offset 16` instead of an honest version mismatch. B therefore also requires a
-  `FormatVersion` bump, which makes **every existing WAL unreadable** (`format.go:328-329` refuses a
-  mismatch outright). That buys a reserved version number, a migration story and a downgrade break in
-  exchange for moving a correctness obligation out of a reviewed ~10-line callback — an obligation
-  that is *already* visible and enforced by the seal gate (ID-2-WIRING-SEAL), which makes the floor
-  claim a greppable `seq.Seal()` line at exactly the point a reviewer must check the derivation.
-  **B also acquires a layering change** — `wal` would gain knowledge of a message sequence — which is
-  the thing `log.go:72-73` was written to prevent.
-- **Option A — caller-side `ScanAll` + decode the body.** Correct, and proven to yield the same floor,
-  but it is the most expensive way to get an answer that a pass we already run is holding in a local
-  variable. Rejected as strictly dominated by A′.
-- **Option C — make the floor an acceptance criterion of the first MSG task that writes a message.**
-  Not a mechanism, a schedule; kept as a *complement* to A′, not a substitute. On its own it is a
-  promise that gets lost, and the MSG-2 implementer then writes the natural, wrong, `go vet`-clean
-  `Replay`-fold. With the seal gate landed it becomes a mechanism, because minting an id without
-  writing `seq.Seal()` is impossible.
-
-**Ordering note — no version number was taken.** `ondisk-format-version` currently holds `1` (the
-shipped format) and `2` (**already reserved by DUR-12**, the CRC32C → HMAC-SHA256 keyed MAC). A′
-consumes neither. If encryption is ever revived and B becomes necessary, it must **reserve its own
-value at that time** — format changes are ORDERED and two changes must never share one version
-number. Never hand-pick it.
-
-**Consequences.**
-
-- **`wal` gains an observer hook, not a schema.** ID-2-WIRING-OBSERVER implements it; the shape the
-  deepdive prototyped and this decision assumes is: `Replay` keeps its exact signature and delegates
-  to a new `ReplayWithPrepares(path, fn func(Committed) error, onPrepare func(Entry) error)`, where
-  `onPrepare` is called once for **every** PREPARE record in file order regardless of how it later
-  resolves, a nil `onPrepare` reproduces today's behaviour exactly, and an error from `onPrepare`
-  fails the replay the same way an error from `fn` does. `wal` passes the `Entry` through without
-  interpreting it.
-- **The derivation must ERROR, never return 0, on failure.** `ids.Resume(0)` is documented as exactly
-  equivalent to `NewSequence` (`sequence.go:159-160`), so a floor of `0` derived from an *empty* log
-  and a floor of `0` derived from a *failed* decode are indistinguishable at the type level. `Seal()`
-  does not fix that. The startup derivation must refuse to start on a scan or decode error rather than
-  hand `Resume` a zero — this is a required behaviour of ID-2-WIRING-STARTUP, not a nicety.
-- **A non-numeric, missing or zero `"seq"` in a message-kind prepare body is a startup failure**, for
-  the same reason: silently skipping an undecodable body would lower the floor exactly when it must
-  not move.
-- **Contract text this implies** (owned by whoever holds `CONTRACTS*.md` / `PROTOCOL.md`, filed
-  separately — this task wrote no contract file): *the WAL body of a `"message"`-kind entry is a JSON
-  object carrying a top-level `"seq"` (uint64, non-zero), the server-minted message sequence; it is
-  cleartext and readable by the bus; the message-sequence high-water mark is derived at startup from
-  every PREPARE in the log, committed, aborted and dangling alike.*
-- **Residual, shared by A′ and B alike, and therefore not a differentiator:** a whole-log
-  **quarantine** renames the unreadable log aside and starts a fresh one at index 1
-  (`recover.go:252-262`), and a repaired tail discards records declared never-durable. Sequences
-  burned in bytes that are no longer replayed cannot be recovered from the WAL by *any* option here —
-  B would compute its `HighestSequence` in the same pass over the same surviving bytes. This is the
-  message-sequence face of the invariant-1 narrowing already filed for the WAL record index
-  (`e120153b`), and it belongs on that task's docket rather than in a second one.
-- **This decision commits the MSG epic to exactly one field and nothing else.** It is deliberately the
-  smallest schema commitment that unblocks the floor derivation.
-
+> CORRECTED 2026-08-16: all three are decided, and none of them here. (1) BOTH — self-signed on first start
+with the fingerprint carried in the invite blob, and operator-supplied `-tls-cert`/`-tls-key`
+(2026-08-02, E6 and E7). (2) TRULY NEVER — no flag, no env var, no build tag; tests use real TLS
+against certificates minted at test time (2026-08-02, E7). (3) Not "in addition to": on the peer
+routes the certificate ALONE authorises and no bearer token is consulted, which the 2026-08-14
+RELAY-6 AMENDMENT ruling (i) records as a deliberate narrowing of invariant 11. The self-signed-
+plus-pinning shape the second bullet above called "not yet decided" is what shipped.
 
 ---
 
@@ -1145,49 +1052,6 @@ is free once both exist.
 
 Invite-only enrolment and mTLS compose well: the invite is what authorises a new client certificate
 to be bound to a new agent id in the first place.
-
----
-
-## 2026-08-02 — Addendum to ID-2-WIRING-SCHEMA: the quarantine residual is a DEFECT, not a narrowing
-
-**Why this is a separate section.** The ID-2-WIRING-SCHEMA entry above and the "Five decisions" entry
-below it were written independently and landed in the same commit (`4110946`). Decision 3 there —
-*"NO id reuse — invariant 1 stands, and the salvage reissue is a DEFECT"* — supersedes the FRAMING of
-one paragraph above. `DECISIONS.md` is append-only, so the correction is recorded here rather than by
-editing a committed line.
-
-**What changes.** The A′ entry's residual paragraph describes the quarantine/discard case as *"the
-message-sequence face of the invariant-1 narrowing already filed for the WAL record index
-(`e120153b`)"*, and parks it on that docket. That is now wrong in kind. The user reaffirmed invariant 1
-**without narrowing**: *"Recovery may not reissue an index it has already handed out, even for a record
-it discards: when recovery discards a record the sequence advances past the hole, it never rewinds"*,
-and *"this makes the current salvage behaviour a bug, not a documented narrowing."* So it is a defect
-to be fixed, not a limitation to be documented and accepted.
-
-**What does NOT change: the choice.** Option A′ still stands, for exactly the reasons given above. The
-residual was explicitly recorded as shared by A′ and B alike and therefore not a differentiator —
-Option B would compute its `Recovered.HighestSequence` in the same pass over the same surviving bytes
-and would lose precisely the same sequences. Reclassifying it from "narrowing" to "defect" changes who
-must fix it and how urgently; it does not change where the number lives.
-
-**What this sharpens, and it is worse for the sequence than for the record index.** Whole-log
-quarantine renames the unreadable log aside and starts a **fresh log at index 1**
-(`internal/wal/recover.go:252-262`). Under "no id reuse" that is not a subtle reissue of one damaged
-tail record — it re-hands-out the entire index space from 1. The message-sequence face is the same and
-is not fixed by anything in the A′ entry: after a quarantine there is no surviving PREPARE for the
-observer to see, so the derived floor is `0`, and a bus that then starts minting sequences from 1 would
-reissue every sequence it has ever used.
-
-**Therefore, a required behaviour of ID-2-WIRING-STARTUP** (stated here so it is not rediscovered
-later): a quarantine event must not be allowed to silently yield floor `0`. The floor derivation must
-distinguish "the log is legitimately empty because this bus is new" from "the log was quarantined and
-its high-water mark is unknown", and in the second case it must refuse to start rather than resume from
-zero — the same fail-closed rule the entry above already imposes for a scan or decode error, and the
-same rule `internal/ids/sequence.go:119-122` states: *a caller that cannot prove its floor MUST refuse
-to start rather than guess.* Where the surviving high-water mark is recorded so a quarantined bus can
-still prove its floor is a durability-plane question that belongs with the quarantine defect, not with
-this schema decision.
-
 
 ---
 
@@ -1290,6 +1154,14 @@ argument for a hatch.
 **`InsecureSkipVerify` must appear nowhere in the tree**, including tests. Worth a grep in CI: it is
 the single clearest signal that verification was disabled to make something pass.
 
+> CORRECTED 2026-08-16 — SUPERSEDED by the 2026-08-07 MTLS-PIN entry §2 and by invariant 11 as it now stands.
+The rule is not "nowhere" but EXACTLY ONE FILE, EXACTLY ONCE: `client/pin.go:260-261`, paired with
+`VerifyPeerCertificate` in the SAME composite literal, enforced by an AST walk rather than a grep
+(`client/guard_test.go`). A grep-based CI check would now be the WRONG check — it cannot see the
+pairing, and the pairing is the part that carries the security property. Everything else in this
+section is unchanged and current: no plaintext hatch anywhere, tests use real TLS, operator-supplied
+certificates allowed.
+
 ### Operator-supplied certificates ARE allowed
 
 `-tls-cert` / `-tls-key` flags, alongside the self-signed default. This is a legitimate need for
@@ -1302,6 +1174,10 @@ whatever the bus actually serves.
 `scripts/bus-serve.sh:54` (`HEALTH_URL="http://${LISTEN}/healthz"`), `CLI-2`'s `proof_cmd` (enrols
 over `http://127.0.0.1:8092`), and DEPLOY-1/DEPLOY-2 all assume plaintext and must be updated as the
 mTLS epic lands.
+
+> CORRECTED 2026-08-16: done. `scripts/bus-serve.sh:107` now reads `HEALTH_URL="https://${PROBE_ADDR}/healthz"`
+and probes with `curl -fsS --cacert "$CERT_FILE"` (`:113`); the image and the compose file were
+reworked by the 2026-08-15 DEPLOY-6 entries. `bus-serve.sh` is the only `scripts/bus-*.sh` file left.
 
 ---
 
@@ -1323,6 +1199,15 @@ binary purpose-built to answer "is the server up." Alpine's busybox already prov
 healthcheck) and `adduser`/`addgroup` (for the non-root user), keeping both to a couple of `RUN`
 lines. That is simple-beats-clever, not a shortcut around it: the image is ~19MB, a few MB over what
 distroless/static would give, in exchange for meaningfully less machinery.
+
+> CORRECTED 2026-08-16: the base-image CHOICE stands; the version and the healthcheck story have both moved.
+The runtime stage is now `alpine:3.22.1@sha256:4bcff63911fcb…`, still digest-pinned
+(`Dockerfile:102`); the builder is still `golang:1.19.4-alpine@sha256:86d32cc0…` (`Dockerfile:15`).
+The busybox-`wget` justification is spent: the healthcheck is now the `agent-bus healthcheck`
+subcommand on the server binary, because busybox `wget` cannot be told to trust one self-signed
+certificate (2026-08-07, MTLS-LISTENER §5). The image also now ships `agent-busctl` and a
+pre-created `/identity` (2026-08-15, DEPLOY-6 §3), and the builder copies `client/` as well as
+`cmd/` and `internal/` (`Dockerfile:29`) — without which it did not build at all.
 
 **Non-root user is a fixed, explicit UID/GID (`10001:10001`)**, not `adduser`'s next-available
 default, so a data volume's on-disk ownership is stable and predictable across image rebuilds — an
@@ -1347,6 +1232,15 @@ CLAUDE.md explicitly sequences *after* mutual TLS. The compose file documents an
 loudly-commented opt-in override (`-listen=0.0.0.0:8080` plus a loopback-bound host-side `ports:`
 entry) for an operator who wants to accept that risk locally, but that is not the default and must
 never become the default before mTLS lands.
+
+> CORRECTED 2026-08-16: still TRUE of `docker-compose.yml`, which keeps `-listen=127.0.0.1:8080` in its
+`command:` and declares no `ports:` (`docker-compose.yml:116`; `restart: unless-stopped` at `:107`).
+NO LONGER true of the IMAGE: the Dockerfile's `CMD` is `-listen=:8080`, changed deliberately on
+2026-08-15 (DEPLOY-6 §2) because a loopback bind inside a container's OWN network namespace is
+unreachable even through a published port — the bus started, passed its own healthcheck and was
+reachable by nobody. The binary's `defaultListen` is unchanged at `127.0.0.1:8080`
+(`cmd/agent-bus/main.go:41`). mTLS has since landed (2026-08-07, MTLS-LISTENER), so the sequencing
+constraint this paragraph guards is discharged.
 
 **Verified by execution, not just inspection** (both binaries invoked directly — see the AGENT_LOG.md
 entry for why `docker` on PATH needed a workaround): `docker build` + `docker run -h` (proof-check
@@ -1392,18 +1286,6 @@ begin/sign/complete handshake. `client.SessionInfo` therefore has **no token fie
 even one tagged `json:"-"`, because a field that exists can still be reached by a reflection walk or
 a struct copy into someone else's logging type.
 
-### 3. `--invite` is REJECTED locally, not guessed onto the wire
-
-Enrolment is becoming invite-only (invariant 3) and the CLI needs the seam now. But the invite's
-wire shape is settled by task `ENROL-SHAPE`, and `/v1/enroll` is explicitly UNSTABLE until that,
-certificate binding and POPKEY all land.
-
-So `busctl enrol --invite <blob>` fails immediately, locally, with a remedial message naming
-`ENROL-SHAPE` — it does **not** invent a JSON field called `invite` and send it. Choosing a wire
-field name ahead of the task that owns it is the same mistake as hand-picking an on-disk
-record-type number: **the shape is reserved, not chosen.** The seam is `client.EnrolOptions.Invite`
-plus one construction site in `Enrol`; when ENROL-SHAPE settles, the field name lands in one place.
-
 ### 4. Enrolment key material is persisted BEFORE the request, and idempotency records are scoped to (key, bus URL)
 
 Found by smoke-testing the first implementation, which was wrong in a way no unit test of it would
@@ -1434,8 +1316,14 @@ AUTH-4's revocation surface exists.
 ### 5. Exit codes are a contract, and the mapping lives in the PACKAGE
 
 Nine codes (`0` ok, `1` internal, `2` usage, `3` config/identity, `4` auth, `5` network, `6` server,
-`7` rejected, `8` nothing-to-report), enumerated in `CONTRACTS-CLI.md`. `2` is usage to match Go's
-`flag` package and `cmd/agent-bus`.
+`7` rejected, `8` nothing-to-report), enumerated in `CONTRACTS-CLI.md`.
+
+> CORRECTED 2026-08-16: there are TEN. `ExitVersionSkew = 9` was added on 2026-08-08
+(`client/errors.go:95-109`). The decision this section records is unchanged and still holds: the
+mapping lives in the importable package (`client.ExitCode`), not in `cmd/`, and `client.Kind` is a
+CLOSED set.
+
+`2` is usage to match Go's `flag` package and `cmd/agent-bus`.
 
 `client.ExitCode(err)` performs the mapping, in the importable package rather than in `cmd/`, so an
 agent that embeds the client and re-exposes it as its own subprocess produces exactly the documented
@@ -1481,6 +1369,12 @@ permits and which is self-inflicted either way; forging one for another agent ga
 visibility is filtered with the AUTHENTICATED PRINCIPAL and the filter never consults the cursor. A
 MAC would protect a value whose integrity buys no security property, at the cost of a key to manage
 and rotate. Invariants 8 and 9 both point away from adding it.
+
+> CORRECTED 2026-08-16: the one-ordered-stream-plus-cursor shape stands, and so does every word about the
+cursor being opaque, versioned, agent-bound and deliberately unsigned. What changed is WHAT the
+cursor names. Since 2026-08-14 (SIGN-1-FU-REORDER-WATERMARK) it names a delivery POSITION — the WAL
+commit index — not a sequence, and `cursorVersion` is `"v2"` (`internal/hub/cursor.go:53`); a `v1`
+cursor is remapped to position 0 and never rejected (`:165-178`).
 
 ### 2. The ENROLMENT EPOCH — a NEW restriction, added because this wave opened a hole
 
@@ -1537,37 +1431,6 @@ The window is orders of magnitude beyond any plausible client retry, and tying k
 message lifetime means the two cannot drift apart. `IDEM-11` owns the cross-cutting layer and may
 revisit this; until then `CONTRACTS-HTTP.md` states the narrowed behaviour explicitly rather than
 letting the stricter sentence stand while the code does something else.
-
-### 4. Message ids may repeat after a WAL QUARANTINE, and after damage deeper than a torn tail
-
-The sequence floor is derived from the durable log's own high-water index
-(`wal.Recovered.NextIndex - 1`). The argument that this bounds every sequence is by counting: each
-message burns ONE sequence and at least TWO WAL indices, so the indices outrun the sequences and the
-gap only widens. `hub.publish` ASSERTS it per message (`PrepareIndex >= seq`) and poisons the hub if
-it ever fails, rather than trusting the counting argument to survive future edits.
-
-The argument depends on the index high-water mark surviving, and there are two cases where it does
-not:
-
-- **Quarantine.** Recovery moves an unreadable log aside and starts a FRESH one whose index restarts
-  near 1, while the quarantined file holds sequences far above it.
-- **Damage deeper than a torn tail.** Measured, not assumed: over a 585-offset truncation sweep of a
-  2523-byte WAL, 70 offsets regressed the sequence — every cut losing more than half the records.
-  Inside the genuine crash window (a tear between two fsyncs) the property HOLDS and is asserted.
-
-This narrows invariant 1, which says ids are never reused including across restarts, and the
-narrowing needs to be recorded rather than implied by invariant 6's availability decision — that
-decision is about DISCARDING RECORDS and says nothing about REUSING IDS. The trade is the same one
-invariant 6 made: a bus held hostage by one bad sector is worse than a bus that has lost something
-and said so. So the bus starts, and `hub.Open` reports the exposure at ERROR naming the quarantine
-path and the resumed floor. **Silence would be the defect; the discard is not.**
-
-The real fix is a separately-persisted, fsynced sequence high-water mark written ahead of the
-sequence it authorises — `MSG-FU-SEQHIGHWATER`, which also needs a RESERVED on-disk record-type
-number. Until it lands, an operator who sees the quarantine line should expect repeated message ids
-and treat the quarantined file as the only record of what came before.
-
----
 
 ## 2026-08-02 — Addendum to the CLI decisions: four more, from the reviewer and security gates
 
@@ -1726,6 +1589,15 @@ The general sustained-ceiling concern is already tracked by IDEM-11-FU-THROUGHPU
 - The divisor counts every distinct agent holding a record, so many cheap identities shrink everyone's
   share — this rule mitigates one agent starving others, it does not bound how many agents can exist.
   The root fix is enrolment authentication (INVITE-GATE); enrolment is unauthenticated today.
+
+  > CORRECTED 2026-08-16: enrolment is NO LONGER unauthenticated. `enrolmentInviteRequired = true`
+  (`cmd/agent-bus/main.go:66`, shipped `3cedcb7`, 2026-08-15), so an un-invited `POST /v1/enroll` is
+  refused 403 — the root fix this residual named has landed. A second bound landed on 2026-08-15
+  (RELAY-FU-IDEM-METER-BY-PEER): a relaying peer controls the origin-agent label, so foreign agents are
+  now charged to their BUS half rather than to a peer-chosen per-agent label, and the store requires
+  its local bus id at construction (`internal/idem/store.go:186-235`). The constants are unchanged:
+  `MaxEntries` 65536, `PressureLine` 32768 (`internal/idem/retention.go:152,240`), `ErrAgentQuota`
+  (`internal/idem/errors.go:88`), replay exempt via `Store.Recover` (`internal/idem/store.go:358`).
 - Below the pressure line, admission is first-come first-served with no reclamation: an agent that
   grew its holding during the free-growth phase keeps that outsized allocation even after the bus
   crosses into pressure, because the share only ever REFUSES new admissions, it never claws back what
@@ -1741,6 +1613,14 @@ time this decision was recorded.
 Settles the P0 that blocked `AUTH-3`, `INVITE-STORE`, `INVITE-GATE`, `MTLS-BIND` and
 `AUTH-1-FU-POPKEY`. **Deliverable is this entry only** — `CONTRACTS-HTTP.md` documents SHIPPED
 behaviour and none of this has shipped.
+
+> CORRECTED 2026-08-16: it has ALL shipped, and shipped exactly as specified — which is the outcome this entry
+was written to buy. `auth.RosterEntry` now carries `AgentID`, `Name`, `AuthPublicKey`,
+`MessagingPublicKey`, `InviteID`, `Epoch`, `CertBindings []CertBinding` and `EnrolledAt`
+(`internal/auth/roster.go:88-171`); `CertBinding` is `{Fingerprint [32]byte; BoundAt time.Time;
+RetiredAt *time.Time}` (`:42-60`); the history is BOUNDED at `MaxCertBindings = 16` (`:32`, enforced
+`:397`). The "no migration required if this lands before AUTH-3" window closed as intended: nothing
+had to be migrated.
 
 **Why one entry instead of three changes.** Three separately-filed tasks each rewrite `POST
 /v1/enroll`'s request body — the invite field, the client-cert fingerprint binding, and
@@ -1815,9 +1695,22 @@ DOCKER_HOST=unix:///run/docker.sock /snap/docker/3505/usr/libexec/docker/cli-plu
 ```
 `/snap/bin/docker` (what's on PATH by default) fails with `cannot create user data directory:
 /home/mike/snap/docker/3505: Not a directory`, because `$HOME` (`/home/mike`) is a symlink to
-`/mnt/sdb4/mike/mike` and the snap's confinement does not resolve through it. Going straight at the
-already-running daemon over its Unix socket sidesteps that entirely — the CLI's per-user data
-directory is only needed for `docker context`/config bookkeeping the socket path bypasses.
+`/mnt/sdb4/mike/mike` and the snap's confinement does not resolve through it.
+
+> UNVERIFIED 2026-08-16: PARTLY confirmed by inspection, NOT by execution — this pass is read-only
+> and did not run `docker`. Confirmed: `/snap/docker/current/bin/docker` exists and is a real 42 MB
+> binary, and `/snap/bin/docker` is a symlink to `/usr/bin/snap` rather than a docker binary, which
+> is consistent with the failure described. NOT confirmed: that the failure still reproduces with
+> that exact message. AND ONE DETAIL IS LIKELY STALE — the compose plugin path hard-codes snap
+> revision `3505`, but **revision `3579` is now also installed** (`/snap/docker/3505/`,
+> `/snap/docker/3579/`, `/snap/docker/current/`). The `docker` line uses the revision-independent
+> `current` symlink; the `docker-compose` line does not, so it may point at a superseded revision.
+> Prefer `/snap/docker/current/usr/libexec/docker/cli-plugins/docker-compose` and verify before
+> quoting this recipe in a `proof_cmd`.
+
+Going straight at the already-running daemon over its Unix socket sidesteps that entirely — the
+CLI's per-user data directory is only needed for `docker context`/config bookkeeping the socket path
+bypasses.
 
 **Rationale for recording this as a decision, not just a log line:** `637fca2f` was filed 2026-08-02
 as "NEEDS THE USER (environment change, outside an agent's remit)". This session (2026-08-07) found
@@ -1898,6 +1791,18 @@ calling `RaiseFloor` over them, then `Seal` exactly once, the same shape `intern
 follows for `Sequence`) is a separate, not-yet-completed piece of work. Do not read this decision as
 evidence the restart-reuse bug is fixed in a running bus; see `AGENT_LOG.md` (2026-08-07) for the full
 review-chain record of that gap.
+
+> CORRECTED 2026-08-16: the wiring landed the same day — see "MSG-FU-SUFFIXFLOOR (wiring)" below. The gap this
+paragraph describes is CLOSED: `ids.NewNameSuffixes` no longer appears in `cmd/` at all,
+`cmd/agent-bus/suffixfloors.go:137-143` constructs through `ids.OpenNameSuffixes`, and
+`TestNoFreshSuffixCounterInCmd` (`cmd/agent-bus/suffixfloors_test.go:685`) is an AST guard that keeps
+it that way. A restarting bus does NOT re-mint agent ids.
+
+The OTHER caveat in this entry is still true, and permanently so: the prepare-observer work
+(`ID-2-WIRING-OBSERVER`) was never implemented — there is no `ReplayWithPrepares` in `internal/wal`,
+only `wal.Replay(path, fn)` (`internal/wal/replay.go:109`) — so on a LEGACY data directory the
+backfill still cannot see a suffix burned by a dangling prepare, and the honest guarantee there
+remains "no suffix that reached COMMITTED history is reissued".
 
 ---
 
@@ -1988,6 +1893,13 @@ this file is append-only.
 
 **The two superseded passages:**
 
+> NOTE 2026-08-16: both target passages have now been REMOVED from this document rather than
+left in place, under an explicit operator instruction authorising removal — see the terminal
+"Removed on 2026-08-16" section. Passage 1 was the whole of the "Addendum to ID-2-WIRING-SCHEMA"
+entry; passage 2 was §4 of the "MSG/POLL" entry. The line numbers quoted below are historical and no
+longer resolve. This entry is KEPT because it is the record of WHY they went and is cited by task
+records outside this file.
+
 1. **~line 1184 (ID-2-WIRING-SCHEMA addendum)** — after a whole-log quarantine the bus *"must refuse
    to start rather than resume from zero… a caller that cannot prove its floor MUST refuse to start
    rather than guess."* **SUPERSEDED** by the always-restart decision (2026-08-02, invariant 6),
@@ -2028,6 +1940,16 @@ Recorded by `feature-runner` while landing RELAY-2 (message relay + ongoing rost
 (loop prevention via the traversed-bus path). All code is in `internal/relay`, which registers no
 route and is imported by nothing (`guards_test.go`); these decisions are therefore about shapes that
 are settled but not yet served.
+
+> CORRECTED 2026-08-16: `internal/relay` IS served now. `internal/httpapi/peermount.go` mounts
+`/v1/peer/{enroll,relay,roster}` behind `RequirePeerPrincipal`, and `cmd/agent-bus/main.go:1441-1442`
+wires `Peer` and `PeerPrincipals` on a shipped server. The old no-mount guard was RETIRED AND
+REPLACED, not deleted, by `TestRelayPeerRoutesAreMountedOnlyByTheGatedMountFile`
+(`internal/relay/guards_test.go:949`), which permits exactly one file outside the package to name
+those paths. All three decisions below still hold in code: the fingerprint excludes `bus_path`
+(`internal/relay/message.go:437-464`), the idempotency key must equal the envelope `message_id`
+(`:599-604`), and a loop drop is `200 {"accepted":false,"dropped_reason":"loop"}`
+(`internal/relay/relayhttp.go:195`).
 
 ### 1. The relay idempotency fingerprint EXCLUDES `bus_path`
 
@@ -2174,25 +2096,6 @@ A partial map is never sealed: failure is TOTAL (`walAgentIDFloors` returns `(ni
 derivation that got every floor it saw right but MISSED A NAME seals exactly as cleanly as a complete
 one, and every missed name then mints from 1 over ids already on disk.
 
-### 4. The scan runs on EVERY start, to cross-check a rewound floors file — and it RAISES, not just reports
-
-**Decision.** The WAL derivation runs even when `agent-suffixes` exists. When the file exists it is
-authoritative and no backfill happens, but a WAL suffix ABOVE the persisted floor for a name is a
-detectable INTEGRITY FAILURE — it cannot happen on a healthy dir, because the floor is written ahead
-of the suffix, so it means the floors file was rewound, restored from an older backup, or replaced.
-That is logged at **ERROR**, naming the file, the name, the persisted floor and the suffix found.
-
-**And the floor is RAISED, not merely reported.** Detection alone would leave the bus knowingly
-re-minting an id it can see on disk, which is the one outcome this whole area exists to prevent.
-`RaiseFloor` never lowers a floor, so folding the finding in cannot weaken the persisted authority,
-and `Seal` writes the merged map back. The posture "the floors file is authoritative" is unchanged:
-the WAL is never allowed to lower a floor, only to reveal that the file is missing one.
-
-**The cost, stated honestly.** `wal.ScanAll` materialises every record in memory and the WAL never
-compacts, so this is one extra sequential read plus a peak proportional to log size, on every start.
-It is affordable now and it is not affordable forever; a streaming scan seam in `internal/wal` is
-filed as a follow-up rather than left to be discovered under a large log.
-
 ### What this does NOT do
 
 It does not make enrolment durable — the roster and all sessions are still in memory only (AUTH-3).
@@ -2240,6 +2143,9 @@ reintroduce the whole hole for any peer not yet seen, which is every peer, once.
   same key. One key is simpler; two lets the connection key rotate on a different schedule from the
   attestation key, which matters because rotating an attestation key invalidates pins held by every
   peer. Recommendation: keep them separate, but this needs its own ruling before implementation.
+
+  > CORRECTED 2026-08-16: settled the same day, in the entry immediately below — "The bus TLS key and the bus
+  SIGNING key are SEPARATE". The recommendation was taken.
 - **Rotation must follow the two-certificates rule** already decided for the bus's own TLS rollover
   (E3, 2026-08-02): a bus rotating its signing key must serve both during a rollover window, or every
   peering breaks at once and re-peering becomes indistinguishable from an attack.
@@ -2283,74 +2189,6 @@ greater one.
 - Both are generated with stdlib per invariant 9 — `crypto/ed25519` for signing, `crypto/tls` +
   `crypto/x509` for the certificate. Never hand-rolled, never assembled from primitives.
 - Rotation of each follows the two-key rollover rule independently.
-
----
-
-## 2026-08-07 — SIGN-2/SIGN-6: the signing core lands; the mandatory-signature policy is BLOCKED
-
-**Context.** SIGN-2 asked for the Ed25519 sign/verify primitive; SIGN-6 asked for the policy that
-makes a message's signature mandatory rather than advisory. Landing `internal/signing` (pure
-delegation to `crypto/ed25519`, per invariant 9) over `internal/signing.Canonicalize`'s bytes forced
-four choices that the next agent must not have to re-derive from scratch.
-
-**Decision 1 — a rejected send must not consume a sequence number; validation happens BEFORE
-minting.** Consuming a sequence on rejection would make every recipient cursor gap-tolerant, and once
-gaps are normal a recipient can no longer tell a DROPPED message from a REJECTED one — which silently
-destroys the only end-to-end signal that a bus on the path is withholding traffic, the one thing
-SIGN-1's option (a) was bought with a round trip to preserve. Gaps also cost SIGN-4 its simplest and
-strongest rule (strictly-increasing). The existing code already agrees with this and says so:
-`internal/hub/hub.go`'s `publish()` checks the idempotency admission BEFORE `h.seq.Next()` with the
-comment "Checked BEFORE the sequence is minted: a sequence spent on a send that will be refused is a
-sequence burned for nothing, and invariant 1 forbids reusing it." So the SIGN-6 checks (signature
-present; exactly 64 bytes; claimed sender == the AUTHENTICATED caller) belong at the same place or
-earlier — in `internal/httpapi`, before `hub.Send`/`hub.Broadcast` is called at all. Consequence,
-stated plainly: a rejected send leaves NO WAL record, NO audit entry beyond a rejection event, NO
-delivery, NO ack, and NO sequence — the mirror image of invariant 4. SIGN-4's cursor is therefore
-strictly increasing with no gap tolerance required.
-
-**Decision 2 — the poison-message wedge: the cursor ADVANCES past an unverifiable message; the body
-is DISCARDED, never delivered; the event is RECORDED.** The alternative — blocking the cursor until
-verification succeeds — hands anyone who can get one bad message into an agent's stream a PERMANENT
-denial of service against that agent, for the price of a single message. The asymmetry that makes
-this the only defensible choice: the message was already durably accepted and cannot be un-sent, so
-refusing to move past it does not undo it, it only stops everything behind it. Fail-closed applies to
-the BODY (it is never handed to the calling agent), not to the CURSOR. And the failure must be LOUD —
-log the message id, the sender, and WHICH check failed — because a silently skipped message is
-indistinguishable from one that never arrived. `internal/signing`'s distinct error sentinels exist
-precisely so "which check failed" is answerable, and the security gate confirmed the taxonomy is not
-an oracle (`ErrVerify` is one opaque verdict for every cryptographic failure — it does not, by itself,
-tell an attacker which byte of a forgery was wrong).
-
-**Decision 3 — which key verifies.** `Verify()` takes the public key as a free parameter and cannot
-check the caller chose it correctly, so PROTOCOL.md §8.3's rule is binding on callers: the key MUST be
-resolved from the roster using the fully-qualified sender field INSIDE the signed bytes, and nothing
-else — never a key or key-hint carried beside the signature. Get it wrong and verification is
-self-signed and worth nothing while every test still passes.
-
-**Decision 4 — why SIGN-2 and SIGN-6 are not done, three blockers, recorded so nobody re-derives
-them.**
-(a) No messaging keypair exists. `internal/auth/service.go` leaves `RosterEntry.MessagingPublicKey`
-ZERO (CRYPTO-3, todo) and there is no `agent-bus keygen` (SIGN-8, todo). Nothing can sign; nothing can
-verify.
-(b) The durable mint does not exist. SIGN-1 chose option (a) — the sender signs the ORIGIN's minted
-message id and sequence — so the bus must hand out an id/seq BEFORE the send, and that hand-out must
-be DURABLE. Today `internal/hub`'s `Open()` derives the restart floor as `NextIndex-1` from the WAL
-high-water index, resting on an explicit counting argument that every sequence issued is <= the WAL
-index of the prepare that carried it. A mint that RETURNS a sequence without writing a durable record
-breaks that argument outright: mint, restart, and the floor resumes below numbers already handed
-out — so two validly-signed messages would share one origin message id, which is undetectable
-downstream. The good news for whoever fixes it: `wal.Log` already exposes
-`Begin`/`Txn.Commit`/`Txn.Abort`, and `CONTRACTS-ONDISK.md` records that `Entry.Kind` is NOT a
-reserved namespace, so a durable reservation can be built without minting a new reserved record-type
-number.
-(c) The signature cannot reach the durable record without `internal/hub`. The path is
-`httpapi -> hub.SendRequest/BroadcastRequest -> hub.publish -> store.NewMessage -> WAL`, and the
-middle of that is `internal/hub`, which was outside this agent's file-ownership boundary.
-
-**Warning to the next agent.** Shipping SIGN-6's ingest check ALONE — requiring a signature the bus
-never persists and never returns on `/v1/wait` — would be exactly the "theatre" SIGN-6 warns against,
-since senders would pay the cost and recipients would still have nothing to verify. It must land
-together with the durable carry and the receive-path field.
 
 ---
 
@@ -2544,6 +2382,17 @@ it, mirroring the session-token expiry check, or (b) explicitly decide expiry is
 session-token/revocation layer is the sole enforcement, and record which. This was not resolved from
 anything already on record and is called out here rather than silently assumed either way.
 
+> CORRECTED 2026-08-16: decided on two of the three surfaces, and still open on the third — the split matters.
+BUS certificate: the CLIENT enforces the window, via `crypto/x509` rather than a local date compare
+(2026-08-07, MTLS-EXPIRY; `client/pin.go:515-534`). PEER surface: option (a) was taken, inside
+`RequirePeerPrincipal` and BEFORE the durable binding is consulted (2026-08-14, RELAY-6 AMENDMENT
+ruling (g)). AGENT surface: STILL OPEN. The listener is `tls.RequestClientCert`
+(`cmd/agent-bus/tlslisten.go:152`), which chain-verifies nothing, so an expired agent certificate is
+still admitted; task `ca356fde`, which must close in the same task as `MTLS-BIND`/`MTLS-CROSSCHECK`.
+Note also that the constant this section chose is real: `buscert.CertValidity = 365 * 24 * time.Hour`
+with `NotBefore` backdated by `clockSkewAllowance = 5 * time.Minute`
+(`internal/buscert/buscert.go:72,78,633`).
+
 ### Key file locations in the data dir — three long-lived secrets after `MTLS-BUSCERT` lands
 
 Confirmed by reading `internal/wal/mackey.go:35`: the existing secret is literally named
@@ -2636,7 +2485,15 @@ the abandoned test name would have carried.
   guarantee to buy nothing invariant 1 does not already get from a larger block. Shipped instead:
   `indexReserveBlock = 256`, which amortises the floor write to roughly one extra fsync per 256 WAL
   appends and accepts that a crash may burn up to 255 unused indices as a permanent hole in the index
-  sequence. Holes are legal and permanent (invariant 1 beats gap-freeness) — the same trade
+  sequence.
+
+  > CORRECTED 2026-08-16: the constant is **64**, not 256 — `internal/wal/indexfloor.go:114`, whose own comment
+  records that "the block came down from 256 to 64". So the real amortisation is one extra fsync per 64
+  appends and a crash burns up to 63 unused indices. The 2026-08-07 CORRECTION entry below spotted this
+  drift and handed it to spec-keeper; the code moved and this paragraph did not. Nothing else in the
+  trade changes.
+
+  Holes are legal and permanent (invariant 1 beats gap-freeness) — the same trade
   `internal/ids/suffixstore.go` already made for the per-name agent-id suffix floor, arrived at
   independently and now mirrored deliberately.
 
@@ -2666,7 +2523,8 @@ re-scopes `MSG-FU-SEQHIGHWATER` should read it as "confirm the residual is accep
 "account for the migration window explicitly", not "build a second floor".
 
 **This SUPERSEDES the 2026-08-02 section "### 4. Message ids may repeat after a WAL QUARANTINE, and
-after damage deeper than a torn tail" (line ~1541).** `DECISIONS.md` is append-only, so the
+after damage deeper than a torn tail" (line ~1541 — that section was REMOVED on 2026-08-16;
+see the terminal "Removed on 2026-08-16" section).** `DECISIONS.md` is append-only, so the
 correction is recorded here rather than by editing those lines, which must be read as HISTORICAL —
 they describe the pre-2026-08-07 behaviour and the narrowing that was, at the time, believed to be
 the accepted trade. It is not: quoted in full, that section recorded *"This narrows invariant 1,
@@ -2859,9 +2717,22 @@ affected** — `auth.RecordVersion` is a separate, independently-versioned numbe
 - **No messaging public key is registered at enrolment.** `auth.Service.Enrol` leaves
   `RosterEntry.MessagingPublicKey` ZERO, `GET /v1/agents` carries no key material, and **CRYPTO-4
   (the server-attested key-bundle endpoint) does not exist.** A recipient can therefore obtain a
-  sender's messaging public key **only OUT OF BAND**. `client/keyring.go`'s `DirKeyRing` is a local,
-  **manually populated** trust store and is explicitly a stopgap. **No fallback may be invented** —
-  no TOFU, no "trust the key the bus handed over", no verification-optional switch, no `--insecure`.
+  sender's messaging public key **only OUT OF BAND**.
+
+  > CORRECTED 2026-08-16 — HALF of this is now false and the half that matters is not. The key IS registered at
+  enrolment: `EnrolRequestBody.MessagingPublicKey` is decoded at `internal/httpapi/auth.go:226-228`,
+  passed at `:348`, validated at `internal/auth/service.go:662` and written into the roster entry at
+  `:799`. It is OPTIONAL — an empty value stays acceptable (`:651`) — and that is what
+  `RELAY-24-BLOCKER-EGRESS` decision 2 relies on when it declines to attest a keyless agent. What has
+  NOT changed is the retrieval half: `GET /v1/agents` still carries no key material at all
+  (`AgentInfo` is `{agent_id, name, enrolled_at}`, `internal/httpapi/messages.go:112-116`) and
+  CRYPTO-4's server-attested key-bundle endpoint still does not exist (`client/keyring.go:20`). So a
+  recipient still obtains a sender's messaging key ONLY OUT OF BAND, and the prohibition below — no
+  TOFU, no "trust the key the bus handed over", no verification-optional switch — is untouched.
+
+  `client/keyring.go`'s `DirKeyRing` is a local, **manually populated** trust store and is explicitly
+  a stopgap. **No fallback may be invented** — no TOFU, no "trust the key the bus handed over", no
+  verification-optional switch, no `--insecure`.
 - **Recipient-side verification is NOT wired into `client.Read`.** Signing works end to end, the
   signature is carried on the wire and returned by the read path, and a client-made signature is
   proven to verify under `internal/signing.Verify` from the wire fields — but nothing verifies
@@ -2942,6 +2813,11 @@ correct and quietly under-counted. Failing closed on both is the point.
 server"*. That is now false and must name this exception, or an operator meeting the refusal has no
 document to search.
 
+> CORRECTED 2026-08-16: that exact unqualified sentence no longer appears in `CONTRACTS-ONDISK.md` (grepped
+2026-08-16, zero matches). The exception itself still holds in code: a data directory with history
+and no `agent-suffixes` file refuses to boot unless `-backfill-suffix-floors` is passed
+(`cmd/agent-bus/suffixfloors.go:184-186`; flag at `cmd/agent-bus/main.go:300`).
+
 ### 2. The `store.RecordVersion` 1→2 break is ACCEPTED
 
 Existing v1 message records are discarded at recovery, and a rollback discards v2 the same way. **No
@@ -3010,6 +2886,10 @@ recorded proof command, not edited directly (task state is server-owned, never h
 noted, not fixed: `.gitignore`'s `/busctl` entry and a descriptive comment in
 `internal/httpapi/composition_test.go` that names `busctl` — both outside this task's file-ownership
 boundary.
+
+> CORRECTED 2026-08-16: `.gitignore` now carries `/agent-busctl` and no bare `/busctl` entry. The one thing this
+entry says must NOT move has not moved: `client/enrol.go:930-942`'s `newIdempotencyKey` still mints
+the wire-visible prefix `"busctl-"`, with the comment recording why.
 
 ---
 
@@ -3090,6 +2970,15 @@ learnable from `/v1/info` alone becomes unreachable.
   genuinely open, not invite-gated, and the document says so plainly rather than pre-announcing a
   control that does not exist yet (`TestDiscoveryEnrolmentIsHonest` pins this and records that the
   flip to `true` must land in the SAME task as the invite gate itself, never before it).
+
+  > CORRECTED 2026-08-16: the flip happened, in the task that shipped the gate, exactly as this bullet required.
+  `invite_required` is no longer a constant — it is computed from `auth.Service.InviteRequired()`
+  (`internal/httpapi/discovery.go:111`) and is `true` on every shipped build
+  (`enrolmentInviteRequired = true`, `cmd/agent-bus/main.go:66`, `3cedcb7`, 2026-08-15).
+  `TestDiscoveryEnrolmentIsHonest` still exists but is now NARROWED to the no-auth-service test server;
+  the true/false honesty property is pinned by `TestInviteGateAdvertisesInviteRequired`
+  (`cmd/agent-bus/invitegate_enforce_test.go`). The two-field split survives: `invite_accepted` is
+  separate (`discovery.go:116`), for the reason the 2026-08-14 INVITE-GATE entry §(d) gives.
 - The endpoint list omits `POST /v1/broadcast` (it answers 501) and states that honestly in
   `limitations` rather than advertising a route that refuses everything.
 - `auth.SessionSigningContext` is never served in the document, by design (see invariant 3 and the
@@ -3260,6 +3149,13 @@ claim, so they are recorded beside it rather than only in a backlog:
   and a wedged fleet is how "just let the flag win" gets argued for. The fix is a SET of accepted
   pins, added only by a deliberate explicit action — never learned from a handshake. Filed as a
   tracked task gating `MTLS-LISTENER`, not left as a sentence.
+
+  > CORRECTED 2026-08-16: the SET shipped, as `MTLS-ROTATE`. `client.BusPinSet` is the stored value, the field is
+  `bus_fingerprints` (`client/store.go:128`), and it is capped at `client.MaxBusPins = 2` — the width
+  of a rollover, not headroom (`client/pinset.go:29`). Pins are still never learned from a handshake.
+  The cap is now load-bearing a second time: `cmd/agent-bus/relaydial.go` REFUSES a dial address whose
+  configured next-hop pins exceed it, rather than truncating (2026-08-15, RELAY-24-BLOCKER-EGRESS gate
+  findings).
 
 One gate finding was **incorrect and is recorded as such** so it is not actioned later on faith: the
 gate reported an `InsecureSkipVerify` in `internal/relay` that the guard does not scan. There is no
@@ -3475,20 +3371,6 @@ ALPN is pinned to `http/1.1` because `tls.NewListener` + `Serve` does not config
 `ServeTLS` does. Advertising only what is actually served is the honest option; the alternative
 leaves a client offering `h2` to infer the answer from an empty ALPN result.
 
-### 3. `ClientAuth: tls.NoClientCert` — server-side enforcement does NOT precede client-side capability
-
-The bus does not request or require a client certificate. Mutual TLS is still the design (invariant
-11), and `MTLS-CLIENTAUTH` is the task that gets there — but it may not land before
-`MTLS-CLIENTCERT`, which is what teaches the client to generate and present one. `MTLS-CLIENTCERT` is
-`todo` today, so a bus demanding a client certificate now would refuse every agent in the fleet AT
-THE HANDSHAKE, before any route, log line or error an agent could act on.
-
-This ordering is not a preference and not caution for its own sake: this repo has already shipped
-server-side enforcement ahead of client-side capability once — signature checking landed before the
-client could sign, and every send failed with `curl` exit 7 until it was reverted. The field is
-written explicitly rather than left as the zero value so that the day it legitimately changes, it
-changes in a diff someone reviews.
-
 ### 4. `TestCmdDoesNotServeTLS` is REPLACED by `TestCmdHasNoPlaintextListener`
 
 The old guard failed the build if `ServeTLS|ListenAndServeTLS|tls.NewListener|TLSConfig` appeared
@@ -3552,6 +3434,9 @@ and invariant 11 forbids exactly that flag."* It must land before this change is
 **The reviewer gate caught this paragraph asserting that filing had already happened when it had
 not**, which is the same defect class as the two comment corrections above: a written claim about
 the world that nobody checked. The task now exists; this sentence names it.
+
+> CORRECTED 2026-08-16: `MTLS-VERIFY-FU-DOCSCHEME` landed. `AGENT_PROTOCOL.md`, `README.md` and `PROTOCOL.md`
+now contain ZERO occurrences of `http://127.0.0.1` (grepped 2026-08-16).
 
 Nothing on disk changed format. No existing WAL, enrolment, invite or agent id is invalidated: the
 certificate has been minted into the data directory since `MTLS-BUSCERT` (`16f54c9`), and this change
@@ -3981,6 +3866,13 @@ Also applied, each mutation-confirmed:
 Reversible if a real consumer appears before the listener ships; the point is to not pay for a
 migration nobody needs.
 
+> CORRECTED 2026-08-16: the ruling held for the WIRE and for every new write, but a one-way READ shim was added
+and is still in the tree — `client/store.go:666` keeps a legacy scalar field `BusFingerprint`,
+tagged `json:"bus_fingerprint"`, consumed only by `migrateLegacyBusFingerprints`.
+That is a migration path, not the maintained alias this entry refused, and it does not re-teach the
+scalar mental model to any live code path. It is recorded here because a reader grepping
+`bus_fingerprint` WILL find it and must not read it as the scalar being supported.
+
 <!-- ===== BEGIN 2026-08-07 feature-runner: data-directory permissions + seq-floor bounds (task be447589-6583-4d5c-a9d4-ec9d9fef0f1c) ===== -->
 
 ## 2026-08-07 — The data directory's PERMISSIONS are enforced at startup, and the message-seq floor is bounded at both ends
@@ -4059,6 +3951,15 @@ bounded; `ensureSeqFloorLocked` still saturates to `MaxUint64` on true arithmeti
 honest caveat is recorded at `maxPlausibleSeqFloor`.
 
 ### 3. Floor file ABSENT **and** the log lost records => REFUSE (invariant 1 over invariant 6)
+
+> CORRECTED 2026-08-16 — READ THE 2026-08-08 CORRECTION FURTHER DOWN THIS FILE BEFORE THIS SECTION. Both
+"durable" arms described below — the unaccounted-for-indices arm this section calls "the arm that
+matters most", and the `MissingRecords` arm built to replace it — were REMOVED on 2026-08-08, because
+each turned an ordinary unclean shutdown into a PERMANENT refusal of a healthy data directory. What
+survives is the four transient `Repaired.*` signals plus a narrow emptied-log arm; the guard is
+one-shot for truncation and interior loss, and refuses on EVERY start after a quarantine (2026-08-08
+(b)). Decisions 1 and 2 of this entry are unaffected and current
+(`cmd/agent-bus/datadirperm.go:88,105-134`; `maxPlausibleSeqFloor`).
 
 A missing floor file is a SUPPORTED UPGRADE PATH — a data directory written by a binary that predates
 it — and rebuilding the floor from the log is right when the log is INTACT. Combined with a damaged
@@ -4184,6 +4085,16 @@ behind a peer bus at once — the same defect one scale up. Six agent-facing fil
 the removed disconnect; no code branches on them, which is exactly why the suite stays green over
 stale security prose.
 
+> CORRECTED 2026-08-16: reconciled. `internal/relay/doc.go` no longer contains "OFFENDING PEER DISCONNECTED";
+the section now states the narrowed rule — same key + different payload is reject-and-log with the
+connection KEPT, and the only disconnect anywhere in the codebase is a well-formed third-party replay
+(`internal/relay/doc.go:482-506`). The narrowing itself is unchanged in code:
+`internal/httpapi/messages.go:1016-1041` keeps the connection on a 409, and `:644-663` disconnects
+only when `ids.ParseAgentID(body.Sender)` succeeds for a DIFFERENT agent.
+`TestCrossMintIsIndistinguishableFromAnHonestSpentReservation` still exists
+(`internal/httpapi/disconnect_socket_test.go:476`) and still asserts the deliberate
+indistinguishability.
+
 <!-- ===== BEGIN 2026-08-08 feature-runner: CORRECTION to the 2026-08-07 seq-floor entry (task be447589-6583-4d5c-a9d4-ec9d9fef0f1c) ===== -->
 
 ## 2026-08-08 — CORRECTION: both "durable" arms of the seq-floor guard were WRONG and were removed
@@ -4306,6 +4217,13 @@ two reasons: it is exact (a broadcast test failing for any *other* reason still 
 rather than hiding behind a convenient explanation), and it is **self-healing** (the day SIGN-3
 lands, every one of those tests comes back on its own — nobody has to find and delete thirty-one
 skips, and none can be left behind).
+
+> CORRECTED 2026-08-16: the mechanism is unchanged and still correct; only the COUNT has moved. `go test -v
+./internal/hub/...` shows **33** leaf `--- SKIP:` lines today (`internal/hub/hub_test.go:113-169`;
+fail-closed call site `internal/hub/hub.go:1753`, before `h.durable.Write` at `:1798`). Read "~31" as
+"every broadcast test in the package" — the number moves whenever a broadcast test is added, which is
+exactly the self-healing property this paragraph is arguing for. `POST /v1/broadcast` still answers
+501 before the body is decoded (`internal/httpapi/messages.go:452-466`).
 
 **Production impact is ZERO, and that is why this was acceptable as an interim posture rather than a
 release blocker.** No broadcast can reach `hub.Broadcast` on a running bus:
@@ -4455,6 +4373,15 @@ candidate scan stays read-only; only the selected tail enters the ordinary WAL r
 discard evidence visible through `Recovered().Repaired` and operator logs. Legacy generation zero
 remains supported until the first checkpoint, including the existing v1-to-v2 WAL migration.
 
+> CORRECTED 2026-08-16 — THE CODE EXISTS AND IS NOT WIRED ON ANY SHIPPED BUS. Everything named above is real:
+`internal/wal/checkpoint.go` carries `checkpointFormatVersion = 7` (`:110`),
+`checkpointCurrent = "CURRENT"` (`:100`), `TailID` (`:126`), `MultiApplier` (`:35`),
+`CheckpointParticipant` (`:25`), `selectCheckpoint` (`:466`) and `verifyGeneration` (`:624`). But
+`cmd/agent-bus/main.go:630` opens the log with NO `wal.LogOptions.Checkpoints`, so
+`Log.Checkpoint` returns `"wal: checkpoint requires a MultiApplier"` unconditionally
+(`internal/wal/checkpoint.go:230-231`) and no generation is ever published. Read this entry as a
+DESIGN record, not as running behaviour.
+
 ## 2026-08-09 — Relay outbox retention is reclaimed only by a successful checkpoint
 
 The `relay-outbox` checkpoint participant owns the `outbox` kind and emits deterministic snapshot
@@ -4476,6 +4403,14 @@ Replay and snapshot restore admit acknowledged state even when it exceeds today'
 overage is explicit legacy capacity debt: it is logged, retained, and blocks applicable new growth
 until successful checkpoint reclamation clears it. Capacity configuration is prospective admission
 policy, not a retrospective data-loss mechanism.
+
+> CORRECTED 2026-08-16: the `relay-outbox` participant is real (`internal/relay/outbox.go:2101-2105`,
+`outboxCheckpointVersion = 1`), but NO checkpoint can run on a shipped bus — see the correction on
+the entry immediately above — so nothing is ever reclaimed by publication. That is not a theoretical
+gap: taking "the log HAS a `Checkpoint` method" as "a checkpoint CAN run" wedged cross-bus egress
+permanently, and the fix was to ask `wal.Log.CheckpointSupported()`
+(`internal/wal/checkpoint.go:217`) and, when the answer is no, DROP and reclaim on sweep rather than
+defer. See the 2026-08-15 "RELAY-24-BLOCKER-EGRESS: the reviewer and security gate findings" entry.
 
 <!-- ===== BEGIN 2026-08-14 MTLS-CLIENTAUTH ===== -->
 
@@ -4641,6 +4576,16 @@ No route is mounted (`RELAY-20`), no running server constructs a `*relay.PeerSto
 peer add` lives in `cmd/agent-bus/peer.go`, untouched here. This is a durable record shape and an HTTP
 middleware, both tested in isolation; nothing in this task makes either operator-reachable.
 
+> CORRECTED 2026-08-16: ALL THREE are now false, and the surface IS operator-reachable. The routes are mounted
+(`internal/httpapi/peermount.go`, RELAY-20 at `ed77bba`); `cmd/agent-bus/main.go:1441-1442` sets
+`Peer` and `PeerPrincipals` on a shipped server (RELAY-24); and `agent-bus peer add
+-peer-client-fingerprint <hex>` writes this exact field — flag at `cmd/agent-bus/peer.go:627`, parsed
+at `:747`, passed as `PeerClientTLSCertFingerprint` into `relay.PutTrust` at `:891`
+(`internal/relay/peerstore.go:2581`), i.e. `RELAY-45-FU-CLI` landed. The 2026-08-14 RELAY-6 AMENDMENT
+already corrected the first of the three; the other two moved after it was written. Everything the
+entry decides about the BINDING — record placement, fingerprint-first-by-enforcement, 403 with no
+challenge, signing-pin requirement — is unchanged.
+
 ## 2026-08-14 — CLI-11: `key export-public` ships on the SERVER binary, against a task record and a deliverable that both said `agent-busctl`
 
 **Decision.** `agent-bus key export-public -data-dir <dir> [-json]` is a subcommand on the **server**
@@ -4717,6 +4662,13 @@ client binary is reintroducing the mistake this entry exists to prevent.
 
 ## 2026-08-14 — INVITE-GATE: invite redemption is genuinely LIVE; the gate stays OFF; five decisions and a corrected residual risk (`documentation`)
 
+> CORRECTED 2026-08-16 — THE TITLE IS NOW WRONG: THE GATE IS **ON**. `enrolmentInviteRequired = true`
+(`cmd/agent-bus/main.go:66`) shipped in `3cedcb7` on 2026-08-15, and an un-invited `POST /v1/enroll`
+is refused **403** (`ErrInviteRequired`, pinned by `TestInviteGateEnrolWithoutAnInviteIsRefused403`).
+The heading is left as written because other entries and task records cite it by name. Section (c) —
+the argument for shipping redemption WITHOUT flipping the gate — has been REMOVED; see the terminal
+"Removed on 2026-08-16" section. Sections (a), (b), (d) and (e) below are unchanged and current.
+
 **Context.** `internal/auth/inviteenrol.go` (composite record), `internal/invite/store.go`
 (`Store.Begin`/`Consume`/`Commit`/`Abort`), `internal/httpapi/auth.go` (`handleEnroll`'s
 `invite_id`/`invite_secret` handling) and `internal/httpapi/discovery.go` (`invite_accepted`) shipped
@@ -4747,26 +4699,6 @@ value with no reservation; `"agent+invite"` follows it. Recorded explicitly, aga
 second time in this file's history someone has had to write down "no, don't reserve a number for this"
 — the first is `internal/invite/doc.go` section 3, which makes the identical argument for
 `invite.RecordKind`.
-
-### (c) Why this ships WITHOUT flipping the gate, naming the lockout risk and its follow-up
-
-Requiring an invite on every enrolment (invariant 3's stated end state, `InviteRequired: true`) is
-DELIBERATELY NOT done here. Two concrete blockers, either one sufficient on its own:
-
-1. **The CLI cannot send an invite yet.** `client/enrol.go`'s `Enrol` refuses `opts.Invite != ""`
-   locally with `KindUsage` (exit 2) — verified in this build, not merely asserted — so flipping the
-   gate today would make `agent-busctl enrol` unable to enrol AT ALL against a bus that required one.
-   That capability is task `INVITE-CLIENT`, filed and not yet started.
-2. **Nine agents are live on a bus that would be locked out.** This project's own bus (the one these
-   agents coordinate through) has real enrolled identities today. Flipping `InviteRequired` to `true`
-   without every one of them holding a valid invite would not add a security control — it would cut off
-   working agents from a bus they are already using, mid-task, with no CLI path back on.
-
-The mechanism (redemption, atomicity, durability) is complete and tested; the POLICY flip is a separate,
-later decision with its own blast radius, and shipping the two together would have forced this task to
-either ship a broken CLI story or delay redemption behind a CLI task it does not depend on. `GET
-/v1/discovery`'s `invite_required: false` and `cmd/agent-bus`'s startup log line both say this plainly
-so nobody infers the gate is on from the mechanism existing.
 
 ### (d) Why `invite_accepted` is a SEPARATE field from `invite_required`
 
@@ -5120,6 +5052,13 @@ who loses it will reach for the pin again.
     exist is the exact defect the 2026-08-08 security gate caught in the original (c), and it is not
     being repeated here. `INVITE-PEERGUARD` (`f5d91dbe`) still owes the redeemable-credential
     properties and is **DEFERRED, not satisfied**.
+
+    > CORRECTED 2026-08-16: `RELAY-45-FU-CLI` HAS LANDED. `agent-bus peer add
+    > -peer-client-fingerprint <hex>` writes the binding — flag at `cmd/agent-bus/peer.go:627`,
+    > parsed at `:747`, into `relay.PutTrust` at `:891`. The rest of this bullet stands unchanged
+    > and is the part that matters: the binding is durable operator CONFIGURATION with no expiry,
+    > no single-use property and NO ONLINE REVOCATION — withdrawal is `RemoveTrust` under the
+    > dirlock plus a restart.
   - **The invite blob as the peer trust anchor** (a narrowing of invariant 11 on this plane). The
     operator transfers the fingerprint out of band, so what anchors a peer link is the operator's own
     channel between machines they control, not invariant 11's invite-integrity property.
@@ -5313,6 +5252,12 @@ true when written and became false at `ed77bba`. It is corrected here in place, 
 file's append-only rule; the rest of that paragraph still holds — **no running server constructs a
 `*relay.PeerStore` for `Options.PeerPrincipals` (`RELAY-24`), and no CLI flag writes the binding
 (`RELAY-45-FU-CLI`)**, so the surface remains operator-unreachable.
+
+> CORRECTED 2026-08-16: the rest of that paragraph NO LONGER holds either. `cmd/agent-bus/main.go:1441-1442`
+wires `Peer` and `PeerPrincipals`, and `cmd/agent-bus/peer.go:627` ships the
+`-peer-client-fingerprint` flag. The peer surface is operator-reachable on a shipped build, and was
+verified end to end in containers on 2026-08-15 (DEPLOY-6): three buses A↔B↔C with A and C not
+peered, each recording `bus_path` `[A]` / `[A,B]` / `[A,B,C]`.
 
 <!-- ===== END 2026-08-14 RELAY-6 amendment (feature-runner) ===== -->
 
@@ -5677,18 +5622,6 @@ on the CROSS-BUS HOP ONLY; the local message is never at risk. Folding the outbo
 message's own entry would close it and would also change RELAY-15's one-record-one-job shape, so it
 is deliberately NOT done here.
 
-**`RemoteRouter` is still NOT wired**, and that is the same decision, not an omission.
-`hub.RemoteRouter`'s own doc forbids injecting a router before the egress path exists: a wired router
-with nowhere to send accepts messages it cannot deliver, having removed the truthful 404 that was
-protecting the client. `/v1/send` to a peer's agent therefore still answers `404 unknown recipient`
-on this build.
-
-> **THIS PARAGRAPH IS SUPERSEDED — see "the outbound-TLS blocker, resolved" below, same date.** The
-> router IS wired and `/v1/send` to an agent on a seeded peer is **accepted (201)**, not 404. The
-> paragraph is left in place per this file's append-only rule; it is flagged here rather than only in
-> the superseding section because a reader grepping for "404" lands on this line first, and two live
-> same-day answers to one question is worse than either answer alone.
-
 ### Decision 2 — the origin attestation's `KeyEpoch` is the enrolment epoch in Unix MILLISECONDS
 
 `attest.Attestation.KeyEpoch` is an unvalidated `uint64` whose only requirement is that the ORIGIN
@@ -5734,38 +5667,6 @@ See `CONTRACTS-ONDISK.md`. It was in no applier map, so replay passed over it in
 registered on the same conditional as the other federation kinds, with `unreplayedPeerRecords`
 counting it on the path where no peer store could be built. `relay.Outbox.Attach` is new, modelled on
 `invite.Store.Attach`.
-
-### BLOCKED, and escalated rather than decided: the OUTBOUND peer TLS pin (invariant 11)
-
-`relay.Forwarder` cannot be constructed without a `relay.Client`, which REQUIRES an `*http.Client`
-carrying the link's mutual-TLS material. The peer's identity is pinned by
-`relay.PeerRecord.NextHopTLSCertFingerprint` — 32 bytes, address-keyed, outbound — over a SELF-SIGNED
-certificate with no CA and no trust-on-first-use (invariant 11). There are exactly three ways to
-check that pin in `crypto/tls`, and today none of them is available here:
-
-1. `RootCAs`. Impossible: we hold a fingerprint, not the certificate, so no `x509.CertPool` can be
-   built. (`cmd/agent-bus/healthcheck.go` CAN use `RootCAs` — it reads the certificate FILE.)
-2. `VerifyConnection` / `VerifyPeerCertificate` alone. Impossible: default chain verification runs
-   first and fails, because there is no root to chain to.
-3. `InsecureSkipVerify: true` paired with `VerifyPeerCertificate` — the ONE supported way, and the
-   one invariant 11 permits **in exactly one file, `client/pin.go`, exactly once**.
-
-Adding a second occurrence in `cmd/agent-bus/` would be worse than it looks: the AST guard in
-`client/guard_test.go` walks only `client/` and `cmd/agent-busctl/`, so the new occurrence would be
-BOTH a second one AND an UNSCANNED one — precisely the "pushed into a package the guard does not
-scan" outcome invariant 11 names as strictly worse than one loud, reviewed hole.
-
-**No such literal was added.** The two candidate resolutions — export the existing pinned transport
-from `client/`, or grow a pinned dialler inside `internal/relay` and widen the AST guard to cover it
-— both change where verification policy may live, which needs an explicit dated decision here and is
-not the implementer's to take. Until it lands: `relay.NewForwarder`, `relay.NewClient` and
-`Forwarder.Resume` still have zero production callers, the Registry is still built inside
-`newFederation`, no peer is seeded into it, and the startup line still truthfully reports
-`onward_relay=false`.
-
-<!-- ===== END 2026-08-15 RELAY-24-BLOCKER-EGRESS ===== -->
-
-<!-- ===== BEGIN 2026-08-15 RELAY-24-BLOCKER-EGRESS (resolution: outbound pinned TLS) ===== -->
 
 ## 2026-08-15 — RELAY-24-BLOCKER-EGRESS: the outbound-TLS blocker, resolved
 
@@ -6373,3 +6274,41 @@ the original P1.
 Finally, the follow-up filed for `CLAUDE.md`'s stale "enrolment is NOT invite-gated" claim is
 **unnecessary**: it was already corrected at HEAD by `aade191`, and the round-1 finding was written
 against a stale snapshot. `DOCS-4` should close as already-done rather than being worked.
+
+---
+
+## Removed on 2026-08-16 — superseded, refuted or overtaken
+
+`DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED
+for this pass by operator instruction, not silently contradicted.** The instruction, 2026-08-16,
+verbatim: *"I want it to reflect the current state. Irelevant, refuted, changed, etc decisions should
+be removed."* It is recorded in the commit message and in `AGENT_LOG.md` as well as here — cite those
+rather than this sentence, because a document asserting its own authority is not evidence of it. The
+condition attached was that nothing vanish without trace. Each line
+below is one decision (or one named section of one) that was REMOVED from the live document above,
+with its original date and title and the reason it went. The reasons were VERIFIED against the code
+on 2026-08-16, not inferred from age — where a decision could not be verified either way it was KEPT
+and marked `> UNVERIFIED 2026-08-16` in place instead.
+
+If these one-liners are also unwanted, deleting this section is a second, trivial edit. Deleting the
+entries without it would not have been.
+
+- **2026-08-02 — The message sequence high-water mark lives in the WAL message body, read via a replay-time PREPARE observer (ID-2-WIRING-SCHEMA)** — DEAD. The mechanism it chose was never built: there is no `ReplayWithPrepares` and no prepare observer anywhere in `internal/wal` (only `wal.Replay(path, fn)`, `internal/wal/replay.go:109`). The high-water mark now comes from the dedicated `<data-dir>/message-seq-floor` file plus three log-derived sources maximised in `internal/hub/hub.go:608-746` — see *2026-08-07 — CORRECTION: the WAL record-index floor does NOT subsume the message-sequence floor*. The one surviving fact, that a `"message"` WAL body carries a top-level `"seq"`, is still true (`internal/store/message.go:448`) and lives in `CONTRACTS-ONDISK.md`.
+
+- **2026-08-02 — Addendum to ID-2-WIRING-SCHEMA: the quarantine residual is a DEFECT, not a narrowing** — SUPERSEDED. Its operative requirement (refuse to start when the floor cannot be proven after a quarantine) was rejected by *2026-08-07 — SUPERSEDES two earlier passages* and by invariant 6; its surviving half (reuse is a DEFECT, not a narrowing) is restated there and in *2026-08-07 — The WAL record-index high-water mark is a dedicated write-ahead file*. The entry it addended is also removed above.
+
+- **2026-08-07 — SIGN-2/SIGN-6: the signing core lands; the mandatory-signature policy is BLOCKED** — SUPERSEDED BY NAME by *2026-08-07 — SIGN-2/SIGN-6 SHIPPED: the mandatory-signature policy is UNBLOCKED*, which re-affirms its decisions 1–3 verbatim and retires its decision 4 (the three blockers) in full. Left in place it read as "a signature is optional on this bus", which is false: a signature is mandatory on `POST /v1/send` (`internal/httpapi/messages.go:564-662`).
+
+- **2026-08-02 — The client is `client/` + `cmd/busctl`, §3 `--invite` is REJECTED locally, not guessed onto the wire** — REFUTED by what shipped. `ENROL-SHAPE` settled the wire shape and `INVITE-CLIENT` landed: `client/enrol.go:256-337` now SENDS the invite id and secret on the wire. The seam (`client.EnrolOptions.Invite`) is used as this decision intended; only the local refusal is gone. The other five decisions in that entry are untouched.
+
+- **2026-08-02 — MSG/POLL, §4 Message ids may repeat after a WAL QUARANTINE, and after damage deeper than a torn tail** — SUPERSEDED BY NAME, twice: by *2026-08-07 — SUPERSEDES two earlier passages* and again by *2026-08-07 — The WAL record-index high-water mark is a dedicated write-ahead file*, which records that invariant 1 is UNNARROWED and that the nine test assertions encoding the old accepted-reissue behaviour were INVERTED. Keeping it left a narrowing of invariant 1 on the page that the code and the tests both contradict.
+
+- **2026-08-07 — MSG-FU-SUFFIXFLOOR (wiring), §4 The scan runs on EVERY start** — SUPERSEDED BY NAME the same day by *2026-08-07 — ADDENDUM to MSG-FU-SUFFIXFLOOR (wiring)*, whose own words are "Correction to §4" and "Where the two disagree, this one governs". The code agrees with the ADDENDUM: the scan is gated on `!alloc.Existed()` (`cmd/agent-bus/suffixfloors.go:172,179-218`), i.e. at most once per data directory. The RAISE-don't-just-report rule survives and is restated in the ADDENDUM.
+
+- **2026-08-07 — The listener is TLS …, §3 `ClientAuth: tls.NoClientCert`** — REFUTED by the code and superseded by *2026-08-14 — MTLS-CLIENTAUTH*. The listener sets `ClientAuth: tls.RequestClientCert` with an `admitClientCertificate` callback (`cmd/agent-bus/tlslisten.go:152,173,309`). The PRINCIPLE the section was written to defend — server-side enforcement does not precede client-side capability — is unchanged and is argued at length in the MTLS-CLIENTAUTH entry.
+
+- **2026-08-14 — INVITE-GATE …, §(c) Why this ships WITHOUT flipping the gate** — REVERSED. The gate was flipped on 2026-08-15 in `3cedcb7`: `enrolmentInviteRequired = true` (`cmd/agent-bus/main.go:66`), and an un-invited `POST /v1/enroll` is refused 403. Both blockers it named were cleared — the CLI now sends an invite (`client/enrol.go:256-337`) and the live agents were re-invited. Sections (a), (b), (d) and (e) of that entry stand.
+
+- **2026-08-15 — RELAY-24-BLOCKER-EGRESS: the egress seams …, §BLOCKED, and escalated rather than decided: the OUTBOUND peer TLS pin** — RESOLVED, and named as superseded by *2026-08-15 — RELAY-24-BLOCKER-EGRESS: the outbound-TLS blocker, resolved*, which took candidate resolution 1 (export `client.PinnedTLSConfig`). Its closing claims are all false now: the forwarder has production callers, the registry is built at the composition root, peers are seeded, and the startup line no longer reports the forwarder unwired. The refusal to add a second `InsecureSkipVerify` literal held — there is still exactly one, in `client/pin.go:260-261`.
+
+- **2026-08-15 — RELAY-24-BLOCKER-EGRESS: the egress seams …, the `RemoteRouter` paragraph under Decision 1** — SUPERSEDED BY NAME the same day by *… the outbound-TLS blocker, resolved*. It said `/v1/send` to a peer's agent "still answers `404 unknown recipient`"; the router is wired (`cmd/agent-bus/main.go:1150`) and such a send is accepted **201**. It already carried an inline supersession banner; both are removed so there is one live answer to that question.
