@@ -78,6 +78,9 @@ identities.json
 identities.json.tmp-*
 #
 # cursors.json is ignored TOO, and it is deliberately not credential material —
+session-*.json
+session-*.json.tmp-*
+session-*.json.INSECURE
 # so the reasoning is stated rather than waved through. Three parts:
 #   - It is not innocuous. It is a map of (agent id -> bus id -> read position):
 #     precisely the routing metadata invariant 6 keeps in the audit trail, and

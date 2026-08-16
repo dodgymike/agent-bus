@@ -6277,6 +6277,84 @@ against a stale snapshot. `DOCS-4` should close as already-done rather than bein
 
 ---
 
+## 2026-08-16 — AUTH-9: a session token MAY be written to disk, opt-in, default off
+
+**This REVERSES the standing decision that a session token is NEVER persisted** (CLI §2, and the
+"sixteen questions" §4-7 answer that sessions do not survive a restart — that second one is
+UNCHANGED and still true; a persisted token is still destroyed by a bus restart, because the bus
+forgets it).
+
+**The reversal was requested by the operator, directly and explicitly, twice.** The second time, after
+the security gate opened, in these words: *"I want this feature to write the creds to disk! so no
+refusals on that, only on practical security / safety concerns."* Recorded verbatim because a
+reversal of a security decision must be traceable to a person, not to a document that asserts its
+own authority.
+
+### What was wrong with the old decision
+
+Nothing, on its own terms. Writing a bearer credential to disk is a real cost and the old entry
+priced it correctly. What it never priced was the **other** side.
+
+`agent-busctl` is one-shot. The client caches a session **in memory only**, so the cache dies with
+the process. The bus holds each session for `SessionLifetime` = 1h against
+`DefaultMaxActiveSessionsPerAgent` = 32 and **evicts nothing** — deliberately, so a stolen key cannot
+be used to destroy a victim's live sessions. Under **invariant 7** an agent drives the bus by
+SHELLING OUT. So every command costs one server-side session for an hour, and an agent working
+faster than **one command every two minutes locks itself out of its own identity**, refused `503`
+with no self-service recovery.
+
+That is not hypothetical. 2026-08-15, live bus `bus-matv6xu7ronvdq7o`: `elastic-agent-1` took
+12 × HTTP 200 then **32 × HTTP 503** on `/v1/session/complete`. The bus was restarted four times that
+evening as the only available remedy — which punishes every agent on the bus to unstick one.
+
+**The sizing assumption is the actual defect.** `internal/auth/service.go:46` justifies 32 as
+"about sixteen times" a steady state of "TWO concurrent sessions". True for a **long-lived embedding
+client**. False for the **shell-out** shape invariant 7 mandates. The healthy agents on that bus ran
+one long-lived `watch`; the broken one shelled out per action. That was the whole discriminator.
+
+### The decision
+
+`--persist-session` / `AGENT_BUS_PERSIST_SESSION`, **default OFF**. When set, the token is written to
+`<identity-dir>/session-<fq-agent-id>.json`, `0600`, `O_EXCL` at creation. `agent-busctl session
+logout` discards it.
+
+**Not** made the default, and not made automatic on hitting the cap: the safe default stays safe, and
+the operator chooses per invocation.
+
+### What this decision does NOT do
+
+- It does **not** make sessions survive a bus restart. The bus forgets them; the file then holds a
+  dead token, which is refused and re-handshaked.
+- It does **not** free a session slot. `session logout` deletes the local copy only — there is no
+  server-side end-session route. `AUTH-7` covers that.
+- It does **not** change what a session authorises, or the session↔certificate cross-check.
+- It does **not** narrow invariant 3. A session remains an opaque, revocable, server-side handle;
+  persisting the handle does not turn it into a signed claim.
+
+### The gate findings, recorded because the class matters more than the bugs
+
+Both gates returned CHANGES-REQUESTED. Two are worth carrying forward as patterns:
+
+**A binding check that compares two values from the same source is a tautology.**
+`loadPersistedSession` compared `doc.BusURL` against `cred.BusURL` — both off the stored credential —
+while `resolveBusURL` prefers `--bus`/`AGENT_BUS_URL`. The flag moved the CONNECTION without moving
+the CHECK, so the token was presented to whatever `--bus` named. Proven leaking to a rogue loopback
+listener, with a passing no-persist control that showed it was **new damage from persistence**, not a
+pre-existing property of `--bus`. The comment above it asserted the opposite guarantee. Bind to the
+value you will ACT on, never to a second copy of the value you already had.
+
+**A cache that outlives the process silently redefines every "check the live state" command.**
+`whoami --verify` calls `EnsureSession`, which is a cache lookup. Once the cache reached disk,
+`--verify` returned exit `0` against an **unreachable bus** — failing at its one job, in exactly the
+bus-restart case its own help text names. Fixed with `VerifySession`, which always reaches the
+network. When adding a cache, audit every caller that promised freshness.
+
+Also fixed in-task: `logout` orphaned a live token it could no longer delete; `session logout
+--as/--json` exited 2; a fixed `.tmp` name raced across processes and was never swept; `os.Stat`
+followed a planted symlink; the world-readable file was overwritten by the same command that warned
+about it; and the "0 handshakes" figure in the docs was impossible from a cold store — the honest
+number is one per hour.
+
 ## Removed on 2026-08-16 — superseded, refuted or overtaken
 
 `DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED

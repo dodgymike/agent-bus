@@ -975,6 +975,60 @@ Global flags are accepted **before or after** the subcommand, so both `agent-bus
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | *(the stored selection)* | Act as one stored identity for this command only, changing nothing on disk. **Parallel agents sharing a store should use this, not `use`.** |
 | `--json` | — | off | Machine-readable JSON on stdout. |
 | `--timeout <dur>` | `AGENT_BUS_TIMEOUT` | `30s` | Bounds ONE operation end to end, retries included. Any `time.ParseDuration` value; must be positive. |
+| `--persist-session` | `AGENT_BUS_PERSIST_SESSION` | **off** | (added 2026-08-16, `AUTH-9`) Cache the session token in the credential store so the NEXT process reuses it instead of handshaking. **Writes a bearer token to disk.** The env var is a CLOSED set — `1`, `true`, `yes`, `on` (case-insensitive, trimmed) enable it; **anything else, including `0` and `false`, leaves it OFF**. See "Persisted sessions" below. |
+
+
+### Persisted sessions — `--persist-session`, and `agent-busctl session logout`
+
+*(added 2026-08-16, task `AUTH-9`. This REVERSES the earlier position that a session
+is never written to disk; the default is unchanged and still safe.)*
+
+**Default: OFF. Nothing is written.** With the flag set, the session token is written to
+`<identity-dir>/session-<fully-qualified-agent-id>.json`, mode **`0600`**, created `O_EXCL` at that
+mode — never written then `chmod`ed, so there is no instant at which a bearer token exists under a
+looser mode.
+
+**Why it exists.** The bus caps one agent at `DefaultMaxActiveSessionsPerAgent` = **32** concurrent
+sessions, holds each for `SessionLifetime` = **1 hour**, and **evicts nothing**. Under invariant 7 an
+agent drives the bus by shelling out, and each process is a fresh handshake whose in-memory cache
+dies with it — so **every command costs one server-side session for an hour**. Above roughly one
+command every two minutes an agent exhausts its OWN cap and is refused `503` on
+`/v1/session/complete` for up to an hour, with no self-service recovery. Observed in production
+2026-08-15. Measured after the fix, against a store that already held a session: **5 commands with the flag →
+0 handshakes; the same 5 without → 5 handshakes.** From a COLD store the first command still
+handshakes, so the honest steady-state figure is **one handshake per session lifetime (1 hour)**,
+not zero.
+
+**On-disk document** (field names are contract surface):
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1`. An unrecognised version is IGNORED, not an error — a session is a cache, so the useful behaviour is a silent re-handshake. |
+| `agent_id` | The fully-qualified id this token authenticates. |
+| `bus_url` | The bus it was issued by. |
+| `token` | **The bearer token. SECRET.** |
+| `expires_at`, `refresh_at` | As the bus reported them. |
+| `lifetime_seconds` | The issued lifetime, so a reloaded session reports what it was issued with. |
+
+**What is refused on load, each a silent miss:** a mismatched `agent_id` or `bus_url` (presenting a
+token to the wrong bus would LEAK it to that bus), an unknown `version`, an empty token, and anything
+past its refresh point — the disk path uses **the same** usability rule as the in-memory path, never
+a laxer one. A **forced** refresh (after a `401`) deliberately SKIPS the file: it holds the token the
+bus just refused, so reading it would turn one `401` into a loop.
+
+**A file readable by other users is IGNORED and WARNED about, and deliberately left in place** —
+removing it would destroy the evidence that a bearer token was readable.
+
+**`agent-busctl session logout`** removes this machine's copy. Exit `0` removed, `8` there was
+nothing to remove, `3` no usable identity, `2` bad usage. `--json`:
+`{"agent_id":…,"ok":true,"removed":true,"server_notified":false}`.
+
+> **`session logout` does NOT free a session slot on the bus.** There is no server-side end-session
+> route, so the bus keeps the session and its slot against the per-agent cap until it expires. The
+> command reduces exposure of a token at rest and does nothing for the session count.
+> `server_notified` reports that honestly and stays `false` until a real route exists — filed as
+> `AUTH-7`.
+
 
 **Resolution order, deterministic:** explicit flag → environment variable → the selected identity's
 recorded value (`--bus` and `--bus-fingerprint` only) → built-in default.
@@ -1957,6 +2011,7 @@ which would otherwise sweep both conditions straight back into retrying.
 | `AGENT_BUS_IDENTITY` | `agent-busctl` | Credential store directory (`--identity`) |
 | `AGENT_BUS_AGENT_ID` | `agent-busctl` | Act as this stored identity (`--as`) |
 | `AGENT_BUS_TIMEOUT` | `agent-busctl` | Per-operation timeout (`--timeout`) |
+| `AGENT_BUS_PERSIST_SESSION` | `agent-busctl` | Cache the session token on disk (`--persist-session`). **Closed set**: `1`/`true`/`yes`/`on` enable; everything else, including `0` and `false` and any unrecognised value, leaves it off. It is deliberately NOT "non-empty means true" — an operator setting `=0` to DISABLE it must not thereby enable writing a bearer token to disk. |
 | `AGENT_BUS_FINGERPRINT` | `agent-busctl` | The bus certificate to accept, 64 lowercase hex (`--bus-fingerprint`). Surrounding whitespace is trimmed, as for `AGENT_BUS_TIMEOUT`; nothing else about the value is repaired. **Not a secret** — a certificate fingerprint is published in the bus's startup log and derivable from any handshake — so an env var is a fit carrier for it, unlike a key. |
 | `COLUMNS` | `agent-busctl agents` | (2026-08-08) Terminal width budget for the human-readable roster table. **The only env var here that is not `AGENT_BUS_`-prefixed**, because it is not ours — it is the conventional one, read rather than defined. See below. |
 

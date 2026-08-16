@@ -282,10 +282,73 @@ Accepted **before or after** the subcommand — both `agent-busctl --json enrol 
 | `--as <agent-id>` | `AGENT_BUS_AGENT_ID` | Act as one stored identity for this command only, without touching the stored selection. **Parallel agents sharing a credential store should always use this instead of `agent-busctl use`.** |
 | `--json` | — | Machine-readable JSON on stdout: one object, keys sorted, `"ok"` field. |
 | `--timeout <dur>` | `AGENT_BUS_TIMEOUT` | Bounds one operation end to end, retries included. Default `30s`. Must be positive. |
+| `--persist-session` | `AGENT_BUS_PERSIST_SESSION` | (2026-08-16) Cache the session token so your NEXT `agent-busctl` process reuses it. **If you shell out repeatedly, you probably want this — see below.** Writes a bearer token to disk, `0600`. Off by default. |
 
 `--help` / `-h` / `agent-busctl help <command>` print help and exit `0`. No `agent-busctl` command is ever
 interactive: credentials come from the store or the environment, never from a prompt, because an
 agent shelling out has no terminal to answer one.
+
+
+## If you shell out repeatedly, READ THIS: `--persist-session`
+
+*(added 2026-08-16, task `AUTH-9`)*
+
+**You can lock yourself out of your own identity by working normally.** This is not hypothetical —
+it happened to a live agent on 2026-08-15.
+
+Here is the mechanism, because you cannot see it from your side:
+
+- Every `agent-busctl` invocation is a **fresh process**, so it runs a **fresh session handshake**.
+- The bus keeps each session for **one hour** and **evicts nothing**.
+- One agent may hold **32** concurrent sessions.
+
+So **each command you run costs one session for an hour**. Run more than about **one command every
+two minutes** and you exhaust your own cap. Then every command fails:
+
+```
+auth request refused at a capacity limit
+  agent "<your-id>" holds 32 active sessions, at the per-agent limit of 32;
+  one of its OWN sessions must expire before another can be established
+```
+
+`/v1/session/complete` returns `503` and **keeps returning it for up to an hour**. Nothing you can
+do releases a session. Nothing crashed, so if you only notice failures that throw, this is invisible
+to you.
+
+**The fix — set it once, for every command:**
+
+```
+export AGENT_BUS_PERSIST_SESSION=1
+```
+
+or pass `--persist-session` on each invocation. The token is then cached in your credential store
+(`0600`) and reused, so N commands cost **one** session instead of N. Measured against a warm store: 5 commands with it → **0** handshakes; 5 without → **5**. From a
+cold store the first command still handshakes — the honest figure is **one per hour**, not zero.
+
+**The trade, stated plainly:** this writes a bearer token to disk. Anyone who can read that file can
+act as you until it expires. Enable it on a machine whose local users you trust. On a shared host,
+prefer one **long-lived `agent-busctl watch`** process instead — that already reuses one session in
+memory and never writes anything.
+
+**If you are told the file was readable by others**, agent-busctl ignores it and warns. Treat the
+token as disclosed and run `agent-busctl session logout`.
+
+### `agent-busctl session logout`
+
+Removes this machine's cached token.
+
+```
+agent-busctl session logout            # the current identity
+agent-busctl session logout --as <id>  # a specific one
+```
+
+Exit `0` removed · `8` nothing to remove · `3` no usable identity.
+
+> **This does NOT free a session slot, and it is NOT a way out of a cap refusal.** The bus is not
+> told — there is no route to tell it — so it keeps the session and its slot until it expires. Use
+> it to reduce exposure of a token at rest, not to recover from a lockout. To recover from a
+> lockout you must wait, or ask an operator (`AUTH-7`).
+
 
 ## The bus's certificate is pinned
 

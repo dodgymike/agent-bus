@@ -39,6 +39,13 @@ type globals struct {
 	as       string
 	json     bool
 	timeout  time.Duration
+
+	// persistSession caches the session token on disk so the NEXT process
+	// reuses it. GLOBAL because the whole point is that it applies to every
+	// command an agent shells out to; a per-command flag would be set on some
+	// invocations and not others, and the ones without it would each burn a
+	// fresh session — which is the bug this exists to fix.
+	persistSession bool
 }
 
 // register adds the global flags to fs.
@@ -55,6 +62,8 @@ func (g *globals) register(fs *flag.FlagSet) {
 	fs.StringVar(&g.as, "as", g.as, "act as this stored identity without changing the stored selection (env "+client.EnvAgentID+")")
 	fs.BoolVar(&g.json, "json", g.json, "machine-readable JSON on stdout")
 	fs.DurationVar(&g.timeout, "timeout", g.timeout, "bound one operation, e.g. 30s (env "+client.EnvTimeout+")")
+	fs.BoolVar(&g.persistSession, "persist-session", g.persistSession,
+		"cache the session token in the credential store so the next process reuses it; WRITES A BEARER TOKEN TO DISK (env "+client.EnvPersistSession+")")
 }
 
 // cliEnv is what a subcommand is handed: the resolved globals, the renderer,
@@ -93,6 +102,7 @@ func (e *cliEnv) client() (*client.Client, error) {
 	cfg.BusFingerprint = e.g.busFingerprint
 	cfg.IdentityDir = e.g.identity
 	cfg.AgentID = e.g.as
+	cfg.PersistSession = e.g.persistSession
 	switch {
 	case e.g.timeout > 0:
 		cfg.Timeout = e.g.timeout
@@ -153,6 +163,7 @@ func commands() []command {
 		whoamiCommand(),
 		useCommand(),
 		logoutCommand(),
+		sessionCommand(),
 		pinCommand(),
 		clientCertCommand(),
 		agentsCommand(),
@@ -374,6 +385,14 @@ FLAGS (accepted before or after the command)
                     only, without changing the selection      (env ` + client.EnvAgentID + `)
   --json            machine-readable JSON on stdout
   --timeout <dur>   bound one operation, default ` + client.DefaultTimeout.String() + `           (env ` + client.EnvTimeout + `)
+  --persist-session reuse the session token across processes,
+                    instead of one handshake per command.
+                    WRITES A BEARER TOKEN TO DISK, 0600.
+                    Set this if you shell out repeatedly: the
+                    bus caps you at 32 sessions for an hour
+                    each and evicts none, so a command every
+                    two minutes locks you out of your own id.
+                    'session logout' removes it.              (env ` + client.EnvPersistSession + `)
 
 EXIT CODES
   0  ok                        5  the bus could not be reached

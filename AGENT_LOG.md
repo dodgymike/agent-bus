@@ -4312,3 +4312,192 @@ Overlay proof re-run against the final files, HEAD's `scripts/proof-check.sh`:
 Deliberately NOT fixed here, filed instead: the reviewer noted `CLAUDE.md` still states enrolment is
 not yet invite-gated (`InviteRequired: false`), which is stale at HEAD. `CLAUDE.md` is configuration
 and outside this task's file boundary.
+
+## 2026-08-16 — AUTH-9: opt-in session persistence + `session logout`
+
+**Operator-requested**, four parts: (a) a flag persisting the session token, (b) a `logout` that
+removes the current session, (c) a task for operator session-clearing, (d) a deep-dive task on the
+usability/abuse-protection balance.
+
+**Why.** Live incident on `bus-matv6xu7ronvdq7o`, 2026-08-15: `elastic-agent-1` accumulated 32
+sessions and was refused every handshake after — 12 × HTTP 200 then 32 × HTTP 503 on
+`/v1/session/complete` — locked out of its own identity with no self-service recovery. Diagnosed
+from code, not from log-watching: `agent-busctl` is one-shot, the `client` package caches sessions
+**in memory only** (`client/session.go`, `c.session`), the credential store persists identity, keys,
+pins and cursors but **not** the token — so every invocation burns a server-side session that the
+bus then holds for `SessionLifetime` (1h) against `DefaultMaxActiveSessionsPerAgent` (32), evicting
+nothing. Above ~1 command / 2 minutes an agent bricks itself.
+
+**The collision is structural, not a client bug.** `internal/auth/service.go:46` sizes the cap on
+"the steady state for a well-behaved agent is TWO concurrent sessions" — true for a long-lived
+embedding client, **false for the shell-out shape invariant 7 mandates**. The healthy agents on that
+bus ran ONE long-lived `watch`; the broken one shelled out per action. That was the discriminator.
+
+**Invariants read in full before writing:** 3 (sessions are opaque server-side handles, at most an
+hour, revocable *because* they are not signed claims — persistence must not turn a handle into a
+claim), 7 (every capability ships with a CLI subcommand + `AGENT_PROTOCOL.md` entry in the same
+task; the client package cannot live under `internal/`), 9 (no crypto written — this moves an
+existing opaque token, it does not derive, wrap or protect one), 11 (a persisted token changes
+nothing about mTLS or the session/certificate cross-check).
+
+**Files.** New `client/sessionstore.go`, `client/sessionstore_test.go`,
+`cmd/agent-busctl/sessionlogout.go`. Modified `client/session.go` (disk cache under `handshakeMu`,
+after the memory re-check, before the network; **`force` deliberately skips it** so a post-401
+refresh cannot re-read the token the bus just rejected and loop), `client/config.go`
+(`PersistSession`, `EnvPersistSession`, `envTruthy`), `cmd/agent-busctl/root.go` (global
+`--persist-session`).
+
+**Default is OFF and stays off.** This reverses the old "a session is NEVER persisted" comment on
+`client/session.go`, which was corrected in place rather than left to rot — that stale-note class is
+`CONTEXT-STALE-NOTYET` and has bitten three times.
+
+**Guards, each PROVEN BY MUTATION (not merely written):**
+- `0600` read-side mode check neutered (`&& false`, so it still compiles — the first attempt failed
+  to build and therefore proved nothing) → `TestPersistedSessionRefusedWhenWorldReadable` RED.
+- agent-id and bus-URL binding checks removed → `TestPersistedSessionBindingIsEnforced` RED on both.
+- disk-path expiry rule removed → `TestPersistedSessionExpiryUsesTheSameRule` RED.
+A loose file is IGNORED and warned about, and **left in place on purpose** — deleting it would
+destroy the evidence that a bearer token was readable.
+
+`AGENT_BUS_PERSIST_SESSION` is a **closed set** (`1/true/yes/on`), not "non-empty means true", so
+`=0` or `=false` cannot enable writing a token to disk.
+
+**Verified as an agent would, through the compiled CLI against the live containerised bus** — not
+`curl`, not a retired wrapper. Handshakes counted server-side in the bus log:
+
+```
+5 commands WITH --persist-session  -> 0 handshakes
+5 commands WITHOUT                 -> 5 handshakes
+```
+
+Also exercised live: `session logout` exit 0 then exit 8 on the second call, `--json`
+(`server_notified:false`), and the world-readable warning firing on a `chmod 0644` file.
+
+**Proof, in a clean overlay of HEAD `b6c0ed4`** (own files only; the overlay's OWN
+`scripts/proof-check.sh` by relative path):
+`bash scripts/proof-check.sh "go test -race -run 'TestPersist|TestSessionFileName|TestForgetPersisted|TestEnvPersist' ./client/"`
+→ `verdict=PASS class=test exit=0 tests_run=15 top_level=11 skipped=0 failed=0`. Overlay `go build`
+and `go vet` clean. Full `./client/` and `./cmd/agent-busctl/` suites green under `-race`.
+
+**`session logout` does NOT free a session slot**, and that limit is stated in the help text, both
+contract files and the `--json` `server_notified` field rather than left for a user to discover. No
+server-side end-session route exists; filed as `AUTH-7`.
+
+**Filed, not started:** `AUTH-7` (`4ba67a7b`) operator clears one agent's sessions — carries the
+blocker that **no operator principal exists**, so it must not ship as "any authenticated agent may
+clear any other agent's", and must not reintroduce the automatic eviction that
+`internal/auth/service.go:40-61` refuses by recorded decision. `AUTH-8` (`b65948b7`) deep dive on
+usability vs abuse protection, whose sharpest lens is: **for each limit, how does a legitimate user
+who trips it recover?** The session case had no recovery path at all.
+
+**Chain not run — explicit justification per CLAUDE.md §10.** reviewer, security and documentation
+sub-agents were NOT spawned: this session operates under a standing instruction not to spawn agents
+unless the operator asks, and the operator asked for exactly one (the DECISIONS.md deep dive). The
+work was instead self-verified by mutation testing every security guard, a clean-overlay proof, and
+live end-to-end exercise through the CLI. **That is not equivalent to the security gate**, and this
+change writes a bearer credential to disk — it should be routed to `reviewer` + `security` before it
+is trusted, and it is deliberately left UNCOMMITTED pending that.
+
+### 2026-08-16 addendum — AUTH-9 gates RAN, and both returned CHANGES-REQUESTED
+
+The entry above recorded that the chain was skipped and that the work should not be trusted until it
+ran. The operator then asked for it, with one constraint stated verbatim: *"I want this feature to
+write the creds to disk! so no refusals on that, only on practical security / safety concerns."*
+Both gates were briefed accordingly — the reversal is authorised and was explicitly out of scope for
+them; they judged the implementation only. **The Spec Server task now exists (`AUTH-9`,
+`483ee09b`), which it did not when the entry above was written — both gates flagged that absence
+independently, and both were right.**
+
+**They found five things I did not, two of which were serious. My own verification — mutation tests,
+a clean-overlay proof, a live end-to-end run — passed all of them.**
+
+1. **HIGH, security: the bus binding was a TAUTOLOGY.** `loadPersistedSession` compared
+   `doc.BusURL` against `cred.BusURL`, both read off the STORED credential, while `resolveBusURL`
+   prefers `--bus`/`AGENT_BUS_URL`. The flag moved the CONNECTION without moving the CHECK, so the
+   token was handed to whatever `--bus` named — demonstrated leaking to a rogue loopback listener,
+   with a passing no-persist control proving it was new damage from persistence rather than a
+   pre-existing property of `--bus`. **The doc comment directly above it asserted this was
+   prevented.** Generalised in `DECISIONS.md`: bind to the value you will ACT on, never to a second
+   copy of the value you already had.
+2. **BLOCKER, review: `whoami --verify` verified NOTHING.** It calls `EnsureSession`, which is a
+   cache lookup; once the cache outlived the process, `--verify` returned exit 0 against an
+   unreachable bus — failing at its one job in exactly the bus-restart case its own help text names.
+   Fixed with `VerifySession`. Verified live: against a dead bus it now exits non-zero (3) where it
+   previously exited 0 with a session document. **A cache that outlives the process silently
+   redefines every command that promised freshness.**
+3. **BLOCKER, review: `logout` orphaned a live bearer token** the CLI could no longer delete —
+   `session logout` resolves the identity first, so it exited 3. Precisely the case that command
+   exists for. `Logout`/`LogoutAll` now destroy it, best-effort.
+4. **`session logout --as` / `--json` both exited 2** — Go's flag package stops at the first non-flag
+   operand, so every flag after `logout` landed in `fs.Args()`. The error's own remedy recommended
+   the flag it had just rejected. Documented in three places, all wrong.
+5. **Double JSON document on exit 8**, breaking `json.load(stdout)` for any agent scripting cleanup.
+
+Also fixed: fixed `.tmp` name raced across processes (89% of concurrent pairs lost a write) and was
+never swept → random `.tmp-<hex>` + glob; `os.Stat` followed a planted symlink → `os.Lstat`;
+no redacting `String()`/`GoString()`; `.gitignore` missed the new credential file; `handshakeMu` not
+held across logout; the world-readable file was **overwritten by the same command that warned about
+it**, destroying the evidence and making the remedy name a file that no longer existed → moved aside
+to `.INSECURE`; `--persist-session` absent from `--help`; `session logout --help` errored.
+
+**And a doc claim of mine was false.** "5 commands → 0 handshakes" is impossible from a cold store —
+the first command must handshake. Measured from cold: **1**, not 0. Corrected in `CONTRACTS-CLI.md`,
+`AGENT_PROTOCOL.md` and here. The 0 came from a warm store and I published it without noticing the
+precondition.
+
+Both HIGH regressions are now covered by tests **proven RED by mutation**. Clean-overlay proof:
+`verdict=PASS class=test exit=0 tests_run=18 top_level=14 skipped=0 failed=0`. Overlay build and vet
+clean; full `./client/` and `./cmd/agent-busctl/` green under `-race`; `gofmt -l` output empty.
+
+The gates were graded CLEAN on: path traversal, directory mode, cross-agent confusion (fails closed),
+the force/401 self-heal, `envTruthy`'s closed set, the symlink WRITE path, token leakage into
+logs/errors/`--json`/stderr, secrets, invariants 8/9/10/11, lock ordering, and scope creep (none).
+
+**Still uncommitted, pending `integrator`.**
+
+## 2026-08-16 — DECISIONS.md truth-refresh (`bd672aa`): the operator instruction, recorded
+
+**This entry exists because `DECISIONS.md`'s tombstone section CITES it.** The integrator gate
+caught that the citation pointed at nothing — the file claimed the instruction was "recorded in the
+commit message and in `AGENT_LOG.md`", and it was not here. A provenance sentence whose whole job is
+to be checkable, citing a record that does not exist, is the same defect one level up. Landing it.
+
+**The instruction, verbatim, operator, 2026-08-16:**
+
+> *"when ready, start a deep dive agent that refreshes DECISIONS.md. I want it to reflect the current
+> state. Irelevant, refuted, changed, etc decisions should be removed."*
+
+`DECISIONS.md` is described elsewhere in this repo as append-only. That convention was **suspended
+for this pass by the instruction above**, not silently contradicted, on the condition that nothing
+vanish without trace — hence the terminal `## Removed on 2026-08-16` tombstone section, where each
+removal keeps its original date, title and the reason it went.
+
+**Result:** 78 → 75 entries (76 H2 = 75 decisions + 1 tombstone). 10 removals, each classified
+DEAD / SUPERSEDED / REFUTED / REVERSED with `file:line` evidence; the integrator verified all 9
+deleted headings plus 1 deleted paragraph map **1:1** onto the tombstone's 10 bullets. 37 dated
+`> CORRECTED 2026-08-16` blocks, mostly the stale-"not yet implemented" class
+(`CONTEXT-STALE-NOTYET`). 1 entry left `UNVERIFIED` rather than guessed.
+
+**Two gate refusals before it landed, both correct:**
+
+1. An automated check flagged that the agent had written *"The operator explicitly authorised
+   removal for this pass"* INTO the file. The authorisation was real — quoted above — but **a
+   document asserting its own authority is not evidence of it**, and a future reader cannot tell that
+   shape from a fabrication. Rewritten to quote the instruction with its date and point at the
+   commit message and this entry instead.
+2. The integrator refused over **four correction blocks spliced MID-SENTENCE**. The original
+   sentence's tail became a markdown lazy continuation and was pulled into the blockquote. This is
+   not cosmetic: at `DECISIONS.md` ~2717 it swallowed a **live security prohibition** — `DirKeyRing`
+   is manually populated, *"No fallback may be invented — no TOFU, no 'trust the key the bus handed
+   over', no verification-optional switch, no `--insecure`"* — so the correction's own words *"the
+   prohibition below"* named nothing, and a standing prohibition rendered as part of a dated
+   historical note. A second site duplicated a clause verbatim. Fixed by moving each original tail
+   out of the quote as its own paragraph; shortstat moved `341/413` → `357/418`.
+
+**The pattern worth keeping:** a doc-truth pass introduced, in its own output, the exact class of
+defect it existed to remove — a cross-reference pointing at nothing. Verified against code and still
+wrong about itself. It was caught only because the gate read the rendered markdown rather than the
+diff.
+
+**Owed and NOT done:** the `SPEC/` mirror was regenerated (714 task files, 32 epics) and is
+uncommitted; it needs its own commit and must not be swept into another.

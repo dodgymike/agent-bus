@@ -126,7 +126,9 @@ func runWhoami(ctx context.Context, env *cliEnv, args []string) error {
 	res := whoamiResult{Identity: id, IsCurrent: id.AgentID == current}
 
 	if *verify {
-		info, verr := c.EnsureSession(ctx)
+		// VerifySession, NOT EnsureSession: --verify must hit the bus. See
+		// client.VerifySession for why the cached path is wrong here.
+		info, verr := c.VerifySession(ctx)
 		if verr != nil {
 			return verr
 		}

@@ -691,8 +691,32 @@ func (c *Client) Logout(ref string) (LogoutResult, error) {
 	if err != nil {
 		return LogoutResult{}, err
 	}
+	// Destroy any PERSISTED SESSION for the identities just removed. Without
+	// this, deleting a credential left a live bearer token in the store that
+	// the CLI could no longer remove — `session logout` resolves the identity
+	// first and would exit 3, so the documented remedy named a file only a
+	// human with a text editor could reach. Exactly the case `session logout`
+	// exists for ("you are handing the host to someone else"). Caught by the
+	// security gate 2026-08-16.
+	//
+	// BEST EFFORT on purpose: the credential removal already succeeded and is
+	// the operation the caller asked for. Failing it now over a cache file
+	// would report a logout that did not happen.
+	c.forgetPersistedSessions(removed)
 	c.forgetIdentity()
 	return LogoutResult{Removed: removed, Current: current, ServerNotified: false}, nil
+}
+
+// forgetPersistedSessions best-effort removes the persisted session of every id
+// in refs. See Logout for why failures are swallowed.
+func (c *Client) forgetPersistedSessions(refs []string) {
+	for _, ref := range refs {
+		if _, err := c.ForgetPersistedSession(ref); err != nil {
+			c.warn("removed the credential for " + ref +
+				" but could NOT remove its persisted session token: " + err.Error() +
+				" — delete it by hand, it is a live bearer credential")
+		}
+	}
 }
 
 // LogoutAll deletes every credential from the LOCAL store. See Logout for what
@@ -705,6 +729,7 @@ func (c *Client) LogoutAll() (LogoutResult, error) {
 	if removed == nil {
 		removed = []string{}
 	}
+	c.forgetPersistedSessions(removed)
 	c.forgetIdentity()
 	return LogoutResult{Removed: removed, Current: "", ServerNotified: false}, nil
 }

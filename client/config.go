@@ -60,6 +60,14 @@ const (
 	// a handshake — so an environment variable is a perfectly good carrier for
 	// it, unlike a key.
 	EnvBusFingerprint = "AGENT_BUS_FINGERPRINT"
+
+	// EnvPersistSession opts in to caching the session token on disk between
+	// processes. Any of "1", "true", "yes", "on" (case-insensitive) enables it;
+	// anything else, including empty, leaves it OFF.
+	//
+	// It is a SECURITY-RELEVANT opt-in and the default is deliberately the safe
+	// one — see Config.PersistSession.
+	EnvPersistSession = "AGENT_BUS_PERSIST_SESSION"
 )
 
 // RetryPolicy bounds how hard the client tries before giving up.
@@ -117,6 +125,29 @@ type Config struct {
 
 	// Timeout bounds one operation end to end. Zero means DefaultTimeout.
 	Timeout time.Duration
+
+	// PersistSession caches the session token in the credential store directory
+	// so the NEXT process reuses it instead of running a fresh handshake.
+	//
+	// # Default false, and the default is the security-preferred one
+	//
+	// A session is a bearer token: whoever reads the file can act as this agent
+	// until it expires. Off, the token exists only in this process's memory.
+	//
+	// # Why the option exists at all
+	//
+	// The bus caps one agent at 32 concurrent sessions, holds each for an hour
+	// and evicts nothing (internal/auth). Under invariant 7 an agent shells out
+	// per command, so each command costs a session — and an agent working
+	// faster than one command every two minutes exhausts its own cap and is
+	// refused for up to an hour. Observed in production 2026-08-15.
+	//
+	// Enable it for an agent that shells out repeatedly on a machine whose
+	// local users are all trusted. Leave it off for a long-lived embedding
+	// client, which already reuses one session in memory and gains nothing, and
+	// on any shared host. See client/sessionstore.go and DECISIONS.md
+	// 2026-08-16.
+	PersistSession bool
 
 	// Retry bounds the retry loop. A zero Attempts means DefaultRetryAttempts.
 	Retry RetryPolicy
@@ -255,7 +286,28 @@ func (c Config) ApplyEnv(lookup func(string) (string, bool)) (Config, error) {
 			c.Timeout = d
 		}
 	}
+	if !c.PersistSession {
+		if v, ok := lookup(EnvPersistSession); ok {
+			c.PersistSession = envTruthy(v)
+		}
+	}
 	return c, nil
+}
+
+// envTruthy reports whether an environment value means "on".
+//
+// It is deliberately a CLOSED set rather than "non-empty means true". This
+// switch turns on writing a bearer token to disk, and the classic shape
+// `AGENT_BUS_PERSIST_SESSION=0` or `=false` — set by someone intending to
+// DISABLE it — must not enable it. An unrecognised value leaves it off, which
+// is the safe direction.
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // withDefaults returns c with every zero-valued knob replaced by its default.

@@ -42,11 +42,19 @@ const sessionExpiryGrace = time.Second
 
 // session is a live bearer credential.
 //
-// It is NEVER persisted. Sessions do not survive a bus restart, last at most
-// an hour, and are opaque server-side handles — so writing one to disk would
-// add a bearer credential at rest in exchange for saving one round trip. The
-// cost of not persisting is two extra requests per process; the cost of
-// persisting is a stealable token in a file. See DECISIONS.md.
+// It is NOT persisted BY DEFAULT, and that default is the safe one: sessions do
+// not survive a bus restart, last at most an hour, and are opaque server-side
+// handles, so writing one to disk adds a bearer credential at rest in exchange
+// for saving one round trip.
+//
+// Since 2026-08-16 a caller may OPT IN with Config.PersistSession
+// (`--persist-session`, env AGENT_BUS_PERSIST_SESSION). That exists because the
+// no-persistence rule has a cost this comment used to ignore: under invariant 7
+// an agent shells out per command, each process burns a server-side session,
+// the bus holds each for an hour against a per-agent cap of 32 and evicts
+// nothing — so an agent working faster than one command every two minutes locks
+// ITSELF out. See client/sessionstore.go for the full trade and DECISIONS.md
+// 2026-08-16.
 type session struct {
 	agentID   string
 	token     string
@@ -54,6 +62,18 @@ type session struct {
 	refreshAt time.Time
 	lifetime  time.Duration
 }
+
+// String and GoString REDACT the token, mirroring persistedSession and
+// Credential. A %v on this struct in any future error path must not print a
+// live bearer credential.
+func (s *session) String() string {
+	if s == nil {
+		return "<nil session>"
+	}
+	return "session{agent:" + s.agentID + " token:[REDACTED] expires:" + s.expiresAt.Format(time.RFC3339) + "}"
+}
+
+func (s *session) GoString() string { return s.String() }
 
 // SessionInfo is the PUBLIC description of a session: everything except the
 // token. Its json tags are a documented contract surface (CONTRACTS-CLI.md).
@@ -124,6 +144,38 @@ func (c *Client) EnsureSession(ctx context.Context) (SessionInfo, error) {
 	return s.info(), nil
 }
 
+// VerifySession establishes a session AGAINST THE BUS, unconditionally, and
+// reports its details. It never returns a cached answer.
+//
+// # Why this exists separately from EnsureSession
+//
+// `whoami --verify` promises: "actually authenticate ... this is the ONLY way
+// to tell a stored credential the bus still honours from one it has forgotten
+// — sessions do not survive a bus restart". EnsureSession is a CACHE lookup by
+// design, and once --persist-session made that cache outlive the process,
+// --verify started answering from disk and exit 0 against a bus that was DOWN
+// — silently failing at the one job it has, in exactly the restart case its
+// help text names. Caught by the review gate 2026-08-16.
+//
+// It therefore costs a handshake every time, deliberately. A caller who wants
+// the cheap answer wants EnsureSession.
+func (c *Client) VerifySession(ctx context.Context) (SessionInfo, error) {
+	ctx, cancel := c.contextWithTimeout(ctx)
+	defer cancel()
+
+	// Drop the in-memory copy first so the re-check under handshakeMu cannot
+	// hand back what we are trying to bypass, then force past the disk read.
+	c.mu.Lock()
+	c.session = nil
+	c.mu.Unlock()
+
+	s, err := c.ensureSession(ctx, true)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return s.info(), nil
+}
+
 // ensureSession returns a usable session, reusing the cached one unless it is
 // past its refresh point or force is set.
 //
@@ -144,9 +196,17 @@ func (c *Client) ensureSession(ctx context.Context, force bool) (*session, error
 	defer c.handshakeMu.Unlock()
 
 	// Re-check under the gate: whoever held it may have established the very
-	// session this call wanted. `force` skips the fast path above but not this
-	// one — a caller forcing a refresh after a 401 clears the cache first, so
-	// anything here is newer than the token that failed.
+	// session this call wanted.
+	//
+	// CAVEAT, and it is a real one for an EMBEDDING client (the one-shot CLI is
+	// single-goroutine and cannot hit it). With persistence on, this re-check
+	// can be satisfied by a token another goroutine LOADED FROM DISK rather
+	// than one it fetched from the network. So a forced refresh after a 401 can
+	// still observe the dead token here. It self-heals — the next 401 forces
+	// again and establishSession overwrites the file — but it costs an extra
+	// round trip. Before persistence this re-check could only ever be satisfied
+	// by a token from the network, which is what the comment here used to
+	// assume. Noted by the review gate 2026-08-16.
 	if s, ok := c.cachedSession(); ok {
 		return s, nil
 	}
@@ -155,6 +215,24 @@ func (c *Client) ensureSession(ctx context.Context, force bool) (*session, error
 	if err != nil {
 		return nil, err
 	}
+
+	// The DISK cache, when the caller opted in. It sits here — under
+	// handshakeMu, after the memory re-check and before the network — so it
+	// costs nothing on the hot path and cannot race two loads.
+	//
+	// `force` skips it deliberately. A forced refresh follows a 401, which
+	// means the token just failed; the file holds that same dead token, so
+	// reading it would hand back exactly what the bus refused. Persistence
+	// must never turn one 401 into a loop.
+	if c.cfg.PersistSession && !force {
+		if s, ok := c.loadPersistedSession(cred); ok {
+			c.mu.Lock()
+			c.session = s
+			c.mu.Unlock()
+			return s, nil
+		}
+	}
+
 	s, err := c.establishSession(ctx, cred)
 	if err != nil {
 		return nil, err
@@ -162,6 +240,9 @@ func (c *Client) ensureSession(ctx context.Context, force bool) (*session, error
 	c.mu.Lock()
 	c.session = s
 	c.mu.Unlock()
+	if c.cfg.PersistSession {
+		c.savePersistedSession(cred, s)
+	}
 	return s, nil
 }
 
