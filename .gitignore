@@ -78,9 +78,6 @@ identities.json
 identities.json.tmp-*
 #
 # cursors.json is ignored TOO, and it is deliberately not credential material —
-session-*.json
-session-*.json.tmp-*
-session-*.json.INSECURE
 # so the reasoning is stated rather than waved through. Three parts:
 #   - It is not innocuous. It is a map of (agent id -> bus id -> read position):
 #     precisely the routing metadata invariant 6 keeps in the audit trail, and
@@ -98,6 +95,14 @@ session-*.json.INSECURE
 # add -f` remains the deliberate, review-visible escape hatch.
 cursors.json
 cursors.json.tmp-*
+
+# session-<fq-agent-id>.json is the THIRD credential file in this directory
+# (AUTH-9, 2026-08-16). It holds a live BEARER TOKEN when --persist-session is
+# set, so it is ignored for the same reason as the two above — the .tmp-* and
+# .INSECURE companions carry the same token and must be ignored with it.
+session-*.json
+session-*.json.tmp-*
+session-*.json.INSECURE
 
 # ...but NEVER a source or script file, and never a directory. The three name
 # patterns above are unanchored substring matches, so without these negations a
