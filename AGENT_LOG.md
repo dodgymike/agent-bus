@@ -4501,3 +4501,85 @@ diff.
 
 **Owed and NOT done:** the `SPEC/` mirror was regenerated (714 task files, 32 epics) and is
 uncommitted; it needs its own commit and must not be swept into another.
+
+## 2026-08-16 — ACK epic golden path + parallel fan-out: state of play
+
+Written deliberately as a HANDOVER. Two agents were still running when this was written; if the
+session ended, this is what someone needs to not lose or redo work.
+
+### Landed
+
+| sha | what |
+|---|---|
+| `13d8d68` | ACK-1 — `ACK-CONTRACT.md`, 813 lines, the contract the epic implements |
+| `6d1cd8f` | ACK-2 — durable ACK lifecycle record, real SIGKILL crash tests in 3 windows |
+| `52987ec` | ACK-4 — ACK authorization / anti-forgery, 18 guards mutation-proven |
+| `caf89b8` | ACK-CONTRACT §15 correction |
+| `6a26a20` | DECISIONS: RELAY-48 carries the attestation on `store.Record` |
+| `ad03e13` | DOCS-22 — invite-gate entry points |
+| `63f4e0a` | IDEM-19 — expiry sweep amortised, both packages |
+
+All five tasks completed on the Spec Server with these shas. **ACK-2, ACK-4 and IDEM-19 are
+CODE-ONLY** — rebuild and restart required; none is live behaviour.
+
+### UNCOMMITTED AND AT RISK — read before touching these files
+
+**RELAY-48 — COMPLETE, gated, NOT committed.** The last durability hole in the relay plane: nothing
+called `WithOriginMessageID`, so `Store.byOrigin` was permanently empty, `Resume` could not re-find a
+relay-ingested message, and every pending onward hop settled `abandoned` **after this bus already
+answered the upstream peer 200**. Fixed by carrying the origin attestation on `store.Record` (see
+`6a26a20`) and writing it in `hub.publish` between `NewMessageWithBusPath` and `Encode()`.
+
+> **Its crash test is the only thing that can catch the failure.** Mutation: moving the writer AFTER
+> `Encode()` leaves the whole `internal/hub` and `internal/store` suites **GREEN** while the fix is
+> broken — because `store.Append` still populates `byOrigin` in the LIVE process. Only a
+> cross-process restart sees it. Do not "simplify" that test into an in-process one.
+
+**BLOCKED ON TWO THINGS:**
+1. `internal/relay/buspath_boundary_test.go:109` goes RED because `OriginAttestation` is now
+   mandatory. One fixture field + three imports. Patch at
+   `…/scratchpad/relay48-blocker-buspath_boundary_test.patch`.
+2. `cmd/agent-bus/{relaywiring.go,main.go,relaywiring_relay24_test.go}` carry **both** RELAY-48's
+   hunks and the live ACK-3 agent's. **A pathspec commit takes the WORKTREE**, so committing
+   RELAY-48 now would ship ACK-3's ungated work under a RELAY-48 title. Needs hunk-level staging
+   after ACK-3 lands.
+
+**SIGCOPY and RELAY-23 — reviewed, gated, and NEED REDOING.** Both sit in worktrees based on
+`9938eb2`, two commits behind, and both are blocked behind live agents editing the *same functions*:
+RELAY-48 edits `copyMessage` two lines from SIGCOPY's change; ACK-3 edits `handshake.go`/`peer.go` and
+its comment reasons *by analogy to RELAY-23's placement*. **Rebasing invalidates their RED-before
+proofs**, which were taken against code that no longer exists in that shape. They must be re-proven,
+not re-applied.
+
+### The lesson that cost the most
+
+**Worktree isolation prevents COLLISION, not ENTANGLEMENT.** Six agents with disjoint file-ownership
+lists still converged on one composition root (`cmd/agent-bus/main.go`) and on shared functions.
+Two pieces of fully-gated work now need redoing. Ownership lists are necessary and not sufficient;
+what actually matters is whether two tasks touch the same *function*, and that is not visible from a
+file list.
+
+### The pattern worth carrying forward
+
+**Three guards written specifically to catch a defect could not fire, and mutation found all three:**
+- ACK-4 — two mutations stayed GREEN; fixtures too short to reach their own boundary.
+- SIGCOPY — a field-name map whose comment claimed the behavioural assertions checked it; they name
+  four fields literally and cannot see a fifth. Proven by adding one and watching `ok` print.
+- IDEM-19 — `TestSweepIsNotOccupancyLinear` asserts `sweptEntries == 0`, so it only ever exercised
+  the case where nothing expired and the copy was never reached.
+
+None was found by review. **Mutation-prove every guard, including the ones that look obviously
+correct — especially those.**
+
+And IDEM-19's agent caught its own **false reproduction**: the first benchmark showed linear
+before-numbers because the fill advanced the clock past every deadline, so the first sweep drained
+the table in one call and measured nothing. A performance claim needs its slow case OBSERVED.
+
+### Owed
+
+- `AGENT_LOG.md`/`DECISIONS.md` entries for IDEM-19 (drafts exist; the documentation agent's draft
+  says "already-committed", which was false when written).
+- `SPEC/` mirror regeneration (~700 files dirty) once concurrent work settles — use the DEFAULT
+  relation-fetching form, not `--no-relations`.
+- `RELAY-48-DEPLOY` and `RELAY-51` (P0): a partial rollout of the wire-version field **abandons
+  messages permanently** — `DisallowUnknownFields` + `Retriable()` treating 400 as final.
