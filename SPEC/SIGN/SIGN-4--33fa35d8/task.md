@@ -26,12 +26,12 @@ GATED on SIGN-1. A signature alone does NOT provide a freshness/replay defence: 
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [IDEM-5](../../IDEM/IDEM-5--9631dfcb/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -38,14 +38,12 @@ ACCEPTANCE. A test: mint an agent, durably burn its suffix via a torn/aborted pr
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **follow-up** [MSG-FU-SUFFIXFLOOR](../MSG-FU-SUFFIXFLOOR--94159d93/task.md)
-- **relates to** [MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN](../../DUR/MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN--6f4c17ef/task.md)
-- **relates to** [ID-2-WIRING-OBSERVER](../ID-2-WIRING-OBSERVER--c31f6999/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

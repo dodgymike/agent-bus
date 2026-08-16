@@ -63,16 +63,12 @@ Depends on: nothing (first task in the epic; several later tasks depend on it).
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
-- **blocks** [COMMS-READER](../COMMS-READER--07a4aa0c/task.md)
-- **blocks** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
-- **blocks** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
-- **blocks** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

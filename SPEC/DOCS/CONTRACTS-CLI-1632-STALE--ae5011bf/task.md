@@ -30,12 +30,12 @@ SCOPE AS ORIGINALLY REPORTED: the line states a fact that is false, and separate
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [INVITE-CLIENT-FU-PRUNETTL-RACE](../../INVITE/INVITE-CLIENT-FU-PRUNETTL-RACE--da0b3a39/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

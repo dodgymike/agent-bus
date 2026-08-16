@@ -53,14 +53,12 @@ plausible but is an estimate (EV), not a guarantee -- record it as such.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md)
-- **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
-- **blocks** [CONTEXT-NOTESBLOCK](../CONTEXT-NOTESBLOCK--95b091a8/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

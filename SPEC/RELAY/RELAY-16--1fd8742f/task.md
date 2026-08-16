@@ -33,16 +33,12 @@ before the durable write, or a peer can permanently exhaust an agent name."​
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-11](../RELAY-11--07824e55/task.md)
-- **relates to** [RELAY-16-FU-RETRY404](../RELAY-16-FU-RETRY404--7f515d76/task.md)
-- **relates to** [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md)
-- **relates to** [RELAY-16-FU-RECOVEREDPRUNE](../RELAY-16-FU-RECOVEREDPRUNE--c3902098/task.md)
-- **relates to** [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -36,13 +36,12 @@ Proof must show the OLD behaviour is currently reachable (a 404 on a route-depen
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [8949b094-66ab-4704-8c8d-39dd54981ca1](../cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md)
-- **relates to** INVITE-CLIENT-FU-EXIT9 (unresolved)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

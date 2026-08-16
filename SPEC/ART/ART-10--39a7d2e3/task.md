@@ -26,17 +26,12 @@ Define resumable cursor/bitmap, sender/recipient cancel authority, retention/exp
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ART-1](../ART-1--55490a33/task.md)
-- **blocked by** [ART-4](../ART-4--3e01fc93/task.md)
-- **blocked by** [ART-6](../ART-6--62a0a213/task.md)
-- **blocked by** [ART-9](../ART-9--f6864354/task.md)
-- **blocks** [ART-15](../ART-15--b88c1c59/task.md)
-- **blocks** [ART-18](../ART-18--ef028209/task.md)
+_Unknown._
 
 ---
 

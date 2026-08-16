@@ -30,15 +30,12 @@ GATED on IDEM-1/IDEM-2. The core behaviour, on the paths that matter most (MSG-2
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [IDEM-1](../IDEM-1--3cac3349/task.md)
-- **blocked by** [IDEM-2](../IDEM-2--1c6a5ef1/task.md)
-- **blocks** [IDEM-8](../IDEM-8--d1ecfc75/task.md)
-- **relates to** [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

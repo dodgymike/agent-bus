@@ -10,24 +10,24 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 4b51635d-336f-4f25-94c2-64c53578859d | AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… | todo | P1 | [task.md](AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) | — | [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) [CLI-6](../CLI/CLI-6--47001cb4/task.md) [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-13-FU-DOCS](../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) [MTLS-CLIENTCERT](../MTLS/MTLS-CLIENTCERT--0bc7a2eb/task.md) |
-| 5a900716-1916-44ac-bd5a-ff695146adc8 | Wire \`-backfill-suffix-floors\` through scripts/bus-serve.sh and document it (invariant 7… | todo | P1 | [task.md](Wire-backfill-suffix-floors-through-scripts-bus-serve.sh--5a900716/task.md) | — | — |
-| ae594fa8-03bb-4d51-aa31-641f5ddcae66 | RUN_DIR created with no ownership check -- enables binary swap and pidfile symlink attack | todo | P1 | [task.md](RUN_DIR-created-with-no-ownership-check-enables-binary-s--ae594fa8/task.md) | follow-up of [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) | [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) |
-| AGENTIF-10 | AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop | todo | P2 | [task.md](AGENTIF-10--1e837ac9/task.md) | — | [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
+| 4b51635d-336f-4f25-94c2-64c53578859d | AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… | todo | P1 | [task.md](AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) | _not fetched_ | [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) [CLI-6](../CLI/CLI-6--47001cb4/task.md) [INVITE-GATE](../INVITE/INVITE-GATE--05a5216d/task.md) [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-13-FU-DOCS](../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) [MTLS-CLIENTCERT](../MTLS/MTLS-CLIENTCERT--0bc7a2eb/task.md) |
+| 5a900716-1916-44ac-bd5a-ff695146adc8 | Wire \`-backfill-suffix-floors\` through scripts/bus-serve.sh and document it (invariant 7… | todo | P1 | [task.md](Wire-backfill-suffix-floors-through-scripts-bus-serve.sh--5a900716/task.md) | _not fetched_ | — |
+| ae594fa8-03bb-4d51-aa31-641f5ddcae66 | RUN_DIR created with no ownership check -- enables binary swap and pidfile symlink attack | todo | P1 | [task.md](RUN_DIR-created-with-no-ownership-check-enables-binary-s--ae594fa8/task.md) | _not fetched_ | [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) |
+| AGENTIF-10 | AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop | todo | P2 | [task.md](AGENTIF-10--1e837ac9/task.md) | _not fetched_ | [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
 
 ## Closed tasks (9) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| AGENTIF-1 | AGENTIF-1: scripts/bus-serve.sh + AGENT_PROTOCOL.md entry | done | P0 | [task.md](AGENTIF-1--5bc152d6/task.md) | — | — |
-| AGENTIF-2 | AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry | superseded | P0 | [task.md](AGENTIF-2--15e4509c/task.md) | superseded by [CLI-2](../CLI/CLI-2--39318208/task.md) | [CLI-2](../CLI/CLI-2--39318208/task.md) |
-| AGENTIF-3 | AGENTIF-3: scripts/bus-agents.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-3--6f1ebe02/task.md) | superseded by [CLI-5](../CLI/CLI-5--86dea094/task.md) | [CLI-5](../CLI/CLI-5--86dea094/task.md) |
-| AGENTIF-4 | AGENTIF-4: scripts/bus-broadcast.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-4--715fc1b8/task.md) | superseded by [CLI-4](../CLI/CLI-4--137465b9/task.md) | [CLI-4](../CLI/CLI-4--137465b9/task.md) |
-| AGENTIF-5 | AGENTIF-5: scripts/bus-send.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-5--8109ab88/task.md) | superseded by [CLI-4](../CLI/CLI-4--137465b9/task.md) | [CLI-4](../CLI/CLI-4--137465b9/task.md) |
-| AGENTIF-6 | AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-6--31c1257c/task.md) | superseded by [CLI-3](../CLI/CLI-3--6e70abe5/task.md) | [CLI-3](../CLI/CLI-3--6e70abe5/task.md) |
-| AGENTIF-7 | AGENTIF-7: scripts/bus-leave.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-7--5cc8872d/task.md) | superseded by [CLI-2](../CLI/CLI-2--39318208/task.md) | [CLI-2](../CLI/CLI-2--39318208/task.md) |
-| AGENTIF-9 | AGENTIF-9: Envelope/schema validation in scripts/bus-*.sh before accepting a server respo… | cancelled | P1 | [task.md](AGENTIF-9--4f78ecb1/task.md) | — | [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) [AGENTIF-3](AGENTIF-3--6f1ebe02/task.md) [AGENTIF-9](../CLI/AGENTIF-9--b890e3d6/task.md) |
-| AGENTIF-8 | AGENTIF-8: scripts/bus-peer.sh + AGENT_PROTOCOL.md entry | superseded | P2 | [task.md](AGENTIF-8--3837e7fd/task.md) | superseded by [CLI-7](../CLI/CLI-7--e600bde6/task.md) | [CLI-7](../CLI/CLI-7--e600bde6/task.md) |
+| AGENTIF-1 | AGENTIF-1: scripts/bus-serve.sh + AGENT_PROTOCOL.md entry | done | P0 | [task.md](AGENTIF-1--5bc152d6/task.md) | _not fetched_ | — |
+| AGENTIF-2 | AGENTIF-2: scripts/bus-enrol.sh + AGENT_PROTOCOL.md entry | superseded | P0 | [task.md](AGENTIF-2--15e4509c/task.md) | _not fetched_ | [CLI-2](../CLI/CLI-2--39318208/task.md) |
+| AGENTIF-3 | AGENTIF-3: scripts/bus-agents.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-3--6f1ebe02/task.md) | _not fetched_ | [CLI-5](../CLI/CLI-5--86dea094/task.md) |
+| AGENTIF-4 | AGENTIF-4: scripts/bus-broadcast.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-4--715fc1b8/task.md) | _not fetched_ | [CLI-4](../CLI/CLI-4--137465b9/task.md) |
+| AGENTIF-5 | AGENTIF-5: scripts/bus-send.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-5--8109ab88/task.md) | _not fetched_ | [CLI-4](../CLI/CLI-4--137465b9/task.md) |
+| AGENTIF-6 | AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-6--31c1257c/task.md) | _not fetched_ | [CLI-3](../CLI/CLI-3--6e70abe5/task.md) |
+| AGENTIF-7 | AGENTIF-7: scripts/bus-leave.sh + AGENT_PROTOCOL.md entry | superseded | P1 | [task.md](AGENTIF-7--5cc8872d/task.md) | _not fetched_ | [CLI-2](../CLI/CLI-2--39318208/task.md) |
+| AGENTIF-9 | AGENTIF-9: Envelope/schema validation in scripts/bus-*.sh before accepting a server respo… | cancelled | P1 | [task.md](AGENTIF-9--4f78ecb1/task.md) | _not fetched_ | [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) [AGENTIF-3](AGENTIF-3--6f1ebe02/task.md) [AGENTIF-9](../CLI/AGENTIF-9--b890e3d6/task.md) |
+| AGENTIF-8 | AGENTIF-8: scripts/bus-peer.sh + AGENT_PROTOCOL.md entry | superseded | P2 | [task.md](AGENTIF-8--3837e7fd/task.md) | _not fetched_ | [CLI-7](../CLI/CLI-7--e600bde6/task.md) |
 
 ## Epic description
 

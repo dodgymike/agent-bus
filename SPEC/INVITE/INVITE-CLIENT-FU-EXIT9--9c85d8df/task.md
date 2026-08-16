@@ -34,13 +34,12 @@ A code comment already references this key, so it MUST exist or the reference da
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [52930611-1b7e-479f-a2d3-cd72fa09044e](../../CLI/client-404-on-a-route-the-client-depends-on-reports-as-v--52930611/task.md)
-- **supersedes** [8949b094-66ab-4704-8c8d-39dd54981ca1](../../CLI/cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

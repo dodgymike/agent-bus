@@ -40,27 +40,12 @@ Blocks RELAY-25 (10491a01). Blocked by RELAY-24-FU-STOREMSGLOOKUP (the store pre
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md)
-- **blocked by** [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md)
-- **blocked by** [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md)
-- **blocks** [RELAY-25](../RELAY-25--10491a01/task.md)
-- **relates to** [0f8c5332-1236-4e22-a249-72119401003f](../../PROCESS/Spec-Server-API-gap-no-relation-delete-endpoint-wrong-bl--0f8c5332/task.md)
-- **relates to** [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC](../RELAY-24-BLOCKER-EGRESS-FU-BROADCASTFSYNC--2d3224f0/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD](../RELAY-24-BLOCKER-EGRESS-FU-LOGFLOOD--40d412fc/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING](../RELAY-24-BLOCKER-EGRESS-FU-NOROUTEWORDING--5c465133/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD](../RELAY-24-BLOCKER-EGRESS-FU-SESSIONCACHEGUARD--65773db7/task.md)
-- **relates to** [6f82180f-8f57-473d-bd87-30f6d9d9695d](../PROTOCOL.md-599-cites-a-deleted-test-TestHandshakeHandle--6f82180f/task.md)
-- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
-- **relates to** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING](../RELAY-24-BLOCKER-EGRESS-FU-CHECKPOINTWIRING--d92abfe9/task.md)
-- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE](../RELAY-24-BLOCKER-EGRESS-FU-LOCKORDERNOTE--dca8ac10/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -42,12 +42,12 @@ No crash test proves the applied-key scope's CROSS-AGENT isolation survives reco
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [ff38f871-988a-4f2c-aa9a-febee4f3b15a](../../DOCS/AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

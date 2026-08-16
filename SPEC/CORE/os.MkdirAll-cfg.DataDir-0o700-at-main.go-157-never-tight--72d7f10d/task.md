@@ -32,12 +32,12 @@ proof_cmd validated via scripts/proof-check.sh: verdict=FAIL (exit 1) today -- n
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **superseded by** [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

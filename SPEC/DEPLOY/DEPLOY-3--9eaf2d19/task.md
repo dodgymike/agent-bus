@@ -26,15 +26,12 @@ A second Compose profile/override (e.g. docker-compose.multi.yml or a `relay` pr
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [ACK-12](../../ACK/ACK-12--17406b3a/task.md)
-- **blocks** [ART-18](../../ART/ART-18--ef028209/task.md)
-- **blocks** [LIVE-15](../../LIVE/LIVE-15--c9e65431/task.md)
-- **relates to** [ORCH-5](../../ORCH/ORCH-5--c4634621/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

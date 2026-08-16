@@ -71,17 +71,12 @@ on this record and must know this before consuming it.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [RELAY-12](../RELAY-12--069f0607/task.md)
-- **blocks** [RELAY-17](../RELAY-17--817649ce/task.md)
-- **follow-up** [RELAY-34](../RELAY-34--03fd8897/task.md)
-- **follow-up** [RELAY-35](../RELAY-35--2bafb2a5/task.md)
-- **follow-up** [RELAY-36](../RELAY-36--1961682b/task.md)
-- **follow-up** RELAY-37 (unresolved)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

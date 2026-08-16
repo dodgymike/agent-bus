@@ -43,18 +43,12 @@ DEPENDENCIES: real blocks relations wired -- this task BLOCKS RELAY-24 (e303c624
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md)
-- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
-- **relates to** [HUB-FU-INGEST-SIGNATURE-GUARD](../HUB-FU-INGEST-SIGNATURE-GUARD--4b3c79c5/task.md)
-- **relates to** [HUB-FU-RECOVER-IDEM-RELAY-ARM](../HUB-FU-RECOVER-IDEM-RELAY-ARM--5e74485a/task.md)
-- **relates to** [IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS](../../IDEM/IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS--6a09349b/task.md)
-- **relates to** [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md)
-- **relates to** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

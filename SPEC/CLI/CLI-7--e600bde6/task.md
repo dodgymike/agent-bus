@@ -48,12 +48,12 @@ DEPENDS ON: RELAY epic, CLI-1, CLI-2. PROOF fails today by construction.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **supersedes** [AGENTIF-8](../../AGENTIF/AGENTIF-8--3837e7fd/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

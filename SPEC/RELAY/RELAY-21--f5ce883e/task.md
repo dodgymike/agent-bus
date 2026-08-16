@@ -34,16 +34,12 @@ LOCAL recipients before the durable write, or a peer can permanently exhaust an 
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-20](../RELAY-20--701dc54d/task.md)
-- **blocked by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
-- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
-- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
-- **relates to** [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

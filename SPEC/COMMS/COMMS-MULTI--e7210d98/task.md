@@ -45,14 +45,12 @@ Depends on: COMMS-MULTI-DESIGN.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md)
-- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
-- **blocks** [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

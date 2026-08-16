@@ -76,14 +76,12 @@ have spec-keeper update the pinned strings rather than loosening them.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [INVMINT-6](../INVMINT-6--cedb8d6f/task.md)
-- **relates to** [ORCH-2](../../ORCH/ORCH-2--5ffeb926/task.md)
-- **relates to** [TUI-6](../../TUI/TUI-6--cb4e3fd7/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -36,13 +36,12 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md)
-- **relates to** [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

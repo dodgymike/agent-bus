@@ -30,14 +30,12 @@ GATED on IDEM-1 (payload fingerprint) and IDEM-2 (stored fingerprint). This is t
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [IDEM-1](../IDEM-1--3cac3349/task.md)
-- **blocks** [IDEM-8](../IDEM-8--d1ecfc75/task.md)
-- **relates to** [SIGN-4](../../SIGN/SIGN-4--33fa35d8/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

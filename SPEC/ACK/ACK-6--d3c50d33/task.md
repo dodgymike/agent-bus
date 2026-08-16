@@ -26,15 +26,12 @@ Add an explicit recipient acknowledgement boundary: delivery to an inbox/poll is
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
-- **blocked by** [ACK-2](../ACK-2--9564f953/task.md)
-- **blocks** [ACK-12](../ACK-12--17406b3a/task.md)
-- **blocks** [ACK-5](../ACK-5--5991ee1a/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

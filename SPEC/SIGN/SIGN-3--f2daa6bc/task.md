@@ -26,13 +26,12 @@ GATED on SIGN-1/SIGN-2. Replaces the encryption-specific scope of superseded CRY
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **supersedes** [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md)
-- **supersedes** [RATCHET-4](../../RATCHET/RATCHET-4--58fd8bc3/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

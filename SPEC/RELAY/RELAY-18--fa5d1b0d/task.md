@@ -36,13 +36,12 @@ this task does not touch invariant-10 disconnect semantics.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-6](../RELAY-6--0f7275b9/task.md)
-- **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

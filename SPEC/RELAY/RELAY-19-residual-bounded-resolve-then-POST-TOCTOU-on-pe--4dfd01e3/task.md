@@ -42,12 +42,12 @@ Source: RELAY-19 file-followups brief item 4 (security P2s), 2026-08-14.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-_None recorded._
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

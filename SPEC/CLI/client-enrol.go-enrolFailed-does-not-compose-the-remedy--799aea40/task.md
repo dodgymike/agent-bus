@@ -20,12 +20,12 @@ Discovered by reviewer during the 9accb65 gate (2026-08-07, task 797fb15f notes)
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **superseded by** [45b2e17a-7b88-4b71-b6a0-a18bd9e4f70e](../enrolFailed-replaces-the-remedy-and-never-sets-Error.Ide--45b2e17a/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

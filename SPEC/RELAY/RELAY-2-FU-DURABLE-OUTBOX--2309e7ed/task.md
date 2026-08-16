@@ -28,13 +28,12 @@ Merged 2026-08-08 (spec-keeper) from duplicate fec942b4 (superseded into this, t
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [RELAY-15](../RELAY-15--663be37c/task.md)
-- **supersedes** [fec942b4-fdb6-4fc3-920b-ae2af4fd5f92](../Durable-relay-outbox-cross-bus-delivery-is-best-effort-a--fec942b4/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

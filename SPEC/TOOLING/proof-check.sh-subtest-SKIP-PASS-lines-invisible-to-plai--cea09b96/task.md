@@ -62,13 +62,12 @@ proof_cmd confirmed RED on 2026-08-08 (before any fix):
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [HANDOVER-CHECK](../../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md)
-- **relates to** [71cdaef8-c757-4ba9-a693-a8f744070d08](../proof-check.sh-runs-the-proof-against-its-OWN-script-dir--71cdaef8/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

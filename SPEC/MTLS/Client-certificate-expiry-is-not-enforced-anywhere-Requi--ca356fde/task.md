@@ -24,12 +24,12 @@ Whoever implements MTLS-CROSSCHECK (2b2af075) must EITHER (a) read the presented
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

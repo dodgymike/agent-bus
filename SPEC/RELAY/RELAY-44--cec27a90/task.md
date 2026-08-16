@@ -45,15 +45,12 @@ OWNERSHIP NOTE: this task's exact file/record placement is NOT pre-decided (unli
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md)
-- **blocked by** [RELAY-41](../RELAY-41--05253c80/task.md)
-- **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
-- **superseded by** [RELAY-45](../RELAY-45--4be32336/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

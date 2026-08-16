@@ -58,14 +58,12 @@ Parallel-safety: design only.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [CONV-AUTHZ-ADMIN](../CONV-AUTHZ-ADMIN--70dd573a/task.md)
-- **relates to** [CONV-AUTHZ-CREATOR](../CONV-AUTHZ-CREATOR--4abd8589/task.md)
-- **relates to** [CONV-LIFECYCLE](../CONV-LIFECYCLE--fe5d14d5/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

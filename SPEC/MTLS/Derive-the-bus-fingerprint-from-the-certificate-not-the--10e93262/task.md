@@ -38,15 +38,12 @@ Files: scripts/bus-serve.sh, CONTRACTS-CLI.md (+ AGENT_LOG.md append).
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **follow-up** [320d4a73-8b75-4f87-afca-ba23ec69a590](../No-regression-guard-exists-for-the-bus-fingerprint-trust--320d4a73/task.md)
-- **follow-up** [4a6e7001-ca2a-430a-a5e6-39e922d7325f](../../DOCS/CONTRACTS-AGENT.md-AGENT_PROTOCOL.md-document-the-remove--4a6e7001/task.md)
-- **follow-up** [88781750-0005-4c2f-8375-2d93dc1560b8](../../DOCS/DECISIONS.md-1302-cites-a-superseded-bus-serve.sh-line-f--88781750/task.md)
-- **follow-up** [ae594fa8-03bb-4d51-aa31-641f5ddcae66](../../AGENTIF/RUN_DIR-created-with-no-ownership-check-enables-binary-s--ae594fa8/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

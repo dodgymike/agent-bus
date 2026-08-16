@@ -65,15 +65,12 @@ do not run those two concurrently against this file. Depends-on set is otherwise
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [HANDOVER-WIRED](../HANDOVER-WIRED--6d85978f/task.md)
-- **blocks** [HANDOVER-MAP-CHECK](../HANDOVER-MAP-CHECK--dce30493/task.md)
-- **blocks** [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md)
-- **relates to** [HANDOVER-CHECK](../HANDOVER-CHECK--0f909b6c/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -59,31 +59,12 @@ proof_cmds are trustworthy until this lands.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [CONTEXT-AGENTDESC-TRIM](../CONTEXT-AGENTDESC-TRIM--eaea0581/task.md)
-- **blocks** [CONTEXT-BUDGET-WIRE](../CONTEXT-BUDGET-WIRE--be76c7e2/task.md)
-- **blocks** [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md)
-- **blocks** [CONTEXT-CLI-SECTIONS](../CONTEXT-CLI-SECTIONS--3b4bd434/task.md)
-- **blocks** [CONTEXT-CONTRACTS-PARKING](../CONTEXT-CONTRACTS-PARKING--881dae01/task.md)
-- **blocks** [CONTEXT-DEEPDIVE-CONVENTION](../CONTEXT-DEEPDIVE-CONVENTION--cea3880c/task.md)
-- **blocks** [CONTEXT-DISPATCH-RULE](../CONTEXT-DISPATCH-RULE--81bc24d6/task.md)
-- **blocks** [CONTEXT-DONEGATE-CANON](../CONTEXT-DONEGATE-CANON--b9b0c654/task.md)
-- **blocks** [CONTEXT-DRIFT-PHANTOM](../CONTEXT-DRIFT-PHANTOM--08e38aec/task.md)
-- **blocks** [CONTEXT-DRIFT-WRAPPERS](../CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md)
-- **blocks** [CONTEXT-FANOUT-COMPRESS](../CONTEXT-FANOUT-COMPRESS--48c0e011/task.md)
-- **blocks** [CONTEXT-LOG-GUARD](../CONTEXT-LOG-GUARD--f39083ae/task.md)
-- **blocks** [CONTEXT-LOG-RETIRE](../CONTEXT-LOG-RETIRE--116179c8/task.md)
-- **blocks** [CONTEXT-NOTESBLOCK](../CONTEXT-NOTESBLOCK--95b091a8/task.md)
-- **blocks** [CONTEXT-PLANE-TOC](../CONTEXT-PLANE-TOC--463afaf6/task.md)
-- **blocks** [CONTEXT-PROTOCOL-WALFLOOR-DEDUP](../CONTEXT-PROTOCOL-WALFLOOR-DEDUP--1e9cec15/task.md)
-- **blocks** [CONTEXT-READRULE](../CONTEXT-READRULE--202ad8d7/task.md)
-- **blocks** [CONTEXT-RESERVE-CANON](../CONTEXT-RESERVE-CANON--3aea21a7/task.md)
-- **blocks** [CONTEXT-SPEC-BRIEF](../CONTEXT-SPEC-BRIEF--4b0f5e57/task.md)
-- **blocks** [CONTEXT-STALE-NOTYET](../CONTEXT-STALE-NOTYET--67b42913/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

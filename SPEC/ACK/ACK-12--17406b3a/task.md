@@ -26,21 +26,12 @@ Run a real three-bus Compose/CLI acceptance: local sender accepts durably; relay
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
-- **blocked by** [ACK-10](../ACK-10--cf417e18/task.md)
-- **blocked by** [ACK-11](../ACK-11--5567f490/task.md)
-- **blocked by** [ACK-5](../ACK-5--5991ee1a/task.md)
-- **blocked by** [ACK-6](../ACK-6--d3c50d33/task.md)
-- **blocked by** [ACK-7](../ACK-7--b7bf9631/task.md)
-- **blocked by** [ACK-8](../ACK-8--bc12541b/task.md)
-- **blocked by** [ACK-9](../ACK-9--08f9987f/task.md)
-- **blocked by** [DEPLOY-3](../../DEPLOY/DEPLOY-3--9eaf2d19/task.md)
-- **blocks** [ART-18](../../ART/ART-18--ef028209/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

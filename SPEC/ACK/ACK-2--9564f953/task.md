@@ -26,19 +26,12 @@ Persist local sender-visible acceptance and lifecycle correlation atomically wit
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md)
-- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
-- **blocked by** [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md)
-- **blocks** [ACK-3](../ACK-3--263c47fe/task.md)
-- **blocks** [ACK-6](../ACK-6--d3c50d33/task.md)
-- **blocks** [ACK-7](../ACK-7--b7bf9631/task.md)
-- **blocks** [ACK-8](../ACK-8--bc12541b/task.md)
-- **blocks** [ACK-9](../ACK-9--08f9987f/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

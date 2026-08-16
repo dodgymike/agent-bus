@@ -26,12 +26,12 @@ Follow-up to AUTH-1 (public_id 54fa94c0-6ca3-459a-aaa2-a3ea047f97d9). POST /v1/e
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-_None recorded._
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -51,6 +51,7 @@ _None recorded._
 
 - [AUTH-1-FU-ACTIVECAP-DOCS](../AUTH-1-FU-ACTIVECAP-DOCS--27a811c9/task.md) — AUTH-1-FU-ACTIVECAP-DOCS: document the per-agent ACTIVE-session cap in CONTRACTS-HTTP.md… (todo)
 - [AUTH-2-FU-RATELIMIT](../AUTH-2-FU-RATELIMIT--504caef3/task.md) — AUTH-2-FU-RATELIMIT: Rate-limit the unauthenticated routes and the 401 path (superseded)
+- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (todo)
 - [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md) — INVITE-GATE-ENFORCE-FU-CLIENTREMEDY: fix client/enrol.go remedy text for the no-invite 403 (todo)
 
 ---

@@ -34,12 +34,12 @@ DEFINITION OF DONE: (1) proof-check.sh either runs the proof in the CALLER'S cwd
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **relates to** [cea09b96-72db-40f1-84b4-c2e227eae1cf](../proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

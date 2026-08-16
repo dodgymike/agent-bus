@@ -90,35 +90,12 @@ re-verification, 2026-08-14.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-12](../RELAY-12--069f0607/task.md)
-- **blocked by** [RELAY-19](../RELAY-19--24e0bd11/task.md)
-- **blocked by** [RELAY-20](../RELAY-20--701dc54d/task.md)
-- **blocked by** [RELAY-21](../RELAY-21--f5ce883e/task.md)
-- **blocked by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
-- **blocked by** [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md)
-- **blocked by** [RELAY-34](../RELAY-34--03fd8897/task.md)
-- **blocked by** [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md)
-- **blocked by** [RELAY-FU-BUSPATH-OFFBYONE](../RELAY-FU-BUSPATH-OFFBYONE--97fc6038/task.md)
-- **blocked by** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
-- **blocked by** [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md)
-- **blocked by** [RELAY-FU-PEERBUSID-CROSSCHECK](../RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md)
-- **blocked by** [RELAY-FU-PEERENROLL-BUSID-BIND](../RELAY-FU-PEERENROLL-BUSID-BIND--12f39697/task.md)
-- **blocked by** [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md)
-- **blocked by** [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md)
-- **blocked by** SIGN-1-FU-REORDER-WATERMARK (unresolved)
-- **blocks** [RELAY-25-FU-INBOUNDBIND](../RELAY-25-FU-INBOUNDBIND--336c3b76/task.md)
-- **blocks** [RELAY-25](../RELAY-25--10491a01/task.md)
-- **relates to** [RELAY-24-FU-PEERWITHDRAWNMSG](../RELAY-24-FU-PEERWITHDRAWNMSG--2a202eca/task.md)
-- **relates to** [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md)
-- **relates to** [RELAY-24-FU-RELAYHTTP-4XX](../RELAY-24-FU-RELAYHTTP-4XX--b2fb4b36/task.md)
-- **relates to** [RELAY-35](../RELAY-35--2bafb2a5/task.md)
-- **relates to** [RELAY-24-FU-AGENTSSORTONHANDSHAKE](../RELAY-24-FU-AGENTSSORTONHANDSHAKE--aeb578f9/task.md)
-- **relates to** [RELAY-24-FU-SKIPPEDPEERADJACENCY](../RELAY-24-FU-SKIPPEDPEERADJACENCY--f7eaf64a/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

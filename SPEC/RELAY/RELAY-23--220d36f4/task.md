@@ -30,13 +30,12 @@ and two meanings on one key is how a peer applies an epoch as a format number.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [RELAY-17](../RELAY-17--817649ce/task.md)
-- **blocked by** [RELAY-20](../RELAY-20--701dc54d/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

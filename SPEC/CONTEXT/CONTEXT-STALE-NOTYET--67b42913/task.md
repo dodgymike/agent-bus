@@ -86,16 +86,12 @@ clean overlay of HEAD for the separate reason that the script is untracked there
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
-- **relates to** [CONTEXT-STALE-INPLACE](../CONTEXT-STALE-INPLACE--ec7fc25e/task.md)
-- **relates to** [INVITE-CLIENT-FU-DOCSTALE](../../INVITE/INVITE-CLIENT-FU-DOCSTALE--66266b5f/task.md)
-- **relates to** [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md)
-- **relates to** [INVITE-GATE-ENFORCE-FU-INVITEDOCS](../../INVITE/INVITE-GATE-ENFORCE-FU-INVITEDOCS--47c7bae9/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -116,6 +112,31 @@ clean overlay of HEAD for the separate reason that the script is untracked there
 
 
 - [CONTEXT-STALE-INPLACE](../CONTEXT-STALE-INPLACE--ec7fc25e/task.md) — CONTEXT-STALE-INPLACE: DECISIONS.md section 2 and the Dockerfile CMD block state a supers… (todo)
+- [DOCS-10](../../DOCS/DOCS-10--d6c84ff8/task.md) — DOCS-10: \`client\` package documents fail-closed verification while shipping fail-open (todo)
+- [DOCS-11](../../DOCS/DOCS-11--a434830e/task.md) — DOCS-11: Invite revocation is documented in three places and implemented in none (todo)
+- [DOCS-12](../../DOCS/DOCS-12--7b363ccf/task.md) — DOCS-12: 8 error remedies name \`agent-busctl keygen\` / \`trust\`, which do not exist (todo)
+- [DOCS-13](../../DOCS/DOCS-13--8ce01598/task.md) — DOCS-13: \`INVARIANTS.md\` truth pass — 8 false factual claims in the file agents must read… (todo)
+- [DOCS-14](../../DOCS/DOCS-14--86741a89/task.md) — DOCS-14: \`CLAUDE.md\`/\`AGENTS.md\`: delete the false \`crypto/ecdh\` toolchain rationale; fix… (todo)
+- [DOCS-15](../../DOCS/DOCS-15--e718e0c0/task.md) — DOCS-15: \`AGENTS.md\` writes fabricated model ids (\`Codex-opus-5\`) into the cost audit tra… (todo)
+- [DOCS-16](../../DOCS/DOCS-16--57933ce7/task.md) — DOCS-16: \`PROTOCOL.md\`'s on-disk version registry omits versions 5, 6 and 7 — a live rese… (todo)
+- [DOCS-17](../../DOCS/DOCS-17--a35d1ec1/task.md) — DOCS-17: Session per-agent cap (32, no eviction) is documented as not existing — caused a… (todo)
+- [DOCS-18](../../DOCS/DOCS-18--5b3f4886/task.md) — DOCS-18: Retire two standing directives that outlived their premise and now FORBID the fix (todo)
+- [DOCS-19](../../DOCS/DOCS-19--9d8ff93b/task.md) — DOCS-19: Durability inverted: \`internal/auth/service.go:502\` says main injects the MEMORY… (todo)
+- [DOCS-20](../../DOCS/DOCS-20--55d5bac2/task.md) — DOCS-20: Mechanical stale-claim detector — likely to MERGE with the in-flight \`scripts/do… (todo)
+- [DOCS-21](../../DOCS/DOCS-21--cdf8660c/task.md) — DOCS-21: \`CONTRACTS-CLI.md\` claims a "mechanically enforced" import guard that nothing ru… (todo)
+- [DOCS-22](../../DOCS/DOCS-22--2f8ae959/task.md) — DOCS-22: The four agent ENTRY POINTS the invite gate missed — \`README\` Quickstart, \`agent… (todo)
+- [DOCS-23](../../DOCS/DOCS-23--c9a51528/task.md) — DOCS-23: \`agent-busctl broadcast --help\` never says the route is refused (501) (todo)
+- [DOCS-24](../../DOCS/DOCS-24--4aaf2803/task.md) — DOCS-24: \`client/transport.go:429-430\`: the 403 remedy tells an agent to retry a refusal… (todo)
+- [DOCS-25](../../DOCS/DOCS-25--9c894053/task.md) — DOCS-25: \`CONTRACTS-AGENT.md\` documents the log-scrape that \`bus-serve.sh\` deliberately r… (todo)
+- [DOCS-26](../../DOCS/DOCS-26--fb39c79d/task.md) — DOCS-26: \`docs/THREE-BUS-DOCKER.md\` tells the operator to ignore \`fed-smoke.sh\`, mint an… (todo)
+- [DOCS-27](../../DOCS/DOCS-27--ec19df4e/task.md) — DOCS-27: \`AGENT_PROTOCOL.md\`: \`client-cert\` undocumented (invariant-7 gap), TOC lists 10… (todo)
+- [DOCS-28](../../DOCS/DOCS-28--7f1030b7/task.md) — DOCS-28: \`docs/comms\` self-audit numbers disagree with the CSVs, and \`LABELLING-KEY.md\`'s… (todo)
+- [DOCS-29](../../DOCS/DOCS-29--7b0e66e8/task.md) — DOCS-29: Investigate \`TestWALRepairDoesNotReissueDiscardedIndex\` — a P0's recorded \`proof… (todo)
+- [DOCS-5](../../DOCS/DOCS-5--051a9829/task.md) — DOCS-5: \`/v1/discovery\` limitation 5 is false on the wire: cross-bus relay IS served (todo)
+- [DOCS-6](../../DOCS/DOCS-6--76879ad1/task.md) — DOCS-6: README is unusable: quickstart 403s, "what works today" curls a TLS port in plain… (todo)
+- [DOCS-7](../../DOCS/DOCS-7--a98ffca6/task.md) — DOCS-7: Doc-truth sweep: enrolment is invite-gated (11 passages, 5 files) (todo)
+- [DOCS-8](../../DOCS/DOCS-8--1f955f09/task.md) — DOCS-8: Doc-truth sweep: relay is mounted, live and imported (17 passages) — incl. 3 \`MUS… (todo)
+- [DOCS-9](../../DOCS/DOCS-9--873417cb/task.md) — DOCS-9: P0-adjacent: reserve a relay wire-protocol version — the envelope is on the wire… (todo)
 
 ---
 

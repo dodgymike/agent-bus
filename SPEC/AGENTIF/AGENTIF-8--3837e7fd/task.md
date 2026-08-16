@@ -36,12 +36,12 @@ Wrapper for the peer-enrolment handshake (add/list/remove a peer bus). Pairs wit
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **superseded by** [CLI-7](../../CLI/CLI-7--e600bde6/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

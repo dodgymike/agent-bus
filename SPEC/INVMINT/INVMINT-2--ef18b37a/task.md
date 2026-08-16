@@ -83,14 +83,12 @@ broken proofs in this backlog and closed 2 tasks on targets that never existed.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [INVMINT-1](../INVMINT-1--1bed65a8/task.md)
-- **blocks** [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md)
-- **blocks** [INVMINT-3](../INVMINT-3--8555e659/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -108,6 +106,8 @@ broken proofs in this backlog and closed 2 tasks on targets that never existed.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (todo)
+- [AUTH-7](../../AUTH/AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
 - [CONV-SUCCESSION](../../CONV/CONV-SUCCESSION--422be55b/task.md) — CONV-SUCCESSION: creator-only mutation freezes a conversation when the creator's agent id… (todo)
 - [INVMINT-1](../INVMINT-1--1bed65a8/task.md) — INVMINT-1: decide the invite-minting AUTHORITY MODEL and reconcile it with E4, FEDERATION… (todo)

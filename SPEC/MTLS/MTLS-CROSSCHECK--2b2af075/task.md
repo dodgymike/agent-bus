@@ -32,14 +32,12 @@ EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BIND | BLOCKS: MTL
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **follow-up of** [MTLS-CROSSCHECK-FU-CERTEXPIRY](../MTLS-CROSSCHECK-FU-CERTEXPIRY--b5d86daa/task.md)
-- **follow-up of** [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md)
-- **follow-up of** [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

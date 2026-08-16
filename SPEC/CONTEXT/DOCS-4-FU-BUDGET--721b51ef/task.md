@@ -47,12 +47,12 @@ TBD by implementer, and it must be genuine: it has to demonstrate the check goes
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **follow-up** [DOCS-4](../../DOCS/DOCS-4--a24c33cd/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

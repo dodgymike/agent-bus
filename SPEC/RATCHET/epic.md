@@ -10,19 +10,19 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| RATCHET-2 | RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… | todo | P1 | [task.md](RATCHET-2--ade31a62/task.md) | relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [CRYPTO-3](../CRYPTO/CRYPTO-3--dd1066af/task.md) [RELAY-2](../RELAY/RELAY-2--654140d7/task.md) [CRYPTO-4](../CRYPTO/CRYPTO-4--13f3947e/task.md) [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) +2 more |
-| RATCHET-6 | RATCHET-6: RFC 8032 Ed25519 known-answer tests wired into the sign/verify implementation | todo | P1 | [task.md](RATCHET-6--fd0f3ca3/task.md) | relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md) [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) |
+| RATCHET-2 | RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… | todo | P1 | [task.md](RATCHET-2--ade31a62/task.md) | _not fetched_ | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [CRYPTO-3](../CRYPTO/CRYPTO-3--dd1066af/task.md) [RELAY-2](../RELAY/RELAY-2--654140d7/task.md) [CRYPTO-4](../CRYPTO/CRYPTO-4--13f3947e/task.md) [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) +2 more |
+| RATCHET-6 | RATCHET-6: RFC 8032 Ed25519 known-answer tests wired into the sign/verify implementation | todo | P1 | [task.md](RATCHET-6--fd0f3ca3/task.md) | _not fetched_ | [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md) [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) |
 
 ## Closed tasks (6) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| RATCHET-3 | RATCHET-3: Do we need full Signal semantics? -- the cheaper-alternative check | superseded | P1 | [task.md](RATCHET-3--be658b02/task.md) | — | — |
-| RATCHET-4 | RATCHET-4: Broadcast fan-out under pairwise ratchets | superseded | P1 | [task.md](RATCHET-4--58fd8bc3/task.md) | superseded by [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) | [MSG-2](../MSG/MSG-2--50995c75/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) |
-| RATCHET-5 | RATCHET-5: Ratchet state durability vs invariants 4/5 -- the key-reuse trap | superseded | P1 | [task.md](RATCHET-5--e376433d/task.md) | — | [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) |
-| RATCHET-7 | RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… | done | P1 | [task.md](RATCHET-7--aaa7cddc/task.md) | blocks [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md)<br>relates to [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) | [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md) [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) [DEPLOY-1](../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-5](../DEPLOY/DEPLOY-5--259a6a55/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) +2 more |
-| RATCHET-8 | RATCHET-8: Record the decision, then gate the CRYPTO epic on it | superseded | P1 | [task.md](RATCHET-8--9a404c64/task.md) | — | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) |
-| RATCHET-1 | RATCHET-1: DEEP DIVE -- how to get a double ratchet WITHOUT writing our own crypto | superseded | P3 | [task.md](RATCHET-1--d86aaa65/task.md) | — | — |
+| RATCHET-3 | RATCHET-3: Do we need full Signal semantics? -- the cheaper-alternative check | superseded | P1 | [task.md](RATCHET-3--be658b02/task.md) | _not fetched_ | — |
+| RATCHET-4 | RATCHET-4: Broadcast fan-out under pairwise ratchets | superseded | P1 | [task.md](RATCHET-4--58fd8bc3/task.md) | _not fetched_ | [MSG-2](../MSG/MSG-2--50995c75/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) |
+| RATCHET-5 | RATCHET-5: Ratchet state durability vs invariants 4/5 -- the key-reuse trap | superseded | P1 | [task.md](RATCHET-5--e376433d/task.md) | _not fetched_ | [SIGN-4](../SIGN/SIGN-4--33fa35d8/task.md) |
+| RATCHET-7 | RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… | done | P1 | [task.md](RATCHET-7--aaa7cddc/task.md) | _not fetched_ | [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [SIGN-2](../SIGN/SIGN-2--1c183f10/task.md) [CRYPTO-10](../CRYPTO/CRYPTO-10--68ff679d/task.md) [DEPLOY-1](../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-5](../DEPLOY/DEPLOY-5--259a6a55/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) +2 more |
+| RATCHET-8 | RATCHET-8: Record the decision, then gate the CRYPTO epic on it | superseded | P1 | [task.md](RATCHET-8--9a404c64/task.md) | _not fetched_ | [CRYPTO-1](../CRYPTO/CRYPTO-1--30570fb9/task.md) |
+| RATCHET-1 | RATCHET-1: DEEP DIVE -- how to get a double ratchet WITHOUT writing our own crypto | superseded | P3 | [task.md](RATCHET-1--d86aaa65/task.md) | _not fetched_ | — |
 
 ## Epic description
 

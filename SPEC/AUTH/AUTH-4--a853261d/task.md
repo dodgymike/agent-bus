@@ -28,13 +28,12 @@ ACCEPTANCE CRITERION ADDED (spec-keeper, 2026-08-02, from ID-3 reviewer F2 + sec
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [AUTH-2-FU-POLLEXPIRY](../AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md)
-- **blocked by** [f505fb57-25ab-46e1-a7a1-2ca5787529ab](../Any-roster-reclamation-path-must-ship-a-bound-on-distinc--f505fb57/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -58,6 +57,7 @@ ACCEPTANCE CRITERION ADDED (spec-keeper, 2026-08-02, from ID-3 reviewer F2 + sec
 - [ADMIN-11](../../ADMIN/ADMIN-11--07926508/task.md) — ADMIN-11: remove an agent from the console (BLOCKED on AUTH-4) (blocked)
 - [AUTH-1](../AUTH-1--54fa94c0/task.md) — AUTH-1: POST /v1/enroll -- signed credential issuance (done)
 - [AUTH-2-FU-POLLEXPIRY](../AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
+- [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [AUTH-ROSTER-RECLAIM](../AUTH-ROSTER-RECLAIM--b418638c/task.md) — AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove &lt;id&gt;" escape hatch -- filesys… (todo)
 - [CLI-2](../../CLI/CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
 - [CLI-2-FU-LEAVE](../../CLI/CLI-2-FU-LEAVE--df79f84f/task.md) — CLI-2-FU-LEAVE: Add /v1/leave and make busctl logout actually revoke (todo)

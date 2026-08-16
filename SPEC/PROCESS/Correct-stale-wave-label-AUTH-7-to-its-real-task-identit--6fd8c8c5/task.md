@@ -20,12 +20,12 @@ The label "AUTH-7" is referenced in roughly 12 Go comments and in CONTRACTS-ONDI
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-_None recorded._
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -34,6 +34,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-7](../../AUTH/AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [MSG-FU-ROSTERSOURCE](../../AUTH/MSG-FU-ROSTERSOURCE--fa26036c/task.md) — MSG-FU-ROSTERSOURCE: the hub must read the AUTHORITATIVE roster the moment AUTH-3 makes e… (done)
 
 ---

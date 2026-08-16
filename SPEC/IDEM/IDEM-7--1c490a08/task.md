@@ -30,14 +30,12 @@ GATED on IDEM-2; lands with RELAY-2/RELAY-3. WHY THIS IS WHERE IDEMPOTENCY EARNS
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [IDEM-2](../IDEM-2--1c6a5ef1/task.md)
-- **relates to** [RELAY-3](../../RELAY/RELAY-3--e944edda/task.md)
-- **relates to** [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -26,16 +26,12 @@ Set per-transfer/principal/bus count/byte/chunk/concurrency quotas, durable rese
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ART-1](../ART-1--55490a33/task.md)
-- **blocked by** [ART-2](../ART-2--d8b2b551/task.md)
-- **blocks** [ART-10](../ART-10--39a7d2e3/task.md)
-- **blocks** [ART-6](../ART-6--62a0a213/task.md)
-- **blocks** [ART-7](../ART-7--5286d0c9/task.md)
+_Unknown._
 
 ---
 

@@ -47,18 +47,12 @@ COMMS-TOKENS, COMMS-MULTI.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
-- **blocked by** [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md)
-- **blocked by** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
-- **blocked by** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
-- **blocked by** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
-- **blocked by** [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md)
-- **blocked by** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

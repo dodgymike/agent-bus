@@ -39,21 +39,12 @@ FILE OWNERSHIP for the agent working it: cmd/agent-bus/**, internal/hub/**, plus
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2](../../DUR/Expose-on-wal.Recovered-the-highest-index-a-record-actua--9fd58deb/task.md)
-- **follow-up** [0d0c54a0-85b8-4117-bb1f-2e7c56df153a](../../DUR/existedAtOpen-is-not-a-snapshot-it-returns-a-field-persi--0d0c54a0/task.md)
-- **follow-up** [3e43c52c-ae62-4b8c-aabb-1b9f7f62d82f](../The-data-dir-permission-gate-checks-MODE-but-not-OWNERSH--3e43c52c/task.md)
-- **follow-up** [4f276d2a-88d5-45fd-90e1-810429b3fb78](../../DUR/maxPlausibleSeqFloor-is-enforced-on-the-READ-path-only-h--4f276d2a/task.md)
-- **follow-up** [7fbe58ec-6b27-43dd-b0c1-986d7c702870](../../DUR/Settle-the-message-seq-floor-KEYING-question-as-an-expli--7fbe58ec/task.md)
-- **follow-up** [9bf6f55f-f069-429d-b004-82fba72d45c2](../../DUR/maxPlausibleSeqFloor-is-2-56-which-exceeds-the-JSON-safe--9bf6f55f/task.md)
-- **follow-up** [c47379ae-9873-4800-a442-03e34a7f1294](../invite-mint-bypasses-the-data-directory-permission-gate--c47379ae/task.md)
-- **follow-up** [d9cfaa61-d643-44eb-b38f-22dbd29e6692](../../DUR/Close-the-two-coverage-gaps-the-security-gates-declared--d9cfaa61/task.md)
-- **follow-up of** [259b7033-2191-423f-bb7b-cff8c6b59dc1](../../DUR/Bound-the-wal-index-floor-reserved-value-the-same-way-as--259b7033/task.md)
-- **supersedes** [72d7f10d-5f4a-4ad7-a680-e548c331eb20](../os.MkdirAll-cfg.DataDir-0o700-at-main.go-157-never-tight--72d7f10d/task.md)
+_Unknown._
 
 ## Referenced by other tasks (derived, not authoritative)
 

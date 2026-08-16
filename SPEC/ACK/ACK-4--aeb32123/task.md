@@ -26,13 +26,12 @@ Bind every acknowledgement to the authenticated forwarding peer and intended mes
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
-- **blocks** [ACK-3](../ACK-3--263c47fe/task.md)
+_Unknown._
 
 ## Referenced by other tasks (derived, not authoritative)
 

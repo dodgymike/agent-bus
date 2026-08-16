@@ -72,16 +72,12 @@ artefact-existence assertion. Verified verdict=FAIL (RED) after the change.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [ORCH-1](../ORCH-1--e22449ec/task.md)
-- **blocked by** [ORCH-2](../ORCH-2--5ffeb926/task.md)
-- **blocked by** [ORCH-3](../ORCH-3--d75a3b68/task.md)
-- **blocked by** [ORCH-4](../ORCH-4--282a2e9c/task.md)
-- **relates to** [DEPLOY-3](../../DEPLOY/DEPLOY-3--9eaf2d19/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

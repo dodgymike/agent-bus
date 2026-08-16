@@ -45,17 +45,12 @@ RED verification observed (2026-08-08): confirmed via a REAL check (not file-abs
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [MTLS-VERIFY-FU](../../AUTH/MTLS-VERIFY-FU--5f8e0cba/task.md)
-- **blocked by** [DISCOVERY-DOC-FU-README](../../DOCS/DISCOVERY-DOC-FU-README--be3c84f3/task.md)
-- **blocked by** [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md)
-- **blocked by** [MTLS-VERIFY-FU-DOCSCHEME](../../DOCS/MTLS-VERIFY-FU-DOCSCHEME--cb4fd330/task.md)
-- **blocked by** [f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78](../../DOCS/Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md)
-- **blocks** [HANDOVER-DOCMAP](../HANDOVER-DOCMAP--e5802f9d/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

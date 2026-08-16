@@ -58,14 +58,12 @@ User-directed acceptance revision (2026-08-09): accept the shipped v7 checkpoint
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md)
-- **blocks** [ACK-2](../../ACK/ACK-2--9564f953/task.md)
-- **follow-up** [8fb219ca-1236-4058-9020-afd52a7e93f3](../WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

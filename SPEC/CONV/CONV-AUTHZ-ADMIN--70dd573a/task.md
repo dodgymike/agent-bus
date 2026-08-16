@@ -60,13 +60,12 @@ READ IN FULL: INVARIANTS.md invariants 3 and 11.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md)
-- **relates to** [CONV-SUCCESSION](../CONV-SUCCESSION--422be55b/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
@@ -86,6 +85,7 @@ READ IN FULL: INVARIANTS.md invariants 3 and 11.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (todo)
 - [CONV-AUTHZ-CREATOR](../CONV-AUTHZ-CREATOR--4abd8589/task.md) — CONV-AUTHZ-CREATOR: only the creator may change the recipient list -- the arm that can sh… (todo)
 
 ---

@@ -47,13 +47,12 @@ full 857-line block.
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocked by** [083c468e-7dbd-4d1f-93fc-53617e28421f](../../MTLS/CONTRACTS-CLI.md-client-export-table-is-missing-the-thre--083c468e/task.md)
-- **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -54,14 +54,12 @@ REPLACEMENT proof_cmd (2026-08-02, main/orchestrator), verified clause-by-clause
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **blocks** [HANDOVER-BACKLOG-RECONCILE](../../HANDOVER/HANDOVER-BACKLOG-RECONCILE--43d14776/task.md)
-- **relates to** [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md)
-- **relates to** [RELAY-6](../../RELAY/RELAY-6--0f7275b9/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 

@@ -26,12 +26,12 @@ DECISIONS.md:1302 names scripts/bus-serve.sh:54 and HEALTH_URL="http://..." as f
 
 ## Relations (authoritative)
 
-> Authoritative, from the Spec Server's relations resource. `blocks` is inert
-> metadata — it never changes a task's status, so the status shown is always the
-> task's own field.
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
 
 
-- **follow-up of** [10e93262-8e34-4738-b435-bfe23d880057](../../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md)
+_Unknown._
 
 ## Referenced in description (derived, not authoritative)
 
