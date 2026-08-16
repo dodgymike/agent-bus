@@ -63,6 +63,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"strings"
@@ -71,6 +72,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/ack"
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/buscert"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/hub"
@@ -78,6 +80,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/relay"
+	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -129,6 +132,7 @@ func (l hubIngest) AcceptRelayed(ctx context.Context, m relay.RelayedMessage) (r
 		Recipients:         m.Recipients,
 		Body:               m.Body,
 		OriginMessageID:    m.OriginMessageID,
+		OriginAttestation:  m.OriginAttestation,
 		BusPath:            m.BusPath,
 		TimestampUnixMilli: m.TimestampUnixMilli,
 		Signature:          m.Signature,
@@ -150,6 +154,221 @@ func (l hubIngest) AcceptRelayed(ctx context.Context, m relay.RelayedMessage) (r
 		return relay.LocalAcceptance{Outcome: res.Outcome}, err
 	}
 	return relay.LocalAcceptance{LocalMessageID: res.MessageID, Outcome: res.Outcome}, nil
+}
+
+// recoverRelayEnvelope is ForwarderOptions.RecoverMessage, as a named function.
+//
+// It answers ONE question, asked only by relay.Forwarder.Resume and therefore
+// only after a restart: "here is the correlation key of a delivery this bus
+// still owes a peer -- rebuild the envelope, or tell me it cannot be rebuilt."
+// The three answers it can give are the three the forwarder distinguishes:
+//
+//	(env, true, nil)   rebuilt; the job is RE-OFFERED
+//	(_, false, nil)    no such message; the job is settled ABANDONED, and this
+//	                   is the ORDINARY case -- the message aged out of the
+//	                   retained window
+//	(_, false, err)    the message is there and the envelope cannot be built;
+//	                   the job is settled ABANDONED and the reason is logged
+//
+// # WHY IT IS NOT A CLOSURE IN main.go
+//
+// It used to be, and being one made it effectively untestable: the only way to
+// reach it was to boot a whole server, and the only thing it has to get right is
+// what happens after a CRASH. A crash test that re-implements the closure beside
+// itself proves the test's copy correct and says nothing about production's.
+// Taking the store and the local-envelope builder as PARAMETERS is what lets the
+// real thing be called directly. main.go keeps only the nil-wiring guard, which
+// is about construction order rather than about recovery.
+//
+// # localEnvelope IS THE ORIGINATED-HERE BUILDER, AND IT IS NOT USED FOR TRANSIT
+//
+// It is relayEgress.envelope in production: the builder for a message THIS BUS
+// ORIGINATED, which names this bus as the origin and MINTS a fresh attestation
+// from the local roster. A relay-INGESTED message must never go through it (it
+// would claim somebody else's message as ours, and attest.Sign would refuse to
+// attest their agent anyway -- invariant 2), which is exactly why the branch
+// below sends transit traffic to relayedOriginEnvelope instead.
+func recoverRelayEnvelope(localBusID string, st *store.Store, localEnvelope func(store.Message) (relay.RelayedMessage, error), originMessageID string) (relay.RelayedMessage, bool, error) {
+	m, ok := st.ByOriginMessageID(originMessageID)
+	if !ok {
+		// "No such message" -- a settled, ABANDONED job per
+		// ForwarderOptions.RecoverMessage. Not an error: the message
+		// aged out of the retained window, which is ordinary.
+		return relay.RelayedMessage{}, false, nil
+	}
+	if m.OriginMessageID != "" {
+		// A RELAYED-IN MESSAGE, AND IT IS REBUILT RATHER THAN REFUSED
+		// (RELAY-48). This arm used to return an error, which
+		// Forwarder.resumeJob turns into a settled ABANDONED job -- so a
+		// pending ONWARD hop did not survive a restart, after this bus had
+		// already answered the upstream peer 200. That peer will not
+		// resend; the obligation was simply destroyed.
+		//
+		// TWO THINGS HAD TO CHANGE, AND ONE ALONE WOULD HAVE BEEN WORSE
+		// THAN NEITHER. The first is that the ingest now records the
+		// origin's message id durably (hub.publish, via
+		// store.WithRelayOrigin), which is what makes the
+		// ByOriginMessageID lookup above HIT at all. On its own that
+		// change reaches exactly this line and fails here instead --
+		// moving the abandonment's reason string and nothing else. The
+		// second is that the same write records the ORIGIN'S
+		// ATTESTATION, which is the one field of the outbound envelope
+		// this bus can never regenerate: attest.Sign refuses to attest an
+		// agent in another bus's namespace (invariant 2), so a
+		// relayed-in envelope was previously unbuildable from durable
+		// state BY CONSTRUCTION. It is now buildable, from the record and
+		// from nothing else.
+		//
+		// ONE BUILDER PER PROVENANCE, NOT ONE BUILDER FOR BOTH. This is
+		// deliberately NOT egressAdapter.envelope: that one names THIS bus
+		// as the origin, uses the LOCAL message id and MINTS an
+		// attestation from the local roster, all three of which are wrong
+		// for somebody else's message. See relayedOriginEnvelope for the
+		// full argument, including the bus-path convention it has to
+		// invert.
+		//
+		// A REFUSAL HERE IS STILL AN ABANDONED JOB, and the one case that
+		// still reaches it is a message relay-ingested BEFORE this bus had
+		// anywhere durable to keep the attestation. That is a genuine,
+		// bounded, historical loss and it is logged loudly and
+		// specifically by the forwarder rather than silently (invariant 6).
+		env, err := relayedOriginEnvelope(localBusID, m)
+		if err != nil {
+			return relay.RelayedMessage{}, false, err
+		}
+		return env, true, nil
+	}
+	// ONE ENVELOPE BUILDER, REUSED. The live forward path and this
+	// recovery path must not be two constructions that could disagree
+	// about what goes on the wire.
+	env, err := localEnvelope(m)
+	if err != nil {
+		return relay.RelayedMessage{}, false, err
+	}
+	return env, true, nil
+}
+
+// relayedOriginEnvelope rebuilds the ONWARD envelope for a message this bus
+// INGESTED over a relay hop, from durable state alone (RELAY-48).
+//
+// # WHY IT IS A SEPARATE BUILDER FROM relayEgress.envelope
+//
+// They answer different questions and neither can answer the other's. envelope()
+// builds the envelope for a message THIS BUS ORIGINATED: it names this bus as the
+// origin, uses the LOCAL message id, and MINTS a fresh attestation from the local
+// roster. Every one of those is wrong here, and the last is not merely wrong but
+// forbidden — attest.Sign refuses a subject in another bus's namespace
+// (invariant 2), which is the whole reason the origin's attestation has to be
+// durable rather than regenerated.
+//
+// So this is the one place a relay-ingested message becomes an outbound envelope
+// again, and it does it by CARRYING what the origin said, never by restating it.
+//
+// # THE TWO BUS-PATH CONVENTIONS, WHICH ARE THE TRAP ON THIS PATH
+//
+// store.Message.BusPath is the path INCLUDING this bus's own hop, appended at
+// ingest. relay.RelayedMessage.BusPath is the path AS RECEIVED, WITHOUT it —
+// Forward appends our hop itself via AppendHop. So the final hop is stripped
+// here, and it is CHECKED to be ours before stripping rather than assumed: a
+// message whose last hop is somebody else has not been through this bus's ingest
+// and nothing about the rest of this function would be true of it.
+//
+// # EVERY FAILURE IS A REFUSAL, NEVER A GUESS
+//
+// The caller (Forwarder.RecoverMessage) turns an error into a settled, ABANDONED
+// job with the reason logged. That is the right outcome for all of these: what
+// must never happen is an envelope assembled around a missing or invented field,
+// because the far end would refuse it as a forgery and the two cases would be
+// indistinguishable to an operator.
+func relayedOriginEnvelope(localBusID string, m store.Message) (relay.RelayedMessage, error) {
+	if m.OriginMessageID == "" {
+		return relay.RelayedMessage{}, fmt.Errorf("message %s carries no origin message id, so it did not arrive over a relay hop and has no origin envelope to rebuild", m.ID)
+	}
+	originBus, originSeq, err := ids.ParseMessageID(m.OriginMessageID)
+	if err != nil {
+		// Structurally unreachable: both store.Message.WithRelayOrigin and
+		// store.Decode parse this field, so it cannot reach a durable message
+		// unparsed. Checked because the alternative is building an envelope around
+		// an origin bus id nobody validated.
+		return relay.RelayedMessage{}, fmt.Errorf("message %s carries an unparseable origin message id: %w", m.ID, err)
+	}
+	if !m.HasOriginAttestation() {
+		// THE ONE GENUINELY LOSSY CASE, and it is a bounded, historical one: a
+		// message relay-ingested by a build that had nowhere durable to keep the
+		// origin's attestation. This bus cannot mint a replacement for another
+		// bus's agent and must not send an unattested envelope — the peer would
+		// refuse it, and that refusal would be indistinguishable from an attack.
+		return relay.RelayedMessage{}, fmt.Errorf("message %s was relayed to this bus from %s but its durable record carries NO origin attestation, so no envelope the next hop could verify can be rebuilt for it. This bus cannot mint one: attesting an agent in another bus's namespace is exactly what invariant 2 forbids. A record written before RELAY-48 looks like this, and the onward hop of that message is unrecoverable", m.ID, originBus)
+	}
+	if len(m.BusPath) < 2 {
+		return relay.RelayedMessage{}, fmt.Errorf("message %s claims origin %s but its bus path has %d hop(s); a relay-ingested message has at least the origin's hop and ours", m.ID, m.OriginMessageID, len(m.BusPath))
+	}
+	// EXACT equality, NOT strings.EqualFold. It mirrors the check on the write
+	// path that produced this path -- store.NewMessageWithBusPath requires the
+	// stored path to END with this bus's id, and it compares exactly -- and a
+	// mirror looser than its original is a mirror that admits something the
+	// original refused. Unreachable through the write path either way; the point
+	// is that the two cannot drift apart.
+	if last := m.BusPath[len(m.BusPath)-1]; last != localBusID {
+		return relay.RelayedMessage{}, fmt.Errorf("message %s has bus path ending at %q rather than at this bus (%q); the stored path of an ingested message always ends with our own hop, so this record was not written by this bus's ingest", m.ID, last, localBusID)
+	}
+
+	return relay.RelayedMessage{
+		// THE ORIGIN IS THEIRS, NOT OURS. Both halves come out of the ONE durable
+		// correlation field, so they cannot drift from each other.
+		OriginBus:       originBus,
+		OriginMessageID: m.OriginMessageID,
+		OriginSeq:       originSeq,
+
+		Sender:     m.Sender,
+		Broadcast:  m.Broadcast,
+		Recipients: append([]string(nil), m.Recipients...),
+
+		// AS RECEIVED: our own final hop removed, so AppendHop can put it back.
+		// Leaving it on would hand AppendHop a path it is already on and every
+		// resumed forward would come back ErrRelayLoop.
+		BusPath: append([]string(nil), m.BusPath[:len(m.BusPath)-1]...),
+
+		// THE SIGNED TIMESTAMP, not this bus's acceptance clock. It is inside the
+		// canonical bytes the origin agent's signature covers; substituting SentAt
+		// would make every resumed message fail verification at the far end.
+		TimestampUnixMilli: m.TimestampUnixMilli,
+
+		// VERBATIM, and the reason this task existed. Copied rather than aliased
+		// for the same reason relay's own cloneAttestation copies.
+		OriginAttestation: cloneRelayedAttestation(m.OriginAttestation),
+
+		Signature:     append([]byte(nil), m.Signature...),
+		Body:          append([]byte(nil), m.Body...),
+		ContentSHA256: m.ContentSHA256,
+
+		// THE RELAY IDEMPOTENCY KEY IS THE ORIGIN MESSAGE ID — not this bus's id,
+		// which is what relayEgress.envelope uses because there the two are the
+		// same value. ValidateRelayRequest REFUSES an envelope whose key differs
+		// from its origin message id, and that equality is what makes two copies
+		// arriving by disjoint paths land on ONE idem.Scope at the far end.
+		IdempotencyKey: m.OriginMessageID,
+
+		// Fingerprint is left ZERO deliberately: relayFingerprint is unexported,
+		// the receiving bus derives it itself inside ValidateRelayRequest, and a
+		// DIFFERENT value computed here would be worse than none.
+	}, nil
+}
+
+// cloneRelayedAttestation snapshots the two byte slices inside a value-typed
+// attestation on its way from the durable store onto an envelope.
+//
+// internal/relay has an identical unexported helper and this package cannot
+// reach it. The duplication is deliberate and is the lesser of the two evils on
+// offer: the alternative is exporting a mutable-slice-copying helper from relay
+// purely for this call, and a struct assignment ALONE — which is what the
+// duplication exists to prevent — silently aliases key and signature bytes into
+// an envelope that is about to be queued for later transmission.
+func cloneRelayedAttestation(a attest.Attestation) attest.Attestation {
+	out := a
+	out.MessagingPublicKey = append(ed25519.PublicKey(nil), a.MessagingPublicKey...)
+	out.Signature = append([]byte(nil), a.Signature...)
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,7 +1329,6 @@ func newFederation(opts federationOptions) (*federation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("relay wiring: %w", err)
 	}
-
 	ackIngest, err := relay.NewAckHandler(relay.AckConfig{
 		BusID: opts.BusID,
 		// The SAME table the forwarder wrote the obligation to. relay.AckHandler

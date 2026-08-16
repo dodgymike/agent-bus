@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
@@ -59,6 +60,33 @@ type RelayedIngestRequest struct {
 	// It is NEVER this message's identity here: this bus mints its own id and
 	// never adopts a peer's (invariant 1).
 	OriginMessageID string
+
+	// OriginAttestation is the ORIGIN bus's signed binding of Sender to Sender's
+	// messaging public key, exactly as it arrived. It is MANDATORY on this path
+	// and is carried straight to the durable record (store.Message.OriginAttestation).
+	//
+	// # WHY THE DURABILITY LAYER NEEDS IT AT ALL (RELAY-48)
+	//
+	// Because the ONWARD hop is rebuilt from durable state after a restart, and
+	// this is the one thing in that envelope this bus cannot regenerate: minting
+	// an attestation for an agent in ANOTHER bus's namespace is precisely what
+	// invariant 2 and the federation-trust design forbid. Without it a pending
+	// onward job is settled ABANDONED at the next boot — after this bus already
+	// answered the upstream peer 200.
+	//
+	// # IT IS NOT VERIFIED HERE, AND MUST NOT BE
+	//
+	// It has ALREADY been verified, against the origin bus's peering-time pin, by
+	// relay.ValidateRelayRequest before a relay.RelayedMessage existed at all. The
+	// pins live in the relay peer store and deliberately never reach this package.
+	// What store.WithRelayOrigin re-checks on the way to disk is SHAPE and
+	// BINDING-TO-SENDER — the same posture this package takes to Signature.
+	//
+	// An absent or malformed one FAILS THE INGEST, before anything is written.
+	// That is the fail-closed direction on purpose: refusing a message the peer
+	// will retry is a smaller failure than accepting an obligation we have
+	// already made ourselves unable to keep.
+	OriginAttestation attest.Attestation
 
 	// BusPath is the path AS RECEIVED: origin-first, and NOT yet including this
 	// bus. It is the value relay.RelayedMessage.BusPath carries, handed over
@@ -226,6 +254,10 @@ func (h *Hub) IngestRelayed(ctx context.Context, req RelayedIngestRequest) (Rela
 		// The origin's assignment, for the audit content hash ONLY (signedAs).
 		originMessageID: req.OriginMessageID,
 		originSeq:       originSeq,
+		// The origin's attestation, for the DURABLE RECORD (RELAY-48). Unlike the
+		// two fields above it is not an audit input at all: it never reaches
+		// wal.AuditRecord, which hub's auditRecordFor assembles field by field.
+		originAttestation: req.OriginAttestation,
 	})
 	if err != nil {
 		if outcome == idem.OutcomeViolation {

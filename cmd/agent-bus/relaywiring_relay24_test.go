@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/ack"
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/idem"
@@ -186,6 +187,23 @@ func relayedTo(t *testing.T, to string, path ...string) relay.RelayedMessage {
 		Recipients:      []string{to},
 		BusPath:         path,
 		Body:            []byte("hello"),
+		// The ORIGIN bus's attestation for the sender (RELAY-48). It is MANDATORY
+		// on the ingest path -- store.WithRelayOrigin refuses a message without one
+		// -- because it is the only field of the ONWARD envelope this bus cannot
+		// regenerate after a restart, and accepting an obligation we could never
+		// discharge is worse than refusing the message.
+		//
+		// Well-formed but not genuine, which is the right fidelity for this seam:
+		// the hub validates SHAPE and BINDING-TO-SENDER and never verifies, since
+		// verification needs the origin bus's pinned signing key and happens in
+		// internal/relay before this seam is reached.
+		OriginAttestation: attest.Attestation{
+			AgentID:            sender,
+			MessagingPublicKey: bytes.Repeat([]byte{0xCD}, ed25519.PublicKeySize),
+			IssuedAtUnixMilli:  1754130896789,
+			NotAfterUnixMilli:  1754130896789 + 86_400_000,
+			Signature:          bytes.Repeat([]byte{0xEF}, signing.SignatureSize),
+		},
 	}
 }
 

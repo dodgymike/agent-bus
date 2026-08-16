@@ -830,6 +830,17 @@ func copyMessage(m Message) Message {
 	out.Body = append([]byte(nil), m.Body...)
 	out.Recipients = append([]string(nil), m.Recipients...)
 	out.BusPath = append([]string(nil), m.BusPath...)
+	// The origin attestation is a VALUE with two byte slices inside it, so struct
+	// assignment alone would hand every caller a view onto the stored key and
+	// signature bytes. Its consumer is the ONWARD relay envelope
+	// (RELAY-48), which is exactly the sort of hold-then-send that a
+	// time-of-check/time-of-use mutation would poison.
+	//
+	// NOTE what is still shallow here and is NOT this task's to fix:
+	// Message.Signature. That is RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY, filed and
+	// owned separately, and relayegress.envelope copies it defensively at the one
+	// place it matters today.
+	out.OriginAttestation = cloneAttestation(m.OriginAttestation)
 	return out
 }
 

@@ -124,11 +124,13 @@ func relayCrashRequest(t *testing.T) hub.RelayedIngestRequest {
 	if err != nil {
 		t.Fatalf("ids.MessageID(%q, %d): %v", relayCrashOriginBus, relayCrashOriginSeq, err)
 	}
+	sender := agentID(t, relayCrashOriginBus, relayCrashOriginAgent)
 	return hub.RelayedIngestRequest{
-		Sender:          agentID(t, relayCrashOriginBus, relayCrashOriginAgent),
-		Recipients:      []string{agentID(t, testBusID, relayCrashLocalAgent)},
-		Body:            relayCrashBody,
-		OriginMessageID: origin,
+		Sender:            sender,
+		Recipients:        []string{agentID(t, testBusID, relayCrashLocalAgent)},
+		Body:              relayCrashBody,
+		OriginMessageID:   origin,
+		OriginAttestation: fixtureOriginAttestation(sender),
 		// The path AS RECEIVED — NOT including this bus. IngestRelayed appends
 		// our own hop.
 		BusPath:            []string{relayCrashOriginBus, relayCrashMiddleBus},
@@ -143,11 +145,13 @@ func relayCrashPeerBucketRequest(t *testing.T, originBus, agent string, seq uint
 	if err != nil {
 		t.Fatalf("ids.MessageID(%q, %d): %v", originBus, seq, err)
 	}
+	sender := agentID(t, originBus, agent)
 	return hub.RelayedIngestRequest{
-		Sender:             agentID(t, originBus, agent),
+		Sender:             sender,
 		Recipients:         []string{agentID(t, testBusID, relayCrashLocalAgent)},
 		Body:               []byte("peer bucket crash fixture " + originBus + agent),
 		OriginMessageID:    origin,
+		OriginAttestation:  fixtureOriginAttestation(sender),
 		BusPath:            []string{originBus, relayCrashMiddleBus},
 		TimestampUnixMilli: fixtureTimestampMs,
 		Signature:          fixtureSignature(),

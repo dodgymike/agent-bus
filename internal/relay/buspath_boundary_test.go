@@ -1,16 +1,20 @@
 package relay_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/relay"
+	"github.com/dodgymike/agent-bus/internal/signing"
 	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -106,10 +110,27 @@ func boundaryRequest(t *testing.T, originBus, localBus string, seq uint64, path 
 	if err != nil {
 		t.Fatalf("message id: %v", err)
 	}
+	now := time.Now().UnixMilli()
 	return hub.RelayedIngestRequest{
 		Sender: sender, Recipients: []string{recipient}, Body: []byte("boundary"),
-		OriginMessageID: messageID, BusPath: path, TimestampUnixMilli: time.Now().UnixMilli(),
+		OriginMessageID: messageID, BusPath: path, TimestampUnixMilli: now,
 		Signature: make([]byte, 64),
+
+		// RELAY-48 made this MANDATORY: the hub refuses a relayed ingest that
+		// carries no origin attestation, because without one the message cannot
+		// be rebuilt into an origin envelope after a restart and its onward hop
+		// is abandoned. This fixture is about the BUS-PATH boundary, so the
+		// attestation only has to be well-formed — it is never verified here.
+		// Shape copied from RELAY-48's own r48Attestation rather than invented,
+		// so the two stay in step.
+		OriginAttestation: attest.Attestation{
+			AgentID:            sender,
+			MessagingPublicKey: bytes.Repeat([]byte{0x5A}, ed25519.PublicKeySize),
+			KeyEpoch:           99,
+			IssuedAtUnixMilli:  now,
+			NotAfterUnixMilli:  now + 86_400_000,
+			Signature:          bytes.Repeat([]byte{0xA5}, signing.SignatureSize),
+		},
 	}
 }
 

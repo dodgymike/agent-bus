@@ -1007,55 +1007,23 @@ func run(cfg Config) error {
 				if h == nil || egressAdapter == nil {
 					return relay.RelayedMessage{}, false, errors.New("the hub and the egress adapter are not constructed yet; Resume ran before the wiring completed, which is a startup-ordering fault in this build")
 				}
-				m, ok := h.Store().ByOriginMessageID(originMessageID)
-				if !ok {
-					// "No such message" -- a settled, ABANDONED job per
-					// ForwarderOptions.RecoverMessage. Not an error: the message
-					// aged out of the retained window, which is ordinary.
-					return relay.RelayedMessage{}, false, nil
-				}
-				if m.OriginMessageID != "" {
-					// A RELAYED-IN message: this bus cannot rebuild an ORIGIN
-					// envelope for somebody else's message, because envelope()
-					// would claim THIS bus as the origin and mint an attestation
-					// for an agent in their namespace (invariant 2).
-					//
-					// THE REASON THIS IS UNREACHABLE CHANGED AT RELAY-47, AND THE
-					// OLD REASON IS NOW FALSE. It read "Unreachable today --
-					// relayEgress.Forward declines those, so no outbox job can name
-					// one". An outbox job CAN name one now: onward relay enqueues a
-					// relay-ingested message under the ORIGIN bus's message id
-					// (relay.Forwarder.Enqueue -> OutboxJob.OriginMessageID). What
-					// keeps this line unreached is something else entirely, and it
-					// is worse rather than better: NOTHING in this build ever sets
-					// store.Message.OriginMessageID, so Store.byOrigin is empty, the
-					// ByOriginMessageID lookup above MISSES, and Resume settles the
-					// job ABANDONED at the !ok arm before ever reaching here.
-					//
-					// So a pending ONWARD hop does not survive a restart. It is
-					// logged loudly by the forwarder (invariant 6 holds), and the
-					// obligation is destroyed rather than retried -- the peer was
-					// told 200 and will not resend. Locally-originated hops are
-					// unaffected: their ids ARE this bus's, so the fallback in
-					// ByOriginMessageID resolves them.
-					//
-					// FIXING IT IS NOT A COMMENT AWAY, which is why this stays a
-					// filed follow-up rather than a patch here: store.Message has no
-					// OriginAttestation field, and RelayRequest.OriginAttestation is
-					// REQUIRED and is verified by the next hop, so a relayed-in
-					// envelope is unbuildable from durable state by construction.
-					// The live path works only because the in-memory RelayedMessage
-					// still carries the origin's attestation.
-					return relay.RelayedMessage{}, false, fmt.Errorf("message %q was relayed to this bus rather than originated here, so this bus cannot rebuild an origin envelope for it", originMessageID)
-				}
-				// ONE ENVELOPE BUILDER, REUSED. The live forward path and this
-				// recovery path must not be two constructions that could disagree
-				// about what goes on the wire.
-				env, err := egressAdapter.envelope(m)
-				if err != nil {
-					return relay.RelayedMessage{}, false, err
-				}
-				return env, true, nil
+				// THE DECISION ITSELF IS A NAMED FUNCTION, not this closure's body
+				// (RELAY-48). This closure is reachable only by starting a whole
+				// server, so a body written inline here can be exercised only through
+				// a full boot -- and the one thing it has to get right is what happens
+				// AFTER A CRASH. recoverRelayEnvelope takes exactly the two things it
+				// needs, so a crash test calls the SAME code the server calls rather
+				// than a re-implementation of it that could agree with the test and
+				// disagree with production.
+				//
+				// busID, NOT cfg.BusID: cfg.BusID is the TEST-ONLY -bus-id flag and is
+				// EMPTY in every production run, while busID is what
+				// ids.LoadOrCreateBusID resolved and is the hop this bus actually
+				// stamps onto the messages it ingests (invariant 1). Passing the flag
+				// would compare every stored bus path's final hop against "" and
+				// abandon every resumed relayed job -- the precise defect RELAY-48
+				// fixes, reintroduced by a plausible-looking identifier.
+				return recoverRelayEnvelope(busID, h.Store(), egressAdapter.envelope, originMessageID)
 			},
 			Logger: lg,
 		})
@@ -1312,8 +1280,19 @@ func run(cfg Config) error {
 			// than stopping. It is the same *relay.Forwarder the egress adapter
 			// holds, reached through an interface-typed variable so a
 			// non-federated build passes a genuinely nil seam.
-			Onward:       onwardForwarder,
-			Peers:        peerStore,
+			Onward: onwardForwarder,
+			Peers:  peerStore,
+			// THE SAME outbox the egress forwarder writes obligations to, and
+			// THE SAME ack store the applier map already holds. Both are passed
+			// rather than rebuilt for the reason Registry is: a second copy of
+			// either would let a hop be owed on one table and unknown on the
+			// other, and the ACK plane's anti-forgery rule (ACK-CONTRACT.md §6.2)
+			// is precisely a lookup in the first of them.
+			//
+			// relayOutbox is non-nil on this branch — it is built on the same
+			// peer-store branch that made `bindable > 0` reachable — and
+			// newFederation refuses a nil one rather than serving an ACK route
+			// that could bind nothing.
 			Outbox:       relayOutbox,
 			AckLifecycle: ackStore,
 			// The applied-key table's own pressure line, read live. It is what
@@ -1393,18 +1372,28 @@ func run(cfg Config) error {
 		//                           with a heuristic that fires on correct
 		//                           traffic.
 		//
-		//                           And an onward hop is NOT re-offered after a
-		//                           restart: the outbox record survives, but the
-		//                           envelope cannot be rebuilt from durable state
-		//                           (see RecoverMessage above), so Resume settles
-		//                           it abandoned. Locally-originated hops DO
-		//                           resume.
+		//                           The ONWARD hop IS crash-safe as of RELAY-48:
+		//                           the durable message record now carries the
+		//                           origin's message id AND the origin's
+		//                           attestation, so Resume rebuilds the envelope
+		//                           and RE-OFFERS the hop instead of abandoning
+		//                           it. The ONE residual is a message
+		//                           relay-ingested by a PRE-RELAY-48 binary: its
+		//                           record has no attestation, this bus may not
+		//                           mint one for another bus's agent (invariant
+		//                           2), and that message's onward hop is
+		//                           unrecoverable. It is settled abandoned with
+		//                           the reason logged, one job at a time.
 		//
 		// This line said "It does NOT carry a message RECEIVED from one peer
 		// onward to a further hop -- multi-hop onward relay is not implemented, so
 		// this bus is a leaf", with onward_relay=false, and that was true when
-		// written. It is corrected rather than deleted.
-		lg.Info("FEDERATION is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents, it FORWARDS messages its own agents originate to agents on a peer bus through the durable relay outbox, and it CARRIES a message received from one peer onward to a further hop when the destination routes to a different peer. THE ONWARD HOP IS NOT YET CRASH-SAFE and is the one part of that sentence not covered by the outbox: a hop still owed when this bus stops is settled ABANDONED at the next start rather than re-offered, because an intermediate cannot rebuild the origin's signed envelope from durable state. A message with no route, one whose next hop has already seen it, or one at the traversed-path limit is carried no further; one that reaches no peer at all is logged individually, one that reaches only some of its destinations is not",
+		// written. It is corrected rather than deleted. It then said "THE ONWARD
+		// HOP IS NOT YET CRASH-SAFE ... because an intermediate cannot rebuild the
+		// origin's signed envelope from durable state", which RELAY-48 falsified
+		// in this same file; a stale operator-facing claim reads as freshly
+		// checked, which is worse than no claim.
+		lg.Info("FEDERATION is served: peer routes are registered behind the TLS client certificate principal. This bus ACCEPTS relayed messages for its own agents, it FORWARDS messages its own agents originate to agents on a peer bus through the durable relay outbox, and it CARRIES a message received from one peer onward to a further hop when the destination routes to a different peer. THE ONWARD HOP IS CRASH-SAFE (RELAY-48): a hop still owed when this bus stops is RE-OFFERED at the next start, rebuilt from the durable record, which carries the origin's message id and the origin's attestation. The one exception is a message ingested by a pre-RELAY-48 binary, whose record has no attestation and whose onward hop cannot be rebuilt; that is settled abandoned with the reason logged. A message with no route, one whose next hop has already seen it, or one at the traversed-path limit is carried no further; one that reaches no peer at all is logged individually, one that reaches only some of its destinations is not",
 			"bus_id", busID,
 			"bindable_peers", bindable,
 			"trusted_buses", len(peerStore.TrustedBuses()),

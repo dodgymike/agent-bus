@@ -84,6 +84,27 @@ const egTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
 // signing.SignatureSize bytes are as good as a real signature here.
 func egSignature() []byte { return bytes.Repeat([]byte{0xAB}, signing.SignatureSize) }
 
+// egOriginAttestation is the ORIGIN bus's attestation for a foreign sender, as
+// every relay-ingest fixture must now carry it (RELAY-48): the hub REQUIRES one,
+// because it is the only field of a later ONWARD envelope this bus could never
+// regenerate, and accepting an obligation we could not discharge is worse than
+// refusing the message.
+//
+// Well-formed but not genuine, which is the right fidelity here: the durability
+// layer validates SHAPE and BINDING-TO-SENDER and never verifies — verification
+// needs the origin bus's peering-time pinned signing key and happens in
+// internal/relay, before the hub is reached.
+func egOriginAttestation(t *testing.T, sender string) attest.Attestation {
+	t.Helper()
+	return attest.Attestation{
+		AgentID:            sender,
+		MessagingPublicKey: bytes.Repeat([]byte{0xCD}, ed25519.PublicKeySize),
+		IssuedAtUnixMilli:  egTimestampMs,
+		NotAfterUnixMilli:  egTimestampMs + 86_400_000,
+		Signature:          bytes.Repeat([]byte{0xEF}, signing.SignatureSize),
+	}
+}
+
 // egSHA256 is the content hash the store computes, recomputed here so an
 // assertion compares two independently-derived values rather than one value
 // with itself.
@@ -690,6 +711,7 @@ func TestLocalMessageForPeerRecipientReachesForwarder(t *testing.T) {
 			Recipients:         []string{f.local},
 			Body:               []byte("relayed in"),
 			OriginMessageID:    originID,
+			OriginAttestation:  egOriginAttestation(t, foreignSender),
 			BusPath:            []string{egOriginBus},
 			TimestampUnixMilli: egTimestampMs,
 			Signature:          egSignature(),

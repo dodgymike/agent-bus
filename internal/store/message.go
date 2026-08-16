@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
@@ -193,6 +195,48 @@ type Message struct {
 	// adopts a peer's (invariant 1).
 	OriginMessageID string
 
+	// OriginAttestation is the ORIGIN bus's signed binding of Sender to Sender's
+	// MESSAGING public key, carried VERBATIM from the hop that delivered this
+	// message. Like OriginMessageID it is present ONLY on a message this bus
+	// INGESTED over a relay hop; the ZERO value means "this bus is the origin",
+	// which is not an error but the ordinary case for every message this bus
+	// minted itself. Set through WithRelayOrigin, which sets it together with
+	// OriginMessageID because the two are useless apart (see there).
+	//
+	// # WHY IT MUST BE DURABLE — RELAY-48
+	//
+	// It is the ONE field an ONWARD hop needs that nothing else on this type can
+	// supply. Everything else the next hop's envelope requires is already here
+	// (Sender, Recipients, BusPath, TimestampUnixMilli, Signature, Body,
+	// ContentSHA256, and the origin bus and sequence, which are the two halves of
+	// OriginMessageID) — but relay's ValidateRelayRequest REQUIRES an origin
+	// attestation and this bus CANNOT mint one: attest.Sign refuses a subject in
+	// another bus's namespace (invariant 2), and re-attesting somebody else's
+	// agent is the one thing the federation-trust design forbids outright.
+	//
+	// So without it a relayed-in envelope is unbuildable from durable state, and
+	// a pending onward hop that survives to the next boot as an outbox job is
+	// settled ABANDONED — after this bus already answered the upstream peer 200.
+	// That is invariant 4's promise broken in spirit: we accepted the obligation
+	// durably and then destroyed it. It is not enough for the value to be in
+	// memory, because its only reader (relay.Forwarder.Resume) runs ONLY after a
+	// restart, which is precisely when memory is gone.
+	//
+	// # IT IS AUTHENTICITY METADATA, NOT A BODY (invariant 6)
+	//
+	// It names an agent, a public key, an epoch and two timestamps, and it is
+	// signed by a bus. It carries no part of the message's content and cannot be
+	// used to recover any: the body is covered by Signature, not by this. It is
+	// therefore routing/authenticity metadata of exactly the kind invariant 6
+	// sanctions — and note that it does NOT reach the AUDIT log at all, because
+	// wal.AuditRecord is assembled field by field in hub's auditRecordFor and
+	// this field is not among them.
+	//
+	// It is INERT in every ordering, cursor and retention decision, for the same
+	// reason OriginMessageID is: it is never compared, never sorted on, and never
+	// consulted to decide what a reader may see or what ages out.
+	OriginAttestation attest.Attestation
+
 	// Sender is the fully-qualified "<bus-id>.<agent-id>" of the authenticated
 	// sender (invariant 2).
 	Sender string
@@ -297,6 +341,23 @@ func (m Message) OriginID() string {
 
 // WithOriginMessageID returns a COPY of m carrying originMessageID.
 //
+// # IT SETS THE CORRELATION KEY AND NOTHING ELSE — THE RELAY INGEST WANTS
+// # WithRelayOrigin
+//
+// A relay ingest needs TWO durable facts, and this method writes only one of
+// them. Setting the id alone produces a message that Store.ByOriginMessageID can
+// FIND after a restart and that nothing can then REBUILD AN ENVELOPE FOR, because
+// the origin attestation the next hop requires is missing (see
+// Message.OriginAttestation). That is not a smaller version of the fix for
+// RELAY-48, it is the SAME defect wearing a different reason string: the onward
+// job stops being abandoned for "no such message" and starts being abandoned for
+// "could not be read back". Both destroy an obligation this bus already answered
+// 200 for.
+//
+// So this method survives as the ID-ONLY setter for tests and for callers that
+// genuinely have nothing else to record, and the INGEST PATH MUST CALL
+// WithRelayOrigin.
+//
 // # Why a setter and not a constructor parameter
 //
 // The origin id is known to the RELAY INGEST, which builds its message through
@@ -353,6 +414,133 @@ func (m Message) WithOriginMessageID(originMessageID string) (Message, error) {
 	out := m
 	out.OriginMessageID = originMessageID
 	return out, nil
+}
+
+// WithRelayOrigin returns a COPY of m marked as INGESTED OVER A RELAY HOP: it
+// carries the origin bus's message id AND the origin bus's attestation for the
+// sender, and it is the ONE call the relay ingest path makes.
+//
+// # WHY THE TWO FIELDS ARE SET TOGETHER AND NOT SEPARATELY (RELAY-48)
+//
+// They are useless apart. The id is what Store.ByOriginMessageID resolves after
+// a restart; the attestation is what makes the message the id resolves to
+// re-sendable. A message with the id and no attestation is FOUND and then
+// ABANDONED, which is the exact defect this method exists to close — and a
+// message with an attestation and no id is never found in the first place. Two
+// setters would be two chances to do half of it, and the half-done state is
+// invisible until a crash, because the only reader of either field runs at
+// startup. One setter makes the half-done state unrepresentable through this
+// package's exported surface.
+//
+// # What is refused, and why
+//
+// All refusals wrap ErrInvalidMessage. The ID half's refusals are
+// WithOriginMessageID's, unchanged and reused rather than restated — a second
+// copy of that rule is a second copy free to disagree with it. The attestation
+// half adds:
+//
+//   - A ZERO or malformed attestation, judged by attest.Canonicalize, which owns
+//     the field bounds and is the same judgement the wire path makes
+//     (relay.validateOriginAttestation). An attestation nobody can canonicalize
+//     is one no signature can ever have covered.
+//   - A signature that is not exactly signing.SignatureSize bytes. The bytes are
+//     NOT echoed on refusal: they came from a peer and are on their way to a log
+//     line, and the length is the whole of the fault.
+//   - An attestation whose SUBJECT is not m.Sender. The next hop checks exactly
+//     this equality (relay.PeerStore.AttestedSignerKey passes m.Sender as
+//     attest.Subject.FQAgentID), so storing a mismatched pair would durably
+//     record an envelope that can never verify anywhere.
+//
+// THIS PACKAGE DOES NOT VERIFY THE ATTESTATION'S SIGNATURE, and that is not an
+// omission: verification needs the ORIGIN BUS'S PINNED SIGNING KEY, which lives
+// in the relay peer store and never comes near the durability layer. The relay
+// ingress has ALREADY verified it before a RelayedMessage exists at all
+// (relay.ValidateRelayRequest runs relay.VerifyRelayed). What is checked here is
+// shape and binding — the same posture as Message.Signature, which this package
+// also bounds and never verifies.
+//
+// The attestation's two byte slices are COPIED, so the durable message cannot be
+// mutated through the caller's copy after this returns. That is the same
+// time-of-check/time-of-use concern internal/relay's cloneAttestation exists for,
+// applied at the boundary where the value stops being transient and starts being
+// durable.
+func (m Message) WithRelayOrigin(originMessageID string, originAttestation attest.Attestation) (Message, error) {
+	out, err := m.WithOriginMessageID(originMessageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := validateOriginAttestation(originAttestation, m.Sender); err != nil {
+		return Message{}, err
+	}
+	out.OriginAttestation = cloneAttestation(originAttestation)
+	return out, nil
+}
+
+// HasOriginAttestation reports whether m carries the ORIGIN bus's attestation
+// for its sender — that is, whether an ONWARD relay envelope can be rebuilt from
+// this message alone.
+//
+// It exists so that the recovery seam in cmd/agent-bus asks THIS package the
+// question instead of writing its own "is it zero" test, which would be a second
+// copy of a rule free to disagree with Record's (see attestationIsZero). FALSE is
+// the ordinary answer for every message this bus originated, and is NOT an error:
+// such a message's envelope is minted fresh at egress from the local roster.
+//
+// It is FALSE for a relay-ingested message durably recorded before RELAY-48 gave
+// this bus somewhere to keep the attestation, which is the one case where the
+// answer is a genuine, unrecoverable loss — and it is a loss confined to the
+// ONWARD hop of that message.
+func (m Message) HasOriginAttestation() bool { return !attestationIsZero(m.OriginAttestation) }
+
+// validateOriginAttestation is the ONE definition of "this attestation is fit to
+// be stored beside this sender", applied on the write path (WithRelayOrigin) and
+// again on the recovery path (Decode) so a restart can never load state the write
+// path would have refused to create.
+func validateOriginAttestation(a attest.Attestation, sender string) error {
+	if _, err := attest.Canonicalize(a); err != nil {
+		return fmt.Errorf("%w: origin attestation: %s", ErrInvalidMessage, err)
+	}
+	if err := signing.ValidateSignature(a.Signature); err != nil {
+		// The signature bytes are not echoed; the length is the whole fault.
+		return fmt.Errorf("%w: origin attestation signature: %s", ErrInvalidMessage, err)
+	}
+	if a.AgentID != sender {
+		// Both values have been through an id parse by the time this can fire —
+		// Canonicalize validates the subject and the constructors validate the
+		// sender — so both are bounded and safe to echo.
+		return fmt.Errorf("%w: the origin attestation names subject %q but the message's sender is %q; the next hop verifies the attestation AGAINST the sender, so a mismatched pair could never be delivered anywhere", ErrInvalidMessage, a.AgentID, sender)
+	}
+	return nil
+}
+
+// attestationIsZero reports whether a carries nothing at all, which is what
+// "this bus is the ORIGIN of this message" looks like: this bus mints no
+// attestation for its own traffic, so absence is the ordinary case and is
+// meaningful rather than an error.
+//
+// It enumerates every field of attest.Attestation deliberately. If that type ever
+// gains one, this function is stale in the SAFE direction — a value carrying only
+// the new field reads as PRESENT, is then put through validateOriginAttestation,
+// and is refused loudly. The unsafe direction (a populated attestation read as
+// absent, and silently dropped on the way to disk) is not reachable from here.
+func attestationIsZero(a attest.Attestation) bool {
+	return a.AgentID == "" &&
+		len(a.MessagingPublicKey) == 0 &&
+		a.KeyEpoch == 0 &&
+		a.IssuedAtUnixMilli == 0 &&
+		a.NotAfterUnixMilli == 0 &&
+		len(a.Signature) == 0
+}
+
+// cloneAttestation snapshots both byte slices inside a value-typed attestation.
+// Struct assignment alone still aliases them, which is the aliasing bug
+// internal/relay's identically-named helper exists to prevent on the wire side;
+// this is the durability side of the same fence.
+func cloneAttestation(a attest.Attestation) attest.Attestation {
+	out := a
+	out.MessagingPublicKey = append(ed25519.PublicKey(nil), a.MessagingPublicKey...)
+	out.Signature = append([]byte(nil), a.Signature...)
+	return out
 }
 
 // VisibleTo reports whether agentID, enrolled at enrolledAt, is entitled to
@@ -484,6 +672,45 @@ type Record struct {
 	// local sequence and the bus path all describe this bus's own view — so if it
 	// is not written here it is gone.
 	OriginMessageID string `json:"origin_message_id,omitempty"`
+
+	// OriginAttestation is the ORIGIN bus's signed binding for Sender, present
+	// ONLY on a message this bus ingested over a relay hop. See
+	// Message.OriginAttestation for what it is and why it must be durable
+	// (RELAY-48: without it a pending onward hop is destroyed at restart).
+	//
+	// # RecordVersion STAYS AT 2, AND NO NUMBER WAS RESERVED
+	//
+	// Same case, same reasoning as OriginMessageID above: an OPTIONAL added field
+	// is what this record is shaped for, RecordVersion's own doc says an added
+	// optional field does not move it, and Decode is deliberately non-strict about
+	// unknown fields. Both directions of a rolling restart are therefore already
+	// correct — an OLD build reading a NEW record ignores it, and a NEW build
+	// reading an OLD record gets nil, which is not a loss but the right answer for
+	// a bus whose every message it originated itself. (The decision to put it HERE
+	// rather than on relay.OutboxRecord is recorded in DECISIONS.md, 2026-08-16:
+	// the outbox record is per-HOP, so it would hold one copy per pending hop of a
+	// fact that belongs to the MESSAGE — the same "second copy free to disagree"
+	// argument that keeps Pos off this record.)
+	//
+	// # WHY A POINTER, WHEN Message HOLDS A VALUE
+	//
+	// encoding/json's omitempty does nothing for a struct, so a value here would
+	// write a full skeleton of nulls and zeroes onto every locally-originated
+	// message on the bus. The pointer is a JSON-layer concern ONLY and never
+	// escapes: Record() takes the address of a copy, Decode dereferences into the
+	// value on Message, and no caller is handed the pointer. attest.Attestation's
+	// own doc requires a VALUE wherever it might be VERIFIED — a nil there is a
+	// panic instead of a refusal — and that rule is honoured: nothing verifies a
+	// Record.
+	//
+	// # SIZE
+	//
+	// It is bounded and small. AgentID is bounded by ids.ParseAgentID
+	// (attest.Canonicalize applies it), the messaging key is exactly 32 bytes and
+	// the signature exactly 64, both rendered as base64 by encoding/json, and the
+	// remaining three fields are integers — under 300 bytes on disk in total, on
+	// relay-ingested messages only. It does not scale with anything.
+	OriginAttestation *attest.Attestation `json:"origin_attestation,omitempty"`
 
 	// IdempotencyKey is durable so the applied-key memory is part of RECOVERED
 	// STATE and not an in-memory cache (invariant 10).
@@ -754,6 +981,13 @@ func (m Message) Record() Record {
 		// id; the `omitempty` tag keeps it off disk entirely in that case.
 		OriginMessageID: m.OriginMessageID,
 
+		// nil on a locally-originated message: this bus mints no attestation for
+		// its own traffic, so absence is the ordinary case rather than a fault.
+		// The pointer addresses a COPY (cloneAttestation), so the record cannot
+		// alias — and therefore cannot be mutated through — the durable message's
+		// key and signature bytes.
+		OriginAttestation: originAttestationRecord(m.OriginAttestation),
+
 		IdempotencyKey: m.IdempotencyKey,
 
 		TimestampUnixMilli: m.TimestampUnixMilli,
@@ -761,6 +995,36 @@ func (m Message) Record() Record {
 
 		Body: m.Body,
 	}
+}
+
+// decodedOriginAttestation is originAttestationRecord's inverse: it turns the
+// record's optional pointer back into the VALUE Message holds, copying the byte
+// slices so a recovered message never aliases the decoded JSON.
+//
+// The value form is what attest.Attestation's own doc requires of anything that
+// might be verified: a nil pointer reaching a verification path is a panic where
+// a zero value is a refusal.
+func decodedOriginAttestation(a *attest.Attestation) attest.Attestation {
+	if a == nil {
+		return attest.Attestation{}
+	}
+	return cloneAttestation(*a)
+}
+
+// originAttestationRecord renders m's origin attestation for the durable record:
+// nil when there is none, and otherwise a pointer to a fresh COPY so the record
+// cannot alias the message's key and signature bytes.
+//
+// It is a function rather than an inline conditional so that "how an absent
+// attestation is written" has ONE definition. nil is what makes `omitempty` keep
+// the key off disk entirely on every locally-originated message, which is most of
+// them — a struct value would write a skeleton of nulls and zeroes instead.
+func originAttestationRecord(a attest.Attestation) *attest.Attestation {
+	if attestationIsZero(a) {
+		return nil
+	}
+	out := cloneAttestation(a)
+	return &out
 }
 
 // Encode marshals m for the durable write path.
@@ -873,6 +1137,34 @@ func Decode(raw json.RawMessage) (Message, error) {
 			return Message{}, fmt.Errorf("%w: record for %s carries origin message id %q, which names the SAME bus (%q); a message this bus minted is its own origin and the field is written only for a message ingested over a relay hop", ErrInvalidMessage, rec.MessageID, rec.OriginMessageID, busID)
 		}
 	}
+	// THE ORIGIN ATTESTATION, when the record carries one, is validated with
+	// EXACTLY the rule WithRelayOrigin applies on the write path — one function,
+	// validateOriginAttestation, called from both — so a restart can never load
+	// state the write path would have refused to create.
+	//
+	// AN ATTESTATION WITHOUT AN ORIGIN MESSAGE ID IS REFUSED. The two facts are
+	// written together by the one setter there is, so a record carrying only the
+	// second is a claim that a message THIS BUS ORIGINATED needs somebody else's
+	// bus to vouch for its sender, which is incoherent: this bus mints no
+	// attestation for its own traffic and never adopts a peer's for it.
+	//
+	// THE CONVERSE IS ACCEPTED, and deliberately: an origin id with NO attestation
+	// is what every record written before this field existed would look like, and
+	// what WithOriginMessageID alone still produces. It decodes, it serves, and it
+	// is delivered to local recipients exactly as before — only the ONWARD hop is
+	// unrebuildable, and that is settled loudly, one job at a time, by the
+	// forwarder's recovery seam. Refusing the record here instead would discard a
+	// whole durable MESSAGE to protect one hop of it, which is the wrong blast
+	// radius (invariant 6 sanctions a discard; it does not ask for a wider one
+	// than the fault).
+	if rec.OriginAttestation != nil {
+		if rec.OriginMessageID == "" {
+			return Message{}, fmt.Errorf("%w: record for %s carries an ORIGIN ATTESTATION but no origin message id, so it claims this bus originated a message whose sender another bus vouches for; the two are written together or not at all", ErrInvalidMessage, rec.MessageID)
+		}
+		if err := validateOriginAttestation(*rec.OriginAttestation, rec.Sender); err != nil {
+			return Message{}, fmt.Errorf("record for %s: %w", rec.MessageID, err)
+		}
+	}
 	// BusPath is VALIDATED, not merely carried, for the same reason and one
 	// more: it is echoed verbatim to every client that reads the message. An
 	// unvalidated hop list off disk is attacker-chosen content on a response
@@ -931,6 +1223,11 @@ func Decode(raw json.RawMessage) (Message, error) {
 		// before this field existed; both mean "this bus is the origin", which is
 		// what OriginID() reads it as.
 		OriginMessageID: rec.OriginMessageID,
+
+		// ZERO when the record carries none — a locally-originated message, or one
+		// written before this field existed. The value is COPIED out of the record
+		// so the recovered message does not alias the decoded JSON's buffers.
+		OriginAttestation: decodedOriginAttestation(rec.OriginAttestation),
 
 		IdempotencyKey: rec.IdempotencyKey,
 

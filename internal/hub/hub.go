@@ -18,6 +18,7 @@ import (
 	// import adds no runtime coupling. internal/ack does not import this
 	// package, so the direction is safe.
 	"github.com/dodgymike/agent-bus/internal/ack"
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -1423,6 +1424,17 @@ type publishRequest struct {
 	// actually covers. See signedAs in audit.go, which is the whole argument.
 	originMessageID string
 	originSeq       uint64
+
+	// originAttestation is the ORIGIN bus's signed binding for a relayed
+	// message's sender, on its way to the DURABLE record (RELAY-48). Set only
+	// when relayed is set.
+	//
+	// It is NOT an audit input and is not a third member of the pair above: the
+	// audit content hash is computed over the SIGNING bytes, which do not include
+	// it, and wal.AuditRecord never carries it. Its one purpose is that
+	// Forwarder.Resume can rebuild an onward envelope after a restart, which it
+	// cannot do from anything else this bus holds.
+	originAttestation attest.Attestation
 }
 
 // publish is the ONE durable write path for a message. Broadcast and Send
@@ -1758,6 +1770,38 @@ func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 	if err != nil {
 		return Result{}, idem.OutcomeNew, err
 	}
+	// THE RELAY PROVENANCE, STAMPED ONTO THE MESSAGE BEFORE IT IS ENCODED — and
+	// the position of these five lines is the whole of RELAY-48.
+	//
+	// # ANYWHERE AFTER Encode() IS A SILENT NO-OP
+	//
+	// store.Message.Record() is the only thing that carries these two fields to
+	// disk and Encode()'s output IS the wal.Entry body below. But h.store.Append
+	// further down populates the store's byOrigin index from the LIVE value, so a
+	// writer placed later still makes every in-process lookup succeed. The two
+	// fields' ONLY reader is relay.Forwarder.Resume, which runs ONLY after a
+	// restart — so the late placement passes every test that does not restart, and
+	// destroys a pending onward hop in production. Any test for this MUST restart.
+	//
+	// # THE HASHES DO NOT MOVE, WHICH IS WHY IT IS SAFE HERE
+	//
+	// store.Message.SigningMessage omits both fields, and auditContentHash derives
+	// from SigningMessage — so the signature this message carries still covers
+	// exactly what it covered, and the audit record's content hash is unchanged.
+	// The applied-key fingerprint is computed from the request above, not from m.
+	//
+	// # IT FAILS THE INGEST RATHER THAN WRITING HALF OF IT
+	//
+	// A relayed message whose attestation is absent or does not bind its sender is
+	// refused HERE, before the two-phase write, so nothing durable is created for
+	// an obligation this bus could never discharge. store.WithRelayOrigin owns
+	// that rule; publish does not restate it.
+	if req.relayed {
+		m, err = m.WithRelayOrigin(req.originMessageID, req.originAttestation)
+		if err != nil {
+			return Result{}, idem.OutcomeNew, err
+		}
+	}
 	payload, err := m.Encode()
 	if err != nil {
 		return Result{}, idem.OutcomeNew, err
@@ -1814,7 +1858,15 @@ func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 	signed := signedAs{}
 	if req.relayed {
 		signed = signedAs{messageID: req.originMessageID, seq: req.originSeq}
-	} else if req.originMessageID != "" || req.originSeq != 0 {
+	} else if req.originMessageID != "" || req.originSeq != 0 || len(req.originAttestation.Signature) != 0 {
+		// The attestation is checked by its SIGNATURE being present, which is the
+		// one field no usable attestation can be missing (attest.Canonicalize is
+		// what bounds the rest, and store.WithRelayOrigin is what applies it). It is
+		// a BELT on a strap: a local send can only reach here with an attestation if
+		// a caller inside this package filled the field and left req.relayed false,
+		// in which case the gate above has already declined to stamp it onto the
+		// message. Failing loudly beats writing a message that quietly dropped a
+		// provenance claim somebody meant to make.
 		return Result{}, idem.OutcomeNew, fmt.Errorf("hub: internal: a LOCAL send carried an origin message assignment; the audit content hash of a local send is computed over its own canonical bytes and must never be moved onto another id")
 	}
 	auditRec, err := auditRecordFor(m, signed)

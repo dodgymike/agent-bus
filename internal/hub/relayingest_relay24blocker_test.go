@@ -45,11 +45,13 @@ const (
 // agent name are parameters because half these tests vary one of them.
 func riIngest(t *testing.T, key string, recipients ...string) hub.RelayedIngestRequest {
 	t.Helper()
+	sender := agentID(t, riOriginBus, "alpha")
 	return hub.RelayedIngestRequest{
-		Sender:             agentID(t, riOriginBus, "alpha"),
+		Sender:             sender,
 		Recipients:         recipients,
 		Body:               []byte("a message that crossed two buses to get here"),
 		OriginMessageID:    key,
+		OriginAttestation:  fixtureOriginAttestation(sender),
 		BusPath:            []string{riOriginBus, riMiddleBus},
 		TimestampUnixMilli: fixtureTimestampMs,
 		Signature:          fixtureSignature(),

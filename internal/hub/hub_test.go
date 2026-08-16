@@ -7,6 +7,7 @@ package hub_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/attest"
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -63,6 +65,31 @@ const fixtureTimestampMs int64 = 1754130896789 // 2026-08-02T12:34:56.789Z
 // signing.SignatureSize bytes are as good as a real signature here, and a
 // constant one keeps a fixture reproducible byte for byte.
 func fixtureSignature() []byte { return bytes.Repeat([]byte{0xAB}, signing.SignatureSize) }
+
+// fixtureOriginAttestation is the ORIGIN BUS's attestation for sender, as every
+// hand-built relay-ingest fixture carries it (RELAY-48).
+//
+// It is WELL-FORMED BUT NOT GENUINE, and that is the right fidelity here for the
+// same reason fixtureSignature is: this package validates SHAPE and BINDING and
+// deliberately never verifies, because verification needs the origin bus's
+// peering-time pinned signing key, which lives in internal/relay's peer store and
+// never comes near the durability layer. The relay ingress has already verified
+// the real thing before a RelayedMessage exists at all.
+//
+// What it does have to satisfy, because store.WithRelayOrigin applies exactly
+// these on the way to disk: attest.Canonicalize must accept it (so the subject is
+// a fully-qualified agent id and the messaging key is the right size), the
+// signature must be exactly signing.SignatureSize bytes, and the subject must BE
+// the message's sender.
+func fixtureOriginAttestation(sender string) attest.Attestation {
+	return attest.Attestation{
+		AgentID:            sender,
+		MessagingPublicKey: bytes.Repeat([]byte{0xCD}, ed25519.PublicKeySize),
+		IssuedAtUnixMilli:  fixtureTimestampMs,
+		NotAfterUnixMilli:  fixtureTimestampMs + 3_600_000,
+		Signature:          bytes.Repeat([]byte{0xEF}, signing.SignatureSize),
+	}
+}
 
 // ---------------------------------------------------------------------------
 // The two-step send: mint, then publish
