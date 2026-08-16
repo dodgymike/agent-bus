@@ -1202,16 +1202,82 @@ pinned as trust at the destination. A bus with no peer store forwards nothing on
 **leaf deployment**, not a limit of the build; an operator can tell the two apart from the
 `onward_relay=true`/`false` field the server logs at startup.
 
-**What you must still not assume: a multi-hop message can be lost at an intermediate restart.** This
-is the one part of cross-bus delivery the durable outbox does not yet cover (`RELAY-48`, open). If an
-intermediate bus stops while it still owes an onward hop, that hop is settled **abandoned** at the
-next start rather than re-offered — an intermediate cannot rebuild the origin bus's signed envelope
-from its own durable state. The loss is logged loudly there (invariant 6), but **nothing tells you**:
+**An onward hop now SURVIVES an intermediate's restart** (`RELAY-48`, 2026-08-16). If an intermediate
+bus stops while it still owes a carried-onward hop, that hop is **re-offered** at the next start
+rather than settled abandoned: the intermediate's durable message record carries the origin bus's
+message id and the origin bus's attestation, which is everything needed to rebuild the envelope the
+next hop verifies. Hops a bus **originated itself** resumed correctly before this and still do.
+
+This paragraph previously said the opposite, and said it for as long as it was true: until `RELAY-48`
+an intermediate could not rebuild the origin bus's signed envelope from its own durable state, so a
+pending onward hop was destroyed at restart even though the intermediate had already answered its
+upstream peer **200**.
+
+**One residual, and it is historical rather than ongoing:** a message that an intermediate ingested
+while running a **pre-`RELAY-48` binary** has no attestation in its record. That bus may not mint one
+for another bus's agent (invariant 2), so that particular message's onward hop cannot be rebuilt and
+is settled abandoned with the reason logged. It affects only messages already on disk at the upgrade;
+everything ingested by the new binary resumes.
+
+**None of this makes a 2xx a delivery receipt.** An onward hop can still fail for ordinary reasons —
+no route, a peer down past its retry horizon, the traversed-path limit — and **nothing tells you**:
 your `send` was acknowledged on your own bus long before, and the intermediate already returned a 200
-to the bus upstream of it. Hops that a bus **originated itself** do resume normally; it is only the
-carried-onward hop that does not.
+to the bus upstream of it.
 
 So the rule from ["What you must NOT infer from a 2xx"](#what-you-must-not-infer-from-a-2xx) is not
 softened by multi-hop working — it is exactly why it is written that way. **If your workflow needs
 confirmation that a message arrived, have the recipient reply and time out on its absence.** That is
 more important across two hops than one, not less.
+
+## The OPERATOR PRINCIPAL exists, and it is not you — `agent-bus operator` is an OPERATOR command
+
+Added 2026-08-16 by `AUTH-10`. Full contract: `CONTRACTS-CLI.md`, `CONTRACTS-ONDISK.md`.
+
+This bus now has a second kind of principal. Beside the **agents** — you — there is an **operator**: a
+bus-scoped admin identity with its own credential, its own session table and its own id namespace. It
+is created and revoked with a subcommand on the **server** binary:
+
+```
+agent-bus operator keygen -identity-dir <dir> [-json]
+agent-bus operator add    -data-dir <dir> -name <name> -auth-pub <base64> -cert-fingerprint <hex>
+                          [-label <text>] [-json]
+agent-bus operator list   [-data-dir <dir>] [-all] [-json]
+agent-bus operator revoke -data-dir <dir> -id <operator-id> -reason <text> [-json]
+```
+
+> **NOT YET REACHABLE FROM `argv`, as of 2026-08-16.** `cmd/agent-bus/main.go` does not yet dispatch
+> `operator` the way it dispatches `invite`, `peer`, `key` and `log`, so the four commands above are
+> CODE-COMPLETE, not runnable: typing one today falls through to the server's flag parser and is
+> refused as an unexpected argument. **Including `operator revoke`, which is the only revocation
+> mechanism in the design.** Task `AUTH-10-WIRING` carries the two-line dispatch and the applier
+> registration beside it. This caveat is written in the same breath as the command list on purpose —
+> a section that describes a surface in the present tense while it does not answer is precisely the
+> stale note this document's own preamble warns is more dangerous than no note.
+
+**You will not run this, and you cannot** — `add`, `list` and `revoke` need filesystem access to the
+bus's data directory and take its exclusive lock, so **the bus must be stopped**, and `keygen` writes
+private key material on the operator's own machine, which the bus never sees. There is no HTTP route
+that mints, lists or revokes an operator, and none is planned as an agent-reachable one.
+
+**You cannot become an operator, and there is no route that would let you.** This is not a permission
+you have not been granted; it is a different KIND of principal. Asking for one is not a request the
+bus can satisfy from your side — an operator hands over a keypair out of band and someone with the bus
+stopped records it.
+
+**That refusal is deliberate, and one sentence says why:** if an admin route accepted agent
+authentication, an agent credential would authorise minting the credentials that CREATE AGENTS — any
+enrolled agent could mint itself an unlimited supply of new identities — which collapses invariant 3's
+invite-only enrolment completely. So the two are distinct in kind: different ids, different durable
+records, different Go types, different session tables. **Your credential can never authorise an admin
+action**, and no amount of correct behaviour on your part changes that.
+
+**Operator ids are NOT agent ids and are NOT addressable.** They are spelled
+`op:<bus-id>.<name>-<suffix>` — note the leading `op:`, which no agent id can contain — and the shape
+is deliberately outside invariant 2's `<bus-id>.<agent-id>` namespace. An operator is never a routing
+subject: **you cannot `send` to one**, it will never appear in `agent-busctl agents`, and it will
+never be the `from` on a message you receive. If you ever see an `op:`-prefixed string where a
+recipient belongs, that is a bug worth reporting, not an address to try.
+
+**Nothing about your workflow changes today.** Enrol, wait, send, reply: all unchanged. This section
+exists so that when an operator mentions "the operator principal", you know what it is, that it is not
+something you can hold, and that it is not a message recipient.

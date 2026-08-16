@@ -457,6 +457,73 @@ points the `byOrigin` index at the newer one, and counts every occurrence in the
 `Store.DuplicateOriginMessageIDs() uint64`, while the operator-facing log line itself is emitted at
 most once per process.
 
+## `OriginAttestation` — the relayed message's origin binding (`RELAY-48`, added 2026-08-16)
+
+`store.Record` gains one more optional field: **`origin_attestation`**, Go tag
+`json:"origin_attestation,omitempty"`, a `*attest.Attestation` (`internal/store/message.go`). It is
+the ORIGIN bus's signed binding of the message's `sender` to that agent's MESSAGING public key,
+carried VERBATIM from the hop that delivered the message. Like `origin_message_id` it is present
+ONLY on a message this bus INGESTED over a relay hop, and absent (`omitempty` keeps it off disk
+entirely) on every message this bus originated itself.
+
+**Shape and size.** It serialises `attest.Attestation`'s own JSON: `agent_id`,
+`messaging_public_key` (32 raw bytes, base64), `key_epoch`, `issued_at_unix_ms`, `not_after_unix_ms`,
+`signature` (64 raw bytes, base64). `agent_id` is bounded by `ids.ParseAgentID` and the two byte
+fields are fixed-width, so the field is **under 300 bytes** and scales with nothing. It does NOT
+count towards `Message.Size()`, which remains `len(Body)` — the number the audit trail records and
+retention accounts against.
+
+**Why it is on the message record and NOT on `relay.OutboxRecord`** (`DECISIONS.md`, 2026-08-16):
+the attestation attests THE MESSAGE, while an outbox record is per-HOP, so putting it there would
+store one copy per pending hop of a single fact — the same "second copy free to disagree with the
+first" argument that keeps `Pos` off this record. It is also the cheaper half of the trade, since the
+outbox route is on-disk surface that would need a reserved number, but that is the tiebreak and not
+the reason.
+
+**Why it must be durable at all.** It is the ONE field of an ONWARD relay envelope this bus cannot
+regenerate: `attest.Sign` refuses a subject in another bus's namespace (invariant 2), so a
+relayed-in envelope was previously **unbuildable from durable state by construction**. Its only
+reader, `relay.Forwarder.Resume`, runs ONLY after a restart — so a value held in memory alone is
+empty at the one moment it is read, and a pending onward hop was settled `abandoned` after this bus
+had already answered the upstream peer **200**.
+
+**It is METADATA, and it does not reach the audit trail.** It names an agent, a public key, an epoch
+and two timestamps; it carries no part of the message content, so invariant 6 sanctions it. It is
+absent from `wal.AuditRecord`, which `internal/hub/audit.go` assembles field by field. It also does
+not move either hash: `store.Message.SigningMessage()` omits it and `auditContentHash` derives from
+`SigningMessage`.
+
+**`store.RecordVersion` DELIBERATELY STAYS AT 2, and no number was reserved** — the same rule, and
+the same warning, as `origin_message_id` above: `RecordVersion`'s own doc says an added OPTIONAL
+field does not move it, `Decode` is non-strict about unknown fields, and `Decode`'s EXACT version
+match means a bump to 3 would discard all existing message history on upgrade.
+
+**Validation, applied identically on both paths.** `store.validateOriginAttestation` is the one
+definition, called by `Message.WithRelayOrigin` on the write path and by `store.Decode` on the
+recovery path, so a restart can never load state the write path would refuse to create. It requires
+`attest.Canonicalize` to accept the value, the signature to be exactly `signing.SignatureSize` bytes,
+and the subject to BE the message's sender (which is what the next hop checks). This package NEVER
+verifies the attestation's signature: that needs the origin bus's peering-time pinned signing key,
+which lives in the relay peer store, and `relay.ValidateRelayRequest` has already done it before the
+hub is reached. `Decode` additionally REFUSES a record carrying an attestation with NO
+`origin_message_id`; the converse — an origin id with no attestation — decodes and serves normally,
+and costs only the onward hop of that one message.
+
+**Compatibility, both directions:**
+- An OLD build reading a NEW record ignores the field (non-strict unknown-field decoding) and serves
+  the message normally.
+- A NEW build reading an OLD record gets no attestation, which is the correct answer for every
+  message a pre-relay bus originated. For a message a pre-`RELAY-48` build relay-INGESTED it is a
+  genuine loss, bounded to that message's ONWARD hop: `recoverRelayEnvelope` refuses to rebuild an
+  envelope for it by name, and the forwarder settles that one job `abandoned` with the reason logged
+  (invariant 6 — loud, not silent). Local delivery of such a message is unaffected.
+
+**Operator impact: rebuild the binary and restart the bus. No re-enrolment, no migration, no new
+file.** The field rides inside the existing message record — same PREPARE frame, same fsync, same
+`bus.wal`. Existing logs and enrolments are unaffected. The behaviour only becomes live for messages
+ingested by the NEW binary: a relayed message already on disk carries no attestation and its onward
+hop remains unrecoverable.
+
 ## The write-ahead log at startup (added 2026-08-02)
 
 `cmd/agent-bus`'s `run()` now opens `internal/wal` with
@@ -1553,10 +1620,13 @@ The remaining limits, stated precisely rather than replaced with a new overclaim
   it for relay ingest too — relaxing it would forward every ingested message TWICE. Onward relay is
   wired through a separate seam, `relay.AcceptOptions.Onward`, not through that check. `nil` there is
   still a legitimate LEAF configuration (no peer store, nothing to forward with), not a limitation of
-  the build — startup reports `onward_relay=true`/`false` accordingly. **Not yet crash-safe**: a
-  pending onward hop is durably ABANDONED, not resumed, if this bus restarts before delivering it —
-  the intermediate does not retain the origin bus's attestation, so the envelope cannot be rebuilt
-  from durable state (`store.Message` has no `OriginAttestation` field); the loss is logged loudly at
+  the build — startup reports `onward_relay=true`/`false` accordingly. **CRASH-SAFE as of `RELAY-48`** — this paragraph
+  said the opposite until then, and the correction is stated rather than quietly swapped because the
+  claim it replaces is exactly the kind that reads as freshly checked. A pending onward hop is now
+  RESUMED after a restart: the intermediate retains the origin bus's attestation on `store.Record`
+  (`OriginAttestation`, written by `store.Message.WithRelayOrigin` on the ingest path), so the
+  envelope CAN be rebuilt from durable state. Before `RELAY-48` the hop was durably ABANDONED after
+  this bus had already answered the upstream peer 200; the loss was logged loudly at
   WARN (invariant 6), and the locally-originated case is unaffected. Filed as `RELAY-48`.
 - **A crash between a message's own commit and its outbox enqueue loses the FORWARD, never the
   message.** The outbox record is written in a SECOND `wal` transaction, after the message's own
@@ -2541,3 +2611,184 @@ to re-check before any task gives a local send several recipients; batching the 
 entry in this change — invariant 7 binds the task that adds the ROUTE, and this task adds none.
 `ack.Store.Settle` and `ack.Store.MarkInFlight` exist and are tested but have **no production
 caller** in this build.
+
+## `relay-wire-version = 1` IS NOW SPENT — the peer ACK frame carries it (`ACK-3`, added 2026-08-16)
+
+The `relay-wire-version` namespace is a **wire** protocol version, not an on-disk format, and it is
+recorded here because this file is where this project's reserved numbers live and because two agents
+bumping it independently would produce two incompatible `v1`s.
+
+| namespace | reserved values | meaning |
+| --- | --- | --- |
+| `relay-wire-version` | `1` — reserved 2026-08-08 (note: *"FEDERATION phase, RELAY-23 will spend this"*), **SPENT by `ACK-3` on 2026-08-16** | The wire-protocol version of the **bus-to-bus peer frames**: the ACK frame at `POST /v1/peer/ack` (`relay.AckWireVersion`, JSON key `protocol_version`) and — when `RELAY-23` lands — the relay envelope at `POST /v1/peer/relay` (`relay.WireVersion`, same key). |
+
+**ONE reserved value covers BOTH frames, and `ACK-3` did NOT reserve a second.** `ACK-CONTRACT.md`
+§10 rules that the ACK frame and the relay envelope are two frames of one peer protocol and are
+versioned together. `ACK-3` spends value 1 on the ACK frame; `RELAY-23` spends the same value on the
+relay envelope. Neither allocates a new number, and **nobody picks the next one by reading a
+constant** — a bump needs a fresh reservation through
+`POST /api/v1/projects/agent-bus/reservations`.
+
+### The reading rules, identical on both frames
+
+- A **missing** version reads as **1**. That is the only backward-compatible read and it is exact:
+  version 1 *is* the format currently on the wire, so a frame written before the field existed is a
+  version-1 frame by definition. Both frames use `omitempty`, so an unset value is **absent** rather
+  than an explicit `0`; `0` is not a version anyone may transmit.
+- An **unrecognised** version is **REJECTED, never defaulted** — `parseOutboxState`'s posture
+  (`internal/relay/outbox.go:316-330`) and for the same reason: guessing turns a corrupt or
+  future-format frame into a plausible-looking valid one. On the ACK frame the stakes are higher than
+  for an outbox row, because the frame carries a **TERMINAL** outcome and terminal is **absorbing** —
+  a v2 frame read under v1's rules could durably settle a message in a way that can never afterwards
+  be corrected. The wire answer is `400 {"error":"unsupported_ack_version"}`.
+- **The literal `1` in the "absent reads as 1" rule must NOT be respelled as the version constant.**
+  When the version is bumped to 2 against a fresh reservation, a versionless frame is *still* a v1
+  frame — it was encoded by a binary that had never heard of v2 — and spelling it as the constant
+  would silently reinterpret every legacy frame as the new format on the day of the bump. That is the
+  same defect as defaulting an unrecognised version, arriving by a different door.
+
+### A KNOWN, TEMPORARY DUPLICATION, recorded rather than papered over
+
+`ACK-3` declares `relay.AckWireVersion` and `resolveAckWireVersion` in `internal/relay/ackframe.go`.
+`RELAY-23` declares `relay.WireVersion` and `resolveWireVersion` in `internal/relay/message.go`, and
+was **unmerged** when `ACK-3` landed. Declaring one name in two files of one package produces a build
+break that **git cannot flag as a conflict** — no overlapping text, so the merge succeeds and the
+package stops compiling. The ACK-scoped spelling merges cleanly and compiles. **A follow-up must
+collapse the two onto one constant once `RELAY-23` lands.** The RULES above are what matters and they
+are identical on both sides; only the spellings differ.
+
+Likewise `ACK-3` adds `relay.CodeUnsupportedAckVersion = "unsupported_ack_version"` beside
+`RELAY-23`'s `CodeUnsupportedRelayVersion = "unsupported_relay_version"`. Two codes is arguably the
+better answer — a peer operator reads *which frame* the far end could not parse — but if an operator
+would rather read one string, collapsing them is a one-line change.
+
+---
+
+## 2026-08-16 — `wal.Entry.Kind = "operator"`: the OPERATOR PRINCIPAL record (AUTH-10)
+
+`auth.OperatorRecordKind = "operator"` (`internal/auth/operatorrecord.go`) is a NEW application
+discriminator sharing this log with `store.RecordKind = "message"`, `auth.RecordKind = "agent"`,
+`invite.RecordKind = "invite"`, `auth.EnrolInviteRecordKind = "agent+invite"`,
+`hub.SeqFloorRecordKind = "seqfloor"`, `relay.OutboxRecordKind = "outbox"`,
+`relay.PeerRecordKind = "peer"`, `relay.BusTrustRecordKind = "bustrust"` and
+`ack.RecordKind = "ack"`.
+
+**Deliberately NOT numbered "the Nth discriminator".** Earlier sections in this file each claimed an
+ordinal ("a fourth `Entry.Kind`", "a fifth"), and those ordinals are now mutually inconsistent — they
+were counted at different times against different subsets, and a draft of THIS section called
+`"operator"` the fifth while listing five others beside it. An ordinal is a fact about the whole set
+that every new record kind silently invalidates, so it is a stale-note generator. Enumerate the set
+instead; a reader can count.
+
+It records an **operator/admin principal**: a bus-scoped,
+**NON-AGENT** identity that authenticates to the running bus and that admin capabilities authorise
+against. An operator is never a routing subject — no message is addressed to one and no relay path
+contains one.
+
+### NO RESERVATION WAS TAKEN, AND NONE IS NEEDED
+
+The same statement `"agent"`, `"invite"` and `"agent+invite"` make above, for the same reason, written
+down again so nobody goes and reserves a number nothing requires. `wal.Entry.Kind` is a **free-form
+application STRING** that sits inside the PREPARE payload, above the framing layer. The **RESERVED**
+numbers are `wal.Type` (`TypePrepare`, `TypeCommit`, …) and the on-disk format version, both owned by
+`internal/wal` and allocated through `POST /api/v1/projects/agent-bus/reservations`.
+**`internal/wal/format.go` was not touched by AUTH-10.** An operator entry rides in the same two-phase
+prepare-fsync → commit-fsync frames as every other kind: no new frame shape, no new fsync.
+
+`auth.OperatorRecordVersion = 1` versions **only** the JSON field set below. It is not the WAL format
+version and not the HTTP API version. A record carrying any other value is refused by `DecodeOperator`
+(rejected, never defaulted), and unknown JSON fields are refused too.
+
+### The JSON shape — THESE FIELD NAMES ARE FOREVER
+
+`internal/auth/operatorrecord.go`'s `operatorJSON`, verified against the struct tags:
+
+```
+{"v":1,
+ "operator_id":"op:<bus-id>.<name>-<16 lowercase base32>",
+ "name":"<name>",
+ "auth_pub":"<base64 std, 32 bytes>",
+ "cert_fp":"<hex, 32 bytes>",
+ "label":"<operator text>",                 // omitted when empty
+ "created_at":"<RFC3339Nano UTC>",
+ "revoked_at":"<RFC3339Nano UTC>",          // OMITTED ENTIRELY while LIVE
+ "revoked_reason":"<operator text>"}        // omitted while LIVE
+```
+
+| field | Go type | on-disk encoding | omitted when |
+| --- | --- | --- | --- |
+| `v` | `int` | `OperatorRecordVersion`, currently `1`; any other value is REFUSED | never |
+| `operator_id` | `string` | server-minted `op:<bus-id>.<name>-<suffix>`, suffix 16 chars of lowercase RFC4648 base32 over 10 bytes of `crypto/rand` | never |
+| `name` | `string` | byte-identical to the name half of `operator_id`; re-checked on encode AND decode | never |
+| `auth_pub` | `ed25519.PublicKey` | **base64 STANDARD encoding**, exactly 32 bytes — the encoding the enrolment wire format and `recordJSON` already use for the same bytes | never (an operator with no key is refused) |
+| `cert_fp` | `[32]byte` | **lowercase hex** — `sha256` over the client certificate DER, the one spelling `buscert.FingerprintOf` and `client.ClientCertificate.Fingerprint` produce | never (the ZERO fingerprint is refused: it is the ABSENCE of a certificate) |
+| `label` | `string` | operator note, `<= MaxOperatorLabelLen` (128) — the same bound `invite.MaxLabelLen` uses | empty |
+| `created_at` | `time.Time` | `RFC3339Nano`, **UTC** | never |
+| `revoked_at` | `*time.Time` | `RFC3339Nano`, UTC | **LIVE** — omitted entirely, so "live" and "revoked at the zero time" cannot be confused (`certBindingJSON`'s `retired_at` rule) |
+| `revoked_reason` | `string` | operator note; REQUIRED whenever `revoked_at` is set (invariant 6: an operator action must be loudly attributable) | LIVE, or empty |
+
+Times are `RFC3339Nano` UTC and digests are hex, matching every other kind on this log.
+
+### REVOCATION IS AN APPEND OF A NEW WHOLE RECORD
+
+Never an in-place edit, never a deletion (invariant 6: the log is append-only in the strict sense).
+A revocation entry carries the **complete** operator with `revoked_at`/`revoked_reason` set, so — as
+for `invite` — a surviving later record reconstructs the principal in its dead state on its own. The
+id stays spent forever (invariant 1): revoking does not free it, and adding an operator under a
+previously-used *name* mints a NEW suffix and is a DIFFERENT principal.
+
+### The `Apply` fold rules (`OperatorRegistry.Apply`)
+
+It runs during recovery **and** on every live commit and cannot tell them apart, and it deliberately
+does **not** re-run the write-side admission checks — a record reaching it is already durable, so
+refusing one would turn a damaged log into an outage (invariant 6). The rules, by case:
+
+| stored | incoming | result |
+| --- | --- | --- |
+| *(absent)* | live | inserted |
+| *(absent)* | **revoked** | inserted as revoked, **and logged loudly**: the record that CREATED the principal is missing, so the log was truncated or the add was damaged, and the credential fields being stored are uncorroborated |
+| live | live | **DISCARDED, logged.** An overwrite would rebind a live ADMIN identity to a different keypair (invariants 1 and 3) |
+| revoked | live | **DISCARDED, logged.** NOTHING SUPERSEDES A REVOCATION — an un-revoke would make the log's most security-critical operation reversible by a duplicated or replayed record |
+| revoked | revoked, **agreeing** | discarded **SILENTLY** — a legitimate retry (invariant 10); noise here would train an operator to ignore the line below |
+| revoked | revoked, **disagreeing** | **DISCARDED, logged loudly.** The first revocation is kept; a second that differs in instant, reason, key, fingerprint or creation instant can only be corruption or tampering |
+| live | revoked | **the revocation is applied — and ONLY the revocation fields are taken.** The key, the fingerprint and the creation instant are kept from the record that CREATED the principal, so a record that claims to revoke while also swapping the credential CANNOT rebind a live identity through the revocation path. A disagreement is applied-and-reported, never merged |
+
+**"Agreeing" is NOT "byte-identical", and the difference is deliberate.** The predicate is
+`operatorRecordsAgree` (`internal/auth/operator.go`), which compares exactly the fields that BIND the
+identity or the revocation: `auth_pub`, `cert_fp`, `created_at`, `revoked_at` and `revoked_reason`.
+It ignores two fields, for two different reasons:
+
+- `label` is an operator's own note. It authorises nothing and binds nothing, so two revocations
+  differing only in their label ARE the same event and must not be reported as tampering.
+- `name` cannot differ for one `operator_id`: it is re-derived from the id and re-checked on encode
+  AND decode (`validateOperator` runs in BOTH `EncodeOperator` and `DecodeOperator`), so a record
+  whose name disagreed would already have been refused as undecodable.
+
+An earlier draft of the "agreeing" row and of the code comment beside it both said **BYTE-IDENTICAL**,
+which overclaims — a second revocation differing only in `label` is silently discarded, and
+"byte-identical" says it would not be. Recorded because this file rates a load-bearing comment that is
+false as a defect in its own right, not as a wording nit.
+
+A record that cannot be decoded is DISCARDED and logged with its prepare/commit indices, naming which
+direction the loss falls in: a discarded ADD means an operator cannot authenticate; a discarded
+REVOCATION means a principal the bus was told to kill is **still LIVE**, which is the fail-OPEN
+direction and is why that log line says so in terms.
+
+### `operator-auth-key.pem` — a file that is NOT in the bus data directory
+
+`<identity-dir>/operator-auth-key.pem`: the operator's **PRIVATE** Ed25519 session-signing key,
+PKCS#8 PEM, mode **0600**, inside a **0700** directory, written with `O_EXCL` and fsynced along with
+its directory entry. It lives on the **OPERATOR's own machine**, created by
+`agent-bus operator keygen`, and it is listed here only so nobody looks for it under `-data-dir`:
+**the bus never holds it and never generates it.** The durable record above carries the PUBLIC half
+and a digest, which is why the whole record is safe to print in `operator list`. Existing material is
+LOADED, never overwritten — regenerating would silently invalidate the operator record the bus holds.
+
+### WIRING STATUS — a server replay currently passes these records over IN SILENCE
+
+`cmd/agent-bus/main.go` does **not** register `auth.OperatorRecordKind` in its applier map, and
+`auth.MultiplexApplier` is silent about kinds nobody registered. So an `"operator"` record in the WAL
+is skipped at **server** startup without a word — the shape invariant 6 rates as the defect, present
+here by omission rather than by choice. The `agent-bus operator` subcommands are unaffected: they open
+the log with their own applier map (operator registry + enrolment roster + invite store). The three
+lines `main.go` needs are named in `OperatorRegistry`'s type doc.
