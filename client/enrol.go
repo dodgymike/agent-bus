@@ -60,10 +60,16 @@ type EnrolOptions struct {
 	// inside it goes in the request body and NOWHERE else: not on argv, not in
 	// EnrolResult, not in an error, not in a log line.
 	//
-	// nil is still accepted, because the bus still accepts an un-invited
-	// enrolment (httpapi.DiscoveryEnrolment.InviteRequired is false today).
-	// Invariant 3 says that must change; when it does, the bus refuses, not this
-	// client.
+	// nil is still accepted BY THIS CLIENT — Enrol never manufactures an
+	// invite, it only forwards one it was given — but the shipped bus now
+	// REQUIRES one (enrolmentInviteRequired = true, cmd/agent-bus/main.go,
+	// landed `3cedcb7`, 2026-08-15: invariant 3). Passing nil against that bus
+	// sends the enrolment with no invite and gets back HTTP 403; it is not a
+	// silent success. A bus an operator has deliberately reconfigured to skip
+	// the gate is the only case nil still works, and a caller can check which
+	// kind of bus this is before assuming so: GET /v1/discovery reports its
+	// own posture in httpapi.DiscoveryEnrolment.InviteRequired
+	// (`invite_required` in JSON).
 	Invite *Invite
 
 	// IdempotencyKey makes the enrolment safe to retry (invariant 10). Leave
@@ -759,13 +765,16 @@ func (c *Client) enrolFailed(op, idemKey, busURL string, opts EnrolOptions, resu
 
 // annotateInviteRefusal rewrites the remedy for a bus that REFUSED the invite.
 //
-// Necessary because a refused invite arrives as HTTP 403, which statusError
-// maps to KindAuth with "the session may have expired or the bus may have
-// restarted; retry, and if it persists re-enrol with `agent-busctl enrol`" —
-// advice that is actively wrong here on every clause. There is no session
-// (enrolment is one of the three routes that has none), retrying cannot help
-// (an invite is single-use, and expiry and revocation do not reverse), and
-// "re-enrol" is what the caller was already doing.
+// Necessary because a refused invite still arrives as a generic HTTP 403.
+// statusError's routeEnroll branch (DOCS-22) already gives a CORRECT base
+// remedy for the common case — no invite was presented at all — but that
+// wording ("redeem one with --invite-file") is itself wrong here: one WAS
+// presented, and redeeming "one" again means nothing when the caller does not
+// know which of single-use/expired/revoked applies to the one they have. Only
+// this function has that context (opts.Invite), so it overrides the message
+// and remedy with wording that is actually actionable: mint a FRESH invite,
+// because retrying this one cannot help (single-use, and expiry/revocation do
+// not reverse).
 //
 // The server's writeInviteError deliberately answers unknown, expired, revoked,
 // already-redeemed and malformed with the SAME 403 and the same terse text, so
@@ -791,13 +800,16 @@ func annotateInviteRefusal(inv *Invite, e *Error) {
 	if inv == nil || e == nil || e.Status != http.StatusForbidden {
 		return
 	}
-	// statusError's 401/403 wording is about a SESSION credential, which this
-	// route does not have. Strip it if it is there rather than prefixing it, so
-	// the line does not read "…refused invite X: the bus rejected this
-	// credential: …". A TrimPrefix that matches nothing simply leaves the
-	// message intact, which is still correct, just wordier.
-	e.Message = "the bus refused invite " + safeText(inv.InviteID, MaxInviteIDLen) + ": " +
-		strings.TrimPrefix(e.Message, "the bus rejected this credential: ")
+	// statusError's routeEnroll branch already prefixes its message with "the
+	// bus refused this enrolment: " (DOCS-22 — the generic "the bus rejected
+	// this credential: " session wording it replaced never applied to enrol,
+	// which has no session). Strip whichever of the two is there rather than
+	// prefixing blindly, so the line does not read "…refused invite X: the bus
+	// refused this enrolment: …". A TrimPrefix that matches neither simply
+	// leaves the message intact, which is still correct, just wordier.
+	msg := strings.TrimPrefix(e.Message, "the bus refused this enrolment: ")
+	msg = strings.TrimPrefix(msg, "the bus rejected this credential: ")
+	e.Message = "the bus refused invite " + safeText(inv.InviteID, MaxInviteIDLen) + ": " + msg
 	e.Remedy = "an invite is single-use, expiring and revocable, so this one may already have been redeemed, may have expired, or may have been revoked — the bus deliberately does not say which. Retrying will not change it: ask the operator to mint a fresh invite (`agent-bus invite mint`) and redeem that instead"
 }
 

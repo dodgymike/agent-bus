@@ -426,6 +426,22 @@ func statusError(op, path string, resp *http.Response, body []byte) *Error {
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
 		e.Kind = KindAuth
+		if path == routeEnroll {
+			// /v1/enroll has no session to have expired — this route IS how a
+			// credential is obtained (invariant 3) — so the generic
+			// "retry, and if it persists re-enrol" wording below is actively
+			// wrong here: it tells the caller to redo the exact thing that
+			// just failed, forever (DOCS-22). The bus requires an invite to
+			// enrol; when opts.Invite was nil this is the only place that
+			// gets to say so. When an invite WAS presented and refused,
+			// enrolFailed's annotateInviteRefusal (enrol.go) overrides this
+			// again with the specific invite id and the single-use/expired/
+			// revoked wording — this branch only has to be correct for the
+			// no-invite case it cannot see.
+			e.Message = "the bus refused this enrolment: " + detail
+			e.Remedy = "the bus requires an invite to enrol (invariant 3): redeem one with `agent-busctl enrol --invite-file <path>` (an operator mints it with `agent-bus invite mint`) — retrying without an invite will fail the same way every time"
+			return e
+		}
 		e.Message = "the bus rejected this credential: " + detail
 		e.Remedy = "the session may have expired or the bus may have restarted; retry, and if it persists re-enrol with `agent-busctl enrol`"
 	case resp.StatusCode == http.StatusNotFound && path != routeSend:

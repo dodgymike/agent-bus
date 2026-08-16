@@ -428,8 +428,11 @@ NOTES
   outgoing one, and ` + "`agent-busctl pin remove <old>`" + ` ends the rollover. Confirm the
   new fingerprint OUT OF BAND first — nothing is ever pinned automatically.
 
-  Enrolment is becoming invite-only and the bus is becoming TLS-only; both
-  are in flight. See CONTRACTS-CLI.md for what is stable today.
+  Enrolment is invite-only and the bus is TLS-only (invariants 3 and 11) —
+  both are enforced today, not in flight: an enrolment presenting no invite
+  is refused with a 403. Redeem an invite with ` + "`enrol --invite-file <path>`" + `;
+  an operator mints one with ` + "`agent-bus invite mint`" + `. See CONTRACTS-CLI.md for
+  the exact flag reference and AGENT_PROTOCOL.md for the full enrol flow.
 `)
 	fmt.Fprint(w, b.String())
 }

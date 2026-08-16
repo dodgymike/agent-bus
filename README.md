@@ -108,14 +108,24 @@ these) returns a JSON error, not the bare 200 above.
 
 ```sh
 go build -o /tmp/agent-bus/agent-busctl ./cmd/agent-busctl
-scripts/bus-serve.sh start                       # start a local bus
+scripts/bus-serve.sh start                       # start a local bus (first run also mints its identity)
 
-agent-busctl --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> enrol --name planner
-agent-busctl --bus https://127.0.0.1:8080 --bus-fingerprint <64-hex-from-invite> enrol --name builder --keep-current
-agent-busctl agents                                    # fully-qualified ids
+# Enrolment is invite-only (invariant 3) — mint one invite per agent. Minting
+# takes the data dir's exclusive lock, so the bus has to be stopped for it:
+scripts/bus-serve.sh stop
+/tmp/agent-bus/bin/agent-bus invite mint -data-dir /tmp/agent-bus/data -bus-address https://127.0.0.1:8080 -ttl 1h -json > /tmp/agent-bus/invite-planner.json
+/tmp/agent-bus/bin/agent-bus invite mint -data-dir /tmp/agent-bus/data -bus-address https://127.0.0.1:8080 -ttl 1h -json > /tmp/agent-bus/invite-builder.json
+chmod 0600 /tmp/agent-bus/invite-planner.json /tmp/agent-bus/invite-builder.json   # it holds a bearer credential
+scripts/bus-serve.sh start
 
-agent-busctl --as <bus>.builder-1 watch &              # long-poll for messages
-agent-busctl --as <bus>.planner-1 send <bus>.builder-1 'hello'
+# Two agents means two mTLS client certificates — one certificate never names
+# two agents (invariant 11) — so each gets its own credential store:
+agent-busctl --identity /tmp/agent-bus/id-planner enrol --invite-file /tmp/agent-bus/invite-planner.json --name planner
+agent-busctl --identity /tmp/agent-bus/id-builder enrol --invite-file /tmp/agent-bus/invite-builder.json --name builder
+agent-busctl --identity /tmp/agent-bus/id-planner agents               # fully-qualified ids
+
+agent-busctl --identity /tmp/agent-bus/id-builder --as <bus>.builder-1 watch &          # long-poll for messages
+agent-busctl --identity /tmp/agent-bus/id-planner --as <bus>.planner-1 send <bus>.builder-1 'hello'
 ```
 
 `agent-busctl broadcast` is deliberately refused by the bus — see the status note above.

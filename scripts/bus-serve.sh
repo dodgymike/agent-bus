@@ -407,7 +407,20 @@ cmd_start() {
       echo "agent-bus:   certificate ${CERT_FILE}"
       if [[ -n "$fp" ]]; then
         echo "agent-bus:   fingerprint ${fp}"
-        echo "agent-bus: enrol with: agent-busctl enrol --bus https://${PROBE_ADDR} --bus-fingerprint ${fp} --name <name>"
+        # Enrolment is invite-only (invariant 3, enrolmentInviteRequired = true
+        # since 3cedcb7, 2026-08-15): the --bus/--bus-fingerprint form this
+        # used to print here now gets a 403 every time, since it presents no
+        # invite. Minting one takes the data dir's exclusive lock, which this
+        # running bus already holds, so it cannot be done while the bus is up
+        # -- print the two-step (stop, mint, start again) rather than a
+        # command that fails as printed.
+        echo "agent-bus: enrolling requires an invite. Already have one? agent-busctl enrol --invite-file <path> --name <name>"
+        echo "agent-bus: need one? mint takes this bus's data-dir lock, so stop it first:"
+        echo "agent-bus:   scripts/bus-serve.sh stop"
+        echo "agent-bus:   ${BIN_FILE} invite mint -data-dir ${DATA_DIR} -bus-address https://${PROBE_ADDR} -ttl 1h -json > invite.json"
+        echo "agent-bus:   chmod 0600 invite.json   # it holds a bearer credential; agent-busctl refuses a wider mode"
+        echo "agent-bus:   scripts/bus-serve.sh start"
+        echo "agent-bus:   agent-busctl enrol --invite-file invite.json --name <name>"
       else
         # No guess, and specifically no falling back to the log: an agent
         # enrolling against a fingerprint from an untrusted source is the whole

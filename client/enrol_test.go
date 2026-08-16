@@ -723,7 +723,65 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 		// wantPendingDropped asserts DropPending ran: no pending record
 		// survives for this (key, busURL) after enrolFailed returns.
 		wantPendingDropped bool
+		// wantMessageContains are substrings the final e.Message must contain.
+		// Most cases don't bother (they only care about the composed Remedy),
+		// but the routeEnroll 401/403 branch (DOCS-22) rewrites Message too,
+		// and that branch had ZERO coverage before this case — annotated
+		// below.
+		wantMessageContains []string
 	}{
+		{
+			// DOCS-22: a 403 on /v1/enroll with NO invite presented
+			// (EnrolOptions.Invite left nil below) must NOT get the generic
+			// session wording ("the session may have expired... retry, and if
+			// it persists re-enrol with `agent-busctl enrol`") — that told a
+			// caller to retry the exact request that just permanently failed.
+			// annotateInviteRefusal is a no-op here (it requires a non-nil
+			// Invite), so this exercises statusError's routeEnroll branch
+			// directly, the same branch annotateInviteRefusal overrides when
+			// an invite WAS presented (covered elsewhere by
+			// TestEnrolClassifiesAndRefusesToRetryARefusedInvite-style cases).
+			name: "403 on enroll with no invite presented names the invite requirement, not retry",
+			save: true,
+			build: func() error {
+				return fromStatus("enrol", http.StatusForbidden, "", "this bus is invite-only")
+			},
+			wantKind:            KindAuth,
+			wantFatal:           false,
+			wantRemedyUnchanged: true,
+			wantPendingDropped:  true,
+			wantMessageContains: []string{"the bus refused this enrolment"},
+			wantRemedyKeeps: []string{
+				"the bus requires an invite to enrol",
+				"agent-busctl enrol --invite-file",
+				"agent-bus invite mint",
+			},
+			wantRemedyLacks: []string{
+				"the session may have expired",
+				"retry, and if it persists re-enrol",
+			},
+		},
+		{
+			name: "401 on enroll gets the same routeEnroll wording as 403",
+			save: true,
+			build: func() error {
+				return fromStatus("enrol", http.StatusUnauthorized, "", "this bus is invite-only")
+			},
+			wantKind:            KindAuth,
+			wantFatal:           false,
+			wantRemedyUnchanged: true,
+			wantPendingDropped:  true,
+			wantMessageContains: []string{"the bus refused this enrolment"},
+			wantRemedyKeeps: []string{
+				"the bus requires an invite to enrol",
+				"agent-busctl enrol --invite-file",
+				"agent-bus invite mint",
+			},
+			wantRemedyLacks: []string{
+				"the session may have expired",
+				"retry, and if it persists re-enrol",
+			},
+		},
 		{
 			name: "fatal 503 keeps its diagnosis and is told NOT to retry",
 			save: true,
@@ -874,6 +932,11 @@ func TestEnrolFailedComposesRemedyAndStampsKey(t *testing.T) {
 			for _, unwanted := range tc.wantRemedyLacks {
 				if strings.Contains(e.Remedy, unwanted) {
 					t.Fatalf("remedy = %q, want it NOT to contain %q", e.Remedy, unwanted)
+				}
+			}
+			for _, want := range tc.wantMessageContains {
+				if !strings.Contains(e.Message, want) {
+					t.Fatalf("message = %q, want it to contain %q", e.Message, want)
 				}
 			}
 
