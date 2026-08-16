@@ -2407,3 +2407,137 @@ because the sweep asks whether a checkpoint **can run** (`wal.Log.CheckpointSupp
 the log was opened with `Checkpoints`) rather than whether the log merely *has* a `Checkpoint`
 method: `wal.Open` here is called with **no** `Checkpoints`, so deferring the reclaim to a checkpoint
 would defer it for ever. See `DECISIONS.md` 2026-08-15.
+
+## A fifth `Entry.Kind`: `"ack"` — the durable sender-visible delivery lifecycle row (`ACK-2`, 2026-08-16)
+
+**Nothing was reserved, and nothing needed to be.** `wal.Entry.Kind` is a free-form APPLICATION
+STRING that sits inside the prepare payload, above the framing layer (see "A composite `Entry.Kind`"
+above). The reserved NUMBERS are `wal.Type`'s framing values, which are untouched.
+`ack.RecordKind = "ack"` (`internal/ack/record.go`) is the fifth application discriminator to share
+the WAL, alongside `store.RecordKind = "message"`, `auth.RecordKind = "agent"`,
+`invite.RecordKind = "invite"`, `auth.EnrolInviteRecordKind = "agent+invite"`,
+`hub.SeqFloorRecordKind = "seqfloor"` and `relay.OutboxRecordKind = "outbox"`. **No `record-type`
+reservation, no `ondisk-format-version` bump, no new on-disk FILE, no HTTP route.**
+
+### What it records, and what it is deliberately NOT
+
+One row is one **(correlation key, recipient)** pair's SENDER-VISIBLE delivery state. Three facts are
+routinely collapsed into the word "ack" and this row is only the first and third of them:
+
+| plane | fact | where it lives |
+| --- | --- | --- |
+| A local acceptance | this bus committed and fsynced the message | **this record** (`accepted`) |
+| B peer-hop receipt | the next bus took responsibility for a copy | `relay.OutboxRecord` — a DIFFERENT table |
+| C recipient delivery | the addressed agent's application accepted it | **this record** (`delivered`/`refused`), not yet written by anything |
+
+**A hop ACK does not advance this row.** There is no method on `ack.Store` that a hop ACK could call;
+the absence is the enforcement.
+
+### The record
+
+`Entry.Body` is compact JSON, no HTML escaping, `record_version` **1**, enums as fixed STRINGS and
+times RFC3339Nano in UTC — so a row can be read straight out of the WAL:
+
+| field | type | rule |
+| --- | --- | --- |
+| `record_version` | int | `1`. A different value is REFUSED, never read with today's field meanings. |
+| `correlation_key` | string | the ORIGIN bus's server-minted message id, `<origin-bus>-<seq>`, `<= ids.MaxMessageIDLen` (85). Reached through `store.Message.OriginID()`; **not a fourth identifier**. |
+| `recipient` | string | fully qualified `<bus-id>.<agent-id>` (invariant 2), `<= ids.MaxAgentIDLen`. |
+| `sender` | string | the authenticated principal that sent the message, fully qualified. It is what authorises the future status read. |
+| `state` | enum | `accepted` \| `in_flight` \| `delivered` \| `refused` \| `undeliverable`. **There is no `unknown` and there must never be one** — it is a REPORTING value, and writing "I don't know" durably overwrites a real outcome with ignorance. |
+| `class` | enum, omitempty | set **iff** `state` is a NEGATIVE terminal, and the half must match: `refused` takes one of the 3 recipient-emitted classes, `undeliverable` one of the 9 bus-emitted ones. Validated in both directions. |
+| `attested_by` | enum, omitempty | set **iff** `state` is terminal. `peer_bus` \| `recipient_signature_unverified`. **There is deliberately no value meaning "verified"** — nothing in this system can produce one. |
+| `accepted_at` | RFC3339Nano | required. The retention anchor for a non-terminal row, and PRESERVED across every transition. |
+| `settled_at` | RFC3339Nano, omitempty | set **iff** terminal. The retention anchor for a terminal row. |
+
+**There is no variable-length free-text field, by construction** (invariant 6 — the trail is metadata
+and routing ONLY; a reason string sourced from a recipient is a body by another name). The record
+also carries **no** body, **no** content hash, **no** `Seq` and **no** `Pos`: it has no ordering axis
+at all, which is exactly why the correlation key is safe to key on.
+
+The decoder is strict in the way `invite.DecodeRecord` and `relay.DecodeOutboxRecord` are: unknown
+fields refused, trailing data refused, unrecognised enum spellings **rejected and never defaulted**,
+every field re-validated, and untrusted text elided before it is quoted into an error.
+
+### Monotonicity, and what replay may therefore do
+
+`accepted` → `in_flight` → terminal, and **terminal is ABSORBING**: never revisited, never reopened,
+never downgraded. The rule is keyed on the state RANK and on nothing else — not a sequence, not a
+timestamp, not the record's position — so a stale `accepted` record replayed after a terminal one is
+REFUSED rather than applied. The first terminal wins; a second, different one is rejected and logged
+and **disconnects nothing**. A duplicate is a no-op.
+
+### Startup wiring — the same three steps every other applier uses
+
+**construct before `wal.Open` → `wal.Open` (replay fills it) → `Attach(log)`.**
+`cmd/agent-bus/main.go` builds `ack.NewStore(...)` before the log, registers
+`appliers["ack"] = ackStore`, and calls `ackStore.Attach(walLog)` after `wal.Open` returns. Between
+steps 1 and 3 the table can be rebuilt but not written; every mutating call refuses with
+`ack.ErrNotDurable`, and a failure to attach is FATAL.
+
+**It is NOT gated on the peer store**, unlike the three federation kinds: the rows are LOCAL
+acceptance, which a bus with no peers produces on every send.
+
+### Retention and capacity
+
+| bound | value | note |
+| --- | --- | --- |
+| `ack.Retention` | **24h** | `= idem.PeerOutageBudget`, the ROOT of the chain `relay.OutboxSettledRetention` = `relay.RetryHorizonCeiling` sits on. Adopted BY REFERENCE, never as a second literal; the equivalence is asserted by `TestAckRetentionMatchesOutboxSettledRetention` in `cmd/agent-bus/ack_retention_drift_test.go` — at the composition root, because `internal/ack` must not import `internal/relay` (it would invert the direction `ACK-4`/`ACK-5` need, and `TestRelayImportedOnlyByWiringSites` permits that import only from `internal/httpapi` and `cmd/agent-bus`; that guard was NOT widened). |
+| `ack.MaxRecordBytes` | 1 KiB | one row's worst-case footprint, derived field by field and asserted by `TestMaxRecordBytesBoundsWorstCase`. |
+| `ack.MaxRetainedBytes` | 64 MiB | the table's memory budget. |
+| `ack.MaxEntries` | 65536 | the quotient. ~0.76 new rows/second sustained over the window. |
+| `ack.PressureLine` | 32768 | `MaxEntries/2` — the crossover where free space stops exceeding used space; the per-sender fair share engages above it. |
+| per-sender fair share | `maxEntries / (senders + 1)` | the `+1` is the sender that has not arrived yet, without which a lone sender's share is the whole table. |
+
+**Both bounds fail closed and evict NOTHING.** Evicting a live row turns a real terminal outcome into
+a false `unknown` — an inversion of the truth rather than a gap in it.
+
+### The one place this design degrades instead of failing closed
+
+> **At capacity the SEND STILL SUCCEEDS (201) and the row is NOT created.** A future
+> `GET /v1/ack/...` then reports `unknown`. The refusal is counted (`ack.Stats().CapacityRefusals`)
+> and logged at ERROR, loudly and specifically — the first one unconditionally, repetitions throttled
+> to one a minute with a running total, so a full table cannot flood the log and push the informative
+> line out of retention.
+
+Stated because it is the one asymmetry in this repository: refusing here would mean an
+**observability** table causing a **messaging** outage, and it would break everything while violating
+nothing — the message is already durable and the sender was already told 201 (invariant 4).
+
+### What writes it on this build, and what does not
+
+`hub.Options.Acks` (a new OPTIONAL `hub.AckRecorder` seam; nil is byte-for-byte the old behaviour) is
+called from `Hub.publish` **after the message's own two-phase commit and before local waiters are
+woken**, writing one `accepted` row per recipient. It **never fails a send**: an error degrades the
+observation and is logged.
+
+| message | row? | why |
+| --- | --- | --- |
+| local directed send | **yes**, one per recipient | this is `ACK-2` |
+| broadcast | no | a broadcast has no canonical audience under signing format v1, so there is no (message, recipient) pair to key on; `/v1/broadcast` answers 501 today |
+| relayed ingest | no | an intermediate's rows are `ACK-5`'s back-propagation shape |
+
+**The row costs a SECOND two-phase transaction PER RECIPIENT** — one per send today, since
+`hub.SendRequest` carries a single `To`; measured at **+32%** on local send latency (9.59 ms → 12.66 ms
+over 50 sends against a real `wal.Log`). It does **not** ride in the message's own entry, and that is a
+TRADE rather than a limitation: a composite `Entry.Kind` could carry both in one transaction exactly
+as `"agent+invite"` already does, but it would change the discriminator on every message record,
+split the message applier and oblige every existing log to be read under both spellings — a migration
+across the whole message plane, to close a window that costs an observation and never a message.
+
+A crash in the window between the message's commit and the row's therefore leaves the message durable
+with **no** row, so the sender is later told `unknown` rather than `accepted` — a bounded loss of
+OBSERVATION and never of the message. That window is asserted by
+`TestAckCrashBeforeRowLeavesMessageDurableAndStatusUnknown`; closing it is `ACK-8`'s.
+
+**A multi-recipient LOCAL send would make this up to 64 serial two-phase transactions under the
+global write lock** (`store.MaxRecipients`), repeatable by any enrolled agent — the live twin of the
+latent broadcast hazard `Hub.forwardOnward` already names. It is unreachable today and is the thing
+to re-check before any task gives a local send several recipients; batching the rows into one
+`wal.Entry` is the fix.
+
+**Nothing reads these rows yet.** `GET /v1/ack/{correlation_key}` is `ACK-9`, `POST /v1/ack` is
+`ACK-6` and `POST /v1/peer/ack` is `ACK-3`, so there is no CLI subcommand and no `AGENT_PROTOCOL.md`
+entry in this change — invariant 7 binds the task that adds the ROUTE, and this task adds none.
+`ack.Store.Settle` and `ack.Store.MarkInFlight` exist and are tested but have **no production
+caller** in this build.

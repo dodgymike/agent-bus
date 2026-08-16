@@ -10,6 +10,14 @@ import (
 	"sync"
 	"time"
 
+	// internal/ack is imported for its SENTINEL ERRORS only — see
+	// recordAcceptance, which must be able to tell a refusal the recorder has
+	// already logged and counted from one it has not. The seam stays an
+	// INTERFACE (hub.AckRecorder) rather than the concrete type, so a nil
+	// recorder is still the default and a test double is still possible; this
+	// import adds no runtime coupling. internal/ack does not import this
+	// package, so the direction is safe.
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
@@ -145,6 +153,53 @@ type Egress interface {
 	Forward(m store.Message)
 }
 
+// AckRecorder records DURABLE LOCAL ACCEPTANCE — one sender-visible delivery
+// lifecycle row per recipient — for a message this bus has just committed
+// (ACK-2; ACK-CONTRACT.md §7, §8.2 event E1).
+//
+// It is OPTIONAL. Nil means no lifecycle table is wired and this bus behaves
+// EXACTLY as it did before the seam existed — the same equivalence RemoteRouter
+// and Egress state about themselves.
+//
+// # IT IS THE *SENDER-VISIBLE* PLANE, WHICH IS NOT THE HOP PLANE
+//
+// Three facts are routinely collapsed into the word "ack": this bus committed
+// the message (plane A); the next bus took responsibility for a copy (plane B);
+// the addressed agent's application accepted it (plane C). This seam records
+// plane A. Plane B is relay.Outbox's and is a DIFFERENT table on purpose — a hop
+// ACK must never advance the state this records, which is why there is no method
+// here for one.
+//
+// # IT MUST NOT FAIL A SEND, AND publish MUST NOT LET IT
+//
+// Accept is called on the send path AFTER the message's own two-phase write has
+// returned, so the message is durable and the sender is already owed its 201.
+// An error from it — including the capacity refusals the lifecycle table is
+// designed to return — DEGRADES THE OBSERVATION AND NEVER THE SEND
+// (ACK-CONTRACT.md §11.3): refusing here would mean an observability table
+// causing a messaging outage, and it would break everything while violating
+// nothing, since the message is already on stable storage. publish logs the
+// refusal loudly (invariant 6) and carries on.
+//
+// It DOES perform a durable write of its own, so it is not free: a send with a
+// recorder wired costs one additional two-phase fsync cycle PER RECIPIENT — which
+// is one today, because SendRequest carries a single `To`. That cost
+// is the price of invariant 4 holding for the lifecycle row as well — a row that
+// is only in memory would report outcomes no restart could reproduce.
+//
+// An implementation MUST be safe for concurrent use.
+type AckRecorder interface {
+	// Accept records that this bus has committed and fsynced the message
+	// identified by correlationKey — the ORIGIN bus's server-minted message id,
+	// which for a locally-originated message is its own id — addressed to
+	// recipient, on behalf of sender. Both agent ids are fully qualified
+	// (invariant 2).
+	//
+	// A repeat call for the same (correlationKey, recipient) is a legitimate
+	// retry and must be a no-op returning nil (invariant 10).
+	Accept(correlationKey, sender, recipient string) error
+}
+
 // Options configures Open.
 type Options struct {
 	// BusID is this bus's server-minted id. REQUIRED: every message id and
@@ -206,6 +261,12 @@ type Options struct {
 	// messages it has no way to deliver, which is worse than the honest 404 it
 	// replaced.
 	Egress Egress
+
+	// Acks is the OPTIONAL durable sender-visible delivery lifecycle table (see
+	// the AckRecorder type). Nil is the correct value for a build with no
+	// lifecycle table, and is behaviourally identical to the bus before the seam
+	// existed.
+	Acks AckRecorder
 
 	// Durable is the two-phase write path. When nil the hub serves reads and
 	// refuses every send with ErrNotDurable — invariant 4 has no "best effort"
@@ -493,6 +554,11 @@ type Hub struct {
 	// forwardOnward, which is where the guarantees about it live.
 	egress Egress
 
+	// acks is the OPTIONAL durable sender-visible delivery lifecycle table. Nil
+	// on a build with none. Set once in Open, never replaced; it is called only
+	// through recordAcceptance, which is where the guarantees about it live.
+	acks AckRecorder
+
 	// recovered holds every agent id named as a sender or a recipient by a
 	// message replayed from disk at startup. It is written only during Open and
 	// read-only afterwards, so it needs no lock.
@@ -573,6 +639,7 @@ func Open(o Options) (*Hub, error) {
 		roster:         o.Roster,
 		router:         o.RemoteRouter,
 		egress:         o.Egress,
+		acks:           o.Acks,
 		recovered:      make(map[string]struct{}),
 		waiters:        make(map[*waiter]struct{}),
 		waitersByAgent: make(map[string]int),
@@ -1892,6 +1959,18 @@ func (h *Hub) publish(req publishRequest) (Result, idem.Outcome, error) {
 		return Result{}, idem.OutcomeNew, h.poisoned
 	}
 
+	// The DURABLE SENDER-VISIBLE ACCEPTANCE ROW, one per recipient (ACK-2).
+	//
+	// BEFORE notify, DELIBERATELY, and this ordering is load-bearing rather than
+	// tidy. Waking a local waiter hands the message to the recipient, and the
+	// recipient's application ACK (ACK-6) is keyed on this very row: wake first
+	// and a fast recipient can ACK a message whose lifecycle row does not exist
+	// yet, which the ACK route can only answer as "not yours". The row is cheap
+	// to have early and impossible to reconstruct late.
+	//
+	// It NEVER fails the send — see recordAcceptance.
+	h.recordAcceptance(m, req.relayed, req.broadcast)
+
 	// LAST, and only here: the message is durable and it is in the serving
 	// copy, so a waiter woken now cannot observe something a crash would take
 	// back (POLL-2).
@@ -1976,6 +2055,152 @@ func (h *Hub) forwardOnward(m store.Message) {
 		}
 	}()
 	h.egress.Forward(m)
+}
+
+// recordAcceptance writes ONE durable sender-visible lifecycle row per
+// recipient for a message this bus has just committed (ACK-2; ACK-CONTRACT.md
+// §7, §8.2 event E1). It is a no-op on a bus with no AckRecorder wired.
+//
+// # WHAT IT RECORDS, AND WHAT THAT SENTENCE MAY NEVER BE STRETCHED INTO
+//
+// `accepted` means "this bus has committed and fsynced the message" and NOTHING
+// MORE. It is not "delivered", it is not "the recipient has it", and it is not
+// "a peer took it". The one sentence this whole epic exists to stop anyone
+// writing is "the send returned success, so the message was delivered".
+//
+// # IT NEVER FAILS THE SEND. THAT IS A DELIBERATE ASYMMETRY, NOT AN OVERSIGHT
+//
+// Everywhere else in this repository the fail-closed answer is to refuse the
+// operation. Here the message is ALREADY on stable storage and the sender is
+// ALREADY owed its 201 (invariant 4), so refusing would mean an OBSERVABILITY
+// table causing a MESSAGING outage — it would break everything while violating
+// nothing. Degrading the observation is recoverable; refusing the send is not.
+// The recorder's own capacity refusals are logged loudly and specifically at the
+// point of refusal (invariant 6), and anything unexpected is logged here.
+//
+// # WHICH MESSAGES GET A ROW, AND WHY THE OTHER TWO DO NOT
+//
+//   - BROADCAST: none. A broadcast has NO canonical audience under signing
+//     format v1 — store.Message keeps it as a FLAG, deliberately not an expanded
+//     roster — so there is no (message, recipient) pair to key a row on.
+//     Inventing one would settle SIGN-3 by accident, in a place nobody would
+//     look. /v1/broadcast answers 501 today, so this arm is unreachable from the
+//     agent surface; it is written as a guard rather than an assumption.
+//   - RELAYED INGEST: none, in this build. An intermediate bus holds a copy of
+//     somebody else's message: the sender is not ours, cannot read a row here
+//     (§13.3 authorises the ORIGINAL SENDER only), and the rows an intermediate
+//     needs are the back-propagation rows that ACK-5 designs. Writing them now
+//     would put a shape on disk before the task that has to live with it exists.
+//
+// # THE CORRELATION KEY IS READ THROUGH OriginID(), NEVER RE-SPELLED
+//
+// store.Message.OriginID() is the ONE place the "origin id when set, local id
+// otherwise" rule is written down, and its doc comment forbids re-spelling that
+// branch at a call site. For a locally-originated message it returns the
+// message's own id, which IS the origin id.
+//
+// # THE COST, MEASURED RATHER THAN ESTIMATED — ONE EXTRA FSYNC CYCLE PER SEND
+//
+// The loop below is over m.Recipients, and each row is a separate two-phase
+// transaction through the same log, under writeMu. TODAY THAT LOOP RUNS EXACTLY
+// ONCE, because the two callers that reach it with more than one recipient are
+// both excluded above: SendRequest carries a single `To`
+// (publish is called with `[]string{req.To}`), a broadcast has no recipient list
+// at all, and only IngestRelayed passes several — and relayed ingest writes no
+// row in this build.
+//
+// So the exposure an authenticated agent has is 1 extra fsync per send, not
+// store.MaxRecipients (64) of them. THAT IS THE THING TO RE-CHECK before any
+// task gives a local send several recipients: at 64 this becomes 64 serial
+// fsyncs with the global write lock held, repeatable by any enrolled agent —
+// exactly the latent hazard forwardOnward names above for the outbox, except
+// live. Batching the rows into one wal.Entry would be the fix, and it is a
+// record-shape change rather than a tidy-up.
+//
+// # THE CRASH WINDOW, NAMED RATHER THAN HIDDEN
+//
+// The row is written in a SECOND wal transaction, after the message's own
+// commit. A crash in between leaves the message durable with no lifecycle row,
+// so the sender is later told `unknown` rather than `accepted`. That is a
+// bounded loss of OBSERVATION and never of the message, it is exactly what
+// §11.3's capacity refusal already produces by design, and reconstructing state
+// across a crash boundary is ACK-8's (§14 D1).
+//
+// IT COULD BE CLOSED, AND WAS NOT. An earlier draft of this comment said folding
+// the row into the message's own wal.Entry was "not possible, a wal.Entry
+// carries exactly one Kind". That is FALSE and it is worth correcting in place
+// rather than deleting, because it is the kind of false impossibility that stops
+// the next reader looking: `auth.EnrolInviteRecordKind = "agent+invite"` is a
+// COMPOSITE kind whose entire purpose is one entry, one transaction, two effects
+// — it exists precisely to close a window of this class
+// (CONTRACTS-ONDISK.md, "A composite Entry.Kind").
+//
+// So the reason is a TRADE, not a limitation. A composite "message+ack" kind
+// would change the discriminator on EVERY message record this bus writes, split
+// the message applier, and oblige every existing log to be read under both
+// spellings — a migration across the whole message plane, taken to close a
+// window that costs an observation and never a message, for a table nothing
+// reads yet. If ACK-8 judges the window unacceptable, that is the shape to
+// reach for.
+func (h *Hub) recordAcceptance(m store.Message, relayed, broadcast bool) {
+	if h.acks == nil || relayed || broadcast {
+		return
+	}
+	correlationKey := m.OriginID()
+	for _, recipient := range m.Recipients {
+		// THE RECOVER IS PER RECIPIENT, NOT AROUND THE LOOP. A panic recovered
+		// outside the loop would abandon rows 2..N as well as the one that
+		// panicked, turning one bad recipient into a silent loss of status for
+		// every other recipient of the same message. It has no effect today —
+		// the loop runs exactly once, see the cost note above — and that is
+		// precisely why it has to be right now rather than when a multi-recipient
+		// local send makes it observable.
+		err := h.acceptOne(m, correlationKey, recipient)
+		if err == nil {
+			continue
+		}
+		// A CAPACITY REFUSAL IS NOT LOGGED HERE, AND THAT IS NOT A SOFTENING.
+		//
+		// The recorder logs those itself, at ERROR, with the full remedy and a
+		// running total — and THROTTLED, to one line per minute, precisely
+		// because a full table refuses on every send and an unthrottled line
+		// would emit thousands per second. Logging them again here, unthrottled,
+		// on the send path, would defeat that throttle completely: an
+		// OBSERVABILITY table would become a DISK outage, which is the exact
+		// failure §11.3 exists to prevent. It would also be the second copy of a
+		// line the recorder already emits.
+		//
+		// What is left is everything the recorder does NOT already account for —
+		// a nil log, a validation refusal, an fsync failure — and those are rare
+		// by construction and must never be quiet.
+		if errors.Is(err, ack.ErrCapacity) || errors.Is(err, ack.ErrAgentQuota) {
+			continue
+		}
+		h.log.Error("NO SENDER-VISIBLE DELIVERY STATUS was recorded for this recipient, so GET /v1/ack will report `unknown` for it. THE MESSAGE IS DURABLE AND WAS ACCEPTED — this degrades the observation and never the send",
+			"message_id", m.ID,
+			"correlation_key", correlationKey,
+			"sender", m.Sender,
+			"recipient", recipient,
+			"err", err,
+		)
+	}
+}
+
+// acceptOne records ONE recipient's acceptance row and converts a panic in the
+// recorder into an error.
+//
+// A panic here would otherwise unwind through publish holding writeMu and kill
+// the process for a message that is already committed and already in the serving
+// copy — the same containment forwardOnward applies to the egress seam, and for
+// the same reason. It is a separate function only so the recover() is scoped to
+// ONE recipient; see the call site.
+func (h *Hub) acceptOne(m store.Message, correlationKey, recipient string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("PANIC in the delivery lifecycle seam: %v", r)
+		}
+	}()
+	return h.acks.Accept(correlationKey, m.Sender, recipient)
 }
 
 // IdempotencyStats reports the observable state of the applied-key table: how

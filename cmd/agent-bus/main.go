@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/dirlock"
 	"github.com/dodgymike/agent-bus/internal/httpapi"
@@ -551,9 +552,24 @@ func run(cfg Config) error {
 	// build serves NO peer route, verifies NO relayed message and authenticates NO
 	// peer bus, so a revocation we could not read cannot be disregarded — there is
 	// nothing left for it to protect.
+	// The DELIVERY LIFECYCLE TABLE (ACK-2). It is built here, BEFORE wal.Open,
+	// for the reason every applier is: replay must find it in the applier map,
+	// or its records are passed over in complete silence by the multiplexer --
+	// the silent discard invariant 6 rates as the defect. It is attached to the
+	// log in the third step below, and until then every write refuses with
+	// ack.ErrNotDurable.
+	//
+	// IT IS NOT GATED ON THE PEER STORE, unlike the three federation kinds
+	// below. The rows it holds are LOCAL sender-visible acceptance -- "this bus
+	// committed and fsynced the message" -- which a bus with no peers produces
+	// on every send. Gating it on federation would leave a standalone bus
+	// writing no status at all, which is the one topology this build actually
+	// exercises.
+	ackStore := ack.NewStore(ack.Options{Logger: lg})
 	appliers := map[string]wal.Applier{
 		auth.RecordKind:   authRoster,
 		invite.RecordKind: inviteStore,
+		ack.RecordKind:    ackStore,
 	}
 	// The RELAY DELIVERY OUTBOX is the third applier of this shape, and it is
 	// registered here for the reason the other two are: it is an applier, so it
@@ -779,6 +795,16 @@ func run(cfg Config) error {
 		if err := relayOutbox.Attach(walLog); err != nil {
 			return fmt.Errorf("attaching the durable relay delivery outbox to the write-ahead log: %w", err)
 		}
+	}
+	// The same third step for the delivery lifecycle table, and FATAL for the
+	// same reason: an unattached table refuses every write with
+	// ack.ErrNotDurable, so a bus that reached here with one would answer
+	// `unknown` about every message it ever accepted while looking perfectly
+	// healthy. Replay ran inside wal.Open above; this line makes the table
+	// writable, and the first live row cannot be written until the hub is
+	// serving, which is after both.
+	if err := ackStore.Attach(walLog); err != nil {
+		return fmt.Errorf("attaching the durable delivery lifecycle table to the write-ahead log: %w", err)
 	}
 	// One line, at INFO, and worded so it can NEVER be read as "enrolment is
 	// open": it is not, as of INVITE-GATE-ENFORCE. This line said the exact
@@ -1131,6 +1157,20 @@ func run(cfg Config) error {
 		Roster:      hubRoster{roster: authRoster},
 		Logger:      lg,
 		PollTimeout: cfg.PollTimeout,
+
+		// The DURABLE SENDER-VISIBLE DELIVERY LIFECYCLE TABLE (ACK-2). Attached
+		// above, so it is writable before the hub can serve a single send.
+		//
+		// What this wires on, stated narrowly: a LOCAL, non-broadcast send now
+		// writes one `accepted` row per recipient, in a second two-phase
+		// transaction after the message's own commit. NOTHING READS THOSE ROWS
+		// YET -- GET /v1/ack is ACK-9 -- so the observable effect of this line
+		// today is one additional fsync cycle per RECIPIENT -- one per send, since
+		// hub.SendRequest carries a single `To` -- and a durable record an
+		// operator can read out of the WAL. It never fails a send: see
+		// hub.AckRecorder and Hub.recordAcceptance for why that asymmetry is
+		// deliberate.
+		Acks: ackStore,
 
 		// THE EGRESS PAIR (RELAY-24-BLOCKER-EGRESS). Both are nil on a bus with
 		// no peer store, and a nil pair is behaviourally identical to the bus
