@@ -33,9 +33,12 @@ WHAT IT DOES
   TRUE TODAY and it is the dangerous direction to be wrong in: it promised
   cross-hop correlation that the bus does not yet perform, so an agent acting
   on it would build a correlation scheme on a value that does not correlate.
-  What actually works is the SAME-BUS case. Across a relay hop, no lifecycle
-  row is written for relayed ingest, so this command answers exit 8 unknown;
-  and watch emits only the LOCAL message_id, never the origin id the
+  What actually works is a same-bus DIRECT message, and only that. Hub's
+  recordAcceptance early-returns on relayed OR broadcast, so a relayed message
+  and a same-bus BROADCAST both open no lifecycle row and both answer exit 8
+  unknown. (This notice itself first said "the SAME-BUS case", which overclaimed
+  in the very direction it exists to correct: broadcast is same-bus and still
+  does not work.) On top of that, watch emits only the LOCAL message_id, never the origin id the
   correlation key is built from, so after a hop you cannot even name the
   message you are being asked to acknowledge. Tracked as P0 7d564118
   (destination row) and P0 f423959c (watch correlation key). When those land,

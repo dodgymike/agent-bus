@@ -24,8 +24,15 @@ WHAT IT DOES
 
   The correlation key is the message id the bus returned when you sent it —
   ` + "`agent-busctl send --json | jq -r .message_id`" + `. It is minted by the bus that
-  accepted the message (invariant 1) and is bus-namespaced, so it identifies
-  the message across every hop it takes.
+  accepted the message (invariant 1) and is bus-namespaced.
+
+  CORRECTED 2026-08-21 (ACK-12). This used to end "...so it identifies the
+  message across every hop it takes." It does not, today. Hub's
+  recordAcceptance early-returns on relayed OR broadcast, so no lifecycle row
+  exists for a relayed message or for a same-bus broadcast, and this command
+  answers unknown for both. Only a same-bus DIRECT message is tracked. See the
+  same notice on the ack subcommand; tracked as P0 7d564118 and P0 f423959c.
+  When those land, delete this notice rather than leaving it to rot.
 
 THE FIVE STATES
   accepted       committed and fsynced on your bus. It is durable; nobody has
