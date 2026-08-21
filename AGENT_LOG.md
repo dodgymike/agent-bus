@@ -4879,3 +4879,70 @@ to record why assigning `LogOptions.Checkpoints` today would refuse every publis
 
 No `CONTRACTS-*.md` plane moved: this task added no route, env var, record type, wire version or CLI
 surface. `AGENT_PROTOCOL.md` is untouched for the same reason — the agent-facing surface did not move.
+
+## 2026-08-21 — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types
+
+**Task.** `ACK-13` (P1, `a998ae43-60e3-4713-9212-71b3c7380c80`). Collapse the closed ACK vocabulary
+so every spelling and membership set is declared exactly ONCE. Ruling and reasoning recorded in
+`DECISIONS.md` (2026-08-21) and in `ACK-CONTRACT.md`.
+
+**Invariants read in full before writing code:** 1 (server-authoritative ids, never reused), 4
+(nothing acknowledged before durable, and its 2026-08-02 narrowing), 6 (the log is metadata and
+routing ONLY; discards logged loudly), 7 (the compiled CLI is THE client), 10 (idempotency; the
+three cases that must never be collapsed; the two questions before ANY disconnect).
+
+**Chain that ran.** spec-keeper (claim) -> implementer -> test-engineer -> reviewer -> security ->
+documentation. All five completed. No step skipped.
+
+**Files changed (10).** `internal/ack/vocabulary.go` (new — `String`, `Valid`, `ParseClass`,
+`ParseAttestation`, `RecipientSourced`, and the `All*()` iteration helpers, all DERIVED from the
+existing membership maps rather than re-listed); `internal/ack/vocabulary_test.go` (new — the
+`TestAckVocabularyHasOneHome` AST guard); `internal/relay/ack.go` (three uint8 enums and their
+`*Count` bounds deleted, replaced by aliases); `internal/relay/ack_test.go`;
+`internal/httpapi/ack.go`; `internal/httpapi/ackrecordvocab_internal_test.go` (new);
+`cmd/agent-bus/relaywiring.go`; `cmd/agent-bus/ackwiring_ack3_test.go`;
+`internal/signing/ackvocab_external_test.go`; `ACK-CONTRACT.md`.
+
+**Two guards that COULD NOT FIRE, found only by mutation.** Review found neither; this is the fourth
+and fifth instance of that pattern in this repo and it is worth recording as such:
+
+1. `internal/relay/ack_test.go` — the `DecideAck` table exercised the class checks through `refused`
+   only, where the half-set arm `outcome == AckRefused && !class.RecipientEmitted()` SUBSUMES both
+   `!class.Valid()` and `class == ackNoClass`. Three separate mutations stayed GREEN. Repaired by
+   adding the `undeliverable` halves of the existing rows. Note this guard was never RED-provable at
+   HEAD either — ACK-13 leaves it stronger than it found it.
+2. `cmd/agent-bus/ackwiring_ack3_test.go` — `for o := relay.AckDelivered; o <= relay.AckUndeliverable; o++`
+   now walks `ack.State` ORDINALS across a package boundary. Reorder that const block and the loop
+   runs ZERO times and the test passes having asserted nothing. Iteration count is now pinned to
+   `len(ack.AllTerminalStates())`.
+
+**One defect this change itself introduced, caught by all three gates independently.**
+`internal/httpapi/ack.go`'s `ackRecordVocabulary` stopped refusing a non-terminal state (its
+terminality guarantee had been inherited from the old uint8's inability to spell one) while its doc
+comment continued to claim it did. Fixed here with an explicit `!state.Terminal()` check and the
+first direct test that function has ever had — it previously had NONE, so deleting any of its three
+gates left the whole `./internal/httpapi` suite green.
+
+**Verification.** All of it in a clean overlay of HEAD carrying only the task's own paths, using the
+OVERLAY's `scripts/proof-check.sh` by relative path — the live working tree does not build, because
+five sibling agents have uncommitted work in it.
+
+- recorded proof: `go build ./... && go test -race -run TestAckVocabularyHasOneHome ./internal/ack`
+  -> `verdict=PASS class=test,toolchain exit=0 tests_run=5 top_level=1 skipped=0 failed=0 empty_pkgs=0`
+- regression: `go test -race -count=1 ./internal/ack ./internal/relay ./internal/httpapi ./internal/signing ./internal/hub`
+  -> `verdict=PASS class=test exit=0 tests_run=2089 top_level=547 skipped=38 failed=0 empty_pkgs=0`
+- `go vet ./...` clean across the WHOLE tree. This matters and `go build` does not substitute for it:
+  `go build` does NOT typecheck `_test.go` files, so an earlier proof of mine had never compiled the
+  ACK-12 harness at `tests/e2e/`. `go vet ./tests/e2e` typechecks it and is clean.
+- `"$(go env GOROOT)/bin/gofmt" -l .` -> output EMPTY (judged by output, never by exit status).
+- 28 mutations run against production code, all inside overlays; the live tree was never mutated.
+
+**No `CONTRACTS-*.md` plane moved and `AGENT_PROTOCOL.md` is untouched**: this task added no route,
+env var, record type, wire version or CLI subcommand. The agent-facing surface did not move — the
+wire spellings are byte-identical, which is the point of the task.
+
+**Process note worth propagating.** The session scratchpad ROOT is shared between concurrently
+running agents. A sibling overwrote an overlay helper I had written there with its own; running it
+produced `verdict=VACUOUS tests_run=0` against my file list, which reads exactly like an implementer
+having lied about its proof. Use a uniquely-named private subdirectory. Same collision class as two
+agents editing one source file, one layer down, and it manufactures FALSE NEGATIVES.

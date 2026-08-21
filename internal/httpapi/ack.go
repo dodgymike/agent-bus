@@ -263,30 +263,49 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ackRecordVocabulary translates the VALIDATED wire enums into the DURABLE ones.
+// ackRecordVocabulary CHECKS a validated wire acknowledgement against the
+// durable closed sets before it becomes a record.
 //
-// internal/relay spells the closed vocabulary as bounded uint8 enums for the
-// wire; internal/ack spells the SAME vocabulary as strings for the record, on
-// purpose — a numeric enum in a durable record is unreadable to an operator and
-// silently changes meaning if the constants are reordered (ack.State's own
-// note). The bridge is therefore through the STRING spelling, which is the one
-// thing both sides agree is canonical, and every step is CHECKED:
-// ack.ParseState refuses a spelling it does not know, and the class is required
-// to be a member of one of the two halves of the closed set. Nothing is
-// defaulted; a spelling neither side recognises is an error.
+// It used to TRANSLATE: internal/relay spelled the vocabulary as bounded uint8
+// enums for the wire while internal/ack spelled the SAME vocabulary as strings
+// for the record, and the bridge went through the string both sides agreed was
+// canonical. ACK-13 collapsed those two declarations — internal/ack is the
+// single home and relay's names are type ALIASES for it — so there is nothing
+// left to translate and no pair of spellings that can drift.
+//
+// The CHECKS stay. Nothing here is defaulted: a state that is not terminal, a
+// class outside the two halves of the closed set, or an absent attestation is an
+// ERROR, because the alternative is writing an ABSORBING terminal that can never
+// afterwards be corrected.
 func ackRecordVocabulary(v relay.ValidatedPeerAck) (ack.State, ack.Class, ack.Attestation, error) {
 	state, err := ack.ParseState(v.Outcome.String())
 	if err != nil {
 		return 0, "", "", err
 	}
+	// TERMINALITY IS ASSERTED HERE, AND IT STOPPED BEING INHERITED IN ACK-13.
+	//
+	// Before ACK-13 v.Outcome was a THREE-member uint8, so a non-terminal value
+	// had no wire spelling at all: it stringified to `AckOutcome(N)` and
+	// ParseState refused it STRUCTURALLY. The alias onto ack.State makes all
+	// FIVE states representable, so `accepted` and `in_flight` now parse
+	// cleanly — and the guarantee the doc above claims has to be CHECKED rather
+	// than assumed. Nothing reaches here with one today (handleAck feeds this
+	// ParseAckOutcome's terminal-only output), which is exactly why the check
+	// has to exist now: it is unreachable-by-agreement between two packages,
+	// and the day that agreement moves this writes an ABSORBING terminal that
+	// can never afterwards be corrected. Its twin, ackVocabulary in
+	// cmd/agent-bus/relaywiring.go, checks the same thing for the same reason.
+	if !state.Terminal() {
+		return 0, "", "", errors.New("httpapi: acknowledgement outcome " + state.String() + " is NOT a terminal state; only delivered, refused and undeliverable may become a durable acknowledgement record")
+	}
 	var class ack.Class
-	if v.Class != 0 {
-		class = ack.Class(v.Class.String())
+	if v.Class != "" {
+		class = v.Class
 		if !class.RecipientEmitted() && !class.BusEmitted() {
 			return 0, "", "", errors.New("httpapi: the wire class spelling " + elideAckLog(v.Class.String()) + " is not a member of the durable closed set")
 		}
 	}
-	attestedBy := ack.Attestation(v.Attestation.String())
+	attestedBy := v.Attestation
 	if !attestedBy.Valid() {
 		return 0, "", "", errors.New("httpapi: the wire attestation spelling " + elideAckLog(string(attestedBy)) + " is not a member of the durable closed set")
 	}

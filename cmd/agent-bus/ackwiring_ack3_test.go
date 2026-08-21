@@ -4,16 +4,19 @@ package main
 // DURABLE one.
 //
 // internal/relay/ack.go (ACK-4) and internal/ack/state.go (ACK-2) were written
-// concurrently and each declares its own spelling of the twelve NACK classes,
-// the three terminal outcomes and the two attestation labels. ack.go records
-// that as a known duplication and says a follow-up must collapse them. Until it
-// does, `ackVocabulary` in relaywiring.go is the seam, and TWO VOCABULARIES THAT
-// MUST AGREE ARE TWO VOCABULARIES THAT CAN DISAGREE.
+// concurrently and each declared its own spelling of the twelve NACK classes,
+// the three terminal outcomes and the two attestation labels. ACK-13 COLLAPSED
+// THEM: internal/ack is the single home and relay's names are type ALIASES for
+// it, so the two spellings are now the same string by construction and
+// `ackVocabulary` in relaywiring.go validates rather than translates.
 //
-// This file is what makes the disagreement LOUD AND EARLY. Without it, a rename
-// on either side compiles cleanly, passes every unit test in both packages, and
-// surfaces only as a peer acknowledgement refused 503 in production with a log
-// line about drift — after a real terminal outcome has already been lost.
+// This file is kept, and still exercises every value, because the ALIASING is
+// what makes the sets one — and an alias can be turned back into a defined type
+// by a single character. If that happens, or if a value is added on one side
+// only, these assertions are what say so LOUDLY AND EARLY: without them a rename
+// compiles cleanly, passes every unit test in both packages, and surfaces only
+// as a peer acknowledgement refused 503 in production with a log line about
+// drift — after a real terminal outcome has already been lost.
 
 import (
 	"context"
@@ -70,7 +73,7 @@ func TestAckVocabularyMapsEVERYWireValue(t *testing.T) {
 		if state.String() != outcome.String() {
 			t.Errorf("%s mapped onto durable state %q; the two spellings must be identical", outcome, state)
 		}
-		if class == 0 {
+		if class == "" {
 			if durableClass != "" {
 				t.Errorf("%s carries no class but mapped onto durable class %q", outcome, durableClass)
 			}
@@ -97,7 +100,7 @@ func TestAckVocabularyMapsEVERYWireValue(t *testing.T) {
 	}
 
 	t.Run("delivered carries no class and a recipient attestation", func(t *testing.T) {
-		check(t, relay.AckDelivered, 0, relay.AckAttestedRecipientSignatureUnverified)
+		check(t, relay.AckDelivered, "", relay.AckAttestedRecipientSignatureUnverified)
 	})
 	t.Run("refused carries each of the three recipient classes", func(t *testing.T) {
 		for _, c := range recipientClasses {
@@ -121,8 +124,8 @@ func TestAckVocabularyMapsEVERYWireValue(t *testing.T) {
 		}{
 			{"zero outcome", relay.ValidatedPeerAck{Attestation: relay.AckAttestedPeerBus}},
 			{"outcome past the enum", relay.ValidatedPeerAck{Outcome: relay.AckOutcome(200), Attestation: relay.AckAttestedPeerBus}},
-			{"class past the enum", relay.ValidatedPeerAck{Outcome: relay.AckUndeliverable, Class: relay.AckClass(200), Attestation: relay.AckAttestedPeerBus}},
-			{"attestation past the enum", relay.ValidatedPeerAck{Outcome: relay.AckDelivered, Attestation: relay.AckAttestation(200)}},
+			{"class past the enum", relay.ValidatedPeerAck{Outcome: relay.AckUndeliverable, Class: relay.AckClass("not-a-class"), Attestation: relay.AckAttestedPeerBus}},
+			{"attestation past the enum", relay.ValidatedPeerAck{Outcome: relay.AckDelivered, Attestation: relay.AckAttestation("not-an-attestation")}},
 			{"zero attestation", relay.ValidatedPeerAck{Outcome: relay.AckDelivered}},
 		} {
 			if _, _, _, err := ackVocabulary(tc.v); err == nil {
@@ -149,7 +152,19 @@ func TestAckVocabularyRejectsANonTerminalState(t *testing.T) {
 		}
 	}
 	// The wire enum must contain NO spelling that parses to one of those.
+	//
+	// THE LOOP BOUND IS NOT THIS PACKAGE'S TO CHOOSE ANY MORE, SO IT IS COUNTED.
+	// Before ACK-13 relay.AckOutcome was relay's own uint8 enum and this range
+	// walked ordinals relay declared. It is now an ALIAS for ack.State, whose
+	// three terminal members happen to be contiguous (3, 4, 5) because of a
+	// const block in ANOTHER package. Reorder that block — put `undeliverable`
+	// before `delivered`, or interleave a non-terminal — and this range runs
+	// zero times or over the wrong members, and the test passes having asserted
+	// nothing. A vacuous guard is worse than no guard, because the report says
+	// PASS either way.
+	walked := 0
 	for o := relay.AckDelivered; o <= relay.AckUndeliverable; o++ {
+		walked++
 		state, err := ack.ParseState(o.String())
 		if err != nil {
 			t.Fatalf("wire outcome %s does not parse as a durable state: %v", o, err)
@@ -157,6 +172,12 @@ func TestAckVocabularyRejectsANonTerminalState(t *testing.T) {
 		if !state.Terminal() {
 			t.Errorf("wire outcome %s maps onto the NON-TERMINAL durable state %s; a frame may only carry a terminal outcome (ACK-CONTRACT.md §8.1)", o, state)
 		}
+	}
+	if got, want := walked, len(ack.AllTerminalStates()); got != want {
+		t.Fatalf("the range relay.AckDelivered..relay.AckUndeliverable walked %d outcomes but the durable vocabulary has %d terminal states: the ordinals of the aliased enum have been reordered in internal/ack, so this loop is no longer walking the wire enum and every assertion in it is vacuous", got, want)
+	}
+	if walked != 3 {
+		t.Fatalf("the wire outcome range walked %d values, want exactly 3 (delivered, refused, undeliverable)", walked)
 	}
 }
 
@@ -271,7 +292,7 @@ func TestSettleAckCorrelatesToTheDurableRecord(t *testing.T) {
 		// status or code by the route, and the difference is an oracle for which
 		// recipients a message named.
 		f, _ := newAckFed(t)
-		_, err := f.settleAck(ctx, settled(relay.AckDelivered, 0))
+		_, err := f.settleAck(ctx, settled(relay.AckDelivered, ""))
 		if !errors.Is(err, relay.ErrAckNotBound) {
 			t.Fatalf("err = %v, want relay.ErrAckNotBound (the ONE uniform refusal); ack.ErrNoRecord must never reach the route", err)
 		}
@@ -327,12 +348,12 @@ func TestSettleAckCorrelatesToTheDurableRecord(t *testing.T) {
 		if err := st.Accept(ackFedKey, ackFedSender, ackFedRecipient); err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
-		if _, err := f.settleAck(ctx, settled(relay.AckDelivered, 0)); err != nil {
+		if _, err := f.settleAck(ctx, settled(relay.AckDelivered, "")); err != nil {
 			t.Fatalf("first settle: %v", err)
 		}
 		before, _ := st.Lookup(ackFedKey, ackFedRecipient)
 
-		got, err := f.settleAck(ctx, settled(relay.AckDelivered, 0))
+		got, err := f.settleAck(ctx, settled(relay.AckDelivered, ""))
 		if err != nil {
 			t.Fatalf("the identical retry errored: %v — invariant 10's first case returns the ORIGINAL result and does not error", err)
 		}
@@ -353,7 +374,7 @@ func TestSettleAckCorrelatesToTheDurableRecord(t *testing.T) {
 		if err := st.Accept(ackFedKey, ackFedSender, ackFedRecipient); err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
-		if _, err := f.settleAck(ctx, settled(relay.AckDelivered, 0)); err != nil {
+		if _, err := f.settleAck(ctx, settled(relay.AckDelivered, "")); err != nil {
 			t.Fatalf("first settle: %v", err)
 		}
 		for _, tc := range []struct {
@@ -384,7 +405,7 @@ func TestSettleAckCorrelatesToTheDurableRecord(t *testing.T) {
 		// outcome.
 		st := ack.NewStore(ack.Options{})
 		f := &federation{busID: wiringLocalBus, acks: st, log: logging.New(io.Discard, logging.LevelError)}
-		_, err := f.settleAck(ctx, settled(relay.AckDelivered, 0))
+		_, err := f.settleAck(ctx, settled(relay.AckDelivered, ""))
 		if err == nil {
 			t.Fatal("an unattached durable store settled successfully")
 		}
@@ -399,7 +420,7 @@ func TestSettleAckCorrelatesToTheDurableRecord(t *testing.T) {
 		if err := st.Accept(ackFedKey, ackFedSender, ackFedRecipient); err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
-		bad := settled(relay.AckDelivered, 0)
+		bad := settled(relay.AckDelivered, "")
 		bad.Ack.Outcome = relay.AckOutcome(200)
 		if _, err := f.settleAck(ctx, bad); err == nil {
 			t.Fatal("an outcome outside the wire enum was settled; the mapping must fail closed rather than write an absorbing terminal nobody chose")

@@ -17,9 +17,9 @@
 //
 // # Why the vocabulary is pinned against internal/ack and NOT internal/relay
 //
-// relay declares the same closed vocabulary a second time (ACK-13), and pinning
-// against it would be the more obvious choice — relay.AckClass is what the WIRE
-// frame parses. But internal/relay carries an architectural guard,
+// relay used to declare the same closed vocabulary a second time, and pinning
+// against it would have been the more obvious choice — relay.AckClass is what
+// the WIRE frame parses. But internal/relay carries an architectural guard,
 // TestRelayImportedOnlyByWiringSites, restricting its importers to
 // internal/httpapi and cmd/agent-bus so that "the mount carries the peer
 // principal" stays reviewable (DECISIONS.md 2026-08-08, RELAY-6 ruling (c)).
@@ -29,8 +29,14 @@
 //
 // internal/ack imports only idem, ids, logging and wal, is under no such guard,
 // and is the DURABLE-RECORD vocabulary — the spellings that reach disk. Pinning
-// there is the stronger pin anyway. When ACK-13 collapses the two declarations
-// into one, this guard follows the survivor and pins everything.
+// there is the stronger pin anyway.
+//
+// ACK-13 (2026-08-16) COLLAPSED THE TWO DECLARATIONS INTO THIS ONE, so the
+// survivor is internal/ack and this guard now pins everything: relay.AckClass,
+// relay.AckOutcome and relay.AckAttestation are Go type ALIASES for ack.Class,
+// ack.State and ack.Attestation, and relay declares no spelling of its own. The
+// signing constants below are STILL a separate, frozen copy on purpose — that is
+// the whole point of the paragraph above — and this test is still the seam.
 package signing_test
 
 import (

@@ -236,6 +236,20 @@ durable, append-only, un-rewritable trail. So:
 | `recipient_refused_undecodable` | The application could not decode/verify it. |
 | `recipient_refused_not_addressed` | The application does not consider itself the addressee. |
 
+**THE SINGLE HOME OF THESE SPELLINGS IS `internal/ack` (ACK-13, 2026-08-16).** The twelve classes,
+the two attestation labels (§6.3) and the five states (§8.1) are declared in `internal/ack` and
+nowhere else inside the server: `internal/relay` consumes them through Go **type aliases**
+(`relay.AckClass = ack.Class`, `relay.AckOutcome = ack.State`,
+`relay.AckAttestation = ack.Attestation`) and declares no spelling of its own, which
+`TestAckVocabularyHasOneHome` (`internal/ack/vocabulary_test.go`) enforces by walking relay's syntax
+tree. They were declared TWICE until ACK-13 — as strings in `internal/ack` and as `uint8` enums in
+`internal/relay` — because ACK-2 and ACK-4 were run in parallel; a closed enum that exists twice is
+not closed, and the failure mode is silent (one side gains a thirteenth member, the other refuses it
+as a protocol violation rather than as version skew). Two copies remain OUTSIDE the server and are
+deliberate: `client/ack.go`, because `client/` may not import `internal/` (invariant 7), and
+`internal/signing`, whose constants are a FROZEN WIRE ALPHABET pinned against `internal/ack` by
+`internal/signing/ackvocab_external_test.go`.
+
 **Why these three and no more.** Each is a fixed constant that reveals *that* something failed, never
 *what*. `recipient_refused_undecodable` in particular says "decoding failed" and says nothing about
 the bytes that failed to decode — which is the exact line invariant 6 draws. Any request for a
@@ -412,6 +426,12 @@ revisited, never reopened, and never downgraded to a non-terminal one.**
 | `delivered` | **YES** (positive) | The recipient application ACKed (plane C, §4). |
 | `refused` | **YES** (negative) | An authenticated terminal NACK arrived. Carries a `recipient_*` class. |
 | `undeliverable` | **YES** (negative) | This bus will never deliver it. Carries a bus-emitted class. |
+
+These five are declared once, in `internal/ack` (§5.2's note on the single home): `relay.AckOutcome`
+is a type alias for `ack.State`, so the three terminal spellings a frame may carry and the durable
+ones are the same strings by construction. The two NON-terminal states are representable in that
+alias and must never travel on a frame — `!outcome.Terminal()` is what refuses them
+(`internal/relay/ack.go`).
 
 **`unknown` is a REPORTING value, not a state.** It is what §13 returns when no record is retained
 (swept, never created, or not yours). It is **never written to the durable record** — writing

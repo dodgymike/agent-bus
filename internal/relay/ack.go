@@ -3,8 +3,10 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
@@ -41,27 +43,50 @@ import (
 //
 // It is NOT a verifier. Read the next paragraph before adding one.
 //
-// # KNOWN DUPLICATION, FLAGGED RATHER THAN PAPERED OVER
+// # ONE HOME FOR THE CLOSED VOCABULARY: internal/ack (ACK-13, 2026-08-16)
 //
-// (No task key is cited here on purpose. ACK-4 does not mint task keys, and a
-// follow-up id that does not resolve is worse than none — an earlier draft named
-// one that had never been filed. The de-duplication is reported to the
-// orchestrator to file through spec-keeper.)
+// The twelve NACK classes, the two attestation labels and the terminal outcomes
+// are declared in internal/ack AND NOWHERE ELSE inside the server. This file
+// declares NO vocabulary value: AckClass, AckOutcome and AckAttestation below
+// are Go TYPE ALIASES for ack.Class, ack.State and ack.Attestation, and every
+// constant is ack's constant by identity. There is no conversion, no mapping
+// table and no round trip through a spelling between the two packages, because
+// there are no longer two sets to reconcile.
 //
-// ACK-2 is concurrently building an internal/ack package that declares its OWN
-// spelling of the same closed vocabulary (ack.Class, ack.Attestation, ack.State).
-// AT THE TIME THIS FILE WAS WRITTEN THAT PACKAGE DID NOT EXIST IN HEAD AND DID
-// NOT COMPILE, so depending on it would have made ACK-4 unverifiable against the
-// committed tree and would have landed a consumer before its definition.
+// WHY THIS FILE STOPPED DECLARING ITS OWN, AND WHY THE REASONING STAYS HERE.
+// ACK-2 and ACK-4 were deliberately run in parallel off the ACK-1 contract with
+// disjoint file ownership, so this file was written self-contained: internal/ack
+// did not exist in HEAD, and depending on it would have landed a consumer before
+// its definition. That was a SEQUENCING decision and never a claim that two
+// copies of a closed enum are acceptable. TWO VOCABULARIES THAT MUST AGREE ARE
+// TWO VOCABULARIES THAT CAN DISAGREE — the same defect OutboxRecord has no
+// sibling origin-bus field to avoid, and the same one store.Record refuses a Pos
+// field over. A closed enum that exists twice is NOT CLOSED, and its failure
+// mode is silent: one side gains a thirteenth member, the other rejects it as
+// unrecognised, and the refusal reads as a peer's protocol violation rather than
+// as version skew between two of our own packages. Do not re-introduce a local
+// spelling here "just for the wire" — a test in internal/ack
+// (TestAckVocabularyHasOneHome) walks this package's syntax tree and fails on
+// any vocabulary spelling that reappears as a string literal.
 //
-// So this file is deliberately SELF-CONTAINED — and that is a sequencing
-// decision, NOT a claim that two copies of a closed enum are acceptable. Two
-// vocabularies that must agree are two vocabularies that can disagree, which is
-// the same defect OutboxRecord.OriginMessageID avoids by having no sibling
-// origin-bus field. A follow-up must collapse them to ONE declaration once both
-// have landed; the AUTHORIZATION rules below (the half-set check, the
-// binding rule, the uniform refusal, the decision enum) are what ACK-4 owns and
-// they stay here whichever package ends up owning the spellings.
+// WHY internal/ack IS THE HOME AND NOT THIS FILE. internal/ack owns the
+// DURABLE-RECORD spellings, the ones that reach disk; internal/signing's frozen
+// wire alphabet is already pinned against it
+// (internal/signing/ackvocab_external_test.go); and internal/relay sits under
+// TestRelayImportedOnlyByWiringSites, which restricts who may IMPORT relay — so
+// a vocabulary living here could not be consumed without widening that guard.
+// The dependency runs relay -> ack and is acyclic: ack imports only idem, ids,
+// logging and wal.
+//
+// TWO COPIES REMAIN OUTSIDE THE SERVER, BOTH DELIBERATE AND BOTH OUT OF SCOPE
+// HERE: client/ack.go keeps its own string constants because client/ may not
+// import internal/ (invariant 7), and internal/signing keeps its AckClass*
+// constants because they are a FROZEN WIRE ALPHABET — deferring to ack.Class
+// there would make a rename silently change signed bytes.
+//
+// The AUTHORIZATION rules below — the half-set check, the binding rule, the
+// uniform refusal, the disconnect-free decision enum — are what this file owns,
+// and they did not move.
 //
 // # WHAT "AUTHENTICATED" CAN MEAN HERE, AND WHAT IT CANNOT
 //
@@ -180,104 +205,73 @@ var (
 // class -> record — and record.Reason MUST NEVER be returned to a sender or
 // forwarded to a peer, because that would re-export a peer-influenced string to
 // a third party.
-type AckClass uint8
+//
+// # IT IS AN ALIAS, NOT A SECOND TYPE
+//
+// AckClass IS ack.Class — a Go type alias, so a value crosses the package
+// boundary without a conversion and the compiler enforces that there is exactly
+// one set of spellings. The wire spelling is the durable spelling because they
+// are the same string. String() and RecipientEmitted() come from ack; the
+// latter is load-bearing rather than descriptive, because
+// ValidateAckClassForOutcome uses it to refuse a peer that dresses a routing
+// failure up as a recipient refusal, or the reverse.
+//
+// ack.Class.String() does NOT echo a non-member: it reports invalid-class(N
+// bytes), the way the uint8 enum this alias replaced could only ever print
+// AckClass(200). That matters because the value arrives from a peer and is
+// formatted into error text and operator log lines below.
+type AckClass = ack.Class
 
 const (
 	// --- Bus-emitted (9). Asserted by the sender's own bus or by a hop, about
 	// ROUTING. Never chosen by a recipient application.
 
 	// AckNoRoute: no configured peer for the destination bus half.
-	AckNoRoute AckClass = iota + 1
+	AckNoRoute = ack.ClassNoRoute
 	// AckNoSuchRecipient: the destination bus has no such agent
 	// (CodeUnknownRecipient, handshake.go:76).
-	AckNoSuchRecipient
+	AckNoSuchRecipient = ack.ClassNoSuchRecipient
 	// AckHopRefused: the next hop answered finally and negatively. FINAL codes
 	// only — CodeUnsigned, CodeBadSignature, CodeUnpeeredBus, CodeInvalidRelay,
 	// CodeInvalidBusPath.
-	AckHopRefused
+	AckHopRefused = ack.ClassHopRefused
 	// AckHopUnauthenticated: the peer could not be authenticated as a principal
 	// (RequirePeerPrincipal refusal, httpapi/peermount.go:316-363).
-	AckHopUnauthenticated
+	AckHopUnauthenticated = ack.ClassHopUnauthenticated
 	// AckLoopDropped: already traversed / split horizon (DropLoop,
 	// message.go:42).
-	AckLoopDropped
+	AckLoopDropped = ack.ClassLoopDropped
 	// AckFanoutExceeded: over maxOnwardBusesPerMessage.
-	AckFanoutExceeded
+	AckFanoutExceeded = ack.ClassFanoutExceeded
 	// AckHorizonExpired: the retry horizon ran out and the outbox settled
 	// abandoned (OutboxAbandoned, outbox.go:286-291).
-	AckHorizonExpired
+	AckHorizonExpired = ack.ClassHorizonExpired
 	// AckLocalCapacity: a local durable resource refused the work, fail-closed.
-	AckLocalCapacity
+	AckLocalCapacity = ack.ClassLocalCapacity
 	// AckObligationLost: a durably-accepted onward obligation was abandoned at
 	// restart (RELAY-48). It CANNOT occur on the golden path; DETECTION IS
 	// DEFERRED TO ACK-8. The constant exists now so the vocabulary is closed
 	// once rather than extended later.
-	AckObligationLost
+	AckObligationLost = ack.ClassObligationLost
 
 	// --- Recipient-emitted (3). Chosen by the recipient APPLICATION from this
 	// enum and from nothing else.
 
 	// AckRecipientRefusedPolicy: the application declines it.
-	AckRecipientRefusedPolicy
+	AckRecipientRefusedPolicy = ack.ClassRecipientRefusedPolicy
 	// AckRecipientRefusedUndecodable: the application could not decode or
 	// verify it. It says NOTHING about the bytes that failed.
-	AckRecipientRefusedUndecodable
+	AckRecipientRefusedUndecodable = ack.ClassRecipientRefusedUndecodable
 	// AckRecipientRefusedNotAddressed: the application does not consider itself
 	// the addressee.
-	AckRecipientRefusedNotAddressed
-
-	// ackClassCount bounds the enum for the closedness test. It is NOT a class
-	// and never appears on the wire.
-	ackClassCount
+	AckRecipientRefusedNotAddressed = ack.ClassRecipientRefusedNotAddressed
 )
 
-// String returns the wire spelling. It is a fixed STRING and not a number, for
-// OutboxState.String's reasoning (outbox.go:297-306): a numeric enum in a
-// durable record is unreadable to an operator and silently changes meaning if
-// the constants are ever reordered.
-func (c AckClass) String() string {
-	switch c {
-	case AckNoRoute:
-		return "no_route"
-	case AckNoSuchRecipient:
-		return "no_such_recipient"
-	case AckHopRefused:
-		return "hop_refused"
-	case AckHopUnauthenticated:
-		return "hop_unauthenticated"
-	case AckLoopDropped:
-		return "loop_dropped"
-	case AckFanoutExceeded:
-		return "fanout_exceeded"
-	case AckHorizonExpired:
-		return "horizon_expired"
-	case AckLocalCapacity:
-		return "local_capacity"
-	case AckObligationLost:
-		return "obligation_lost"
-	case AckRecipientRefusedPolicy:
-		return "recipient_refused_policy"
-	case AckRecipientRefusedUndecodable:
-		return "recipient_refused_undecodable"
-	case AckRecipientRefusedNotAddressed:
-		return "recipient_refused_not_addressed"
-	default:
-		return fmt.Sprintf("AckClass(%d)", uint8(c))
-	}
-}
-
-// RecipientEmitted reports whether the class is one of the three a recipient
-// application may choose. The distinction is load-bearing rather than
-// descriptive: ValidateAckClassForOutcome uses it to refuse a peer that dresses
-// a routing failure up as a recipient refusal, or the reverse.
-func (c AckClass) RecipientEmitted() bool {
-	switch c {
-	case AckRecipientRefusedPolicy, AckRecipientRefusedUndecodable, AckRecipientRefusedNotAddressed:
-		return true
-	default:
-		return false
-	}
-}
+// ackNoClass is the "no class" value: the empty string, which is the zero value
+// of ack.Class and what a frame that omits the field decodes to. It is NOT a
+// member of the set — ack.Class.Valid() answers false for it — and it is named
+// here only so the branches below read as intent rather than as a bare "".
+const ackNoClass AckClass = ""
 
 // ParseAckClass maps the wire spelling back onto a class.
 //
@@ -288,13 +282,19 @@ func (c AckClass) RecipientEmitted() bool {
 //
 // The offending spelling is ELIDED in the error, because a peer chooses it and
 // must not get to choose the size of the line we log about refusing it.
+//
+// It stays a relay function rather than deferring to ack.ParseClass because its
+// SENTINEL is ErrInvalidAckFrame, which is what the peer handler's status
+// mapping keys on, and because its message text is ACK-4 behaviour that tests
+// pin. It ranges over ack's single set, so it can refuse nothing the vocabulary
+// admits and admit nothing the vocabulary refuses.
 func ParseAckClass(s string) (AckClass, error) {
-	for c := AckClass(1); c < ackClassCount; c++ {
-		if c.String() == s {
+	for _, c := range ack.AllClasses() {
+		if string(c) == s {
 			return c, nil
 		}
 	}
-	return 0, fmt.Errorf("%w: %q is not one of the twelve acknowledgement classes", ErrInvalidAckFrame, elideAck(s))
+	return ackNoClass, fmt.Errorf("%w: %q is not one of the twelve acknowledgement classes", ErrInvalidAckFrame, elideAck(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -314,58 +314,55 @@ func ParseAckClass(s string) (AckClass, error) {
 // (§8.1), never a state and never a frame outcome: an "I don't know" that could
 // travel on the wire is how a real terminal outcome gets overwritten by
 // ignorance.
-type AckOutcome uint8
+//
+// # IT IS AN ALIAS FOR ack.State, WHICH HAS FIVE MEMBERS AND NOT THREE
+//
+// AckOutcome IS ack.State (a Go type alias), so the two non-terminal states —
+// accepted and in_flight — are now REPRESENTABLE in this type even though they
+// must never travel on a frame. That is not a loosening: the closed-set check
+// moved from a numeric bound (`outcome >= ackOutcomeCount`) onto
+// `!outcome.Terminal()`, which is STRICTER. It still rejects the zero value and
+// anything outside the enum, and it additionally rejects accepted and in_flight
+// by name.
+type AckOutcome = ack.State
 
 const (
 	// AckDelivered: the recipient application ACKed (plane C). Positive, and it
 	// carries NO CLASS — a success has nothing to explain, and an optional class
 	// on it would create a disclosure channel where none is needed (§5.4).
-	AckDelivered AckOutcome = iota + 1
+	AckDelivered = ack.StateDelivered
 	// AckRefused: an authenticated terminal NACK from the RECIPIENT. Carries a
 	// recipient-emitted class.
-	AckRefused
+	AckRefused = ack.StateRefused
 	// AckUndeliverable: this bus (or a hop) will never deliver it. Carries a
 	// bus-emitted class.
-	AckUndeliverable
-
-	// ackOutcomeCount bounds the enum for the closedness test.
-	ackOutcomeCount
+	AckUndeliverable = ack.StateUndeliverable
 )
 
-// String returns the wire spelling — a fixed string, for OutboxState.String's
-// reasoning.
-func (o AckOutcome) String() string {
-	switch o {
-	case AckDelivered:
-		return "delivered"
-	case AckRefused:
-		return "refused"
-	case AckUndeliverable:
-		return "undeliverable"
-	default:
-		return fmt.Sprintf("AckOutcome(%d)", uint8(o))
+// ackTerminalOutcomes renders the frame-legal outcomes for an error message.
+//
+// It is BUILT from ack's single set, never written as a literal: a vocabulary
+// spelling in a string literal in this package would be the thirteenth
+// declaration of a closed set, in the one file that exists to have none.
+// TestAckVocabularyHasOneHome fails on one.
+func ackTerminalOutcomes() string {
+	spellings := make([]string, 0, 3)
+	for _, o := range ack.AllTerminalStates() {
+		spellings = append(spellings, o.String())
 	}
+	return strings.Join(spellings, ", ")
 }
 
-// Negative reports whether the outcome is a negative terminal, i.e. whether a
-// class is REQUIRED. It is the single spelling of that branch; re-spelling it at
-// a call site is how the two ends of "class iff negative" come to disagree.
-func (o AckOutcome) Negative() bool { return o == AckRefused || o == AckUndeliverable }
-
-// RecipientSourced reports whether the outcome originates with the RECIPIENT
-// APPLICATION (plane C) rather than with a bus's routing layer. It is what
-// decides whether an attestation must be present.
-func (o AckOutcome) RecipientSourced() bool { return o == AckDelivered || o == AckRefused }
-
 // ParseAckOutcome maps the wire spelling back onto an outcome. Unrecognised is
-// an ERROR, never a default — see ParseAckClass.
+// an ERROR, never a default — see ParseAckClass. It ranges over the TERMINAL
+// states only, so the two non-terminal spellings do not parse on a frame.
 func ParseAckOutcome(s string) (AckOutcome, error) {
-	for o := AckOutcome(1); o < ackOutcomeCount; o++ {
+	for _, o := range ack.AllTerminalStates() {
 		if o.String() == s {
 			return o, nil
 		}
 	}
-	return 0, fmt.Errorf("%w: outcome %q is not one of delivered, refused, undeliverable", ErrInvalidAckFrame, elideAck(s))
+	return ack.StateInvalid, fmt.Errorf("%w: outcome %q is not one of %s", ErrInvalidAckFrame, elideAck(s), ackTerminalOutcomes())
 }
 
 // ValidateAckClassForOutcome enforces the class/outcome coupling IN BOTH
@@ -385,31 +382,39 @@ func ParseAckOutcome(s string) (AckOutcome, error) {
 // asserted by different parties (§1) and the frame must not be allowed to
 // blur them.
 //
-// zero is the "no class" spelling; a frame that omits the field decodes to it.
+// The EMPTY STRING is the "no class" spelling (ackNoClass); a frame that omits
+// the field decodes to it.
 //
 // # THE OUTCOME IS BOUNDS-CHECKED FIRST, AND THAT ORDER IS LOAD-BEARING
 //
 // Negative and RecipientSourced both answer FALSE for a value outside the enum,
 // so an unchecked zero or out-of-range outcome would fall through the positive
-// arm and be accepted — turning a never-populated struct, or a conversion from
-// ACK-2's parallel vocabulary that returned a zero value on an unmapped input,
-// into a valid POSITIVE TERMINAL. Terminal is absorbing, so that record could
-// never be corrected. Rejecting up front is the same posture ParseAckClass
-// takes: an unrecognised value is an ERROR, never a default.
+// arm and be accepted — turning a never-populated struct, or a conversion that
+// returned a zero value on an unmapped input, into a valid POSITIVE TERMINAL.
+// Terminal is absorbing, so that record could never be corrected. Rejecting up
+// front is the same posture ParseAckClass takes: an unrecognised value is an
+// ERROR, never a default.
+//
+// The check is `!outcome.Terminal()` since ACK-13 aliased this type to
+// ack.State. That is STRICTER than the numeric bound it replaced, not looser: it
+// still refuses the zero value and anything outside the enum, and it also
+// refuses `accepted` and `in_flight`, which the five-member alias makes
+// representable and which must NEVER travel on a frame — they are facts about
+// THIS bus, not about the recipient.
 func ValidateAckClassForOutcome(outcome AckOutcome, class AckClass) error {
-	if outcome == 0 || outcome >= ackOutcomeCount {
-		return fmt.Errorf("%w: outcome %s is outside the closed set delivered, refused, undeliverable; an unrecognised outcome is REJECTED, never treated as a positive terminal", ErrInvalidAckFrame, outcome)
+	if !outcome.Terminal() {
+		return fmt.Errorf("%w: outcome %s is outside the closed set %s; an unrecognised outcome is REJECTED, never treated as a positive terminal", ErrInvalidAckFrame, outcome, ackTerminalOutcomes())
 	}
 	if !outcome.Negative() {
-		if class != 0 {
+		if class != ackNoClass {
 			return fmt.Errorf("%w: outcome %s is positive and carries no class, but class %s was set", ErrInvalidAckFrame, outcome, class)
 		}
 		return nil
 	}
-	if class == 0 {
+	if class == ackNoClass {
 		return fmt.Errorf("%w: outcome %s is a negative terminal and REQUIRES a class", ErrInvalidAckFrame, outcome)
 	}
-	if class >= ackClassCount {
+	if !class.Valid() {
 		return fmt.Errorf("%w: class %s is not one of the twelve acknowledgement classes", ErrInvalidAckFrame, class)
 	}
 	if outcome == AckRefused && !class.RecipientEmitted() {
@@ -434,46 +439,49 @@ func ValidateAckClassForOutcome(outcome AckOutcome, class AckClass) error {
 // distributes agents' messaging public keys, so a sender cannot verify either.
 // Adding a "verified" value would be the status API asserting, on the
 // recipient's behalf, a fact nobody established.
-type AckAttestation uint8
+//
+// It IS ack.Attestation (a Go type alias): one declaration, one set of
+// spellings, no conversion at the package boundary. ack.Attestation.String()
+// does not echo a non-member, for AckClass's reason.
+type AckAttestation = ack.Attestation
 
 const (
 	// AckAttestedPeerBus: authenticated as coming from an adjacent bus by
 	// RequirePeerPrincipal's certificate check, and bound to an obligation this
 	// bus wrote. This is the STRONGEST claim available and it is a claim about a
 	// BUS, not about an agent.
-	AckAttestedPeerBus AckAttestation = iota + 1
+	AckAttestedPeerBus = ack.AttestedByPeerBus
 	// AckAttestedRecipientSignatureUnverified: the frame carried a detached
 	// signature of the right SHAPE over canonical ACK bytes. NOBODY VERIFIED IT.
 	// The name says so on purpose, so a reader of a status response cannot
 	// mistake presence for validity.
-	AckAttestedRecipientSignatureUnverified
-
-	// ackAttestationCount bounds the enum for the closedness test.
-	ackAttestationCount
+	AckAttestedRecipientSignatureUnverified = ack.AttestedByRecipientSignatureUnverified
 )
 
-// String returns the wire spelling.
-func (a AckAttestation) String() string {
-	switch a {
-	case AckAttestedPeerBus:
-		return "peer_bus"
-	case AckAttestedRecipientSignatureUnverified:
-		return "recipient_signature_unverified"
-	default:
-		return fmt.Sprintf("AckAttestation(%d)", uint8(a))
+// ackNoAttestation is the zero value of ack.Attestation — not a member of the
+// set, and what an error return carries.
+const ackNoAttestation AckAttestation = ""
+
+// ackAttestationLabels renders the two labels for an error message, built from
+// ack's single set rather than from literals — see ackTerminalOutcomes.
+func ackAttestationLabels() string {
+	spellings := make([]string, 0, 2)
+	for _, a := range ack.AllAttestations() {
+		spellings = append(spellings, a.String())
 	}
+	return strings.Join(spellings, ", ")
 }
 
 // ParseAckAttestation maps the wire spelling back. Unrecognised is an error,
 // never a default — and in particular "verified" does not parse, because no
 // such attestation exists.
 func ParseAckAttestation(s string) (AckAttestation, error) {
-	for a := AckAttestation(1); a < ackAttestationCount; a++ {
+	for _, a := range ack.AllAttestations() {
 		if a.String() == s {
 			return a, nil
 		}
 	}
-	return 0, fmt.Errorf("%w: attestation %q is not one of peer_bus, recipient_signature_unverified", ErrInvalidAckFrame, elideAck(s))
+	return ackNoAttestation, fmt.Errorf("%w: attestation %q is not one of %s", ErrInvalidAckFrame, elideAck(s), ackAttestationLabels())
 }
 
 // AckSurface is WHICH AUTHENTICATED SURFACE a frame arrived on. It is supplied
@@ -538,23 +546,23 @@ func ValidateAckAttestation(surface AckSurface, outcome AckOutcome, signature []
 	// out-of-range outcome would be labelled peer_bus — this bus vouching, in a
 	// durable record, for a frame it could not even classify.
 	if surface == 0 || surface >= ackSurfaceCount {
-		return 0, fmt.Errorf("%w: surface %s is outside the closed set peer, agent; the mount site must name which gate authenticated this frame", ErrInvalidAckFrame, surface)
+		return ackNoAttestation, fmt.Errorf("%w: surface %s is outside the closed set peer, agent; the mount site must name which gate authenticated this frame", ErrInvalidAckFrame, surface)
 	}
-	if outcome == 0 || outcome >= ackOutcomeCount {
-		return 0, fmt.Errorf("%w: outcome %s is outside the closed set delivered, refused, undeliverable; it is REJECTED rather than attested", ErrInvalidAckFrame, outcome)
+	if !outcome.Terminal() {
+		return ackNoAttestation, fmt.Errorf("%w: outcome %s is outside the closed set %s; it is REJECTED rather than attested", ErrInvalidAckFrame, outcome, ackTerminalOutcomes())
 	}
 	if surface == AckSurfaceAgent && !outcome.RecipientSourced() {
-		return 0, fmt.Errorf("%w: outcome %s is a ROUTING claim and arrived on the agent surface; a recipient application may only assert delivered or refused", ErrInvalidAckFrame, outcome)
+		return ackNoAttestation, fmt.Errorf("%w: outcome %s is a ROUTING claim and arrived on the agent surface; a recipient application may only assert delivered or refused", ErrInvalidAckFrame, outcome)
 	}
 	if outcome.RecipientSourced() {
 		if len(signature) != signing.SignatureSize {
-			return 0, fmt.Errorf("%w: outcome %s is recipient-sourced and requires a detached signature of exactly %d bytes, got %d (SHAPE ONLY — no bus verifies it)",
+			return ackNoAttestation, fmt.Errorf("%w: outcome %s is recipient-sourced and requires a detached signature of exactly %d bytes, got %d (SHAPE ONLY — no bus verifies it)",
 				ErrInvalidAckFrame, outcome, signing.SignatureSize, len(signature))
 		}
 		return AckAttestedRecipientSignatureUnverified, nil
 	}
 	if len(signature) != 0 {
-		return 0, fmt.Errorf("%w: outcome %s is asserted by a bus, not a recipient, so it must carry no attestation; got %d bytes",
+		return ackNoAttestation, fmt.Errorf("%w: outcome %s is asserted by a bus, not a recipient, so it must carry no attestation; got %d bytes",
 			ErrInvalidAckFrame, outcome, len(signature))
 	}
 	return AckAttestedPeerBus, nil

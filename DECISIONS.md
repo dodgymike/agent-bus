@@ -6735,3 +6735,63 @@ rollout gate passed on a completely deaf bus for exactly this reason. **This har
 actual A->B->C delivery being observed**, and that gate was proved fireable by sabotage — removing
 `-peer-client-fingerprint` makes it fail with `DELIVERY GATE FAILED`, not pass quietly. When
 RELAY-55 lands an authenticated `/v1/readyz`, this is a candidate to re-point.
+
+## 2026-08-21 — ACK-13: `internal/ack` is the SINGLE home of the closed ACK vocabulary
+
+**Decision.** The closed ACK vocabulary — the twelve NACK classes, the two attestation labels and
+the five lifecycle states — is declared exactly once, in `internal/ack`. `internal/relay` declares
+no vocabulary value at all: `AckClass`, `AckOutcome` and `AckAttestation` are true Go **type
+aliases** (`=`) for `ack.Class`, `ack.State` and `ack.Attestation`, and all seventeen relay
+constants are bound to `ack`'s by identity.
+
+**Why `internal/ack` and not `internal/relay`.** Three reasons, in order of weight:
+
+1. `internal/ack` owns the DURABLE spellings — the bytes that reach disk. Pinning the vocabulary
+   where it is persisted is the stronger pin.
+2. `internal/signing/ackvocab_external_test.go` already pins its FROZEN wire alphabet against
+   `internal/ack`, and its own comment anticipated this task ("when ACK-13 collapses the two
+   declarations into one, this guard follows the survivor").
+3. `internal/relay` sits under `TestRelayImportedOnlyByWiringSites`, which restricts its IMPORTERS
+   to `internal/httpapi` and `cmd/agent-bus` (RELAY-6 ruling (c), 2026-08-08). That guard does not
+   restrict what relay itself imports, and `internal/ack` imports only `idem`, `ids`, `logging` and
+   `wal`, so `relay -> ack` is acyclic. The reverse direction would have forced a third entry into
+   `wiringSites`, which is an architectural change a de-dup has no business making.
+
+**What was deliberately NOT collapsed.** Two further copies of these spellings survive, both
+justified:
+
+- `client/ack.go` keeps its own string constants because `client/` cannot import `internal/`
+  (invariant 7 — an importable client package is the whole point of "embed").
+- `internal/signing` keeps its FROZEN alphabet. Deferring to `ack.Class` would mean that renaming a
+  constant there silently changes the SIGNED BYTES and invalidates every signature ever made, with
+  nothing going red because signer and verifier would follow the rename together. The drift guard
+  is the seam instead.
+
+**Consequence that had to be designed, not assumed: `String()` must not echo.** Moving from a
+bounded `uint8` to a string type turns un-echoable values into echoable ones — HEAD's
+`AckClass(200)` could not reproduce attacker bytes, whereas a naive `string(c)` would put
+peer-chosen bytes into operator logs and error text. `Class.String()` and `Attestation.String()`
+therefore render a NON-MEMBER as `invalid-class(N bytes)` / `invalid-attestation(N bytes)` and echo
+nothing. This is what makes the uint8->string move safe under invariant 6, and it leaves invariant 6
+marginally STRONGER than before the change.
+
+**Consequence two: `!outcome.Terminal()` replaces the numeric bound.** The alias makes `accepted`
+and `in_flight` REPRESENTABLE as an `AckOutcome` for the first time — a three-member uint8 enum
+excluded them structurally. `!outcome.Terminal()` is at least as strict (it admits the same three
+and additionally refuses the two non-terminals) and it is now the only thing keeping a non-terminal
+state off a wire frame and out of an absorbing durable terminal.
+
+**And the defect that consequence caused, found by three gates independently.**
+`internal/httpapi/ack.go`'s `ackRecordVocabulary` had inherited its terminality guarantee from the
+old uint8's inability to spell a non-terminal; after the alias, `accepted` and `in_flight` parse
+cleanly and it stopped refusing them — while its own doc comment went on claiming it did. Not
+exploitable (`handleAck` feeds it terminal-only output), but it was unreachability by AGREEMENT
+BETWEEN TWO PACKAGES rather than by construction. Fixed in the same task with an explicit
+`!state.Terminal()` check mirroring its twin in `cmd/agent-bus/relaywiring.go`, plus the first
+direct test that function has ever had.
+
+**Rejected: changing anything about the vocabulary while moving it.** The task forbade it and the
+prohibition earned its keep — `internal/ack/state.go` has a ZERO-BYTE diff and all nineteen wire
+literals are byte-identical to HEAD, which is a structural proof rather than a reviewer's opinion.
+A de-dup that also edited values would have made the diff unreviewable and the mutation proofs
+unrepeatable.

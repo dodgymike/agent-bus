@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dodgymike/agent-bus/internal/ack"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
@@ -336,7 +337,7 @@ func TestAckRejectsReplay(t *testing.T) {
 		},
 		{
 			name: "unrecognised_class_is_rejected_never_defaulted", hasPrior: false,
-			incoming: AckTerminal{Outcome: AckRefused, Class: AckClass(200)},
+			incoming: AckTerminal{Outcome: AckRefused, Class: AckClass("not-a-class")},
 			wantErr:  ErrInvalidAckFrame,
 			why:      "parseOutboxState's posture: guessing turns a corrupt frame into a plausible TERMINAL outcome",
 		},
@@ -363,6 +364,47 @@ func TestAckRejectsReplay(t *testing.T) {
 			incoming: AckTerminal{Outcome: AckRefused},
 			wantErr:  ErrInvalidAckFrame,
 			why:      "a NACK that cannot say which closed class it is, is a silent discard with a timestamp",
+		},
+		// THE TWO CASES BELOW ARE THE `undeliverable` HALF OF THE TWO ROWS ABOVE.
+		// ADDED BY ACK-13's MUTATION RE-PROOF, BECAUSE WITHOUT THEM THE TABLE
+		// COULD NOT OBSERVE `!class.Valid()` FIRING AT ALL.
+		//
+		// ValidateAckClassForOutcome ends in four checks, and on a `refused`
+		// frame the LAST two subsume the first two: the empty string and an
+		// unrecognised spelling are both non-members of the recipient half, so
+		// `outcome == AckRefused && !class.RecipientEmitted()` refuses them
+		// whatever `class == ackNoClass` and `!class.Valid()` do. Deleting
+		// `!class.Valid()` therefore left this whole table GREEN.
+		//
+		// On `undeliverable` the subsumption runs the other way — the half-set
+		// check is `class.RecipientEmitted()`, which answers FALSE for "" and
+		// FALSE for garbage alike — so nothing downstream catches either, and
+		// with these rows present the deletion goes red. That matters most for
+		// the second row: without `!class.Valid()` a peer chooses ARBITRARY
+		// BYTES for the class of an absorbing terminal this bus records.
+		//
+		// `class == ackNoClass` is a separate story and is recorded here rather
+		// than papered over: deleting it ALONE is still green on both halves,
+		// because `!class.Valid()` refuses "" too. It is behaviourally
+		// redundant and survives only to name the fault ("REQUIRES a class")
+		// instead of the generic "not one of the twelve". Deleting BOTH is red
+		// on both rows below, which is what pins the pairing rule itself.
+		//
+		// All of this is a consequence of ACK-13 aliasing AckClass to
+		// ack.Class: "" is now both the zero value AND what a frame that
+		// OMITTED the field decodes to, and any byte sequence is representable
+		// where AckClass(200) used to be the only shape a non-member took.
+		{
+			name: "bus_outcome_must_carry_a_class", hasPrior: false,
+			incoming: AckTerminal{Outcome: AckUndeliverable},
+			wantErr:  ErrInvalidAckFrame,
+			why:      "the `undeliverable` half of `negative_outcome_must_carry_a_class`, and the ONLY case in which the `class == ackNoClass` check is observable: a routing failure that names no class is a silent discard with a timestamp, and the empty string is what an OMITTED field decodes to",
+		},
+		{
+			name: "unrecognised_class_on_a_bus_outcome_is_rejected", hasPrior: false,
+			incoming: AckTerminal{Outcome: AckUndeliverable, Class: AckClass("not-a-class")},
+			wantErr:  ErrInvalidAckFrame,
+			why:      "the `undeliverable` half of `unrecognised_class_is_rejected_never_defaulted`, and the ONLY case in which the `!class.Valid()` check is observable: without it a peer chooses arbitrary bytes for the class of an ABSORBING terminal this bus records",
 		},
 	}
 
@@ -523,19 +565,20 @@ func TestAckDoesNotLeakRecipientState(t *testing.T) {
 		// Invariant 6: a recipient-sourced reason string is a body by another
 		// name. There must be exactly twelve compile-time classes and no
 		// adjacent string field to put "detail" in.
-		if got, want := int(ackClassCount)-1, 12; got != want {
+		// ACK-13: the set is ack's, ranged over rather than re-declared here.
+		if got, want := len(ack.AllClasses()), 12; got != want {
 			t.Fatalf("the NACK class set has %d members, want exactly %d: it is CLOSED, and a thirteenth needs the §5.2 reasoning redone", got, want)
 		}
 		seen := map[string]bool{}
 		recipientEmitted := 0
-		for c := AckClass(1); c < ackClassCount; c++ {
+		for _, c := range ack.AllClasses() {
 			s := c.String()
 			if seen[s] {
 				t.Fatalf("class spelling %q appears twice", s)
 			}
 			seen[s] = true
-			if strings.ContainsAny(s, " \t\n\"%") || strings.HasPrefix(s, "AckClass(") {
-				t.Fatalf("class %d spells %q: a class is a fixed constant, never assembled, templated or concatenated", uint8(c), s)
+			if strings.ContainsAny(s, " \t\n\"%") || strings.HasPrefix(s, "invalid-class(") {
+				t.Fatalf("class %q spells %q: a class is a fixed constant, never assembled, templated or concatenated", string(c), s)
 			}
 			parsed, err := ParseAckClass(s)
 			if err != nil || parsed != c {
@@ -560,16 +603,16 @@ func TestAckDoesNotLeakRecipientState(t *testing.T) {
 		// checks SHAPE only and no endpoint distributes messaging public keys.
 		// A "verified" label would be the status API asserting a fact nobody
 		// established.
-		if got, want := int(ackAttestationCount)-1, 2; got != want {
+		if got, want := len(ack.AllAttestations()), 2; got != want {
 			t.Fatalf("AckAttestation has %d values, want exactly %d (peer_bus, recipient_signature_unverified)", got, want)
 		}
 		for _, claim := range []string{"verified", "recipient_signature_verified", "signature_verified", "trusted"} {
 			if _, err := ParseAckAttestation(claim); err == nil {
 				t.Fatalf("ParseAckAttestation(%q) succeeded: there is deliberately NO value meaning verified, because nothing can produce one", claim)
 			}
-			for a := AckAttestation(1); a < ackAttestationCount; a++ {
+			for _, a := range ack.AllAttestations() {
 				if a.String() == claim {
-					t.Fatalf("AckAttestation(%d) spells %q", uint8(a), claim)
+					t.Fatalf("attestation %q spells %q", string(a), claim)
 				}
 			}
 		}
@@ -617,10 +660,13 @@ func TestAckDoesNotLeakRecipientState(t *testing.T) {
 		// struct, or a conversion from ACK-2's parallel vocabulary that returned
 		// a zero value on an unmapped input, would then have been recorded as a
 		// valid delivered-shaped ABSORBING terminal that can never be corrected.
-		if got, want := int(ackOutcomeCount)-1, 3; got != want {
-			t.Fatalf("AckOutcome has %d members, want exactly %d (delivered, refused, undeliverable)", got, want)
+		// ACK-13 aliased AckOutcome to ack.State, which has FIVE members. The
+		// three a FRAME may carry are the terminal ones, and the two
+		// non-terminal states are checked below to be rejected by name.
+		if got, want := len(ack.AllTerminalStates()), 3; got != want {
+			t.Fatalf("AckOutcome has %d terminal members, want exactly %d (delivered, refused, undeliverable)", got, want)
 		}
-		for o := AckOutcome(1); o < ackOutcomeCount; o++ {
+		for _, o := range ack.AllTerminalStates() {
 			parsed, err := ParseAckOutcome(o.String())
 			if err != nil || parsed != o {
 				t.Fatalf("ParseAckOutcome(%q) = (%v, %v), want (%v, nil)", o.String(), parsed, err, o)
@@ -631,8 +677,11 @@ func TestAckDoesNotLeakRecipientState(t *testing.T) {
 				t.Fatalf("ParseAckOutcome(%q) accepted an unrecognised outcome: it must be REJECTED, never defaulted — and %q in particular is a REPORTING value that must never travel as a frame outcome", unknown, AckStatusUnknown)
 			}
 		}
-		for _, bad := range []AckOutcome{0, ackOutcomeCount, AckOutcome(99)} {
-			if err := ValidateAckClassForOutcome(bad, 0); !errors.Is(err, ErrInvalidAckFrame) {
+		// The non-terminal states are in this list because the alias makes them
+		// REPRESENTABLE: !Terminal() is what refuses them, and it is stricter
+		// than the numeric bound it replaced, not looser.
+		for _, bad := range []AckOutcome{0, ack.StateAccepted, ack.StateInFlight, AckOutcome(99)} {
+			if err := ValidateAckClassForOutcome(bad, ""); !errors.Is(err, ErrInvalidAckFrame) {
 				t.Fatalf("ValidateAckClassForOutcome(%v, no class) = %v, want ErrInvalidAckFrame: an out-of-range outcome answers false to Negative() and would be waved through as a POSITIVE terminal", bad, err)
 			}
 			if _, err := ValidateAckAttestation(AckSurfacePeer, bad, nil); !errors.Is(err, ErrInvalidAckFrame) {

@@ -1897,72 +1897,58 @@ func (f *federation) priorTerminal(correlationKey, recipient string) (relay.AckT
 	if !ok || !rec.State.Terminal() {
 		return relay.AckTerminal{}, false
 	}
-	outcome, err := relay.ParseAckOutcome(rec.State.String())
-	if err != nil {
-		// A durable state that is terminal but is not one of the three wire
-		// outcomes cannot exist — ack.State's terminal set IS those three. Treated
-		// as "no prior" would let a conflicting terminal overwrite it, so it is
-		// reported as a prior that matches nothing and Settle's own absorbing
-		// check refuses the write.
-		return relay.AckTerminal{Outcome: 0}, true
-	}
+	// ACK-13: relay.AckOutcome IS ack.State and relay.AckClass IS ack.Class (type
+	// aliases), so what used to be ParseAckOutcome(rec.State.String()) is a no-op
+	// round trip through a spelling. The value is used directly.
+	//
+	// THE VALIDITY CHECK THAT PARSE WAS ALSO DOING IS KEPT, EXPLICITLY, because
+	// both fields come off a DURABLE RECORD and are input to be validated:
+	//   - the outcome is checked by rec.State.Terminal() above, which is exactly
+	//     what ParseAckOutcome accepted (it ranges the terminal states);
+	//   - the class is checked here by Valid().
+	// An unrecognised class must NOT be reported as "no prior": that would let a
+	// conflicting terminal overwrite a recorded one. It is reported as a prior
+	// that matches nothing, so DecideAck answers conflict and Settle's own
+	// absorbing check refuses the write.
+	outcome := rec.State
 	var class relay.AckClass
 	if rec.Class != "" {
-		if class, err = relay.ParseAckClass(string(rec.Class)); err != nil {
+		if !rec.Class.Valid() {
 			return relay.AckTerminal{Outcome: outcome}, true
 		}
+		class = rec.Class
 	}
 	return relay.AckTerminal{Outcome: outcome, Class: class}, true
 }
 
-// ackVocabulary maps relay's WIRE spellings of the closed ACK sets onto
-// internal/ack's DURABLE ones.
+// ackVocabulary is the LAST GATE between a validated wire acknowledgement and a
+// durable, ABSORBING terminal row.
 //
-// # THIS FUNCTION EXISTS BECAUSE TWO PACKAGES DECLARE ONE CLOSED SET, AND THAT
-// # IS A KNOWN DUPLICATION, NOT A DESIGN
+// # IT NO LONGER TRANSLATES, BECAUSE THERE IS ONLY ONE VOCABULARY (ACK-13)
 //
 // internal/relay/ack.go (ACK-4) and internal/ack/state.go (ACK-2) were written
-// concurrently and each declares its own spelling of the twelve classes, the
-// three terminal outcomes and the two attestation labels. ack.go records the
-// sequencing reason and says a follow-up must collapse them. Until that lands,
-// THIS is the one place the two meet, and it is deliberately in the composition
-// root rather than in either package — putting it in one of them would make that
-// package the owner of the other's vocabulary and quietly settle which one
-// survives.
+// concurrently and each declared its own spelling of the twelve classes, the
+// three terminal outcomes and the two attestation labels. ACK-13 collapsed them:
+// internal/ack is the single home and relay's names are Go type ALIASES for it,
+// so relay.AckOutcome IS ack.State and no mapping step remains that could rot.
 //
-// # IT IS TOTAL AND IT FAILS CLOSED
+// # IT IS STILL A CHECK, AND IT STILL FAILS CLOSED
 //
-// Both mappings go through the WIRE SPELLING — the string both sides already
-// agree to put on disk and on the network — rather than through a numeric table
-// somebody maintains. That is the only mapping that cannot silently rot: if a
-// constant is renamed on either side, this returns an error and the
-// acknowledgement is refused with "not now", instead of being recorded as some
-// other outcome. A default arm that guessed would write a TERMINAL state, and
-// terminal is ABSORBING — it could never afterwards be corrected.
+// The function is kept — rather than the call site simply assigning the fields —
+// because a caller reaching Settle with a non-terminal state, an unrecognised
+// class or a missing attestation would write, or fail to write, an outcome that
+// can NEVER afterwards be corrected. Refusing HERE names the fault; refusing
+// inside Settle names only the symptom. An error is answered "not now" (503) and
+// nothing is written.
 func ackVocabulary(v relay.ValidatedPeerAck) (ack.State, ack.Class, ack.Attestation, error) {
-	state, err := ack.ParseState(v.Outcome.String())
-	if err != nil {
-		return 0, "", "", fmt.Errorf("mapping acknowledgement outcome onto the durable vocabulary: %w", err)
+	if !v.Outcome.Terminal() {
+		return ack.StateInvalid, "", "", fmt.Errorf("acknowledgement outcome %s is not a terminal durable state; only a terminal outcome may be recorded", v.Outcome)
 	}
-	if !state.Terminal() {
-		// Unreachable: relay.AckOutcome has only the three terminal members. It is
-		// checked because a non-terminal state reaching Settle would be refused
-		// there anyway, and being refused HERE names the drift instead of the
-		// symptom.
-		return 0, "", "", fmt.Errorf("acknowledgement outcome %s mapped onto the non-terminal durable state %s; the wire and durable vocabularies have drifted", v.Outcome, state)
+	if v.Class != "" && !v.Class.Valid() {
+		return ack.StateInvalid, "", "", fmt.Errorf("acknowledgement class %s is outside the closed durable set", v.Class)
 	}
-
-	var class ack.Class
-	if v.Class != 0 {
-		class = ack.Class(v.Class.String())
-		if !class.BusEmitted() && !class.RecipientEmitted() {
-			return 0, "", "", fmt.Errorf("acknowledgement class %s is in the wire vocabulary and not in the durable one; the two closed sets have drifted", v.Class)
-		}
+	if !v.Attestation.Valid() {
+		return ack.StateInvalid, "", "", fmt.Errorf("acknowledgement attestation %s is outside the closed durable set", v.Attestation)
 	}
-
-	attested := ack.Attestation(v.Attestation.String())
-	if !attested.Valid() {
-		return 0, "", "", fmt.Errorf("acknowledgement attestation %s is in the wire vocabulary and not in the durable one; the two closed sets have drifted", v.Attestation)
-	}
-	return state, class, attested, nil
+	return v.Outcome, v.Class, v.Attestation, nil
 }
