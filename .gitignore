@@ -168,3 +168,13 @@ session-*.json.INSECURE
 # otherwise rescue `.env.sh` — a very common way to spell "a file full of
 # exported secrets".
 .env.*
+
+# Agent scratch that is NOT source, appended 2026-08-21. These sit at the END
+# deliberately: `!*.go` / `!*.sh` / `!*.md` / `!*.py` above would otherwise
+# rescue files inside them, and the LAST matching pattern wins. (Git cannot
+# re-include a file whose parent directory is excluded, so the two directory
+# patterns are belt-and-braces — but `.claude/RESUME.md` is a plain file and
+# genuinely does need to sit below `!*.md` to stay ignored.)
+.worktrees/
+.codex/
+.claude/RESUME.md
