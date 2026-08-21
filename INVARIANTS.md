@@ -70,7 +70,7 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    75% of lifetime. Tokens are **opaque server-side handles, not signed claims**, which is precisely
    what makes immediate revocation possible — stateless claims cannot be revoked before they expire.
    Sessions do NOT survive a restart. Every route authenticates EXCEPT the **six** on the explicit
-   allow-list in `internal/httpapi/authmw.go:76`, whose own doc comment justifies each one
+   allow-list in `internal/httpapi/authmw.go` (`unauthenticatedRoutes`, exported as `httpapi.UnauthenticatedRoutes()`), whose own doc comment justifies each one
    individually and is the authority if this paragraph and it ever disagree:
 
    - the three that necessarily cannot authenticate, because they are how a credential is obtained:
@@ -98,7 +98,7 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    here and in `CLAUDE.md`, and smaller again in the failure message of a test under
    `internal/httpapi`, which stated a count of its own. Every one of them read as freshly checked,
    which is why all three survived so long. They have since been reconciled against the code: this
-   file and `CLAUDE.md` cite `internal/httpapi/authmw.go:76`, and the test message now defers to
+   file and `CLAUDE.md` cite that list BY NAME rather than by line number, and the test message now defers to
    `httpapi.UnauthenticatedRoutes()` instead of naming a number. The lesson outlives the defect,
    because a count in prose goes stale in silence while the list itself cannot. An
    auditor reconciling the code against the docs finds an entry the docs do not mention and cannot

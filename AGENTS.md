@@ -49,7 +49,11 @@ auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `IN
    reverse). Invites are single-use, expiring, revocable, and are the ONLY way onto the bus. Sessions
    last at most one hour, are opaque server-side handles rather than signed claims (which is what
    makes immediate revocation possible), and do not survive a restart. Every route authenticates
-   except enrolment, session begin/complete, `/healthz` and `/v1/info`.
+   except the ones on the explicit allow-list in `internal/httpapi/authmw.go` (`unauthenticatedRoutes`, exported as `httpapi.UnauthenticatedRoutes()`) — today enrolment, session
+   begin/complete, `/healthz`, `/v1/info` and `/v1/discovery`. **Trust the allow-list, never a
+   count in prose**: the list is the security boundary, the middleware is default-deny, and a
+   number written down here rots in silence while the list cannot. This line said five until
+   2026-08-21; see `INVARIANTS.md` invariant 3 for what that cost.
 4. **Nothing is acknowledged before it is durable** — two-phase prepare→commit, fsynced. Never trade
    this for latency. **NARROWED (2026-08-02):** this guarantees we never lose acknowledged data
    through OUR OWN WRITE PATH. It does NOT promise acknowledged data survives damaged media — see

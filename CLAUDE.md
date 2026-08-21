@@ -49,7 +49,7 @@ auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `IN
    reverse). Invites are single-use, expiring, revocable, and are the ONLY way onto the bus. Sessions
    last at most one hour, are opaque server-side handles rather than signed claims (which is what
    makes immediate revocation possible), and do not survive a restart. Every route authenticates
-   except the **six** on the explicit allow-list at `internal/httpapi/authmw.go:76`: enrolment,
+   except the **six** on the explicit allow-list in `internal/httpapi/authmw.go` (`unauthenticatedRoutes`, exported as `httpapi.UnauthenticatedRoutes()`): enrolment,
    session begin/complete, `/healthz`, `/v1/info` and **`/v1/discovery`** — that last one was
    missing from this line until 2026-08-21, when three counts that had been live at once (the
    code's, this line's, and one in an `internal/httpapi` test's failure message) were reconciled
