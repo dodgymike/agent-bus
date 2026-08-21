@@ -1377,8 +1377,21 @@ value rather than an error.
 
 Registered inside the `Options.Hub != nil` block, through `(*Server).route`, so it is authenticated
 by **being registered**: `authMiddleware` is default-deny and this path is not on the allow-list. It
-therefore requires a bearer session **and** passes invariant 11's mTLS cross-check, like every other
-messaging route. It is a **bare path with no trailing slash**, so it does not collide with
+therefore requires a bearer session, and is subject to invariant 11's session/certificate
+cross-check **on the same terms as every other authenticated route — which is weaker than "mTLS is
+enforced" and must not be read as that**. The listener is `ClientAuth: tls.RequestClientCert`
+(`cmd/agent-bus/tlslisten.go:27`), so the cross-check bites only for an agent that HAS a live
+certificate binding; **for an agent with none, this route is bearer-token-only.** That is inherited
+from the platform, neither narrowed nor widened here.
+
+> **CORRECTED 2026-08-21 (`ACK-6` reviewer finding D2).** This sentence previously read *"requires a
+> bearer session **and** passes invariant 11's mTLS cross-check"*. `internal/httpapi/ack.go:24-30`
+> was written specifically to deny that reading — *"it is written out so nobody reads this file as
+> evidence that mutual TLS is enforced"* — so a contract file was asserting the very thing the
+> handler's own comment exists to prevent. Overstating an authentication property is the dangerous
+> direction: a reader plans against a guarantee the build does not make.
+
+It is a **bare path with no trailing slash**, so it does not collide with
 `GET /v1/ack/<correlation-key>` (`ACK-9`), which `http.ServeMux` resolves as a separate subtree.
 
 `POST /v1/peer/ack` is the *other* half of this plane and is a **different surface** with a
