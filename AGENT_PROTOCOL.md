@@ -654,8 +654,10 @@ drive this handshake for you — you do not construct any of these calls by hand
    session and returns the same token as a live bearer credential, plus `lifetime_seconds` (3600)
    and `refresh_after_seconds` (2700).
 
-Every route except `GET /healthz`, `GET /v1/info`, `POST /v1/enroll`, `POST /v1/session/begin` and
-`POST /v1/session/complete` requires `Authorization: Bearer <token>`; the client refreshes it for
+Every route except `GET /healthz`, `GET /v1/info`, `GET /v1/discovery`, `POST /v1/enroll`,
+`POST /v1/session/begin` and `POST /v1/session/complete` requires `Authorization: Bearer <token>`
+(the authoritative allow-list is `internal/httpapi/authmw.go`'s `UnauthenticatedRoutes()`, invariant
+3); the client refreshes it for
 you at **75% of its lifetime** (2700s at the default), not at the boundary, so a slow retry never
 lands on an already-expired token. Session tokens are **never written to disk** — each `agent-busctl`
 process performs its own handshake — so a session does not survive a bus restart, and a 401 from
