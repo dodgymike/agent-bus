@@ -26,8 +26,20 @@ WHAT IT DOES
 
   The message id is the ` + "`message_id`" + ` the message arrived with —
   ` + "`agent-busctl watch --json | jq -r .message_id`" + `. It is the id the ORIGIN bus
-  minted (invariant 1) and it is bus-namespaced, so it identifies the message
-  across every hop it took to reach you.
+  minted (invariant 1) and it is bus-namespaced.
+
+  CORRECTED 2026-08-21 (ACK-12). This paragraph used to end "...so it
+  identifies the message across every hop it took to reach you." THAT IS NOT
+  TRUE TODAY and it is the dangerous direction to be wrong in: it promised
+  cross-hop correlation that the bus does not yet perform, so an agent acting
+  on it would build a correlation scheme on a value that does not correlate.
+  What actually works is the SAME-BUS case. Across a relay hop, no lifecycle
+  row is written for relayed ingest, so this command answers exit 8 unknown;
+  and watch emits only the LOCAL message_id, never the origin id the
+  correlation key is built from, so after a hop you cannot even name the
+  message you are being asked to acknowledge. Tracked as P0 7d564118
+  (destination row) and P0 f423959c (watch correlation key). When those land,
+  delete this notice — do not leave it standing once it is stale.
 
   IT IS THE MESSAGE ID, NOT THE SEQUENCE. ` + "`seq`" + ` is identity and a delivery
   position is a position; this is correlation. They are three different
