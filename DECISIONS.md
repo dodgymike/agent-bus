@@ -6987,3 +6987,70 @@ draft said 29, which was never reachable: that epic holds 30 tasks in total.) Th
 "absence is never a pass" now also covers a
 `.tsv` with no data rows, why the selftest's failure path is a literal `exit 1` that bypasses the
 dispatcher, and why every guard added here was mutation-proved RED before being trusted.
+
+## 2026-08-21 — DOC-REFACTOR: `PITFALLS.md` is a third companion tier, and `CLAUDE.md` gets the one-line rule only
+
+Spec task `f4bd3c9f-3af8-4438-bcb0-18203b857255` (PROCESS, P2). Full audit and evidence in
+`DOC-REFACTOR_DEEPDIVE.md`.
+
+**The problem.** `CLAUDE.md` measured 31023 B in the WORKING TREE against the 28781 B ratchet in
+`docs/doc-budgets.tsv` (`doc-check.sh budget` exit 1, 2242 B over). The COMMITTED file was 30063 B at
+`85ed77f`, `b95d22d` and `2ed05c2`, i.e. over by 1282 B; the 960 B difference is a `## How to write`
+section that was in the worktree and in no commit. Both readings are over the ceiling. Stated
+explicitly because an earlier draft of the deep-dive treated the worktree figure as a commit figure
+and wrongly called two other files stale on the strength of it. Measured cause: 8267 B — 27% of the file — was incident
+NARRATIVE (dates, shas, exact output) for process and verification traps, and there was nowhere else
+for it to go. `INVARIANTS.md` already carried the correct pattern for DESIGN reasoning and states it
+at `INVARIANTS.md:6-8`, but it covers only the eleven invariants. Nothing covered traps, so every
+newly learned trap was appended in full to the one file injected into every sub-agent spawn.
+
+**Decision 1 — a third tier, not a bigger ceiling.** `CLAUDE.md` = rules, injected per spawn.
+`INVARIANTS.md` = design reasoning. `PITFALLS.md` (new) = process and verification incidents.
+Each rule in `CLAUDE.md` keeps its one-line form and points at exactly one companion section.
+This extends the split `INVARIANTS.md` established rather than inventing a new arrangement.
+
+**Decision 2 — a written destination for the NEXT warning.** `CLAUDE.md`'s "How to write" section
+now states where a new trap goes: one-line rule in `CLAUDE.md`, incident in `PITFALLS.md`, design
+reasoning in `INVARIANTS.md`, and never delete a warning to make room. Without this the refactor
+buys a fixed number of bytes and the growth resumes. `CLAUDE.md` is 28213 B (27253 B without that foreign
+section), 568 B under the ceiling; the ratchet going red on the next careless append is the intended behaviour, because the
+correct response is now defined.
+
+**Nothing was deleted.** A relocation audit checked 50 load-bearing phrases plus one negative
+control across the three files with whitespace normalisation: 50/50 present, control correctly
+absent. The `docs/doc-preserve.tsv` count is unchanged at 5 and all five phrases remain in
+`CLAUDE.md` — the relocation was designed around keeping them there. `docs/doc-preserve.tsv` was
+not edited.
+
+**Decision 3 — `AGENTS.md` gets a CONTENT sync only; the MECHANISM is not decided here.** Task
+`6a5ece85` owns that decision and is still `todo`/unowned, and `f4bd3c9f`'s own description forbids
+deciding it twice. `AGENTS.md` is now byte-identical to `CLAUDE.md`. Two findings handed to
+`6a5ece85`: (a) the drift was not only staleness — a hand `Claude`→`Codex` substitution had renamed
+real paths, producing `.Codex/agents/` (does not exist) and
+`/mnt/sdc/mike/Codex-scratch/spec-cloud-creds.env` (no such file), so any mechanism preserving a
+substitution table must forbid substituting filesystem paths, directory names and model ids;
+(b) `6a5ece85`'s stored `proof_cmd` (`diff … | grep -qx 0`) now PASSES because of this task's copy,
+so it measures the symptom rather than the mechanism and must be strengthened before that task is
+closed.
+
+**A correction found while checking (b), unrelated to sizing.** Both `CLAUDE.md` and `AGENTS.md`
+named the Spec Server creds file as `spec-cloud-creds.env`. `scripts/spec-cloud.sh:20` actually
+defaults to `spec-cloud-creds-agent-bus.env`. Both files exist on disk, so the wrong one is readable
+and stale rather than absent, which is why the error survived. `CLAUDE.md` now cites
+`scripts/spec-cloud.sh:20` as the authority instead of copying a path — the same rule invariant 3
+already applies to the unauthenticated allow-list: cite the enumeration, never a copy of it.
+
+**Related invariant-3 note.** `CLAUDE.md`'s invariant 3 said "the **six** on the explicit
+allow-list" above a list that reads as FIVE bullets, because `session begin/complete` is two routes
+written as one phrase. That is the most likely mechanical reason the count was written as five three
+separate times (`401f112`, `2828dcf`, `b95d22d`; `DOC-TRUTH_DEEPDIVE.md` row 25). The numeral is
+removed; the enumeration is unchanged. Flagged for operator ratification because open task
+`9a02d65a` reserves that wording to the operator.
+
+**Append-only convention, decided explicitly because the task required a decision rather than a
+silent reorganisation, and NEITHER file was reorganised.** `DECISIONS.md` keeps append-only: it is
+grepped and range-read, never injected, and its value is that a dated decision cannot be rewritten;
+`docs/doc-budgets.tsv` already exempts it and says why. `AGENT_LOG.md`'s convention has ALREADY been
+ruled on by the user (2026-08-08, "freeze + one-line entries", recorded on task `116179c8`, with
+`f39083ae` adding the mechanical guard) — both still `todo`. This task points at that ruling and does
+not re-open it.

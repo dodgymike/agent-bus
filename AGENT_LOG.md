@@ -5142,3 +5142,86 @@ first owns it.**
 every reservation from that namespace collides until it passes 18. Value 15 is now burnt — a GAP,
 which is expected and not a defect, but the namespace needs re-seeding or the next agent to reserve
 from it will hit the same 409. Reported rather than worked around; no duplicate task was created.
+
+## 2026-08-21 — f4bd3c9f DOC-REFACTOR (deep-diver)
+
+**Task.** `f4bd3c9f-3af8-4438-bcb0-18203b857255` (PROCESS, P2): audit and refactor the repo's
+tracked `.md` files, `CLAUDE.md` primary, fix `AGENTS.md` syncing in the same work. Claimed
+`owner=deep-diver, status=in_progress` via spec-keeper before starting.
+
+**Invariants read IN FULL before editing:** invariant 3 (`INVARIANTS.md:53-111`) — the passage
+edited in `CLAUDE.md` and the file the enforcement-status text moved into; invariant 11
+(`INVARIANTS.md:227+`) — because the relocated enforcement text makes claims about mTLS and
+certificate rotation. No code plane touched.
+
+**Files changed.** `CLAUDE.md` 31023 → 28213 B, worktree-to-worktree; the COMMITTED file was 30063 B
+and the 960 B difference is a `## How to write` section present in the worktree and in no commit, so
+the committed result is 27253 B if that section is committed separately and 28213 B if it rides
+along — both under the 28781 B ceiling. `AGENTS.md` 29501 → 28213 B (byte-identical to
+`CLAUDE.md`). `INVARIANTS.md` 23003 → 27199 B (new `## Enforcement status` section; added the
+missing `## The eleven invariants` parent so `doc-check.sh section` can scope to a `###`).
+`PITFALLS.md` NEW, 21539 B — §6 was added mid-task from a concurrent security re-gate on
+`scripts/doc-check.sh` (`e2c9cd0`); each of its three findings was re-measured here rather than
+restated. Two of my three write-ups were WRONG and both review gates caught them: I fabricated a
+"92/92 silent count drop" for `unset -f` (measured: the selftest goes loudly red at `6 of 96` under
+`unset -f wc grep sed awk mktemp` — the four-name form without `mktemp` gives 5, and pairing that
+command with the six-count was a THIRD unre-derivable number, caught by the integrator, which refused
+the commit over it; the denominator is structurally fixed), and I stated the awk mutation so that a reviewer
+measuring the literal reading reproduced the very 19/21/23 I had said did not reproduce. The
+conclusion survives — adding `--` breaks 0 assertions — but only with the env assignment kept, and
+the isolating control (dropping `DOC_CHECK_WANT` alone breaks the same 23) is what proves it. `DOC-REFACTOR_DEEPDIVE.md` NEW. Plus this entry and a
+`DECISIONS.md` section.
+
+**Proof.** Task `proof_cmd` `bash scripts/doc-check.sh budget`, run through the OVERLAY's
+`proof-check.sh` in a clean `git archive HEAD` overlay at `2ed05c2` with only the owned files copied
+in, called by relative path: `verdict=PASS class=wrapper exit=0`, output
+`doc-check: PASS: budget — 3 file(s) within ceiling, 5 preserved phrase(s) present`. Baseline at
+`85ed77f` was `verdict=FAIL class=wrapper exit=1`, `CLAUDE.md is 31023 B, over its 28781 B ceiling
+by 2242 B`. Preserved-phrase count unchanged at 5, which was the task's explicit condition that no
+trap was deleted to make room. `6a5ece85`'s proof in the same overlay: `SYNC_OK`,
+`verdict=PASS class=file-assertion exit=0` — but that task should NOT be closed on it, see
+`DECISIONS.md` decision 3.
+
+**Two recorded findings.**
+
+1. *A relocated claim is a re-asserted claim.* The first draft of `INVARIANTS.md`'s enforcement
+   section carried `CLAUDE.md`'s wording "a certificate that IS presented authenticates nobody by
+   itself" straight across. `DOC-TRUTH_DEEPDIVE.md` row 26 had already found that FALSE, and
+   `internal/httpapi/crosscheck.go:69-72` says so directly — on the peer plane the certificate alone
+   authorises, a NAMED NARROWING of invariant 11. Corrected before any gate ran. The entry now splits
+   the agent plane from the peer plane and cites `peerprincipal.go:9-24` and `crosscheck.go:69-72`.
+   Two further enforcement gaps were added the same way, verified against code not copied:
+   certificate rotation is not implemented server-side (`cmd/agent-bus/tlslisten.go:134` serves one
+   certificate, `internal/buscert/buscert.go:65-70` calls the expiry a SCHEDULED OUTAGE).
+2. *My own relocation audit produced two false MISSING results* — `grep -F` against phrases the
+   files wrap across two lines. Same failure class as the grep-proof trap I was in the middle of
+   documenting. Re-run with whitespace normalisation plus a negative control: 50/50 present, control
+   correctly absent.
+
+**Gates.** reviewer: CHANGES REQUESTED (5 blocking), all addressed. security: CHANGES REQUESTED,
+**no P0 and no P1**, 7 P2s — 4 fixed here, 3 routed. Security asserted the property that matters most
+for a self-judging change: `scripts/doc-check.sh`, `docs/doc-budgets.tsv` and `docs/doc-preserve.tsv`
+are unmodified, so the instrument deciding PASS/FAIL was not touched by the author. It also confirmed
+invariants 4-11 are byte-identical to HEAD and that the invariant-3 enumeration is complete at six
+routes (`internal/httpapi/authmw.go:76-83`), so removing the numeral created no undercount. Nothing
+committed by this agent — `integrator` owns that.
+
+**FOREIGN TEXT IN THIS COMMIT, DISCLOSED.** `CLAUDE.md`'s `## How to write` section (1410 B) is in no
+commit (`git log -S'How to write (agent output' --all` is empty). It was in the worktree before this
+task started, it is the coordinator's, and the brief directed it be preserved and applied, not
+removed. `cp CLAUDE.md AGENTS.md` has duplicated it into `AGENTS.md`. Any commit of either file
+carries it under this task's title; the integrator must decide whether to split it out.
+
+**Reviewer finding worth keeping.** The relocation pass carried a SECOND stale claim across — the
+"known still-stale twin: `client/enrol.go:64`" warning, corrected by `ad03e13` (DOCS-22) on
+2026-08-16. I had re-checked the relocated claims against code and still missed it; the gate found
+it. A relocation pass needs an independent reader, not only a careful author.
+
+**Left alone under other agents, reported not edited.** `CONTRACTS-AGENT.md` and both `docs/*.tsv`
+(integrator, staged at task start, committed at `2ed05c2`) — `CONTRACTS-AGENT.md:322-334` and the
+`doc-budgets.tsv` header now state a stale "CLAUDE.md is OVER its ceiling" figure as a result of this
+change, filed as a follow-up rather than edited around them. `AGENT_PROTOCOL.md`, `PROTOCOL.md`,
+`CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, `ACK-CONTRACT.md` — held by worktrees
+`agent-a5af74373fb0b1fc3` (ACK-5) and `agent-a3b41d07f84017fc1`. `README.md`, `CONTRACTS.md`,
+`CONTRACTS-CLI.md` were uncontended but deliberately not edited: out of this task's scope and already
+owned by `76879ad1`, `cb4fd330` and `881dae01`.

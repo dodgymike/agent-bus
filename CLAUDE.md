@@ -18,18 +18,10 @@ change that weakens one needs an explicit decision recorded in `DECISIONS.md`.
 
 > **These state what MUST be true, not what IS true today.** Several are only partly enforced in
 > code: the server REQUESTS but never REQUIRES a client certificate
-> (`ClientAuth: tls.RequestClientCert`, `a97f854` — one that IS presented authenticates nobody by
-> itself), recipients CANNOT verify message signatures, and enrol idempotency is in-memory only.
-> Do not build on a guarantee without checking it holds.
->
-> **Enrolment IS invite-gated as of `3cedcb7` (2026-08-15)** — `enrolmentInviteRequired = true`,
-> `cmd/agent-bus/main.go:66`. This paragraph claimed the opposite for several hours AFTER the gate
-> shipped, which is the failure it exists to warn about: a stale "not yet implemented" note is more
-> dangerous than no note, because it reads as freshly checked. Verified by forge, not by code
-> reading — 220 refused enrolments (20 via CLI, 200 raw) grew the data dir by **0 bytes**, and a
-> name refused 20 times then enrolled legitimately received suffix **1, not 21**, so the gate sits
-> ABOVE the id mint and invariant 1's never-reuse rule is never engaged.
-> **Known still-stale twin: `client/enrol.go:64` repeats the old claim.**
+> (`ClientAuth: tls.RequestClientCert`, `a97f854`), recipients CANNOT verify message signatures,
+> and enrol idempotency is in-memory only. Enrolment IS invite-gated as of `3cedcb7` —
+> `enrolmentInviteRequired = true`, `cmd/agent-bus/main.go:67`. Do not build on a guarantee without
+> checking it holds — `INVARIANTS.md` "Enforcement status" carries the per-item evidence.
 
 **The REASONING lives in `INVARIANTS.md`, and you must read the relevant entry IN FULL before working
 on that plane.** The lines below are reminders, not specifications — each one is a summary of several
@@ -49,13 +41,11 @@ auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `IN
    reverse). Invites are single-use, expiring, revocable, and are the ONLY way onto the bus. Sessions
    last at most one hour, are opaque server-side handles rather than signed claims (which is what
    makes immediate revocation possible), and do not survive a restart. Every route authenticates
-   except the **six** on the explicit allow-list in `internal/httpapi/authmw.go` (`unauthenticatedRoutes`, exported as `httpapi.UnauthenticatedRoutes()`): enrolment,
-   session begin/complete, `/healthz`, `/v1/info` and **`/v1/discovery`** — that last one was
-   missing from this line until 2026-08-21, when three counts that had been live at once (the
-   code's, this line's, and one in an `internal/httpapi` test's failure message) were reconciled
-   against `httpapi.UnauthenticatedRoutes()` — all three had read as freshly checked, which is why
-   they lasted. Trust the allow-list, never the prose: it is the security boundary and the
-   middleware is default-deny.
+   except the routes on the explicit allow-list in `internal/httpapi/authmw.go`
+   (`unauthenticatedRoutes`, exported as `httpapi.UnauthenticatedRoutes()`): enrolment, session
+   begin/complete, `/healthz`, `/v1/info`, `/v1/discovery`. **Trust the allow-list, never the
+   prose** — it is the security boundary, the middleware is default-deny, and a count written here
+   can go out of date while the list cannot. `INVARIANTS.md` invariant 3 justifies each entry.
 4. **Nothing is acknowledged before it is durable** — two-phase prepare→commit, fsynced. Never trade
    this for latency. **NARROWED (2026-08-02):** this guarantees we never lose acknowledged data
    through OUR OWN WRITE PATH. It does NOT promise acknowledged data survives damaged media — see
@@ -122,6 +112,10 @@ scripts/spec-cloud.sh authed curl shim for the Spec Server (task state)
 scripts/gen-spec-mirror.sh regenerates SPEC.md AND SPEC/ — the ONLY supported way to write either
 INVARIANTS.md         the 11 invariants WITH their reasoning — read the relevant one IN FULL
                       before working on that plane; CLAUDE.md carries only the one-line rules
+PITFALLS.md           the verification and commit traps WITH the incident behind each — same
+                      split: the one-line rule here, the dates/shas/output there
+AGENTS.md             this same protocol for runtimes that read AGENTS.md, not CLAUDE.md. Edit
+                      CLAUDE.md and re-sync; the two have drifted before (PITFALLS.md §5)
 .claude/ORCHESTRATION.md  which sub-agent to pick, which model to pass, the review panel — read
                       before spawning anything; deliberately NOT injected per spawn
 AGENT_PROTOCOL.md     agent-facing instructions: enrol, list, wait, send, relay
@@ -155,25 +149,43 @@ Consequences:
   third-party dependency still needs a justification in `DECISIONS.md`. The relaxation is about the
   Go VERSION, not about pulling in libraries.
 
+## How to write (agent output, commit messages, docs, notes)
+
+Speak plainly and directly. Prioritize useful information over commentary or rhetorical flourish.
+
+Avoid:
+- metaphors, figurative language, and colorful phrasing
+- praise or validation such as "that's the right instinct"
+- editorial commentary about what a point "teaches" or "reveals"
+- dramatic, clever, or literary wording
+- restating the user's observation before answering it
+
+Use simple, literal language. State the relevant fact, implication, or next action directly.
+Prefer "The count can become outdated" over "A count restated in prose is precisely the thing
+that rots."
+
+This applies to everything written here: replies to the user, briefs to sub-agents, commit
+messages, `DECISIONS.md` and `AGENT_LOG.md` entries, task notes, and code comments. It does not
+license dropping detail — the evidence, file:line citations, exact verdicts and caveats stay. Cut
+the framing, not the facts.
+
+**Where a new warning goes.** This file is injected into EVERY sub-agent spawn, so a paragraph added
+here is paid on every dispatch and it has a byte ceiling in `docs/doc-budgets.tsv`. A newly learned
+trap gets its ONE-LINE rule here and its incident — date, sha, exact output — in `PITFALLS.md`;
+a design rule gets its one-liner here and its reasoning in `INVARIANTS.md`. Never delete a warning
+to make room: relocate it and leave the pointer.
+
 ## Go conventions
 
 - Formatting must be clean, `go vet ./...` clean, `go build ./...` green before any commit.
-  **Do NOT call bare `gofmt` — it is NOT on PATH on this box** (only `$(go env GOROOT)/bin/gofmt` is).
-  This matters because the idiomatic check is silently self-defeating: `test -z "$(gofmt -l .)"`
-  **passes** when `gofmt` exits 127, because a command that fails to launch prints nothing to stdout.
-  Every "gofmt clean" recorded from a bare call is a false pass. Use one of:
+  **Do NOT call bare `gofmt` — it is NOT on PATH on this box**, and `test -z "$(gofmt -l .)"`
+  PASSES when it exits 127. **And `gofmt -l` EXITS 0 EVEN WHEN IT LISTS FILES**, so
+  `gofmt -l . && echo CLEAN` prints CLEAN over a list. Judge by empty OUTPUT, never exit status:
   ```
-  go fmt ./...                      # reformats in place; prints the files it changed
-  "$(go env GOROOT)/bin/gofmt" -l . # lists unformatted files; empty output = clean
-  ```
-  **And `gofmt -l` EXITS 0 EVEN WHEN IT LISTS FILES.** It reports by printing, not by status. So
-  `gofmt -l . && echo CLEAN` prints CLEAN over a list of unformatted files — a second false pass, in
-  a form the 127 case above does not cover. Observed 2026-08-07: a chain echoed `GOFMT_CLEAN` while
-  `gofmt -l` had just named `client/messages_test.go`. Judge it by whether the OUTPUT is empty, never
-  by its exit status:
-  ```
+  go fmt ./...                                     # reformats in place; prints what it changed
   test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"   # correct: tests the output
   ```
+  Both false passes, with the chain that echoed `GOFMT_CLEAN`, are in `PITFALLS.md` §1.
 - Tests run with `-race`. Concurrency here is the product; a data race is a P0.
 - Durability and recovery code must have **crash-injection tests** — a test that writes, kills at a
   chosen point in the write path, and asserts what recovery yields. "The code looks right" is not
@@ -186,52 +198,41 @@ Run the NARROWEST relevant check: `go test -race -run <Name> ./internal/<pkg>`, 
 `go vet ./...`, `go fmt ./...` (NOT bare `gofmt` — see the formatting note above).
 
 **A check that runs nothing is not a pass.** `go test -run TestThatDoesNotExist ./pkg` prints
-`ok ... [no tests to run]` and EXITS 0, so a proof command naming a test that was never written
-looks identical to a passing one. Run proof commands through `bash scripts/proof-check.sh '<cmd>'`,
+`ok ... [no tests to run]` and EXITS 0. Run every proof through `bash scripts/proof-check.sh '<cmd>'`,
 which reports PASS / FAIL / VACUOUS / UNVERIFIABLE, and quote its verdict rather than a bare exit
 code. A task must never be completed on a VACUOUS proof, and **a task with NO `proof_cmd` may not be
-completed at all** — a missing proof is worse than a vacuous one, since it leaves no record of what
-would even count as evidence. Completing a task requires RUNNING `proof-check.sh` and quoting its
-verdict, not storing a command nobody executed. For anything agent-facing, ALSO exercise it the way an agent would:
-through the compiled CLI (`cmd/agent-busctl`) against a running server, **never** through a
-hand-written `curl` and **never** through a `scripts/bus-*.sh` wrapper — those are retired and only
-`bus-serve.sh` (server lifecycle) survives. If the subcommand doesn't work, the feature doesn't work;
-if the capability has no subcommand yet, that is the missing half of the task, not a reason to reach
-for `curl`.
+completed at all** — a missing proof leaves no record of what would even count as evidence.
+Completing a task requires RUNNING `proof-check.sh` and quoting its verdict, not storing a command
+nobody executed.
 
-**A passing parent test does not rescue skipped children.** Go reports a parent as PASS when every
-leaf subtest called `t.Skip`; that shape exercised no assertion and `proof-check.sh` therefore reports
-VACUOUS. Its plain-text and JSON parsers judge leaf results so an indented child `--- SKIP:` cannot be
-hidden by the unindented parent `--- PASS:` line. Results remain scoped to their package, and a
-package's `[no tests to run]` summary overrides marker-shaped output printed by `TestMain`.
+More shapes that look like a pass and are not. Each rule stands alone; the incident behind it is in
+`PITFALLS.md` §2:
+- **A passing parent test does not rescue skipped children** — a parent whose leaves all called
+  `t.Skip` reports PASS; `proof-check.sh` reports VACUOUS and judges leaf results.
+- **An unquoted `-run` regex is re-parsed by the inner shell**, so the command that runs is not the
+  one you stored: verdict UNVERIFIABLE, exit 3. Double-quote the `-run` argument.
+- **`grep`-based doc proofs are the MORE dangerous family** — they pass on an INCIDENTAL match
+  elsewhere in the file. Pin the specific line (the table row, the field name, the artefact name),
+  and confirm the proof is **RED before the fix**; a proof never observed failing is not evidence
+  that it can fail. `scripts/doc-check.sh section` scopes a doc assertion to one heading.
+- **Quote the proof's own number**, never a wider suite figure in its place.
+- **A guard can be disabled by a change that reads as hardening** — `unset -f`, a "tidier" flag, a
+  deleted line. And an assertion checking only an EXIT CODE can pass for the wrong reason once its
+  guard is gone: assert on WHY a fixture failed, not just that it did. `PITFALLS.md` §6, and
+  invariant 11's `client/pin.go`.
 
-**Verify in a clean overlay of HEAD, not in your working tree — and run the OVERLAY's `proof-check.sh`,
-not the live one.** A working tree that builds proves nothing about what is COMMITTED: a definition
-you consume may be sitting uncommitted beside you, so a consumer can land before its definition and
-break `main`. That has happened here. Extract HEAD, copy in ONLY the files you own, `cd` in, and run
-the check from there:
+**Verify in a clean overlay of HEAD, not in your working tree — and run the OVERLAY's
+`proof-check.sh`, not the live one.** A working tree that builds proves nothing about what is
+COMMITTED: a consumer can land before its definition and break `main`, and that has happened here.
+Extract HEAD, copy in ONLY the files you own, `cd` in, and run from there — calling `proof-check.sh`
+and every path in the proof by a RELATIVE path, never an absolute one into the live worktree.
+`PITFALLS.md` §3 has the recipe and why copying the live script over the overlay's defeats it.
 
-```
-T=$(mktemp -d); git archive HEAD | tar -x -C "$T"
-cp <the paths you own> "$T"/<same paths>     # ONLY your files — nothing else uncommitted
-(cd "$T" && go build ./... && bash scripts/proof-check.sh '<cmd>')
-```
-
-**Call `proof-check.sh` — and every path in your proof command — by a RELATIVE path from inside `$T`,
-never by an absolute path into the live worktree.** `git archive` already places `scripts/proof-check.sh`
-in the overlay, so there is nothing to copy: **do NOT `cp` the live script over it**, or the one file
-deciding PASS/FAIL becomes the only uncommitted code in the overlay. The point is that the verifier's
-logic comes from HEAD too. (Its *cwd* handling is no longer the hazard — `535876c` made it run proofs
-in the caller's cwd — but an absolute path still reaches a script that MAY be uncommitted, and any
-other absolute path in the proof reaches uncommitted files.)
-
-**`grep`-based proofs are the MORE dangerous family, and CLAUDE.md previously warned only about
-tests.** A doc proof like `grep -n '8080' README.md CONTRACTS.md | grep -qi localhost && echo DOCS_OK`
-passes on an INCIDENTAL match somewhere else in the file — in the real case, a pre-existing
-`curl -s localhost:8080/healthz` line in README — and would have green-lit closing a task over the
-exact file two reviewers had blocked on. A doc proof must pin the specific line it claims to prove
-(the table row, the field name, the artefact name), and you must confirm it is **RED before the fix**.
-A proof that was never observed failing is not evidence that it can fail.
+For anything agent-facing, ALSO exercise it the way an agent would: through the compiled CLI
+(`cmd/agent-busctl`) against a running server, **never** through a hand-written `curl` and **never**
+through a `scripts/bus-*.sh` wrapper — those are retired and only `bus-serve.sh` (server lifecycle)
+survives. If the subcommand doesn't work, the feature doesn't work; if the capability has no
+subcommand yet, that is the missing half of the task, not a reason to reach for `curl`.
 
 If a test fails, you are NOT done. Diagnose whether YOUR change caused it or it is pre-existing,
 name the exact failing test, and report the verdict. NEVER hand-wave "pre-existing failures" to
@@ -243,8 +244,8 @@ Task state lives in the **Spec Server**, project slug **`agent-bus`**. The PRIMA
 CLOUD (`https://api.spec.elasticninja.com`). Every spec API call MUST go through the authed wrapper
 **`bash scripts/spec-cloud.sh <curl-opts> /api/v1/…`** (a drop-in for `curl`): it finds the `/path`
 arg, prepends the cloud host, and injects a fresh Cognito bearer (cached ~40 min, auto-refreshed on
-401). Creds live OUTSIDE the repo, never committed
-(`/mnt/sdc/mike/claude-scratch/spec-cloud-creds.env`).
+401). Creds live OUTSIDE the repo, never committed; the path is `SPEC_CLOUD_CREDS`, whose default
+is set at `scripts/spec-cloud.sh:20`. Read it there; a path copied into prose here can go out of date.
 
 Health check: `bash scripts/spec-cloud.sh -sf /readyz`. If it fails, fall back to the local server
 (`cd ~/source/spec-keeper && docker compose up -d`, then `curl -s localhost:8080/api/v1/…`) and
@@ -260,17 +261,14 @@ API, never by hand-editing a file:
   keys) → `POST $B/projects/agent-bus/reservations {"namespace":"<ns>","reserved_by":"<you>"}`.
   **Never pick a number by eyeballing the list** — that is the classic parallel-agent collision.
 - **Your own tasks** → `GET $B/projects/agent-bus/tasks?owner=<you>`.
-- **Refresh the mirror** after mutations → `bash scripts/gen-spec-mirror.sh`.
-  That is the ONLY write anyone makes to `SPEC.md` **or** `SPEC/`, and it rewrites BOTH. `SPEC.md`
-  is an epic INDEX; the records live in `SPEC/<EPIC>/epic.md` and `SPEC/<EPIC>/<task>/task.md`, one
-  file per task, description untruncated. **Closed tasks ARE included** — in a tree they cost
-  nothing until a file is opened — so **`--all` is now a NO-OP**, kept only so old invocations do
-  not fail. The default run also fetches the authoritative `blocks`/`supersedes`/`relates`/
-  `follow_up` edges, one request per task against a rate-limited API (~70 s per the script header);
-  `--no-relations` is the fast path and then every file says "NOT FETCHED — unknown, not absent".
-  Do NOT regenerate with a bare `spec-cloud.sh … export > SPEC.md`: that puts the old 640 KB
-  single-file mirror back over the index, bypasses the generator's guards, and silently overwrites
-  it with an error page if the fetch fails.
+- **Refresh the mirror** after mutations → `bash scripts/gen-spec-mirror.sh`. That is the ONLY
+  write anyone makes to `SPEC.md` **or** `SPEC/`, and it rewrites BOTH: `SPEC.md` is an epic INDEX,
+  the records live one file per task in `SPEC/<EPIC>/<task>/task.md`, description untruncated,
+  closed tasks included (`--all` is now a NO-OP). The default run also fetches the authoritative
+  `blocks`/`supersedes`/`relates`/`follow_up` edges (~70 s); `--no-relations` is the fast path and
+  then every file says "NOT FETCHED — unknown, not absent". **Do NOT regenerate with a bare
+  `spec-cloud.sh … export > SPEC.md`** — it bypasses the generator's guards and silently writes an
+  error page over the index if the fetch fails.
 
 ## Spec Server task notes are the work JOURNAL
 
@@ -311,48 +309,32 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
 7. Mark the task done via `complete` (with `commit_sha`, `test_summary`, `proof_cmd`), add any
    discovered follow-ups, refresh the `SPEC.md` mirror, and post the journal notes.
 8. Record decisions in `DECISIONS.md`; append to `AGENT_LOG.md`.
-9. Update the relevant `CONTRACTS-*.md` plane file for what changed — `CONTRACTS-CLI.md` (flags, env
-   vars), `CONTRACTS-HTTP.md` (routes, headers, enrolment/sessions, auth), `CONTRACTS-ONDISK.md`
-   (record types, wire protocol versions, on-disk files, WAL), `CONTRACTS-AGENT.md` (agent-facing
-   wrappers, repo tooling scripts) — see `CONTRACTS.md` for the full index if unsure which one. And
-   — if the agent-facing surface moved — `AGENT_PROTOCOL.md` plus the `cmd/agent-busctl` subcommand
-   that delivers it. **Not** a `scripts/bus-*.sh` wrapper: those are retired (invariant 7), and a
-   capability without its subcommand is the missing half of the task.
+9. Update the relevant `CONTRACTS-*.md` plane file for what changed — CLI flags and env vars, HTTP
+   routes and auth, on-disk records and the WAL, or agent-facing tooling. `CONTRACTS.md` is the
+   index; use it rather than guessing. And — if the agent-facing surface moved — `AGENT_PROTOCOL.md`
+   plus the `cmd/agent-busctl` subcommand that delivers it. **Not** a `scripts/bus-*.sh` wrapper:
+   those are retired (invariant 7), and a capability without its subcommand is the missing half of
+   the task.
     - **ALWAYS commit with an explicit pathspec: `git commit -m '…' -- <paths>`.** `git add <paths>`
-      does NOT scope a later commit — a bare `git commit` takes the WHOLE index, including anything a
-      concurrently-running agent has staged. This has produced four mis-titled commits in this repo,
-      one of which left `main` un-compilable for several commits because half of a change was swept
-      into an unrelated docs commit while the other half stayed in the working tree. The working tree
-      looked green throughout, which is why nobody noticed. Never `git add` then bare-`git commit`
-      while any other agent is running.
+      does NOT scope a later commit — a bare `git commit` takes the WHOLE index, including anything
+      a concurrently-running agent has staged. Never `git add` then bare-`git commit` while any
+      other agent is running.
     - **A pathspec commit takes the WORKTREE, not the index — so `git add` does not protect you
-      either.** This is the other half of the trap above and it bites in the opposite direction.
-      `git commit -- <path>` commits that path's WORKING-TREE content, silently discarding whatever
-      you staged for it. So on a file showing `MM` in `git status --porcelain` — index clean, worktree
-      dirty — carefully staging only your own text and then committing by pathspec ships the OTHER
-      agent's unstaged edits under YOUR commit title. Caught 2026-08-07 by the integrator on
-      `DECISIONS.md`: the index held only the DISCOVERY-DOC section, while the worktree had gained a
-      full `## 2026-08-07 — MTLS-PIN` section from a concurrent agent — text asserting that
-      `client/pin.go` had landed, when that file was untracked and its test was red. It refused the
-      commit rather than putting a false dated claim in `main`. **Before any pathspec commit, check
-      `git status --porcelain -- <paths>` for an `MM`, and diff the worktree (`git diff HEAD -- …`),
-      never just the index (`git diff --cached -- …`).** This applies hardest to the shared
-      append-only files — `DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS*.md` — which several agents
-      append to at once by design.
-    - **`MM` catches only ONE direction; a clean ` M` hides the other.** Index clean over a
-      contaminated worktree trips no status check, and the pathspec commit still takes the lot: on
-      2026-08-14 `client/client.go` sat at ` M` carrying one in-scope doc comment plus `endpointWith`
-      and `resolvePinsWith` from another agent's live, ungated task. Status is never sufficient —
-      read `git diff HEAD -- <path>` and confirm every hunk is yours.
-    - **Do NOT commit work no agent has reported.** A package appearing in the tree and passing its
-      tests is not a signal that it is finished — it may be mid-review, or mid-edit. Wait for the
-      owning agent's report with gates COMPLETED. Committing on "it is green and it is there" has
-      shipped ungated code three times (`518e71b`, `2451b4a`, `f56c723`), each time discovered only
-      when the agent later reported findings against code already in `main`.
+      either.** It commits that path's working-tree content and silently discards what you staged,
+      so it can ship another agent's edits under YOUR commit title. Before any pathspec commit,
+      check `git status --porcelain -- <paths>` AND diff the worktree (`git diff HEAD -- …`), never
+      just the index (`git diff --cached -- …`).
+    - **`MM` catches only ONE direction; a clean ` M` hides the other.** Status is never sufficient
+      — read `git diff HEAD -- <path>` and confirm every hunk is yours. This applies hardest to the
+      shared append-only files — `DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS*.md` — which several
+      agents append to at once by design.
+    - **Do NOT commit work no agent has reported.** A package that is present and green may be
+      mid-review or mid-edit. Wait for the owning agent's report with gates COMPLETED.
     - **A green tree is not a GATED tree.** Do not commit an agent's work until it reports its
-      reviewer AND security gates as COMPLETED, not merely dispatched. Committing mid-review has
-      shipped two real security holes here (a relay SSRF and an unbounded input), both caught by
-      gates that were still running when the commit landed.
+      reviewer AND security gates as COMPLETED, not merely dispatched.
+    - Every one of those five has already happened here — four mis-titled commits, one
+      un-compilable `main`, ungated code shipped three times, two security holes committed
+      mid-review. `PITFALLS.md` §4 carries each incident with its date, sha and file.
 10. **Tidy-up & git hygiene — a task is NOT complete until ALL of these hold:**
     - `git status --porcelain` is EMPTY. Every file you created or changed, including outside the
       Edit tool (gofmt, chmod, generators, renames), is committed or gitignored. New files MUST be
@@ -376,8 +358,12 @@ For tasks that require permission multiple times, write a script and ask permiss
   `POST .../reservations`; it allocates a unique monotonic value so two agents never collide.
 - **Task state is coordinated by the Spec Server, not by file locks.** `claim-next` hands each agent
   a distinct task; `SPEC.md` is a GENERATED MIRROR — never hand-edit it concurrently.
-- For the remaining shared files (`DECISIONS.md`, `AGENT_LOG.md`, `CONTRACTS.md`), only ONE agent at
-  a time; prefer adding a new dated section over editing existing lines.
+- For the shared append-only files (`DECISIONS.md`, `AGENT_LOG.md`), only ONE agent at a time;
+  prefer adding a new dated section over editing existing lines. The four `CONTRACTS-*.md` PLANE
+  files are the opposite case — the 2026-08-02 split (commit `0439836`) exists so they can be written
+  concurrently — but treat each plane file as single-owner FOR ONE PASS. Concurrency is about who may
+  OWN a file; it does not relax the pathspec rule in step 9, which applies to any file two agents can
+  touch at once, plane files included.
 - Never run two agents against the same bus **data directory**. Each parallel run gets its own
   throwaway dir under `/tmp`; the tracked `data/` dir is not a test fixture.
 

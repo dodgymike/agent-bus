@@ -21,10 +21,62 @@ you start.** The one-line version in `CLAUDE.md` is a reminder, not a specificat
 > Status note: this file currently states the DESIGN CONTRACT — what must be true. It does not yet
 > state what is ENFORCED IN CODE TODAY, and several invariants are only partly enforced (notably 3,
 > 7, 10 and 11). Spec task `HANDOVER-MAP-DOC` adds a per-invariant status and evidence row. Until it
-> lands, do not read this file as a description of the running system.
+> lands, do not read this file as a description of the running system. The section immediately below
+> is the partial, hand-maintained stand-in for that row.
 
 ---
 
+## Enforcement status — what is actually true in code today
+
+Relocated from `CLAUDE.md` on 2026-08-21 by the doc refactor (Spec task `f4bd3c9f`), then CORRECTED:
+the peer-plane entry reverses the wording it replaces and the rotation entry is new, so this is not a
+verbatim move. `CLAUDE.md` keeps the one-line warning and points here for the evidence. This list is
+NOT exhaustive: it records the gaps somebody has checked, not every gap that exists. Do not build on
+an invariant's guarantee without confirming it holds in the code you are about to touch.
+
+- **mTLS is not REQUIRED, and what a certificate proves depends on the plane (invariant 11).** The
+  server REQUESTS but never REQUIRES a client certificate — `ClientAuth: tls.RequestClientCert`,
+  `a97f854`. On the AGENT plane a certificate alone authenticates nobody: the session token does
+  that, and the cross-check between the two is what the invariant asks for. **On the PEER plane the
+  certificate alone AUTHORISES** — `RequirePeerPrincipal` reads no token and no header
+  (`internal/httpapi/peerprincipal.go:9-24`), and `internal/httpapi/crosscheck.go:69-72` records
+  this as a NAMED NARROWING of invariant 11 (`DECISIONS.md`, 2026-08-14, FEDERATION AMENDMENT ruling
+  (i)), "not as compliance with it". A blanket "a certificate authenticates nobody" claim is FALSE
+  for the entire federation ingress; `DOC-TRUTH_DEEPDIVE.md` row 26 filed it against the wording
+  this entry replaces.
+- **Recipients do not verify message signatures on the read path (invariants 9, 10).** The signature
+  is carried but not checked end-to-end by the receiving agent. **The verifier already EXISTS** —
+  `verifySignedMessage`, `client/canonical.go:515`, documented FAIL-CLOSED at `:479` — it simply has
+  no non-test caller, and `client/wedge_test.go:495 TestReadDoesNotYetVerifyReceivedMessages` pins
+  the gap deliberately. This is a WIRING gap, not a missing capability. Do not write a second
+  implementation: invariant 9 forbids it, and the seam to call is already there.
+- **Enrol idempotency is in-memory only (invariant 10).** It does not survive a restart, so the
+  invariant's "durable across restart" clause is not met on that path.
+- **Certificate rotation is NOT implemented server-side (invariant 11).** The invariant requires
+  serving TWO certificates during rollover. `cmd/agent-bus/tlslisten.go:134` serves exactly one
+  (`Certificates: []tls.Certificate{cert}`, no `GetCertificate`), and
+  `internal/buscert/buscert.go:65-70` states it plainly: "there is no rotation machinery yet ... so
+  this expiry is a SCHEDULED OUTAGE". The CLIENT accept-set is real, which is what makes this easy
+  to misread as done. `DOC-TRUTH_DEEPDIVE.md` row 27.
+- **Enrolment IS invite-gated (invariant 3), as of `3cedcb7`, 2026-08-15** —
+  `enrolmentInviteRequired = true`, `cmd/agent-bus/main.go:67`. Verified by forge rather than by
+  code reading: 220 refused enrolments (20 via the CLI, 200 raw) grew the data dir by **0 bytes**,
+  and a name refused 20 times and then enrolled legitimately received suffix **1, not 21**. The gate
+  therefore sits ABOVE the id mint, and invariant 1's never-reuse rule is never engaged by a refusal.
+
+**Why this list is written as evidence and not as a claim.** `CLAUDE.md` asserted the OPPOSITE of
+that last item — "enrolment is not yet invite-gated" — for several hours after the gate shipped. A
+stale "not yet implemented" note is more dangerous than no note at all, because it reads as freshly
+checked. When you correct an item here, search for its twins in the same change; see
+`PITFALLS.md` §5.
+
+*(This entry carried "Known still-stale twin: `client/enrol.go:64` repeats the old claim" until
+2026-08-21. That warning was itself five days stale: `ad03e13` (DOCS-22, 2026-08-16) corrected
+`client/enrol.go:63-67`, which now says the shipped bus REQUIRES an invite. It was caught by the
+reviewer gate on the very change that relocated it, which is the hazard this section is about.
+`DOC-TRUTH_DEEPDIVE.md` row 35 still cites the old wording and is stale for the same reason.)*
+
+## The eleven invariants
 
 These are the load-bearing invariants. Every change is measured against them; a change that weakens
 one needs an explicit decision recorded in `DECISIONS.md`.
