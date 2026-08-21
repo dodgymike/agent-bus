@@ -5,14 +5,14 @@
 | Public id | `9972d0ed-f6ae-4220-85a0-e0c8c0c8a459` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | docs |
 | Section | backlog |
 | Tags | docs, relay-21-followup, possible-duplicate-check-first |
 | Created | 2026-08-14T13:56:27.863359+00:00 |
-| Updated | 2026-08-14T13:56:38.866879+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:36:17.155437+00:00 |
+| Completed | 2026-08-16T10:36:17.155419+00:00 |
 
 ## Proof command
 

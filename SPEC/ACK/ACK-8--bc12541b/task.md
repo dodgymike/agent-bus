@@ -5,13 +5,13 @@
 | Public id | `bc12541b-e3be-44bc-8f22-e28fe820e229` |
 | Key | ACK-8 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:38.693266+00:00 |
-| Updated | 2026-08-09T08:25:38.693266+00:00 |
+| Updated | 2026-08-21T14:19:20.836025+00:00 |
 | Completed | — |
 
 ## Proof command

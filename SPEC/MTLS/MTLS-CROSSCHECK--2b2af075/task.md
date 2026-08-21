@@ -71,7 +71,7 @@ _Unknown._
 - [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
 - [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (superseded)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
-- [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
+- [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 - [ca356fde-0613-42cb-ac85-a629609d9c78](../Client-certificate-expiry-is-not-enforced-anywhere-Requi--ca356fde/task.md) — Client-certificate expiry is not enforced anywhere: RequireAnyClientCert does no chain ve… (todo)
 

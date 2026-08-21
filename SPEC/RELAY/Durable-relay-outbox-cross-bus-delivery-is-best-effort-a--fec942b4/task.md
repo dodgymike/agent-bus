@@ -50,7 +50,7 @@ _Unknown._
 
 
 - [RELAY-15](../RELAY-15--663be37c/task.md) — RELAY-15: Durable outbox record + replay (part 1 of 2) (done)
-- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (todo)
+- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (done)
 
 ---
 

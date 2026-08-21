@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**13 open / 35 total.** Full records live in `SPEC/CLI/<task>/task.md`.
+**14 open / 36 total.** Full records live in `SPEC/CLI/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (13)
+## Open tasks (14)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -15,6 +15,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CLI-10 | CLI-10: Rewrite AGENT_PROTOCOL.md against CLI subcommands (it currently documents shell w… | todo | P1 | [task.md](CLI-10--aba6e399/task.md) | _not fetched_ | [CLI-2](CLI-2--39318208/task.md) [CLI-8](CLI-8--ae4caacc/task.md) |
 | CLI-2-FU-LEAVE | CLI-2-FU-LEAVE: Add /v1/leave and make busctl logout actually revoke | todo | P1 | [task.md](CLI-2-FU-LEAVE--df79f84f/task.md) | _not fetched_ | [CLI-2](CLI-2--39318208/task.md) [AUTH-4](../AUTH/AUTH-4--a853261d/task.md) |
 | DISCOVERY-DOC-FU-CLI | DISCOVERY-DOC-FU-CLI: \`agent-busctl\` subcommand that fetches and renders the bus discover… | todo | P1 | [task.md](DISCOVERY-DOC-FU-CLI--b123c098/task.md) | _not fetched_ | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
+| CLI-13 | CLI-13: TestCLIEnrolEndToEnd SIGTERMs the priming server before it installs a handler --… | todo | P2 | [task.md](CLI-13--c66dd902/task.md) | _not fetched_ | [DOCS-22](../DOCS/DOCS-22--2f8ae959/task.md) |
 | CLI-2-FU-TLSSEAM | CLI-2-FU-TLSSEAM: The client transport is built before the identity is resolved | todo | P2 | [task.md](CLI-2-FU-TLSSEAM--e4d60d97/task.md) | _not fetched_ | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-7 | CLI-7: peers -- relay topology and health (replaces bus-peer.sh) | todo | P2 | [task.md](CLI-7--e600bde6/task.md) | _not fetched_ | [AGENTIF-8](../AGENTIF/AGENTIF-8--3837e7fd/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-8 | CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure | todo | P2 | [task.md](CLI-8--ae4caacc/task.md) | _not fetched_ | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |

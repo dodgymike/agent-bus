@@ -5,14 +5,20 @@
 | Public id | `cca64afd-f75d-46e4-91ca-ebc502151253` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T12:56:08.235881+00:00 |
-| Updated | 2026-08-08T10:29:56.559662+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:28:12.356007+00:00 |
+| Completed | 2026-08-16T10:28:12.355989+00:00 |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run TestIngestRelayedRecipientRules ./internal/hub
+```
 
 ## Description
 
@@ -51,7 +57,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (done)
 - [RELAY-16-FU-RETRY404](../RELAY-16-FU-RETRY404--7f515d76/task.md) — RELAY-16-FU-RETRY404: retry of an already-committed send can 404 if the recipient stopped… (todo)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
 

@@ -40,7 +40,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-1](../ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (todo)
+- [ACK-1](../ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
 
 ---
 

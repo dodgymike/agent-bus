@@ -65,7 +65,7 @@ _Unknown._
 - [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
 - [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
 - [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
 - [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md) — Fix the kind=model cost channel -- make token counts real (independently justified, survi… (todo)
 - [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)

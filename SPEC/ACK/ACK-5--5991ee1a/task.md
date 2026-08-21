@@ -5,13 +5,13 @@
 | Public id | `5991ee1a-fc26-443b-a459-428b14dc18da` |
 | Key | ACK-5 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P1 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:38.013443+00:00 |
-| Updated | 2026-08-09T08:25:38.013443+00:00 |
+| Updated | 2026-08-21T14:22:26.786583+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -50,6 +50,7 @@ _Unknown._
 
 
 - [RELAY-47](../../RELAY/RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
+- [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
 
 ---
 

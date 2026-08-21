@@ -90,6 +90,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [9a02d65a-e96b-4fbe-93cf-846d8b5c2034](../../DOCS/Invariant-3-s-unauthenticated-route-enumeration-is-stale--9a02d65a/task.md) — Invariant 3's unauthenticated-route enumeration is stale in three docs -- six entries in… (todo)
 - [HANDOVER-MAP-CHECK](../HANDOVER-MAP-CHECK--dce30493/task.md) — HANDOVER-MAP-CHECK: make the invariant map executable, not prose (todo)
 - [HANDOVER-README](../HANDOVER-README--1dc9cf90/task.md) — HANDOVER-README: README stops telling a human things that are false (todo)
 - [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md) — HANDOVER-REGISTER: KNOWN_ISSUES.md, the known-defect register (todo)

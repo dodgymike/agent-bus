@@ -5,19 +5,19 @@
 | Public id | `2309e7ed-b848-4e05-8d7d-26726c538648` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T12:26:52.208824+00:00 |
-| Updated | 2026-08-08T15:52:58.640033+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:27:13.131747+00:00 |
+| Completed | 2026-08-16T10:27:13.131730+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestRelayOutboxSurvivesCrash ./internal/relay
+go test -race -count=1 -run TestRelayOutboxSurvivesCrash ./internal/relay
 ```
 
 ## Description

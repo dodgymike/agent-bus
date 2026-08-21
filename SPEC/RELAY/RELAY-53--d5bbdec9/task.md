@@ -1,0 +1,110 @@
+# RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolvers in one package
+
+| Field | Value |
+| --- | --- |
+| Public id | `d5bbdec9-0659-423e-a420-183133ab9818` |
+| Key | RELAY-53 |
+| Epic | [RELAY](../epic.md) |
+| Status | todo |
+| Priority | P1 |
+| Component | BE |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-16T15:41:16.094565+00:00 |
+| Updated | 2026-08-16T15:41:16.094565+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go build ./internal/relay && go test -race -run 'TestWireVersion' ./internal/relay
+```
+
+## Description
+
+FILED 2026-08-16 by main, from the 591355f docs-commit gate. Found by an integrator reading what
+the documentation PROMISED against what the code contains.
+
+# The landmine
+
+internal/relay will contain TWO wire-version resolvers that git merges CLEANLY and then FAILS TO
+COMPILE:
+
+  resolveAckWireVersion   -- landed in 7e73c20 (ACK-3), in internal/relay
+  resolveWireVersion      -- RELAY-23, UNMERGED, in a worktree, same package
+
+Same package, near-identical role, no textual overlap. Git has no reason to flag a conflict. The
+break appears only at build time, after the merge, to whoever lands RELAY-23 -- who will reasonably
+assume they broke it.
+
+CONTRACTS-ONDISK.md's ACK-3 section already documents that these must be collapsed. It says so as
+PROSE -- "a follow-up must" -- with NO task named. That is how this gets lost: the obligation is
+recorded somewhere nobody greps at the moment it matters.
+
+# Why it is worth a task rather than a comment
+
+RELAY-23 is already in an awkward position: its worktree is several commits behind, and rebasing
+invalidates its RED-before proofs, so it must be RE-PROVEN rather than re-applied. Adding a
+compile break discovered mid-rebase to that is how a gated, reviewed piece of work gets abandoned
+instead of landed.
+
+# Scope
+
+Collapse the two resolvers into one when RELAY-23 lands. Both spend the SAME already-reserved value
+(relay-wire-version = 1) and both implement the same rule -- absent reads as 1, unrecognised is
+REFUSED never defaulted (mirroring parseOutboxState at internal/relay/outbox.go:316-330).
+
+DO NOT reserve a second version. The ledger holds exactly one entry and both surfaces spend it; that
+was ruled by ACK-1 and confirmed independently by the RELAY validation sweep.
+
+# Acceptance
+  - one resolver in internal/relay, both call sites using it
+  - the absent-reads-as-1 and unrecognised-is-refused behaviours are unchanged for BOTH surfaces,
+    each proven by mutation on its own surface -- a guard proven on one surface says nothing about
+    the other
+  - the ACK-3 section of CONTRACTS-ONDISK.md updated to say the collapse HAPPENED and where, so the
+    prose obligation cannot outlive its own discharge
+
+# Caution carried from today
+ACK-3's own honest note: the "absent reads as 1 must not be respelled as the constant" rule CANNOT be
+mutation-proved while the constant IS 1. Do not claim a proof you cannot construct; state the limit
+as ACK-3 did.
+
+# Related
+  RELAY-23 (the unmerged wire-version field) -- blocked on rebase + fresh proofs.
+  ACK-3-FU-COLLAPSE-WIREVERSION (8c6d6765) -- filed by ACK-3 as P2; THIS task is the same subject
+  seen from the RELAY-23 side. Merge them or supersede one; do not work both.
+
+## Relations (authoritative)
+
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+
+
+_Unknown._
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-1](../../ACK/ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
+- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-3-FU-COLLAPSE-WIREVERSION](../../ACK/ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) — ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… (todo)
+- [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

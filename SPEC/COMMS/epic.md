@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**13 open / 13 total.** Full records live in `SPEC/COMMS/<task>/task.md`.
+**12 open / 13 total.** Full records live in `SPEC/COMMS/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (13)
+## Open tasks (12)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -22,11 +22,12 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | COMMS-STRUCT | Measure whether heavy message structure pays off -- pre-registered, mechanically ordered | todo | P2 | [task.md](COMMS-STRUCT--6829b61c/task.md) | _not fetched_ | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
 | COMMS-THREAD-TRIAL | Trial threading via convention (no wire field) and measure whether it's enough | todo | P2 | [task.md](COMMS-THREAD-TRIAL--3a7705b8/task.md) | _not fetched_ | [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-STRUCT](COMMS-STRUCT--6829b61c/task.md) [COMMS-RETRACT](COMMS-RETRACT--dd4b739c/task.md) [COMMS-THREAD-FIELD](COMMS-THREAD-FIELD--35db4a7b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
 | COMMS-TYPES | Define a message verdict-class / type taxonomy from measured corpus usage | todo | P2 | [task.md](COMMS-TYPES--f17ec5ab/task.md) | _not fetched_ | [COMMS-METRICS](COMMS-METRICS--ee18aa5f/task.md) [COMMS-CORPUS](COMMS-CORPUS--075d0c32/task.md) [COMMS-CONSENT](COMMS-CONSENT--1ae2403b/task.md) [COMMS-DOC](COMMS-DOC--d899d622/task.md) |
-| COMMS-THREAD-FIELD | Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… | blocked | P3 | [task.md](COMMS-THREAD-FIELD--35db4a7b/task.md) | _not fetched_ | [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md) |
 
-## Closed tasks (0) — done, cancelled, superseded
+## Closed tasks (1) — done, cancelled, superseded
 
-_None._
+| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
+| --- | --- | --- | --- | --- | --- | --- |
+| COMMS-THREAD-FIELD | Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… | superseded | P3 | [task.md](COMMS-THREAD-FIELD--35db4a7b/task.md) | _not fetched_ | [COMMS-THREAD-TRIAL](COMMS-THREAD-TRIAL--3a7705b8/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) [COMMS-MULTI](COMMS-MULTI--e7210d98/task.md) |
 
 ## Epic description
 

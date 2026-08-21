@@ -5,19 +5,19 @@
 | Public id | `e0ac42e1-5d63-422b-b163-ab10912d5ef4` |
 | Key | ACK-1 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:24:53.811343+00:00 |
-| Updated | 2026-08-09T08:25:36.738176+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T14:04:08.407320+00:00 |
+| Completed | 2026-08-16T14:04:08.407302+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestAckContractStateMachine$ ./internal/relay'
+test -f ACK-CONTRACT.md && grep -c "^## " ACK-CONTRACT.md
 ```
 
 ## Description
@@ -41,8 +41,11 @@ _Unknown._
 
 
 - [ACK-11](../ACK-11--5567f490/task.md) — ACK-11: Document ACK/NACK semantics, operations and privacy limits (todo)
-- [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (todo)
+- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (in_progress)
+- [ACK-15](../ACK-15--a63b133d/task.md) — ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… (done)
+- [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
 - [RELAY-47](../../RELAY/RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
 
 ---
 

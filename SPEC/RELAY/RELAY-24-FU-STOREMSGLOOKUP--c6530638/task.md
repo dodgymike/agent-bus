@@ -77,6 +77,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [88255314-6658-4bba-b1cd-76ebeec9806a](../../UNASSIGNED/store.Append-retains-the-CALLER-s-slice-headers-and-hub--88255314/task.md) — store.Append retains the CALLER's slice headers, and hub.publish keeps using the same Mes… (todo)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (done)
 - [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md) — RELAY-24-BLOCKER-EGRESS-ATTEST: no bus can ISSUE an origin attestation for its own agents… (done)
@@ -85,7 +86,7 @@ _Unknown._
 - [RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP](../RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP--0e045086/task.md) — RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP: AST guard bans store point-lookups by selector name… (todo)
 - [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (todo)
 - [RELAY-24-FU-STOREMSGLOOKUP-THROTTLE](../RELAY-24-FU-STOREMSGLOOKUP-THROTTLE--cc7a463e/task.md) — RELAY-24-FU-STOREMSGLOOKUP-THROTTLE: duplicate-origin log throttle is process-wide and bu… (todo)
-- [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (todo)
+- [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
 
 ---
 

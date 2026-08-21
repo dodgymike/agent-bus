@@ -5,14 +5,20 @@
 | Public id | `2f8ae959-aed2-4479-8a47-2847b69f26ba` |
 | Key | DOCS-22 |
 | Epic | [DOCS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T08:37:33.274287+00:00 |
-| Updated | 2026-08-16T08:37:33.274287+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T14:04:15.278894+00:00 |
+| Completed | 2026-08-16T14:04:15.278875+00:00 |
+
+## Proof command
+
+```sh
+go test -race ./client/...
+```
 
 ## Description
 
@@ -63,6 +69,16 @@ _Unknown._
 
 - [AUTH-7](../../AUTH/AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONTEXT-STALE-NOTYET](../../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) — CONTEXT-STALE-NOTYET: a doc-check \`forbid\` mode, so a "not yet implemented" note cannot o… (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [CLI-13](../../CLI/CLI-13--c66dd902/task.md) — CLI-13: TestCLIEnrolEndToEnd SIGTERMs the priming server before it installs a handler --… (todo)
+- [DOCS-30](../DOCS-30--a311a067/task.md) — DOCS-30: clientcert help says the bus ignores the client certificate; the bus refuses 409… (todo)
 
 ---
 

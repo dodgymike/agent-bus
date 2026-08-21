@@ -46,7 +46,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -55,7 +55,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [IDEM-11-FU-THROUGHPUT](../IDEM-11-FU-THROUGHPUT--4b67701c/task.md) — IDEM-11-FU-THROUGHPUT: sustained ceiling roughly halves to ~0.36 ops/s and nothing surfac… (todo)
 
 ---

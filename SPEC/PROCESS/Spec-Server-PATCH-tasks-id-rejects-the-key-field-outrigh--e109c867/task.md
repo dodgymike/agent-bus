@@ -66,7 +66,6 @@ _Unknown._
 
 
 - [2582f548-6493-439c-ba71-7f5cf73650fc](../Spec-Server-export-both-format-markdown-and-format-json--2582f548/task.md) — Spec Server /export (both format=markdown and format=json) silently drops the commits\[\] a… (todo)
-- [TRIAGE-LOCK](../TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (done)
 
 ---
 

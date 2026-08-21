@@ -76,7 +76,7 @@ _Unknown._
 - [IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS](../../IDEM/IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS--6a09349b/task.md) — IDEM-FU-RESULTBYTES-VS-MAXRECIPIENTS: idem.MaxResultBytes (512) is too small for a multi-… (todo)
 - [INVITE-FU-STORE-TEST-RED-ON-MAIN](../../INVITE/INVITE-FU-STORE-TEST-RED-ON-MAIN--fb7be1d6/task.md) — INVITE-FU-STORE-TEST-RED-ON-MAIN: TestInviteNotDurableIsRefused fails on a pristine HEAD (done)
 - [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)
-- [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (todo)
+- [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (done)
 - [RELAY-FU-BUSPATH-OFFBYONE](../RELAY-FU-BUSPATH-OFFBYONE--97fc6038/task.md) — RELAY-FU-BUSPATH-OFFBYONE: bus-path off-by-one between internal/relay/path.go:128 and int… (done)
 - [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
 - [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) — SIGN-1-FU-OUTOFORDER-POISON: Reserve-then-send lets mints be spent out of order, which pe… (done)

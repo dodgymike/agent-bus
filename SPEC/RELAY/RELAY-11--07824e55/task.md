@@ -52,7 +52,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -64,7 +64,7 @@ _Unknown._
 - [06ac5885-5df4-4fab-8b51-45b37c7a38c2](../CONTRACTS-ONDISK.md-document-the-bus_path-len-1-is-recor--06ac5885/task.md) — CONTRACTS-ONDISK.md: document the bus_path\[len-1\]-is-recording-bus on-disk invariant, and… (todo)
 - [RELAY-11-FU-BUSID-ECHO](../RELAY-11-FU-BUSID-ECHO--18b3307a/task.md) — ids.ValidateBusID echoes an oversized bus id with %q and no length guard (todo)
 - [RELAY-11-FU-INGEST-LOOPGUARD](../RELAY-11-FU-INGEST-LOOPGUARD--a41c273c/task.md) — Relay ingest MUST route through relay.CheckIncomingPath before hub.publish, or a 64-hop l… (todo)
-- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (done)
 - [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
 
 ---

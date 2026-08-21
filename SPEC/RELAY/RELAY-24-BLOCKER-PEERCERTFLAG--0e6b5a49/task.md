@@ -66,7 +66,7 @@ _Unknown._
 
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (done)
-- [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md) — RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE: three-bus federation smoke test (fed-smoke.sh, both… (todo)
+- [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md) — RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE: three-bus federation smoke test (fed-smoke.sh, both… (done)
 - [RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE](../RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE--002f4875/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG-FU-BINDNOROUTE: a binding with no route satisfies the mount… (todo)
 - [RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS](../RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS--b64e2675/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG-FU-CROSSNS: no cross-namespace uniqueness between agent cli… (todo)
 - [RELAY-25-FU-INBOUNDBIND](../RELAY-25-FU-INBOUNDBIND--336c3b76/task.md) — RELAY-25-FU-INBOUNDBIND: fed-smoke.sh never binds each peer's INBOUND client-certificate… (done)

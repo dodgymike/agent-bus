@@ -5,14 +5,24 @@
 | Public id | `37993b49-e317-4dde-bcf5-abd22c97648d` |
 | Key | AUTH-10 |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T09:09:20.872778+00:00 |
-| Updated | 2026-08-16T09:09:20.872778+00:00 |
+| Updated | 2026-08-16T14:38:09.027362+00:00 |
 | Completed | — |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run 'TestOperatorPrincipal' ./internal/auth
+```
+
+## Status note
+
+CODE-COMPLETE, NOT LIVE — 2026-08-16, feature-runner. The operator principal, its durable registry, its session table and the authorization check are implemented, gated and proven; reviewer and security both re-verified (security PASS; reviewer PASS on everything except the out-of-boundary wiring). It is NOT runnable: cmd/agent-bus/main.go was held by RELAY-48 for the whole run and is outside this agent's file ownership, so (a) `agent-bus operator ...` is not dispatched from argv — including `operator revoke`, the design's only revocation mechanism — and (b) auth.OperatorRecordKind is not in the server's applier map, so a server replay passes operator records over in silence (an invariant-6 shape, present by omission). Both are carried by AUTH-10-WIRING (P0, b11ef24c-3791-456f-a45f-1223cce5b50b) and are disclosed in CONTRACTS-CLI.md, CONTRACTS-ONDISK.md and AGENT_PROTOCOL.md. AUTH-10 may be completed only once the five design answers are recorded in DECISIONS.md (proposed text handed to the orchestrator; DECISIONS.md is contended and was outside this agent's boundary) — and it should be completed as CODE-ONLY, with AUTH-10-WIRING carrying the observable behaviour.
 
 ## Description
 
@@ -100,9 +110,24 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
 - [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
-- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
+- [RELAY-48](../../RELAY/RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-10-FU-CHECKPOINT](../AUTH-10-FU-CHECKPOINT--4a7289bb/task.md) — AUTH-10-FU-CHECKPOINT: OperatorRegistry is not a wal.CheckpointParticipant — operator rec… (todo)
+- [AUTH-10-FU-ENROLSEAM](../AUTH-10-FU-ENROLSEAM--a83e9a13/task.md) — AUTH-10-FU-ENROLSEAM: cross-plane certificate uniqueness is one-directional — Service.Enr… (todo)
+- [AUTH-10-FU-LABELAGREE](../AUTH-10-FU-LABELAGREE--7336077e/task.md) — AUTH-10-FU-LABELAGREE: no test asserts the label-differs-still-silent path that two docum… (todo)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---
 

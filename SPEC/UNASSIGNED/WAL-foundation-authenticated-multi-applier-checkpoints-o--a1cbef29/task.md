@@ -84,7 +84,7 @@ _Unknown._
 
 
 - [8fb219ca-1236-4058-9020-afd52a7e93f3](../WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md) — WAL checkpoint follow-up: exhaustive in-operation crash-path evidence (todo)
-- [ACK-2](../../ACK/ACK-2--9564f953/task.md) — ACK-2: Durable local send acceptance and ACK/NACK lifecycle record (todo)
+- [ACK-2](../../ACK/ACK-2--9564f953/task.md) — ACK-2: Durable local send acceptance and ACK/NACK lifecycle record (done)
 
 ---
 

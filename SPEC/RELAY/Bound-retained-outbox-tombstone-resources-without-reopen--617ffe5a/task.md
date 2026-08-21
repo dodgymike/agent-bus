@@ -65,7 +65,7 @@ _Unknown._
 
 
 - [8fb219ca-1236-4058-9020-afd52a7e93f3](../../UNASSIGNED/WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md) — WAL checkpoint follow-up: exhaustive in-operation crash-path evidence (todo)
-- [ACK-2](../../ACK/ACK-2--9564f953/task.md) — ACK-2: Durable local send acceptance and ACK/NACK lifecycle record (todo)
+- [ACK-2](../../ACK/ACK-2--9564f953/task.md) — ACK-2: Durable local send acceptance and ACK/NACK lifecycle record (done)
 - [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md) — RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per… (done)
 - [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) — WAL foundation: authenticated multi-applier checkpoints over shared bus.wal (done)
 

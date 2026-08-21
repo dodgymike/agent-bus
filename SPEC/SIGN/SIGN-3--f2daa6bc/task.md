@@ -55,7 +55,7 @@ _Unknown._
 
 
 - [COMMS-MULTI-DESIGN](../../COMMS/COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
-- [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md) — CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path (deferred)
 - [RATCHET-4](../../RATCHET/RATCHET-4--58fd8bc3/task.md) — RATCHET-4: Broadcast fan-out under pairwise ratchets (superseded)
 - [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../../RELAY/RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) — RELAY-24-BLOCKER-EGRESS-HANDSHAKE: this bus never DIALS a peer, so its relay Registry nev… (todo)

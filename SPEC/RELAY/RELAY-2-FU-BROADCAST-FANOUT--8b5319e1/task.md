@@ -40,7 +40,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (todo)
+- [RELAY-16](../RELAY-16--1fd8742f/task.md) — RELAY-16: Egress admission: /v1/send accepts a routable remote recipient (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

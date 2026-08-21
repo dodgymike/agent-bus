@@ -109,7 +109,7 @@ _Unknown._
 
 - [INVITE-GATE-ENFORCE](../../INVITE/INVITE-GATE-ENFORCE--8297d7e2/task.md) — INVITE-GATE-ENFORCE: enforce invite-only enrolment (P0: anonymous roster exhaustion) (in_progress)
 - [INVMINT-1](../INVMINT-1--1bed65a8/task.md) — INVMINT-1: decide the invite-minting AUTHORITY MODEL and reconcile it with E4, FEDERATION… (todo)
-- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 - [INVMINT-4](../INVMINT-4--ea948fb0/task.md) — INVMINT-4: the CLI subcommand for online invite minting + its AGENT_PROTOCOL.md entry (in… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

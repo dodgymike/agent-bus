@@ -70,6 +70,7 @@ _Unknown._
 - [0f8c5332-1236-4e22-a249-72119401003f](../../PROCESS/Spec-Server-API-gap-no-relation-delete-endpoint-wrong-bl--0f8c5332/task.md) — Spec Server API gap: no relation-delete endpoint -- wrong blocks/relates/supersedes/follo… (todo)
 - [6f82180f-8f57-473d-bd87-30f6d9d9695d](../PROTOCOL.md-599-cites-a-deleted-test-TestHandshakeHandle--6f82180f/task.md) — PROTOCOL.md:599 cites a deleted test (TestHandshakeHandlerIsNotWiredIntoAnyMux) as a live… (todo)
 - [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md) — RELAY-24-BLOCKER-EGRESS-ATTEST: no bus can ISSUE an origin attestation for its own agents… (done)
+- [RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND](../RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND--09fc1ec5/task.md) — RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND: doc.go gap 5 OUTBOUND half -- Client.Enroll n… (todo)
 
 ---
 

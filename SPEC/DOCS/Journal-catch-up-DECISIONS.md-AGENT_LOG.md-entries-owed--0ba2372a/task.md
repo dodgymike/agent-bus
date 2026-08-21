@@ -59,7 +59,6 @@ _Unknown._
 
 
 - [CONTEXT-LOG-RETIRE](../../CONTEXT/CONTEXT-LOG-RETIRE--116179c8/task.md) — CONTEXT-LOG-RETIRE: AGENT_LOG.md freezes its narrative and moves to one line per task (todo)
-- [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (done)
 
 ---
 

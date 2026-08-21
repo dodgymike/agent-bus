@@ -54,11 +54,11 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [IDEM-15](../../IDEM/IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-3](../../IDEM/IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 - [IDEM-7](../../IDEM/IDEM-7--1c490a08/task.md) — IDEM-7: Exactly-once application on the relay path -- dedupe on the ORIGIN's identity, co… (superseded)
-- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (todo)
+- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (done)
 - [ef6c4645-b454-417f-a4a7-c75843bbcbd0](../Relay-forwarder-s-PeerBaseURL-callback-give-Registry-a-c--ef6c4645/task.md) — Relay forwarder's PeerBaseURL callback: give Registry a concurrency-safe accessor and sta… (superseded)
 - [fec942b4-fdb6-4fc3-920b-ae2af4fd5f92](../Durable-relay-outbox-cross-bus-delivery-is-best-effort-a--fec942b4/task.md) — Durable relay outbox: cross-bus delivery is best-effort and every drop path loses the mes… (superseded)
 

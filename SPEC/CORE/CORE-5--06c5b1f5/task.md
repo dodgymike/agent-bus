@@ -55,7 +55,7 @@ _Unknown._
 
 - [ADMIN-8](../../ADMIN/ADMIN-8--7f550309/task.md) — ADMIN-8: GET /v1/status -- authenticated, in-process counters, exhaustive field-set pin,… (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [IDEM-11-FU-THROUGHPUT](../../IDEM/IDEM-11-FU-THROUGHPUT--4b67701c/task.md) — IDEM-11-FU-THROUGHPUT: sustained ceiling roughly halves to ~0.36 ops/s and nothing surfac… (todo)
 - [IDEM-3](../../IDEM/IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 

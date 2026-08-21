@@ -5,14 +5,14 @@
 | Public id | `12f39697-93b0-432e-92c2-3cf185ea6e50` |
 | Key | RELAY-FU-PEERENROLL-BUSID-BIND |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:06:27.766032+00:00 |
-| Updated | 2026-08-15T14:50:26.564572+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:24:04.238162+00:00 |
+| Completed | 2026-08-16T10:24:04.238145+00:00 |
 
 ## Proof command
 
@@ -51,8 +51,8 @@ _Unknown._
 
 
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
-- [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (todo)
-- [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md) — internal/relay/doc.go gap 3: RosterUpdate.BusID is not bound to the authenticated connect… (todo)
+- [RELAY-FU-BUSPATH-BIND-PEER](../RELAY-FU-BUSPATH-BIND-PEER--f6a9fad0/task.md) — RELAY-FU-BUSPATH-BIND-PEER: Bind the arriving BusPath's last hop to the authenticated pee… (done)
+- [RELAY-FU-ROSTER-VERSION-BOUND](../RELAY-FU-ROSTER-VERSION-BOUND--b361d9e2/task.md) — internal/relay/doc.go gap 3: RosterUpdate.BusID is not bound to the authenticated connect… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -61,7 +61,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-FU-PEERBUSID-CROSSCHECK](../RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (todo)
+- [RELAY-FU-PEERBUSID-CROSSCHECK](../RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (done)
+- [RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND](../RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND--09fc1ec5/task.md) — RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND: doc.go gap 5 OUTBOUND half -- Client.Enroll n… (todo)
 
 ---
 

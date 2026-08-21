@@ -79,6 +79,7 @@ _Unknown._
 
 - [CONTEXT-AGENTDESC-TRIM](../CONTEXT-AGENTDESC-TRIM--eaea0581/task.md) — CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn… (done)
 - [CONTEXT-DISPATCH-RULE](../CONTEXT-DISPATCH-RULE--81bc24d6/task.md) — CONTEXT-DISPATCH-RULE: dispatch briefs stop restating standing rules already in every sub… (todo)
+- [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---
 

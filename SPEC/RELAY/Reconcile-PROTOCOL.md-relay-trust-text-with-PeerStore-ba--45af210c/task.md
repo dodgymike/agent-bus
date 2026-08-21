@@ -11,13 +11,13 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T23:15:22.824020+00:00 |
-| Updated | 2026-08-08T23:15:22.824020+00:00 |
+| Updated | 2026-08-16T10:39:16.381775+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-rg -n "PeerStore-backed CrossBusTrust" PROTOCOL.md
+! grep -qF 'no bus signing key and no certificate fingerprint' PROTOCOL.md && ! grep -qF 'registers nothing and the' PROTOCOL.md && grep -qF 'peerstore.go' PROTOCOL.md && echo PROTOCOL_RELAY_TRUST_RECONCILED
 ```
 
 ## Description

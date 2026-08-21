@@ -5,19 +5,19 @@
 | Public id | `3e96dae2-19d7-4a2e-94c8-ad0e26fd5519` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T10:45:18.295532+00:00 |
-| Updated | 2026-08-15T10:45:18.295532+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:35:31.000453+00:00 |
+| Completed | 2026-08-16T10:35:31.000435+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'bash scripts/fed-smoke.sh'
+bash scripts/fed-smoke.sh
 ```
 
 ## Description

@@ -11,8 +11,14 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T07:09:22.560274+00:00 |
-| Updated | 2026-08-15T07:09:22.560274+00:00 |
+| Updated | 2026-08-16T10:41:07.945222+00:00 |
 | Completed | — |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run TestCopyMessageDeepCopiesSignatureOnEveryExitPoint ./internal/store
+```
 
 ## Description
 
@@ -45,6 +51,16 @@ _Unknown._
 
 
 - [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [19595b60-16c8-4ce2-a67a-dcb8a1804ce1](../../UNASSIGNED/store.Message.WithOriginMessageID-s-doc-undercounts-what--19595b60/task.md) — store.Message.WithOriginMessageID's doc undercounts what the returned copy shares: it say… (todo)
+- [88255314-6658-4bba-b1cd-76ebeec9806a](../../UNASSIGNED/store.Append-retains-the-CALLER-s-slice-headers-and-hub--88255314/task.md) — store.Append retains the CALLER's slice headers, and hub.publish keeps using the same Mes… (todo)
 
 ---
 

@@ -66,7 +66,7 @@ _Unknown._
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-34-FU-ATOMICWRITER](../RELAY-34-FU-ATOMICWRITER--7497f762/task.md) — RELAY-34-FU-ATOMICWRITER: four copies of the atomic temp+fsync+rename writer must move to… (todo)
 - [RELAY-34-FU-CONFUSABLEORDER](../RELAY-34-FU-CONFUSABLEORDER--bbe577ae/task.md) — RELAY-34-FU-CONFUSABLEORDER: reconcile's ASCII-case-confusable guard is order-dependent (… (todo)
-- [RELAY-34-FU-DIRWIRING](../RELAY-34-FU-DIRWIRING--4b302011/task.md) — RELAY-34-FU-DIRWIRING: cmd/agent-bus/peer.go must pass PeerStoreOptions.Dir or every revo… (todo)
+- [RELAY-34-FU-DIRWIRING](../RELAY-34-FU-DIRWIRING--4b302011/task.md) — RELAY-34-FU-DIRWIRING: cmd/agent-bus/peer.go must pass PeerStoreOptions.Dir or every revo… (done)
 - [RELAY-34-FU-ERRNIT](../RELAY-34-FU-ERRNIT--8e68c6cb/task.md) — RELAY-34-FU-ERRNIT: a comment names ErrPeerBusIDCollision where the refusal may now be Er… (todo)
 - [RELAY-34-FU-REPAIRCOST](../RELAY-34-FU-REPAIRCOST--8bd25efd/task.md) — RELAY-34-FU-REPAIRCOST: floor repair from the log is linear, one rewrite + fsync per with… (todo)
 - [RELAY-34-FU-TEMPREAPER](../RELAY-34-FU-TEMPREAPER--07777f7b/task.md) — RELAY-34-FU-TEMPREAPER: no stale-temp reaper for .peer-withdrawal-floor-* left by a crash… (todo)

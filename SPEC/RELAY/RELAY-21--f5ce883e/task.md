@@ -50,7 +50,7 @@ _Unknown._
 
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
-- [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (todo)
+- [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -60,10 +60,10 @@ _Unknown._
 
 
 - [06ac5885-5df4-4fab-8b51-45b37c7a38c2](../CONTRACTS-ONDISK.md-document-the-bus_path-len-1-is-recor--06ac5885/task.md) — CONTRACTS-ONDISK.md: document the bus_path\[len-1\]-is-recording-bus on-disk invariant, and… (todo)
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [RELAY-11-FU-INGEST-LOOPGUARD](../RELAY-11-FU-INGEST-LOOPGUARD--a41c273c/task.md) — Relay ingest MUST route through relay.CheckIncomingPath before hub.publish, or a 64-hop l… (todo)
-- [RELAY-21-FU-DOCGAP4](../RELAY-21-FU-DOCGAP4--9972d0ed/task.md) — RELAY-21-FU-DOCGAP4: internal/relay/doc.go known-gaps item 4 falsely claims forward-only-… (todo)
+- [RELAY-21-FU-DOCGAP4](../RELAY-21-FU-DOCGAP4--9972d0ed/task.md) — RELAY-21-FU-DOCGAP4: internal/relay/doc.go known-gaps item 4 falsely claims forward-only-… (done)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md) — RELAY-24-BLOCKER-HUBINGEST: internal/hub exported relay-ingest entry point -- foreign sen… (done)
 - [RELAY-24-FU-STOREMSGLOOKUP](../RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (done)

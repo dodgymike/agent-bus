@@ -64,7 +64,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../../RELAY/internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../../RELAY/internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [fbb16f9b-1b81-4fd0-a60f-5b2a76806bff](../../RELAY/internal-httpapi-peermount.go-pre-auth-prober-does-not-e--fbb16f9b/task.md) — internal/httpapi/peermount.go: 'pre-auth prober does not exist' overstates ruling (h), an… (todo)
 
 ---

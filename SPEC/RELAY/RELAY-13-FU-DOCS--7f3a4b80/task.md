@@ -64,7 +64,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [CLAUDE-PATHSPEC-MM-NOT-GATE](../../PROCESS/CLAUDE-PATHSPEC-MM-NOT-GATE--077bcba5/task.md) — CLAUDE.md: MM is not the gate -- a clean M can still hide another agent's worktree hunks (todo)
 - [RELAY-13](../RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)

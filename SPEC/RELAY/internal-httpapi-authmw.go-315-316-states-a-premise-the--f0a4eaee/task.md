@@ -5,19 +5,19 @@
 | Public id | `f0a4eaee-8428-4b6c-8485-cf44dd9df779` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | httpapi |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T16:45:04.241038+00:00 |
-| Updated | 2026-08-14T16:45:04.241038+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:35:58.535216+00:00 |
+| Completed | 2026-08-16T10:35:58.535199+00:00 |
 
 ## Proof command
 
 ```sh
-grep -qF 'no route through which it could obtain' internal/httpapi/authmw.go && echo STILL_FALSE || echo FIXED
+grep -qF 'THAT PREMISE IS FALSE' internal/httpapi/authmw.go && ! grep -qF 'no route through which it could obtain' internal/httpapi/authmw.go
 ```
 
 ## Description

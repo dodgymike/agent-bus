@@ -66,7 +66,6 @@ _Unknown._
 - [CONTEXT-CLI-SECTIONS](../../CONTEXT/CONTEXT-CLI-SECTIONS--3b4bd434/task.md) — CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… (todo)
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-LISTENER-FU-CLIENTHTTP](../MTLS-LISTENER-FU-CLIENTHTTP--8d906b8b/task.md) — MTLS-LISTENER-FU-CLIENTHTTP: client/config.go still allows unpinned http:// to loopback,… (todo)
-- [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (done)
 - [efc7facd-ac16-4a17-a3af-c0c3b69c72ae](../Config.HTTPClient-lets-an-embedder-bypass-certificate-pi--efc7facd/task.md) — Config.HTTPClient lets an embedder bypass certificate pinning entirely (todo)
 - [ff5ca3f9-c100-4116-ab25-a62f74c0d066](../client-doc.go-package-documentation-does-not-mention-tha--ff5ca3f9/task.md) — client/doc.go package documentation does not mention that the pinned certificate's validi… (todo)
 

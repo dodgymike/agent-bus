@@ -5,13 +5,13 @@
 | Public id | `35db4a7b-f4af-4252-9433-4f0424c0a431` |
 | Key | COMMS-THREAD-FIELD |
 | Epic | [COMMS](../epic.md) |
-| Status | blocked |
+| Status | superseded |
 | Priority | P3 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:01.079102+00:00 |
-| Updated | 2026-08-08T17:12:28.714831+00:00 |
+| Updated | 2026-08-16T10:08:30.570023+00:00 |
 | Completed | — |
 
 ## Proof command

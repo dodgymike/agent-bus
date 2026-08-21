@@ -73,7 +73,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [COMMS-THREAD-TRIAL](../../COMMS/COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
 
 ---

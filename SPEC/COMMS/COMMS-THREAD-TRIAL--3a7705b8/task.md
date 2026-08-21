@@ -62,7 +62,7 @@ _Unknown._
 - [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
 - [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
 - [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -75,7 +75,7 @@ _Unknown._
 - [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
 - [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
 - [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (todo)
 
 ---

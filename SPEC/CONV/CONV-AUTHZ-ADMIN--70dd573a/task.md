@@ -76,7 +76,7 @@ _Unknown._
 
 - [CONV-SUCCESSION](../CONV-SUCCESSION--422be55b/task.md) — CONV-SUCCESSION: creator-only mutation freezes a conversation when the creator's agent id… (todo)
 - [INVMINT-1](../../INVMINT/INVMINT-1--1bed65a8/task.md) — INVMINT-1: decide the invite-minting AUTHORITY MODEL and reconcile it with E4, FEDERATION… (todo)
-- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -85,7 +85,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (todo)
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
+- [AUTH-10-WIRING-DOCS](../../AUTH/AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (todo)
 - [CONV-AUTHZ-CREATOR](../CONV-AUTHZ-CREATOR--4abd8589/task.md) — CONV-AUTHZ-CREATOR: only the creator may change the recipient list -- the arm that can sh… (todo)
 
 ---

@@ -5,14 +5,14 @@
 | Public id | `08f9987f-4366-4763-8519-db25ce3cdc8a` |
 | Key | ACK-9 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:38.953629+00:00 |
-| Updated | 2026-08-09T08:25:38.953629+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T14:17:16.112283+00:00 |
+| Completed | 2026-08-21T14:17:16.112267+00:00 |
 
 ## Proof command
 
@@ -32,6 +32,21 @@ Expose durable sender-visible acknowledgement status, terminal result and safe d
 
 
 _Unknown._
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-14](../ACK-14--1884218d/task.md) — ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… (todo)
+- [ACK-15](../ACK-15--a63b133d/task.md) — ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… (done)
+- [ACK-16](../ACK-16--f60cdd30/task.md) — ACK-16: the per-principal wait cap is untested -- a global bucket passes the whole package (done)
+- [ACK-6-FU-CLI](../ACK-6-FU-CLI--836c9ff8/task.md) — ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign (in_progress)
+- [ACK-6-FU-SETTLE-ERRORLOG](../ACK-6-FU-SETTLE-ERRORLOG--dc58e7ee/task.md) — ACK-6-FU-SETTLE-ERRORLOG: throttle the terminal-conflict ERROR in ack.Store.Settle (todo)
+- [ACK-6-FU-SETTLE-WALERR-SENTINEL](../ACK-6-FU-SETTLE-WALERR-SENTINEL--c4dc6b6b/task.md) — ACK-6-FU-SETTLE-WALERR-SENTINEL: a WAL failure in ack.Store.Settle answers 500, not 503 (todo)
+- [AUTH-10-WIRING](../../AUTH/AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
 
 ---
 

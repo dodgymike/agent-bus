@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**42 open / 47 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
+**43 open / 49 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (42)
+## Open tasks (43)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -18,7 +18,6 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | DOCS-16 | DOCS-16: \`PROTOCOL.md\`'s on-disk version registry omits versions 5, 6 and 7 — a live rese… | todo | P1 | [task.md](DOCS-16--57933ce7/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-17 | DOCS-17: Session per-agent cap (32, no eviction) is documented as not existing — caused a… | todo | P1 | [task.md](DOCS-17--a35d1ec1/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-18 | DOCS-18: Retire two standing directives that outlived their premise and now FORBID the fix | todo | P1 | [task.md](DOCS-18--5b3f4886/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
-| DOCS-22 | DOCS-22: The four agent ENTRY POINTS the invite gate missed — \`README\` Quickstart, \`agent… | todo | P1 | [task.md](DOCS-22--2f8ae959/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-29 | DOCS-29: Investigate \`TestWALRepairDoesNotReissueDiscardedIndex\` — a P0's recorded \`proof… | todo | P1 | [task.md](DOCS-29--7b0e66e8/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-3 | DOCS-3: CONTRACTS.md -- route/flag/env-var/record-type table | todo | P1 | [task.md](DOCS-3--a24bb214/task.md) | _not fetched_ | [CONTRACTS-SPLIT](CONTRACTS-SPLIT--360a2679/task.md) |
 | DOCS-5 | DOCS-5: \`/v1/discovery\` limitation 5 is false on the wire: cross-bus relay IS served | todo | P1 | [task.md](DOCS-5--051a9829/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
@@ -29,6 +28,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | 0ba2372a-09f7-4f05-bd33-98a5f80e0e6f | Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE | todo | P2 | [task.md](Journal-catch-up-DECISIONS.md-AGENT_LOG.md-entries-owed--0ba2372a/task.md) | _not fetched_ | [INVITE-MINT](../INVITE/INVITE-MINT--1d0d0e60/task.md) [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
 | 4c97d561-e81f-40a6-a1fe-3c9976d790f1 | INVARIANTS.md invariant 1's entry has no pointer to the 2026-08-14 SIGN-1-FU-OUTOFORDER-P… | todo | P2 | [task.md](INVARIANTS.md-invariant-1-s-entry-has-no-pointer-to-the--4c97d561/task.md) | _not fetched_ | [SIGN-1-FU-OUTOFORDER-POISON](../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md) |
 | 83850937-a3c9-4b90-8ac6-19655233cb13 | DECISIONS.md carries the pre-correction (wrong) accepted-limit sentence for the MAC key;… | todo | P2 | [task.md](DECISIONS.md-carries-the-pre-correction-wrong-accepted-l--83850937/task.md) | _not fetched_ | [DUR-12](../DUR/DUR-12--cbc9ab0c/task.md) |
+| 9a02d65a-e96b-4fbe-93cf-846d8b5c2034 | Invariant 3's unauthenticated-route enumeration is stale in three docs -- six entries in… | todo | P2 | [task.md](Invariant-3-s-unauthenticated-route-enumeration-is-stale--9a02d65a/task.md) | _not fetched_ | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) [RELAY-55](../RELAY/RELAY-55--0a571a02/task.md) [DOCS-13](DOCS-13--8ce01598/task.md) [HANDOVER-MAP-DOC](../HANDOVER/HANDOVER-MAP-DOC--a52d4a99/task.md) [DOCS-5](DOCS-5--051a9829/task.md) [DOCS-30](DOCS-30--a311a067/task.md) |
 | DISCOVERY-DOC-FU-README | DISCOVERY-DOC-FU-README: README.md still documents the old three-field /v1/info body | todo | P2 | [task.md](DISCOVERY-DOC-FU-README--be3c84f3/task.md) | _not fetched_ | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
 | DOCS-10 | DOCS-10: \`client\` package documents fail-closed verification while shipping fail-open | todo | P2 | [task.md](DOCS-10--d6c84ff8/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-13 | DOCS-13: \`INVARIANTS.md\` truth pass — 8 false factual claims in the file agents must read… | todo | P2 | [task.md](DOCS-13--8ce01598/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
@@ -37,6 +37,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | DOCS-23 | DOCS-23: \`agent-busctl broadcast --help\` never says the route is refused (501) | todo | P2 | [task.md](DOCS-23--c9a51528/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-24 | DOCS-24: \`client/transport.go:429-430\`: the 403 remedy tells an agent to retry a refusal… | todo | P2 | [task.md](DOCS-24--4aaf2803/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-25 | DOCS-25: \`CONTRACTS-AGENT.md\` documents the log-scrape that \`bus-serve.sh\` deliberately r… | todo | P2 | [task.md](DOCS-25--9c894053/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
+| DOCS-30 | DOCS-30: clientcert help says the bus ignores the client certificate; the bus refuses 409… | todo | P2 | [task.md](DOCS-30--a311a067/task.md) | _not fetched_ | [DOCS-22](DOCS-22--2f8ae959/task.md) [DOCS-11](DOCS-11--a434830e/task.md) |
 | DOCS-6 | DOCS-6: README is unusable: quickstart 403s, "what works today" curls a TLS port in plain… | todo | P2 | [task.md](DOCS-6--76879ad1/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-7 | DOCS-7: Doc-truth sweep: enrolment is invite-gated (11 passages, 5 files) | todo | P2 | [task.md](DOCS-7--a98ffca6/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | a695f85f-0c69-42a8-a653-deed4960a610 | PROTOCOL.md §8 cites Spec Server task id INVITE-PEERGUARD (f5d91dbe) as if it were a comm… | todo | P2 | [task.md](PROTOCOL.md-8-cites-Spec-Server-task-id-INVITE-PEERGUARD--a695f85f/task.md) | _not fetched_ | [MTLS-RELAYGUARD](../MTLS/MTLS-RELAYGUARD--8192c3c7/task.md) [INVITE-PEERGUARD](../INVITE/INVITE-PEERGUARD--f5d91dbe/task.md) [DOCS-2](DOCS-2--41c52cfa/task.md) [e120153b-9d8a-4b6a-bd4e-89431954496b](../DUR/Fix-WAL-recovery-reissuing-a-discarded-tail-record-index--e120153b/task.md) [db350e39-3dde-4166-b241-b21fa4635359](../DUR/Whole-log-quarantine-reissued-EVERY-sequence-number-ever--db350e39/task.md) |
@@ -53,12 +54,13 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | DOCS-27 | DOCS-27: \`AGENT_PROTOCOL.md\`: \`client-cert\` undocumented (invariant-7 gap), TOC lists 10… | todo | P3 | [task.md](DOCS-27--ec19df4e/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | DOCS-28 | DOCS-28: \`docs/comms\` self-audit numbers disagree with the CSVs, and \`LABELLING-KEY.md\`'s… | todo | P3 | [task.md](DOCS-28--7f1030b7/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 
-## Closed tasks (5) — done, cancelled, superseded
+## Closed tasks (6) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | DOCS-1 | DOCS-1: README.md + DECISIONS.md seed | done | P0 | [task.md](DOCS-1--909e2152/task.md) | _not fetched_ | — |
 | CONTRACTS-SPLIT | CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every pro… | done | P1 | [task.md](CONTRACTS-SPLIT--360a2679/task.md) | _not fetched_ | [AUTH-1-FU-LISTENADDR](../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) [LISTENADDR-FU-CONTRACTS](LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) [DUR-11-FU-CONTRACTS](DUR-11-FU-CONTRACTS--5b178dde/task.md) [ID-2-WIRING-SEAL](../ID/ID-2-WIRING-SEAL--8c9b6489/task.md) [ID-2-WIRING-OBSERVER](../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) [AUTH-1-FU-ACTIVECAP](../AUTH/AUTH-1-FU-ACTIVECAP--2d92b699/task.md) +1 more |
+| DOCS-22 | DOCS-22: The four agent ENTRY POINTS the invite gate missed — \`README\` Quickstart, \`agent… | done | P1 | [task.md](DOCS-22--2f8ae959/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |
 | LISTENADDR-FU-CONTRACTS | LISTENADDR-FU-CONTRACTS: CONTRACTS.md CLI-flag table still shows -listen default :8080 | done | P1 | [task.md](LISTENADDR-FU-CONTRACTS--b0a5630b/task.md) | _not fetched_ | [AUTH-1-FU-LISTENADDR](../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) [AUTH-1-FU-PENDINGCAP](../AUTH/AUTH-1-FU-PENDINGCAP--687ad8c9/task.md) |
 | CONTRACTS-CLI-1632-STALE | CONTRACTS-CLI.md:1632 states a false fact and dangles a reference to a comment the invite… | done | P2 | [task.md](CONTRACTS-CLI-1632-STALE--ae5011bf/task.md) | _not fetched_ | [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE/INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--970e2a81/task.md) [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--9c85d8df/task.md) [INVITE-CLIENT-FU-PRUNETTL-RACE](../INVITE/INVITE-CLIENT-FU-PRUNETTL-RACE--da0b3a39/task.md) |
 | DOCS-4 | DOCS-4: CLAUDE.md is stale on invariant 3 -- enrolment IS invite-gated at HEAD | done | P3 | [task.md](DOCS-4--a24c33cd/task.md) | _not fetched_ | [DEPLOY-6](../DEPLOY/DEPLOY-6--e12b75cd/task.md) |

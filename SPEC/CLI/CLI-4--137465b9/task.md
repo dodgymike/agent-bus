@@ -79,7 +79,7 @@ _Unknown._
 - [CLI-2](../CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
 - [CLI-3](../CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
 - [DEPLOY-2-FU-CONTAINERNAME](../../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) — DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… (done)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [IDEM-18](../../IDEM/IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

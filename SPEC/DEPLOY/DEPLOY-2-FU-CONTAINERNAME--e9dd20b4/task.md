@@ -60,6 +60,7 @@ _Unknown._
 - [CLI-5](../../CLI/CLI-5--86dea094/task.md) — CLI-5: agents -- roster listing (replaces bus-agents.sh) (done)
 - [DEPLOY-2](../DEPLOY-2--14f8ec3b/task.md) — DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck (done)
 - [ORCH-6](../../ORCH/ORCH-6--6cfe7288/task.md) — ORCH-6: STANDALONE — verify and document what DEPLOY already ships; do NOT rebuild it (todo)
+- [ZZB-firsthal](../../UNASSIGNED/ZZB-firsthal--74cb9c06/task.md) — probe (todo)
 
 ---
 

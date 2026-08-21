@@ -2,25 +2,26 @@
 
 [← all epics](../../SPEC.md)
 
-**7 open / 7 total.** Full records live in `SPEC/INVMINT/<task>/task.md`.
+**6 open / 7 total.** Full records live in `SPEC/INVMINT/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (7)
+## Open tasks (6)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | INVMINT-1 | INVMINT-1: decide the invite-minting AUTHORITY MODEL and reconcile it with E4, FEDERATION… | todo | P2 | [task.md](INVMINT-1--1bed65a8/task.md) | _not fetched_ | [INVMINT-2](INVMINT-2--ef18b37a/task.md) [INVMINT-6](INVMINT-6--cedb8d6f/task.md) [INVMINT-7](INVMINT-7--174c7ba9/task.md) [INVMINT-3](INVMINT-3--8555e659/task.md) |
 | INVMINT-6 | INVMINT-6: \`agent-bus invite mint -count N\` — mint a pool in ONE process start (quick win… | todo | P2 | [task.md](INVMINT-6--cedb8d6f/task.md) | _not fetched_ | [INVMINT-1](INVMINT-1--1bed65a8/task.md) [INVMINT-7](INVMINT-7--174c7ba9/task.md) |
 | INVMINT-7 | INVMINT-7: document the pre-minted-invite pool recipe, with the 0600 mode built in (quick… | todo | P2 | [task.md](INVMINT-7--174c7ba9/task.md) | _not fetched_ | [INVMINT-6](INVMINT-6--cedb8d6f/task.md) |
-| INVMINT-2 | INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… | todo | P3 | [task.md](INVMINT-2--ef18b37a/task.md) | _not fetched_ | [INVMINT-1](INVMINT-1--1bed65a8/task.md) |
 | INVMINT-3 | INVMINT-3: the invite-mint HTTP route on the running bus (NOT /v1/mint, which is message-… | todo | P3 | [task.md](INVMINT-3--8555e659/task.md) | _not fetched_ | [INVMINT-2](INVMINT-2--ef18b37a/task.md) [INVMINT-1](INVMINT-1--1bed65a8/task.md) [INVITE-GATE-ENFORCE](../INVITE/INVITE-GATE-ENFORCE--8297d7e2/task.md) [INVMINT-4](INVMINT-4--ea948fb0/task.md) |
 | INVMINT-4 | INVMINT-4: the CLI subcommand for online invite minting + its AGENT_PROTOCOL.md entry (in… | todo | P3 | [task.md](INVMINT-4--ea948fb0/task.md) | _not fetched_ | [INVMINT-3](INVMINT-3--8555e659/task.md) [INVMINT-7](INVMINT-7--174c7ba9/task.md) |
 | INVMINT-5 | INVMINT-5: invite REVOCATION and LISTING over the same online operator surface | todo | P3 | [task.md](INVMINT-5--18f15aa9/task.md) | _not fetched_ | [INVMINT-3](INVMINT-3--8555e659/task.md) [INVMINT-1](INVMINT-1--1bed65a8/task.md) |
 
-## Closed tasks (0) — done, cancelled, superseded
+## Closed tasks (1) — done, cancelled, superseded
 
-_None._
+| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
+| --- | --- | --- | --- | --- | --- | --- |
+| INVMINT-2 | INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… | superseded | P3 | [task.md](INVMINT-2--ef18b37a/task.md) | _not fetched_ | [INVMINT-1](INVMINT-1--1bed65a8/task.md) |
 
 ## Epic description
 

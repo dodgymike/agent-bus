@@ -149,9 +149,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-1](../../ACK/ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (todo)
-- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (todo)
-- [ACK-6](../../ACK/ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (todo)
+- [ACK-1](../../ACK/ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
+- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (in_progress)
+- [ACK-6](../../ACK/ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
 - [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
 - [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
@@ -167,7 +167,7 @@ _Unknown._
 - [RELAY-47-FU-DOCS](../RELAY-47-FU-DOCS--6f7281e8/task.md) — RELAY-47-FU-DOCS: three shipped docs still tell agents multi-hop relay does not work, aft… (done)
 - [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md) — RELAY-47-FU-FANOUT: refine the onward fan-out bound -- maxOnwardBusesPerMessage counts DE… (todo)
 - [RELAY-47-FU-IDEMFINGERPRINT](../RELAY-47-FU-IDEMFINGERPRINT--b666cd5a/task.md) — RELAY-47-FU-IDEMFINGERPRINT: the ENFORCED idempotency fingerprint is not the one internal… (todo)
-- [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (todo)
+- [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
 - [RELAY-49](../RELAY-49--efbcc6cf/task.md) — RELAY-49: the egress split horizon is applied to the DESTINATION bus, not to the NEXT HOP… (todo)
 - [RELAY-50](../RELAY-50--c4a1bd15/task.md) — RELAY-50: a PARTIALLY-routed relayed message is not individually logged -- one destinatio… (todo)
 

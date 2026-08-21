@@ -47,7 +47,7 @@ _Unknown._
 
 
 - [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
-- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (todo)
+- [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md) — RELAY-2-FU-DURABLE-OUTBOX: Durable relay outbox: Forwarder's queue is in-memory and lossy (done)
 - [fec942b4-fdb6-4fc3-920b-ae2af4fd5f92](../Durable-relay-outbox-cross-bus-delivery-is-best-effort-a--fec942b4/task.md) — Durable relay outbox: cross-bus delivery is best-effort and every drop path loses the mes… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)

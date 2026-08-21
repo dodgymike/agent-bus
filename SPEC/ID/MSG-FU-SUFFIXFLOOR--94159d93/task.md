@@ -85,7 +85,7 @@ _Unknown._
 - [MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN](../../DUR/MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN--6f4c17ef/task.md) — MSG-FU-SUFFIXFLOOR-FU-STREAMSCAN: export a streaming raw WAL scan and reinstate the every… (todo)
 - [MSG-FU-SUFFIXFLOOR-FU-UNSEAL](../MSG-FU-SUFFIXFLOOR-FU-UNSEAL--d5ed5ccc/task.md) — MSG-FU-SUFFIXFLOOR-FU-UNSEAL: make ids.NewNameSuffixes born-unsealed (or delete it) now t… (todo)
 - [a18a9a00-33e3-46e2-bec1-61bae440fc55](../The-hub-id-reuse-detector-is-narrower-than-its-log-line--a18a9a00/task.md) — The hub id-reuse detector is narrower than its log line implies (broadcast-only agents le… (todo)
-- [cca64afd-f75d-46e4-91ca-ebc502151253](../../RELAY/RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (todo)
+- [cca64afd-f75d-46e4-91ca-ebc502151253](../../RELAY/RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (done)
 
 ---
 

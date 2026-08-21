@@ -124,7 +124,7 @@ _Unknown._
 - [DOCS-19](../../DOCS/DOCS-19--9d8ff93b/task.md) — DOCS-19: Durability inverted: \`internal/auth/service.go:502\` says main injects the MEMORY… (todo)
 - [DOCS-20](../../DOCS/DOCS-20--55d5bac2/task.md) — DOCS-20: Mechanical stale-claim detector — likely to MERGE with the in-flight \`scripts/do… (todo)
 - [DOCS-21](../../DOCS/DOCS-21--cdf8660c/task.md) — DOCS-21: \`CONTRACTS-CLI.md\` claims a "mechanically enforced" import guard that nothing ru… (todo)
-- [DOCS-22](../../DOCS/DOCS-22--2f8ae959/task.md) — DOCS-22: The four agent ENTRY POINTS the invite gate missed — \`README\` Quickstart, \`agent… (todo)
+- [DOCS-22](../../DOCS/DOCS-22--2f8ae959/task.md) — DOCS-22: The four agent ENTRY POINTS the invite gate missed — \`README\` Quickstart, \`agent… (done)
 - [DOCS-23](../../DOCS/DOCS-23--c9a51528/task.md) — DOCS-23: \`agent-busctl broadcast --help\` never says the route is refused (501) (todo)
 - [DOCS-24](../../DOCS/DOCS-24--4aaf2803/task.md) — DOCS-24: \`client/transport.go:429-430\`: the 403 remedy tells an agent to retry a refusal… (todo)
 - [DOCS-25](../../DOCS/DOCS-25--9c894053/task.md) — DOCS-25: \`CONTRACTS-AGENT.md\` documents the log-scrape that \`bus-serve.sh\` deliberately r… (todo)

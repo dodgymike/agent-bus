@@ -5,19 +5,19 @@
 | Public id | `9564f953-5d90-491e-b6b1-55d546d33cf5` |
 | Key | ACK-2 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:37.195950+00:00 |
-| Updated | 2026-08-09T08:25:37.195950+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T14:04:10.739012+00:00 |
+| Completed | 2026-08-16T14:04:10.738993+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestAckLocalAcceptanceDurable$ ./internal/relay'
+go test -race -run "^TestAckLocalAcceptanceDurable$" ./internal/hub
 ```
 
 ## Description
@@ -42,6 +42,17 @@ _Unknown._
 
 - [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) — Bound retained outbox tombstone resources without reopening replay resurrection (done)
 - [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) — WAL foundation: authenticated multi-applier checkpoints over shared bus.wal (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (in_progress)
+- [IDEM-19](../../IDEM/IDEM-19--82b79094/task.md) — IDEM-19: expiry-queue compaction is O(retained) -- 48.4s vs 32ms measured, on the every-s… (done)
+- [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---
 

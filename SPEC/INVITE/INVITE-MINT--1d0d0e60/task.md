@@ -59,7 +59,6 @@ _Unknown._
 - [CONTEXT-LOG-RETIRE](../../CONTEXT/CONTEXT-LOG-RETIRE--116179c8/task.md) — CONTEXT-LOG-RETIRE: AGENT_LOG.md freezes its narrative and moves to one line per task (todo)
 - [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [INVITE-STORE](../INVITE-STORE--a9ef92de/task.md) — INVITE-STORE: durable single-use invite record (mint/lookup/consume/expire), recovered by… (done)
-- [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (done)
 - [cbfb7d88-1bb0-4ade-b1d1-f287b4c0c179](../../PROCESS/Triage-dispatched-two-concurrent-agents-with-overlapping--cbfb7d88/task.md) — Triage dispatched two concurrent agents with overlapping ownership of CONTRACTS-CLI.md (todo)
 
 ---

@@ -5,19 +5,19 @@
 | Public id | `8e2c4de3-5752-4d4c-a321-778cb6daa6e1` |
 | Key | IDEM-11 |
 | Epic | [IDEM](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | core |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T13:10:34.566117+00:00 |
-| Updated | 2026-08-14T23:02:19.621427+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T09:35:54.152389+00:00 |
+| Completed | 2026-08-21T09:35:54.152373+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestIdemCrash ./internal/hub/
+go test -race -run "TestIdemCrash|TestRetentionWindowDerivation|TestMemoryBoundDerivation|TestAppliedKeyRecoveryFromPreIdemLog" ./internal/idem/ ./internal/hub/
 ```
 
 ## Status note
@@ -98,6 +98,7 @@ _Unknown._
 - [IDEM-2](../IDEM-2--1c6a5ef1/task.md) — IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the e… (superseded)
 - [IDEM-3](../IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)
 - [MSG-5](../../MSG/MSG-5--9d125bc6/task.md) — MSG-5: Messaging durability integration test (done)
+- [RELAY-52-FU-HUBDISCARDS](../../RELAY/RELAY-52-FU-HUBDISCARDS--d2cad9e7/task.md) — RELAY-52-FU-HUBDISCARDS: remaining untested hub/mint/roster discard-and-recovery log lines (in_progress)
 
 ---
 

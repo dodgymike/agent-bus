@@ -70,7 +70,7 @@ _Unknown._
 
 - [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
 - [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
-- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (blocked)
+- [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md) — CONV-MULTI-CLI: expose multi-recipient send through the CLI -- COMMS-MULTI owns the handl… (todo)
 
 ---

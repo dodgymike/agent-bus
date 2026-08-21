@@ -11,13 +11,13 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:01:44.485457+00:00 |
-| Updated | 2026-08-14T22:01:44.485457+00:00 |
+| Updated | 2026-08-16T10:37:23.638415+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run TestRefusalsAreFinalRatherThanRetryable ./cmd/agent-bus'
+go test -race -count=1 -run 'TestRelayLastHopMismatchIsAFinal4xx|TestRefusalsAreFinalRatherThanRetryable' ./internal/relay ./cmd/agent-bus
 ```
 
 ## Description

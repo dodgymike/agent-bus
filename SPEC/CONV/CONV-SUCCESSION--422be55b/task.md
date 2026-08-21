@@ -74,7 +74,7 @@ _Unknown._
 
 - [CONV-LIFECYCLE](../CONV-LIFECYCLE--fe5d14d5/task.md) — CONV-LIFECYCLE: decide whether a conversation ENDS, whether a participant may LEAVE, and… (todo)
 - [INVMINT-1](../../INVMINT/INVMINT-1--1bed65a8/task.md) — INVMINT-1: decide the invite-minting AUTHORITY MODEL and reconcile it with E4, FEDERATION… (todo)
-- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
 

@@ -87,9 +87,11 @@ _Unknown._
 
 
 - [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
+- [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../../RELAY/agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md) — agent-bus peer list mints wal-mac.key as a side effect of a read-only command (todo)
 - [CLI-6-FU-FOLLOW](../CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
 - [CLI-6-FU-NITS](../CLI-6-FU-NITS--643749b3/task.md) — CLI-6-FU-NITS: three non-blocking nits in \`agent-bus log\` raised by the reviewer and secu… (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
+- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (todo)
 - [fc8cd234-d275-43a1-9cb0-d10bca4a4086](../../PROCESS/Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) — Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… (todo)
 
 ---

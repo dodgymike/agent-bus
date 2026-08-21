@@ -5,14 +5,20 @@
 | Public id | `b9d645be-0849-4a62-9c50-3ab32e41fc8a` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | security |
 | Section | backlog |
 | Tags | federation, mtls, cli, critical-path |
 | Created | 2026-08-14T12:42:19.032310+00:00 |
-| Updated | 2026-08-14T12:42:19.032310+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:35:12.541081+00:00 |
+| Completed | 2026-08-16T10:35:12.541064+00:00 |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run 'TestPeerAddBindsInboundClientCertFingerprint|TestPeerAddPeerClientFingerprintRequiresASigningKey|TestPeerAddNeverSilentlyErasesAnInboundBinding|TestPeerListReportsTheInboundClientCertBinding' ./cmd/agent-bus
+```
 
 ## Description
 
@@ -63,6 +69,7 @@ _Unknown._
 
 - [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-45-FU-ROTATION](../RELAY-45-FU-ROTATION--ec1c1d7c/task.md) — RELAY-45-FU-ROTATION: inbound peer client-certificate binding has no rollover overlap win… (todo)
+- [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---
 

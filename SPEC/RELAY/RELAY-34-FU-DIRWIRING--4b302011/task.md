@@ -5,14 +5,20 @@
 | Public id | `4b302011-4956-4a98-b6ee-7c509cce9449` |
 | Key | RELAY-34-FU-DIRWIRING |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | follow-up, relay-34 |
 | Created | 2026-08-08T21:48:19.100009+00:00 |
-| Updated | 2026-08-08T21:48:19.100009+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:34:54.077035+00:00 |
+| Completed | 2026-08-16T10:34:54.077018+00:00 |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run 'TestPeerAddListRemove|TestPeerRemoveDoesNotAbandonTheSecondWithdrawal' ./cmd/agent-bus
+```
 
 ## Description
 

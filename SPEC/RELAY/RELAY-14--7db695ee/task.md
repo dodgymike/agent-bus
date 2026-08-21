@@ -57,6 +57,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [ACK-6-FU-PROTOCOL-DOC](../../ACK/ACK-6-FU-PROTOCOL-DOC--cd5a022a/task.md) — ACK-6-FU-PROTOCOL-DOC: PROTOCOL.md carries no normative byte table for the ACK format or… (todo)
 - [RELAY-17](../RELAY-17--817649ce/task.md) — RELAY-17: CrossBusTrust implementation + attestation travels in the relay envelope (done)
 - [RELAY-27](../RELAY-27--f417c6a0/task.md) — RELAY-27: fix internal/relay/signed.go:306 to wrap attest.Verify errors with %w, not %v (cancelled)
 - [RELAY-27](../RELAY-27--c2486740/task.md) — RELAY-27: relay error taxonomy collapses ALL FIVE attest sentinels to ErrNoSignerKey/bad_… (done)

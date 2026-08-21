@@ -123,6 +123,7 @@ _Unknown._
 - [CONV-PEERQUOTA](../../CONV/CONV-PEERQUOTA--35cb7dc6/task.md) — CONV-PEERQUOTA: bound conversation tracking per PEER on DISTINCT CONVERSATION IDS -- the… (todo)
 - [CONV-TRACK-ON-RECEIPT](../../CONV/CONV-TRACK-ON-RECEIPT--ed1e70ac/task.md) — CONV-TRACK-ON-RECEIPT: a bus starts tracking a conversation on first receipt -- gated by… (todo)
 - [IDEM-17-FU-CROSSAGENT](../../IDEM/IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) — Crash-injection coverage for cross-agent applied-key isolation across recovery (todo)
+- [IDEM-19](../../IDEM/IDEM-19--82b79094/task.md) — IDEM-19: expiry-queue compaction is O(retained) -- 48.4s vs 32ms measured, on the every-s… (done)
 - [POLL-CONCURRENT-WAITERS](../../POLL/POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (todo)
 - [RELAY-47](../RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
 - [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)

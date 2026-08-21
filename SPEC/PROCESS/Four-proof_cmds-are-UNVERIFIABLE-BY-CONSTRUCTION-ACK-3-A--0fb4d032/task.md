@@ -54,8 +54,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (todo)
-- [ACK-4](../../ACK/ACK-4--aeb32123/task.md) — ACK-4: ACK/NACK authorization, anti-forgery and privacy review implementation (todo)
+- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-4](../../ACK/ACK-4--aeb32123/task.md) — ACK-4: ACK/NACK authorization, anti-forgery and privacy review implementation (done)
 - [AGENTIF-10](../../AGENTIF/AGENTIF-10--1e837ac9/task.md) — AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop (todo)
 - [LIVE-3](../../LIVE/LIVE-3--c5c0a210/task.md) — LIVE-3: Authenticated heartbeat request/response and replay resistance (todo)
 - [RELAY-24-BLOCKER-EGRESS](../../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md) — RELAY-24-BLOCKER-EGRESS: a bus SENDING a relayed message has no wiring at all -- relay.Ne… (done)

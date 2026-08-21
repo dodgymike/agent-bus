@@ -5,13 +5,13 @@
 | Public id | `ef18b37a-72b5-4b00-865f-edac288a0659` |
 | Key | INVMINT-2 |
 | Epic | [INVMINT](../epic.md) |
-| Status | todo |
+| Status | superseded |
 | Priority | P3 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T07:46:05.674354+00:00 |
-| Updated | 2026-08-15T07:46:05.674354+00:00 |
+| Updated | 2026-08-16T10:08:03.185880+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -106,7 +106,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (todo)
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
 - [AUTH-7](../../AUTH/AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
 - [CONV-SUCCESSION](../../CONV/CONV-SUCCESSION--422be55b/task.md) — CONV-SUCCESSION: creator-only mutation freezes a conversation when the creator's agent id… (todo)

@@ -42,7 +42,7 @@ _Unknown._
 
 - [CRYPTO-7](../../CRYPTO/CRYPTO-7--f90d7889/task.md) — CRYPTO-7: Ratchet-state durability and recovery (CRASH-INJECTION TEST REQUIRED) (deferred)
 - [IDEM-1](../../IDEM/IDEM-1--3cac3349/task.md) — IDEM-1: The idempotency-key contract -- format, transport, scope, and which operations re… (superseded)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [IDEM-17](../../IDEM/IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
 - [IDEM-2](../../IDEM/IDEM-2--1c6a5ef1/task.md) — IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the e… (superseded)
 - [IDEM-3](../../IDEM/IDEM-3--e34f9c31/task.md) — IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… (superseded)

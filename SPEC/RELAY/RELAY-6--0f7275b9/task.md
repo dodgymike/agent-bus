@@ -88,15 +88,15 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 - [RELAY-18](../RELAY-18--fa5d1b0d/task.md) — RELAY-18: Retire the relay import guard deliberately, replaced by a narrower one (done)
 - [RELAY-20](../RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-22](../RELAY-22--b4e45cda/task.md) — RELAY-22: Choose and wire the multi-principal relay abuse-control primitive (todo)
 - [RELAY-25-FU-REALHOST](../RELAY-25-FU-REALHOST--8708f7c9/task.md) — RELAY-25-FU-REALHOST: Real three-host SSH-tunnel federation run -- loopback smoke does no… (todo)
 - [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (todo)
 - [RELAY-41](../RELAY-41--05253c80/task.md) — RELAY-41: Per-NEXT-HOP TLS certificate fingerprint on PeerRecord, plumbed through \`agent-… (done)
-- [f0a4eaee-8428-4b6c-8485-cf44dd9df779](../internal-httpapi-authmw.go-315-316-states-a-premise-the--f0a4eaee/task.md) — internal/httpapi/authmw.go:315-316 states a premise the security gate refuted: a peer bus… (todo)
+- [f0a4eaee-8428-4b6c-8485-cf44dd9df779](../internal-httpapi-authmw.go-315-316-states-a-premise-the--f0a4eaee/task.md) — internal/httpapi/authmw.go:315-316 states a premise the security gate refuted: a peer bus… (done)
 - [fbb16f9b-1b81-4fd0-a60f-5b2a76806bff](../internal-httpapi-peermount.go-pre-auth-prober-does-not-e--fbb16f9b/task.md) — internal/httpapi/peermount.go: 'pre-auth prober does not exist' overstates ruling (h), an… (todo)
 
 ---

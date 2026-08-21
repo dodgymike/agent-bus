@@ -64,6 +64,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [9a02d65a-e96b-4fbe-93cf-846d8b5c2034](../../DOCS/Invariant-3-s-unauthenticated-route-enumeration-is-stale--9a02d65a/task.md) — Invariant 3's unauthenticated-route enumeration is stale in three docs -- six entries in… (todo)
 - [DISCOVERY-DOC-FU-CLI](../../CLI/DISCOVERY-DOC-FU-CLI--b123c098/task.md) — DISCOVERY-DOC-FU-CLI: \`agent-busctl\` subcommand that fetches and renders the bus discover… (todo)
 - [DISCOVERY-DOC-FU-GITIGNORE](../../TOOLING/DISCOVERY-DOC-FU-GITIGNORE--9047f6a7/task.md) — DISCOVERY-DOC-FU-GITIGNORE: stale untracked busctl binary at repo root is not gitignored (todo)
 - [DISCOVERY-DOC-FU-README](../../DOCS/DISCOVERY-DOC-FU-README--be3c84f3/task.md) — DISCOVERY-DOC-FU-README: README.md still documents the old three-field /v1/info body (todo)

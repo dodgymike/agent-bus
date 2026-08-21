@@ -63,6 +63,7 @@ _Unknown._
 - [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
 - [ORCH-6](../../ORCH/ORCH-6--6cfe7288/task.md) — ORCH-6: STANDALONE — verify and document what DEPLOY already ships; do NOT rebuild it (todo)
 - [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md) — RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… (done)
+- [ZZB-firsthal](../../UNASSIGNED/ZZB-firsthal--74cb9c06/task.md) — probe (todo)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../../MTLS/EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 
 ---

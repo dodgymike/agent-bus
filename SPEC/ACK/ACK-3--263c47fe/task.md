@@ -5,20 +5,24 @@
 | Public id | `263c47fe-0675-4b6a-b842-8c8b909f35b7` |
 | Key | ACK-3 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:37.472178+00:00 |
-| Updated | 2026-08-09T08:25:37.472178+00:00 |
+| Updated | 2026-08-16T14:33:17.255263+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestRelayHopAckNack(Authentication|Correlation)$ ./internal/relay'
+bash scripts/proof-check.sh "go test -race -run '^(TestRelayHopAckNack(Authentication|Correlation)|TestPeerAckRoundTripsThroughTheClient|TestMaxAckBytesFitsAMaximumFrame|TestPeerAckBindsToTheCertificateResolvedBus|TestSettleAckCorrelatesToTheDurableRecord|TestPriorTerminalReportsOnlyTERMINALOutcomes|TestAckVocabularyMapsEVERYWireValue|TestAckVocabularyRejectsANonTerminalState)\$' ./internal/relay ./internal/httpapi ./cmd/agent-bus"
 ```
+
+## Status note
+
+ACK-3 implementation complete in the working tree, NOT yet committed. Reviewer and security gates running. Peer route POST /v1/peer/ack, frame + handler + mount + correlation to internal/ack's durable record via relay.AuthorizePeerAck's obligation binding.
 
 ## Description
 
@@ -41,6 +45,12 @@ _Unknown._
 
 
 - [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md) — Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- un… (todo)
+- [ACK-14](../ACK-14--1884218d/task.md) — ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… (todo)
+- [ACK-3-FU-COLLAPSE-WIREVERSION](../ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) — ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… (todo)
+- [ACK-3-FU-SETTLEACK-RACE-ARM](../ACK-3-FU-SETTLEACK-RACE-ARM--d829afb2/task.md) — ACK-3-FU-SETTLEACK-RACE-ARM: the ack.ErrTerminal arm of federation.settleAck is unreachab… (todo)
+- [ACK-4-FU-RECIPIENT-BINDING](../ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) — ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… (todo)
+- [RELAY-51](../../RELAY/RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (todo)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
 
 ---
 

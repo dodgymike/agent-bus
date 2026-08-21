@@ -5,19 +5,19 @@
 | Public id | `aeb32123-6c20-4c56-813b-a2bdcef51553` |
 | Key | ACK-4 |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:37.733427+00:00 |
-| Updated | 2026-08-09T08:25:37.733427+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T14:04:13.002761+00:00 |
+| Completed | 2026-08-16T14:04:13.002743+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestAck(RejectsForgery|RejectsReplay|DoesNotLeakRecipientState)$ ./internal/relay'
+go test -race -run "^TestAck(RejectsForgery|RejectsReplay|DoesNotLeakRecipientState)$" ./internal/relay
 ```
 
 ## Description
@@ -41,6 +41,8 @@ _Unknown._
 
 
 - [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md) — Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- un… (todo)
+- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (in_progress)
+- [RELAY-52](../../RELAY/RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
 
 ---
 

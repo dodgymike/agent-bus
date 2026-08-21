@@ -66,7 +66,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../../RELAY/internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../../RELAY/internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (in_progress)
 - [48223968-0f96-4ac2-8d7e-710a1a4026b8](../../RELAY/Choose-the-abuse-control-primitive-for-a-MULTI-PRINCIPAL--48223968/task.md) — Choose the abuse-control primitive for a MULTI-PRINCIPAL relay link (todo)
 - [INVITE-PEERGUARD](../../INVITE/INVITE-PEERGUARD--f5d91dbe/task.md) — INVITE-PEERGUARD: no ungated peer/federation enrolment path may ever exist -- enumerate t… (todo)

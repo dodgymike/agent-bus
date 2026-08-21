@@ -1,0 +1,58 @@
+# RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND: doc.go gap 5 OUTBOUND half -- Client.Enroll never binds a dialled peer's claimed bus id to the pinned certificate
+
+| Field | Value |
+| --- | --- |
+| Public id | `09fc1ec5-1bfd-44f1-9318-4c0836a0b561` |
+| Key | RELAY-FU-PEERENROLL-BUSID-BIND-FU-OUTBOUND |
+| Epic | [RELAY](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | relay |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-16T10:42:04.224731+00:00 |
+| Updated | 2026-08-16T10:42:04.224731+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -count=1 -run TestEnrollBindsTheResponderClaimedBusIDToTheDialledPin ./internal/relay
+```
+
+## Description
+
+SPLIT OUT by spec-keeper on 2026-08-16 from RELAY-FU-PEERENROLL-BUSID-BIND (12f39697), which expressly permitted it: 'OUTBOUND HALF remains IN SCOPE of this same task unless split during implementation'. The INBOUND half -- the roster-hijack primitive, and the whole of that task's P0 severity -- was verified closed and live (checkPeerAssertsOwnID at cmd/agent-bus/relaywiring.go:1113, fed by httpapi.PeerBusIDFromContext at :1102, landed 94e89af, live 7095231). Splitting keeps a closed P0 from masking this dormant gap, and keeps this gap from holding a closed P0 open.
+
+THE GAP, verified at HEAD, not adopted from the original text. internal/relay/doc.go:355-358 (gap 5, outbound half) still states it: 'THE BUS ID IN A HANDSHAKE RESPONSE IS NEVER BOUND TO THE HOST WE DIALLED. Client.Enroll validates the responder's claimed id for SHAPE only, and Registry.UpsertPeer then installs whatever it claimed. The gate must cross-check it against the pinned certificate or the invite.' Confirmed in code: relay.Client.Enroll (internal/relay/client.go:168) ends at :243 with ValidatePeerEnrollResponse(c.busID, decoded), which checks shape and that the claim is not OURS -- and nothing else. Nothing compares the responder's claimed bus id against the certificate pinned for the ADDRESS being dialled, nor against the peer record the operator configured for that bus.
+
+WHY IT IS P2 AND NOT P0 -- IT IS UNREACHABLE, NOT HARMLESS. grep confirms Client.Enroll has ZERO non-test callers in the tree. This bus never dials a peer to shake hands; the outbound relay POST the forwarder makes is a different path. That is the same fact RELAY-24-BLOCKER-EGRESS-HANDSHAKE (0ab31d26) records from the other side -- the Registry is populated from operator-configured records and inbound handshakes, never from a dial. SO THIS TASK MUST BE CLOSED BEFORE, OR IN THE SAME CHANGE AS, ANYTHING THAT MAKES THIS BUS DIAL A PEER FOR A HANDSHAKE. Wiring the dial first turns a dormant gap into a live one: a host that answers on a pinned address could name itself any bus it likes and Registry.UpsertPeer would install a full roster under that claimed id.
+
+SHAPE OF THE FIX. The pin material already exists and is durable -- relay.PeerStore holds the per-bus BusTrustRecord (SigningKeys, PeerClientTLSCertFingerprint) and the per-address next-hop TLS pin used by cmd/agent-bus/relaydial.go. The comparison is 'the bus id this responder claims must be the bus id the operator bound to the address I dialled'. Unlike the inbound half, this one CAN live inside internal/relay, because the dialled address and the pin are both the client's own inputs -- no internal/httpapi import is needed and the doc.go:393-396 constraint does not bite. Prefer an explicit parameter over anything context-carried, for the reason doc.go:465-470 gives: a forgotten context value still compiles.
+
+Do NOT relax invariant 11 to do this: there is no CA and no trust-on-first-use, so 'the TLS handshake succeeded' is not evidence of WHICH bus answered -- the pin says which HOST, and the claimed bus id is what needs binding to it.
+
+PROOF must be RED before the fix: assert that Enroll against a pinned address whose responder claims a DIFFERENT bus id is refused and that Registry.UpsertPeer is never reached, and that the matching claim is accepted.
+
+## Relations (authoritative)
+
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+
+
+_Unknown._
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) — RELAY-24-BLOCKER-EGRESS-HANDSHAKE: this bus never DIALS a peer, so its relay Registry nev… (todo)
+- [RELAY-FU-PEERENROLL-BUSID-BIND](../RELAY-FU-PEERENROLL-BUSID-BIND--12f39697/task.md) — internal/relay/doc.go gap 5 (inbound twin): peer B presenting its own valid certificate a… (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

@@ -99,7 +99,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 - [INVMINT-3](../INVMINT-3--8555e659/task.md) — INVMINT-3: the invite-mint HTTP route on the running bus (NOT /v1/mint, which is message-… (todo)
 - [INVMINT-6](../INVMINT-6--cedb8d6f/task.md) — INVMINT-6: \`agent-bus invite mint -count N\` — mint a pool in ONE process start (quick win… (todo)
 - [INVMINT-7](../INVMINT-7--174c7ba9/task.md) — INVMINT-7: document the pre-minted-invite pool recipe, with the 0600 mode built in (quick… (todo)
@@ -113,7 +113,7 @@ _Unknown._
 
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
 - [CONV-SUCCESSION](../../CONV/CONV-SUCCESSION--422be55b/task.md) — CONV-SUCCESSION: creator-only mutation freezes a conversation when the creator's agent id… (todo)
-- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (todo)
+- [INVMINT-2](../INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 - [INVMINT-3](../INVMINT-3--8555e659/task.md) — INVMINT-3: the invite-mint HTTP route on the running bus (NOT /v1/mint, which is message-… (todo)
 - [INVMINT-5](../INVMINT-5--18f15aa9/task.md) — INVMINT-5: invite REVOCATION and LISTING over the same online operator surface (todo)
 - [INVMINT-6](../INVMINT-6--cedb8d6f/task.md) — INVMINT-6: \`agent-bus invite mint -count N\` — mint a pool in ONE process start (quick win… (todo)

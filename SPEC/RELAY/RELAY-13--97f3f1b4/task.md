@@ -62,7 +62,7 @@ _Unknown._
 
 
 - [11d171c2-9f5a-427f-b4fe-cdbfc9f0ad48](../../IDEM/Stale-invariant-10-unconditional-disconnect-prose-WIDENE--11d171c2/task.md) — Stale invariant-10 unconditional-disconnect prose -- WIDENED 2026-08-08: 6 files, 14 site… (todo)
-- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (todo)
+- [2ca053dd-1b63-42b5-a485-f57b623722ac](../internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
 - [8ef2c753-daf1-4433-86e3-4eee4ad470dc](../../UNASSIGNED/AST-guard-assert-a-doc-comment-attaches-to-the-declarati--8ef2c753/task.md) — AST guard: assert a doc comment attaches to the declaration it names (repo-wide godoc-att… (todo)
 - [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (done)

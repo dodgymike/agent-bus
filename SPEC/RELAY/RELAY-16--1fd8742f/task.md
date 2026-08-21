@@ -5,19 +5,19 @@
 | Public id | `1fd8742f-4cff-4ed4-a4b2-b58ff51c2898` |
 | Key | RELAY-16 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | hub |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:43.777682+00:00 |
-| Updated | 2026-08-08T15:56:43.777682+00:00 |
-| Completed | — |
+| Updated | 2026-08-16T10:27:53.871474+00:00 |
+| Completed | 2026-08-16T10:27:53.871458+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestSendAdmitsRemoteRecipientViaRemoteRouter ./internal/hub
+go test -race -count=1 -run TestSendAdmitsRemoteRecipientViaRemoteRouter ./internal/hub
 ```
 
 ## Description
@@ -48,7 +48,7 @@ _Unknown._
 
 
 - [RELAY-11](../RELAY-11--07824e55/task.md) — RELAY-11: store/hub can record a MULTI-HOP bus path (done)
-- [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (todo)
+- [cca64afd-f75d-46e4-91ca-ebc502151253](../RELAY-precondition-roster-check-LOCAL-recipients-before--cca64afd/task.md) — RELAY precondition: roster-check LOCAL recipients before the durable write, or a peer can… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

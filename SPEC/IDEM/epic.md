@@ -2,7 +2,7 @@
 
 [← all epics](../../SPEC.md)
 
-**18 open / 32 total.** Full records live in `SPEC/IDEM/<task>/task.md`.
+**18 open / 34 total.** Full records live in `SPEC/IDEM/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
@@ -10,7 +10,6 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| IDEM-11 | IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… | todo | P0 | [task.md](IDEM-11--8e2c4de3/task.md) | _not fetched_ | [DUR-1](../DUR/DUR-1--c51e1959/task.md) [DUR-2](../DUR/DUR-2--4132b879/task.md) [DUR-3](../DUR/DUR-3--d8a991ea/task.md) [DUR-7](../DUR/DUR-7--ba6739e6/task.md) [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) +10 more |
 | IDEM-12 | IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… | todo | P1 | [task.md](IDEM-12--26dd5625/task.md) | _not fetched_ | [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [MSG-2](../MSG/MSG-2--50995c75/task.md) [MSG-3](../MSG/MSG-3--2655c6ae/task.md) [IDEM-14](IDEM-14--b0facce9/task.md) [IDEM-16](IDEM-16--b6b76aeb/task.md) +3 more |
 | IDEM-13 | IDEM-13: Idempotent enrol / leave / peer-enrol | todo | P1 | [task.md](IDEM-13--a869264d/task.md) | _not fetched_ | [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [AUTH-4](../AUTH/AUTH-4--a853261d/task.md) [RELAY-1](../RELAY/RELAY-1--9bc9d6c4/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) +4 more |
 | IDEM-14 | IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… | todo | P1 | [task.md](IDEM-14--b0facce9/task.md) | _not fetched_ | [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) [IDEM-13](IDEM-13--a869264d/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [AUTH-4](../AUTH/AUTH-4--a853261d/task.md) +6 more |
@@ -27,18 +26,21 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | IDEM-17-FU-CHILDNONCE | Per-run nonce to gate crash-injection self-SIGKILL children (repo-wide) | todo | P2 | [task.md](IDEM-17-FU-CHILDNONCE--8b392400/task.md) | _not fetched_ | [IDEM-17](IDEM-17--8b1e85fd/task.md) |
 | IDEM-17-FU-CROSSAGENT | Crash-injection coverage for cross-agent applied-key isolation across recovery | todo | P2 | [task.md](IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) | _not fetched_ | [IDEM-17](IDEM-17--8b1e85fd/task.md) [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) |
 | IDEM-17-FU-PLACEMENT | Decide crash-suite package placement: internal/idem vs internal/hub | todo | P2 | [task.md](IDEM-17-FU-PLACEMENT--998e1c19/task.md) | _not fetched_ | [IDEM-17](IDEM-17--8b1e85fd/task.md) |
+| IDEM-20 | IDEM-20: the amortised sweep overshoots the 64 MiB budget by ~4 MiB, and CONTRACTS-HTTP.m… | todo | P2 | [task.md](IDEM-20--5f914b18/task.md) | _not fetched_ | [IDEM-19](IDEM-19--82b79094/task.md) |
 | RELAY-2-FU-IDEM-ROSTEROP | RELAY-2-FU-IDEM-ROSTEROP: internal/idem has no OpRosterSync, so roster pushes borrow OpPe… | todo | P2 | [task.md](RELAY-2-FU-IDEM-ROSTEROP--083eddd6/task.md) | _not fetched_ | [RELAY-2](../RELAY/RELAY-2--654140d7/task.md) |
 
-## Closed tasks (14) — done, cancelled, superseded
+## Closed tasks (16) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| IDEM-11 | IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… | done | P0 | [task.md](IDEM-11--8e2c4de3/task.md) | _not fetched_ | [DUR-1](../DUR/DUR-1--c51e1959/task.md) [DUR-2](../DUR/DUR-2--4132b879/task.md) [DUR-3](../DUR/DUR-3--d8a991ea/task.md) [DUR-7](../DUR/DUR-7--ba6739e6/task.md) [IDEM-10](IDEM-10--b28e5153/task.md) [IDEM-12](IDEM-12--26dd5625/task.md) +10 more |
 | IDEM-17 | IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect | done | P0 | [task.md](IDEM-17--8b1e85fd/task.md) | _not fetched_ | [DUR-6](../DUR/DUR-6--d56a997d/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [IDEM-16](IDEM-16--b6b76aeb/task.md) [DUR-3](../DUR/DUR-3--d8a991ea/task.md) [DUR-2](../DUR/DUR-2--4132b879/task.md) |
 | 372b5072-2396-4e2a-8a80-398d5d006894 | Narrow invariant 10's disconnect to the third-party replay path | done | P1 | [task.md](Narrow-invariant-10-s-disconnect-to-the-third-party-repl--372b5072/task.md) | _not fetched_ | — |
 | IDEM-1 | IDEM-1: The idempotency-key contract -- format, transport, scope, and which operations re… | superseded | P1 | [task.md](IDEM-1--3cac3349/task.md) | _not fetched_ | [IDEM-6](IDEM-6--208c4fb5/task.md) [SIGN-1](../SIGN/SIGN-1--43fd21ae/task.md) [IDEM-9](IDEM-9--b0dc4a12/task.md) [IDEM-10](IDEM-10--b28e5153/task.md) [DUR-1](../DUR/DUR-1--c51e1959/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) +4 more |
 | IDEM-10 | IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent | done | P1 | [task.md](IDEM-10--b28e5153/task.md) | _not fetched_ | [AUTH-6](../AUTH/AUTH-6--1640e0b4/task.md) [IDEM-11](IDEM-11--8e2c4de3/task.md) [IDEM-15](IDEM-15--ab3f48b0/task.md) [DUR-3](../DUR/DUR-3--d8a991ea/task.md) [IDEM-1](IDEM-1--3cac3349/task.md) [IDEM-13](IDEM-13--a869264d/task.md) +4 more |
 | IDEM-11-FU-FAIRSHARE | IDEM-11-FU-FAIRSHARE: applied-key capacity is bus-wide fail-closed with no per-agent shar… | done | P1 | [task.md](IDEM-11-FU-FAIRSHARE--5abec835/task.md) | _not fetched_ | [IDEM-11](IDEM-11--8e2c4de3/task.md) |
 | IDEM-14-FU-CLIENTTEXT | IDEM-14-FU-CLIENTTEXT: client remedy text (messages.go:1175) asserts a server disconnect… | done | P1 | [task.md](IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) | _not fetched_ | [IDEM-14](IDEM-14--b0facce9/task.md) |
+| IDEM-19 | IDEM-19: expiry-queue compaction is O(retained) -- 48.4s vs 32ms measured, on the every-s… | done | P1 | [task.md](IDEM-19--82b79094/task.md) | _not fetched_ | [ACK-2](../ACK/ACK-2--9564f953/task.md) [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) |
 | IDEM-2 | IDEM-2: Durable applied-key store -- committed in the SAME two-phase transaction as the e… | superseded | P1 | [task.md](IDEM-2--1c6a5ef1/task.md) | _not fetched_ | [IDEM-1](IDEM-1--3cac3349/task.md) [IDEM-4](IDEM-4--d9c00d0d/task.md) [DUR-1](../DUR/DUR-1--c51e1959/task.md) [IDEM-10](IDEM-10--b28e5153/task.md) [AUTH-1](../AUTH/AUTH-1--54fa94c0/task.md) [MSG-2](../MSG/MSG-2--50995c75/task.md) +4 more |
 | IDEM-3 | IDEM-3: Bounded dedupe window -- retention policy, eviction, and the honest statement of… | superseded | P1 | [task.md](IDEM-3--e34f9c31/task.md) | _not fetched_ | [IDEM-2](IDEM-2--1c6a5ef1/task.md) [RELAY-4](../RELAY/RELAY-4--5ac738b4/task.md) [DUR-7](../DUR/DUR-7--ba6739e6/task.md) [CORE-5](../CORE/CORE-5--06c5b1f5/task.md) [IDEM-1](IDEM-1--3cac3349/task.md) [IDEM-10](IDEM-10--b28e5153/task.md) +7 more |
 | IDEM-4 | IDEM-4: Idempotent send and broadcast -- a legitimate retry returns the ORIGINAL result a… | superseded | P1 | [task.md](IDEM-4--d9c00d0d/task.md) | _not fetched_ | [IDEM-1](IDEM-1--3cac3349/task.md) [IDEM-2](IDEM-2--1c6a5ef1/task.md) [MSG-2](../MSG/MSG-2--50995c75/task.md) [MSG-3](../MSG/MSG-3--2655c6ae/task.md) [IDEM-5](IDEM-5--9631dfcb/task.md) [SIGN-6](../SIGN/SIGN-6--c9e4aea1/task.md) +7 more |

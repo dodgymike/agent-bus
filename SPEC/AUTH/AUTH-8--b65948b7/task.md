@@ -114,6 +114,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
 - [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [AUTH-9](../AUTH-9--483ee09b/task.md) — AUTH-9: Opt-in session persistence (--persist-session) + agent-busctl session logout (done)
 

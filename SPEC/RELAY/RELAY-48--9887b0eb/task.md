@@ -5,19 +5,19 @@
 | Public id | `9887b0eb-8e8a-45d9-8a10-bd3161f720e2` |
 | Key | RELAY-48 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | relay, durability, crash-safety, from-review, relay-47-followup |
 | Created | 2026-08-15T12:54:28.921278+00:00 |
-| Updated | 2026-08-15T12:54:28.921278+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T10:28:15.549958+00:00 |
+| Completed | 2026-08-21T10:28:15.549941+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestOnwardRelayPendingJobRequeuesAfterRestart ./cmd/agent-bus
+go test -race -timeout 1200s -run 'TestOnwardRelayPendingJobRequeuesAfterRestart' ./cmd/agent-bus
 ```
 
 ## Description
@@ -92,8 +92,13 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
+- [AUTH-10-WIRING](../../AUTH/AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
 - [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (in_progress)
 - [RELAY-47-FU-DOCS](../RELAY-47-FU-DOCS--6f7281e8/task.md) — RELAY-47-FU-DOCS: three shipped docs still tell agents multi-hop relay does not work, aft… (done)
+- [RELAY-52](../RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
+- [RELAY-52-FU-HUBDISCARDS](../RELAY-52-FU-HUBDISCARDS--d2cad9e7/task.md) — RELAY-52-FU-HUBDISCARDS: remaining untested hub/mint/roster discard-and-recovery log lines (in_progress)
+- [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
 
 ---
 

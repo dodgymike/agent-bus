@@ -113,6 +113,7 @@ _Unknown._
 - [ORCH-4](../ORCH-4--282a2e9c/task.md) — ORCH-4: restart semantics under an orchestrator — sessions are IN-MEMORY, so every pod re… (todo)
 - [ORCH-5](../ORCH-5--c4634621/task.md) — ORCH-5: the sidecar and Kubernetes manifests themselves (todo)
 - [ORCH-6](../ORCH-6--6cfe7288/task.md) — ORCH-6: STANDALONE — verify and document what DEPLOY already ships; do NOT rebuild it (todo)
+- [ZZB-firsthal](../../UNASSIGNED/ZZB-firsthal--74cb9c06/task.md) — probe (todo)
 
 ---
 

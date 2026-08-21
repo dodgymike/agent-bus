@@ -47,7 +47,7 @@ _Unknown._
 
 
 - [DUR-12-FU-VERSIONFLIP](../DUR-12-FU-VERSIONFLIP--5f78f749/task.md) — DUR-12-FU-VERSIONFLIP: single-bit version-field flip on a v2 log misidentifies it as v1 a… (todo)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (todo)
+- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
