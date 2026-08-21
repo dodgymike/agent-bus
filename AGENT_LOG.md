@@ -4583,3 +4583,48 @@ the table in one call and measured nothing. A performance claim needs its slow c
   relation-fetching form, not `--no-relations`.
 - `RELAY-48-DEPLOY` and `RELAY-51` (P0): a partial rollout of the wire-version field **abandons
   messages permanently** — `DisallowUnknownFields` + `Retriable()` treating 400 as final.
+
+## 2026-08-21 — RELAY-52 (`665971c`) and the ACK wave: two documentation-gate skips, recorded
+
+`CLAUDE.md` §10 requires an explicit one-line justification in this file whenever a mandated chain
+step is skipped. Two are owed. Both agents correctly refused to write here — this file is contended —
+so the record is mine to land, and an unrecorded skip is indistinguishable from a forgotten one.
+
+**`RELAY-52` — LANDED, `665971c`.** *"internal/hub: the undecodable-record discard is finally tested."*
+Documentation gate skipped: no agent-facing surface moved — no route, flag, env var, on-disk format
+or wire version — and the property it tests (`internal/hub/hub.go:1104`) was already published. The
+test is the deliverable.
+
+Worth keeping from that task: **the discard line invariant 6 REQUIRES to exist was the one nothing
+tested.** Invariant 6 says recovery always reaches a running server and damaged records are
+discarded, but *every discard must be logged loudly and specifically — silent discard IS the defect*.
+That log line is therefore the sole observable the invariant demands, and it had no test anywhere in
+the repo. Its siblings at `hub.go:1126/1187/1207/1240` are still untested and are now
+`RELAY-52-FU-HUBDISCARDS` (`d2cad9e7`).
+
+**`836c9ff8` (canonical ACK bytes) — NOT LANDED at time of writing**, staged pending the ACK wave
+commit. Documentation gate skipped deliberately: the agent-facing surface did not move (no route, no
+CLI, no flag, no on-disk change), the normative byte layout lives in the `CanonicalizeAck` doc plus a
+published key-agreed-test vector file, and `PROTOCOL.md` — which has no byte table for this format
+*or* for attest v2 — is outside that task's boundary. Filed as `ACK-6-FU-PROTOCOL-DOC` (`cd5a022a`).
+
+### Two things from this wave worth carrying, neither of them about ACK
+
+**A vacuity mechanism nothing in this repo guards against.** An agent's first mutation run reported
+**thirteen** passes — the most convincing possible false result — because its scratch directory name
+collided with a stale directory from an earlier session, so every mutation ran against a tree
+containing none of its code. It caught this itself and redid the run with unique paths. Our existing
+defences (`proof-check.sh`, quoted `-run` regexes, clean overlays of HEAD) do not detect it: the
+proof genuinely runs, genuinely passes, and proves nothing. **Use a unique, timestamped scratch dir
+per run, and prefer a helper that refuses a pre-existing path.**
+
+**"N/N mutations RED" is a statement about the chooser, not the code.** A reviewer made this precise
+while confirming an author's 17/17: removing only the outer `ValidateCorrelationKey` stayed GREEN,
+which is genuine defence in depth rather than a vacuous guard — but the count says nothing about the
+mutations *not* chosen. On the same wave a reviewer named four further keying mutations that still
+leave a whole package green, the worst being a bucket keyed on the SESSION rather than the agent:
+with `DefaultMaxActiveSessionsPerAgent = 32` that is up to 1024 parked waits for one agent, against a
+published contract promising the opposite. Filed as `ACK-17`.
+
+**Four guards in this project have now been found that were written specifically to catch a defect
+and could not fire. Mutation found all four; review found none.**

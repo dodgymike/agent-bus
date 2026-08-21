@@ -6477,6 +6477,170 @@ attestation included, and builds the hub request at `:126`. The pass-through is 
 change, so the real boundary is `internal/store` + `internal/hub` + `cmd/agent-bus` — and the epic's
 `internal/relay` work does not collide with it.
 
+## 2026-08-21 — ACK-6 and ACK-9: the delivery-acknowledgement plane reaches an agent
+
+> **LANDED as `dc04a95`**, together with `ACK-15`, `ACK-16`, `836c9ff8` and `AUTH-10-WIRING`. This
+> entry carried a "NOT LANDED" marker until then, because an earlier draft written in landed tense
+> was REFUSED at the integrator gate as a false dated claim — correctly, and that is the 2026-08-07
+> incident shape.
+>
+> One consequence of landing the whole wave, recorded because it is better than what this entry
+> originally said: `ACK-6`'s invariant-7 blocker is **SATISFIED, not waived.** The reviewer's remedy
+> was "a `DECISIONS.md` section **OR** land `836c9ff8` first"; the wave landed `836c9ff8` *and*
+> `ACK-15`, so there is no deferral left to authorise. The authorisation text below was written for a
+> deferral that no longer exists — kept because its reasoning about WHY the CLI could not be written
+> earlier is still the record of that decision.
+
+`ACK-6` adds `POST /v1/ack` (the RECIPIENT declares receipt) and `ACK-9` adds
+`GET /v1/ack/<correlation-key>` plus `agent-busctl ack-status` (the SENDER reads it). They must land
+together because `internal/httpapi/server.go` and `CONTRACTS-HTTP.md` interleave both halves.
+
+### Inbox delivery is NOT receipt — an explicit application ACK is required
+
+`ACK-1` ruled it and this implements it. The reasoning is not ergonomic, it is structural: **the bus
+does not verify message signatures** (`internal/store/message.go:260-270`), so auto-ACKing on poll
+would have the bus assert, on the recipient's behalf, a fact only the recipient can establish.
+Supporting: the cursor is opaque and client-held, so inferring receipt would need strictly MORE
+server state, and a replayed cursor would fire many receipts for one message.
+
+### Authorization is STRUCTURAL, not a comparison — and the load-bearing line is not the obvious one
+
+The recipient IS the authenticated principal AND is the second half of the `(correlation key,
+recipient)` key, so an agent can only ever reach the row naming it. `internal/httpapi/ack.go`
+compares the frame's `recipient` and then **discards** it.
+
+Proven by mutation, and the result is worth recording because it inverts the intuition: deleting the
+403 check while leaving `Recipient: recipient` at `internal/httpapi/ack.go:248` yields a third party
+getting `200 unknown` with the victim's row untouched and **no row minted**. Deleting BOTH gives full
+privilege escalation. **So `:248` is the security boundary and the 403 is loudness.** A future
+reader tidying away "the redundant 403" would be removing a diagnostic; tidying away `:248` would be
+removing the control.
+
+### §13.3's uniform answer has NO owner in the record shape — it lives entirely in the handlers
+
+Nothing in `internal/ack` enforces it. Malformed, swept, never-existed and someone-else's must all
+return one byte-identical answer, or the route is an existence oracle. A review enumerated **10
+shapes on `POST /v1/ack` and 9 on `GET /v1/ack/<key>`**: all negatives are byte-identical. The sole
+deviation is a 413 at the 4 KiB frame cap, decided on caller-chosen bytes independently of bus
+state — not an oracle.
+
+Round 1 found a real one: a malformed or ABSENT `correlation_key` answered **500 with two unthrottled
+ERROR lines** while an unknown key answered the uniform `unknown` — the fourth of the four facts,
+reachable by omitting a field. The cause is a seam worth remembering:
+`relay.ValidatePeerAckRequest` deliberately validates NO ids, because the PEER route validates them
+inside `AuthorizePeerAck` — **and the agent route has no `AuthorizePeerAck`.** The validator was
+inherited without its other half.
+
+### What is NOT reachable yet, stated plainly
+
+`POST /v1/ack` ships with **no CLI subcommand**, so **no row can reach `delivered` through the
+supported client surface** and `ack-status` can in practice only report `accepted`/`in_flight`.
+
+This is a deferral with a hard technical cause, not a scheduling excuse:
+`relay.ValidateAckAttestation` (`internal/relay/ack.go:549-553`) requires a 64-byte signature on
+every recipient-sourced outcome, and `internal/signing` has **no canonical-ACK-bytes function**,
+which `ACK-CONTRACT.md §6.3` mandates. A CLI written before that encoding exists would sign
+*something* and freeze an unspecified format onto the wire permanently. Sequenced as `836c9ff8`
+(canonical bytes) → `ACK-15` (the subcommand).
+
+### `internal/ack/store.go:479` — deliberately NOT "fixed", and why
+
+The WAL error is wrapped without `ErrNotDurable`, so `errors.Is(err, ErrNotDurable)` is false on a
+write failure. Two agents and a reviewer converged on the same answer: **`ErrNotDurable` means "no
+log attached"**, and wrapping a FAILED WRITE in it would make `errors.Is` true for two conditions
+with **opposite remedies**. Invariant 4 holds structurally — a non-nil error is returned, the memory
+row stays `accepted`, nothing is acknowledged. What is wrong is only the status CLASS: 500 where 503
+is right on a disk failure. If a caller ever needs that branch it wants a NEW sentinel, not this one
+widened. Pre-existing; filed `c4dc6b6b`.
+
+### A guard that could not fire, found by mutation after two gates passed it — AND IT IS A BLOCKER, NOT A NOTE
+
+> **This was initially mis-triaged BY ME as a follow-up** (`ACK-16`) and written up here as an
+> observation. That was wrong: the reviewer raised it as a BLOCKER with security impact, and
+> recording a defect is not the remedy it prescribed. An integrator refused the commit over it and
+> was right to. Corrected here rather than quietly, because the mis-triage is the more instructive
+> half: a finding written into a decisions file can LOOK addressed while the code is unchanged.
+
+`internal/httpapi/ackstatus.go:292` — changing the per-principal `s.ackWaiters.acquire(sender)` to a
+GLOBAL bucket leaves the entire package green, even with the newly-added internal test present. One
+agent could then lock every other agent out of `?wait=`, which `ackstatus.go:65-79` and
+`CONTRACTS-HTTP.md:456` both claim is structurally impossible.
+
+That is the **fourth** guard in this project written specifically to catch a defect that could not
+fail, and the fourth found by mutation rather than review. Recorded here because the pattern is now
+the most reliable defect-finder we have: **mutate every guard, including — especially — the ones
+that look obviously correct.**
+
+Related and worth carrying: "17/17 mutations RED" means 17/17 of the mutations CHOSEN. Removing only
+the outer `ValidateCorrelationKey` stays green, and that is genuine defence in depth rather than a
+vacuous guard — but a mutation count is a statement about the chooser, not about the code.
+
+## 2026-08-21 — RELAY-51: the wire-version rollout is READERS-FIRST, and health is not a rollout gate
+
+> The rehearsal and its two findings ARE landed (`14ed009`, `scripts/fed-smoke.sh` +
+> `docs/THREE-BUS-DOCKER.md`). `RELAY-23` itself has NOT landed, so the hazard below is
+> **prospective**: it was reproduced against simulated accept-only and emitting builds in `/tmp`,
+> never against code in this repo.
+
+### The hazard, reproduced rather than reasoned about
+
+A strict decoder plus a non-retriable 4xx loses messages permanently on a partial deploy.
+`internal/relay/handshake.go:334` uses `DisallowUnknownFields()`; `internal/relay/client.go:78-84`'s
+`Retriable()` is true only for 408, 429 and 5xx. So a pre-`RELAY-23` peer answers a versioned frame
+**400**, the sender treats 400 as FINAL, and the message is **abandoned, not retried**:
+
+```
+B: status=400 code=invalid_request  err="json: unknown field \"protocol_version\""
+A: "relay forward failed" attempt=1 retriable=false
+A: "an outbox job was ABANDONED; this message will never reach the peer"
+```
+
+`attempt=1` — the retry horizon is never entered. Seven configurations were run; the hazard and both
+staging orders were each observed, not inferred.
+
+Note `RELAY-23` has NOT landed, so this is PROSPECTIVE. The rollout was rehearsed against simulated
+accept-only and emitting builds in `/tmp`, never in the repo.
+
+### The decision: READERS-FIRST, two deploys, no downtime window
+
+Stage 1 ships an **accept-only** build everywhere (the field exists, nothing assigns it, so an
+`omitempty` field is simply absent from the wire). Stage 2 enables emission. Because the accept-only
+build and an un-upgraded bus interoperate **in both directions**, stage 1 rolls one bus at a time in
+any order — proven by `mid→old→old` passing.
+
+**Drain-and-restart was REJECTED even for the dev set**, and the reason generalises: the drain must be
+VERIFIED, and the only instrument that would verify it does not exist. The durable
+`"state":"abandoned"` outbox record lives in the WAL and **no subcommand surfaces it** (`agent-bus
+log` reads the audit file). An unverifiable drain is an assumption, and this task exists because of
+one.
+
+**`ACK-3` is already correctly positioned as stage 1**: its route shipped with **no production
+caller**, which IS readers-first. `ACK-5` (emission) must not be enabled until every bus serves
+`/v1/peer/ack`.
+
+### Two things found while rehearsing that are worse than the hazard
+
+**1. A transit bus's ORIGIN logs nothing.** In `A(old) → B(new,emits) → C(old)`, the origin logged
+ZERO forward failures — only B logged it. **The loss is completely invisible from the bus that owes
+the delivery.** Combined with there being no operator view of an abandoned job, a federation can be
+dropping messages with nothing on the owing side to show it.
+
+**2. `/healthz` IS NOT A ROLLOUT GATE.** `httpapi.mountPeerSurface` is all-or-nothing: an incomplete
+`PeerSurface` registers NO peer route, so every `/v1/peer/` path — relay included — answers **404**,
+equally non-retriable — **while the container healthcheck still reports `healthy`**. The only signal
+is a startup `level=error` line, `FEDERATION IS NOT SERVED`.
+
+So a bus can be healthy and silently deaf to the entire federation. **Any rollout gate must assert the
+ABSENCE of that error line, not the presence of health.**
+
+### The standing rule this confirms
+
+A strict decoder defeats precisely the forward-compatibility a version field exists to provide.
+Adding the version did not make the envelope forward-compatible; it made the NEXT change
+**diagnosable**. That is worth having — but it is not tolerance, and the difference is paid for in
+deploy discipline. The strict decoder stays: an unknown field on a federation surface is a real
+signal.
+
 ## Removed on 2026-08-16 — superseded, refuted or overtaken
 
 `DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED
