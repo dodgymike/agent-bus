@@ -6795,3 +6795,195 @@ prohibition earned its keep — `internal/ack/state.go` has a ZERO-BYTE diff and
 literals are byte-identical to HEAD, which is a structural proof rather than a reviewer's opinion.
 A de-dup that also edited values would have made the diff unreviewable and the mutation proofs
 unrepeatable.
+
+## 2026-08-21 — ACK-7: a terminal negative does NOT cancel outstanding hops (ACK-CONTRACT.md §16 Q2)
+
+**The question, assigned to ACK-7 by name.** §16 Q2 asks whether a terminal negative ACK should
+cancel outstanding hops for that recipient — stop retrying a message the recipient has already
+refused. The contract set a default of "do not cancel" and deferred the ruling here, with ACK-4
+reviewing the denial-of-service angle.
+
+**Ruling: DO NOT CANCEL. The default becomes the decision.**
+
+**1. Nobody can verify a recipient attestation, so a cancel would act on an unverifiable claim.**
+§16 Q1 is still open: no endpoint distributes agents' messaging public keys, so a recipient NACK is
+attributable to a BUS and is end-to-end unverifiable by anybody — which is why `Attestation` has no
+value meaning "verified". Cancelling on that claim converts an unverifiable assertion into
+irreversible work-cancellation.
+
+**2. That makes cancellation a denial-of-delivery vector — PROSPECTIVELY, and the tense matters.**
+The obligation binding rule (§6.2) constrains WHO may speak about a correlation key, but in an
+A->B->C chain B is legitimately bound to the key: `AuthorizePeerAck` binds **(peer, correlation key)
+only** and never binds the RECIPIENT, and §6.2 deliberately declines a "bus half must equal the
+acking peer" rule because that would break multi-hop. If a NACK cancelled outstanding hops, B could
+suppress A's OTHER routes to C by refusing its own copy. The binding rule was never designed to
+carry that weight; it answers "may this peer speak about this key", not "may this peer decide the
+fate of every other route".
+
+> **PRECONDITION, stated so a future reader does not reverse this ruling after failing to reproduce
+> the attack.** As of 2026-08-21 the suppression is NOT reachable at HEAD, and the security gate
+> confirmed it: directed routing picks exactly ONE next hop per recipient (`f.reg.Route`, deduped,
+> `internal/relay/forward.go`), `Hub.recordAcceptance`'s recipient loop "runs exactly once" today,
+> and broadcast answers 501. One job and one row per key means a cancel could only ever reach the
+> acking peer's OWN job. **The attack goes live the moment multi-recipient send or broadcast lands**,
+> because a peer bound to K by one recipient's job can then name a DIFFERENT recipient routed via a
+> DIFFERENT peer. This is therefore a FORWARD-LOOKING rule adopted before the hazard exists, which is
+> the cheap moment to adopt it — not a description of a live hole. Do not read the absence of a
+> reproduction as evidence against it.
+
+**3. A NACK from one route does not prove the other route's copy is unwanted.** Distinct hops may
+reach distinct recipient instances, and §3.2 already keys the sender-visible row per
+(key, recipient) precisely because outcomes are per-recipient facts.
+
+**4. The saving is small, and smallest exactly when it is claimed to matter.** A hop that has been
+forwarded is already settled `OutboxDelivered` at forward time (`internal/relay/forward.go`), so the
+only jobs a cancel could reach are ones no peer has accepted — a dead peer, which is not consuming
+meaningful work. Cancelling buys little and spends a security property.
+
+**5. The sender loses nothing by not cancelling.** The sender-visible state reaches `refused`
+immediately on the terminal NACK; cancellation would change only hop-level work, never what the
+sender learns. Terminal is absorbing either way.
+
+**What is given up, stated plainly.** A message the recipient refused on one route may still be
+delivered on another, so a recipient can receive a copy it has already refused. That is at-least-once
+delivery behaving as designed; the answer is recipient-side idempotency (invariant 10), not
+cancellation.
+
+**Status quo confirmed rather than assumed.** No cancellation mechanism exists today: there is no
+`Cancel`/`dropJob` path anywhere in `internal/relay`, `internal/hub` or `cmd/agent-bus`; the only
+production `Outbox.Settle` caller is the forwarder settling its own job (`internal/relay/forward.go`);
+and `federation.settleAck`'s BODY touches only `f.log`, `f.acks` and `f.busID`. **That last clause is
+deliberately about the METHOD, not the type**: `federation` does reach a forwarder one field-hop away
+(`onward.next`), so this is a statement about what the settle path does, not a structural
+impossibility. The pin against regression is the test, not the object graph. This decision RECORDS
+that posture and pins it so it cannot drift in silently.
+
+**Revisit condition.** If §16 Q1 is ever answered — a key-distribution endpoint that lets a SENDER
+verify a recipient NACK end-to-end — cancellation becomes safe to reconsider, because the cancel
+would then be authorized by the recipient itself rather than by a bus asserting on its behalf. Until
+then this is not a close call.
+
+## 2026-08-21 — ACK-7: a concurrent byte-identical retry is answered 503, and that is invariant 4 winning
+
+**The apparent contradiction.** `ack.Store.Settle` reserves the `(correlation key, recipient)` pair
+ACROSS the fsync (`Store.inflight`), so a second transition for the same pair that arrives while the
+first is being made durable gets `ErrConcurrentTransition`, which `settleAck` lets fall through to
+**503 `CodeUnavailable`, nothing written**. A byte-identical retry therefore receives an ERROR — and
+invariant 10's first case says a legitimate retry must "return the ORIGINAL result, do not re-apply,
+do not error".
+
+**Ruling: 503 is CORRECT and must not be "fixed" to `200 {duplicate:true}`.**
+
+When the loser is refused, the winner's fsync **may or may not have completed** — and the decisive
+point is that **the reservation is one bit and cannot tell the two apart**. It is taken before
+`durable.Write` and released after `foldIn`, so a refusal covers both the pre-fsync window (nothing
+is durable yet) and the sliver after `Write` returns (it is). Answering `duplicate:true` would
+therefore assert durability in a case where no one has confirmed it — a direct breach of invariant 4,
+which is the stronger guarantee and the one the whole system is built on. Refusing is the only answer
+that is safe in BOTH windows.
+
+> An earlier draft of this entry said flatly that "the winner's fsync has not completed". That is
+> false for the post-`Write` sliver. The conclusion is unchanged, but the reasoning was stated more
+> confidently than it was true, which is the failure this file exists to avoid. Invariant 10's "do not error" is about not PUNISHING a retry; it is not a licence to
+acknowledge before durability. A 503 is retriable, carries no penalty, drops no connection, and the
+retry gets the correct absorbed answer once the write lands.
+
+**This is recorded because the wrong fix looks like an improvement.** "A duplicate should not get a
+503" is a natural code-review comment, the change is two lines, and every positive test would still
+pass — while the bus would have begun acknowledging writes before they were durable. That is the
+failure mode invariant 4 exists to prevent and it would be invisible until a crash.
+
+**The distinction that must never be collapsed**, and is now pinned by
+`TestAckTerminalExactlyOnceUnderRetry`:
+
+| Sentinel | Meaning | Status | Retriable |
+| --- | --- | --- | --- |
+| `ack.ErrConcurrentTransition` | transient race; nothing written | **503** | yes |
+| `ack.ErrTerminal` -> `relay.ErrAckOutcomeConflict` | permanent; a DIFFERENT terminal is recorded | **409** | no |
+
+Conflating them in either direction is a defect. Reporting a race as a **conflict** tells an honest
+retrying peer it committed a protocol violation; reporting a conflict as a **race** invites it to
+retry a frame that can never be accepted. Neither disconnects (§12).
+
+**Exactly-once is enforced in ONE place and it is not the reporting path.** `Settle`'s reservation is
+the mechanism; `settleAck`'s advisory read exists only to label `duplicate` and is explicitly allowed
+to lose a race. Mutation-proved: deleting the reservation's busy check produces **12 durable terminal
+records for one pair** under 12 identical concurrent frames. The in-memory table is idempotent, so
+the WAL write count is the ONLY place that second write is observable — which is why the test counts
+writes rather than inspecting the table.
+
+## 2026-08-21 — CONTEXT-DOCCHECK: an ambiguous heading FAILS, and re-entry is argv-only
+
+Two decisions inside `scripts/doc-check.sh` that change what a proof can assert, recorded because
+both look like over-strictness until you know what they replaced.
+
+### A repeated heading is a hard failure, with no fallback to "the first one"
+
+`section <file> <heading> <needle>` used to bind to the first heading that matched. On live docs that
+produced BOTH errors at once: a needle from `AGENT_PROTOCOL.md`'s canonical `## Exit codes` table
+FAILED because the range stopped at an earlier `### Exit codes`, and a needle from that earlier
+section PASSED as if the canonical one had been checked. Either way the proof asserts something the
+document does not say.
+
+The decision: **count every match and fail when there is more than one**, naming the count and
+quoting each spelling verbatim. Where the matches differ in level, the caller can pin one by passing
+the full heading line; where they are spelled identically **no argument can pin one**, and the tool
+says so rather than suggesting a remedy that cannot work. The rejected alternative was an occurrence
+index (`heading#2`): it would let a proof keep passing while the document silently reordered, which
+is the same class of defect one level down.
+
+The cost is accepted deliberately: measured on 2026-08-21, 9 heading keys across `AGENT_PROTOCOL.md`,
+`CONTRACTS-HTTP.md`, `DECISIONS.md` and `AGENT_LOG.md` are duplicated at the SAME level and are now
+unassertable until the document makes them unique. `AGENT_LOG.md` repeats `### Proof` and
+`### Verification` per entry by convention — that convention is fine, and it simply means per-entry
+sections are not section-proof targets.
+
+**No list of duplicates is kept in the script.** The one that was there had gone stale within five
+days and was wrong in both directions — it named four headings that were still singular on the date
+it claimed and omitted three that were already duplicated. A hand-maintained list of a moving
+property is a stale claim with a fuse; what is recorded instead is the `awk` one-liner that measures
+it on demand.
+
+### The environment gets no say in what the selftest runs
+
+Re-entry (the selftest re-invoking itself to test its own temp-dir handling) was keyed on an exported
+`DOC_CHECK_SELFTEST_INNER`. Inheriting that variable dropped seven assertions — precisely the ones
+proving the command-injection and `mktemp` fixes — while both runs printed an identical
+`proof-check: verdict=PASS class=wrapper exit=0`, because `proof-check.sh` judges a wrapper proof by
+exit status alone.
+
+The decision: **an internal flag is a private argv token, never an environment variable**, and the
+selftest carries a probe that spawns a child with the old names exported and asserts the child's
+assertion COUNT is still the larger one. Comparing counts rather than exit status is the point — the
+broken version exited 0 too.
+
+The general rule this is an instance of: **a proof instrument must not have an off switch that the
+ambient environment can reach.** If a knob has to exist, it belongs in argv where it is visible in
+the command the proof records.
+
+### A measurement that did not happen is never a pass
+
+Two 2026-08-21 security findings closed the same gap from opposite ends, and the rule they leave
+behind is worth stating once: **the tool must distinguish "measured and fine" from "could not
+measure".** `sed` reading stdin because the file name looked like an option, and `[ "$actual" -gt
+"$max" ]` returning 2 because `wc` produced nothing, both ended in a confident PASS about something
+that was never examined. So `<file>` is passed after `--`, `wc -c` output goes through the same
+`is_uint` gate as `max_bytes`, and a `.tsv` row that cannot be measured is a FAIL naming the file
+rather than a silently uncounted row.
+
+That also settles a deferral. Deleting a row from `docs/doc-budgets.tsv` still turns the check green
+and remains `CONTEXT-BUDGET-WIRE`'s to close, and the argument for deferring it is that the deletion
+is visible in the diff of a tracked three-row file. The unmeasured-size defect reached the same
+outcome — the failing row stops being measured — **with no diff at all**, which is why it was fixed
+here rather than deferred with it.
+
+### The fact that forces both
+
+`proof-check.sh` classifies a shell proof as `class=wrapper` and takes its exit status as the whole
+check. Anything that can make this script exit 0 while asserting less is therefore invisible at the
+gate, and 16 stored `proof_cmd`s invoke it — measured, not recalled: 16 tasks in a 783-task
+enumeration on 2026-08-21, every one in the CONTEXT epic and every one still `todo`. (An earlier
+draft said 29, which was never reachable: that epic holds 30 tasks in total.) That is why
+"absence is never a pass" now also covers a
+`.tsv` with no data rows, why the selftest's failure path is a literal `exit 1` that bypasses the
+dispatcher, and why every guard added here was mutation-proved RED before being trusted.

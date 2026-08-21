@@ -4946,3 +4946,199 @@ running agents. A sibling overwrote an overlay helper I had written there with i
 produced `verdict=VACUOUS tests_run=0` against my file list, which reads exactly like an implementer
 having lied about its proof. Use a uniquely-named private subdirectory. Same collision class as two
 agents editing one source file, one layer down, and it manufactures FALSE NEGATIVES.
+
+## 2026-08-21 — ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling
+
+**Task.** `ACK-7` (P0, `b7bf9631-59e2-4baf-805a-24968c5675db`). Two rulings recorded in
+`DECISIONS.md` (2026-08-21): ACK-CONTRACT.md §16 Q2, and why a concurrent byte-identical retry is
+answered 503.
+
+**Invariants read in full:** 4 (nothing acknowledged before durable, and its 2026-08-02 narrowing),
+10 (idempotency; the three cases; the two questions before ANY disconnect); 1, 5 and 6 consulted.
+
+**Outcome: TEST AND DECISION ONLY. No production code changed** — confirmed by `git status` over
+`internal/`, `cmd/`. That is the honest result, not a shortfall, and the reasoning is worth keeping:
+
+- The task title says "retry/backoff ... for lost/duplicated ACK/NACK frames", but **there is nothing
+  to retry yet**: ACK-5 owns peer-ACK emission and `relay.Client.PeerAck` still has zero non-test
+  callers. Building a retry loop for an emitter that does not exist would have been speculative work.
+- **Durable idempotency across restart is already covered by ACK-8** (`d454ef7`) in `internal/ack` —
+  `TestAckRetryAndConflictStayDistinctAcrossARestart`, `TestAckRestartCannotResurrectASettledRow`,
+  `TestAckReplayingTheSameLogTwiceIsIdempotent`, plus prepare/commit crash injection. Duplicating it
+  here would have added coverage of nothing.
+- **"Retry must not redeliver a completed message" already holds structurally**: `Forwarder.Resume`
+  re-offers `outbox.Pending()`, which is `Jobs(OutboxPending)`, so a settled job is never re-offered.
+
+What was genuinely missing: **the relay ACK plane had ZERO concurrency coverage** — no `go func` and
+no `sync.WaitGroup` anywhere in `internal/relay/ack_test.go` or `ackhttp_test.go`, in a plane whose
+P0 property is exactly-once under concurrent retry.
+
+**Files changed (3).** `internal/relay/ackretry_ack7_test.go` (new), `DECISIONS.md`, `AGENT_LOG.md`.
+
+**`TestAckTerminalExactlyOnceUnderRetry`** drives the REAL `AckHandler` over a real socket against a
+real `ack.Store` on a real on-disk `wal.Log`. Eight phases: the mirror-vs-production tie-back; N
+concurrent identical frames settling exactly once; the reservation-race 503; an overtaken frame being
+absorbed rather than re-written; post-settlement retries staying duplicates; a conflicting terminal
+answering 409 with the first terminal standing; no connection dropped on any path; and §16 Q2's
+no-cancel rule.
+
+**Honesty note on the harness.** `federation.settleAck` lives in `cmd/agent-bus`, which
+`internal/relay` cannot import, so the test MIRRORS its read-decide-settle sequence. A mirror is a
+copy and copies drift, so the first phase is `a7AssertMirrorMatchesProduction` — without it every
+other phase would be a proof about the test's own code.
+
+**Five mutations, all proven RED** (each in a fresh HEAD overlay; the live tree was never mutated):
+
+| Mutation | Guard that fired |
+| --- | --- |
+| delete `reserveLocked`'s busy check | **12 durable terminal records for one pair** under 12 identical frames, want 1 |
+| `Settle`'s byte-identical arm writes instead of absorbing | the overtaken frame answered 409, want 200 |
+| map the settle-error default arm to 409 instead of 503 | byte-identical frames answered `idempotency_violation` |
+| `DecideAck` returns `AckApply` where it returns `AckReplay` | caller cannot tell a fresh apply from a replay |
+| cancel the outstanding hop on a settled terminal | **0 pending jobs after a terminal negative, want 1** (§16 Q2) |
+
+The first is the load-bearing one: the in-memory table is idempotent, so the **WAL write count is the
+only place a second write is observable**. A test that inspected the table would have passed under
+that mutation.
+
+**Verification.** All in clean overlays of HEAD carrying only the new test file, using the OVERLAY's
+`scripts/proof-check.sh` by relative path.
+
+- proof: `go test -race -run ^TestAckTerminalExactlyOnceUnderRetry$ ./internal/relay`
+  -> `verdict=PASS class=test exit=0 tests_run=9 top_level=1 skipped=0 failed=0 empty_pkgs=0`
+- regression `./internal/relay ./internal/ack ./internal/httpapi`
+  -> `verdict=PASS class=test exit=0 tests_run=1661 top_level=400 skipped=6 failed=0 empty_pkgs=0`
+- `go build ./...` and `go vet ./internal/relay` clean; `gofmt -l .` output EMPTY.
+
+**No `CONTRACTS-*.md` plane moved and `AGENT_PROTOCOL.md` is untouched.** The task listed
+`CONTRACTS-ONDISK.md` as prospective, but no record type, wire version, route, env var or CLI surface
+changed — there is nothing to document there. `ACK-CONTRACT.md` §16 Q2 is now answered; the answer
+lives in `DECISIONS.md` and is pinned by a test rather than left as a default nobody chose.
+
+**Process.** The test-engineer running this task was killed mid-work by a session limit. Its file
+survived on disk and was complete and passing, but it had NOT reached the mutation stage — so the
+work looked finished while none of its assertions had ever been observed failing. The mutations above
+were run afterwards. A green test from an interrupted agent is exactly the shape that gets waved
+through; assume the proof is missing until it is quoted.
+
+## 2026-08-21 — CONTEXT-DOCCHECK: closing eleven gate findings inside the proof instrument itself
+
+**Task.** `CONTEXT-DOCCHECK` (`b3b28f45-54b3-4d0e-bde7-933c9c3923b2`). `scripts/doc-check.sh` plus the
+`CONTRACTS-AGENT.md` entry describing it, and the two `docs/*.tsv` files it reads. Not a server
+change: no Go file was touched.
+
+**Invariants read in full:** 7 (the compiled CLI is THE client — which settles that this script is
+repo TOOLING, so it needs no `agent-busctl` subcommand and must never become a `scripts/bus-*.sh`
+wrapper), 8 (bash and coreutils only, no dependency added), 9 (no crypto on this plane). 1-6, 10 and
+11 do not touch it: it opens no socket, mints no id and writes no WAL.
+
+**What was wrong, and what closed it.** Three rounds of gates, every finding demonstrated before it
+was fixed and mutation-proved after:
+
+| Finding | Was | Now |
+| --- | --- | --- |
+| trap interpolated `$tmp` | a quoted `TMPDIR` ran injected commands, selftest still PASS 27/27 | single-quoted trap + `${tmp:?}`; eight hostile `TMPDIR` shapes leave no marker |
+| no containment on `section <file>` | absolute and `../` paths read outside the repo | `path_is_contained` before the existence test |
+| duplicate headings | bound silently to the first match, both failure directions live | AMBIGUOUS, count + quoted spellings, and it says when NO pin exists |
+| `mktemp` unguarded | wrote `/doc.md` as root | status AND value tested |
+| dispatcher untested | `exit $?` -> `exit 0` left 42/42 green | 16 subprocess assertions through the real argv path |
+| exit codes self-referential | `EXIT_FAIL=0` left 42/42 green | literals pinned; failure path `exit 1`, bypassing the dispatcher |
+| re-entry via env var | an inherited variable dropped 7 guards, verdict line identical | private argv token; a probe compares assertion counts |
+| `budget` on an empty `.tsv` | `PASS — 0 file(s)` | no data rows is a FAIL |
+| `grep -F` guarantee | removing `-F` left the selftest green | regex-metacharacter needles must miss |
+| dated claims | a "live duplicates" list dated 08-16 was wrong in both directions | no list; the measuring command instead |
+| an unsourceable count | "eight broken proof commands" | dropped; `proof-cmd-audit.py` says 114 of one kind |
+
+**The one that matters most.** The header's own dated claim was false, inside the instrument built to
+catch false dated claims. A hand-maintained list of a moving property is a stale claim on a timer, so
+it was replaced by the `awk` one-liner that measures it. Every other round-2 date said 2026-08-16;
+the task journal has **no 08-16 notes at all**. Round 1 (08-14/08-15) was right, so the error was
+systematic, not a typo.
+
+**Verification.** Selftest 27 -> 96 assertions. A final suite of 25 mutation shapes, each RED with a
+named assertion and GREEN when restored; three of them found defects of their own — a `--selftest`
+arm mutated to `exit 0` printed SELFTEST FAIL and exited **0** (fixed: the failure path now `exit`s,
+bypassing the dispatcher); my first stub-`mktemp` mutant proved my own mutation rather than the
+guard; and re-running the original injection reproduction against the finished file exposed a
+**vacuous probe of my own** — the stub `mktemp` was installed via `PATH`, and the hostile `TMPDIR`
+fixture contains a colon, which `PATH` cannot represent, so the child silently ran the real `mktemp`.
+It is an exported shell function now, and the installation is verified before it is relied on. One
+18th mutant (faking that verification) is an equivalent mutant and stays green: the load-bearing
+check is the probe itself, which mutant 17 proves fires. Proofs run in a clean overlay of HEAD carrying only the changed files, through the
+OVERLAY's `scripts/proof-check.sh` by relative path: `verdict=PASS class=wrapper exit=0`.
+`doc-check.sh budget` stays RED (`CLAUDE.md` 30063 B over 28781 B at `85ed77f`) — the ratchet working, and the
+negative control proving the instrument can fail.
+
+**Chain that ran.** implementer (this) -> security (round 1 CHANGES, round 2 PASS) -> reviewer
+(round 1 BLOCKING x2, round 2 CHANGES x2) -> independent spot-check (4 findings, 2 of them
+corrections to evidence I had reported). Not committed by me; the integrator holds that gate.
+
+**Round 4** added two more of the same family, both found by security in the finished file: `sed`
+consumed a `<file>` named `-n` as an option and read **stdin**, printing a legitimate-looking PASS for
+a file without the needle; and `wc -c` output was compared with `-gt` without passing `is_uint` first,
+so a file that could not be measured counted as "within ceiling" — the very lesson this file's own
+`is_uint` comment records, left unclosed on the other operand. That second one also decides the
+row-deletion deferral: it achieved the same "quietly stop measuring the failing row" outcome with no
+`.tsv` diff at all, so the deferral only stands now that it is fixed. Two lows went with them: the
+`DOC_CHECK_BUDGETS`/`DOC_CHECK_PRESERVE` paths are now contained like the rows inside them, and
+heading text reaches `awk` via `ENVIRON` rather than `-v`, which interprets backslash escapes.
+
+**Round 5** closed two lows, one of which was a comment that lied. The `ENVIRON` note claimed an awk
+without it would leave `want` empty "so every heading would be reported NOT FOUND — loud, and in the
+safe direction". Measured, the opposite: an empty want matches a heading whose TEXT is empty (a bare
+`# ` line), scopes the whole file, and reports `PASS ... 1/1 needles inside "TotallyBogusHeading"`
+for a heading that does not exist. The property is now IMPLEMENTED — the awk `BEGIN` block bails on
+an empty want — rather than described. And the "29 stored proof_cmds invoke it" claim, sitting sixty
+lines below the paragraph that deleted an unsourceable "eight" for the same reason, was corrected to
+**16**, measured across a 783-task enumeration: all CONTEXT, all still `todo`, and 29 was never
+reachable because that epic holds 30 tasks in total.
+
+**Left open, deliberately.** A symlink inside the tree pointing outside still passes the lexical
+containment check — documented in the script header and in `CONTRACTS-AGENT.md`, with a `realpath`
+follow-up filed separately. Same-level duplicate headings are now unassertable until the document
+makes them unique; that is the intended outcome, not a regression. Deleting a *row* from
+`docs/doc-budgets.tsv` still turns the check green: the zero-row guard catches only the empty file,
+and the cheapest real fix is a `doc-preserve.tsv` row pinning `CLAUDE.md` inside `doc-budgets.tsv`,
+which needs no new code but is a policy call for `CONTEXT-BUDGET-WIRE`.
+
+**Security gate remediation (same task, before commit).** Security returned PASS with three P2s and
+one correction that mattered more than the nits:
+
+- **My own `DECISIONS.md` text overstated the §16 Q2 attack as present-tense.** The gate verified the
+  A->B->C suppression is NOT reachable at HEAD: directed routing picks exactly ONE next hop per
+  recipient, `Hub.recordAcceptance`'s recipient loop runs exactly once, and broadcast answers 501 —
+  so one job and one row per key, and a cancel could only reach the acking peer's own job. The RULING
+  is unchanged and correct; only the tense was wrong. Corrected with an explicit PRECONDITION block
+  naming when it goes live (multi-recipient send or broadcast) and warning a future reader not to
+  reverse the ruling after failing to reproduce it. **This is the repo's stale-prose failure mode
+  pointing the other way** — not a claim that decayed into falsehood, but one that was never true
+  yet, which reads identically and is just as misleading.
+- "`settleAck` holds no reference to the outbox or the forwarder at all" was true of the METHOD but
+  not the TYPE — `federation` reaches a forwarder one field-hop away via `onward.next`. Reworded so
+  the structural argument is not read as stronger than it is; the pin against regression is the test,
+  not the object graph.
+- Every `http.Client` in the test is now bounded by `a7ClientTimeout`. This file deliberately PARKS a
+  write inside the real `wal.Log` to force the reservation race, so "a request that never returns" is
+  a shape it manufactures on purpose — without a client timeout a genuine server hang was
+  indistinguishable from that park and degraded into a package-wide `go test` timeout: a failure with
+  no name, in a different test, minutes later. The bare `http.Post` in the §16 Q2 phase was
+  inheriting `http.DefaultClient`, which has no timeout at all.
+- The invariant-6 conflict-log assertion was a WHOLE-LOG substring match, so "conflict" and
+  "NOT disconnected" could be satisfied by two unrelated lines. Tightened to require a SINGLE line
+  (`a7LineContainingAll`) and **mutation-proven**: splitting the reasoning across two `log.Warn` calls
+  in `ackhttp.go` now goes RED, where the old assertion passed. That is a sixth mutation proof and the
+  P2 fix strengthened a guard that could not previously fire for that mutation.
+
+**Follow-up NOT filed as a new task, deliberately.** The gate's out-of-scope finding — that
+`AuthorizePeerAck` binds the peer to the KEY but never to the RECIPIENT — is already filed as
+`ACK-4-FU-RECIPIENT-BINDING` (P1, todo, filed 2026-08-16 from the ACK-3 gate). Two gates found it
+independently five days apart. Corroborated there with a `kind=report` note rather than duplicating
+it, adding the HEAD-current mechanism and the new coordination point: **ACK-14 is ruled to add the
+recipient to the outbox record, which is the same field that task needs to bind — whichever lands
+first owns it.**
+
+**Reservation-counter drift, observed.** `POST /reservations {"namespace":"task-key-ACK"}` returned
+**15**, but `ACK-15` already exists (the epic runs to ACK-18). The counter is behind the live keys, so
+every reservation from that namespace collides until it passes 18. Value 15 is now burnt — a GAP,
+which is expected and not a defect, but the namespace needs re-seeding or the next agent to reserve
+from it will hit the same 409. Reported rather than worked around; no duplicate task was created.
