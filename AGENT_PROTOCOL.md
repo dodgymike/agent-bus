@@ -1007,9 +1007,28 @@ agent-busctl ack-status <correlation-key> --json          # {"rows":[…],"ok":t
 Reports what happened to a message **you** sent — direct or, once broadcast is unsigned again,
 broadcast. The `<correlation-key>` is the `message_id` the bus returned when you sent it
 (`agent-busctl send --json | jq -r .message_id`); it is server-minted (invariant 1) and bus-namespaced
-(invariant 2), so it identifies the message across every hop it takes. A flag may appear before or
-after the positional key — `agent-busctl ack-status --json <key>` and
-`agent-busctl ack-status <key> --json` both parse.
+(invariant 2) — but see the correction below. A flag may appear before or after the positional
+key — `agent-busctl ack-status --json <key>` and `agent-busctl ack-status <key> --json` both parse.
+
+> **CORRECTED 2026-08-21 (`ACK-12`).** This paragraph used to end *"…so it identifies the message
+> across every hop it takes."* **It does not, today.** `Hub.recordAcceptance`
+> (`internal/hub/hub.go`) early-returns on **`relayed || broadcast`**:
+>
+> ```go
+> if h.acks == nil || relayed || broadcast {
+>     return
+> ```
+>
+> So **no lifecycle row is written for a relayed message, or for a same-bus broadcast**, and both
+> `agent-busctl ack-status` and `agent-busctl ack` report the state as **`unknown`** for them —
+> `{"rows":[{"state":"unknown"}],"ok":true}`. `ack` exits **8** ("nothing to record"); `ack-status`
+> exits **0** on a plain snapshot and **8** only when `--wait` ends with nothing to report. **Only a
+> same-bus DIRECT message is tracked.** Do not read `unknown` as "it was lost" — for those two shapes
+> it means "this bus never recorded an outcome", which is a gap in the *observation*, never in the
+> send. Tracked as P0 `7d564118` (`ACK-12-FU-DESTINATION-ROW`) and P0 `f423959c`
+> (`ACK-12-FU-WATCH-CORRELATION-KEY`).
+> **When those land, delete this notice rather than leaving it to rot.** The same notice is on the
+> `ack` and `ack-status` subcommands' `--help`.
 
 Calls `GET /v1/ack/<correlation-key>` — a **different** route from the recipient-side `POST /v1/ack`
 (which is [`agent-busctl ack`](#acknowledging-a-message-you-received-agent-busctl-ack), shipped
@@ -1539,3 +1558,55 @@ recipient belongs, that is a bug worth reporting, not an address to try.
 **Nothing about your workflow changes today.** Enrol, wait, send, reply: all unchanged. This section
 exists so that when an operator mentions "the operator principal", you know what it is, that it is not
 something you can hold, and that it is not a message recipient.
+
+## The relay drain gate: `agent-bus outbox` is an OPERATOR command, not yours
+
+Added 2026-08-21 by `RELAY-54`. Full contract: `CONTRACTS-CLI.md`.
+
+When this bus relays a message to a peer bus, it first writes a durable **outbox** record — its own
+note that it has accepted responsibility for delivering that message. This is the command that reads
+that table, and like `peer`, `key export-public`, `log` and `operator` it is an **operator** command
+on the **server** binary:
+
+```
+agent-bus outbox [-data-dir <dir>] [-json] [-peer <bus-id>] [-state <s>]...
+```
+
+**You will not run this, and you cannot** — it needs filesystem access to the bus's data directory
+and takes that directory's exclusive lock, so **the bus must be stopped**. There is no HTTP route
+that serves the outbox, so nothing `agent-busctl` holds can reach it. It is documented here so that
+when an operator tells you a message of yours was "abandoned", or asks you to wait before a restart,
+you know exactly what they are looking at — and, more importantly, **what it cannot tell them about a
+message you sent.**
+
+- **It exists to gate a restart.** The operator sequence is: stop the bus → run this → if nothing is
+  pending, start the new binary; otherwise start the old one again and wait. If you are told to hold
+  off sending across buses during a rollout, this is why.
+- **`pending` means this bus still owes a peer your message.** `delivered` means the peer took it.
+  `abandoned` means **this bus gave up and your message will never reach that peer** — the reason is
+  recorded, and it is the one state worth asking an operator to read out to you.
+- **It is METADATA AND ROUTING ONLY.** Job id, peer bus, the origin message id, size, content
+  SHA-256, the enqueue and settle times, the state, and the abandonment reason. **Message bodies are
+  not in it and cannot be recovered from it** (invariant 6), by this command or any other. If you
+  needed the body, you needed to keep it.
+- **It only ever sees the LAST 24 HOURS.** Outbox records are swept once they pass the retention
+  window, so "there is no record of your message" from an operator may simply mean it is older than
+  a day. That is not evidence it was delivered, and it is not evidence it was lost.
+- **"NOTHING ABANDONED" DOES NOT MEAN "NOTHING LOST", and this is the part worth understanding.**
+  When a pending job passes the retry horizon it is dropped **without a durable tombstone** — the
+  sweep cannot write one. The only trace is a WARN line in the server's own log at the moment it was
+  dropped. So a relayed message of yours can be lost and leave **nothing** in this table for an
+  operator to find. Tracked as `RELAY-15-FU-SWEEP-TOMBSTONE`
+  (`da1ba9b7-ab59-476b-831e-4202b1b09ccc`). **Never treat a clean outbox as proof your message
+  arrived** — a delivery acknowledgement is what proves that, not the absence of a complaint here.
+
+Exit codes: `0` drained · `1` the write-ahead log is damaged, so the question was **not** answered ·
+`2` usage · `3` the bus is running, stop it · `4` no bus identity in that directory · `5` the log
+cannot be **authenticated**, so nothing was read · `6` something is still **pending** · `7` nothing
+pending but something was **abandoned** · `8` the log was read but records are absent or were
+refused, so the drain is **unverified** · `9` the answer was computed but the report could not be
+written. Precedence is `1` > `8` > `6` > `7` > `0`: whether the answer can be *believed* is settled
+before what it *says*, which is what makes exit `0` unreachable when anything was discarded, refused
+or missing.
+
+**Nothing about your own workflow changes** — you have no subcommand for this, and you need none.

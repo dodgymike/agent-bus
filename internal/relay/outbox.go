@@ -1481,7 +1481,61 @@ func (ob *Outbox) Lookup(jobID string) (OutboxRecord, bool) {
 // The order is deterministic rather than map order because a restart must
 // re-offer jobs in the same sequence it would have sent them, and because a
 // non-deterministic order makes a failure impossible to reproduce.
-func (ob *Outbox) Pending() []OutboxRecord {
+//
+// It is now exactly Jobs(OutboxPending) — one selection and one sort, so the
+// pending set and any wider operator view can never disagree about ordering or
+// about which records the sweep has already taken out of the answer.
+func (ob *Outbox) Pending() []OutboxRecord { return ob.Jobs(OutboxPending) }
+
+// Jobs returns every retained record whose state is in states, in Pending's
+// deterministic order: oldest enqueue first, job id as the tie-break. Passing
+// NO states returns EVERY state.
+//
+// It exists for the operator question RELAY-54 filed and Pending cannot answer:
+// "is anything stuck, and is anything LOST?" Pending sees only the jobs still
+// owed, so an abandoned job — a message this bus accepted and will never
+// deliver, which invariant 6 requires be recorded specifically rather than
+// discarded silently — was durable in the log and reachable from no caller.
+//
+// # IT IS A PURE QUERY, WHICH IS WHY ITS LOCKING IS TRIVIAL
+//
+// Take mu, sweep (every exported entry point sweeps first — that is why mu is a
+// plain Mutex and not an RWMutex: sweeping mutates), copy out of the in-memory
+// table, sort, return. IT NEVER CALLS INTO THE DURABLE LOG. So rule 2 on Outbox
+// — the lock is never held across a durable write — holds here trivially rather
+// than by care, and the MEASURED lock-order inversion outboxCheckpointReclaims
+// documents (ob.mu -> log.mu against log.mu -> ob.mu, via wal.Log.Write ->
+// Apply) is not approached at all. Nothing may be added here that reaches the
+// log.
+//
+// Records already marked expired are skipped, exactly as they were when this
+// body was Pending's: a checkpoint-capable log keeps the record in the table so
+// tail replay cannot resurrect it, but it is no longer part of the answer.
+//
+// Duplicate states are harmless. Membership is tested per record rather than by
+// iterating the filter, so Jobs(OutboxPending, OutboxPending) yields each
+// record ONCE — a caller assembling a filter from repeatable CLI flags does not
+// have to deduplicate it first.
+//
+// # THE RESULT IS BOUNDED BY THE RETENTION WINDOW, AND A CALLER MUST SAY SO
+//
+// sweepLocked has already dropped pending jobs past ob.retryHorizon (which
+// defaults to OutboxRetryHorizon) and settled tombstones past
+// ob.settledRetention (which defaults to OutboxSettledRetention). The two
+// constants hold the SAME value, 24h, and are named separately anyway because
+// they bound different things and only one of them is the retention window — so
+// this can only ever describe roughly THE LAST 24 HOURS. Anything older is gone
+// from the table and there is nothing here to report it.
+//
+// Worse, and it is the limit an operator must be told about explicitly: the
+// horizon sweep WRITES NO DURABLE TOMBSTONE (see sweepLocked — it cannot, since
+// it runs with mu held and this package never holds the lock across a durable
+// write). A pending job dropped at the horizon leaves a WARN line in the
+// server's log and NOTHING in this table. So an empty abandoned set is evidence
+// that nothing was RECORDED as lost inside the window, and is NOT evidence that
+// nothing was lost. Any caller that renders this for a human must state that,
+// or it converts a gap into a false assurance.
+func (ob *Outbox) Jobs(states ...OutboxState) []OutboxRecord {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	ob.sweepLocked(ob.now())
@@ -1490,9 +1544,17 @@ func (ob *Outbox) Pending() []OutboxRecord {
 		if _, expired := ob.expired[id]; expired {
 			continue
 		}
-		if r.State == OutboxPending {
-			out = append(out, r)
+		wanted := len(states) == 0
+		for _, s := range states {
+			if s == r.State {
+				wanted = true
+				break
+			}
 		}
+		if !wanted {
+			continue
+		}
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].EnqueuedAt.Equal(out[j].EnqueuedAt) {

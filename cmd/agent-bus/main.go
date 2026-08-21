@@ -259,6 +259,24 @@ func main() {
 		os.Exit(runOperatorCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `agent-bus outbox` is the RELAY DELIVERY DRAIN GATE (RELAY-54): the
+	// read-only view of the durable outbox, so an operator can answer "is
+	// anything still owed to a peer, and has anything been abandoned?" BEFORE
+	// restarting a bus. Until it landed, an abandoned outbox job was invisible to
+	// every subcommand -- `log` reads bus.audit, which is a different artefact --
+	// so the drain a rollout needs could not be verified at all, which is why
+	// RELAY-51 rejected drain-and-restart as a rollout order. A capability with
+	// no reachable subcommand is not a capability (invariant 7).
+	//
+	// It is on this binary for `invite mint`'s reason -- the authority behind it
+	// is FILESYSTEM ACCESS to the data directory, not a network privilege -- and
+	// it takes the same exclusive lock, so like `peer`, `key`, `log` and
+	// `operator` it needs the bus STOPPED. That does NOT defeat the gate: the
+	// stop is the restart's first half anyway. See cmd/agent-bus/outbox.go.
+	if len(os.Args) > 1 && os.Args[1] == outboxCommandName {
+		os.Exit(runOutboxCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -309,6 +327,11 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 			"                        credential can never satisfy. `%s %s revoke` is the only\n"+
 			"                        way to take an operator's authority away\n"+
 			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, operatorCommandName, prog, operatorCommandName, prog, operatorCommandName)
+		fmt.Fprintf(out, "  %s %s\n"+
+			"                        the RELAY DRAIN GATE: what this bus still owes its peers,\n"+
+			"                        and what it has ABANDONED. The exit code IS the answer --\n"+
+			"                        6 means jobs are still pending, so do not restart yet\n"+
+			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, outboxCommandName, prog, outboxCommandName)
 	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")

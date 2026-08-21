@@ -1135,7 +1135,154 @@ remembers it can tell a correction from a deletion.
   admitting or revoking one is still an **offline** action under the data directory's exclusive lock,
   so a revocation needs the bus restarted before it is in effect.
 
+### `agent-bus outbox` — the RELAY DRAIN GATE: what this bus still owes, and what it gave up on (`RELAY-54`, 2026-08-21)
+
+Source: `cmd/agent-bus/outbox.go`. Query method: `relay.Outbox.Jobs(states ...relay.OutboxState)`.
+
+```
+agent-bus outbox [-data-dir <dir>] [-json] [-peer <bus-id>] [-state <s>]...
+```
+
+An **offline, read-only** view of the durable relay outbox — the table of messages this bus accepted
+responsibility for delivering to a peer. It answers two questions an operator could not previously
+ask at all: **is anything still pending, and has anything been abandoned — and for which peer.**
+
+**Why it exists.** `RELAY-51` REJECTED drain-and-restart as a rollout order, because a drain must be
+VERIFIED before you restart and the instrument that would verify it did not exist. `agent-bus log`
+reads `bus.audit`, which is a **different artefact** and holds no outbox record. An abandoned outbox
+job — a message this bus will never deliver — was durable in `bus.wal` and reachable from no
+subcommand.
+
+**The rollout sequence it is for:** stop bus A → run this → if nothing is pending, start the NEW
+binary; otherwise start the OLD binary again and wait. **A stopped bus does not defeat the gate** —
+the stop is the restart's first half anyway, and a running bus is still enqueueing, so a drain cannot
+be verified against one.
+
+**It is a subcommand on the SERVER binary, not on `agent-busctl`,** for `invite mint`'s reason
+(`DECISIONS.md` E4), restated by `peer`, `key export-public`, `log` and `operator`: the authority it
+needs is **filesystem access** to the data directory, not a network privilege. `agent-busctl` imports
+only `client/`, `internal/buscert` and `internal/signing` and has no data-directory, WAL or `dirlock`
+plumbing. **There is no HTTP route that serves the outbox and this command does not add one** — the
+operator principal (`42fad3c`) is offline-only.
+
+**THE BUS MUST BE STOPPED.** It takes the data directory's exclusive `dirlock` (exit `3` otherwise).
+
+**It is STRUCTURALLY read-only, not merely careful:** the `relay.Outbox` is constructed with
+`Durable: nil`, so every mutating call on it fails with `relay.ErrOutboxNotDurable`, and the log is
+read with `wal.Replay`, which repairs nothing and truncates nothing.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-data-dir` | `./data` | The bus's data directory. It must already hold a bus identity; **this command never creates one** (exit `4` otherwise). |
+| `-json` | off | Emit **ONE JSON object** with `ok` first — **not** NDJSON (unlike `agent-bus log`). Carries `integrity`, `filter`, `counts`, both per-peer breakdowns, the selected `jobs`, `limits` and `exit_code`. |
+| `-peer <bus-id>` | — | Print only jobs owed to this peer bus (exact match). |
+| `-state <s>` | — | Print only jobs in this state: `pending`, `delivered` or `abandoned`. Repeatable; an unrecognised value is exit `2`. |
+
+**FILTERS NEVER CHANGE THE EXIT CODE.** The verdict, `counts` and both per-peer breakdowns are
+computed over the **WHOLE** outbox *before* `-peer` and `-state` are consulted; a filter changes only
+the printed `jobs` list. This mirrors `agent-bus log`'s "filters never suppress damage" rule and
+exists for the same reason: a filter that could turn a `6` into a `0` would make this command's
+silence meaningless, and its silence is the entire product.
+
+#### Exit codes (`agent-bus outbox`) — CONTRACT
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Read cleanly; **nothing pending and nothing abandoned** — the outbox is drained. |
+| `1` | The write-ahead log is **DAMAGED**: it could not be read, or the replay **threw bytes away**. The question was **NOT ANSWERED** — this must never be read as "drained". |
+| `2` | Usage: bad flag, unexpected positional argument, unparseable filter value. Nothing was read. |
+| `3` | The data directory is **locked** by a live process, almost certainly the bus. Stop it and retry. |
+| `4` | The data directory holds **no bus identity** (`bus-id`), so it is not a bus's data directory. Also covers a `-data-dir` that is absent or is not a directory. |
+| `5` | **UNVERIFIABLE:** `wal-mac.key` is absent, so nothing in `bus.wal` can be authenticated. **Nothing was read, nothing was printed, and NO KEY WAS CREATED.** |
+| `6` | Read cleanly; **at least one job is PENDING** — the drain is **NOT** complete. Do not restart onto a new binary. |
+| `7` | Read cleanly; nothing pending, but **at least one job is ABANDONED** inside the retention window — messages this bus accepted will never reach their peer. |
+| `8` | The log was read and **no bytes were lost**, but record indices are **absent** from it, or an outbox record was **REFUSED** as it was applied, so **THE DRAIN IS UNVERIFIED**. This is **NOT** a claim of damage (see below). Treat it as a stop. |
+| `9` | The outbox was read and the verdict computed, but the **REPORT could not be written** (closed pipe, failing disk). Nothing is implied about the log. |
+
+**PRECEDENCE: `1` > `8` > `6` > `7` > `0`.** `1` and `8` say whether the answer can be **believed**;
+`6`, `7` and `0` say what it **is**, and trust is decided first. **Exit `0` is therefore
+STRUCTURALLY UNREACHABLE whenever anything was discarded, refused or missing** — a quiet instrument
+must not be able to spell itself the same way as a quiet outbox. `9` is neither: it means the answer
+never reached you.
+
+That property is the point of the task. Before it, `wal.Replay` returning `err == nil` for
+**record-level** discards meant a damaged log printed `VERDICT: DRAINED … safe to start the new
+binary` with **exit 0 and empty stderr** — a gate reporting green over damage, which is the exact
+`RELAY-51` shape.
+
+**Why `8` is separate from `1`, and not more `1`s.** A `wal.Discard` with `Length > 0`, or `Severe`,
+or `Stage == "framing"` means bytes were actually thrown away → `1`. A discard with `Length == 0` is
+a **hole in the index sequence** → `8`, because `internal/wal/replay.go` says a hole may be a record
+lost from the media, a record an earlier recovery correctly discarded without renumbering the
+survivors, **or an index range BURNED BY A RESERVATION A CRASH NEVER USED** — the ordinary
+post-crash signature, since the durable index floor authorises indices in blocks and an authorised
+index is never authorised again (invariant 1). `Recovered.MissingRecords` is documented as an
+**UPPER BOUND ON LOSS, NOT A COUNT OF IT**. Reporting "damaged" on every bus that ever crashed would
+be a channel that cries wolf; reporting "drained" would be worse. `DiscardCount > len(Discarded)`
+is also `1`: wal caps retained detail, and a loss nobody can inspect reads as damage.
+
+**Dangling prepares are deliberately NOT a trust signal.** A prepare that reached neither commit nor
+abort is the ordinary crash-between-the-two-fsyncs signature, and **nothing about it was ever
+acknowledged** (invariant 4), so it does not make the answer doubtful. It is still **reported** on
+the trustworthy path, because `wal.Replay` has no logger and this read path would otherwise be
+quieter than a normal `wal.Open` start.
+
+#### `--json`: the `integrity` and `filter` blocks
+
+Both are **always present and never null**.
+
+```json
+"integrity": {"trustworthy":true,"wal_discards":0,"missing_records":0,"index_gaps":0,
+              "outbox_records_refused":0,"dangling_prepares":0,"discarded":[]},
+"filter":    {"peer":"","states":[],
+              "note":"jobs is filtered; counts, the per-peer breakdowns and exit_code are computed over the whole outbox"}
+```
+
+`discarded[]` entries carry `stage`, `index`, `offset`, `length`, `reason`. **`discarded` is CAPPED**
+(wal's `maxDiscardsRetained`) while **`wal_discards` is EXACT** — never read `len(discarded)` as the
+total. `pending_by_peer`, `abandoned_by_peer`, `jobs`, `limits` and `discarded` are `[]` when empty,
+never `null`.
+
+A job object carries **routing and accounting only** — `job_id`, `peer_bus_id`, `origin_message_id`,
+`state`, `enqueued_at`, `settled_at`, `reason`, `size`, `content_sha256`. **There is no body,
+payload, raw or catch-all field** (invariant 6), and the raw WAL frame is never marshalled.
+
+**Untrusted text is quoted on the human output** (`strconv.Quote`, the house standard from
+`internal/logging`): the stored abandonment `reason`, the wal discard `reason`, `-data-dir` and
+`-peer`. A stored reason is bounded and UTF-8-validated but **control characters survive**, and a
+security gate demonstrated a reason carrying `ESC[2J ESC[H` repainting a **fake `VERDICT: DRAINED`**
+over the real one — on the one command whose product is a restart decision.
+
+#### TWO LIMITS THIS COMMAND STATES IN ITS OWN OUTPUT — and they belong here too
+
+1. **It can only ever answer about the LAST 24 HOURS.** Retention is `relay.OutboxSettledRetention`
+   ( = `RetryHorizonCeiling` = `idem.PeerOutageBudget` = 24h). Anything older has been swept out of
+   the table. The prose in `-h` and in `limits[]` is **derived from the constant**, not typed beside
+   it, so it cannot rot the day the constant moves; `retention_window_seconds` reports it exactly.
+2. **"NOTHING ABANDONED" DOES NOT MEAN "NOTHING LOST".** When a pending job passes the retry horizon
+   the sweep drops it **without a durable tombstone** — it cannot write one, because it runs holding
+   a lock this package never holds across a durable write. The only trace is a WARN line in the
+   **server's** log at the moment it was dropped. So a message can be lost and leave nothing for this
+   command to find. Tracked as **`RELAY-15-FU-SWEEP-TOMBSTONE`** (`da1ba9b7-ab59-476b-831e-4202b1b09ccc`);
+   this command references the gap and does not fix it.
+
+Both limits appear in the human output, in `-h`, and in the JSON `limits` array — a caveat only
+humans can see is a caveat that gets dropped.
+
+#### It refuses to mint the key that would authenticate the file it is judging
+
+`wal.macKeyFor` **creates `wal-mac.key` as a side effect of a read** whenever the log is non-empty and
+does not positively identify itself as format version 2 (garbage magic, or a header too short to
+read). A reader without a guard therefore *manufactures the authority to verify the very bytes it is
+about to judge* — and every positive test passes either way. This command reuses `auditlog.go`'s
+`checkMACKeyPresent` and calls it **before `dirlock.Acquire`** (so a refusal writes nothing at all,
+not even `bus.lock`) **and again under the lock** (the pre-lock check races a concurrent delete).
+That pre-lock + post-lock pair is **stricter than `agent-bus log`**, whose MAC-key check is post-lock
+only. The same guard makes `ids.LoadOrCreateBusID`'s *create* half unreachable, so no bus id is ever
+minted by a read (invariants 1 and 2).
+
 ---
+
 
 ## `cmd/agent-busctl` — the client
 
