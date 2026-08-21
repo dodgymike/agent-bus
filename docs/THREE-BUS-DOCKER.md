@@ -439,20 +439,170 @@ early and only expiry retires it.
 **Do not run two containers against the same data volume.** The dirlock will stop the second one, but
 do not rely on that as a design.
 
+### Rolling out a wire change — readers first
+
+**A bus-to-bus frame gains a field only in two deploys, readers before senders. One deploy loses
+messages permanently.** This is a procedure, not advice, and every log line quoted below was
+observed, not expected.
+
+*Verified 2026-08-21 against `591355f`, on the loopback three-bus harness `scripts/fed-smoke.sh` —
+**not** on the Docker set this runbook otherwise describes.* Seven runs: the hazard cases failed and
+the readers-first cases passed. That harness proves the bus-to-bus wire behaviour, which is what this
+section is about, and its own header disclaims the rest — SSH tunnel bring-up, flap recovery,
+NAT/keepalive, latency against `RetryHorizonCeiling`, and pinning across a real tunnel. The
+`docker` commands below follow from the same ordering but were not themselves rehearsed.
+
+**Why one deploy destroys traffic.** The peer surface decodes with `DisallowUnknownFields`
+(`internal/relay/handshake.go`), so a bus running yesterday's binary answers **400 invalid_request**
+to any frame carrying a field it does not know. The sender then classifies that 400 with
+`PeerRefusedError.Retriable` (`internal/relay/client.go`), which is true for **408, 429 and 5xx
+only** — every other 4xx is a verdict on the message's content, and resending identical bytes cannot
+change it. So the message is **abandoned on the first attempt**, not retried:
+
+```
+# on the OLD receiver
+msg="peer request rejected" surface=peer-relay status=400 code=invalid_request \
+  err="relay: invalid peer handshake payload: json: unknown field \"protocol_version\""
+
+# on the NEW sender, same millisecond
+msg="relay forward failed"          ... attempt=1 retriable=false
+msg="an outbox job was ABANDONED; this message will never reach the peer"
+msg="relay forward permanently refused; NOT retried, because resending identical bytes cannot change this answer" attempts=1
+```
+
+`attempt=1` is the whole problem. The retry horizon is never entered, so the loss is not a delay you
+can wait out — and it is **total for the affected link**, because the first-hop path and the
+restart-resume path both emit through the same `Forward`.
+
+None of that is a defect to be fixed by loosening the decoder. An unknown field on a federation
+surface is a real signal, and the strict decode is the standing posture on this surface. Which means
+a version field does **not** buy forward compatibility here — it makes the *next* change diagnosable,
+and that is a different and smaller thing. **The cost of the strictness is paid in deploy discipline,
+which is what this section is.**
+
+Two consequences that are easy to get wrong:
+
+* **A transit bus is a sender too.** Upgrading only the middle bus breaks the second hop. Observed on
+  `A(old) → B(new) → C(old)`: A→B was fine, B→C was refused, and **B** logged the abandonment.
+* **The origin sees nothing.** In that same run bus A — which minted the message and owes the
+  delivery — logged **zero** forward failures, because its own hop succeeded. The three lines above
+  appear only on the bus that actually attempted the refused hop. There is also **no CLI subcommand
+  that surfaces an abandoned outbox job**: `agent-bus log` reads the audit file, and the
+  `"state":"abandoned"` outbox record lives in the WAL. So during a rollout, **the bus logs are your
+  only instrument** — collect them from every bus, not just the origin.
+
+**The procedure.** Build two images from the change: an **accept-only** build, which knows the field
+in its decoder but never sets it on an outgoing frame, and the **emitting** build. In Go these differ
+by one line, because a `json:"…,omitempty"` field that nothing assigns is absent from the wire — the
+accept-only build is the full struct change with the sender's assignment left out.
+
+```bash
+# roll IMAGE — replace one bus, and REFUSE to destroy it for an image that is
+# not there. `docker rm -f` before a `docker run` that cannot succeed leaves you
+# with no bus at all, and the health loop then spins forever, because
+# `docker inspect` on an absent container prints nothing and nothing is never
+# "healthy". Check the image first, and bound the wait.
+roll() {
+  local n="$1" image="$2" i=0
+  docker image inspect "$image" >/dev/null || { echo "no such image: $image" >&2; return 1; }
+  docker rm -f bus-$n
+  docker run -d --name bus-$n --network busnet -v bus-$n-data:/data \
+    --restart unless-stopped "$image"
+  until [ "$(docker inspect --format '{{.State.Health.Status}}' bus-$n 2>/dev/null)" = healthy ]; do
+    i=$((i + 1)); [ "$i" -lt 60 ] || { echo "bus-$n never became healthy" >&2; return 1; }
+    sleep 1
+  done
+}
+
+# gate IMAGE — assert, do not eyeball. Every bus must be on IMAGE *and* actually
+# serving the peer surface. This is the step the whole procedure rests on, so it
+# has to be able to go red; a list of image names printed for a human to compare
+# is not a check.
+gate() {
+  local image="$1" n ok=0
+  for n in a b c; do
+    [ "$(docker inspect --format '{{.Config.Image}}' bus-$n)" = "$image" ] ||
+      { echo "bus-$n is NOT on $image" >&2; ok=1; }
+    docker logs bus-$n 2>&1 | grep -q 'FEDERATION IS NOT SERVED' &&
+      { echo "bus-$n is not serving the peer surface" >&2; ok=1; }
+  done
+  [ "$ok" -eq 0 ] && echo "GATE OK: all three buses on $image and federating"
+  return $ok
+}
+
+# Stage 1 — every bus learns to READ the field. No frame carries it yet, so
+# an upgraded bus and a not-yet-upgraded bus interoperate in both directions
+# and the buses may be rolled one at a time, in any order, with no window.
+for n in c b a; do roll $n agent-bus:accept-only || break; done
+gate agent-bus:accept-only || echo "STOP — do not start stage 2"
+
+# Stage 2 — buses start EMITTING the field. Safe now, and again one at a time,
+# because every peer has been able to read it since stage 1.
+for n in c b a; do roll $n agent-bus:emitting || break; done
+gate agent-bus:emitting
+```
+
+Downstream-first (`c b a`) within each stage for the reason §3.6 gives. Neither stage needs a
+drain or a maintenance window; that is the point of splitting them.
+
+**"Healthy" does not mean "federating", and this is the trap in the gate above.** Peer-route
+registration is all-or-nothing: if the peer surface is supplied but incomplete,
+`httpapi.mountPeerSurface` registers **no peer route at all** and *every* `/v1/peer/` path — relay
+included — answers **404**. The bus still starts, and its container healthcheck still reports
+`healthy`, because serving federation is not what `/healthz` measures. Meanwhile 404 is non-retriable
+just like the 400 above, so every peer sending to that bus **abandons** its traffic. The only signal
+is a startup line at `level=error`:
+
+```
+msg="FEDERATION IS NOT SERVED: a PeerSurface was supplied but is incomplete, so no peer route is registered and every /v1/peer/ path answers 404"
+```
+
+So gate each stage on that line's **absence**, not on the healthcheck. A bus can be on the right
+image, healthy, and silently deaf to the entire federation.
+
+**A new peer ROUTE is the same hazard with a different status code.** A bus that does not serve the
+route answers **404**, which `Retriable` also treats as final. `POST /v1/peer/ack`
+(`internal/relay/ackhttp.go`) is the live example: the route shipped with no caller precisely so that
+every bus can serve it before anything emits to it. Roll the receiving half first, confirm it
+everywhere, then enable emission — the same two stages.
+
+**Rehearse it before you do it.** `scripts/fed-smoke.sh` runs the three-bus A→B→C proof on one build
+by default, and takes a per-bus override so you can put a *different build* on each bus and rehearse
+the mixed state a rollout actually passes through:
+
+```bash
+# The hazard, on purpose: a bus that emits, talking to one that cannot read.
+# This run FAILS, and the artifacts it preserves under /tmp/fed-smoke-{a,b,c}
+# contain the log lines quoted above.
+FED_SMOKE_SERVE_A=/path/to/emitting-checkout/scripts/bus-serve.sh \
+  bash scripts/fed-smoke.sh
+
+# Stage 2 as it will really run: an emitting sender into accept-only peers.
+FED_SMOKE_SERVE_A=/path/to/emitting-checkout/scripts/bus-serve.sh \
+FED_SMOKE_SERVE_B=/path/to/accept-only-checkout/scripts/bus-serve.sh \
+FED_SMOKE_SERVE_C=/path/to/accept-only-checkout/scripts/bus-serve.sh \
+  bash scripts/fed-smoke.sh
+```
+
+Each variable names the `scripts/bus-serve.sh` of another checkout, and `bus-serve.sh` builds the
+server from the tree it lives in — that is what puts a different binary on that bus. Unset, all three
+default to this checkout and the run is exactly the single-build smoke test it has always been.
+**Rehearse the failing direction too, and confirm it fails**: a rollout plan whose hazard was never
+reproduced is a plan nobody has tested.
+
 ---
 
 ## 5. Known gaps
 
 These are real, currently true, and stated here rather than discovered later.
 
-* **`scripts/fed-smoke.sh` exits 1, and that is a defect in the test, not in the product.** It
-  asserts one identical `message_id` across all three buses. Every bus is authoritative on its own
-  ids (invariant 1) and mints its own, so the assertion cannot hold. Directly observed in the run
-  above: the sender saw `bus-t4yr4qzepvv7zjd6-11` on A while the recipient saw
-  `bus-rupqkacueu6qce45-9` on C — the same message, two ids. **Do not treat that script's exit status
-  as a green check for your deployment.** Tracked as `RELAY-25-FU-CORRELATION`. There is no
-  cross-bus correlation id today. `content_sha256` is the practical substitute — **but read the next
-  bullet before using it.**
+* **There is still no cross-bus correlation id.** Every bus is authoritative on its own ids
+  (invariant 1) and mints its own, so one logical message is `bus-t4yr4qzepvv7zjd6-11` on A and
+  `bus-rupqkacueu6qce45-9` on C. `content_sha256` is the practical substitute — **but read the next
+  bullet before using it.** (`scripts/fed-smoke.sh` used to assert one identical `message_id` across
+  all three buses, which invariant 1 makes unsatisfiable, and so could never pass. That assertion was
+  removed under `RELAY-25-FU-CORRELATION`; the script now correlates on the audit digest and **exits
+  0**. This entry previously said it exits 1 — verified 2026-08-21 that it does not.)
 * **`content_sha256` is stable across buses, and differs between the two views that report it.** In
   one verified run the value was `9322…` in both the sender's `send` result and the recipient's
   `watch` record, and `fe31…` in the `agent-bus log` audit record on *all three* buses. So it

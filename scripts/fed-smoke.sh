@@ -36,6 +36,33 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pw
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 readonly SERVE="${REPO_ROOT}/scripts/bus-serve.sh"
 
+# MIXED-VERSION REHEARSAL (RELAY-51) -- per-bus lifecycle command overrides.
+#
+# bus-serve.sh builds the server from the repository root it ITSELF lives in, so
+# pointing a bus at a bus-serve.sh under a DIFFERENT checkout is what runs that
+# bus on a DIFFERENT BUILD. That is the only way to rehearse a rollout, because
+# a rollout is by definition the window in which two buses run different
+# binaries, and a harness that can only run one build can never enter it.
+#
+# Default is this checkout for all three, so an unset environment is byte-for-byte
+# the single-build behaviour every existing invocation and proof_cmd relies on.
+#
+#   FED_SMOKE_SERVE_A=/path/to/other/checkout/scripts/bus-serve.sh bash scripts/fed-smoke.sh
+#
+# The three buses are the SENDER (A), the TRANSIT bus (B) and the RECIPIENT (C),
+# so A-new/B-old is the emitter-meets-old-reader case and A-old/B-new is the
+# readers-first case. See docs/THREE-BUS-DOCKER.md "Rolling out a wire change".
+#
+# THESE OVERRIDE THE SERVER BUILD ONLY. The compiled agent CLI is always built
+# from THIS checkout (see the `go build ./cmd/agent-busctl` below), so a mixed
+# run varies the three bus binaries against ONE client. That is the right shape
+# for a bus-to-bus wire change, which is what this exists for -- but it means a
+# rehearsal of an AGENT-FACING wire change would go falsely green here, because
+# the client half never varies. Do not use these to rehearse one.
+readonly SERVE_A="${FED_SMOKE_SERVE_A:-$SERVE}"
+readonly SERVE_B="${FED_SMOKE_SERVE_B:-$SERVE}"
+readonly SERVE_C="${FED_SMOKE_SERVE_C:-$SERVE}"
+
 readonly ROOT_A=/tmp/fed-smoke-a
 readonly ROOT_B=/tmp/fed-smoke-b
 readonly ROOT_C=/tmp/fed-smoke-c
@@ -85,12 +112,28 @@ owns_root() {
   [[ "$token" == "$OWNER_TOKEN" ]]
 }
 
+# serve_for_run_dir maps a bus's run directory to the lifecycle command that
+# BUILDS AND RUNS it. It fails closed: an unrecognised run directory is a caller
+# bug, and silently falling back to the default checkout would run a bus on the
+# wrong build while reporting success -- the exact fail-silent direction a
+# mixed-version rehearsal cannot tolerate, since "the message got through" would
+# then be evidence about a topology nobody configured.
+serve_for_run_dir() {
+  case "$1" in
+    "$RUN_A") printf '%s' "$SERVE_A" ;;
+    "$RUN_B") printf '%s' "$SERVE_B" ;;
+    "$RUN_C") printf '%s' "$SERVE_C" ;;
+    *) die "serve_for_run_dir: unknown run directory $1" ;;
+  esac
+}
+
 serve_bus() {
-  local run_dir="$1" data_dir="$2" listen="$3" action="$4"
+  local run_dir="$1" data_dir="$2" listen="$3" action="$4" serve=""
+  serve="$(serve_for_run_dir "$run_dir")"
   AGENT_BUS_RUN_DIR="$run_dir" \
     AGENT_BUS_DATA_DIR="$data_dir" \
     AGENT_BUS_LISTEN="$listen" \
-    "$SERVE" "$action"
+    "$serve" "$action"
 }
 
 stop_owned_bus() {
@@ -548,7 +591,29 @@ if [[ "${1:-}" == "--self-test" ]]; then
 fi
 
 command -v jq >/dev/null 2>&1 || die "jq is required to validate compiled --json output"
-[[ -x "$SERVE" ]] || die "sanctioned lifecycle command is not executable: $SERVE"
+for candidate in "$SERVE_A" "$SERVE_B" "$SERVE_C"; do
+  # -f as well as -x: a DIRECTORY is executable, and naming one would otherwise
+  # pass this check and fail later as an opaque exec error.
+  [[ -f "$candidate" && -x "$candidate" ]] ||
+    die "sanctioned lifecycle command is not an executable file: $candidate"
+done
+unset candidate
+
+# STATE WHICH BUILD EACH BUS RAN, ON EVERY RUN -- never only when an override is
+# detected. A run that announced itself only when it saw an override would make
+# the operator's evidence the ABSENCE of a line, and absence is indistinguishable
+# from a typo: FED_SMOKE_SERVE_1=... or a lowercased name is silently ignored, all
+# three buses quietly default to this checkout, and the run PASSES while the
+# operator believes a mixed-version rehearsal happened. A passing run then deletes
+# its roots, so this banner is the only provenance that survives it.
+if [[ "$SERVE_A" == "$SERVE" && "$SERVE_B" == "$SERVE" && "$SERVE_C" == "$SERVE" ]]; then
+  note "single-build run -- all three buses build from this checkout"
+else
+  note "MIXED-VERSION RUN -- the buses are NOT all on this checkout's build"
+fi
+note "  A (sender)    $SERVE_A"
+note "  B (transit)   $SERVE_B"
+note "  C (recipient) $SERVE_C"
 
 preflight
 trap cleanup EXIT
