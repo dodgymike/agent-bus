@@ -92,9 +92,15 @@ one needs an explicit decision recorded in `DECISIONS.md`.
      NOT derived from the registered routes, so it does not disclose which optional surfaces this
      build serves.
 
-   **UNDERCOUNTING AN ALLOW-LIST IS NOT A HARMLESS DOC BUG.** Three different counts were live in
-   this repo simultaneously — six in the code, five here and in `CLAUDE.md`, and "the four on the
-   allow-list" in `internal/httpapi/ack_test.go:407`. Every one of them reads as freshly checked. An
+   **UNDERCOUNTING AN ALLOW-LIST IS NOT A HARMLESS DOC BUG.** *(Historical, reconciled 2026-08-21;
+   this is a record of a defect that HAS been fixed, not a live one.)* Until 2026-08-21 this repo
+   carried three different counts of this allow-list at the same time — the code's, a smaller one
+   here and in `CLAUDE.md`, and smaller again in the failure message of a test under
+   `internal/httpapi`, which stated a count of its own. Every one of them read as freshly checked,
+   which is why all three survived so long. They have since been reconciled against the code: this
+   file and `CLAUDE.md` cite `internal/httpapi/authmw.go:76`, and the test message now defers to
+   `httpapi.UnauthenticatedRoutes()` instead of naming a number. The lesson outlives the defect,
+   because a count in prose goes stale in silence while the list itself cannot. An
    auditor reconciling the code against the docs finds an entry the docs do not mention and cannot
    tell, from the docs alone, whether it is a documented exemption or an ungated route somebody
    added quietly — which is exactly the question this invariant exists to answer. The middleware is

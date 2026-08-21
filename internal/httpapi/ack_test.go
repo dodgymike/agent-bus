@@ -404,7 +404,7 @@ func TestAckRouteIsTheRecipientBoundary(t *testing.T) {
 
 		anon := doRequest(t, srv, http.MethodPost, httpapi.RouteAck, deliveredFrame(msgTestBusID+"-1", beta.id), "application/json")
 		if anon.Code != http.StatusUnauthorized {
-			t.Fatalf("an anonymous POST = %d, want 401; every route authenticates except the four on the allow-list (invariant 3)", anon.Code)
+			t.Fatalf("an anonymous POST = %d, want 401; every route authenticates except the ones on the allow-list in internal/httpapi/authmw.go (httpapi.UnauthenticatedRoutes, invariant 3)", anon.Code)
 		}
 		get := authed(t, srv, beta, http.MethodGet, httpapi.RouteAck, "")
 		if get.Code != http.StatusMethodNotAllowed {

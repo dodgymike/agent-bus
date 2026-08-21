@@ -51,9 +51,11 @@ auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `IN
    makes immediate revocation possible), and do not survive a restart. Every route authenticates
    except the **six** on the explicit allow-list at `internal/httpapi/authmw.go:76`: enrolment,
    session begin/complete, `/healthz`, `/v1/info` and **`/v1/discovery`** — that last one was
-   missing from this line until 2026-08-21, and `internal/httpapi/ack_test.go:407` still says
-   "the four on the allow-list". Three live counts, all reading as freshly checked. Trust the
-   allow-list, never the prose: it is the security boundary and the middleware is default-deny.
+   missing from this line until 2026-08-21, when three counts that had been live at once (the
+   code's, this line's, and one in an `internal/httpapi` test's failure message) were reconciled
+   against `httpapi.UnauthenticatedRoutes()` — all three had read as freshly checked, which is why
+   they lasted. Trust the allow-list, never the prose: it is the security boundary and the
+   middleware is default-deny.
 4. **Nothing is acknowledged before it is durable** — two-phase prepare→commit, fsynced. Never trade
    this for latency. **NARROWED (2026-08-02):** this guarantees we never lose acknowledged data
    through OUR OWN WRITE PATH. It does NOT promise acknowledged data survives damaged media — see
