@@ -523,10 +523,20 @@ gate() {
   for n in a b c; do
     [ "$(docker inspect --format '{{.Config.Image}}' bus-$n)" = "$image" ] ||
       { echo "bus-$n is NOT on $image" >&2; ok=1; }
-    docker logs bus-$n 2>&1 | grep -q 'FEDERATION IS NOT SERVED' &&
+    # FIVE literals covering SEVEN call sites, because there are seven ways to be
+    # deaf and they are worded differently -- including one at INFO, in lower
+    # case. Each alternative is a literal you can `git grep` in the server source.
+    # NEVER NARROW this alternation; matching only the first of them was a gate
+    # that could not fire -- see the 2026-08-21 correction below. grep is
+    # case-SENSITIVE here on purpose: the healthy line is "FEDERATION is served".
+    docker logs bus-$n 2>&1 | grep -qE 'FEDERATION IS NOT SERVED|FEDERATION INGRESS IS NOT SERVED|FEDERATION IS DISABLED FOR THIS RUN|federation is not configured|REFUSING to mount a peer route' &&
       { echo "bus-$n is not serving the peer surface" >&2; ok=1; }
   done
-  [ "$ok" -eq 0 ] && echo "GATE OK: all three buses on $image and federating"
+  # NOT "and federating". This is an ABSENCE-of-announcement test, and claiming
+  # more than it measured is the same overclaim the correction note below exists
+  # to undo -- in executable form this time.
+  [ "$ok" -eq 0 ] &&
+    echo "GATE OK: all three buses on $image; none announced a refusal to serve the peer surface"
   return $ok
 }
 
@@ -545,20 +555,115 @@ gate agent-bus:emitting
 Downstream-first (`c b a`) within each stage for the reason §3.6 gives. Neither stage needs a
 drain or a maintenance window; that is the point of splitting them.
 
-**"Healthy" does not mean "federating", and this is the trap in the gate above.** Peer-route
-registration is all-or-nothing: if the peer surface is supplied but incomplete,
-`httpapi.mountPeerSurface` registers **no peer route at all** and *every* `/v1/peer/` path — relay
-included — answers **404**. The bus still starts, and its container healthcheck still reports
-`healthy`, because serving federation is not what `/healthz` measures. Meanwhile 404 is non-retriable
-just like the 400 above, so every peer sending to that bus **abandons** its traffic. The only signal
-is a startup line at `level=error`:
+**"Healthy" does not mean "federating", and this is the trap the gate above exists to catch.**
+Peer-route registration is all-or-nothing at the surface level: when the peer surface is absent or
+incomplete the server registers **no peer route at all** and *every* `/v1/peer/` path — relay
+included — answers **404**. (Two per-route guard-rails in `mountPeerRoute` can also skip a *single*
+route, rows 6–7 below, which is the one way a bus can end up serving a *partial* peer surface.)
+The bus still starts, and its container healthcheck still reports `healthy`, because serving
+federation is not what `/healthz` measures. Meanwhile 404 is non-retriable just like the 400 above,
+so every peer sending to that bus **abandons** its traffic.
 
-```
-msg="FEDERATION IS NOT SERVED: a PeerSurface was supplied but is incomplete, so no peer route is registered and every /v1/peer/ path answers 404"
-```
+**There is no single signal, and that is the whole difficulty.** Seven distinct startup lines mean
+"this bus is not serving the peer surface", they are worded differently, and one of them is at
+`level=info` and in lower case. Five literals cover all seven, and the gate above matches them all:
 
-So gate each stage on that line's **absence**, not on the healthcheck. A bus can be on the right
+| # | Emitted by | Reachable in the shipped `agent-bus` binary? | The line |
+|---|---|---|---|
+| 1 | `cmd/agent-bus/main.go` | **Yes** — the peer configuration store could not be built | `FEDERATION IS DISABLED FOR THIS RUN: the peer configuration store could not be built, …` |
+| 2 | `cmd/agent-bus/main.go` | **Yes** — peering is configured, but no adjacent bus has an inbound client certificate bound to it | `FEDERATION INGRESS IS NOT SERVED although peering is configured: …` |
+| 3 | `internal/httpapi/peermount.go` | **Not today** — `main.go` supplies `Peer` and `PeerPrincipals` as a **nil pair**, which takes `mountPeerSurface`'s *silent* exit | `FEDERATION IS NOT SERVED: a PeerSurface was supplied but is incomplete, …` |
+| 4 | `internal/httpapi/peermount.go` | **Not today** — same nil-pair reason | `FEDERATION IS NOT SERVED: a complete PeerSurface was supplied but no inbound peer principal resolver was, …` |
+| 5 | `cmd/agent-bus/main.go` | **Yes** — this bus has no peer records at all. `level=info`, **lower case** | `federation is not configured: this bus has no peer records and no peer trust records, …` |
+| 6 | `internal/httpapi/peermount.go` | **Not today** — a compile-time guard-rail; a test asserts the route constants and the unauthenticated allow-list are disjoint | `REFUSING to mount a peer route: it is on the unauthenticated allow-list, …` |
+| 7 | `internal/httpapi/peermount.go` | **Not today** — `missingParts` already refused a nil handler | `REFUSING to mount a peer route with no handler` |
+
+Rows 1, 2 and 5 are the ones a deployment actually hits, and they fail for genuinely different
+reasons: 1 is "no peer configuration could be loaded at all", 2 is "configuration loaded, but
+nothing can authenticate inbound", 5 is "there was no peer configuration to load". An operator
+needs all three, so the gate matches all three.
+
+**Row 5 is the by-design case for an unpeered bus, and it is gated here anyway — deliberately.**
+`level=info` and lower case make it look benign, and for a single standalone bus it is. But in
+*this* runbook all three buses are peered, so a bus reporting it has lost its peer configuration:
+a mis-mounted or recreated `bus-$n-data` volume produces exactly this line, and the bus is then as
+deaf as in rows 1–4 while looking entirely healthy. If you copy this gate to a deployment where
+some buses legitimately do not federate, drop the `federation is not configured` alternative — that
+one by name, and only that one. **Never** drop row 6's `REFUSING to mount a peer route`: that line
+means the federation ingress was about to be served to an anonymous caller.
+
+Rows 3, 4, 6 and 7 are matched **deliberately even though nothing emits them today.** They are the
+embedder-and-bug path: any binary importing `internal/httpapi` directly can reach rows 3 and 4, and
+so can `cmd/agent-bus` the moment it supplies a non-nil but incomplete pair. (Rows 3 and 4 are
+unreachable from this binary for **two** independent reasons, not one: the nil pair above, and
+`cmd/agent-bus/relaywiring.go`, which fills `httpapi.PeerSurface` in a single literal with no
+conditional field — so a non-nil surface from this binary is always complete. Either reason alone
+would do it, which is why neither is a licence to stop matching them.) Rows 6 and 7 are
+guard-rails that exist precisely to fail loudly if a future edit makes them reachable — row 6 would
+mean the federation ingress had been put on the unauthenticated allow-list, which is the worst
+outcome on this surface and must never be gated *out*. Matching all four costs two alternatives in
+a regex and nothing at runtime, whereas dropping them would make the gate go quiet again on
+precisely the class of change that broke it before.
+
+So gate each stage on the **absence of all seven**, not on the healthcheck. A bus can be on the right
 image, healthy, and silently deaf to the entire federation.
+
+**Three families — five lines — are deliberately NOT matched, so that the next reader does not
+re-derive the set and think they found a hole.**
+
+* **Co-emitted consequences.** `FEDERATION CONFIGURATION IN THE LOG WAS NOT RESTORED` and its
+  owed-delivery twin `CROSS-BUS DELIVERIES THIS BUS OWED A PEER WERE NOT RESTORED` are both guarded
+  by `skippedPeerRecords != nil`, which is assigned only inside the same branch that emits row 1 on
+  the same start. They are consequences, never independent signals: matching them would add
+  alternatives that can only fire when row 1 already has.
+* **Egress.** The two `level=error` lines about a peer that could not be seeded into the routing
+  table mean this bus cannot *send* to that peer, not that it cannot *serve* the peer surface. This
+  section is scoped to ingress, which is what a wire-version rollout breaks; egress faults need
+  their own check.
+* **Request-time, not startup.** `REFUSING a peer acknowledgement: …` (`peermount.go`) fires per
+  request, not at boot, and means the surface *is* served but this caller carried no peer principal
+  — served-but-unauthenticated, not not-served. It sits two grep hits from row 6, so it is named
+  here precisely because a reader re-deriving the set will land on it.
+
+**What this gate does NOT prove.** It is an absence-of-error test, and absence is weaker than a
+positive readiness signal — which is the whole reason `RELAY-55` exists. Three limits worth knowing
+before you trust it: `docker inspect --format '{{.Config.Image}}'` succeeds on an **exited**
+container, so `gate` does not by itself establish that a bus is running — that is `roll`'s
+`.State.Health.Status` loop, and `roll` failing only `break`s the stage loop; `docker logs` is
+**cumulative across restarts** of one container, so a stale error line from an earlier boot can
+redden a bus that is fine now (fail-safe, but it will confuse you); and nothing here proves a peer
+route actually answers — only that the server did not announce that it had refused to mount one.
+
+**And it depends on `docker logs` actually returning the log, which is a FAIL-OPEN dependency.**
+Under a logging driver the CLI cannot read back — `gelf`, `fluentd`, `syslog`, `none` — `docker logs`
+returns an error and no lines, so the gate matches nothing and reports success; under `json-file`,
+rotation can evict a startup line from a long-lived container for the same effect. Both fail OPEN,
+unlike the cumulative-logs case above, which fails safe. The `docker run` in this runbook sets no
+`--log-driver`, so the daemon default governs — check it before trusting this gate, and treat an
+empty `docker logs` as a RED, not a pass.
+
+> **Correction, 2026-08-21 (RELAY-51).** From `14ed009` — which shipped this rollout section into a
+> runbook created by `9938eb2` — until this change, the gate above read `grep -q 'FEDERATION IS NOT SERVED'` and this section claimed that
+> line was **"the only signal"**. *Both claims were FALSE.* The shipped server binary never emits
+> that literal at all: only rows 1 and 2 reach a real deployment, and **neither contains the
+> substring**. Row 2 is not even a partial match, because the word `INGRESS` intervenes —
+> `printf %s 'FEDERATION INGRESS IS NOT SERVED although peering is configured' | grep -q 'FEDERATION IS NOT SERVED'`
+> finds nothing. The gate could therefore **never fire**: it reported
+> `GATE OK: all three buses on $image and federating` for every bus, including one deaf to the
+> entire federation, and it did so most confidently at exactly the moment it was needed. This is
+> recorded rather than quietly swapped because a flipped claim reads as freshly checked whichever
+> way it points, and that is how this class of defect survives review.
+
+> **This log gate is INTERIM — `RELAY-55` replaces it.** Scraping `docker logs` for an error string
+> is a guard whose correctness depends on prose in a source file that nothing mechanically links to
+> this runbook, which is exactly how it broke. **`RELAY-55`** is filed (P1) to make a bus that cannot
+> serve the peer surface distinguishable from a healthy one **without parsing logs**. Its mechanism
+> is deliberately still open — a readiness endpoint separate from liveness, a field on
+> `GET /v1/info`, or a refusal to start — so do not assume one here. When it lands, one of its
+> acceptance criteria is that **this document names the chosen gate explicitly** — at which point
+> RE-POINT this section at the new signal and keep the log alternation only as the fallback for
+> buses not yet on that build. Until then the instruction in the gate stands: add a literal if you
+> find one that is missing, never remove one.
 
 **A new peer ROUTE is the same hazard with a different status code.** A bus that does not serve the
 route answers **404**, which `Retriable` also treats as final. `POST /v1/peer/ack`
