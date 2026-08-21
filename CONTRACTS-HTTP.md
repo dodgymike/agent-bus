@@ -1380,7 +1380,7 @@ by **being registered**: `authMiddleware` is default-deny and this path is not o
 therefore requires a bearer session, and is subject to invariant 11's session/certificate
 cross-check **on the same terms as every other authenticated route — which is weaker than "mTLS is
 enforced" and must not be read as that**. The listener is `ClientAuth: tls.RequestClientCert`
-(`cmd/agent-bus/tlslisten.go:27`), so the cross-check bites only for an agent that HAS a live
+(`cmd/agent-bus/tlslisten.go:152`; line 27 is only the comment that explains it), so the cross-check bites only for an agent that HAS a live
 certificate binding; **for an agent with none, this route is bearer-token-only.** That is inherited
 from the platform, neither narrowed nor widened here.
 

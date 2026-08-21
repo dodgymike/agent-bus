@@ -69,9 +69,40 @@ one needs an explicit decision recorded in `DECISIONS.md`.
    pre-computation and proves far less. Sessions last **at most one hour**; the client refreshes at
    75% of lifetime. Tokens are **opaque server-side handles, not signed claims**, which is precisely
    what makes immediate revocation possible — stateless claims cannot be revoked before they expire.
-   Sessions do NOT survive a restart. Every route authenticates EXCEPT the three that necessarily
-   cannot: enrolment, session-begin and session-complete (they are how a credential is obtained),
-   plus `/healthz` and `/v1/info`.
+   Sessions do NOT survive a restart. Every route authenticates EXCEPT the **six** on the explicit
+   allow-list in `internal/httpapi/authmw.go:76`, whose own doc comment justifies each one
+   individually and is the authority if this paragraph and it ever disagree:
+
+   - the three that necessarily cannot authenticate, because they are how a credential is obtained:
+     `/v1/enroll` (no identity exists yet), session-begin (called with NO session at all — it is the
+     request that ASKS for a token to sign), and session-complete (subtler and the one that looks
+     skippable: the caller does hold a token, but a PENDING one, which `auth.Service.Authenticate`
+     rejects exactly like an unknown one — so a bearer requirement here would be *unsatisfiable*,
+     not strict; the real authentication on that route is the Ed25519 signature over the
+     server-chosen token);
+   - `/healthz` — liveness, called by probes before any agent exists, returns no state at all;
+   - `/v1/info` — pre-enrolment discovery, deliberately limited to bus id, version, uptime and the
+     discovery path;
+   - `/v1/discovery` — the protocol document. **This one was missing from this list until
+     2026-08-21**, and its omission is the more instructive half of the error: it is anonymous for a
+     circular reason that makes it necessary — it is HOW A CALLER HOLDING ONLY A URL LEARNS TO
+     ENROL, so requiring the credential it explains would make it unreachable by everyone who needs
+     it. It is safe to serve anonymously because it carries no bus state: a compile-time constant
+     document plus the bus id `/v1/info` already serves the same caller, and its endpoint list is
+     NOT derived from the registered routes, so it does not disclose which optional surfaces this
+     build serves.
+
+   **UNDERCOUNTING AN ALLOW-LIST IS NOT A HARMLESS DOC BUG.** Three different counts were live in
+   this repo simultaneously — six in the code, five here and in `CLAUDE.md`, and "the four on the
+   allow-list" in `internal/httpapi/ack_test.go:407`. Every one of them reads as freshly checked. An
+   auditor reconciling the code against the docs finds an entry the docs do not mention and cannot
+   tell, from the docs alone, whether it is a documented exemption or an ungated route somebody
+   added quietly — which is exactly the question this invariant exists to answer. The middleware is
+   **default-deny**, so a route added tomorrow is authenticated the moment it is registered; that
+   property is what keeps the failure bounded, and it is the reason the allow-list, not the prose,
+   is the security boundary. The `/v1/peer/` routes are NOT on it and must never be added: they are
+   authenticated by TLS client certificate through `RequirePeerPrincipal`, so allow-listing one
+   would not document an existing exemption, it would CREATE an ungated federation ingress.
 ### Invariant 4 — Nothing acknowledged before durable
 
 4. **Nothing is acknowledged before it is durable.** A send returns success only after the message

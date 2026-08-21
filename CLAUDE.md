@@ -49,7 +49,11 @@ auth, durability, the log, the CLI surface, crypto, idempotency or TLS, open `IN
    reverse). Invites are single-use, expiring, revocable, and are the ONLY way onto the bus. Sessions
    last at most one hour, are opaque server-side handles rather than signed claims (which is what
    makes immediate revocation possible), and do not survive a restart. Every route authenticates
-   except enrolment, session begin/complete, `/healthz` and `/v1/info`.
+   except the **six** on the explicit allow-list at `internal/httpapi/authmw.go:76`: enrolment,
+   session begin/complete, `/healthz`, `/v1/info` and **`/v1/discovery`** — that last one was
+   missing from this line until 2026-08-21, and `internal/httpapi/ack_test.go:407` still says
+   "the four on the allow-list". Three live counts, all reading as freshly checked. Trust the
+   allow-list, never the prose: it is the security boundary and the middleware is default-deny.
 4. **Nothing is acknowledged before it is durable** — two-phase prepare→commit, fsynced. Never trade
    this for latency. **NARROWED (2026-08-02):** this guarantees we never lose acknowledged data
    through OUR OWN WRITE PATH. It does NOT promise acknowledged data survives damaged media — see
