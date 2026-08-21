@@ -30,8 +30,14 @@ WHAT IT DOES
   message across every hop it takes." It does not, today. Hub's
   recordAcceptance early-returns on relayed OR broadcast, so no lifecycle row
   exists for a relayed message or for a same-bus broadcast, and this command
-  answers unknown for both. Only a same-bus DIRECT message is tracked. See the
-  same notice on the ack subcommand; tracked as P0 7d564118 and P0 f423959c.
+  answers unknown for both. Only a same-bus DIRECT message is tracked.
+
+  Mind the EXIT CODE difference from the ack subcommand, which carries the
+  same notice: ack exits 8 on unknown, but THIS command exits 0 without
+  --wait, because an unknown state is still a state it successfully reported.
+  It exits 8 only when --wait ends with nothing to report. So do not treat a
+  0 from this command as evidence the message is tracked -- read the state.
+  Tracked as P0 7d564118 and P0 f423959c.
   When those land, delete this notice rather than leaving it to rot.
 
 THE FIVE STATES
