@@ -4723,3 +4723,159 @@ argv; `exec.Command` argv slices throughout, no `sh -c`; kernel-allocated ports 
 stderr; ambient `AGENT_BUS_*` reaching the CLI; a cleanup that Goexits and leaks two buses; one
 over-claiming subtest name) were left UNAPPLIED on purpose: both gates verified this exact file,
 and editing after the gates would ship code neither had reviewed. Filed as a follow-up instead.
+
+---
+
+## 2026-08-21 — ACK-8: the ack plane had never been tested against a real WAL
+
+**Task** `bc12541b-e3be-44bc-8f22-e28fe820e229` (ACK-8, P0) — "ACK/NACK restart, replay and
+crash-consistency recovery", ACK-CONTRACT.md §14 D1. Test-only; no production code changed.
+
+**Invariants read in full before writing:** 1 (ids never reused, recovery advances past a hole and
+never rewinds), 4 (nothing acknowledged before durable, plus its 2026-08-02 narrowing), 5 (memory
+serves, disk is truth, recovery yields a PREFIX), 6 (metadata-only append-only log; recovery ALWAYS
+reaches a running server; the discard is fine, the SILENT discard is the defect), 10 (the three
+duplicate cases, and the 2026-08-08 narrowing that stopped a protocol violation dropping the socket).
+
+### The gap, which was not the one the task description predicted
+
+The description named `internal/relay/`, `internal/hub/` and `internal/wal/` as the prospective
+files, and carried a `proof_cmd` of
+`go test -race -run ^TestAckCrashRecoveryMatrix$ ./internal/relay` — **a test that does not exist, in
+a package that never had one.** Run as-is that proof reports `[no tests to run]` and exits 0, i.e. it
+was a VACUOUS proof waiting to be quoted as a pass. It has been corrected.
+
+The real gap was one package over. **Every pre-existing test in `internal/ack` — all forty — writes
+through `fakeLog` (`store_test.go:19`), an in-memory `[]wal.Entry`.** It never frames, never MACs,
+never fsyncs, and its `replayFrom` hands the store back exactly the entries it was given. That is the
+right tool for a state machine and it is *structurally incapable* of producing the three things this
+task is about: a torn record, a discard, and an index. `TestRestartRebuildsFromTheLogAlone` is a
+replay test, not a restart test — **nothing in the package had ever opened a file.**
+
+### What landed
+
+`internal/ack/restart_ack8_test.go` (package `ack_test`, so it also proves the EXPORTED surface is
+enough to rebuild the table from disk) — SEVEN tests over a real on-disk `wal.Log`: all five states
+reproduced exactly across a reopen including class, attestation and both retention anchors; no
+resurrection of a settled row by a post-restart retry; the torn tail; an *acknowledged* row lost to
+media damage; an undecodable record; replay idempotence over three rounds; and invariant 10's FIRST
+TWO cases — retry and conflict — re-checked against recovered state. (Not its third: that is
+signed-message replay, which is rejected AND disconnects, and it has no expression in this package.
+An earlier draft of this very entry said "three cases", which is the exact error the reviewer caught
+in the code and is corrected in both places.)
+
+`internal/ack/crash_ack8_test.go` (`//go:build linux || darwin`) — real `SIGKILL` crash injection at
+three points in the **SETTLE** write path. `internal/hub/ack_crash_test.go` already covered E1
+`accepted`; the terminal transitions E4/E5/E6 had **no crash coverage anywhere**, which is the
+transition where the two opposite failures both live: a terminal that was acknowledged and lost, and
+a terminal that never committed and is visible. The second is the subtler one — a recovered
+`delivered` row that reached only PREPARE is not a lost message but a *false statement* about one,
+and it is worse, because the sender stops retrying.
+
+### Invariant 1 in the ack plane: no exposure, and now guarded
+
+`ack.Store` mints nothing. Its identity is `(correlation_key, recipient)`, both supplied by the
+caller, so its invariant-1 exposure is entirely INHERITED from `wal`. **Two independent defences hold
+the line, and neither alone is load-bearing:** the durable index floor in `<data-dir>/wal-index-floor`,
+and the repair pass separately recording the *index* of the frame it discarded. Deleting the floor
+alone does **not** rewind. Removing both does: the next write then takes prepare index 8 when 8 had
+already been handed out. That is now asserted, and it is the same shape as the sibling finding where
+a recovered bus re-issued sequence 257 over a record already written at 1000.
+
+### Mutation results — 11 RED, and **two honest GREENs**
+
+The two GREENs are the useful part and are recorded rather than buried, because AGENT_LOG's own
+2026-08-16 entry is right that "N/N RED" describes the chooser, not the code:
+
+- **Making `Settle` re-stamp `AcceptedAt` stays GREEN** — masked by `upsertLocked` preferring the
+  value already held. Genuine defence in depth; the single-point mutation is invisible. Mutating
+  `upsertLocked` instead goes RED.
+- **Deleting `wal-index-floor` stays GREEN** — masked by the repair pass, as above.
+
+Neither is a vacuous guard, but each took a *second* mutation to demonstrate, which is the whole
+argument for mutating rather than reviewing.
+
+### Two process notes from this run
+
+**The worktree handed to the agent was 26 commits stale and contained no `internal/ack` at all.** The
+brief named HEAD as `b95d22d`; the worktree branch sat at `9938eb2`, before the ack plane existed.
+Had this not been checked first, every "the package does not do X" conclusion would have been drawn
+from a tree in which the package was absent. **Verify the worktree is where the brief says it is
+before concluding anything about what code does or does not exist.**
+
+**The session scratchpad is SHARED between concurrently running agents, and a script in it was
+overwritten mid-task** by another agent's file of the same name. The overlay proof was therefore
+re-run under a uniquely-named script and reproduced verbatim. This is the same family as the
+thirteen-false-passes stale-directory incident recorded above, arriving by a different route: not a
+stale path this time, but a *live* one owned by somebody else. **Name scratch files uniquely per
+agent, not per purpose.**
+
+### Gate outcomes, and what they changed
+
+**Security: PASS.** Nothing exploitable now. It ran ten of its own mutations against production code
+and nine went RED — including two that stayed GREEN and were the most useful result of the audit:
+cutting `elide()` to four characters and shrinking the WAL log budgets both left the suite green,
+which is the strongest available evidence that *nothing in these tests creates pressure to weaken log
+elision*. It also chased the `Settle` authorization question end to end.
+
+**Reviewer: CHANGES-REQUIRED, then re-verified.** Three blockers, all legitimate:
+
+1. **The stored `proof_cmd` was VACUOUS** — it independently reproduced
+   `verdict=VACUOUS ... tests_run=0 ... empty_pkgs=1`. Already corrected.
+2. **Delivered scope was a strict SUBSET of ACK-8 as recorded** — under-delivery, which is as fatal
+   to a completion as scope creep and is much easier to miss because everything is green. ACK-8 has
+   been NARROWED and the descoped work filed as `ACK-8-FU-HOPBOUNDARY`, `ACK-8-FU-D2-OBLIGATIONLOST`
+   and `ACK-8-FU-CHECKPOINTS` rather than quietly dropped.
+3. **The invariant-10 test collapsed the very distinction it was arguing for.** It listed "an
+   already-applied record replayed -> a no-op" as invariant 10's third case. The third case is
+   **replay of an already-accepted SIGNED message, which is rejected AND DISCONNECTS** — a different
+   subject with the OPPOSITE behaviour. WAL-replay idempotency is not that. In a file whose thesis is
+   that the three cases must not be collapsed, that was the worst possible place to collapse one.
+   Renamed to `TestAckRetryAndConflictStayDistinctAcrossARestart` and the exclusion is now stated
+   explicitly. **The rule was mis-stated in a COMMENT while every assertion passed** — which is why a
+   reviewer reading for truth catches things mutation cannot.
+
+Two tautological assertions it found (`reason=` and `offset=` are emitted unconditionally by wal's
+`logDiscards`, and `reason=` matches an EMPTY reason) were deleted rather than kept as decoration.
+Only `record_index=` is load-bearing, and it is the one M5b proved can fail.
+
+**The reviewer also derived the bound that makes `fi.Size()-9` safe** rather than leaving it a magic
+number: `FrameHeaderSize` is 48, so nine bytes cannot remove a whole frame and cannot reach the
+16-byte covered header carrying the index. That is now a comment AND a runtime guard, so the constant
+cannot silently stop tearing if the format changes.
+
+**Both gates independently asked for the same missing test, from opposite directions**, and it is now
+in: `TestAckAcknowledgedRowLostToMediaDamageStartsAnywayAndSaysSo`. The torn-tail test tears a record
+that was NEVER acknowledged, so it never engages invariant 4's 2026-08-02 narrowing at all. The new
+test damages a record that WAS committed, fsynced and acknowledged, and asserts the uncomfortable
+correct answer: the row is GONE, the bus starts anyway, and the loss is stated at ERROR. That is the
+one place invariants 4 and 6 actually meet, and it is what makes the narrowing checkable instead of
+merely written down.
+
+### One measurement I nearly filed as a defect, and should not have
+
+The media-damage test first timed at **19.5 s under `-race`** against 0.1 s for the torn-tail test —
+a 200x gap that looked exactly like a quadratic resync scan in mid-file repair, i.e. a real
+recovery-availability problem. It was not. It was **disk contention from the full-repo suite I had
+left running in the background.** Re-timed clean: **0.09 s**, and a scaling probe showed recovery is
+roughly linear (~30 ms over a 70 KB log). **A performance number measured while something else is
+hammering the same disk is not a measurement.** Measure twice before filing.
+
+### A pre-existing failure, diagnosed rather than waved away
+
+`go test ./...` is RED at `client.TestStoreConcurrentMutationsLoseNothing`. It is **not** ACK-8's:
+reproduced at clean HEAD `dbae79d` in an overlay containing none of ACK-8's files, failing 1 run in
+3. Filed as `CLIENT-CREDSTORE-CONCURRENCY-FLAKE` — and filed with a warning against closing it as
+"just flaky", because the test's own message says `a concurrent PromotePending lost an update`, which
+would be a correctness defect in the credential store's locking rather than a slow lock.
+
+### Documentation
+
+`internal/ack/doc.go` named ACK-8 as owner of the checkpoint debt and listed "crash reconstruction
+beyond replay" as NOT wired. Both were about to become stale reassurances the moment ACK-8 closed —
+the failure mode CLAUDE.md's own preamble warns about, where a note reads as freshly checked because
+it is specific. Corrected to point at `ACK-8-FU-CHECKPOINTS`, to say what ACK-8 actually proved, and
+to record why assigning `LogOptions.Checkpoints` today would refuse every publish and every enrolment.
+
+No `CONTRACTS-*.md` plane moved: this task added no route, env var, record type, wire version or CLI
+surface. `AGENT_PROTOCOL.md` is untouched for the same reason — the agent-facing surface did not move.

@@ -43,7 +43,27 @@
 //	E5 delivered        the recipient application ACKed      ACK-6
 //	E6 refused          the recipient application NACKed     ACK-6
 //	relayed ingest      an intermediate bus's rows           ACK-5
-//	crash reconstruction beyond replay                       ACK-8 (§14 D1)
+//	bounded replay via WAL checkpoints                       ACK-8-FU-CHECKPOINTS
+//
+// ACK-8 DELIVERED PART OF §14 D1, AND THE PART IT DID NOT IS NAMED. D1 asks for
+// reconstruction after a crash at ANY transition boundary; ACK-8 was NARROWED on
+// 2026-08-21 to the LOCAL-ACCEPT and SETTLE boundaries, which are the two this
+// package owns. Within those, it proved — against a real on-disk wal.Log rather
+// than this package's fakeLog stub — that restart reconstructs every state
+// exactly, that a settled row cannot be resurrected, that a torn tail AND a
+// bit-flipped *acknowledged* record are each discarded LOUDLY while the bus
+// still starts and the WAL index advances past the hole instead of rewinding,
+// and that a SIGKILL at each of three points in the SETTLE write path recovers
+// to a prefix of accepted history. See restart_ack8_test.go and
+// crash_ack8_test.go.
+//
+// STILL OPEN under D1, so do not read the above as "D1 is closed":
+//
+//	the HOP boundary                    ACK-8-FU-HOPBOUNDARY
+//	§14 D2 obligation_lost              ACK-8-FU-D2-OBLIGATIONLOST
+//	bounding how LONG replay takes      ACK-8-FU-CHECKPOINTS (the checkpoint
+//	                                    clause ACK-8's description also carried;
+//	                                    it is WAL-wide, not ack's — see below)
 //
 // The METHODS for E2/E4/E5/E6 exist and are tested here, because a state
 // machine that is only half-expressible cannot be reviewed as a state machine.
@@ -59,7 +79,10 @@
 // invariant 4 in full, and it is checkpoint-independent. This package
 // implements no CheckpointParticipant on purpose: seven of the eight production
 // kinds have none, and adding one here would not change that debt (it is
-// ACK-8's).
+// ACK-8-FU-CHECKPOINTS's, and it is WAL-wide: LogOptions.Checkpoints has ZERO
+// production assignments, and assigning it TODAY would refuse every message
+// publish and every enrolment, because log.go makes an unowned kind a hard
+// error on write and checkpoint.go makes it a hard error on Apply).
 //
 // # THREE PROPERTIES, THE SAME THREE relay.Outbox AND invite.Store DOCUMENT
 //
