@@ -233,6 +233,109 @@ bare command — a proof that only runs inside our harness is a worse artifact t
 paste into a shell. Nothing in the tool can enforce this; its value is an auditable verdict line.
 Full rationale and tradeoffs are in the comment block at the top of the script.
 
+### `scripts/doc-check.sh` (added 2026-08-14, `CONTEXT-DOCCHECK`)
+
+**Why it exists.** `proof-check.sh`'s sibling, for the *documentation* proofs. A doc proof of the
+shape `grep -q 'some phrase' CLAUDE.md` is green whether the phrase sits in the section the task
+actually changed or in an unrelated one. That incidental-match failure has already green-lit a wrong
+task closure here, and every CONTEXT task
+claims a doc changed — so without a section-scoped assert, each of those proofs repeats the same
+bug.
+
+```
+scripts/doc-check.sh section <file> '<heading>' '<needle>' [<needle>...]
+scripts/doc-check.sh budget
+scripts/doc-check.sh --selftest
+```
+
+| Mode | Meaning |
+| --- | --- |
+| `section` | Locates the ATX heading (full line `## Alpha` or bare text `Alpha`), computes its range to the next heading of the **same or shallower** level, and asserts every needle occurs **inside** that range. Shallower counts deliberately — a parent heading ends a subsection, and stopping early can only make an assertion harder to satisfy, never easier. |
+| `budget` | Reads `docs/doc-budgets.tsv` (`path`↹`max_bytes`) and fails on any overrun; reads `docs/doc-preserve.tsv` (`path`↹`literal_phrase`) and fails on any phrase that has gone **missing**. The pair is deliberate: a ceiling alone rewards deleting the paragraph that explains why a rule exists. |
+| `--selftest` | Asserts the assert — heading-absent ⇒ FAIL, needle-only-outside-section ⇒ FAIL, needle-inside ⇒ PASS, plus every trap this repo has actually been bitten by: **96 assertions as of 2026-08-21** (3 required by `CONTEXT-DOCCHECK`, 93 added by gate findings). It prints that count on every run — trust the tool's stdout over this row, which is a snapshot. Some of them re-invoke the script as a subprocess, so the dispatcher and the literal exit codes are on the tested path, not just the internal functions. |
+
+Exit: `0` pass · `1` fail · `2` usage.
+
+**Absence is never a pass.** A missing heading, a missing file, or a budgeted path that does not
+exist all exit non-zero, and so does a `.tsv` with no data rows — a check that measured nothing is
+never a pass. This is the property that makes the tool worth trusting: the broken proof commands
+found in this repo all *reported success*, and most did so by proving nothing at all. (No count and
+no date are given because neither is sourceable. The earlier "eight ... on 2026-08-08" was removed
+in two steps: the date first, when `AGENT_LOG.md`, `DECISIONS.md` and the git log corroborated none,
+then the count, which appears nowhere in this repo but here and in the script header. The one
+measurable figure is a different population: `python3 scripts/proof-cmd-audit.py` found **114**
+stored proofs naming a Go test target that does not exist, on 2026-08-21.)
+
+**Matching is literal and whitespace-normalised.** Needle and haystack both have every run of
+whitespace (newlines included) collapsed to one space before comparison, so a phrase re-wrapped
+across a line boundary still matches — a straddling string previously caused a spurious result here
+— while a *reworded* phrase does not. Fixed-string matching throughout: a needle containing `.` or
+`*` cannot quietly match something else.
+
+**Code fences are skipped for heading detection, and that is the limit of what fences buy you.** A
+`#` inside a ``` block is not structure — before this, `AGENT_PROTOCOL.md` read 44 headings where 39
+exist, which both truncated real sections (false FAIL) and, when a fenced `# X` was selected as a
+start, swallowed neighbouring sections (false PASS). But fenced content is still part of the section
+BODY: a needle matching text inside a fence *within the target section* still passes. Stated
+explicitly because documenting a guarantee the tool does not provide is the same defect class one
+level up.
+
+**A typed comparison is never reached with an untyped operand.** `max_bytes` is validated as
+digits-only *before* `[ -gt ]` sees it. This closes a silent false-PASS found by the security gate on
+2026-08-15 in this very script: `[ "$a" -gt "$b" ]` with a non-numeric `$b` prints "integer expression
+expected" and returns **2**, an `if` reads 2 as false, the overrun branch is skipped, and `budget`
+exits **0**. A typo like `28,781` or `8192B` passed silently — the defect class this tool exists to
+close, living inside the tool. Paths from either `.tsv` are also rejected if absolute or containing
+`..`; that is defence in depth, since the `.tsv` files are trusted checked-in content.
+
+**An ambiguous heading FAILs; it is never resolved by guessing.** If `<heading>` matches more than
+one heading in the file, `section` exits 1 and names the count and the matching line numbers.
+Binding to the first match was live on real docs — `AGENT_PROTOCOL.md` carries both `### Exit codes`
+and the canonical `## Exit codes` — and produced a false FAIL in one direction and a silent pass
+against the wrong section in the other. Disambiguate with the FULL heading line, which is compared
+verbatim and so distinguishes levels. Same-level duplicates (`### Output` three times in
+`AGENT_PROTOCOL.md`) cannot be disambiguated at all and must be made unique to be assertable.
+
+**A file is a file, and a size is an integer.** `<file>` is passed to `sed` after `--`, so a file
+named `-n`, `-s`, `-z` or `--debug` is read as a FILE; without it `sed` consumed the name as an
+option, read **stdin** instead, and printed a legitimate-looking `PASS ... (lines 1-3)` for a file
+that did not contain the needle. `budget` runs `wc -c` output through the same `is_uint` gate as
+`max_bytes`: a file it cannot measure (unreadable, or gone between the existence test and the
+measurement) is a **FAIL**, never "within ceiling" — the untyped-operand defect, on the other
+operand. Heading text reaches `awk` through `ENVIRON`, not `-v`, so a heading containing a backslash
+matches itself; `-v` interprets escapes, which made literal matching true for needles but not for
+headings.
+
+**`DOC_CHECK_BUDGETS` / `DOC_CHECK_PRESERVE`** override the two `.tsv` paths (used by the selftest and
+for local experiments). Both are containment-checked exactly like the rows inside them: absolute or
+`..` is refused. To measure files elsewhere, `cd` there.
+
+**`section <file>` must stay inside the tree.** Absolute paths and `..` traversal are refused with
+the same message the `.tsv` rows get, because a proof running inside a `git archive HEAD` overlay
+must not be able to reach the live worktree and "prove" uncommitted text. The check is lexical, so
+it does not follow a symlink that is itself inside the tree.
+
+**It does not call `proof-check.sh`.** The dependency runs the other way — `proof-check.sh 'bash
+scripts/doc-check.sh --selftest'` — and the reverse would recurse (task `69eb6f56`).
+
+Ceilings cover files whose bytes are paid repeatedly or read first — per-spawn, generated, or
+front-door. `CLAUDE.md` is injected into **every** sub-agent spawn, so its bytes are multiplied by
+every dispatch; `SPEC.md` is generated; `README.md` is budgeted as neither, but as the first thing a
+new agent or human reads. Only **one** of the three ceilings was set at the file's size: at `0a9a674`, `CLAUDE.md` was
+exactly its 28781 B ratchet, while `SPEC.md` (6010 B) and `README.md` (7254 B) were given a round
+8192 B — headroom, not a ratchet. The CONTEXT epic's job is to lower `CLAUDE.md`'s.
+**`CLAUDE.md` is OVER its ceiling** — 30063 B against 28781 B **at `85ed77f`** (29459 B at `591355f`,
+the last 2026-08-16 commit; already 31023 B in a working tree mid-edit as this was written) — so
+`doc-check.sh budget` exits 1 on a clean checkout. The figure is pinned to a commit deliberately:
+this file's subject is edited by every CONTEXT task, so an unpinned "currently N bytes" is a stale
+claim within the day. `doc-check.sh budget` is the answer; this sentence is only a signpost.
+`README.md` now sits **4 bytes** under its own, at 8188 B, so that row is one sentence from red too. That is the
+ratchet working, and it doubles as the negative control proving the instrument can still fail; the
+remedy is to shrink `CLAUDE.md`, never to raise the number. `DECISIONS.md` and `AGENT_LOG.md` are exempt **by
+design** — they are grepped and range-read rather than injected, so their bytes are paid once, and
+capping them would delete the reasons this project has already been caught removing three times. The
+exemption and its reason are recorded in `docs/doc-budgets.tsv` itself.
+
 ### `scripts/proof-cmd-audit.py` (`TOOLING-1`)
 
 Read-only audit of every stored `proof_cmd` in the complete Spec Server JSON export:

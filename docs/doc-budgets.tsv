@@ -1,0 +1,46 @@
+# docs/doc-budgets.tsv — byte ceilings, enforced by `scripts/doc-check.sh budget`.
+#
+# FORMAT: <path>\t<max_bytes>          (tabs, not spaces; # and blank lines ignored)
+#
+# WHAT BELONGS HERE, AND WHAT DOES NOT
+# ------------------------------------
+# Ceilings apply to files whose bytes are paid repeatedly, or read first — three
+# categories, not two: per-spawn, generated, and front-door. (This said "ONLY to
+# per-spawn and generated files" while listing README.md, which is neither.)
+#
+#   CLAUDE.md   is injected into EVERY sub-agent spawn, so its size is multiplied
+#               by every dispatch. That multiplication is the entire reason the
+#               CONTEXT epic exists, which is why its ceiling was set AT the
+#               file's size when the ratchet landed (28781 B at 0a9a674): a
+#               ratchet, not headroom. It is the ONLY row set that way — SPEC.md
+#               (6010 B) and README.md (7254 B) were given a round 8192 B, which
+#               IS headroom. CLAUDE.md was 30063 B at 85ed77f, i.e. OVER by 1282 B
+#               (do not trust that number: run `doc-check.sh budget`),
+#               so `budget` exits 1 until it shrinks; that red is the ratchet
+#               working. Do not raise the number, and do not delete the row —
+#               deleting it turns the check green and leaves nothing to notice.
+#               README.md sits 4 B under its ceiling (8188 B) as of 2026-08-21.
+#   SPEC.md     is a generated mirror (scripts/gen-spec-mirror.sh), so growth here
+#               is a generator change, not authorship.
+#   README.md   is the first thing a new agent or human reads.
+#
+# EXEMPT BY DESIGN — deliberately absent from this file, recorded here so their
+# absence reads as a decision rather than an oversight:
+#
+#   DECISIONS.md   append-only rationale. It is consulted by grep and range-read,
+#   AGENT_LOG.md   never injected wholesale, so its bytes are paid once by the
+#                  one agent that reads the relevant range — not per spawn. They
+#                  are ~483 KB and ~364 KB respectively (2026-08-21; they were
+#                  described here as ~400 KB and ~287 KB, which they outgrew)
+#                  and SHOULD keep growing:
+#                  capping them would delete the reasons this project has already
+#                  been caught removing three times. Cut cost, not reasons.
+#
+#   CONTRACTS-*.md and PROTOCOL.md and AGENT_PROTOCOL.md are also uncapped for
+#                  now: they are reference documents read by grep, not injected.
+#                  Add them here only with evidence that something reads them
+#                  whole.
+#
+CLAUDE.md	28781
+SPEC.md	8192
+README.md	8192

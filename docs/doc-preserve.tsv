@@ -1,0 +1,33 @@
+# docs/doc-preserve.tsv — phrases that must SURVIVE compression.
+#
+# FORMAT: <path>\t<literal_phrase>     (tabs, not spaces; # and blank lines ignored)
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The CONTEXT epic cuts documentation cost, and compressing rationale out of
+# CLAUDE.md has ALREADY been caught three times removing something load-bearing.
+# A byte ceiling on its own rewards deletion indiscriminately: the cheapest way
+# to pass a budget is to cut the paragraph explaining why a rule exists, which is
+# exactly the paragraph that stops an agent breaking things. This file is the
+# counterweight — the budget says "get smaller", this says "not by losing THIS".
+#
+# The pairing is deliberate: `doc-check.sh budget` fails if a file is over its
+# ceiling OR if a preserved phrase has gone missing, so neither pressure can be
+# satisfied by ignoring the other.
+#
+# Phrases are matched LITERALLY, after whitespace normalisation, so re-wrapping a
+# paragraph is fine and rewording is not. Keep each phrase short enough to
+# survive legitimate editing and distinctive enough that an incidental match
+# elsewhere is implausible.
+#
+# ADDING TO THIS FILE: add the phrase, not the paragraph. If a rule's rationale
+# is genuinely superseded, DELETE THE ROW in the same change that removes the
+# text — a stale row here blocks correct work, and a gate that blocks correct
+# work gets switched off.
+#
+# Each row below is a rule whose REASON has been lost or nearly lost before.
+CLAUDE.md	A pathspec commit takes the WORKTREE, not the index
+CLAUDE.md	A green tree is not a GATED tree.
+CLAUDE.md	Numbers are reserved, not chosen
+CLAUDE.md	Task state is coordinated by the Spec Server, not by file locks.
+CLAUDE.md	SPEC.md` is a GENERATED MIRROR
