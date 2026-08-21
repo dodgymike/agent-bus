@@ -1,0 +1,66 @@
+{
+  "context": "agent-bus/recipient-ack/3",
+  "ed25519_public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "ed25519_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "format": "agent-bus canonical RECIPIENT-ACKNOWLEDGEMENT signing format (ACK-CONTRACT.md 6.3)",
+  "format_version": 3,
+  "key_note": "RFC 8032 section 7.1 TEST 1, the same key the message vectors use, chosen so the key derivation itself is checkable against a published vector. It is a TEST key and must never be used by a real agent.",
+  "note": "PUBLISHED ARTIFACT. These are the exact bytes a RECIPIENT signs to acknowledge a message, and the exact detached Ed25519 signatures over them (ed25519.Sign over canonical_hex UNHASHED). Layout: the table in signing.CanonicalizeAck's doc comment. Regenerating this file to make a test pass is a WIRE-FORMAT CHANGE, not a fix -- a new format version reserved from the signing-format-version namespace, with a new context string. NOTE the signature is checked for SHAPE ONLY by every bus (relay.ValidateAckAttestation); no bus verifies it and none may claim to, and today no endpoint distributes agents' messaging public keys so a sender cannot verify it either (16 Q1).",
+  "vectors": [
+    {
+      "name": "delivered-local",
+      "why": "positive ACK, origin bus and recipient bus coincide; the class is an EMPTY but PRESENT zero-length field",
+      "correlation_key": "bus-a-1",
+      "recipient": "bus-a.bob-2",
+      "outcome": "delivered",
+      "class": "",
+      "emitted_at_unix_milli": 1,
+      "canonical_hex": "000000196167656e742d6275732f726563697069656e742d61636b2f33000000076275732d612d310000000b6275732d612e626f622d320000000964656c697665726564000000000000000000000001",
+      "signature_hex": "0b3e84dc4701529b614c721282215132632fed12983e0934bbe21a0cf2e2aec6b5519326281345b1ad108d104a85964eb37498508ab38d75f52cd56e127db603"
+    },
+    {
+      "name": "delivered-cross-bus",
+      "why": "positive ACK across a relay hop; the two bus halves DIFFER and that is legitimate (ACK-CONTRACT.md 6.2)",
+      "correlation_key": "bus-a-7",
+      "recipient": "bus-b.bob-2",
+      "outcome": "delivered",
+      "class": "",
+      "emitted_at_unix_milli": 1755777600000,
+      "canonical_hex": "000000196167656e742d6275732f726563697069656e742d61636b2f33000000076275732d612d370000000b6275732d622e626f622d320000000964656c6976657265640000000000000198cc800a00",
+      "signature_hex": "16f8a71273ade969ec35af122a4e80ec9e718c19ac3b49efeb652dcaeae88170ca24f99884d7e1ede6980c621306aa8d8ee75947cfc3159ca683d50cd65c2805"
+    },
+    {
+      "name": "refused-policy",
+      "why": "negative terminal, recipient-emitted class",
+      "correlation_key": "bus-a-7",
+      "recipient": "bus-b.bob-2",
+      "outcome": "refused",
+      "class": "recipient_refused_policy",
+      "emitted_at_unix_milli": 1,
+      "canonical_hex": "000000196167656e742d6275732f726563697069656e742d61636b2f33000000076275732d612d370000000b6275732d622e626f622d32000000077265667573656400000018726563697069656e745f726566757365645f706f6c6963790000000000000001",
+      "signature_hex": "3b4393f4f517986f3ad37d1b7363dae0ef6b4aaa2dbe1cc60143d9b89efa7e292dd9b39e6126ee3de117cc65d5b35c5a77e29c046f00d5b768379282bd78270c"
+    },
+    {
+      "name": "refused-undecodable",
+      "why": "reveals THAT decoding failed and nothing about the bytes that failed (invariant 6)",
+      "correlation_key": "bus-a-7",
+      "recipient": "bus-b.bob-2",
+      "outcome": "refused",
+      "class": "recipient_refused_undecodable",
+      "emitted_at_unix_milli": 1755777600000,
+      "canonical_hex": "000000196167656e742d6275732f726563697069656e742d61636b2f33000000076275732d612d370000000b6275732d622e626f622d3200000007726566757365640000001d726563697069656e745f726566757365645f756e6465636f6461626c6500000198cc800a00",
+      "signature_hex": "34bc530a83b020f56428044b5c4e9e2881a961263f67742599c87d904a33bb27be742fa79f1c1d02a04b28be168cda3f2a227b4ef1ae6511092fa4a0bd6b9b0e"
+    },
+    {
+      "name": "refused-not-addressed",
+      "why": "the third and last recipient-emitted class",
+      "correlation_key": "bus-a-1",
+      "recipient": "bus-a.bob-2",
+      "outcome": "refused",
+      "class": "recipient_refused_not_addressed",
+      "emitted_at_unix_milli": 2,
+      "canonical_hex": "000000196167656e742d6275732f726563697069656e742d61636b2f33000000076275732d612d310000000b6275732d612e626f622d3200000007726566757365640000001f726563697069656e745f726566757365645f6e6f745f6164647265737365640000000000000002",
+      "signature_hex": "6ce3968f651e3c9346ce497881950550bb34d51916c7e80b860d6437724ecbb8c9c29aa299f42a59cdcb5cc26366f9a512c617213b3889ff56013535dbb40e0c"
+    }
+  ]
+}

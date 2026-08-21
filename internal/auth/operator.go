@@ -29,24 +29,52 @@ import (
 //	log, err := wal.Open(wal.LogOptions{Dir: dir, Applier: mux, ...}) // 2. replay fills r
 //	if err := r.Attach(log); err != nil { ... }                       // 3. now it can write
 //
-// # !! THE SERVER DOES NOT YET REGISTER THIS APPLIER — READ THIS BEFORE ASSUMING IT DOES !!
+// # THE SERVER REGISTERS THIS APPLIER (AUTH-10-WIRING, 2026-08-21)
 //
-// cmd/agent-bus/main.go builds its applier map WITHOUT auth.OperatorRecordKind,
-// and auth.MultiplexApplier is SILENT about kinds it does not own, so an
-// operator record in the WAL is currently PASSED OVER AT SERVER REPLAY WITHOUT A
-// WORD — which is exactly the silent discard invariant 6 rates as the defect.
-// `agent-bus operator add|list|revoke` is unaffected: it opens the log with its
-// own applier map (cmd/agent-bus/operator.go) and therefore sees every record.
-// What is missing is the SERVER-side half. The three lines main.go needs, beside
-// the ones that already register auth.RecordKind (main.go:505 and main.go:569):
+// THIS BLOCK ASSERTED THE OPPOSITE, in the present tense, until AUTH-10-WIRING:
+// "!! THE SERVER DOES NOT YET REGISTER THIS APPLIER — READ THIS BEFORE ASSUMING
+// IT DOES !!", cmd/agent-bus/main.go "builds its applier map WITHOUT
+// auth.OperatorRecordKind", an operator record "is currently PASSED OVER AT
+// SERVER REPLAY WITHOUT A WORD". EVERY CLAUSE OF THAT IS NOW FALSE. It was true
+// when it was written, and it is the silent discard invariant 6 rates as the
+// defect.
 //
-//	operatorRegistry := auth.NewOperatorRegistry(lg)     // beside authRoster, main.go:505
-//	appliers[auth.OperatorRecordKind] = operatorRegistry // in the map literal, main.go:569
-//	if err := operatorRegistry.Attach(walLog); err != nil { ... } // beside authRoster.Attach
+// READ THE EVIDENCE CAREFULLY, because the obvious reading of it is wrong.
+// Verified 2026-08-21 by running BOTH builds over one data directory holding two
+// adds and one revoke: the PRE-WIRING binary logged
+// `msg="wal replayed" records=6 applied=3 … discarded=0` and NOTHING ELSE about
+// operators, and the WIRED binary logs THAT SAME LINE, same counters, plus
+// `operators_recovered=2 live_operators=1`. So `applied=3` is NOT three records
+// skipped — Replay.Applied counts entries DELIVERED to the applier (records=6 is
+// three prepare+commit pairs), and the multiplexer then returned nil for a kind
+// it did not own. That is what made the old state so dangerous: the replay line
+// read perfectly healthy, `discarded=0` included, over records nothing had
+// rebuilt. The ONLY signal is the operator line below and its two counts.
 //
-// This is NOT worked around here and must not be worked around anywhere else:
-// a shim in another cmd/agent-bus file that reached into main's wiring would put
-// the registration in a place nobody looking at the applier map would find.
+// main.go now takes all three steps in the order above: it builds the registry
+// beside authRoster, registers auth.OperatorRecordKind in the applier map it
+// hands wal.Open, and calls Attach once wal.Open has returned. It reports the
+// outcome at INFO on every start — a log holding two adds and one revoke replays
+// as `operators_recovered=2 live_operators=1` — and those counts reading 0 over a
+// data directory that holds operator records is how this defect would be seen if
+// it ever came back.
+//
+// `agent-bus operator add|list|revoke` was never affected either way: it opens
+// the log with its own applier map (cmd/agent-bus/operator.go) and has always
+// seen every record.
+//
+// The registration belongs IN main's applier map and must stay there: a shim in
+// another cmd/agent-bus file that reached into main's wiring would put it where
+// nobody reading the applier map would find it.
+//
+// # STILL TRUE, and a different claim entirely: nothing CONSUMES this principal
+//
+// auth.NewOperatorService has no non-test caller, no HTTP route authenticates an
+// operator, and admitting or revoking one remains an OFFLINE action taken under
+// the data directory's exclusive lock — so a revocation is in effect from the
+// next start, NOT immediately on a running bus. The principal now EXISTS and
+// REPLAYS; nothing USES it (AUTH-7, INVMINT and CONV-AUTHZ-ADMIN are the
+// consumers, each unstarted).
 //
 // The zero value is not usable; construct with NewOperatorRegistry. It is safe
 // for concurrent use.
@@ -106,13 +134,22 @@ func NewOperatorRegistry(logger *logging.Logger) *OperatorRegistry {
 // called EXACTLY ONCE, after wal.Open has returned.
 //
 // A second call is an ERROR and changes nothing, and a nil writer is likewise an
-// error rather than a silent no-op — WALRoster.Attach's two reasons, unchanged:
-// two logs would mean two durable histories behind one in-memory registry, and a
-// nil writer would leave Add succeeding in memory with nothing on disk, which is
-// the exact false durability claim this type exists to remove.
+// error rather than a silent no-op — WALRoster.Attach's two reasons, the second
+// of them CORRECTED (AUTH-10-WIRING, 2026-08-21): two logs would mean two
+// durable histories behind one in-memory registry, and a nil writer would spend
+// the once-only Attach on nothing while leaving the registry exactly as
+// unattached as it already was.
+//
+// THE SECOND REASON USED TO READ "a nil writer would leave Add succeeding in
+// memory with nothing on disk, which is the exact false durability claim this
+// type exists to remove", and it is INVERTED. Add and Revoke both check r.w and
+// refuse with ErrNotAttached before writing anything, so an unattached
+// registry is FAIL-CLOSED, not silently-succeeding. Attach therefore SPENDS that
+// guard rather than adding one — it is not a hardening step and must not be read
+// as one.
 func (r *OperatorRegistry) Attach(w DurableWriter) error {
 	if w == nil {
-		return errors.New("auth: attaching the operator registry: the durable writer must not be nil; a registry with no log would acknowledge an operator that never reached disk (invariant 4)")
+		return errors.New("auth: attaching the operator registry: the durable writer must not be nil; a nil writer would spend the once-only Attach and leave the registry unattached, where Add and Revoke refuse with ErrNotAttached")
 	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
@@ -510,9 +547,17 @@ func (r *OperatorRegistry) Revoke(operatorID, reason string, at time.Time) (Oper
 // reachable trigger is not a round-trip bug, it is MIS-WIRING: Attach takes any
 // DurableWriter and cannot check that the log was opened with THIS registry in
 // its applier map. Hand it a log wired to a multiplexer that does not know
-// OperatorRecordKind — which is EXACTLY the state cmd/agent-bus/main.go is in
-// today, see the type doc — and every write would succeed durably, return nil,
-// and leave the registry permanently empty.
+// OperatorRecordKind and every write would succeed durably, return nil, and
+// leave the registry permanently empty.
+//
+// WHICH IS NO LONGER THE STATE cmd/agent-bus/main.go IS IN (AUTH-10-WIRING,
+// 2026-08-21). The sentence above carried "— which is EXACTLY the state
+// cmd/agent-bus/main.go is in today, see the type doc —" in the middle of it, and
+// that is now false: main.go registers OperatorRecordKind. The check stays
+// because the trigger is merely hypothetical FOR MAIN while remaining live for
+// any other embedder that opens a log without this registry in its applier map.
+// Note what the check is, though: it reads back AFTER the durable commit, so it
+// DETECTS that mis-wiring and cannot PREVENT the write it detects.
 func (r *OperatorRegistry) write(o Operator, what string) error {
 	body, err := EncodeOperator(o)
 	if err != nil {

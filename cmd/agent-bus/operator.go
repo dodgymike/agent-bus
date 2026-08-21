@@ -40,9 +40,17 @@ package main
 // This delivers the PRINCIPAL and the AUTHORIZATION CHECK. It adds NO admin
 // route. Nothing on the wire consumes an OperatorPrincipal yet — AUTH-7 (clear
 // an agent's sessions), INVMINT (online invite mint) and CONV-AUTHZ-ADMIN are
-// the consumers, each a separate task with its own gates. A record written here
-// is durable; see the note in internal/auth/operator.go about the server's
-// applier map, which does NOT yet register auth.OperatorRecordKind.
+// the consumers, each a separate task with its own gates, and
+// auth.NewOperatorService still has no non-test caller. AUTH-10-WIRING did NOT
+// change that sentence and must not be read as softening it.
+//
+// What AUTH-10-WIRING (2026-08-21) did change: a record written here is durable
+// AND IT IS NOW REPLAYED BY THE SERVER. This paragraph used to end "see the note
+// in internal/auth/operator.go about the server's applier map, which does NOT
+// yet register auth.OperatorRecordKind", and that is now false — main.go
+// registers auth.OperatorRecordKind, so a record this command writes is applied
+// at server startup instead of being passed over in silence. Replaying a
+// principal is not consuming one; the two halves are separate claims.
 
 import (
 	"crypto/ed25519"
@@ -75,18 +83,19 @@ import (
 // server flag parsing. Pinned as a constant so the dispatch in main.go and the
 // usage text cannot drift apart.
 //
-// !! THE DISPATCH IN main.go IS NOT YET WIRED. cmd/agent-bus/main.go is owned by
-// another change in flight, so the two lines it needs are reported rather than
-// written here:
+// THE DISPATCH IN main.go IS WIRED (AUTH-10-WIRING, 2026-08-21). This comment
+// said the opposite for as long as it was true — "!! THE DISPATCH IN main.go IS
+// NOT YET WIRED", the two lines main.go needed quoted beneath it, and the
+// warning that until they landed `agent-bus operator …` "falls through to
+// parseFlags and is refused as an unexpected argument". THAT IS NOW FALSE:
+// main.go tests os.Args[1] == operatorCommandName beside the identical block for
+// peerCommandName, and parseFlags' usage announces the subcommand, so all four
+// verbs answer at a prompt.
 //
-//	if len(os.Args) > 1 && os.Args[1] == operatorCommandName {
-//		os.Exit(runOperatorCommand(os.Args[2:], os.Stdout, os.Stderr))
-//	}
-//
-// beside the identical block for peerCommandName (main.go:219-221). Until that
-// lands, `agent-bus operator …` falls through to parseFlags and is refused as an
-// unexpected argument. The command itself is complete and is exercised end to
-// end through runOperatorCommand.
+// TestOperatorSubcommandIsReachableFromArgv (cmd/agent-bus/operatorwiring_test.go)
+// proves that against the COMPILED BINARY, which is the only thing that can:
+// operator_test.go calls runOperatorCommand directly and was green throughout
+// the period the command could not be typed at a shell.
 const operatorCommandName = "operator"
 
 // operatorAuthKeyFileName is the operator's PRIVATE session-signing key, PKCS#8

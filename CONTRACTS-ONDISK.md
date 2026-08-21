@@ -2784,11 +2784,32 @@ its directory entry. It lives on the **OPERATOR's own machine**, created by
 and a digest, which is why the whole record is safe to print in `operator list`. Existing material is
 LOADED, never overwritten — regenerating would silently invalidate the operator record the bus holds.
 
-### WIRING STATUS — a server replay currently passes these records over IN SILENCE
+### WIRING STATUS — a server replay now REPLAYS these records (`AUTH-10-WIRING`, 2026-08-21)
 
-`cmd/agent-bus/main.go` does **not** register `auth.OperatorRecordKind` in its applier map, and
-`auth.MultiplexApplier` is silent about kinds nobody registered. So an `"operator"` record in the WAL
-is skipped at **server** startup without a word — the shape invariant 6 rates as the defect, present
-here by omission rather than by choice. The `agent-bus operator` subcommands are unaffected: they open
-the log with their own applier map (operator registry + enrolment roster + invite store). The three
-lines `main.go` needs are named in `OperatorRegistry`'s type doc.
+**This heading read "a server replay currently passes these records over IN SILENCE", and the
+paragraph under it said `cmd/agent-bus/main.go` "does **not** register `auth.OperatorRecordKind` in
+its applier map" so an `"operator"` record "is skipped at **server** startup without a word — the
+shape invariant 6 rates as the defect". That is no longer true.** `main.go` registers
+`auth.OperatorRecordKind` in the applier map it hands `wal.Open` and calls `Attach` once `Open` has
+returned, so every `"operator"` record on disk is applied at server startup. The outcome is reported
+at INFO on every start — `msg="operator registry recovered from the append-only log…"
+operators_recovered=<n> live_operators=<n>` — and a log holding two adds and one revoke reads
+`operators_recovered=2 live_operators=1`. The second count is the one that proves the **revocation**
+survived the restart rather than just the two adds; both reading `0` over a directory that holds
+operator records is how this defect would be seen to return.
+
+**The `wal replayed` line does not show it, and never did** — verified 2026-08-21 by running a
+pre-wiring and a wired build over one data directory holding two adds and one revoke: **both** print
+`records=6 applied=3 … discarded=0`. `Applied` counts entries DELIVERED to the applier (`records=6`
+is three prepare/commit pairs), so a multiplexer returning `nil` for a kind it does not own leaves a
+replay line that reads perfectly healthy over records nothing rebuilt. Only the operator line above
+distinguishes the two.
+
+The `agent-bus operator` subcommands were unaffected in either state: they open the log with their
+own applier map (operator registry + enrolment roster + invite store).
+
+**What did NOT change:** the server is a **reader** of this plane and writes no `"operator"` record
+itself. `agent-bus operator add|revoke` takes the data directory's exclusive lock, so admitting or
+revoking an operator means stopping the bus — a revocation is in effect from the next start, not
+immediately — and nothing on the wire consumes an operator principal yet (`AUTH-7`, `INVMINT`,
+`CONV-AUTHZ-ADMIN`).

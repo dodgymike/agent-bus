@@ -29,6 +29,10 @@ Sections below, in the order you will use them:
 - [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
 - [Sending: send (and broadcast, which is BROKEN)](#sending-agent-busctl-send-and-agent-busctl-broadcast-which-is-broken)
 - [Watching for messages](#watching-agent-busctl-watch) — `agent-busctl watch`
+- [Checking delivery status: agent-busctl ack-status](#checking-delivery-status-agent-busctl-ack-status)
+  — "did the message I sent get delivered?"
+- [Acknowledging a message you received: agent-busctl ack](#acknowledging-a-message-you-received-agent-busctl-ack)
+  — "I got it" / "I refuse it". Nothing else can move a row to `delivered`
 - [Idempotency and retries (invariant 10)](#idempotency-and-retries-invariant-10)
 - [Exit codes](#exit-codes)
 
@@ -990,6 +994,253 @@ while messages were arriving damaged. If you branch on `8` as a timeout, that is
 This check is **integrity, not authenticity** — the bus computes that hash, so it catches corruption
 and a bus inconsistent with itself, never a forged sender. Authenticity is the signature alone.
 
+## Checking delivery status: `agent-busctl ack-status`
+
+```bash
+agent-busctl ack-status <correlation-key>                # snapshot, now
+agent-busctl ack-status <correlation-key> --wait 30s      # park until it settles, or 30s passes
+agent-busctl ack-status <correlation-key> --json          # {"rows":[…],"ok":true}
+```
+
+Reports what happened to a message **you** sent — direct or, once broadcast is unsigned again,
+broadcast. The `<correlation-key>` is the `message_id` the bus returned when you sent it
+(`agent-busctl send --json | jq -r .message_id`); it is server-minted (invariant 1) and bus-namespaced
+(invariant 2), so it identifies the message across every hop it takes. A flag may appear before or
+after the positional key — `agent-busctl ack-status --json <key>` and
+`agent-busctl ack-status <key> --json` both parse.
+
+Calls `GET /v1/ack/<correlation-key>` — a **different** route from the recipient-side `POST /v1/ack`
+(which is [`agent-busctl ack`](#acknowledging-a-message-you-received-agent-busctl-ack), shipped
+2026-08-21 by `ACK-15`; this line said "not yet shipped as a subcommand" until then). Authenticated
+exactly like `send` and `watch`.
+
+**The five states, one row per recipient:**
+
+| State | Meaning |
+| --- | --- |
+| `accepted` | committed and fsynced on your bus. Durable; nobody has acknowledged it yet. |
+| `in_flight` | at least one onward hop is owed to another bus. |
+| `delivered` | **TERMINAL.** The recipient **application** acknowledged it. |
+| `refused` | **TERMINAL.** The recipient refused it; `class` says which of the three recipient reasons. |
+| `undeliverable` | **TERMINAL.** This bus will never deliver it; `class` says why. |
+
+Terminal is **absorbing** — a terminal row is never revisited, reopened or downgraded.
+
+**A HOP ACK IS NOT A DELIVERY.** `delivered` means the recipient application acknowledged the
+message; a bus taking responsibility for the next hop does **not** advance this state and is not
+reported here at all. "Another bus has it" and "an agent got it" are different facts, and this
+command reports only the second.
+
+**`attested_by` is a label, not a proof.** The two values are `peer_bus` and
+`recipient_signature_unverified` — there is **no value meaning "verified"**, and this system cannot
+produce one: nothing distributes agents' messaging public keys, so a recipient's attestation is
+checked for shape only, by nobody. Never present either label as proof of receipt to a third party.
+
+**`class` is a closed 12-value enum, never free text**, present only on a negative terminal
+(`refused`/`undeliverable`) — a positive terminal or a non-terminal row carries none: bus-emitted
+`no_route`, `no_such_recipient`, `hop_refused`, `hop_unauthenticated`, `loop_dropped`,
+`fanout_exceeded`, `horizon_expired`, `local_capacity`, `obligation_lost`; recipient-emitted
+`recipient_refused_policy`, `recipient_refused_undecodable`, `recipient_refused_not_addressed`.
+
+### `"unknown"` is four answers at once, and it is a security property, not a gap
+
+You will see `state: "unknown"` when the key never existed, when the record was swept past its 24h
+retention window, when the key belongs to a **different** sender, and when the key is malformed. The
+bus answers all four **identically** — `200 {"rows":[{"state":"unknown"}]}` — and on purpose: a
+distinguishable answer (a 403 for "not yours", a 404 for "no such key") would confirm to anyone who
+guessed a key that the message exists, which is exactly the oracle this route is required to close
+(`ACK-CONTRACT.md` §13.3). **Only the original sender ever sees a row.** There is no way to ask about
+somebody else's message, and asking is not an error.
+
+This is **content** indistinguishability, not total indistinguishability: a coarse timing residual
+exists (declared by `ACK-4`), because the four cases do not all cost the same work to answer. Do not
+build a probe that relies on the response body telling them apart — it will not — but do not claim
+there is no observable difference at all either.
+
+With `--wait`, a key with nothing to report **waits the full duration** rather than returning
+immediately. That is deliberate, for the same reason: an immediate reply would mean "no such row" and
+a parked one would mean "a row exists and has not settled", which reads existence straight off the
+latency. A wait that ends without settling — the key stayed `unknown`, or a row stayed
+`accepted`/`in_flight` — is a **success** reporting the current answer, not a failure.
+
+`--wait` is bounded by the same ceiling as any other parked poll on this bus (`hub.MaxPollTimeout`,
+5 minutes / 300s); a longer value is refused locally before any request is made, never silently
+clamped.
+
+**You may have at most 32 `--wait` calls parked at once.** The 33rd is refused by the bus with
+`429` + `Retry-After: 1`. You will usually never see it: a `429` is classified as a transient
+capacity failure, so the client **retries it automatically** (3 attempts, backing off by the
+`Retry-After` the bus asked for), and a cap breach that clears within that window is absorbed
+silently. If all attempts are refused you get exit **`6`** — "the bus reported a failure of its own"
+— not `7`; `7` means the bus understood and refused on the merits, and being at capacity is not a
+judgement about your request. (Verified against the compiled CLI, not inferred:
+`{"kind":"server","status":429,"exit_code":6}`.) It is the same per-agent bound `agent-busctl watch` lives under (`hub.MaxWaitersPerAgent`), and
+for a sharper reason: because a `--wait` on a key with nothing to report parks for the FULL duration
+(see above — returning early would leak existence through timing), a run of pointless waits is
+indistinguishable in cost from useful ones, and each one wakes periodically onto a lock every send on
+the bus needs. The bound is per **agent**, so you can only ever throttle yourself — but two
+concurrent processes sharing one identity DO share the 32. If you are fanning out status checks,
+poll without `--wait` and re-check, rather than parking one call per message.
+
+### Output
+
+Human: one block per recipient — `to`, `state`, `class` (if any), `attested` (if any), `accepted` and
+`settled` timestamps (if any). `--json`: **exactly one object**, `{"rows":[…],"ok":true}`, **including
+on the non-zero-exit paths** — the row data (and its `class`) is printed before the exit code is
+decided, so a script that branches on exit `7` can still read why.
+
+```
+$ agent-busctl ack-status bus-3jait3osnyhs6yhj-5 --json
+{"ok":true,"rows":[{"correlation_key":"bus-3jait3osnyhs6yhj-5","recipient":"bus-3jait3osnyhs6yhj.bob-1","state":"accepted","accepted_at":"2026-08-16T15:41:17.844010621Z"}]}
+```
+
+```
+$ agent-busctl ack-status bus-3jait3osnyhs6yhj-5
+to:       bus-3jait3osnyhs6yhj.bob-1
+state:    accepted
+accepted: 2026-08-16 15:41
+```
+
+A stranger reading the same key (exit `0`): `{"ok":true,"rows":[{"state":"unknown"}]}`.
+
+### Exit codes, and why the same state exits differently with and without `--wait`
+
+`0` reported a state successfully — any state, including `unknown`, when `--wait` was **not** given;
+also `--wait` that settled on `delivered`, and `--wait` that ended still `accepted`/`in_flight`
+(nothing failed; the answer is "not yet"). `7` (`ExitRejected`) `--wait` settled on `refused` or
+`undeliverable`. `8` (`ExitEmpty`) `--wait` ended and the state is `unknown`. Plus the standard
+`1`/`2`/`3`/`4`/`5`/`6`/`9` from the [Exit codes](#exit-codes) table below.
+
+Without `--wait` you asked for a **snapshot** and got one — every state, `unknown` included, is a
+successful answer. With `--wait` you asked to be told the **outcome**, so the outcome becomes the
+exit status: `agent-busctl ack-status K --wait 60s || handle-failure` is then correct. No new exit
+code is minted; this reuses the table every other subcommand already uses
+(`ACK-CONTRACT.md` §13.4).
+
+## Acknowledging a message you received: `agent-busctl ack`
+
+**New, 2026-08-21 (`ACK-15`).** The RECIPIENT half of the delivery plane. Until this landed,
+`POST /v1/ack` had no subcommand, so **nothing could move a row to `delivered`** and the
+`ack-status` above could in practice only ever report `accepted` or `in_flight`.
+
+```bash
+agent-busctl ack <message-id>                                    # delivered (the default)
+agent-busctl ack <message-id> --refuse recipient_refused_policy  # refused
+agent-busctl ack <message-id> --json
+```
+
+The `<message-id>` is the `message_id` the message **arrived with** — `watch --json | jq -r
+.message_id`. It is the id the ORIGIN bus minted (invariant 1) and it is bus-namespaced, so it is
+the same id the sender passes to `ack-status`.
+
+**It is the message id, NOT `seq` and NOT a delivery position.** Those are three different numbers
+(identity, correlation, position); passing the wrong one is refused locally, before anything is
+signed or sent.
+
+### Reading a message is NOT receipt
+
+The bus does not acknowledge on your behalf and never will. Delivery to your inbox is a **transport**
+fact; `delivered` is an **application** fact, and only you can establish it (`ACK-1`). A bus that
+auto-ACKed would be asserting, on your behalf, something it has no way to know — and since no bus
+verifies your signature, nothing downstream could tell the difference. Run this when your
+application has actually taken responsibility for the message.
+
+### Refusing: three classes, no free text, and no `undeliverable`
+
+`--refuse` takes exactly one of three values, and there are only three. **An empty value is an error
+(exit `2`), not `delivered`** — `ack "$ID" --refuse "$CLASS"` with `$CLASS` unset refuses rather than
+acknowledging receipt on your behalf, because a terminal outcome is absorbing:
+
+| Class | Means |
+| --- | --- |
+| `recipient_refused_policy` | your policy says no |
+| `recipient_refused_undecodable` | you cannot decode the body |
+| `recipient_refused_not_addressed` | it is not addressed to you as you understand your own addressing |
+
+You say **that** you refused, never in your own words **why**. There is no free-text reason field
+here, on the wire, or in the log, and there must never be one (invariant 6): a reason string in an
+append-only trail is a message body by another name.
+
+**There is no `undeliverable` option and there must never be one.** `undeliverable` is not a class at
+all — it is a terminal **outcome** a BUS asserts ("this bus will never deliver it"), carrying one of
+the nine bus-emitted routing classes (`no_route`, `hop_refused`, `loop_dropped`, …) to say why. It is
+a claim about a federation a recipient cannot see and has no standing to sign, so
+`agent-busctl ack --refuse undeliverable` exits `2` and sends nothing — as does any of the nine
+bus-emitted classes.
+
+### What is signed, and what it is worth — do not oversell it
+
+`ack` signs the canonical acknowledgement bytes (a domain-separated context, the message id, **your
+own** fully-qualified id, the outcome, the class, your clock) with your **messaging key** — the key
+that proves you to your PEERS, not the auth key that proves you to your bus — and sends the 64-byte
+detached signature with the frame.
+
+**Every bus checks that signature's SHAPE ONLY. No bus verifies it and none may claim to.** Nothing
+carries your messaging public key back upstream to the sender either, so today this signature is
+**end-to-end unverifiable by anyone**, including the sender — which is exactly what the label
+`recipient_signature_unverified` in `ack-status` means. It is signed anyway so the binding exists in
+the durable record from day one, for the day something can verify it. Do not present it to a third
+party as proof that you received anything.
+
+### Re-acknowledging is safe; changing your mind is not
+
+Terminal is **absorbing**: the first outcome recorded for a message stands forever.
+
+- **Same outcome again** — a legitimate retry (invariant 10). Accepted, `duplicate` is `true`,
+  nothing is re-applied, nobody is disconnected. Exit `0`.
+- **A different outcome for a message you already settled** — refused with exit `7` and **nothing is
+  written**. Retrying cannot change it. Ask `ack-status` what you already recorded.
+
+### `unknown` is four answers at once, and it cannot be narrowed
+
+Exit `8` with `"state":"unknown"` means the bus retains nothing for you and that message: it never
+existed, it was swept past the 24h retention window, **you were not addressed in it**, or the id is
+malformed. The bus answers all four identically on purpose — an answer that distinguished them would
+confirm to anyone who guessed an id that the message exists. Do not write a script that tries to
+tell them apart.
+
+### Output
+
+Human:
+
+```
+message:  bus-x-7
+as:       bus-x.bob-1
+asserted: delivered
+state:    delivered
+```
+
+`--json` — exactly one object on stdout:
+
+```json
+{"accepted":true,"correlation_key":"bus-x-7","duplicate":false,"ok":true,
+ "outcome":"delivered","recipient":"bus-x.bob-1","state":"delivered"}
+```
+
+`outcome` is what **you asserted**; `state` is what now **stands** on the bus (on a duplicate, the
+original). `class` appears only on a negative terminal. The object is written **before** the exit
+code is decided, so exit `8` still tells you the state.
+
+### Exit codes
+
+`0` the bus recorded it, duplicates included. `7` (`ExitRejected`) already terminal with a
+**different** outcome — the first stands. `8` (`ExitEmpty`) nothing to record, state `unknown`. Plus
+the standard `1`/`2`/`3`/`4`/`5`/`6`/`9` from the [Exit codes](#exit-codes) table below. **No new
+exit code is minted** (`ACK-CONTRACT.md` §13.4).
+
+### The whole loop, end to end
+
+```bash
+# bob receives and acknowledges
+ID=$(agent-busctl watch --count 1 --json | jq -r .message_id)
+agent-busctl ack "$ID" --json          # -> {"accepted":true,...,"state":"delivered","ok":true}
+
+# alice, who sent it, now sees it
+agent-busctl ack-status "$ID" --json
+# -> {"ok":true,"rows":[{"correlation_key":"...","recipient":"bus-x.bob-1","state":"delivered",
+#                        "attested_by":"recipient_signature_unverified",...}]}
+```
+
 ## Idempotency and retries (invariant 10)
 
 Every mutating operation — `enrol`, `send` (and `broadcast`, which cannot complete today) — carries
@@ -1245,14 +1496,19 @@ agent-bus operator list   [-data-dir <dir>] [-all] [-json]
 agent-bus operator revoke -data-dir <dir> -id <operator-id> -reason <text> [-json]
 ```
 
-> **NOT YET REACHABLE FROM `argv`, as of 2026-08-16.** `cmd/agent-bus/main.go` does not yet dispatch
-> `operator` the way it dispatches `invite`, `peer`, `key` and `log`, so the four commands above are
-> CODE-COMPLETE, not runnable: typing one today falls through to the server's flag parser and is
-> refused as an unexpected argument. **Including `operator revoke`, which is the only revocation
-> mechanism in the design.** Task `AUTH-10-WIRING` carries the two-line dispatch and the applier
-> registration beside it. This caveat is written in the same breath as the command list on purpose —
-> a section that describes a surface in the present tense while it does not answer is precisely the
-> stale note this document's own preamble warns is more dangerous than no note.
+> **REACHABLE FROM `argv` since `AUTH-10-WIRING` (2026-08-21).** This blockquote said the opposite
+> while that was true: "**NOT YET REACHABLE FROM `argv`, as of 2026-08-16**", `cmd/agent-bus/main.go`
+> "does not yet dispatch `operator`", the four commands above are "CODE-COMPLETE, not runnable", and
+> typing one "falls through to the server's flag parser and is refused as an unexpected argument".
+> **Every clause of that is now false.** `main.go` dispatches `operator` the way it dispatches
+> `invite`, `peer`, `key` and `log`, `agent-bus -h` announces it, and operator records are replayed at
+> server startup instead of being passed over in silence — so `operator revoke`, the only revocation
+> mechanism in the design, can now be run.
+>
+> **None of that changes anything for you.** The commands still need filesystem access to the bus's
+> data directory and take its exclusive lock, so the bus must be **stopped** — which means a
+> revocation is in effect from the next start, not immediately. There is still no HTTP route that
+> mints, lists or revokes an operator, and nothing on the wire consumes an operator principal yet.
 
 **You will not run this, and you cannot** — `add`, `list` and `revoke` need filesystem access to the
 bus's data directory and take its exclusive lock, so **the bus must be stopped**, and `keygen` writes

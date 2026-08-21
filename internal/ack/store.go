@@ -107,6 +107,14 @@ type Store struct {
 	// it (§13.3).
 	bySender map[string]int
 
+	// byCorrelation indexes correlation key -> the set of recipients retained
+	// under it. It is the secondary index Lookup's doc says ACK-9 owes, and it
+	// exists so StatusRows can answer without scanning the whole table under
+	// this mutex — see status.go, which is the only file that reads it and
+	// holds the two maintenance helpers. It holds exactly the keys of records,
+	// so it adds no new bound: putLocked adds on insert, delLocked removes.
+	byCorrelation map[string]map[string]struct{}
+
 	// writes and writesBySender are rows RESERVED across an fsync: admitted,
 	// not yet folded in. They are counted in every bound so two concurrent
 	// admissions cannot both pass a check that only one of them fits.
@@ -163,6 +171,7 @@ func NewStore(o Options) *Store {
 		retention:      o.Retention,
 		records:        make(map[key]Record),
 		bySender:       make(map[string]int),
+		byCorrelation:  make(map[string]map[string]struct{}),
 		writesBySender: make(map[string]int),
 		inflight:       make(map[key]struct{}),
 	}
@@ -872,6 +881,11 @@ func (s *Store) putLocked(k key, r Record) {
 	prev, existed := s.records[k]
 	if !existed {
 		s.bySender[r.Sender]++
+		// The correlation index tracks EXISTENCE, so it moves on exactly the
+		// two paths that create and destroy a row and on no other. A
+		// replacement leaves the key set unchanged, which is why this sits
+		// inside the !existed branch beside the per-sender count.
+		s.indexAddLocked(k)
 	}
 	s.records[k] = r
 	// Queued on INSERT, and again only when the ANCHOR MOVES — which happens
@@ -891,6 +905,7 @@ func (s *Store) delLocked(k key) {
 		return
 	}
 	delete(s.records, k)
+	s.indexRemoveLocked(k)
 	s.bySender[r.Sender]--
 	if s.bySender[r.Sender] <= 0 {
 		delete(s.bySender, r.Sender)

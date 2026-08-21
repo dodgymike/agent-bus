@@ -147,6 +147,29 @@ type Options struct {
 	// discovery document reports the same bit as enrolment.invite_accepted.
 	Invites *invite.Store
 
+	// AckStatus is the sender-visible delivery lifecycle table (internal/ack).
+	// When it is non-nil, GET /v1/ack/<correlation-key> is registered
+	// (ACK-CONTRACT.md §13, ACK-9). *ack.Store satisfies it.
+	//
+	// It may be nil, in which case the route is NOT REGISTERED AT ALL and
+	// 404s through the catch-all like any other path this build does not serve
+	// — the same choice, for the same reason, as Hub and Auth above: a route
+	// that exists and refuses is a claim the surface is there.
+	//
+	// It is an INTERFACE with one method, and that is a security decision
+	// rather than a testing convenience: see AckStatusSource in ackstatus.go
+	// for why an accessor taking a recipient could not be offered here.
+	//
+	// BEING AN INTERFACE, IT HAS THE TYPED-NIL TRAP: assigning a nil
+	// *ack.Store to it yields a non-nil interface, so the route registers and
+	// the first request dereferences nothing. Pass a store or pass nothing;
+	// do not pass a nil-valued variable of a concrete type. Unlike Hub and
+	// Auth above — which are concrete pointers and cannot have this problem —
+	// there is no cheap check for it that does not reach for reflection, and a
+	// reflective nil test in New would be a clever answer to a caller mistake
+	// that cmd/agent-bus cannot make.
+	AckStatus AckStatusSource
+
 	// PeerPrincipals resolves an inbound peer bus's TLS client certificate to
 	// the one adjacent bus principal it names (RELAY-45). It is satisfied by
 	// *relay.PeerStore.
@@ -202,6 +225,16 @@ type Server struct {
 	// invites is the durable invite table, or nil when this build does not
 	// redeem invites; see Options.Invites.
 	invites *invite.Store
+
+	// ackWaiters bounds parked GET /v1/ack/<key>?wait= requests per principal.
+	// Always non-nil after New; see maxParkedAckStatusPerAgent in ackstatus.go
+	// for why this route needs a cap that a plain read does not.
+	ackWaiters *ackWaiterCount
+
+	// ackStatus is the sender-filtered read side of the delivery lifecycle
+	// table, or nil when this build does not serve delivery status; see
+	// Options.AckStatus and ackstatus.go.
+	ackStatus AckStatusSource
 
 	// peerPrincipals resolves an inbound peer bus's client certificate; see
 	// Options.PeerPrincipals. A nil value means this bus can authorise no peer
@@ -261,6 +294,8 @@ func New(opts Options) *Server {
 		hub:         opts.Hub,
 		auth:        opts.Auth,
 		invites:     opts.Invites,
+		ackStatus:   opts.AckStatus,
+		ackWaiters:  newAckWaiterCount(),
 		now:         opts.Now,
 		// NO DEFAULT: see Options.PeerPrincipals. A nil resolver is the
 		// fail-closed state, not a gap to be filled in with a permissive one.
@@ -363,6 +398,29 @@ func New(opts Options) *Server {
 		s.route(mux, RouteSend, s.handleSend)
 		s.route(mux, RouteMessages, s.handleMessages)
 		s.route(mux, RouteWait, s.handleWait)
+		// /v1/ack is the RECIPIENT half of the delivery acknowledgement plane
+		// (ACK-6). It belongs here rather than beside the peer routes below: it
+		// is an AGENT surface, authenticated by session AND certificate and
+		// cross-checked like every other line in this block, and §6.1's
+		// narrowing forbids accepting a peer's frame here. See ack.go.
+		s.route(mux, RouteAck, s.handleAck)
+	}
+
+	// The SENDER-VISIBLE DELIVERY STATUS route (ACK-9, §13). Registered only
+	// when there is a lifecycle table to serve it; see Options.AckStatus.
+	//
+	// It is registered through s.route like everything else, which is what
+	// authenticates it: authMiddleware is default-deny and this pattern is not
+	// on unauthenticatedRoutes, so the route is protected by being registered
+	// rather than by anyone remembering to protect it. That matters more here
+	// than on most routes — an anonymous caller able to read delivery status
+	// would be an existence oracle over every message on the bus.
+	//
+	// It is registered OUTSIDE the hub block on purpose: it reads a durable
+	// table rather than the messaging surface, so a bus whose hub is missing
+	// can still answer for messages it already accepted.
+	if s.ackStatus != nil {
+		s.route(mux, RouteAckStatus, s.handleAckStatus)
 	}
 
 	// The FEDERATION ingress (RELAY-20). Registered only when Options.Peer

@@ -170,6 +170,8 @@ func commands() []command {
 		sendCommand(),
 		broadcastCommand(),
 		watchCommand(),
+		ackStatusCommand(),
+		ackCommand(),
 	}
 }
 
@@ -281,6 +283,21 @@ func runWithTTY(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if err == flag.ErrHelp {
 			fmt.Fprint(stdout, cmd.help)
 			return client.ExitOK
+		}
+		// A command that ALREADY WROTE its one result object and only needs the
+		// process status set. Nothing failed, so nothing is rendered: rendering
+		// would either replace the result the caller needs (JSON mode writes
+		// exactly one object) or contradict it (human mode would print an error
+		// under a successful report).
+		//
+		// The users are `ack-status` and, since ACK-15 (2026-08-21), `ack`,
+		// where ACK-CONTRACT.md §13.4 requires exit 7 for a message that was
+		// REFUSED and exit 8 for one with nothing to report — outcomes of the
+		// message, not failures of the command. It is matched by INTERFACE so
+		// each new command carries an exit code the same way without this file
+		// growing a branch per command; `ack` needed no change here.
+		if carrier, ok := err.(interface{ ExitCode() int }); ok {
+			return carrier.ExitCode()
 		}
 		// Re-read --json here, not only inside the subcommand. A global flag
 		// given AFTER the command name (`agent-busctl whoami --json --badflag`) is

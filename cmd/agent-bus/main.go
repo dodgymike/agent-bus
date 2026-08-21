@@ -243,6 +243,22 @@ func main() {
 		os.Exit(runLogCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `agent-bus operator keygen|add|list|revoke` is the OPERATOR/ADMIN PRINCIPAL
+	// surface (AUTH-10). It is on this binary for `invite mint`'s reason -- the
+	// authority behind it is FILESYSTEM ACCESS to the data directory, not a
+	// network privilege -- and it takes the same exclusive lock, so like `peer`,
+	// `key` and `log` it needs the bus STOPPED. See cmd/agent-bus/operator.go.
+	//
+	// THIS LINE IS WHY THE SUBCOMMAND EXISTS AT ALL (AUTH-10-WIRING). Until it
+	// landed, `agent-bus operator …` fell through to parseFlags and was refused
+	// as an unexpected argument, so `operator revoke` -- the ONLY mechanism in
+	// the design for taking an operator's authority away -- could not be invoked
+	// by anyone. A capability with no reachable subcommand is not a capability
+	// (invariant 7).
+	if len(os.Args) > 1 && os.Args[1] == operatorCommandName {
+		os.Exit(runOperatorCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	cfg, err := parseFlags(os.Args[0], os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -288,6 +304,11 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 			"                        read the append-only message audit trail: metadata only —\n"+
 			"                        routing and provenance, never message bodies\n"+
 			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, logCommandName, prog, logCommandName)
+		fmt.Fprintf(out, "  %s %s keygen|add|list|revoke\n"+
+			"                        manage OPERATOR principals: the admin identity an agent\n"+
+			"                        credential can never satisfy. `%s %s revoke` is the only\n"+
+			"                        way to take an operator's authority away\n"+
+			"                        (requires the bus to be STOPPED; run `%s %s -h` for details)\n", prog, operatorCommandName, prog, operatorCommandName, prog, operatorCommandName)
 	}
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
@@ -503,6 +524,52 @@ func run(cfg Config) error {
 	// make publish's own admission control dead code. It is given a read-only
 	// replay pass of its own below instead. See (*hub.Hub).Apply.
 	authRoster := auth.NewWALRoster(lg)
+	// The OPERATOR/ADMIN PRINCIPAL registry (AUTH-10), built here for the reason
+	// every applier above and below it is: it must exist BEFORE wal.Open, because
+	// replay is what rebuilds it, and it is handed its log in the third step.
+	// Until then every mutating call refuses -- which is correct, because the
+	// server never mutates it at all: `agent-bus operator add|revoke` is an
+	// OFFLINE operator action taken under the data directory's exclusive lock
+	// (DECISIONS.md E4's reasoning, as for `invite mint` and `peer add`). The
+	// server is a READER of this plane.
+	//
+	// IT IS ATTACHED BELOW, unlike the peer store, which is deliberately left
+	// with no durable log for this registry's exact "offline operator action"
+	// reason. BE PRECISE ABOUT WHY, because the intuitive justification is
+	// backwards: an UNATTACHED registry does NOT silently succeed in memory --
+	// auth.OperatorRegistry.Add and .Revoke both refuse with ErrNotAttached.
+	// Unattached is the FAIL-CLOSED state. Attaching is therefore the LESS
+	// restrictive choice, not the safer one, and it is taken because
+	// auth.OperatorRegistry's type doc prescribes the three-step order as its
+	// contract, not because it closes a hole.
+	//
+	// DO NOT CREDIT OperatorRegistry.write's serving-copy check with more than it
+	// does: it reads back AFTER the durable commit, so it DETECTS a registry that
+	// is attached but missing from the applier map -- exactly the AUTH-10-WIRING
+	// defect -- and cannot PREVENT the write it detects. Its own error says so
+	// ("committed durably but the serving registry does not reflect it"). A
+	// post-commit detector, not a pre-write guard.
+	//
+	// WHAT MAKES IT SAFE IS THE THING TO PRESERVE: this registry is handed to NO
+	// COMPONENT. run() holds the concrete pointer, but only to call Attach, Len
+	// and LiveLen on it; the sole reference that ESCAPES run() is the wal.Applier
+	// in the map below, an interface exposing Apply alone. So nothing that serves
+	// traffic can reach Add or Revoke -- not because the interface forbids it,
+	// but because no component was given the registry to call them on -- and
+	// admitting an operator still means stopping the bus. THE MOMENT A CONSUMER
+	// TAKES THIS REGISTRY (AUTH-7, INVMINT, CONV-AUTHZ-ADMIN), it finds an armed
+	// write path with the ErrNotAttached guard already spent; that consumer owes
+	// its own authorisation check and must not read this Attach as one.
+	//
+	// REGISTERING IT IS THE WHOLE POINT OF AUTH-10-WIRING. auth.MultiplexApplier
+	// is SILENT about kinds it does not own -- which is what keeps the "message"
+	// and "seqfloor" records of a NEIGHBOURING plane from being read as damage --
+	// so until auth.OperatorRecordKind appeared in the map below, every operator
+	// record in this log was passed over at replay WITHOUT A WORD. That is the
+	// silent discard invariant 6 rates as the defect, and it is worse in one
+	// direction than the other: a skipped `add` merely fails closed, but a
+	// skipped REVOCATION leaves a revoked operator LIVE, which is fail-OPEN.
+	operatorRegistry := auth.NewOperatorRegistry(lg)
 	// Built here, BEFORE wal.Open, because it is one of the appliers replay feeds
 	// -- and with no Durable: it gets its log in step 3, once wal.Open has
 	// returned. Until then every mutating call on it refuses with ErrNotDurable,
@@ -567,9 +634,10 @@ func run(cfg Config) error {
 	// exercises.
 	ackStore := ack.NewStore(ack.Options{Logger: lg})
 	appliers := map[string]wal.Applier{
-		auth.RecordKind:   authRoster,
-		invite.RecordKind: inviteStore,
-		ack.RecordKind:    ackStore,
+		auth.RecordKind:         authRoster,
+		auth.OperatorRecordKind: operatorRegistry,
+		invite.RecordKind:       inviteStore,
+		ack.RecordKind:          ackStore,
 	}
 	// The RELAY DELIVERY OUTBOX is the third applier of this shape, and it is
 	// registered here for the reason the other two are: it is an applier, so it
@@ -806,6 +874,28 @@ func run(cfg Config) error {
 	if err := ackStore.Attach(walLog); err != nil {
 		return fmt.Errorf("attaching the durable delivery lifecycle table to the write-ahead log: %w", err)
 	}
+	// The same third step for the operator registry -- and NOT for the same
+	// reason as the four above, which is why this comment does not say "the same
+	// reason". Those tables are written by a running server, so an unattached one
+	// would be a bus refusing live traffic. This registry is never written by the
+	// server at all: `operator add|revoke` is offline, under the exclusive lock
+	// this process is holding. So this line enables nothing that was failing, and
+	// it must not be read as opening an online admin write path.
+	//
+	// It is here because auth.OperatorRegistry's type doc makes the
+	// build -> replay -> Attach order its contract, and a registry left half-way
+	// through that order is a shape no other applier in this function is in. The
+	// honest cost is stated beside the construction above: unattached is the
+	// FAIL-CLOSED state (Add and Revoke refuse with ErrNotAttached), so attaching
+	// spends a guard rather than adding one. It is safe only while nothing on the
+	// server side holds this registry -- today nothing does.
+	//
+	// FATAL, like the four above: a second Attach or a nil log is a wiring fault
+	// in this build, and starting with one would leave the operator plane in a
+	// state no test covers.
+	if err := operatorRegistry.Attach(walLog); err != nil {
+		return fmt.Errorf("attaching the durable operator registry to the write-ahead log: %w", err)
+	}
 	// One line, at INFO, and worded so it can NEVER be read as "enrolment is
 	// open": it is not, as of INVITE-GATE-ENFORCE. This line said the exact
 	// OPPOSITE until the gate landed -- "ENROLMENT IS NOT GATED ... an enrolment
@@ -821,6 +911,23 @@ func run(cfg Config) error {
 		"bus_id", busID,
 		"invites_recovered", inviteStore.Len(),
 		"enrolment_invite_required", enrolmentInviteRequired,
+	)
+	// The operator plane's own recovery line, and it is EVIDENCE, not decoration:
+	// these two numbers are non-zero only because the registry above is in the
+	// applier map, so the line going quiet is how an operator would notice the
+	// AUTH-10-WIRING defect coming back. Before that registration both counts
+	// were structurally 0 on a data dir holding any number of operator records.
+	//
+	// BOTH numbers, because they answer different questions and the difference is
+	// the one that matters after a revocation: operators_recovered is how much
+	// history the registry replayed, live_operators is how many principals can
+	// authenticate right now. A revoked operator raises the first and not the
+	// second, so "2 recovered, 1 live" is what proves a REVOCATION survived the
+	// restart rather than just the two adds that preceded it.
+	lg.Info("operator registry recovered from the append-only log: operator records are now REPLAYED rather than passed over, so a revocation taken with `agent-bus operator revoke` survives this restart. Operators are an OFFLINE-managed principal: this process never writes one -- `agent-bus operator add|revoke` takes the data directory's exclusive lock that this process is holding, so admitting or revoking an operator means STOPPING the bus, running the subcommand, and starting it again",
+		"bus_id", busID,
+		"operators_recovered", operatorRegistry.Len(),
+		"live_operators", operatorRegistry.LiveLen(),
 	)
 	// THE GATE IS TURNED ON HERE, at the composition root, and this is the only
 	// place in the tree that decides it (auth.Options.RequireInvite defaults
@@ -1464,6 +1571,12 @@ func run(cfg Config) error {
 		// Registers the messaging surface: /v1/agents, /v1/broadcast, /v1/send,
 		// /v1/messages and /v1/wait. Every one of them authenticates.
 		Hub: h,
+		// Registers GET /v1/ack/<correlation-key>, the SENDER-VISIBLE delivery
+		// status route (ACK-9, ACK-CONTRACT.md §13). It is the same *ack.Store
+		// the relay wiring settles outcomes into and the same one the WAL
+		// replays, so a status read and a peer ACK can never disagree about a
+		// row — there is one table, not a serving copy of one.
+		AckStatus: ackStore,
 		// THE FEDERATION INGRESS. Both are nil on a build with no bindable peer,
 		// and the mount then registers nothing at all — see the switch above.
 		// They are supplied as a PAIR: a surface without the resolver would be

@@ -182,6 +182,9 @@ added to it.
 | `HEAD` | `/v1/agents`, `/v1/messages`, `/v1/wait` | bearer | 200 | **Added 2026-08-08 (CORE-7).** Accepted exactly as on the unauthenticated GET routes: same status, same headers, no body. Authentication is unchanged — `HEAD` goes through the same default-deny `authMiddleware` as `GET`, so an anonymous `HEAD` is 401. Safe because every `requireGET` route is a pure read: the cursor is the client-supplied `after`/`cursor` parameter, so a `HEAD` consumes and advances nothing a later `GET` needed. |
 | `GET` | `/v1/messages`, `/v1/wait` | bearer | 405 | any method but `GET` or `HEAD`; `Allow: GET, HEAD` (was `GET` before CORE-7) |
 | `GET` | `/v1/wait` | bearer | (none) | A **cancelled request context** (client hung up, or server shutting down) writes no response at all — there is nobody to write to. Distinct from a timeout, which is a 200. |
+| `GET` | `/v1/ack/<correlation-key>` | bearer | 200 | **NEW (`ACK-9`, 2026-08-16).** Sender-visible delivery status; `{"rows":[...]}`, never empty/null. **200 whatever the key is** — never existed, swept, somebody else's and malformed are one byte-identical answer, and there is no 400/403/404 branch **on the key**. (The 400 and 429 rows below are judgements about the caller's own `wait` parameter and its own parked-request count, not about the key.) See `## The SENDER-visible ack-status route` near the end of this file for the full oracle rule, the `?wait=` long-poll and the response shape. Registered only when `Options.AckStatus` is set; otherwise this path 404s through the catch-all. |
+| `GET` | `/v1/ack/<correlation-key>` | bearer | 400 | `wait` present but not a positive whole number of seconds, or over `hub.MaxPollTimeout` (300s) — refused, never clamped |
+| `GET` | `/v1/ack/<correlation-key>` | bearer | 429 | `wait` requested while this **principal** already has `maxParkedAckStatusPerAgent` (32) requests parked on this route. `Retry-After: 1`. Decided from the caller's own parked count and **nothing about the key**, so an unknown key and a live non-terminal one are refused identically. See the limits table below. |
 
 A `<message>` on the read path is (`timestamp_ms` and `signature` **added 2026-08-07, SIGN-6**):
 
@@ -202,6 +205,19 @@ which is exactly why it is stated here. A recipient reconstructs the signed byte
 (settled in SIGN-1, `PROTOCOL.md` §8.3).
 
 `HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`. `AgentsResponseBody` / `MintRequestBody` / `MintResponseBody` / `BroadcastRequestBody` / `SendRequestBody` / `SendResponseBody` / `WireMessage` / `BatchResponseBody` live in `internal/httpapi/messages.go`. (`BroadcastRequestBody` is still declared but is **never decoded** — the route refuses before reading the body.)
+
+**`POST /v1/ack`** (`ACK-6`, 2026-08-16) is a messaging route too and is registered in this same
+block, so it authenticates identically. It is documented in full under
+`## The RECIPIENT ack route` at the end of this file rather than as a row here, because its answer
+is deliberately NOT expressible as one status per situation: the same **200** carries both a
+recorded acknowledgement and §13.3's uniform `unknown` refusal, and compressing that into a table
+row is how somebody comes to read the status line instead of `accepted`.
+
+**`GET /v1/ack/<correlation-key>`** (`ACK-9`, 2026-08-16) is the **SENDER**-visible counterpart and a
+**separate route** — `http.ServeMux` resolves the bare `/v1/ack` path above and this subtree
+independently, so the two coexist without colliding. It is registered OUTSIDE this block (see the
+routes table above and `## The SENDER-visible ack-status route` near the end of this file), because it
+reads a durable table rather than the messaging surface.
 
 ### Cross-bus send (`RELAY-24-BLOCKER-EGRESS`, 2026-08-15)
 
@@ -437,6 +453,7 @@ the cap exists to prevent. `IDEM-11` owns the cross-cutting layer and may revisi
 | `hub.MaxBatchLimit` | 256 | Ceiling on `limit`; above it is a 400. |
 | `store.MaxBatchBytes` | 1 MiB | Ceiling on one batch in **body bytes**, enforced alongside `limit`. Count alone is the wrong unit: 256 × 64 KiB is 16 MiB of body, which is then base64-encoded and marshalled, so one request would cost ~45 MiB of live allocation. **At least one message is always returned** even if it alone exceeds the budget, so a large message can never become undeliverable to a client that pages politely. Hitting it sets `more: true`. |
 | `hub.MaxWaitersPerAgent` | 32 | Concurrent parked long polls per agent. A 33rd gets **503** with `Retry-After: 5`. Fails closed, evicts nothing. The bound is not really about memory — a waiter is a few words — it is that the wake loop runs on the critical path of *every* send, so an agent parking thousands of polls would slow every **other** agent's durable write. Keyed on the agent id, which is safe here for the same reason `auth.MaxActiveSessionsPerAgent` is: this route is authenticated, so the key is a proven identity and a flooder can only fill its own bucket. |
+| `maxParkedAckStatusPerAgent` | 32 | (`ACK-9`) Concurrent parked `GET /v1/ack/<key>?wait=` requests per agent. A 33rd gets **429** with `Retry-After: 1`. Fails closed, evicts nothing, keyed on the authenticated principal — same shape and same reasoning as `hub.MaxWaitersPerAgent` above, and deliberately the same number. **It exists because this route parks even when there is nothing to report**: returning early on an unknown key would leak existence through latency, so a probe needs no valid key and is guaranteed to hold a connection for the full ceiling, waking every 200 ms onto `ack.Store`'s single global mutex — the same mutex `Accept` takes inside `Hub.publish`, so the cost lands on every **writer** on the bus. **The status differs from `/v1/wait` on purpose:** that route answers 503 + `Retry-After: 5`, this one 429 + `Retry-After: 1`. 429 is the more accurate code — the service is healthy and it is *this caller* that is over a quota — and the shorter retry matches a bound that frees as soon as any one parked request finishes. Self-starvation between two connections of the SAME agent is possible and accepted, exactly as for `hub.MaxWaitersPerAgent`; cross-agent starvation is structurally impossible because the key is a proven identity. |
 
 A parked poll holds **no goroutine of its own** — it parks the request's own goroutine on a select
 over the request context, the deadline, and its wake channel. A client that vanishes mid-wait
@@ -1329,3 +1346,299 @@ before any bus starts emitting. Nothing in this build emits one yet (`ACK-5` own
 after), so the ordering is satisfiable rather than merely stated. This is the same hazard family as
 `RELAY-51`, which is **not** fixed here and is not made worse: the frame ships complete and versioned,
 so the first task needing a new field has a version to bump.
+
+## The RECIPIENT ack route: `POST /v1/ack` — an explicit application acknowledgement (`ACK-6`, added 2026-08-16)
+
+The **agent-surface** half of the delivery acknowledgement plane, and the ONLY way a message becomes
+`delivered` or `refused` on this bus. `ACK-CONTRACT.md` §4 is the ruling it implements:
+
+> **Delivery to an inbox or a poll is NOT recipient receipt. An EXPLICIT application ACK is
+> required.** Plane C is reached only by the recipient calling this route; it is NEVER inferred from
+> a cursor advancing.
+
+Three reasons, and none of them is a preference:
+
+1. **The bus cannot know what the recipient knows.** It carries the sender's signature as opaque
+   bytes and never verifies it (`internal/store/message.go`, "the BUS enforces SHAPE and the
+   RECIPIENT enforces AUTHENTICITY"). A bus that auto-ACKed on poll would assert, on the recipient's
+   behalf, a fact only the recipient can establish.
+2. **There is no server-side per-recipient delivery state to derive it from**, and adding one is
+   strictly MORE state than an explicit ACK. The cursor is opaque and client-held.
+3. **A poll is replayable.** Delivery is at-least-once and an unrecognised cursor is remapped to
+   position 0 — one message would produce many "receipts".
+
+There is therefore **no `polled` state and one must not be added.** A message that has been polled
+and not acknowledged stays `accepted` / `in_flight`, and an agent that never acknowledges leaves its
+sender's row non-terminal until the 24h retention window sweeps it, after which the status route
+answers `unknown`. That cost is real, is the honest answer, and is why `unknown` is a first-class
+value rather than an error.
+
+### The route
+
+Registered inside the `Options.Hub != nil` block, through `(*Server).route`, so it is authenticated
+by **being registered**: `authMiddleware` is default-deny and this path is not on the allow-list. It
+therefore requires a bearer session **and** passes invariant 11's mTLS cross-check, like every other
+messaging route. It is a **bare path with no trailing slash**, so it does not collide with
+`GET /v1/ack/<correlation-key>` (`ACK-9`), which `http.ServeMux` resolves as a separate subtree.
+
+`POST /v1/peer/ack` is the *other* half of this plane and is a **different surface** with a
+**different gate** (a peer certificate through `RequirePeerPrincipal`, no session). §6.1's documented
+one-factor narrowing on the peer surface is **inherited and not widened**: an ACK frame is never
+accepted on the agent surface on behalf of a peer bus, and a session token is never consulted on the
+peer surface. The concrete expression of that is `relay.AckSurfaceAgent`, a compile-time constant
+supplied by the mount site and **never read from the frame**.
+
+### The frame
+
+Identical to `POST /v1/peer/ack`'s (`relay.PeerAckRequest`, bounded by `relay.MaxAckBytes` = 4 KiB) —
+deliberately one type for both surfaces, so the closed vocabulary has one spelling and the two
+surfaces cannot drift into accepting different things.
+
+```json
+{ "protocol_version": 1,
+  "correlation_key": "<origin-bus>-<seq>",
+  "recipient":       "<bus-id>.<agent-id>",
+  "outcome":         "delivered" | "refused",
+  "class":           "recipient_refused_policy" | "recipient_refused_undecodable" | "recipient_refused_not_addressed",
+  "emitted_at":      1755000000000,
+  "attestation":     { "signature": "<base64, exactly 64 bytes>" } }
+```
+
+- **`recipient` MUST equal the authenticated principal.** It is a CLAIM that is compared and then
+  **discarded**; the row is looked up with the context principal, exactly as `/v1/send` attributes a
+  message to the context principal and discards `body.sender` (invariant 1). There is no path by
+  which a frame-supplied value reaches the lookup key.
+- **`outcome` is `delivered` or `refused` ONLY.** `undeliverable` is a claim about the federation's
+  routing, asserted by a bus about its own failure to deliver; a recipient application has no
+  standing to make it and the frame is refused before the hub is reached.
+- **`class` is REQUIRED on `refused`, forbidden on `delivered`, and must come from the three
+  RECIPIENT-emitted members** of the closed twelve (`ACK-CONTRACT.md` §5.2). A recipient sending
+  `refused` + `horizon_expired` would have this bus record ITS OWN routing failure as THE RECIPIENT'S
+  DECISION. **There is no free-text reason field on this frame and one must not be added** (invariant
+  6): a recipient-chosen string in an append-only trail is a body by another name. Recipient and
+  sender already have an end-to-end message channel for prose.
+- **`attestation` is REQUIRED** and is checked for **SHAPE ONLY** — present, exactly
+  `signing.SignatureSize` (64) bytes — byte-for-byte the posture already taken for message
+  signatures. **No bus verifies it and no bus may claim to**: nothing distributes agents' messaging
+  public keys, so it is end-to-end unverifiable by anybody today, **including the sender** (§16 Q1).
+  The durable record therefore records `attested_by: recipient_signature_unverified`, and there is
+  deliberately **no value meaning "verified"**. The signature bytes themselves are **not persisted** —
+  the record (`CONTRACTS-ONDISK.md`, kind `"ack"`) has no field for them.
+- **`emitted_at` is REQUIRED and positive.** It is PROVENANCE FOR THE LOG ONLY, is never persisted
+  and never compared: the durable `accepted_at`/`settled_at` are this bus's clock.
+- An **absent** `protocol_version` reads as **1**; an unrecognised one is **rejected, never
+  defaulted**.
+
+### Status codes
+
+| Situation | Answer |
+| --- | --- |
+| Recorded, or an idempotent replay | **200** `{"accepted":true,"duplicate":<bool>,"state":"delivered"\|"refused","class":"<enum>"}` |
+| **The uniform answer** — no retained row for (correlation key, authenticated principal) | **200** `{"accepted":false,"duplicate":false,"state":"unknown"}` |
+| `recipient` is not the authenticated principal | **403** `{"error":"recipient does not match the authenticated caller"}` |
+| Malformed frame, unknown class/outcome/version, bad attestation shape | **400** `{"error":"invalid acknowledgement"}` |
+| Already terminal with a **different** outcome | **409** — the FIRST terminal stands, nothing is written. **No `Retry-After`**: re-sending can never succeed. |
+| Another transition for the SAME pair is being fsynced right now | **503** + `Retry-After: 1`. The ONE transient refusal here: the retry lands on the row the in-flight transition wrote and is absorbed as a duplicate. It must never be a 5xx-with-no-remedy or a 500 — invariant 10's first case says a same-key/same-payload retry returns the original result and **does not error**, and an eager client retrying its own acknowledgement is the ordinary way to reach it. |
+| This build has no delivery lifecycle table | **501** `{"error":"delivery acknowledgement is not available on this bus"}` |
+| Any method but `POST` | **405**, `Allow: POST` |
+
+**Why a refusal can be a 200.** `accepted:false, state:"unknown"` is §13.3's UNIFORM ANSWER and is
+returned **identically for four different facts**: the key was never accepted here, the key names a
+message this agent was not addressed in, the row was swept by retention, or the key is malformed.
+They MUST stay indistinguishable — a 403 for "not yours" beside a 404 for "no such key" is a
+**message-existence oracle**, letting any authenticated agent enumerate what this bus is carrying and
+for whom. So the status line carries the SHAPE of the request and the body carries the OUTCOME; a
+client reads `accepted`, not the status. This is the same reasoning `handleBroadcast` applies when it
+authenticates before answering 501.
+
+**`state` is never `unknown` on disk.** It is a REPORTING value only; `ack.ParseState` refuses the
+spelling by name, so an "I don't know" cannot round-trip through the log and overwrite a real
+terminal outcome with ignorance.
+
+### The three cases invariant 10 never collapses, on this route
+
+| Case | Answer |
+| --- | --- |
+| Same pair, **same** outcome | **200 `duplicate:true`.** The ORIGINAL result stands, nothing is re-applied, **no second WAL record is written**, and **nobody is disconnected**. This is the normal answer to a duplicate DELIVERY: delivery is at-least-once and both copies carry the same correlation key. |
+| Same pair, **different** terminal outcome | **409.** Rejected AND logged at ERROR by `internal/ack` with both outcomes named. The first terminal stands. **No disconnect, and no `Retry-After`** — re-sending can never succeed, and dressing a permanent refusal as transient puts a client in an endless retry loop. |
+| Replay of an already-accepted **signed message** | Untouched by this route. **An ACK frame is not a message and never reaches that path** — which is the only disconnect on the bus. |
+
+**NO NEW DISCONNECT EXISTS ANYWHERE ON THE ACK PLANE** (§12). Invariant 10's two questions were
+answered on the record before the route was written: a merely BUGGY client reaches every refusal here
+(a mistyped correlation key, a re-acknowledgement after its own restart, a retry that crossed with a
+200 it never saw), and a connection does not carry a single principal's traffic. The 403 above looks
+like `/v1/send`'s sender-mismatch, which DOES drop the socket, and is deliberately not the same
+thing: there are no signed bytes to replay here, and an agent embedding `client/` under two
+enrolments reaches it honestly.
+
+### Authorization is structural, not a comparison
+
+The lifecycle record is keyed on **(correlation key, recipient)** from day one, and the recipient
+half is the authenticated principal. So "was I addressed?" and "may I settle this?" are ONE question
+answered by ONE map lookup that cannot be talked out of it — an agent can only ever reach the row
+that names it. `ack.Store.Settle`'s own doc records why this must live at the route: it copies the
+sender forward from the row it found, so its internal sender guard **cannot** fire from this path.
+
+**The route never creates a row.** A refusal writes nothing, so an authenticated agent cannot mint
+durable rows for correlation keys it invented, and a swept row is never resurrected.
+
+### What is NOT consulted: the message store
+
+The lifecycle row is the sole authority; `store.Store` is not read at all. The two retention regimes
+differ — a message body is kept for **1 day or 1 GiB, whichever bites first**, while a lifecycle row
+is kept for **24h from `accepted_at`** — so a busy bus prunes bodies long before rows expire.
+Requiring the body to still be held would refuse an acknowledgement for a message the recipient
+demonstrably received and is holding a copy of, and would strand the sender's row non-terminal for
+the rest of the window for no reason the recipient could act on.
+
+"Expired message" therefore has two meanings and they answer differently:
+
+| Case | Answer |
+| --- | --- |
+| The **body** was pruned, the **row** is retained | The acknowledgement is **accepted normally**. |
+| The **row** was swept (24h) | The **uniform answer**, and **no row is created**. |
+
+**A MALFORMED OR ABSENT `correlation_key` IS THE UNIFORM ANSWER TOO, and that is a fix rather than
+a nicety.** It is the fourth of the four facts above, and it was found by this task's security gate
+answering **500** with an unthrottled ERROR log line while an unknown key answered `unknown`. The
+cause is worth recording because it is a seam and not a slip: `relay.ValidatePeerAckRequest`
+deliberately validates **no ids**, because the PEER route validates them inside `AuthorizePeerAck`,
+in the same call that binds them — and this route has no `AuthorizePeerAck`. The agent route
+inherited the validator without inheriting that half. The id check now lives at the hub boundary
+(`ack.ValidateCorrelationKey`), and `ack.ErrInvalidRecord` is additionally mapped onto the uniform
+refusal so the inner check cannot reintroduce a fifth answer. A client that omits the field is
+merely buggy, and §12 names that caller honest.
+
+### The agent-facing half is `ACK-9`'s
+
+Invariant 7 requires a CLI subcommand and an `AGENT_PROTOCOL.md` entry for every capability.
+**INVARIANT 7 IS MET FOR THIS ROUTE as of `ACK-15` (2026-08-21).** The recipient CLI is
+`agent-busctl ack <message-id> [--refuse <class>] [--json]`. Exit codes reuse the existing stable
+set — `unknown` maps to `ExitEmpty` (8), an already-terminal conflict to `ExitRejected` (7) — and
+mint no new code.
+
+> **CORRECTED 2026-08-21, and the correction is stated rather than swapped.** Everything below this
+> line used to read: *"Until `ACK-9` lands, this route has no subcommand"*, followed by an
+> *"Update, 2026-08-16: only HALF of `ACK-9` has landed … **this route (`POST /v1/ack`) still has no
+> subcommand***". **Both are now false**, and the attribution was wrong too: the recipient CLI landed
+> as **`ACK-15`**, not `ACK-9`. `ACK-CONTRACT.md` §13.4 did assign it to `ACK-9`; that assignment was
+> re-scoped when `ACK-9` shipped the sender half alone.
+>
+> This mattered more than a stale line usually does: **a CONTRACTS file telling an agent a route has
+> no subcommand is telling it to hand-write HTTP**, which invariant 7 exists to prevent. The
+> "Update, 2026-08-16" heading made it read as freshly checked.
+
+**What is still true, and must not be over-corrected away:** the recipient CLI signs with the agent's
+**messaging** key, not its auth key, and **every bus checks the signature's SHAPE only** — no bus
+verifies it, and no route carries a recipient's messaging key back to a sender (`ACK-CONTRACT.md`
+§16 Q1). So `attested_by` reports `recipient_signature_unverified` and an ACK remains **evidence, not
+proof**. `agent-busctl ack` deliberately offers no way to spell `undeliverable`: that is a bus's
+routing claim, and `signing.CanonicalizeAck` refuses it.
+
+## The SENDER-visible ack-status route: `GET /v1/ack/<correlation-key>` — delivery status (`ACK-9`, added 2026-08-16)
+
+The **sender-facing** half of the delivery acknowledgement plane (`internal/httpapi/ackstatus.go`),
+answering "what happened to the message I sent". `httpapi.RouteAckStatus = "/v1/ack/"` is registered
+as a **SUBTREE** — note the trailing slash — because this build targets go1.19, whose `http.ServeMux`
+has no path wildcards; the correlation key is whatever remains of the path after the prefix, taken
+with `strings.TrimPrefix` and treated as **UNTRUSTED INPUT** (a client-supplied string shaped like a
+server-minted id, never an identity — invariant 1). It is a route **distinct** from `POST /v1/ack`
+(`ACK-6`, above): `http.ServeMux` resolves the bare path and the subtree independently, so the two
+coexist without colliding.
+
+**Registered only when the server is built with `Options.AckStatus` (a `*ack.Store`).** A build with
+no lifecycle table does not mount this route at all, and the path falls through to the catch-all
+404 — there is no dedicated 501 here the way there is for `/v1/broadcast`. It is mounted **outside**
+the `Options.Hub != nil` block: it reads a durable table, not the messaging surface, so a bus whose
+hub is unavailable can still answer for messages it already accepted.
+
+**Authenticated exactly like every other route.** `/v1/ack/` is not on `unauthenticatedRoutes`
+(`internal/httpapi/authmw.go`), so `authMiddleware`'s default-deny applies: an anonymous caller gets
+401, never a peek at delivery status.
+
+### Query parameter
+
+`?wait=<whole seconds>`, optional. Absent or empty means "answer with a snapshot now". A value that
+is not a positive whole number of seconds, or that exceeds `hub.MaxPollTimeout` (300s / 5 minutes —
+the same ceiling `GET /v1/wait` enforces), is **REFUSED with 400**, never silently clamped:
+`{"error":"wait must be a positive whole number of seconds"}` or `{"error":"wait must be at most 300
+seconds"}`.
+
+With `?wait=`, the request **parks** (re-reading the table roughly every 200ms —
+`ackStatusPollInterval`, a deliberate poll rather than a wake-on-write registry, invariant 8) until
+every visible row is terminal, the deadline passes, or the client hangs up. **It parks even when
+there is nothing to report for the key** — see the oracle rule below; returning early on an unknown
+key would leak the key's existence through response latency alone. A deadline reached with nothing
+settled is a 200 with the current (possibly `unknown`) rows, exactly as a timed-out `GET /v1/wait`
+is a 200 — never an error.
+
+### Response
+
+**200 whatever the key is** — there is no 400/403/404 branch on the key itself (see the oracle rule
+below). The route does answer two non-200 statuses, and **neither is about the key**: a **400** when
+`wait` is not a positive whole number of seconds at most `hub.MaxPollTimeout`, and a **429** when
+this principal is already at its parked-request cap. Both judge the caller's own request, so neither
+tells anybody whether a message exists. Body of the 200:
+
+```json
+{"rows": [
+  {"correlation_key": "<bus-id>-<seq>", "recipient": "<bus-id>.<agent-id>",
+   "state": "accepted"|"in_flight"|"delivered"|"refused"|"undeliverable"|"unknown",
+   "class": "<one of the closed 12-value enum>",
+   "attested_by": "peer_bus"|"recipient_signature_unverified",
+   "accepted_at": "<RFC3339Nano UTC>", "settled_at": "<RFC3339Nano UTC>"}
+]}
+```
+
+`rows` is **never empty and never null** — every field but `state` is `omitempty`; `state` is always
+present. `class` is present **only** on a negative terminal (`refused`/`undeliverable`); a positive
+terminal or a non-terminal row carries none. When nothing is visible for the caller, the body is
+**exactly** `{"rows":[{"state":"unknown"}]}` — the single smallest shape this response can take.
+
+### The status-oracle rule (`ACK-CONTRACT.md` §13.3) — read this before building anything on this route
+
+> **Only the ORIGINAL SENDER sees a row.** A key that never existed, a key swept past the 24h
+> retention window (see "What is NOT consulted" above), a key belonging to a **different** sender,
+> and a **malformed** key all return the identical `200 {"rows":[{"state":"unknown"}]}`.
+
+There is **no 403 and no 404** for any of those four cases — a distinguishable answer would confirm
+that a message exists, which is the existence oracle `ACK-4` is required to close. The filter is
+applied against the **authenticated principal from the request context** (never a header, query
+parameter or path value), through `AckStatusSource.StatusRows(correlationKey, sender string)` — an
+interface that takes no recipient and returns no error, so a handler that could iterate candidate
+recipients, or tell "wrong sender" apart from "unknown key" by an error value, cannot be written by
+accident.
+
+**This is CONTENT indistinguishability, not TOTAL indistinguishability.** A coarse timing residual
+exists — declared by `ACK-4`, not introduced here — because the four cases do not all cost the same
+amount of work to answer. The claim this route makes is about the response BODY; do not read it as a
+claim that every observable (timing included) is identical.
+
+### Two facts this route is misread on
+
+- **A HOP ACK IS NOT A DELIVERY.** `delivered` means the recipient **application** acknowledged the
+  message (`POST /v1/ack`, `ACK-6`, above). Another bus taking responsibility for the next hop
+  (`POST /v1/peer/ack`, `ACK-3`, above) does **not** advance this state and is **not reported** here —
+  the transport layer's "another bus has it" and the application layer's "an agent got it" are
+  different facts, and this route reports only the second.
+- **`attested_by` is a LABEL, not a proof.** The two values are `peer_bus` and
+  `recipient_signature_unverified`. There is **no value meaning "verified"**, and nothing in this
+  system can produce one: no route distributes agents' messaging public keys, so an ACK's attestation
+  is checked for shape only, by nobody, ever (see the `POST /v1/ack` and `POST /v1/peer/ack` sections
+  above).
+
+`class` is a **closed 12-value enum**, never free text: bus-emitted `no_route`, `no_such_recipient`,
+`hop_refused`, `hop_unauthenticated`, `loop_dropped`, `fanout_exceeded`, `horizon_expired`,
+`local_capacity`, `obligation_lost`; recipient-emitted `recipient_refused_policy`,
+`recipient_refused_undecodable`, `recipient_refused_not_addressed`.
+
+### CLI (invariant 7)
+
+`agent-busctl ack-status <correlation-key> [--wait <dur>] [--json]` — see `AGENT_PROTOCOL.md`,
+"Checking delivery status", and `CONTRACTS-CLI.md`'s subcommand table and flags list. Exit codes
+reuse the existing stable set, `ACK-CONTRACT.md` §13.4 — **no new code is minted**: `0` for any
+reported state without `--wait` (including `unknown`), `0` for `--wait` that settles `delivered` or
+that ends still `accepted`/`in_flight`, `7` (`ExitRejected`) for `--wait` that settles
+`refused`/`undeliverable`, `8` (`ExitEmpty`) for `--wait` that ends `unknown`. As with the recipient
+route above, this is the ONLY status branch this route has after authentication — the row data, not
+the HTTP status, carries the outcome.

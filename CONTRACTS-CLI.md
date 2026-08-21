@@ -1038,14 +1038,22 @@ parameter for one, which makes it structural rather than a rule this file has to
 
 #### Exit codes (`agent-bus operator`) — CONTRACT
 
-> **NOT REACHABLE FROM `argv` TODAY (2026-08-16) — read this before scripting against the table.**
-> `cmd/agent-bus/main.go` does not dispatch `os.Args[1] == "operator"`, so **every** surface documented
-> in this section falls through to the server's flag parser and is refused as an unexpected argument —
-> including `operator revoke`, the only revocation mechanism in the design. The codes below are the
-> contract the implementation already satisfies (`runOperatorCommand` is exercised by
-> `cmd/agent-bus/operator_test.go`); they are not yet the codes a command run at a prompt returns,
-> because the command does not run. Task `AUTH-10-WIRING` (P0) carries the dispatch, and "Wiring
-> status" below carries the second gap.
+> **REACHABLE FROM `argv` since `AUTH-10-WIRING` (2026-08-21) — this caveat has been REVERSED.**
+> It read "**NOT REACHABLE FROM `argv` TODAY (2026-08-16)**", said `cmd/agent-bus/main.go` "does not
+> dispatch `os.Args[1] == "operator"`" so **every** surface in this section "falls through to the
+> server's flag parser and is refused as an unexpected argument", and warned that the codes below
+> "are not yet the codes a command run at a prompt returns, because the command does not run".
+> **Every clause of that is now false.** `main.go` dispatches `operator` beside `invite`, `peer`,
+> `key` and `log`, `agent-bus -h` announces the subcommand, and the table below IS what a command run
+> at a prompt returns — including `operator revoke`, the only revocation mechanism in the design.
+> `TestOperatorSubcommandIsReachableFromArgv` (`cmd/agent-bus/operatorwiring_test.go`) proves it by
+> driving the **compiled binary** through `add`, `list` and `revoke`. `cmd/agent-bus/operator_test.go`
+> calls `runOperatorCommand` directly and stayed green for the whole period the command could not be
+> typed, which is exactly why it could not have caught this.
+>
+> **Not softened by any of that:** `add`, `list` and `revoke` take the data directory's exclusive
+> lock, so **the bus must be stopped** (exit `3` otherwise). A revocation is therefore in effect from
+> the next start rather than on a running bus, and no HTTP route consumes an operator principal yet.
 
 Numbered to **match** `invite` and `peer`, so an operator scripting against all three needs one table.
 
@@ -1090,28 +1098,42 @@ follows). What it carries today:
 | `keygen` | The certificate is outside its validity window. |
 | `add` | The fingerprint was held by a **REVOKED** operator. A revoked binding constrains nothing, so the add SUCCEEDS and the new operator is live on the same certificate — right after an administrative revocation, wrong if the laptop was stolen. The warning names the revoked operator id, instant and reason. |
 
-#### Wiring status — READ THIS BEFORE ASSUMING ANY OF THE ABOVE RUNS
+#### Wiring status — BOTH GAPS ARE CLOSED (`AUTH-10-WIRING`, 2026-08-21)
 
-**Two separate gaps, and the second makes the whole section above unreachable:**
+**This section is a REVERSAL and is written as one on purpose.** It was headed "READ THIS BEFORE
+ASSUMING ANY OF THE ABOVE RUNS" and listed "**two separate gaps, and the second makes the whole
+section above unreachable**". Both are closed; what each one claimed is quoted below so a reader who
+remembers it can tell a correction from a deletion.
 
-1. **`main.go` does not DISPATCH the subcommand.** `cmd/agent-bus/main.go` does not test
-   `os.Args[1] == "operator"` the way it does for `invite` and `peer`, so `agent-bus operator …` falls
-   through to **server flag parsing** and never reaches `runOperatorCommand`. **Everything documented in
-   this section — `keygen`, `add`, `list`, `revoke`, the flags, the exit codes and the `--json` shapes —
-   is therefore CODE-COMPLETE AND NOT REACHABLE FROM `argv`.** That includes `operator revoke`, which is
-   the only revocation mechanism in the design: today an operator record can be written only by a Go
-   caller, so a bus with a live operator has **no shipped way to revoke it from a shell**. Do not read
-   the exit-code table as an operational contract until this line is gone.
-2. **`main.go` does not register `auth.OperatorRecordKind`** in its applier map, and
-   `auth.MultiplexApplier` is silent about kinds it does not own — so an operator record in the WAL is
-   passed over at **server** replay without a word. The `operator` subcommands themselves are
-   unaffected: they open the log with their own applier map, which registers the operator registry, the
-   enrolment roster **and** the invite store (the last so a composite `agent+invite` record's rider has
-   an applier — without it every gated enrolment made the multiplexer log a **false** "invite may be
-   REDEEMABLE AGAIN" at ERROR on a command that writes nothing to the invite plane).
+1. **`main.go` DOES dispatch the subcommand.** The old gap 1 read "`cmd/agent-bus/main.go` does not
+   test `os.Args[1] == "operator"` the way it does for `invite` and `peer`", concluded that everything
+   in this section was "CODE-COMPLETE AND NOT REACHABLE FROM `argv`", and warned that "a bus with a
+   live operator has **no shipped way to revoke it from a shell**". `main.go` now dispatches
+   `operator` beside its five sibling subcommands and `parseFlags`' usage announces it, so `keygen`,
+   `add`, `list`, `revoke`, the flags, the exit codes and the `--json` shapes above **are** an
+   operational contract.
+2. **`main.go` DOES register `auth.OperatorRecordKind`** in the applier map it hands `wal.Open`, and
+   `Attach`es the registry once `Open` has returned. The old gap 2 read "`main.go` does not register
+   `auth.OperatorRecordKind` … so an operator record in the WAL is passed over at **server** replay
+   without a word" — the silent-discard shape invariant 6 rates as the defect, and fail-**open** for a
+   revocation. The server now reports the outcome at INFO on every start:
+   `msg="operator registry recovered from the append-only log…" operators_recovered=<n>
+   live_operators=<n>`. A log holding two adds and one revoke reads `operators_recovered=2
+   live_operators=1`; those counts reading `0` over a data directory that holds operator records is
+   how the defect would be seen to return.
 
-Nothing on the wire consumes an `OperatorPrincipal` yet; `AUTH-7`, `INVMINT` and `CONV-AUTHZ-ADMIN` are
-the consumers.
+**Unchanged by all of that** — two things to keep straight:
+
+- The `operator` subcommands were never affected by gap 2: they open the log with their own applier
+  map, which registers the operator registry, the enrolment roster **and** the invite store (the last
+  so a composite `agent+invite` record's rider has an applier — without it every gated enrolment made
+  the multiplexer log a **false** "invite may be REDEEMABLE AGAIN" at ERROR on a command that writes
+  nothing to the invite plane).
+- **Nothing on the wire consumes an `OperatorPrincipal`.** `auth.NewOperatorService` has no non-test
+  caller and no HTTP route authenticates an operator; `AUTH-7`, `INVMINT` and `CONV-AUTHZ-ADMIN` are
+  the consumers and are unstarted. The principal now EXISTS and REPLAYS — it is not yet USED — and
+  admitting or revoking one is still an **offline** action under the data directory's exclusive lock,
+  so a revocation needs the bus restarted before it is in effect.
 
 ---
 
@@ -1223,9 +1245,15 @@ widen the stored set. The flag itself never widens anything.
 | `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
 | `broadcast [body]` | **BROKEN as of 2026-08-07.** The subcommand is still registered and still builds a request; the bus answers **501** because a broadcast has no canonical audience under signing format v1. Surfaces as **exit 6** — see below. | yes — `POST /v1/mint` then `POST /v1/broadcast`, which refuses |
 | `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
+| `ack-status <correlation-key>` | (`ACK-9`, added 2026-08-16) Report the sender-visible delivery status of a message you sent — one row per recipient, `--wait <dur>` to park until it settles | yes — `GET /v1/ack/<correlation-key>` |
+| `ack <message-id>` | (`ACK-15`, added 2026-08-21) Acknowledge a message you RECEIVED: `delivered` by default, `--refuse <class>` for one of the three recipient classes. Signs the canonical acknowledgement bytes with the agent's **messaging** key. **Nothing else can move a row to `delivered`.** | yes — `POST /v1/ack` |
 
-**There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand**, and the registry in
-`cmd/agent-busctl/root.go` is exactly the nine rows above. This matters because several error remedies in
+**There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand.** `cmd/agent-busctl/root.go`
+registers **thirteen** commands: the eleven rows above (nine before `ack-status`, `ACK-9`,
+2026-08-16; ten before `ack`, `ACK-15`, 2026-08-21) plus `session` and `client-cert`, which have
+their own sections. **The count above previously said the table WAS the registry, which it never
+was** — corrected 2026-08-21 (`ACK-15` reviewer, minor/pre-existing). What matters is the claim the
+paragraph is actually making: `keygen` and `trust` are in NEITHER list. This matters because several error remedies in
 `client/store.go`, `client/client.go` and `client/keyring.go` tell the operator to "run
 `agent-busctl keygen`" or to add a key with `agent-busctl trust` — **those commands do not exist**. The
 capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
@@ -1475,6 +1503,41 @@ positional needs the same helper, or it will reproduce that exact bug.
 `watch` flags: `--replay`, `--cursor <c>`, `--limit N`, `--poll-timeout <dur>`, `--count N`,
 `--for <dur>`, `--no-cursor` — see "`watch`: output modes and the cursor contract" below.
 
+`ack-status` flags: `--wait <dur>` (park on the bus until every row is terminal, or this duration
+elapses — ceiling `client.MaxPollTimeout`, 5 minutes / 300s, refused locally if exceeded, never
+clamped; `0`/omitted answers immediately with a snapshot). The correlation key is a **positional**
+argument, and the flag may appear before or after it — `ack-status` parses in passes for exactly this
+reason (`cmd/agent-busctl/ackstatus.go`), the same accommodation `send`'s `parseWithPositionals` makes
+above. A negative `--wait` is refused locally (exit `2`), as is a correlation key containing
+whitespace or more than one positional argument. At most **32** `--wait` calls may be parked
+per agent at once (`maxParkedAckStatusPerAgent`, `internal/httpapi/ackstatus.go` — the ack-status
+twin of `hub.MaxWaitersPerAgent`); the bus refuses the 33rd with `429` + `Retry-After: 1`. That is
+a **transient** capacity failure, so `client.retryable` retries it automatically (3 attempts,
+honouring `Retry-After`); only if every attempt is refused does it surface, as **exit `6`**
+(`KindServer`) — **not** exit `7`, because being at capacity is not the bus refusing the request on
+its merits. No new exit code is minted.
+
+`ack` flags: `--refuse <class>` (refuse the message instead of accepting it; one of
+`recipient_refused_policy`, `recipient_refused_undecodable`, `recipient_refused_not_addressed`, and
+**only** those three). OMITTED, the outcome is `delivered` — that is the ONLY default. **`--refuse`
+PRESENT WITH AN EMPTY VALUE IS EXIT `2`, NOT THE DEFAULT** (`ACK-15` reviewer finding C1): `ack "$ID"
+--refuse "$CLASS"` with `$CLASS` unset is the idiom an agent shelling out writes, and defaulting it
+to `delivered` would assert receipt for a caller that was trying to refuse — a terminal outcome is
+ABSORBING and can never be revisited. `cmd/agent-busctl/ack.go` distinguishes absent from
+present-but-empty with `fs.Visit`. There is deliberately **no `--outcome` flag**, which is what makes
+`undeliverable` unspellable through the CLI: `undeliverable` is not a class at all but a terminal
+OUTCOME a BUS asserts (`ACK-CONTRACT.md` §8.1), carrying one of the nine bus-emitted routing classes
+to say why, and a recipient has no standing to assert either (§5.2, §6.3). `--refuse undeliverable`
+is refused locally with its own message, exit `2`, and nothing is signed or sent — as is any of the
+nine bus-emitted classes. The message id is a **positional** argument and the flags
+may appear before or after it (`parseWithPositionals`, `cmd/agent-busctl/send.go`). A key that is
+not a well-formed message id, one containing whitespace, one over `client.MaxCorrelationKeyLen`
+(512), and any argument count other than one are all refused locally (exit `2`) before a request is
+built. The frame carries **no idempotency key** (`ACK-CONTRACT.md` §4): an ACK's idempotency is the
+durable `(correlation key, recipient)` row and the absorbing-terminal rule over it, so the request is
+retryable by construction — every attempt asserts the same outcome for the same pair, which the bus
+answers as `duplicate` rather than as a conflict.
+
 **`logout` is LOCAL ONLY.** `/v1/leave` does not exist yet, so nothing is revoked: the enrolment
 stays on the roster and any live session lives out its hour. The JSON field `server_notified` reports
 this honestly and is `false` today.
@@ -1544,6 +1607,27 @@ No code changes meaning; some commands give one a more specific sense:
   the body it invented. Sender authenticity is the signature and nothing else. An **absent** field is
   not verified: `size` `0` or an omitted `content_sha256` is an older bus, and refusing to read from
   it would turn version skew into an outage for a check that is not an authenticity control anyway.
+
+- `7`/`8` — **`ack-status` (`ACK-9`, added 2026-08-16) reuses both codes, and mints no new one**
+  (`ACK-CONTRACT.md` §13.4). `--wait` that settles on `refused` or `undeliverable` is `7`
+  (`ExitRejected`); `--wait` that ends with the state still `unknown` is `8` (`ExitEmpty`). Without
+  `--wait`, EVERY state — `unknown` included — is a successful snapshot and exits `0`; a `--wait` that
+  ends still `accepted`/`in_flight` is also `0` (nothing failed, the answer is "not yet"). The same
+  reported state therefore exits differently depending on whether `--wait` was given: without it the
+  caller asked for a snapshot and got one, with it the caller asked to be told the outcome, so the
+  outcome becomes the exit status. The row data (and its `class`) is always printed **before** the
+  exit code is decided, including under `--json`, so a script branching on `7` still has the one
+  field — `class` — it needs.
+
+- `7`/`8` — **`ack` (`ACK-15`, added 2026-08-21) reuses both codes too, and mints no new one**
+  (`ACK-CONTRACT.md` §13.4). `7` (`ExitRejected`) is a `409`: the `(message, recipient)` pair is
+  already terminal with a DIFFERENT outcome, the first terminal stands and NOTHING was written —
+  the client replaces the transport's generic 409 remedy, which talks about idempotency keys this
+  frame does not carry. `8` (`ExitEmpty`) is the uniform `accepted:false, state:"unknown"` answer,
+  byte-identical for a message that never existed, one swept past retention, one this agent was not
+  addressed in, and a malformed id (§13.3) — it is NOT an error and NOT a permission failure. A
+  duplicate of the SAME outcome is exit `0` (invariant 10's legitimate retry). The result object is
+  printed BEFORE the exit code is decided, including under `--json`.
 
 ### JSON shapes — CONTRACT
 
