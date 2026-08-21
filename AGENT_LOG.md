@@ -4628,3 +4628,98 @@ published contract promising the opposite. Filed as `ACK-17`.
 
 **Four guards in this project have now been found that were written specifically to catch a defect
 and could not fire. Mutation found all four; review found none.**
+
+## 2026-08-21 — ACK-12 (`17406b3a`): the three-bus ACK/NACK acceptance harness, and what it found
+
+`tests/e2e/threebus_ack_test.go` (new, the only file this task created). A three-bus acceptance
+harness — A sender -> B transit -> C recipient — driven entirely through the compiled
+`agent-busctl` (invariant 7), with `scripts/bus-serve.sh` for server lifecycle and nothing else.
+No `net/http`, no curl, no retired `bus-*.sh` wrapper. Invariants read in full: 2, 7, 11.
+
+**Proof, in a clean `git archive HEAD` overlay at `dbae79d` carrying only this file:**
+
+```
+proof-check: verdict=PASS class=test exit=0 tests_run=8 top_level=1 skipped=0 failed=0 empty_pkgs=0
+```
+
+7 subtests, ZERO `t.Skip`, no build tag, no `-short` guard, 100 `t.Fatalf` / 0 `t.Errorf`, and
+`run()` fails the test when a command cannot LAUNCH. ~53 s.
+
+### THE HARNESS PASSES. THE FEATURE IT WAS WRITTEN TO ACCEPT DOES NOT WORK.
+
+Do not read the PASS above as "three-bus ACK works". It means the harness correctly records that
+the ACK plane is a SINGLE-BUS SURFACE today. Measured, not inferred:
+
+- **No lifecycle row is written for relayed ingest.** `internal/hub/hub.go` `recordAcceptance`
+  returns early when `relayed` is true; `internal/hub/relayingest.go:253` sets it. An ACK requires
+  a pre-existing retained row and NEVER creates one (`ErrAckNotRetained`), so a recipient on C gets
+  `state:"unknown"`, exit 8 — for BOTH C's local id and A's origin id.
+- **The return path is unwired.** `relay.Client.PeerAck` (`internal/relay/ackhttp.go:567`) has ZERO
+  non-test callers, so the sender's row on A stays exactly `accepted`, `attested_by` empty.
+- **Retry/bounce does not exist.** `ack.ClassHorizonExpired` and `ClassObligationLost` are declared
+  with zero production call sites. Nothing wires an outbox `abandoned` settlement into
+  `ack.Store.Settle`. There is no dead-letter.
+
+Against the user's acceptance sentence — transport ack, then application delivery notification,
+then retry, then bounce — only the first two clauses hold, and only for a LOCAL same-bus send.
+Filed as P0: `7d564118` (destination-row) and `f423959c` (watch-correlation-key).
+
+### The second gap was not predicted and is invariant 7's missing half
+
+The correlation key is the ORIGIN bus's message id (`ACK-CONTRACT.md` §3), but
+`cmd/agent-busctl/watch.go`'s `watchRecord` carries no origin/correlation field at all. For a
+relayed message the recipient sees only the DESTINATION bus's minted id — measured
+`bus-zdqih2rygav3uzip-11` on A versus `bus-2jnyxyibpicviugs-9` on C. **So even once rows exist on
+the destination, the recipient still cannot name the right one through any compiled subcommand.**
+`cmd/agent-busctl/ack.go`'s help text meanwhile tells agents the id "identifies the message across
+every hop it took to reach you", which is false today.
+
+### The gate is FIREABLE, and that was proved rather than asserted
+
+The federation readiness gate is the OBSERVED RELAY, never `/healthz` — a bus reports healthy while
+every `/v1/peer/` path 404s, which is how RELAY-51 produced a confident false pass. Proved by
+sabotage: removing `-peer-client-fingerprint` un-mounts the peer surface (`bindable > 0` fails, so
+`main.go` supplies a NIL PAIR and `mountPeerSurface` registers nothing), and
+`send_relays_a_to_c` then FAILS with `DELIVERY GATE FAILED ... never observed ... within 60s`.
+The three single-bus subtests correctly still pass, since they never cross a hop.
+
+### Two gap subtests must be INVERTED, never deleted or loosened
+
+`relayed_message_cannot_yet_be_acked_on_the_receiving_bus` and
+`ack_does_not_yet_propagate_to_origin_bus` pin exact values and will go RED the day ACK-5 lands —
+which is the point. The INVERT-don't-delete instruction is written inside the `t.Fatalf` MESSAGE
+(lines 796-800, 1097-1101), because that is the only text guaranteed to be read by the agent who
+makes it go red. A comment at the top of the file would not be.
+
+### Process failures in this task, recorded because they cost real time
+
+**Two agents were given the same file concurrently.** The runner dispatched `test-engineer` while
+`implementer` was still working; the implementer later rewrote the file wholesale and clobbered
+test-engineer's first four edits, which were then rebased. Nothing was lost in the end, but that
+was luck. One writer per file, and wait for the report.
+
+**The first cut asserted the plane as it SHOULD work, not as it does** — five aspirational
+assertions, five reds. An acceptance harness's whole job is to encode measured reality; writing the
+ideal and calling the difference a failure inverts what the artefact is for.
+
+**`SendMessage` was disabled for the session**, so a mid-flight correction (correlate on the
+correlation key, not `message_id`) could not reach the running implementer and had to be re-issued
+through the next agent in the chain.
+
+### Gates
+
+Reviewer PASS on the code (no change required), with three RECORD-level conditions: do not write a
+`test_summary` implying §15 acceptance is met; post the inversion linkage on ACK-5 and `7d564118`;
+record the §15 "do not build a parallel harness" deviation. It checked that premise rather than
+assuming it — DEPLOY-3 is `todo` and `docker-compose.yml` has exactly ONE service, so there is no
+Compose topology to reuse, and the stored `proof_cmd` mandates a Go test at `./tests/e2e`.
+
+Security PASS, no blocking findings; invariants 1, 2, 3, 6, 7, 9, 10, 11 checked against the code.
+Notable negatives: no `InsecureSkipVerify` and no `crypto/tls` at all (the harness builds no TLS
+config, inheriting the CLI's pinning path); invites 0600 and passed via `--invite-file`, never
+argv; `exec.Command` argv slices throughout, no `sh -c`; kernel-allocated ports so fed-smoke's
+9101-9103 cannot be hijacked; no orphaned processes or temp roots after a run. Five LOW findings
+(an `invite_secret` reachable on a `t.Fatalf` path; the §13.3 oracle comparing stdout but not
+stderr; ambient `AGENT_BUS_*` reaching the CLI; a cleanup that Goexits and leaks two buses; one
+over-claiming subtest name) were left UNAPPLIED on purpose: both gates verified this exact file,
+and editing after the gates would ship code neither had reviewed. Filed as a follow-up instead.

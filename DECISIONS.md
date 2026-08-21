@@ -6676,3 +6676,62 @@ entries without it would not have been.
 - **2026-08-15 — RELAY-24-BLOCKER-EGRESS: the egress seams …, §BLOCKED, and escalated rather than decided: the OUTBOUND peer TLS pin** — RESOLVED, and named as superseded by *2026-08-15 — RELAY-24-BLOCKER-EGRESS: the outbound-TLS blocker, resolved*, which took candidate resolution 1 (export `client.PinnedTLSConfig`). Its closing claims are all false now: the forwarder has production callers, the registry is built at the composition root, peers are seeded, and the startup line no longer reports the forwarder unwired. The refusal to add a second `InsecureSkipVerify` literal held — there is still exactly one, in `client/pin.go:260-261`.
 
 - **2026-08-15 — RELAY-24-BLOCKER-EGRESS: the egress seams …, the `RemoteRouter` paragraph under Decision 1** — SUPERSEDED BY NAME the same day by *… the outbound-TLS blocker, resolved*. It said `/v1/send` to a peer's agent "still answers `404 unknown recipient`"; the router is wired (`cmd/agent-bus/main.go:1150`) and such a send is accepted **201**. It already carried an inline supersession banner; both are removed so there is one live answer to that question.
+
+## 2026-08-21 — ACK-12: a Go acceptance harness at `tests/e2e/`, and why it asserts a BROKEN plane
+
+Two decisions, both taken deliberately and both easy to mistake for mistakes later.
+
+### 1. `ACK-CONTRACT.md` §15 says "do not build a parallel harness". This task built one.
+
+§15 directs ACK-12 to reuse DEPLOY-3's Compose topology and `scripts/fed-smoke.sh`. **The premise
+is false as of today, and was checked rather than assumed:**
+
+- **DEPLOY-3 is `todo`.** The multi-bus Compose profile it would supply does not exist.
+- **`docker-compose.yml` defines exactly ONE service.** There is no three-bus Compose topology to
+  reuse.
+- **The stored `proof_cmd` mandates a Go test:**
+  `bash scripts/proof-check.sh 'go test -race -run ^TestThreeBusEndToEndAckNack$ ./tests/e2e'`.
+  A shell script cannot satisfy it, and `tests/` did not exist.
+
+So §15's instruction could not be followed as written. What §15 is actually protecting against —
+a second, divergent bring-up recipe — is honoured a different way: the harness reuses the
+SANCTIONED building blocks rather than reimplementing them. Server lifecycle goes through
+`scripts/bus-serve.sh` and nothing else; every bus and client capability goes through a compiled
+command (invariant 7); and the peering recipe is lifted in shape from `scripts/fed-smoke.sh:620-692`,
+including the outbound `-tls-fingerprint` / inbound `-peer-client-fingerprint` split, which are
+opposite directions and must never be collapsed.
+
+**It is deliberately ADDITIVE, not a superset.** It does NOT re-assert what fed-smoke already
+proves — send idempotency, exact `bus_path` equality beyond what the readiness gate needs. It
+covers the ACK plane only. If DEPLOY-3 later lands a real Compose topology, this harness should be
+re-pointed at it rather than duplicated again.
+
+### 2. Two subtests assert that the product is BROKEN. That is the deliverable, not a defect.
+
+`relayed_message_cannot_yet_be_acked_on_the_receiving_bus` and
+`ack_does_not_yet_propagate_to_origin_bus` assert measured current behaviour: `state:"unknown"` /
+exit 8 on the destination bus, and a sender row stuck at exactly `accepted`.
+
+The alternative — asserting the ideal and leaving the test red, or skipping it — was rejected. A
+red test is noise that gets muted; a skipped one scores VACUOUS under `proof-check.sh` and asserts
+nothing. **An assertion pinned to today's exact values goes RED the moment the product moves**,
+which is what forces the next agent to look.
+
+**They must be INVERTED when ACK-5 lands, never deleted and never loosened.** That instruction is
+written inside the `t.Fatalf` MESSAGE rather than in a header comment, because the failure message
+is the only text guaranteed to be read by the agent who makes it go red.
+
+**The risk being accepted, stated plainly:** a test asserting a bug entrenches it if nobody reads
+the comment. Mitigated by two P0 follow-ups naming the exact lines — `7d564118`
+(ACK-12-FU-DESTINATION-ROW) and `f423959c` (ACK-12-FU-WATCH-CORRELATION-KEY) — and by the fact that
+ACK-5 is already `in_progress`, so the inversion will be exercised within days rather than years.
+
+### The readiness gate is the observed relay, never `/healthz`
+
+Recorded because it is the third time this has bitten the project. A bus reports healthy on
+`/healthz` while every `/v1/peer/` path 404s, because `mountPeerSurface` is all-or-nothing and
+`main.go` supplies a NIL PAIR when no peer has an inbound client-certificate binding. RELAY-51's
+rollout gate passed on a completely deaf bus for exactly this reason. **This harness gates on an
+actual A->B->C delivery being observed**, and that gate was proved fireable by sabotage — removing
+`-peer-client-fingerprint` makes it fail with `DELIVERY GATE FAILED`, not pass quietly. When
+RELAY-55 lands an authenticated `/v1/readyz`, this is a candidate to re-point.
