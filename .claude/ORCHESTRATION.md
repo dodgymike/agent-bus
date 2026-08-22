@@ -62,6 +62,12 @@ performance-reviewer + security + test-engineer (+ reviewer for code-level). Run
 parallel**, each emitting findings to its own doc, then synthesize into a single prioritized
 P0/P1/P2 backlog. None of the reviewers edit code.
 
+**Run the full `-race` suite ONCE for the panel, not once per reviewer.** The convener (or ONE
+dedicated sub-agent) runs `go test -race ./...` against the exact tree the panel sees, and pastes the
+result — command, sha, pass/fail — into every panelist's brief. Panelists run only their own narrow,
+dimension-specific checks and never re-run `./...`. N reviewers each running the whole suite is N-1
+wasted full runs; it has happened.
+
 ## Dispatching well
 
 - Send independent spawns in ONE message so they run concurrently.

@@ -76,6 +76,14 @@ beat, the specific files, and the traps below. Send them in ONE message so they 
   scratchpad path outside the repo is the only write permitted.
 - Warn them about **in-flight files**. If another agent is concurrently writing a path, name it and
   tell them findings there are provisional.
+- **Do NOT run the whole test suite.** Your brief carries a full `go test -race ./...` result — its
+  command, the sha it ran against, and pass/fail — that the orchestrator ran ONCE for the panel.
+  Your work is mostly static analysis of boundaries and data flow; trust that result and run only a
+  single targeted check when a specific boundary claim genuinely needs a live run, never `./...`.
+  Every panelist re-running the suite is wasted duplicate work. If the result is absent, HEAD moved
+  since it ran, or you have a concrete reason to distrust one result, say so and run the SPECIFIC
+  test — still not `./...`. If the shared result cites `working-tree @ <sha>`, treat it as ADVISORY
+  and analyse the LIVE files regardless — a sha match cannot detect further uncommitted edits.
 - **Verify before you relay.** A sub-agent's claim is a lead, not a result. Confirm the load-bearing
   ones against the actual file or a live read — sub-agents state false things confidently, and a
   wrong finding in your report costs more than a missed one.

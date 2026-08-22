@@ -79,6 +79,15 @@ batch unrelated work or refactor unless the task explicitly asks.
 - Run the NARROWEST relevant check: `go build ./...`, `go vet ./...`,
   `go test -race -run <Name> ./<pkg>`, and for formatting `go fmt ./...` or
   `test -z "$("$(go env GOROOT)/bin/gofmt" -l .)"`.
+- **Run the full `-race` suite ONCE per task, not once per reviewer.** Before you dispatch the review
+  panel, run `go test -race ./...` yourself — or hand it to ONE dedicated sub-agent (test-engineer is
+  the natural owner) — against the exact HEAD/worktree the reviewers will see. Capture the command,
+  the sha (or `working-tree @ <sha>`), and the pass/fail summary, and paste that verbatim into EVERY
+  reviewer's brief. The panel then runs only its own dimension-specific checks and does NOT re-run
+  `./...`. If you change code after the suite ran, RE-run it and update the briefs — a stale suite
+  result reads as current and is worse than none. Security, reliability-reviewer and the rest have
+  each independently run the whole suite for one change; that is N-1 wasted full runs and this is how
+  it stops.
 - **NEVER call bare `gofmt`, and never judge `gofmt -l` by its exit status.** Bare `gofmt` is not on
   PATH here and exits 127, so `test -z "$(gofmt -l .)"` PASSES because a command that fails to launch
   prints nothing. And `gofmt -l` exits 0 EVEN WHEN IT LISTS FILES, so `gofmt -l . && echo CLEAN`
