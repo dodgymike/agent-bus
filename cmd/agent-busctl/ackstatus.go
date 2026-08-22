@@ -57,14 +57,28 @@ WHAT IT DOES
   still answers unknown for it. That gap is tracked separately as
   ACK-BROADCAST-NO-LIFECYCLE-ROW.
 
-  P0 7d564118 is CLOSED. P0 f423959c is STILL OPEN: ` + "`watch`" + ` shows a recipient
-  only the LOCAL message id its own bus minted, so a recipient on another bus
-  cannot learn this correlation key from the bus. Until that lands, send it to
-  them out of band — it is the ` + "`message_id`" + ` ` + "`agent-busctl send --json`" + ` handed
-  you, and it is the id they must pass to ` + "`agent-busctl ack`" + `.
+  UPDATED 2026-08-22 (f423959c). Two sentences here are retracted, quoted so
+  they are not read as current: "P0 7d564118 is CLOSED. P0 f423959c is STILL
+  OPEN: ` + "`watch`" + ` shows a recipient only the LOCAL message id its own bus
+  minted, so a recipient on another bus cannot learn this correlation key from
+  the bus. Until that lands, send it to them out of band."
+
+  DO NOT SEND IT OUT OF BAND. Every ` + "`watch`" + ` record now carries
+  ` + "`correlation_key`" + `, and it is THE SAME STRING you pass here — the ORIGIN
+  bus's id — however many buses the message crossed. That is what makes this key
+  the one id both ends can name: you read it from
+  ` + "`agent-busctl send --json | jq -r .message_id`" + ` on this bus, the recipient
+  reads the identical value from
+  ` + "`agent-busctl watch --json | jq -r .correlation_key`" + ` on theirs, and passes
+  it to ` + "`agent-busctl ack`" + `.
+
+  AND 7d564118 IS NOT "CLOSED". Its BEHAVIOUR landed with ACK-5, but its Spec
+  Server record still read ` + "`todo`" + ` on 2026-08-22 when this was checked. The
+  two are different facts and this notice conflated them.
 
   The exit-code paragraph above is unchanged and still applies. Delete this
-  notice only once f423959c AND the broadcast gap have landed too.
+  notice only once the broadcast gap has landed too — that is now the sole
+  remaining trigger.
 
 THE FIVE STATES
   accepted       committed and fsynced on your bus. It is durable; nobody has

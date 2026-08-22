@@ -26,11 +26,23 @@ WHAT IT DOES
 
   The message id is the CORRELATION KEY, and the correlation key is the id the
   ORIGIN bus — the SENDER's bus — minted (invariant 1), fully bus-namespaced
-  (invariant 2). For a message sent from YOUR OWN bus that is the
-  ` + "`message_id`" + ` the message arrived with,
-  ` + "`agent-busctl watch --json | jq -r .message_id`" + `. For a message RELAYED
-  to you it is NOT: your bus minted a SECOND id for its own local copy, ` + "`watch`" + `
-  prints that LOCAL id, and this route refuses it.
+  (invariant 2). ` + "`agent-busctl watch`" + ` puts it on every record as
+  ` + "`correlation_key`" + `, so ONE spelling covers every message you receive,
+  relayed or not:
+  ` + "`agent-busctl watch --json | jq -r .correlation_key`" + `.
+
+  IT IS NOT ` + "`message_id`" + `, AND THAT TRAP SURVIVED THIS CHANGE.
+  ` + "`message_id`" + ` is the id YOUR bus minted for its own local copy. For a
+  message sent from your own bus the two are the same string, so reaching for
+  it LOOKS right; for a message RELAYED to you your bus minted a SECOND id, and
+  that local id is precisely the one this route refuses — the uniform exit 8
+  unknown, with nothing recorded anywhere.
+
+  CORRECTED 2026-08-22 (f423959c). This paragraph used to send you to
+  ` + "`jq -r .message_id`" + ` for a same-bus message and say that for a relayed one
+  ` + "`watch`" + ` printed only the LOCAL id. ` + "`watch`" + ` now carries the correlation
+  key itself, so the two-case split is gone. The refusal above is unchanged:
+  only the workaround changed, not the rule.
 
   CORRECTED 2026-08-21 (ACK-12). This paragraph used to end "...so it
   identifies the message across every hop it took to reach you." THAT IS NOT
@@ -42,11 +54,14 @@ WHAT IT DOES
   and a same-bus BROADCAST both open no lifecycle row and both answer exit 8
   unknown. (This notice itself first said "the SAME-BUS case", which overclaimed
   in the very direction it exists to correct: broadcast is same-bus and still
-  does not work.) On top of that, watch emits only the LOCAL message_id, never the origin id the
-  correlation key is built from, so after a hop you cannot even name the
-  message you are being asked to acknowledge. Tracked as P0 7d564118
-  (destination row) and P0 f423959c (watch correlation key). When those land,
-  delete this notice — do not leave it standing once it is stale.
+  does not work.) It went on: "On top of that, watch emits only the LOCAL
+  message_id, never the origin id the correlation key is built from, so after a
+  hop you cannot even name the message you are being asked to acknowledge."
+  RETRACTED 2026-08-22 (f423959c) — watch now carries correlation_key on every
+  record, and the sentence is quoted here only so it is not read as current.
+  Tracked as P0 7d564118 (destination row) and P0 f423959c (watch correlation
+  key). Both have now landed as BEHAVIOUR; the notice still stands for the
+  broadcast gap alone — see the deletion trigger at the end of this block.
 
   UPDATED 2026-08-21 (ACK-5). PART of the notice above has landed and part has
   not, so it stays — corrected beside itself rather than deleted, because a
@@ -64,12 +79,21 @@ WHAT IT DOES
   only that" — is now FALSE under the origin id, and still TRUE under the
   local id.
 
-  WHAT DID NOT LAND — P0 f423959c, and it is the trap. The id ` + "`watch`" + ` prints is
-  still the LOCAL one, and this route REFUSES a correlation key whose bus half
-  is this bus: the same uniform exit 8 unknown, with nothing recorded anywhere.
-  There is still no way to obtain the origin id from ` + "`watch`" + `, so today it has
-  to reach you OUT OF BAND — the sender captures it from
-  ` + "`agent-busctl send --json | jq -r .message_id`" + ` and tells you.
+  WHAT LANDED NEXT — P0 f423959c, 2026-08-22. This paragraph was headed "WHAT
+  DID NOT LAND — P0 f423959c, and it is the trap" and said: "There is still no
+  way to obtain the origin id from ` + "`watch`" + `, so today it has to reach you OUT
+  OF BAND — the sender captures it from
+  ` + "`agent-busctl send --json | jq -r .message_id`" + ` and tells you." DO NOT DO
+  THAT ANY MORE. Every ` + "`watch`" + ` record now carries ` + "`correlation_key`" + `,
+  the ORIGIN bus's id, computed by the bus — so a recipient names the id from
+  its own stream however many buses the message crossed. If you built a side
+  channel to carry ids to a recipient, take it out.
+
+  THE TRAP ITSELF IS UNCHANGED. This route still REFUSES a correlation key whose
+  bus half is this bus — the uniform exit 8 unknown, with nothing recorded
+  anywhere — so passing ` + "`message_id`" + ` for a relayed message fails exactly as
+  it did before. What changed is that you no longer have to be told the right id
+  by someone else.
 
   BROADCAST IS UNTOUCHED. recordAcceptance still early-returns on broadcast, so
   a same-bus BROADCAST still opens no lifecycle row and still answers exit 8
@@ -91,7 +115,10 @@ WHAT IT DOES
   "already terminal with a different outcome". The message text tells those
   apart, so do not branch on the number alone.
 
-  Delete this notice only once f423959c AND the broadcast gap have landed too.
+  Delete this notice only once the broadcast gap has landed too. (f423959c was
+  struck from this trigger on 2026-08-22, having landed. 7d564118's BEHAVIOUR
+  landed with ACK-5, but its Spec Server record still read ` + "`todo`" + ` when this
+  line was written, so it is not a deletion trigger either.)
 
   IT IS THE MESSAGE ID, NOT THE SEQUENCE. ` + "`seq`" + ` is identity and a delivery
   position is a position; this is correlation. They are three different
@@ -259,7 +286,7 @@ func runAck(ctx context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "ack",
 			Message: fmt.Sprintf("expected exactly one message id, got %d arguments", len(rest)),
-			Remedy:  "run `agent-busctl ack <message-id>`; the id is the `message_id` the message arrived with",
+			Remedy:  "run `agent-busctl ack <message-id>`; the id is the message's `correlation_key` -- `agent-busctl watch --json | jq -r .correlation_key`, NOT `.message_id`",
 		}
 	}
 

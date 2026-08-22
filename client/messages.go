@@ -110,6 +110,23 @@ type Message struct {
 	// at-least-once, so a message may legitimately arrive twice.
 	MessageID string `json:"message_id"`
 
+	// CorrelationKey is the value to pass to Ack as AckOptions.CorrelationKey.
+	// It is the ORIGIN bus's server-minted id, computed by the bus.
+	//
+	// MessageID IS NOT THAT VALUE FOR A RELAYED MESSAGE. Every bus mints its own
+	// id (invariant 1), so a message this bus received over a relay hop has a
+	// local MessageID that the ack path refuses; only the origin's id settles
+	// it. For a message the local bus originated the two are the same string.
+	//
+	// Do not derive it here. The "origin id when set, local id otherwise" rule
+	// lives in exactly one place — internal/store.Message.OriginID(), which this
+	// package cannot import — and its doc forbids re-spelling that branch at a
+	// call site; the wrong branch still yields a well-formed message id, just
+	// for the wrong bus. The bus sends the answer; carry it verbatim.
+	//
+	// The bus always sets it, so it is never empty against a current bus.
+	CorrelationKey string `json:"correlation_key"`
+
 	// Seq is the server-minted sequence: a unique, never-reused IDENTITY.
 	//
 	// It is NOT a freshness or ordering token, and it is NOT monotone in the
@@ -969,6 +986,24 @@ func validateBatch(op string, b *Batch) error {
 		}
 		for _, bus := range m.BusPath {
 			if err := validateServerField(op, "bus id in bus_path", bus); err != nil {
+				return err
+			}
+		}
+		// The correlation key gets exactly the treatment the message id, the
+		// sender and the bus path get, and for a sharper reason than any of
+		// them: an agent reads this field off the stream and hands it straight
+		// back as an ARGV to `agent-busctl ack`. Control characters, bidi
+		// overrides and over-long values are REFUSED here, at the boundary,
+		// rather than sanitised at some later render.
+		//
+		// THE EMPTY GUARD IS A COMPATIBILITY GUARD, NOT LAXITY.
+		// validateServerField rejects "" outright, and a bus that predates this
+		// field simply omits it — so validating unconditionally would make a
+		// current CLI unable to read ANY message from an older bus, turning an
+		// additive field into a hard break. An absent key is not a malformed
+		// key. A key that IS present is fully checked.
+		if m.CorrelationKey != "" {
+			if err := validateServerField(op, "correlation key", m.CorrelationKey); err != nil {
 				return err
 			}
 		}

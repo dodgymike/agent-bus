@@ -314,7 +314,22 @@ func runWatch(ctx context.Context, env *cliEnv, args []string) error {
 // bytes. Every other field is client.Message's, key for key, so the two shapes
 // do not drift.
 type watchRecord struct {
-	MessageID     string   `json:"message_id"`
+	MessageID string `json:"message_id"`
+
+	// CorrelationKey is the id `agent-busctl ack` takes: the ORIGIN bus's
+	// server-minted id, computed by the bus (client.Message.CorrelationKey).
+	//
+	// It is here because message_id alone made the ack path unreachable from
+	// this stream — for a RELAYED message the local message_id is precisely the
+	// id ack refuses. It is carried verbatim and never derived: the "origin id
+	// when set, local id otherwise" rule lives once, server-side, in
+	// store.Message.OriginID().
+	//
+	// NOT omitempty, deliberately. `jq -r .correlation_key` must be one
+	// instruction for a relayed and a same-bus message alike; omitting it on
+	// the same-bus case would push `// .message_id` into every consumer's shell.
+	CorrelationKey string `json:"correlation_key"`
+
 	Seq           uint64   `json:"seq"`
 	From          string   `json:"from"`
 	Broadcast     bool     `json:"broadcast"`
@@ -350,7 +365,9 @@ type watchRecord struct {
 
 func newWatchRecord(m client.Message) watchRecord {
 	r := watchRecord{
-		MessageID:     m.MessageID,
+		MessageID:      m.MessageID,
+		CorrelationKey: m.CorrelationKey,
+
 		Seq:           m.Seq,
 		From:          m.From,
 		Broadcast:     m.Broadcast,
@@ -425,6 +442,22 @@ func plainText(body []byte) (string, bool) {
 // sender id and the timestamp get keepNewlines=false: a line break in either is
 // an attempt to forge a second line of output.
 func writeHumanMessage(w io.Writer, m client.Message) {
+	// A RELAYED message can only be acked with the ORIGIN bus's id, and the
+	// human render shows no id at all otherwise — so print it, but ONLY when it
+	// differs from the local message id. On a same-bus message the two are the
+	// same string and the line would be noise on every message.
+	//
+	// Deferred so it lands after the body on all three exit paths below,
+	// including the not-text one. Neutralised like every other server-supplied
+	// string here, with keepNewlines=false: a line break in an id is an attempt
+	// to forge a second line of output.
+	defer func() {
+		if m.CorrelationKey == "" || m.CorrelationKey == m.MessageID {
+			return
+		}
+		fmt.Fprintf(w, "  ack key: %s\n", client.TerminalSafe(m.CorrelationKey, false))
+	}()
+
 	scope := "broadcast"
 	if !m.Broadcast {
 		scope = "→you"

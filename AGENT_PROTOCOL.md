@@ -893,12 +893,45 @@ watch.
 **Output, three modes, chosen for you:** `--json` → NDJSON; no `--json` and stdout is a pipe →
 NDJSON (a pipe is a machine); no `--json` and stdout is a TTY → a readable live feed. NDJSON is one
 compact JSON object per line, flushed as each message arrives, no envelope, no `"ok"` field, no
-array brackets. Each record carries `message_id`, `seq`, `from`, `broadcast`, `to`, `bus_path`,
-`sent_at`, `size`, `content_sha256`, `timestamp_ms`, `signature`, `body` (standard base64, always
-present, lossless) and `text` (a string, present only when the body is valid UTF-8 with no control
-characters other than tab, newline, carriage return). `jq -r .text` for text traffic,
+array brackets. Each record carries `message_id`, `correlation_key`, `seq`, `from`, `broadcast`,
+`to`, `bus_path`, `sent_at`, `size`, `content_sha256`, `timestamp_ms`, `signature`, `body` (standard
+base64, always present, lossless) and `text` (a string, present only when the body is valid UTF-8
+with no control characters other than tab, newline, carriage return). `jq -r .text` for text traffic,
 `jq -r .body | base64 -d` for anything. Diagnostics (retry notices, cursor warnings, the closing
 summary) always go to stderr, never inside the stream.
+
+**`correlation_key` is the id you ACKNOWLEDGE with, added 2026-08-22 (`ACK-12-FU-WATCH-CORRELATION-KEY`).**
+It is the id the **ORIGIN** bus minted for the message — `ACK-CONTRACT.md` §3's correlation key, and
+the only id [`agent-busctl ack`](#acknowledging-a-message-you-received-agent-busctl-ack) accepts. It
+**equals `message_id` when the bus you are watching is the origin** and **differs when the message
+was relayed to you**, and that equality in the same-bus case is exactly why reaching for
+`message_id` survives every test you run on one bus and then fails the first time a message crosses
+a relay. So `jq -r .correlation_key`, never `jq -r .message_id`: passing your bus's local
+`message_id` for a relayed message exits **8** `unknown` and records nothing anywhere.
+
+The bus computes it, and you must not: the "origin id when set, local id otherwise" rule lives in
+exactly one place server-side (`store.Message.OriginID()`), and a second copy of it in your shell
+would drift silently — the wrong branch still yields a well-formed message id, just naming the wrong
+bus's message. Do not try to reconstruct it from `bus_path[0]` either, which names a bus and nothing
+more.
+
+**It does NOT change what you deduplicate on — keep deduplicating on `message_id`.** The two fields
+answer different questions. `message_id` is *this* bus's id for the copy it handed you, which is the
+right key for the at-least-once delivery described below; `correlation_key` names the one logical
+message every hop agrees on, which is what an acknowledgement has to bind to. Dedup on the local id,
+acknowledge with the origin id.
+
+**The field is ALWAYS present — it is never `omitempty`, so `jq -r .correlation_key` can never print
+`null` against a current bus.** That is deliberate: were it omitted on a same-bus message you would
+write `.correlation_key // .message_id`, which is the origin/local branch again, now in shell — and
+in `jq` the empty string is truthy while `null` is not, so that idiom would silently fall through to
+the *wrong* id rather than failing loudly. (Against a bus old enough to predate the field the CLI
+still emits the key, with the empty string as its value.)
+
+In the **human** feed the key is printed as a `  ack key: <value>` line **only when it differs from
+`message_id`** — that is, only for a relayed message, the one case where the reader could not
+otherwise name the id `ack` wants. On a same-bus message the two strings are equal and the line
+would be noise on every message.
 
 **`timestamp_ms` and `signature` were added 2026-08-07, and `sent_at` is NOT the same thing as
 `timestamp_ms`.** `timestamp_ms` is the **sender's** clock in Unix milliseconds and is the one the
@@ -1038,10 +1071,27 @@ key — `agent-busctl ack-status --json <key>` and `agent-busctl ack-status <key
 > travels backwards one hop at a time along the path the message took and stops at the origin (see
 > the cross-bus paragraph a little further down this section). The **broadcast** half is still true
 > — a same-bus broadcast still opens no row and still answers `unknown` — and is now tracked
-> separately as `ACK-BROADCAST-NO-LIFECYCLE-ROW`. The exit-code sentence above is unchanged. P0
-> `7d564118` is **closed**; P0 `f423959c` is **still open**, so a recipient on another bus still
-> cannot learn this correlation key from `watch` and you must send it to them out of band.
-> **Delete this notice only once `f423959c` AND the broadcast gap have landed too.**
+> separately as `ACK-BROADCAST-NO-LIFECYCLE-ROW`. The exit-code sentence above is unchanged.
+>
+> **UPDATED AGAIN 2026-08-22 (`ACK-12-FU-WATCH-CORRELATION-KEY`).** The two sentences that ended the
+> paragraph above were wrong on both counts and are retracted, quoted here so they are not read as
+> current: *"P0 `7d564118` is **closed**; P0 `f423959c` is **still open**, so a recipient on another
+> bus still cannot learn this correlation key from `watch` and you must send it to them out of band.
+> **Delete this notice only once `f423959c` AND the broadcast gap have landed too.**"* Unwind both:
+>
+> - **Nothing has to reach a recipient out of band any more.** Every `agent-busctl watch` record
+>   carries `correlation_key`, and it is **the same string you pass to `ack-status`** — the origin
+>   bus's id — however many buses the message crossed. That is what makes this key the one id both
+>   ends can name: you read it from `agent-busctl send --json | jq -r .message_id` here, the
+>   recipient reads the identical value from `agent-busctl watch --json | jq -r .correlation_key`
+>   there. If you built a side channel to ship ids to a recipient, take it out.
+> - **`7d564118` is NOT "closed".** The BEHAVIOUR it names does work — a relayed message can be
+>   acknowledged on the receiving bus (`ACK-5`) — but its Spec Server record still read `todo` when
+>   this was checked on 2026-08-22. Landed behaviour and a closed record are different facts and that
+>   sentence conflated them.
+>
+> **Delete this notice only once the broadcast gap has landed** — that is now the sole remaining
+> trigger.
 
 Calls `GET /v1/ack/<correlation-key>` — a **different** route from the recipient-side `POST /v1/ack`
 (which is [`agent-busctl ack`](#acknowledging-a-message-you-received-agent-busctl-ack), shipped
@@ -1190,15 +1240,28 @@ agent-busctl ack <message-id> --json
 The `<message-id>` is the id **the SENDER's bus minted** — the correlation key — and it is
 bus-namespaced (invariants 1 and 2), so it is the same id the sender passes to `ack-status`.
 
-**For a message sent by an agent on YOUR OWN bus**, that is the `message_id` the message arrived with:
-`watch --json | jq -r .message_id`.
+**`watch` hands you that id on every message, whichever bus it came from** — one spelling, no
+branch:
 
-> **CORRECTED 2026-08-21 (`ACK-5`).** This passage said, without qualification, that the id a message
-> arrives with "is the id the ORIGIN bus minted". **That is true only for a same-bus message.** For a
-> message RELAYED to your bus there are two ids for one logical message — the origin's, and the local
-> one your bus minted for its own copy — and `watch` prints the **local** one. Read the [cross-bus
-> section](#acknowledging-a-message-that-came-from-another-bus--new-2026-08-21-ack-5) before
-> acknowledging anything that came from another bus.
+```bash
+agent-busctl ack "$(agent-busctl watch --count 1 --json | jq -r .correlation_key)"
+```
+
+**Use `.correlation_key`, NOT `.message_id`.** `message_id` is *your* bus's id for its own copy of
+the message. For a same-bus message the two are equal, so `.message_id` appears to work — and then
+exits **8** `unknown`, having recorded nothing anywhere, the first time a message crosses a relay.
+
+> **CORRECTED 2026-08-21 (`ACK-5`), then again 2026-08-22
+> (`ACK-12-FU-WATCH-CORRELATION-KEY`).** This passage first said, without qualification, that the id
+> a message arrives with "is the id the ORIGIN bus minted" — true only for a same-bus message.
+> `ACK-5` narrowed it to *"**For a message sent by an agent on YOUR OWN bus**, that is the
+> `message_id` the message arrived with: `watch --json | jq -r .message_id`"* and sent readers to the
+> cross-bus section for everything else. **That two-case split is now gone:** `watch` carries
+> `correlation_key`, which is the right id in both cases. The fact underneath is unchanged and still
+> worth knowing — a relayed message really does have two ids for one logical message, and your bus's
+> local one is never the correlation key — and the [cross-bus
+> section](#acknowledging-a-message-that-came-from-another-bus--new-2026-08-21-ack-5) still explains
+> what happens on that path.
 
 **It is the message id, NOT `seq` and NOT a delivery position.** Those are three different numbers
 (identity, correlation, position); passing the wrong one is refused locally, before anything is
@@ -1290,16 +1353,27 @@ its own before it looks anything up, deliberately: without that refusal the loca
 the very same relayed message, and you would have been handed a **503 that no retry could ever
 clear** — a "try again" for something that can never succeed.
 
-**Today there is no way to get the origin id out of `watch`, and you should plan around that.**
-`watch --json`'s `message_id` is the id **your** bus minted, and no field on that record carries the
-origin id — so for a relayed message the id in your hand is precisely the one that will be refused.
-That is a real usability gap, not a solved problem: it is tracked separately (`f423959c`,
-`ACK-12-FU-WATCH-CORRELATION-KEY`), and until it lands **the origin id has to reach you out of band**
-— from the sender, in the message body, or from whoever coordinates the two agents. You can *tell the
-two apart* by their bus half — the origin id begins with the sender's bus id (the first half of the
-`from` field), the local one with yours — but you cannot **derive** it: the sequence half of the id
-your bus minted is its own, unrelated to the origin's, and no field on the delivered record carries
-the origin's.
+**`watch` NOW CARRIES THE ORIGIN ID — corrected 2026-08-22 (`ACK-12-FU-WATCH-CORRELATION-KEY`).**
+This paragraph used to open *"**Today there is no way to get the origin id out of `watch`, and you
+should plan around that.**"* and to end *"…until it lands **the origin id has to reach you out of
+band** — from the sender, in the message body, or from whoever coordinates the two agents."* **That
+is no longer true. If you built an out-of-band channel to carry ids, unwind it.** Every `watch`
+record carries `correlation_key` — the id the ORIGIN bus minted — and it is the id to acknowledge
+with whichever bus the message came from:
+
+```bash
+agent-busctl ack "$(agent-busctl watch --count 1 --json | jq -r .correlation_key)"
+```
+
+**What has NOT changed is why the id had to be CARRIED rather than computed.** `watch --json`'s
+`message_id` is still the id **your** bus minted, so for a relayed message it is still precisely the
+id that will be refused. You can *tell the two apart* by their bus half — the origin id begins with
+the sender's bus id (the first half of the `from` field), the local one with yours — but you still
+cannot **derive** one from the other: the sequence half of the id your bus minted is its own,
+unrelated to the origin's. That is why the origin's id travels on the record, computed by the bus,
+rather than being reconstructed by you; and it is why you must not reach for `bus_path[0]`, which
+names a bus and nothing more. The same paragraph also removed a sentence saying "no field on that
+record carries the origin id" — `correlation_key` is that field.
 
 What changed underneath: your bus never held a status row for a message it merely carried. The row
 lives on the **origin** bus — the one whose agent sent it, and whose id is the first half of the
@@ -1370,8 +1444,10 @@ exit code is minted** (`ACK-CONTRACT.md` §13.4).
 ### The whole loop, end to end
 
 ```bash
-# bob receives and acknowledges
-ID=$(agent-busctl watch --count 1 --json | jq -r .message_id)
+# bob receives and acknowledges.
+# .correlation_key, NOT .message_id — it is the ORIGIN bus's id, so this one
+# spelling works whether alice is on this bus or the message was relayed in.
+ID=$(agent-busctl watch --count 1 --json | jq -r .correlation_key)
 agent-busctl ack "$ID" --json          # -> {"accepted":true,...,"state":"delivered","ok":true}
 
 # alice, who sent it, now sees it

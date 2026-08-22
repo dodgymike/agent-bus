@@ -281,9 +281,13 @@ type ackRequestBody struct {
 
 // AckOptions is the input to Ack.
 type AckOptions struct {
-	// CorrelationKey is the MESSAGE ID of the message being acknowledged, as
-	// Message.MessageID carries it — the origin bus's server-minted
-	// "<bus-id>-<seq>" (invariant 1).
+	// CorrelationKey identifies the message being acknowledged: the ORIGIN
+	// bus's server-minted "<bus-id>-<seq>" (invariant 1), as
+	// Message.CorrelationKey carries it.
+	//
+	// NOT Message.MessageID. That is the id the LOCAL bus minted, and for a
+	// message that arrived over a relay hop it is a different string that the
+	// ack path refuses. The two are equal only when the local bus is the origin.
 	//
 	// NOT Message.Seq and NOT a delivery position. Seq is identity, Pos is
 	// position, this is correlation, and confusing them has caused three

@@ -261,7 +261,34 @@ type SendResponseBody struct {
 
 // WireMessage is one message as a client receives it.
 type WireMessage struct {
-	MessageID string   `json:"message_id"`
+	MessageID string `json:"message_id"`
+
+	// CorrelationKey is the value a recipient must present to POST /v1/ack —
+	// store.Message.OriginID(), i.e. the ORIGIN bus's server-minted id. For a
+	// message this bus minted it equals MessageID; for a RELAYED message it is
+	// the origin's id, and MessageID is the one id the ack path REFUSES.
+	//
+	// It is computed SERVER-SIDE so the "origin id when set, local id
+	// otherwise" branch is written down exactly once, in OriginID(), whose own
+	// doc forbids re-spelling it at a call site. client/ cannot import
+	// internal/store, so a wire that carried only the raw origin id would force
+	// that branch to be re-implemented in the client and in the CLI — and its
+	// wrong branch fails SILENTLY, yielding a well-formed message id that names
+	// the wrong bus's message.
+	//
+	// NEVER omitempty. Omitting it on a same-bus message would make every
+	// consumer write `.correlation_key // .message_id` — the same re-spelled
+	// branch, now in shell, in every agent. OriginID() never returns empty (ID
+	// is always set), so `jq -r .correlation_key` is one uniform instruction
+	// and can never yield null.
+	//
+	// It is named for its PURPOSE, not as an id: it is the same value and the
+	// same field name the ack frame carries (internal/relay.PeerAckRequest's
+	// correlation_key). OriginID() is a correlation key, not an identity, and
+	// must never be served as "the message id" (invariant 1 — this bus never
+	// adopts a peer's id).
+	CorrelationKey string `json:"correlation_key"`
+
 	Seq       uint64   `json:"seq"`
 	From      string   `json:"from"`
 	Broadcast bool     `json:"broadcast"`
@@ -841,18 +868,22 @@ func toWireMessage(m store.Message) WireMessage {
 		busPath = []string{}
 	}
 	return WireMessage{
-		MessageID:     m.ID,
-		Seq:           m.Seq,
-		From:          m.Sender,
-		Broadcast:     m.Broadcast,
-		To:            to,
-		BusPath:       busPath,
-		SentAt:        formatInstant(m.SentAt),
-		Size:          m.Size(),
-		ContentSHA256: m.ContentSHA256,
-		TimestampMs:   m.TimestampUnixMilli,
-		Signature:     encodeBase64(m.Signature),
-		Body:          encodeBase64(m.Body),
+		MessageID: m.ID,
+		// Derived HERE, through OriginID(), and nowhere else on the read path.
+		// Never m.OriginMessageID directly: that is empty on a message this bus
+		// minted, and an empty correlation key acks nothing.
+		CorrelationKey: m.OriginID(),
+		Seq:            m.Seq,
+		From:           m.Sender,
+		Broadcast:      m.Broadcast,
+		To:             to,
+		BusPath:        busPath,
+		SentAt:         formatInstant(m.SentAt),
+		Size:           m.Size(),
+		ContentSHA256:  m.ContentSHA256,
+		TimestampMs:    m.TimestampUnixMilli,
+		Signature:      encodeBase64(m.Signature),
+		Body:           encodeBase64(m.Body),
 	}
 }
 

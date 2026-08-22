@@ -548,9 +548,19 @@ func TestSendRoute(t *testing.T) {
 			t.Fatalf("the recipient sees %d messages, want 1", len(mine))
 		}
 		m := mine[0].(map[string]interface{})
-		wantKeys(t, m, "message_id", "seq", "from", "broadcast", "to", "bus_path", "sent_at", "size", "content_sha256", "timestamp_ms", "signature", "body")
+		wantKeys(t, m, "message_id", "correlation_key", "seq", "from", "broadcast", "to", "bus_path", "sent_at", "size", "content_sha256", "timestamp_ms", "signature", "body")
 		if m["message_id"] != msgID {
 			t.Errorf("message_id = %v, want %q", m["message_id"], msgID)
+		}
+		// correlation_key is the value POST /v1/ack takes: OriginID(). This bus
+		// minted this message, so it is the SAME string as message_id — and it
+		// is present anyway, never omitted (ACK-12-FU-WATCH-CORRELATION-KEY).
+		// It diverges only for a RELAYED message; that case is proven end to
+		// end in tests/e2e's TestThreeBusEndToEndAckNack.
+		if m["correlation_key"] != msgID {
+			t.Errorf("correlation_key = %v, want %q — for a message this bus originated the §3 key IS its "+
+				"own id, and it must be served whether or not it differs from message_id",
+				m["correlation_key"], msgID)
 		}
 		if got := m["body"]; got != b64("just for you") {
 			t.Errorf("body = %v, want the base64 the sender posted", got)

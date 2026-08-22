@@ -1847,7 +1847,8 @@ One NDJSON record per message, field by field:
 
 | Field | Meaning |
 | --- | --- |
-| `message_id` | the server-minted id, the key to deduplicate on |
+| `message_id` | the server-minted id, the key to deduplicate on. **This bus's** id for the copy it handed you — for a relayed message it is NOT the id `ack` takes; see `correlation_key` |
+| `correlation_key` | (added 2026-08-22) the **ORIGIN** bus's server-minted id — `ACK-CONTRACT.md` §3's correlation key, and the only id `agent-busctl ack` accepts. **Equal to `message_id` when this bus is the origin, DIFFERENT when the message was relayed in**, which is why acknowledging with `message_id` passes every same-bus test and then exits `8` `unknown` the first time a message crosses a relay. Computed by the BUS (`store.Message.OriginID()`), carried verbatim, never re-derived client-side; bus-namespaced (invariant 2) and not reconstructible from `bus_path[0]`. **Deduplicate on `message_id`; acknowledge with this.** Always present — see below |
 | `seq` | the server-minted sequence — a unique, never-reused IDENTITY. Monotone in **allocation** order, NOT in delivery order: it is minted when a client *reserves*, so a message with a lower `seq` can arrive after one with a higher `seq`. Do not order, deduplicate or discard on it; key on `message_id`. |
 | `from` | the fully-qualified sender id |
 | `broadcast` | whether this went to every agent except the sender |
@@ -1864,6 +1865,22 @@ One NDJSON record per message, field by field:
 **`sent_at` and `timestamp_ms` are different facts and are both on the stream on purpose.** Verifying
 a signature against `sent_at` fails every time. The signed bytes are reconstructed from
 `message_id`, `seq`, `from`, `to`, `timestamp_ms` and `body`; `bus_path` is deliberately not covered.
+
+`correlation_key` is **always present and never `omitempty`**, so `jq -r .correlation_key` can never
+print `null` against a current bus. That is the point of it: were it omitted on a same-bus message
+every consumer would write `.correlation_key // .message_id`, re-spelling the bus's own origin/local
+branch in shell — and in `jq` the empty string is truthy while `null` is not, so that idiom would
+fall through to the **wrong** id silently instead of failing loudly. Against a bus old enough to
+predate the field the CLI still emits the key, with the empty string as its value; treat an empty
+`correlation_key` as "this stream cannot tell me what to acknowledge with", never as a key to hand
+to `ack`.
+
+In the **human** feed (no `--json`, stdout a terminal) it is printed on its own line after the body,
+`  ack key: <value>`, and **only when it differs from `message_id`** — that is, only for a relayed
+message, the one case where the reader could not otherwise name the id `ack` wants. For a same-bus
+message the two strings are equal and the line would be noise on every message. Like every other
+bus-supplied string on that render it goes through `client.TerminalSafe` with `keepNewlines=false`
+first, so a line break inside an id cannot forge a second line of output.
 
 `body` is **always present**, standard base64 — the authoritative, lossless form, true for any bytes
 at all. `text` is present **only** when the body is valid UTF-8, free of control characters other

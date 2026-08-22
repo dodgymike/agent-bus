@@ -5391,3 +5391,71 @@ binding rule + four in-place corrections), `AGENT_PROTOCOL.md` (`agent-busctl ac
 rule, and a correction to the unqualified "it is the id the ORIGIN bus minted"), `DECISIONS.md` (two
 sub-entries appended to the existing dated `ACK-5` section), this file. Invariants read in full first:
 **1**, **2**, **10**, **11**.
+
+## 2026-08-22 — `ACK-12-FU-WATCH-CORRELATION-KEY` (`f423959c`): documentation gate
+
+Documented the `correlation_key` field now carried on the read path, and retracted the four places
+that told agents to use `.message_id` or to obtain the origin id out of band. Invariants read in
+full first: **1** (server-authoritative, never-reused ids — the key is CARRIED, never adopted as
+this bus's identity), **2** (fully-qualified/bus-namespaced ids), **7** (the compiled CLI is THE
+client: the capability ships with its `watch` field, its `--help` and its `AGENT_PROTOCOL.md` entry
+in the same task), plus the "Enforcement status" section, whose read-path-signature entry is the
+basis of finding (ii) below.
+
+Files changed: `cmd/agent-busctl/ack.go` and `cmd/agent-busctl/ackstatus.go` (help text only — no
+behaviour), `AGENT_PROTOCOL.md`, `CONTRACTS-HTTP.md`, `CONTRACTS-CLI.md`, `DECISIONS.md`, this file.
+
+Stale claims retracted in place, old text quoted so it is not read as current:
+
+- `AGENT_PROTOCOL.md` "**For a message sent by an agent on YOUR OWN bus**, that is the `message_id`
+  … `jq -r .message_id`" → one unconditional `jq -r .correlation_key`, no two-case split.
+- `AGENT_PROTOCOL.md` "**Today there is no way to get the origin id out of `watch`** … the origin id
+  has to reach you out of band" and the "you cannot **derive** it … no field on that record carries
+  the origin's" paragraph → retracted; `correlation_key` is that field. The "cannot derive it
+  yourself" fact is KEPT, as the reason the bus computes it.
+- `AGENT_PROTOCOL.md` `ack-status` notice: "P0 `f423959c` is **still open** … send it to them out of
+  band" → retracted; and the deletion trigger reduced to the broadcast gap alone.
+- `AGENT_PROTOCOL.md` end-to-end example: `jq -r .message_id` feeding an `ack` → `.correlation_key`.
+- `cmd/agent-busctl/ack.go`: the same-bus/relayed split; "watch emits only the LOCAL message_id …
+  after a hop you cannot even name the message"; the whole "WHAT DID NOT LAND — P0 `f423959c`"
+  paragraph including "it has to reach you OUT OF BAND"; and the usage `Remedy` string "the id is
+  the `message_id` the message arrived with".
+- `cmd/agent-busctl/ackstatus.go`: "P0 `f423959c` is STILL OPEN … send it to them out of band".
+- `CONTRACTS-HTTP.md` transit-ack bullet: "no route exposes the origin id".
+
+Kept deliberately, because it is still true: the ack route refuses a correlation key whose bus half
+is this bus, so `message_id` on a relayed message still answers the uniform exit `8` `unknown` with
+nothing recorded. Every retraction says so explicitly — only the workaround changed, not the rule.
+
+Two findings, both verified rather than assumed:
+
+1. **`7d564118` is `todo`, not "closed".** `ackstatus.go` and `AGENT_PROTOCOL.md` both said closed.
+   Checked against the Spec Server on 2026-08-22: status `todo`. Its BEHAVIOUR landed with `ACK-5`;
+   the record did not. Corrected in place in both files. (`f423959c` itself was `in_progress` at the
+   time of writing, so nothing here claims it is closed either — only that it LANDED.)
+2. **Signature coverage on a relayed message is the ORIGIN's id/seq, not the local pair.**
+   `CONTRACTS-HTTP.md` said "a recipient reconstructs the signed bytes from `message_id`, `seq`, …".
+   `relay.RelayedMessage.CanonicalBytes` passes `MessageID: m.OriginMessageID, Sequence: m.OriginSeq`
+   (`internal/relay/signed.go:262-263`), and `signing.Canonicalize` requires the sender's bus half
+   and the message id's bus half to AGREE (`internal/signing/canonical.go:266-268`) — so a verifier
+   built to the old sentence is refused before any signature is compared. `client.Message.signingMessage`
+   (`client/canonical.go:215-218`) still feeds the LOCAL pair. Nothing verifies signatures on the
+   read path today (`INVARIANTS.md`, Enforcement status), so this breaks nothing now. Stated in
+   `CONTRACTS-HTTP.md` as a trap for whoever wires verification on, and REPORTED rather than fixed.
+3. **Out of scope, reported not touched:** `internal/hub/ack.go`'s comment "`agent-busctl watch`
+   prints the LOCAL message id and does not expose the origin id at all" is now stale in its second
+   clause. Tracked as `b5ffc730`.
+
+Verification (this worktree, not a clean overlay — no code behaviour changed, only help text):
+
+```
+go build ./...                                          -> OK
+go vet ./cmd/agent-busctl/                              -> OK
+"$(go env GOROOT)/bin/gofmt" -l cmd/agent-busctl/ack.go cmd/agent-busctl/ackstatus.go
+                                                        -> EMPTY OUTPUT (the check that matters)
+go run ./cmd/agent-busctl ack --help                    -> rendered and read end to end
+go run ./cmd/agent-busctl ack-status --help             -> rendered and read end to end
+```
+
+`gofmt -l .` also lists `.worktrees/fu-relay/...`, which is a separate gitignored worktree
+(`.gitignore:178`) and predates this change.

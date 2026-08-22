@@ -152,6 +152,28 @@ type watchRecord struct {
 	Text      string   `json:"text"`
 	Broadcast bool     `json:"broadcast"`
 	BusPath   []string `json:"bus_path"`
+
+	// CorrelationKey is the ACK-CONTRACT.md §3 key AS THE RECIPIENT READS IT —
+	// the ORIGIN bus's minted id, carried on the watch stream by
+	// ACK-12-FU-WATCH-CORRELATION-KEY.
+	//
+	// IT IS DECODED HERE SO THIS HARNESS STOPS CHEATING. Until that task landed
+	// the only way to name a relayed message's correlation key was to take it
+	// from `send`'s return value on bus A — the SENDER's — and hand it to the
+	// recipient's `ack` on bus C, in the test process, out of band. That is a
+	// channel no real agent has: it made the acceptance test pass while the
+	// recipient-facing capability was entirely missing. Every ack of a relayed
+	// message below is now driven by THIS field, and the sender's value is
+	// retained only as a cross-check that the two agree.
+	//
+	// The CLI's record spells it `json:"correlation_key"` with NO `omitempty`,
+	// deliberately: a consumer writing `jq -r .correlation_key` gets one
+	// instruction for a relayed and a same-bus message alike, and an empty
+	// string is loud rather than a silent fallback to the WRONG id. So the
+	// only way this decodes to "" is a bus that did not send the field at all
+	// — which is exactly the failure the subtests below name explicitly,
+	// instead of acking the empty string.
+	CorrelationKey string `json:"correlation_key"`
 }
 
 type ackDoc struct {
@@ -731,8 +753,17 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 	f := setup(t)
 
 	var (
-		relayedOriginID     string // the id bus A minted — what the SENDER holds
-		relayedRecipientID  string // the id bus C minted — what the RECIPIENT sees
+		relayedOriginID    string // the id bus A minted — what the SENDER holds
+		relayedRecipientID string // the id bus C minted — what the RECIPIENT sees
+
+		// relayedCorrelationKey is the key THE RECIPIENT READ OFF ITS OWN WATCH
+		// STREAM, and it is what every ack of the relayed message below is
+		// driven by. It must equal relayedOriginID — that equality is the
+		// property, asserted where it is captured — but the two are kept as
+		// separate variables on purpose: the sender's value now CROSS-CHECKS
+		// what the recipient read instead of standing in for it.
+		relayedCorrelationKey string
+
 		localDeliveredID    string // same-bus message, settled `delivered`
 		localRefusedID      string // same-bus message, settled `refused`
 		localDeliveredSeen  bool
@@ -784,8 +815,49 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 			t.Fatalf("origin and recipient-visible ids are both %q; each bus mints its own (invariant 1)",
 				relayedOriginID)
 		}
-		t.Logf("one logical message, two ids: origin on A = %s, recipient-visible on C = %s",
-			relayedOriginID, relayedRecipientID)
+
+		// -------------------------------------------------------------------
+		// THE CORRELATION KEY, TAKEN FROM THE RECIPIENT'S OWN STREAM
+		// (ACK-12-FU-WATCH-CORRELATION-KEY).
+		//
+		// READ THIS BEFORE "SIMPLIFYING" ANY ACK BELOW BACK TO relayedOriginID.
+		// Until this field existed, this harness passed only because it handed
+		// the recipient a key it could not possibly have: relayedOriginID comes
+		// from `send` ON BUS A — the SENDER's return value — and the test
+		// process carried it, in memory, to the recipient's `ack` on bus C. No
+		// real agent has that channel. The acceptance test was therefore green
+		// while the recipient-facing half of the capability was entirely
+		// missing, which is exactly the "missing half of a feature" invariant 7
+		// names. Every ack of this message from here on is driven by the value
+		// BELOW, and relayedOriginID stays only to cross-check it.
+		// -------------------------------------------------------------------
+		relayedCorrelationKey = rec.CorrelationKey
+		if relayedCorrelationKey == "" {
+			t.Fatalf("the recipient's watch record for the RELAYED message carries no correlation_key: %+v\n"+
+				"Without it a recipient has NO WAY, through any compiled subcommand, to name the id `ack` "+
+				"wants: message_id here is bus C's own (%s) and settles nothing. Do not paper over this by "+
+				"acking with the sender's id — that is the out-of-band pass this assertion exists to end.",
+				rec, relayedRecipientID)
+		}
+		if relayedCorrelationKey != relayedOriginID {
+			t.Fatalf("the recipient read correlation_key %q, but bus A minted %q for this message. The §3 key is "+
+				"the ORIGIN bus's server-minted id and NOTHING else; two spellings of one key defeat "+
+				"idempotency at the origin (invariant 10) and would be forwarded under a name no upstream bus "+
+				"can bind", relayedCorrelationKey, relayedOriginID)
+		}
+		if relayedCorrelationKey == rec.MessageID {
+			t.Fatalf("correlation_key and message_id are both %q on the recipient's stream. Every bus mints its "+
+				"own id (invariant 1), so for a RELAYED message they MUST differ — equal here means the stream "+
+				"is re-serving bus C's local id under the correlation key's name, which sends the recipient "+
+				"straight back to exit 8", relayedCorrelationKey)
+		}
+		// Its BUS HALF is bus A: the key names the message on the bus that
+		// minted it, which is the one name every hop agrees on.
+		assertMessageIDShape(t, "correlation key on the recipient's watch stream", relayedCorrelationKey, f.a.busID)
+
+		t.Logf("one logical message, two ids: origin on A = %s, recipient-visible on C = %s; "+
+			"the recipient read the correlation key %s off its own stream",
+			relayedOriginID, relayedRecipientID, relayedCorrelationKey)
 	})
 
 	// -----------------------------------------------------------------------
@@ -884,16 +956,31 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 		}
 
 		// PROBE 2 — THE ORIGIN ID, WHICH NOW SETTLES THE MESSAGE END TO END.
-		res, doc := f.ack(t, relayedOriginID, nil)
-		t.Logf("ack on C using the ORIGIN id bus A minted (%s): exit=%d doc=%+v", relayedOriginID, res.code, doc)
+		//
+		// THE KEY COMES FROM THE RECIPIENT'S WATCH STREAM, NOT FROM THE SENDER
+		// (ACK-12-FU-WATCH-CORRELATION-KEY). This probe used to pass
+		// relayedOriginID — the value `send` returned on bus A — which the test
+		// process carried to bus C out of band. That made the probe green while
+		// the recipient had no way to obtain the key at all, so it proved the
+		// ack plane and hid the missing CLI surface beside it. Driving it from
+		// the stream is what makes this an END-TO-END proof; send_relays_a_to_c
+		// has already asserted the two values agree, so nothing is weakened by
+		// the switch. Do not "simplify" it back.
+		if relayedCorrelationKey == "" {
+			t.Fatalf("no recipient-visible correlation key was captured; send_relays_a_to_c did not establish one")
+		}
+		res, doc := f.ack(t, relayedCorrelationKey, nil)
+		t.Logf("ack on C using the correlation key the RECIPIENT read (%s; bus A minted %s): exit=%d doc=%+v",
+			relayedCorrelationKey, relayedOriginID, res.code, doc)
 		if res.code != 0 {
-			t.Fatalf("ack on C using the ORIGIN id %s exited %d, want 0 — ACK-5 authorizes this as a TRANSIT "+
-				"acknowledgement and carries it back C -> B -> A synchronously.\n"+
+			t.Fatalf("ack on C using the correlation key the recipient read off its own watch stream (%s) exited "+
+				"%d, want 0 — ACK-5 authorizes this as a TRANSIT acknowledgement and carries it back "+
+				"C -> B -> A synchronously.\n"+
 				"exit 8 means the transit authorization refused it: either no relayed copy is retained under "+
 				"this key or the recipient is not named in it. exit 6 is a 503: some hop refused or could not be "+
 				"reached, and NOTHING was recorded anywhere — which is honest, but it is a broken federation "+
 				"path, not a passing test.\nstdout:\n%s\nstderr:\n%s",
-				relayedOriginID, res.code, res.stdout, res.stderr)
+				relayedCorrelationKey, res.code, res.stdout, res.stderr)
 		}
 		if !doc.OK || !doc.Accepted {
 			t.Fatalf("the transit ack was not accepted: %+v", doc)
@@ -949,6 +1036,17 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 		if rec.MessageID != localDeliveredID {
 			t.Fatalf("same-bus message: sender saw %q and recipient saw %q; one bus mints one id",
 				localDeliveredID, rec.MessageID)
+		}
+		// THE CONTRAST THAT MAKES THE RELAYED ASSERTION MEAN ANYTHING. Here the
+		// correlation key EQUALS the message id, because this bus is the origin
+		// and its own id already IS the origin id (store.Message.OriginID()
+		// falls back to ID). That equality is also why a bus could serve m.ID as
+		// the correlation key and pass every same-bus test ever written — so
+		// this is asserted BESIDE the relayed case, never instead of it.
+		if rec.CorrelationKey != rec.MessageID {
+			t.Fatalf("same-bus message: correlation_key %q != message_id %q. This bus minted the message, so "+
+				"the §3 key is its own id; a different value here names a message on a bus that never saw it",
+				rec.CorrelationKey, rec.MessageID)
 		}
 		if len(rec.BusPath) != 1 || rec.BusPath[0] != f.c.busID {
 			t.Fatalf("same-bus bus_path = %v, want exactly [%s]", rec.BusPath, f.c.busID)
@@ -1035,8 +1133,19 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 
 	t.Run("recipient_nack_is_authenticated_and_classed", func(t *testing.T) {
 		localRefusedID = f.send(t, f.local, f.recipient.id, payloadLocalRefuse, "ack-12-e2e-local-refused-v1")
-		f.waitForDelivery(t, payloadLocalRefuse, f.local.id)
+		rec := f.waitForDelivery(t, payloadLocalRefuse, f.local.id)
 		localRefusedSeen = true
+
+		// Same-bus again: the key the recipient reads IS the id it was
+		// delivered under, and it is the id every refusal below is spelled
+		// with. The relayed subtests are the ones where the two diverge.
+		if rec.CorrelationKey != rec.MessageID {
+			t.Fatalf("same-bus message: correlation_key %q != message_id %q; one bus, one mint, one key",
+				rec.CorrelationKey, rec.MessageID)
+		}
+		if rec.CorrelationKey != localRefusedID {
+			t.Fatalf("the recipient read correlation_key %q for a message bus C minted as %q", rec.CorrelationKey, localRefusedID)
+		}
 
 		// `--refuse` WITH AN EMPTY VALUE IS EXIT 2 AND MUST NOT ACK. An unset
 		// $CLASS must never be silently promoted to `delivered`: a terminal
@@ -1245,8 +1354,20 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 		}
 
 		// EXACTLY ONCE, ABSORBED AT THE ORIGIN (invariant 10, first case).
-		again, againDoc := f.ack(t, relayedOriginID, nil)
-		t.Logf("re-acking the relayed message on C with the ORIGIN id: exit=%d doc=%+v", again.code, againDoc)
+		//
+		// DRIVEN BY THE KEY THE RECIPIENT READ, like every other ack of this
+		// message (ACK-12-FU-WATCH-CORRELATION-KEY). This probe was the last one
+		// still passing relayedOriginID — `send`'s return value on bus A,
+		// carried to bus C inside the test process — which made the promise at
+		// the top of send_relays_a_to_c ("every ack of this message from here on
+		// is driven by the value BELOW") false for exactly one call. The retry
+		// must be spelled the way the FIRST ack was spelled or it is not testing
+		// a retry at all: invariant 10's first case is same key + same payload,
+		// and "same key" is only meaningful if both acks got the key the same
+		// way. relayedOriginID stays in the log line as the cross-check.
+		again, againDoc := f.ack(t, relayedCorrelationKey, nil)
+		t.Logf("re-acking the relayed message on C with the correlation key the RECIPIENT read (%s; bus A minted %s): exit=%d doc=%+v",
+			relayedCorrelationKey, relayedOriginID, again.code, againDoc)
 		if again.code != 0 {
 			t.Fatalf("re-acking the SAME outcome across the relay exited %d, want 0 — same key and same payload "+
 				"is a legitimate retry, returned as the original result and re-applied nowhere; punishing it "+
@@ -1307,15 +1428,40 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 		const class = "recipient_refused_undecodable"
 
 		originID := f.send(t, f.sender, f.recipient.id, payloadRelayRefuse, "ack-12-e2e-relayed-refused-v1")
-		f.waitForDelivery(t, payloadRelayRefuse, f.sender.id)
+		rec := f.waitForDelivery(t, payloadRelayRefuse, f.sender.id)
 		assertMessageIDShape(t, "origin id minted by bus A for the refused relayed message", originID, f.a.busID)
 
-		res, doc := f.ack(t, originID, str(class))
-		t.Logf("refusing the relayed message on C with the ORIGIN id %s: exit=%d doc=%+v", originID, res.code, doc)
+		// THE KEY IS READ OFF THE RECIPIENT'S STREAM, NOT TAKEN FROM THE SENDER
+		// (ACK-12-FU-WATCH-CORRELATION-KEY). This subtest used to DISCARD the
+		// watch record and refuse using `originID` — the value `send` returned
+		// on bus A, carried to bus C inside the test process. That is a channel
+		// no real agent has, and it hid the fact that a recipient could not name
+		// the key at all. A NACK must be refusable by the party that actually
+		// received the message, so the refusal below is driven by what the
+		// recipient read; originID stays as the CROSS-CHECK. Do not put it back.
+		key := rec.CorrelationKey
+		if key == "" {
+			t.Fatalf("the recipient's watch record for the relayed message to be REFUSED carries no "+
+				"correlation_key: %+v — a recipient that cannot name the key cannot refuse the message either, "+
+				"and an un-refusable message is indistinguishable from an accepted one", rec)
+		}
+		if key != originID {
+			t.Fatalf("the recipient read correlation_key %q, but bus A minted %q; the §3 key is the ORIGIN "+
+				"bus's id and has exactly one spelling (invariant 10)", key, originID)
+		}
+		if key == rec.MessageID {
+			t.Fatalf("correlation_key and message_id are both %q for a RELAYED message; each bus mints its own "+
+				"(invariant 1) and refusing with C's own id settles nothing", key)
+		}
+		assertMessageIDShape(t, "correlation key the recipient read for the refused relayed message", key, f.a.busID)
+
+		res, doc := f.ack(t, key, str(class))
+		t.Logf("refusing the relayed message on C with the correlation key the RECIPIENT read (%s; bus A minted %s): exit=%d doc=%+v",
+			key, originID, res.code, doc)
 		if res.code != 0 {
-			t.Fatalf("ack --refuse %s on C using the ORIGIN id exited %d, want 0 — a NACK crosses the relay by "+
-				"exactly the same route an ACK does\nstdout:\n%s\nstderr:\n%s",
-				class, res.code, res.stdout, res.stderr)
+			t.Fatalf("ack --refuse %s on C using the correlation key the recipient read (%s) exited %d, want 0 — "+
+				"a NACK crosses the relay by exactly the same route an ACK does\nstdout:\n%s\nstderr:\n%s",
+				class, key, res.code, res.stdout, res.stderr)
 		}
 		if doc.Outcome != "refused" || doc.State != "refused" {
 			t.Fatalf("transit refusal outcome/state = %q/%q, want refused/refused (%+v)", doc.Outcome, doc.State, doc)

@@ -186,15 +186,46 @@ added to it.
 | `GET` | `/v1/ack/<correlation-key>` | bearer | 400 | `wait` present but not a positive whole number of seconds, or over `hub.MaxPollTimeout` (300s) — refused, never clamped |
 | `GET` | `/v1/ack/<correlation-key>` | bearer | 429 | `wait` requested while this **principal** already has `maxParkedAckStatusPerAgent` (32) requests parked on this route. `Retry-After: 1`. Decided from the caller's own parked count and **nothing about the key**, so an unknown key and a live non-terminal one are refused identically. See the limits table below. |
 
-A `<message>` on the read path is (`timestamp_ms` and `signature` **added 2026-08-07, SIGN-6**):
+A `<message>` on the read path is (`timestamp_ms` and `signature` **added 2026-08-07, SIGN-6**;
+`correlation_key` **added 2026-08-22, `ACK-12-FU-WATCH-CORRELATION-KEY`**):
 
 ```json
-{"message_id":"<bus-id>-<seq>","seq":42,"from":"<bus>.<agent>","broadcast":false,
+{"message_id":"<bus-id>-<seq>","correlation_key":"<origin-bus-id>-<seq>","seq":42,
+ "from":"<bus>.<agent>","broadcast":false,
  "to":["<bus>.<agent>"],"bus_path":["<bus-id>"],"sent_at":"<RFC3339Nano UTC>","size":11,
  "content_sha256":"<hex sha256 of the decoded body>",
  "timestamp_ms":1754570000000,"signature":"<standard base64 of 64 bytes>",
  "body":"<standard base64>"}
 ```
+
+**`correlation_key` and `message_id` are two different facts and the read path carries both.**
+`message_id` is **this** bus's server-minted id for the copy it is serving. `correlation_key` is the
+**ORIGIN** bus's server-minted id — `ACK-CONTRACT.md` §3's correlation key — and it is the only id
+`POST /v1/ack` accepts, because that route binds a **(correlation key, recipient)** row. The two are
+**equal when this bus is the origin** and **differ when the message was relayed here**, which is
+precisely why the field exists: a recipient holding only `message_id` could name the right row for a
+local message and never for a relayed one.
+
+It is derived **server-side**, in `toWireMessage` (`internal/httpapi/messages.go`), from
+`store.Message.OriginID()` — never from `Message.OriginMessageID` directly, which is empty on a
+message this bus minted. `OriginID()` is the one place the "origin id when set, local id otherwise"
+rule is written down, and its own doc forbids re-spelling that branch at a call site: the wrong
+branch still returns a well-formed message id, just naming the wrong bus's message. Deriving it here
+is what keeps the branch out of `client/` and out of `cmd/agent-busctl`, neither of which can import
+`internal/store`. It is the origin's id **carried**, never re-minted or adopted as an identity
+(invariant 1), and it is bus-namespaced (invariant 2), so it is not derivable from `bus_path[0]`.
+
+**It is NEVER `omitempty`.** The server always knows the value — `OriginID()` falls back to `ID`,
+which is always set — so it always sends it, and `jq -r .correlation_key` can never yield `null`
+against a current bus. Omitting it on a same-bus message would push `.correlation_key //
+.message_id` into every consumer, which is that same origin/local branch re-spelled one layer out;
+and in `jq` the empty string is truthy while `null` is not, so that idiom would fall through to the
+wrong id silently rather than failing loudly.
+
+The name is its **purpose**, not an identity claim. It is the same field name the ack plane already
+uses — the `correlation_key` of the `POST /v1/ack` request body and of `internal/relay`'s peer ack
+frame — and `OriginID()`'s doc is explicit that the value is "a CORRELATION key, not an identity"
+that "must never be served as 'the message id'".
 
 **`sent_at` and `timestamp_ms` are two different facts and MUST NOT be conflated.** `timestamp_ms`
 is an `int64` of Unix milliseconds UTC, it is the **SENDER's** clock, and it **IS covered by the
@@ -203,6 +234,23 @@ verifying against `sent_at` fails every time, and the reason is not obvious from
 which is exactly why it is stated here. A recipient reconstructs the signed bytes from
 `message_id`, `seq`, `from`, `to`, `timestamp_ms` and `body`; `bus_path` is deliberately NOT covered
 (settled in SIGN-1, `PROTOCOL.md` §8.3).
+
+**On a RELAYED message the first two of those are the ORIGIN's — i.e. `correlation_key` and the
+sequence half parsed out of it, not the `message_id`/`seq` beside them** (noted 2026-08-22 while
+adding `correlation_key`; the sentence above is stated for the bus that minted the message and was
+never narrowed). The signature was made by the sender on the origin bus before any hop existed, so
+the preimage can only carry the origin's pair: `RelayedMessage.CanonicalBytes`
+(`internal/relay/signed.go`) passes `MessageID: m.OriginMessageID, Sequence: m.OriginSeq`. On the
+origin bus the two ids are the same string and the distinction is invisible, which is how a verifier
+passes every same-bus test and then fails on the first relayed message — and it fails EARLIER than a
+mismatched signature: `signing.Canonicalize` requires the sender's bus half and the message id's bus
+half to agree (`internal/signing/canonical.go`), and on a relayed message `from` names the origin bus
+while the local `message_id` names this one, so canonicalization is refused before any signature is
+compared. `sent_at` and `bus_path` are unaffected and remain uncovered. **Nothing verifies signatures
+on the read path today** (see the enforcement note in `INVARIANTS.md`), so this is a trap for whoever
+wires verification on, not a live break — and `client.Message.signingMessage`
+(`client/canonical.go:215-218`) currently feeds the LOCAL pair, which must be settled before that
+happens. **Reported, not fixed, by this task.**
 
 `HealthResponse` / `InfoResponse` / `ErrorResponse` types live in `internal/httpapi/server.go`. `EnrolRequestBody` / `EnrolResponseBody` / `SessionBeginRequestBody` / `SessionBeginResponseBody` / `SessionCompleteRequestBody` / `SessionCompleteResponseBody` live in `internal/httpapi/auth.go`. `AgentsResponseBody` / `MintRequestBody` / `MintResponseBody` / `BroadcastRequestBody` / `SendRequestBody` / `SendResponseBody` / `WireMessage` / `BatchResponseBody` live in `internal/httpapi/messages.go`. (`BroadcastRequestBody` is still declared but is **never decoded** — the route refuses before reading the body.)
 
@@ -1706,10 +1754,16 @@ the defect `ACK-5` exists to fix, because it left plane C unreachable beyond one
   told `AckStopAtOrigin` because the key's bus half is ours, and answer a **retriable 503 that no
   client could ever clear**. The answer is the uniform `unknown` instead. **It is reached by doing the
   obvious thing:** `agent-busctl watch` prints the LOCAL `message_id` (`toWireMessage` sets
-  `MessageID: m.ID`, `internal/httpapi/messages.go:844`) and no route exposes the origin id, so the id
-  a recipient holds is precisely the one refused here. That gap is tracked separately (`f423959c`,
-  `ACK-12-FU-WATCH-CORRELATION-KEY`); this route's job is to answer it correctly, not to make it look
-  like it worked.
+  `MessageID: m.ID`), so the id a recipient reaches for first is precisely the one refused here.
+  **CORRECTED 2026-08-22 (`ACK-12-FU-WATCH-CORRELATION-KEY`):** this bullet used to continue *"and no
+  route exposes the origin id, so the id a recipient holds is precisely the one refused here. That
+  gap is tracked separately (`f423959c`, `ACK-12-FU-WATCH-CORRELATION-KEY`)"*, and **the read path
+  now DOES expose the origin id** — the same `toWireMessage` sets `correlation_key` from
+  `store.Message.OriginID()`, and `agent-busctl watch` carries it. The check described here is
+  unchanged and still load-bearing (a client that keeps reaching for `message_id` still lands on it),
+  but the origin id is no longer unobtainable. It also cited
+  `internal/httpapi/messages.go:844` for the `MessageID: m.ID` line; the line number moved with this
+  change and the citation is now to the function.
 - **A locally-originated message is refused outright** even though the store holds it. This bus IS its
   origin, so forwarding would send a terminal outcome to a bus that never owed it one — an expired
   row would become an unsolicited network contact. **The bus-half check above is what actually

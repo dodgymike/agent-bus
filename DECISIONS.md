@@ -7370,3 +7370,105 @@ grepped and range-read, never injected, and its value is that a dated decision c
 ruled on by the user (2026-08-08, "freeze + one-line entries", recorded on task `116179c8`, with
 `f39083ae` adding the mechanical guard) — both still `todo`. This task points at that ruling and does
 not re-open it.
+
+## 2026-08-22 — `ACK-12-FU-WATCH-CORRELATION-KEY` (`f423959c`): the correlation key is DERIVED SERVER-SIDE and always present on the read path
+
+The ACK correlation key was unreachable from the CLI. `agent-busctl watch` emitted only
+`message_id` — the id the LOCAL bus minted — and `agent-busctl ack` accepts only the ORIGIN bus's
+id, so for a relayed message the one id a recipient held was precisely the one the ack route
+refuses. The documented workaround was out of band: the sender captured its own `message_id` and
+told the recipient. This change puts the key on the read path. Three decisions, and the rejected
+alternative, recorded because each is the reason and not the mechanism.
+
+**1. It is derived on the SERVER, not in the client.** `internal/httpapi.WireMessage` gained
+`CorrelationKey`, set in `toWireMessage` from `store.Message.OriginID()`. The alternative was to
+emit the raw `origin_message_id` (empty on a same-bus message) and let each consumer branch on it.
+**Rejected.** `OriginID()` is the ONE place the "origin id when set, local id otherwise" rule is
+written down, and its own doc forbids re-spelling that branch at a call site; `client/` cannot
+import `internal/store`, so a wire carrying only the raw origin id would force a SECOND copy of the
+rule into `client/` and a third into `cmd/agent-busctl`. The drift would be silent — the wrong
+branch still returns a well-formed message id, it just names the wrong bus's message, so an
+acknowledgement would resolve to nothing rather than fail visibly. Deriving once, server-side,
+keeps the branch where it already lives.
+
+**2. It is NEVER `omitempty`, on the wire or in the CLI record.** Omitting it on a same-bus message
+(where it equals `message_id`) looks like a saving and is a trap: every consumer would then write
+`.correlation_key // .message_id`, which is the same origin/local branch re-spelled in shell, in
+every agent. Worse, `jq`'s `//` operator treats the EMPTY STRING as truthy and `null` as falsy, so
+that idiom would fall through to the *wrong* id silently on exactly the case it was written for.
+Always-present makes `jq -r .correlation_key` one instruction with no fallback and no branch.
+`OriginID()` never returns empty — it falls back to `ID`, which is always set — so the field can
+never be `null` against a current bus.
+
+**3. It is named for its PURPOSE, not as an id.** `correlation_key` is the vocabulary the ack plane
+already uses: the `correlation_key` field of the `POST /v1/ack` request body,
+`client.AckOptions.CorrelationKey`, and `internal/relay`'s peer ack frame. `OriginID()`'s doc states
+that the value is "a CORRELATION key, not an identity" that "must never be served as 'the message
+id'" — invariant 1, this bus never adopts a peer's id. Calling the field `origin_message_id` on the
+read path would have invited exactly that reading.
+
+Nothing on disk changed: no record type, no record-type number, no wire protocol version. The value
+is derived at render time from state already durable.
+
+The human `watch` render gained one line, `  ack key: <key>`, printed **only when the key differs
+from `message_id`** — i.e. only for a relayed message. On a same-bus message the two are the same
+string and the line would be noise on every message.
+
+**Docs corrected rather than supplemented, because a stale warning reads as freshly checked.** Four
+places told agents to use `.message_id` or to pass the id out of band, and all four are retracted in
+place with the old text quoted: `AGENT_PROTOCOL.md` (the `ack` id rule, the cross-bus "no way to get
+the origin id out of `watch`" paragraph, the `ack-status` notice, and the end-to-end worked
+example), `cmd/agent-busctl/ack.go` and `cmd/agent-busctl/ackstatus.go` `--help`, and
+`CONTRACTS-HTTP.md`'s transit-ack bullet. The TRAP itself is unchanged and is kept everywhere: the
+ack route still refuses a correlation key whose bus half is this bus, so passing `message_id` for a
+relayed message still exits `8` `unknown` with nothing recorded. Only the workaround changed.
+
+**Two findings recorded while checking, both verified rather than assumed.** (i) `7d564118` was
+described as "closed" in `ackstatus.go` and in `AGENT_PROTOCOL.md`; its Spec Server record read
+`todo` on 2026-08-22. The BEHAVIOUR landed with `ACK-5`; the record did not. Corrected in place.
+(ii) `CONTRACTS-HTTP.md` said a recipient reconstructs the signed bytes from `message_id` and `seq`;
+on a RELAYED message the preimage carries the ORIGIN's pair instead —
+`relay.RelayedMessage.CanonicalBytes` passes `MessageID: m.OriginMessageID, Sequence: m.OriginSeq`
+(`internal/relay/signed.go:262-263`), and `client.Message.signingMessage`
+(`client/canonical.go:215-218`) still feeds the local pair. Nothing verifies signatures on the read
+path today, so this breaks nothing now; it is stated in `CONTRACTS-HTTP.md` as a trap for whoever
+wires verification on, and is REPORTED rather than fixed by this task.
+
+### Information disclosure: the origin SEQ becomes visible to the recipient — assessed and accepted (added by the security gate, 2026-08-22)
+
+Recorded here so a later audit does not have to re-derive it. `correlation_key` is
+`<origin-bus-id>-<seq>`, so for a RELAYED message the recipient now learns the ORIGIN bus's
+sequence number. That number is a **strictly dense monotone counter** (`internal/ids/sequence.go`,
+`s.floor++`, one allocation per `Next()`, never rewound, durable across restart), so a recipient
+holding two relayed messages from the same origin with seqs `s1 < s2` can infer that exactly
+`s2-s1-1` other allocations happened on that bus in between — the aggregate send-reservation plus
+relay-ingest volume of every agent there. The inference is real and exact. It reveals no sender, no
+recipient, no body and no agent name.
+
+It is accepted, for four reasons in descending strength:
+
+1. **The identical leak already exists for the local bus.** `WireMessage.Seq` has always carried the
+   same dense counter to every recipient of every message. This extends an already-accepted side
+   channel from the local bus to the origin bus; it does not introduce a new class.
+2. **It was already sanctioned and already instructed.** `AGENT_PROTOCOL.md` at `493450f` told the
+   sender to hand the recipient this exact string out of band. The change moves the channel
+   in-band; it does not create the disclosure.
+3. **The ACK-5 design requires it.** A recipient cannot acknowledge a relayed message without this
+   string, because `POST /v1/ack` refuses a correlation key whose bus half is the local bus.
+4. **Nobody new sees it.** `toWireMessage` is reached only from `writeBatch`, only from
+   `handleMessages`/`handleWait`. Neither route is on `httpapi.UnauthenticatedRoutes()` (the
+   middleware is default-deny), and selection is gated by `store.Message.VisibleTo`.
+
+**A relayed BROADCAST cannot exist, so no origin id is fanned out to every local agent.** Verified
+rather than assumed: `internal/relay/accept.go` refuses a broadcast at ingest and
+`internal/hub/relayingest.go` hardcodes `broadcast: false`, so `OriginMessageID` is never set on a
+broadcast record and a broadcast's `correlation_key` always equals its `message_id`.
+
+**One LOW finding was accepted as a follow-up rather than fixed here.** The human render writes
+`  ack key: <key>` with the same two-space indent that multi-line body continuations get, so a
+sender can put `ack key: <id>` on its own line in a multi-line body and produce byte-identical
+output — and on a same-bus message, where the genuine line is deliberately suppressed, the forged
+line is the only one present. Impact is bounded: `POST /v1/ack` answers the uniform `unknown` for any
+key the caller was not a recipient of. The `--json` path carries `correlation_key` as a real field,
+which is the agent-facing surface invariant 7 governs, so the human feed is not the path an agent
+should parse. Rendering the key at column 0 would make it unforgeable; that is the follow-up.
