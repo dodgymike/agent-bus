@@ -5667,3 +5667,34 @@ place. (4) F6 — `CLAUDE.md:334` and `PITFALLS.md` §4 still say "reviewer AND 
 COMPLETED". That errs STRICT, never loose; the bullet's lead phrase — "A green tree is not a GATED
 tree." — is one of the five rows in `docs/doc-preserve.tsv`, so the bullet cannot simply be deleted,
 and `PITFALLS.md` §4.5 now records that the stricter reading is always safe to follow.
+
+## 2026-08-22 — PROCESS: review panel ran the full test suite N times (`9ef57953`, commit `e956cfe`)
+
+User reported that on one task, security + architecture-reviewer + reliability-reviewer EACH ran the
+full `go test -race ./...` suite — N-1 wasted full runs. No agent was TOLD to run the whole suite;
+each "prefers proof" and nothing said a suite result already existed, so each re-ran it.
+
+Fix (7 `.claude/**` files, additions only, 58 insertions / 0 deletions): `feature-runner.md` and
+`ORCHESTRATION.md` now say run the `-race` suite ONCE per task/panel and paste the result — command,
+sha, pass/fail — into every reviewer's brief; the five panel agents (security, reliability-,
+architecture-, performance-reviewer, reviewer) each got a "do NOT re-run `./...`; run only your
+dimension's narrow checks" bullet, with a safe escape hatch (run the SPECIFIC test if the shared
+result is absent / HEAD moved / distrusted — never `./...`) and a `working-tree @ <sha>` advisory
+(a shared result cited that way can go stale via uncommitted edits without the sha changing, so treat
+it as advisory and check the LIVE files). feature-runner is correctly the only file WITHOUT the
+consumer clause — it is the producer.
+
+CONTROL-PLANE change (all `.claude/**`), so it did NOT qualify for the docs-and-tests security
+carve-out and required reviewer + security. Gate cycle: reviewer PASS + security PASS — each raised a
+DIFFERENT low observation (security: a `working-tree @ <sha>` shared result can go stale via
+uncommitted edits without the sha changing; reviewer: the guarantee a full run exists rests entirely
+on feature-runner, with no reviewer fallback if it silently skips) → folded in the advisory clause
+that closes security's finding → reviewer DELTA PASS + security DELTA PASS. All four verdicts transcribed onto the Spec task
+journal (the task was filed mid-review, so the gate agents returned verdicts as reports rather than
+posting live). Proof: two `doc-check.sh section` assertions, RED at HEAD `7de9bd1`, PASS in a clean
+overlay with the change.
+
+Reviewer skip: NONE — reviewer ran. Security skip: NONE — security ran (control-plane required it).
+This entry itself closes the step-10 `AGENT_LOG.md` hygiene gap the integrator flagged: the commit
+landed without a log line because `AGENT_LOG.md` was not in the pathspec, and the reasoning otherwise
+lived only in the Spec journal — which is not visible in-repo while the mirror is stale.
