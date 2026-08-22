@@ -192,10 +192,10 @@ type RosterEntry struct {
 // (AUTH-7); see the "What is durable, what is not, and what is actually WIRED"
 // section of doc.go, which is kept honest about the SHIPPED BINARY.
 type Roster interface {
-	// Put records a new enrolment, and MUST refuse it on either of TWO
-	// uniqueness rules. They guard the same identity from opposite directions,
-	// and an implementation that enforces only the first is silently weaker than
-	// this interface promises.
+	// Put records a new enrolment, and MUST refuse it on any of THREE uniqueness
+	// rules. They guard the same identity from different directions, and an
+	// implementation that enforces only some is silently weaker than this
+	// interface promises.
 	//
 	//  1. A duplicate AgentID -> ErrDuplicateAgentID, rather than overwriting.
 	//     An overwrite would rebind a live identity to a different keypair,
@@ -208,15 +208,21 @@ type Roster interface {
 	//     (invariant 11). Use checkCertFingerprintUnbound, and run it in the
 	//     SAME critical section as the insert — a check-then-write split across
 	//     two lock acquisitions admits exactly the duplicate it refuses.
+	//  3. An AuthPublicKey already held by a DIFFERENT agent ->
+	//     ErrAuthKeyBound (AUTH-DUP-ENROL-KEY). This rule keeps one KEYPAIR from
+	//     naming two agents; without it one private-key holder authenticates as
+	//     two identities (invariant 1 — the server is authoritative on ids, and a
+	//     client must not force a second id for one key). Use checkAuthKeyUnbound,
+	//     in the SAME critical section as the insert, for the same reason rule 2 is.
 	//
 	// Rule 1 is decided FIRST, so re-putting an existing agent reports the taken
-	// id rather than a certificate colliding with itself.
+	// id rather than a key or certificate colliding with itself.
 	//
-	// Note for TEST DOUBLES: rule 2 is the one an in-package double is likely to
-	// omit, and omitting it is legitimate ONLY when the double exists to build a
-	// state the real rosters refuse (both doubles in this package do). A double
-	// that skips it by accident makes the enrolment path look correct while the
-	// rule is not being exercised at all.
+	// Note for TEST DOUBLES: rules 2 and 3 are the ones an in-package double is
+	// likely to omit, and omitting them is legitimate ONLY when the double exists
+	// to build a state the real rosters refuse (the doubles in this package do).
+	// A double that skips them by accident makes the enrolment path look correct
+	// while the rules are not being exercised at all.
 	Put(RosterEntry) error
 
 	// Get returns the entry for agentID and whether it was found.
@@ -236,6 +242,15 @@ type Roster interface {
 	// arrived — internal/buscert.FingerprintOf, never a second implementation
 	// and never a re-marshalled certificate.
 	AgentIDForCertFingerprint(fp [32]byte) (string, error)
+
+	// AgentIDForAuthKey resolves an AUTH public key to the ONE agent id that
+	// holds it (AUTH-DUP-ENROL-KEY). It is the read half of Put's rule 3, used by
+	// Service.Enrol before the mint so the common refusal costs no burned suffix.
+	//
+	// It MUST fail closed and MUST NOT guess: ErrAuthKeyUnknown when no agent
+	// holds it, ErrAuthKeyAmbiguous when more than one does (reachable only off a
+	// damaged log — the write path refuses to create it). See authKeyOwner.
+	AgentIDForAuthKey(key ed25519.PublicKey) (string, error)
 
 	// Len reports how many agents are enrolled. It backs admission control on
 	// the unauthenticated enrolment route.
@@ -319,6 +334,12 @@ func (r *MemoryRoster) Put(e RosterEntry) error {
 	if err := checkCertFingerprintUnbound(r.byID, e); err != nil {
 		return err
 	}
+	// The auth-key axis (rule 3), in the SAME critical section for the same
+	// reason — see checkAuthKeyUnbound. This is the authoritative refusal; the
+	// pre-mint read in Service.Enrol is only an advisory optimisation.
+	if err := checkAuthKeyUnbound(r.byID, e); err != nil {
+		return err
+	}
 	r.byID[e.AgentID] = copyRosterEntry(e)
 	return nil
 }
@@ -329,6 +350,14 @@ func (r *MemoryRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return certFingerprintOwner(r.byID, fp)
+}
+
+// AgentIDForAuthKey implements Roster. See authKeyOwner for the three answers
+// and why two of them are refusals.
+func (r *MemoryRoster) AgentIDForAuthKey(key ed25519.PublicKey) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return authKeyOwner(r.byID, key)
 }
 
 // Get implements Roster. The returned entry is a DEEP COPY, for the mirror of

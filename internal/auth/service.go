@@ -779,6 +779,41 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 		}
 	}
 
+	// THE AUTH-KEY UNIQUENESS CHECK, ALSO **BEFORE** THE MINT (AUTH-DUP-ENROL-KEY),
+	// and the placement is the point, exactly as it is for the certificate check
+	// above. Enrol used to validate only the key's LENGTH, so the SAME public key
+	// enrolled twice minted two agent ids bound to one keypair — one private-key
+	// holder able to authenticate as two agents (invariant 1: a client must not
+	// force a second id for one key; and the accountability the whole roster
+	// rests on). DECISIONS.md (2026-08-22) settled this by REJECTING the second
+	// enrolment rather than minting a second id or idempotently returning the
+	// first — see that entry for why reject over idempotent-return.
+	//
+	// IT IS A READ, AND IT IS NOT A SUBSTITUTE FOR Put'S CHECK. Roster.Put decides
+	// authoritatively under its own lock, in the same critical section as the
+	// insert (rule 3). This one is advisory: it holds enrolMu but not the roster's
+	// lock. What it adds is that the refusal costs nothing durable — Put runs
+	// AFTER the mint, so relying on it alone would BURN AN AGENT ID SUFFIX on every
+	// refused duplicate, and because a refused enrolment aborts and RELEASES the
+	// invite reservation (the resolve guard at the top of this method), a single
+	// invite could otherwise drive an unbounded suffix-burn loop with one keypair
+	// and fresh names — the exact hazard the certificate check records for itself.
+	//
+	// IT FAILS CLOSED ON EVERY ANSWER THAT IS NOT "NOBODY HOLDS IT". req.PublicKey
+	// is already length-validated above, so ErrAuthKeyUnknown here means the key is
+	// genuinely new (proceed); an ambiguous binding (reachable only off a damaged
+	// log — see authKeyOwner) means the key resolves to nobody, which is a reason
+	// to refuse, not a licence to bind it again.
+	holder, err := s.roster.AgentIDForAuthKey(req.PublicKey)
+	switch {
+	case err == nil:
+		return EnrolResult{}, fmt.Errorf("%w: agent %q already holds this enrolment public key", ErrAuthKeyBound, holder)
+	case errors.Is(err, ErrAuthKeyUnknown):
+		// Nobody holds it: the ordinary case, and the only one that proceeds.
+	default:
+		return EnrolResult{}, err
+	}
+
 	agentID, err := s.minter.Mint(req.Name)
 	if err != nil {
 		return EnrolResult{}, fmt.Errorf("auth: enrolling %q: %w", req.Name, err)

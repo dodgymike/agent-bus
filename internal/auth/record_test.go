@@ -20,6 +20,7 @@ package auth_test
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -55,6 +56,18 @@ func fixedKey(b byte) ed25519.PublicKey {
 	return ed25519.PublicKey(k)
 }
 
+// distinctAuthKey returns a deterministic ed25519.PublicKeySize key that is
+// UNIQUE per agent id. baseEntry uses it so that two distinct agents never share
+// an auth key by fixture accident — which the AUTH-DUP-ENROL-KEY uniqueness rule
+// (Roster.Put rule 3) now refuses, exactly as real agents never share a keypair.
+// Deterministic (a hash of the id, not random) so byte-exact record assertions
+// stay repeatable; nothing here verifies a signature, so a key that is not on the
+// curve is fine — Decode's job is to check the LENGTH.
+func distinctAuthKey(agentID string) ed25519.PublicKey {
+	sum := sha256.Sum256([]byte("auth-key:" + agentID))
+	return ed25519.PublicKey(sum[:])
+}
+
 // fixedFingerprint returns a deterministic 32-byte certificate fingerprint.
 func fixedFingerprint(b byte) [32]byte {
 	var fp [32]byte
@@ -81,10 +94,13 @@ func mustAgentID(t *testing.T, name string, n uint64) string {
 // reserved field is left at its zero value, which is the reserved state.
 func baseEntry(t *testing.T, name string, n uint64) auth.RosterEntry {
 	t.Helper()
+	id := mustAgentID(t, name, n)
 	return auth.RosterEntry{
-		AgentID:       mustAgentID(t, name, n),
-		Name:          name,
-		AuthPublicKey: fixedKey(0x11),
+		AgentID: id,
+		Name:    name,
+		// Distinct per id (AUTH-DUP-ENROL-KEY): two agents built by this helper
+		// must not collide on the auth-key uniqueness rule.
+		AuthPublicKey: distinctAuthKey(id),
 		Epoch:         recordEpoch,
 		EnrolledAt:    recordEpoch,
 	}
@@ -289,7 +305,7 @@ func TestRecordMinimalIsByteIdenticalToAPreInviteRecord(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 	want := `{"v":1,"agent_id":"` + testBusID + `.worker-1","name":"worker","auth_pub":"` +
-		base64.StdEncoding.EncodeToString(fixedKey(0x11)) + `","epoch":"` + recordEpochText +
+		base64.StdEncoding.EncodeToString(distinctAuthKey(testBusID+".worker-1")) + `","epoch":"` + recordEpochText +
 		`","enrolled_at":"` + recordEpochText + `"}`
 	if string(raw) != want {
 		t.Fatalf("the on-disk record changed shape. THESE FIELD NAMES AND THIS ORDER ARE FOREVER.\n  got  %s\n  want %s", raw, want)

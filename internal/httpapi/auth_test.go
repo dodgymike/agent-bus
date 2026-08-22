@@ -220,6 +220,40 @@ func TestEnrollRoute(t *testing.T) {
 		}
 	})
 
+	// AUTH-DUP-ENROL-KEY: a SECOND enrolment presenting an already-enrolled AUTH
+	// public key under a DIFFERENT name AND a DIFFERENT idempotency key (so it is
+	// NOT the idempotency-reuse 409 above, but the auth-key uniqueness 409) is
+	// refused with 409, the connection is KEPT, and the body names no agent and
+	// does not echo the key.
+	t.Run("a duplicate enrolment public key is 409 and keeps the connection", func(t *testing.T) {
+		srv, _ := newAuthServer(t)
+		_, _, pubB64 := newAuthKeypair(t)
+
+		if rec := postJSON(t, srv, httpapi.RouteEnroll, `{"name":"alpha","public_key":"`+pubB64+`","idempotency_key":"idem-1"}`); rec.Code != http.StatusCreated {
+			t.Fatalf("first status = %d, want 201; body %s", rec.Code, rec.Body.String())
+		}
+
+		rec := postJSON(t, srv, httpapi.RouteEnroll, `{"name":"beta","public_key":"`+pubB64+`","idempotency_key":"idem-2"}`)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 for a duplicate enrolment public key; body %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Result().Header.Get("Connection"); strings.EqualFold(got, "close") {
+			t.Errorf("Connection = %q, want it absent: a duplicate key is rejected and logged, but this route is unauthenticated so the connection is kept (invariant 10)", got)
+		}
+		body := decodeBody(t, rec)
+		wantKeys(t, body, "error")
+		if msg, _ := body["error"].(string); !strings.Contains(msg, "already bound") {
+			t.Errorf("error = %q, want it to say the enrolment public key is already bound", msg)
+		}
+		// Names no agent id, and does not echo the key.
+		if strings.Contains(rec.Body.String(), pubB64) {
+			t.Error("the error body echoed the presented public key")
+		}
+		if strings.Contains(rec.Body.String(), ".alpha-1") {
+			t.Error("the error body named the agent that already holds the key; enrolment must not be an oracle")
+		}
+	})
+
 	t.Run("a rejected enrolment never echoes the key material back", func(t *testing.T) {
 		srv, _ := newAuthServer(t)
 		_, _, pubB64 := newAuthKeypair(t)

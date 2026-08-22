@@ -213,6 +213,31 @@ func (r *stubRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
 	}
 }
 
+// AgentIDForAuthKey implements auth.Roster: the same fail-closed rule the
+// shipped rosters have (see authKeyOwner). Written out rather than stubbed so a
+// test that enrols the same auth key twice gets the REAL answer instead of a
+// lie. This double does NOT enforce uniqueness in Put — see the type doc — which
+// is what lets a test build the ambiguous state and watch this method refuse it.
+func (r *stubRoster) AgentIDForAuthKey(key ed25519.PublicKey) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var holders []string
+	for agentID, e := range r.byID {
+		if e.AuthPublicKey.Equal(key) {
+			holders = append(holders, agentID)
+		}
+	}
+	sort.Strings(holders)
+	switch len(holders) {
+	case 1:
+		return holders[0], nil
+	case 0:
+		return "", auth.ErrAuthKeyUnknown
+	default:
+		return "", auth.ErrAuthKeyAmbiguous
+	}
+}
+
 // Get implements auth.Roster.
 func (r *stubRoster) Get(agentID string) (auth.RosterEntry, bool) {
 	r.mu.Lock()

@@ -26,6 +26,7 @@ package auth_test
 // invitegate_crash_test.go, over a SIGKILLed process.
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,6 +129,28 @@ func (r *igCompositeRoster) AgentIDForCertFingerprint(fp [32]byte) (string, erro
 		return "", auth.ErrCertBindingUnknown
 	default:
 		return "", auth.ErrCertBindingAmbiguous
+	}
+}
+
+// AgentIDForAuthKey implements auth.Roster: the same fail-closed rule the
+// shipped rosters have (see authKeyOwner). Written out rather than stubbed so an
+// enrolment test that reuses an auth key gets the real answer.
+func (r *igCompositeRoster) AgentIDForAuthKey(key ed25519.PublicKey) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var holders []string
+	for agentID, e := range r.byID {
+		if e.AuthPublicKey.Equal(key) {
+			holders = append(holders, agentID)
+		}
+	}
+	switch len(holders) {
+	case 1:
+		return holders[0], nil
+	case 0:
+		return "", auth.ErrAuthKeyUnknown
+	default:
+		return "", auth.ErrAuthKeyAmbiguous
 	}
 }
 
@@ -525,12 +548,19 @@ redeemed.`, err, other.id)
 
 	// And the mirror: a key first used WITHOUT an invite, then re-presented WITH
 	// one. The un-invited enrolment remembers the empty string, so this is
-	// caught by the same comparison.
-	if _, err := svc.Enrol(auth.EnrolRequest{Name: "worker", PublicKey: fixedKey(0x51), MessagingPublicKey: fixedKey(0x52), IdempotencyKey: "k-was-uninvited"}); err != nil {
+	// caught by the same comparison. It uses a DISTINCT auth key (0x71) from the
+	// first enrolment above, so it is a fresh identity and not refused by the
+	// auth-key uniqueness rule (AUTH-DUP-ENROL-KEY) before the idempotency check
+	// this case is about can be exercised.
+	if _, err := svc.Enrol(auth.EnrolRequest{Name: "worker", PublicKey: fixedKey(0x71), MessagingPublicKey: fixedKey(0x72), IdempotencyKey: "k-was-uninvited"}); err != nil {
 		t.Fatalf("the un-invited enrolment: %v", err)
 	}
 	late := newIGFakeInvite("inv-0000000000000009")
-	if _, err := svc.Enrol(igEnrolReq("worker", "k-was-uninvited", late)); !errors.Is(err, auth.ErrIdempotencyKeyReused) {
+	// The SAME 0x71 key as the un-invited enrolment above, so ONLY the invite
+	// differs from the remembered payload — which is the difference this case is
+	// about (the invite id is part of the remembered payload).
+	relate := auth.EnrolRequest{Name: "worker", PublicKey: fixedKey(0x71), MessagingPublicKey: fixedKey(0x72), IdempotencyKey: "k-was-uninvited", Invite: late}
+	if _, err := svc.Enrol(relate); !errors.Is(err, auth.ErrIdempotencyKeyReused) {
 		t.Fatalf("re-presenting an un-invited key WITH an invite = %v, want ErrIdempotencyKeyReused", err)
 	}
 	if late.aborts != 1 {

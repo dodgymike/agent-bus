@@ -167,6 +167,28 @@ func (r *opCompositeRoster) AgentIDForCertFingerprint(fp [32]byte) (string, erro
 	}
 }
 
+// AgentIDForAuthKey implements auth.Roster: the same fail-closed rule the
+// shipped rosters have (see authKeyOwner). Written out so the agent-plane
+// enrolment in this file gets the real answer instead of a lie.
+func (r *opCompositeRoster) AgentIDForAuthKey(key ed25519.PublicKey) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var holders []string
+	for id, e := range r.byID {
+		if e.AuthPublicKey.Equal(key) {
+			holders = append(holders, id)
+		}
+	}
+	switch len(holders) {
+	case 1:
+		return holders[0], nil
+	case 0:
+		return "", auth.ErrAuthKeyUnknown
+	default:
+		return "", auth.ErrAuthKeyAmbiguous
+	}
+}
+
 // opFakeInvite is the minimal auth.InviteRedemption the invite-gated enrolment
 // path needs. internal/invite's own suite proves what a real participant does;
 // what matters here is only that the enrolment is genuinely gated.

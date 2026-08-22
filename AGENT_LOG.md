@@ -5744,3 +5744,30 @@ docs-and-tests carve-out would have PERMITTED skipping security (one test file; 
 no `*guard*` name, no AST guard, removal disables no invariant check; not control-plane); security
 was RUN anyway because the change drives the Ed25519 sign/verify + session-token path
 (auth-recovery, security-adjacent).
+
+## 2026-08-22 — AUTH-DUP-ENROL-KEY (`ac4f9c2b`): enrol rejects a duplicate enrolment public key
+
+Closed the hole where `Service.Enrol` accepted the same AUTH public key twice, minting two agent ids
+bound to one keypair (impersonation/accountability hole). The fix mirrors the certificate-fingerprint
+uniqueness rule: a new authoritative refusal in `Roster.Put` (rule 3, `ErrAuthKeyBound`, in the same
+critical section as the insert) and an advisory pre-mint read (`Roster.AgentIDForAuthKey` /
+`authKeyOwner`) in `Enrol` so the refusal burns no agent-id suffix. HTTP maps it to 409, connection
+KEPT (invariant 10 — not a signed-message replay). DECISION recorded in `DECISIONS.md`: REJECT rather
+than idempotently return the existing id, with the reasoning (idempotency key ≠ public key; a public
+value must not resume identity; consistency with `ErrCertFingerprintBound`).
+
+Invariants read IN FULL for this plane: **1** (server authoritative on ids — a client cannot force a
+second id for one key), **2** (fully-qualified ids, unchanged), **3** (roster is the authoritative
+set; enrolment invite-gated bounds the oracle), **10** (idempotency/no-disconnect — central; genuine
+retry still replays, refusal keeps the connection).
+
+Files: `internal/auth/{errors.go,authkey.go,roster.go,walroster.go,service.go}`,
+`internal/httpapi/auth.go`; three in-package Roster test doubles gained the new
+`AgentIDForAuthKey` method; new test `internal/auth/authkey_test.go`. Docs: `CONTRACTS-HTTP.md`,
+`AGENT_PROTOCOL.md`. Proof `go test -race -run "TestEnrolRejectsDuplicateAuthKey" ./internal/auth`:
+PASS, and RED-before confirmed (the three enforcement tests accept the duplicate — err=nil — with the
+checks neutralised).
+
+Chain: spec-keeper → implementer (folded into feature-runner) → test-engineer (folded) → reviewer →
+security. Security REQUIRED (auth-identity change; not a docs-and-tests-only change). Reviewer skip:
+NONE. Security skip: NONE. Documentation ran (this entry + the two contract/protocol updates).

@@ -166,6 +166,40 @@ var (
 	// unbound.
 	ErrCertBindingUnknown = errors.New("auth: no agent is bound to this client certificate")
 
+	// ErrAuthKeyBound reports an attempt to enrol an AUTH public key that is
+	// ALREADY held by a DIFFERENT agent id (AUTH-DUP-ENROL-KEY).
+	//
+	// It is the AUTH-KEY mirror of ErrCertFingerprintBound, and exists for the
+	// same reason read the other way round: without it one keypair could hold two
+	// agent ids, so one private-key holder could authenticate as two agents and
+	// the key would stop naming a single identity. That is the impersonation and
+	// accountability hole DECISIONS.md (2026-08-22, AUTH-DUP-ENROL-KEY) settled by
+	// REJECTING the second enrolment rather than minting a second id.
+	//
+	// Whether it is a client error or an internal breach depends on how it was
+	// reached, so the HTTP layer decides by route: on /v1/enroll it is a 409 the
+	// client can act on by generating a fresh keypair, and the CONNECTION IS KEPT
+	// (invariant 10 — this is not a signed-message replay, and a merely buggy
+	// client that re-enrols reaches it). The reply does NOT name the agent that
+	// already holds the key; the server log does, where an operator can act on it.
+	ErrAuthKeyBound = errors.New("auth: enrolment public key is already bound to another agent")
+
+	// ErrAuthKeyUnknown reports an AUTH public key that no enrolled agent holds.
+	// It is the ordinary negative answer on the pre-mint uniqueness read — the key
+	// is new — not a malfunction.
+	ErrAuthKeyUnknown = errors.New("auth: no agent is bound to this enrolment public key")
+
+	// ErrAuthKeyAmbiguous reports ONE AUTH public key held by MORE THAN ONE agent,
+	// which resolves to nobody.
+	//
+	// The live enrolment path refuses to create this state (ErrAuthKeyBound), so
+	// reaching it means the state came off DISK: recovery replays records that are
+	// already durable and must not refuse them (invariant 6). It is reported
+	// rather than resolved because picking a holder would let one key holder be
+	// served as a definite agent it may not be — the same fail-closed posture as
+	// ErrCertBindingAmbiguous.
+	ErrAuthKeyAmbiguous = errors.New("auth: this enrolment public key is bound to more than one agent")
+
 	// ErrCertBindingAmbiguous reports ONE client-certificate fingerprint held
 	// live by MORE THAN ONE agent, which resolves to nobody.
 	//

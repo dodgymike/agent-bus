@@ -7601,3 +7601,60 @@ is byte-identical (`cmp`).
 
 The narrowing is self-demonstrating: check (c) prints five paths for THIS change, so the change that
 narrows the carve-out does not qualify for the carve-out.
+
+## 2026-08-22 — AUTH-DUP-ENROL-KEY (`ac4f9c2b`): a duplicate enrolment public key is REJECTED, not idempotently returned
+
+**The defect.** `Service.Enrol` validated the AUTH public key's LENGTH but never checked whether that
+key was already on the roster. Three enrolments with a byte-identical public key were all accepted and
+minted three distinct agent ids bound to ONE keypair (found by the security gate on
+AUTH-1-FU-ACTIVECAP, verified empirically). One private-key holder could then authenticate as any of
+those ids — an impersonation and accountability hole — and it was the direct reason the per-agent
+active-session cap raised an attacker's flood cost by only ~1.6%: the "distinct enrolments" the cap
+counted were one keypair, not many identities the attacker had to obtain.
+
+**The decision: REJECT the second enrolment with `auth.ErrAuthKeyBound` (409, connection KEPT), NOT
+idempotently return the first agent's id.** Two behaviours were defensible; this one was chosen.
+
+Why reject, not idempotent-return:
+
+- **Idempotent-return conflates two different keys.** The enrolment IDEMPOTENCY key (a client-supplied
+  retry token, `EnrolRequest.IdempotencyKey`) is a different concept from the enrolment PUBLIC key.
+  Returning the existing agent id to whoever re-presents a public key would key identity resumption on
+  a value that is PUBLIC (agent auth keys are listed on `GET /v1/agents`), so anyone who read another
+  agent's key could "enrol" and be handed that agent's id. They still could not obtain a session
+  without the private half, so no session is granted — but returning an identity a caller cannot use,
+  and doing so off a public value, muddies invariant 1 for no benefit.
+- **Idempotent-return would silently ignore a genuinely different request.** The same public key can
+  arrive with a DIFFERENT requested name or invite. Returning the original agent id would apply
+  neither, leaving the caller believing a name/invite was registered that was not — the same
+  "worse than a missing check" failure the messaging-key idempotency comment already documents.
+- **Consistency with the established, security-gate-approved pattern.** The codebase already keeps one
+  CERTIFICATE from naming two agents (`ErrCertFingerprintBound`, MTLS-BIND). The auth public key is
+  the same kind of identity-bearing credential, so it gets the same shape of rule: an authoritative
+  refusal in `Roster.Put` (new rule 3, in the same critical section as the insert) and an advisory
+  pre-mint read (`Roster.AgentIDForAuthKey`) in `Enrol` so the refusal burns no agent-id suffix.
+
+The genuine idempotent RETRY is untouched: same idempotency key + same payload still replays the
+original result, because the idempotency replay check runs BEFORE the auth-key read. Nothing here
+disconnects — enrolment is not a signed-message replay, and `/v1/enroll` is unauthenticated so the
+socket names no principal to punish (invariant 10's two questions).
+
+**On the oracle concern.** Rejecting does tell an enrolling caller "this key is already enrolled". That
+disclosure is bounded and accepted: enrolment is invite-gated on the shipped bus (invariant 3), so
+each probe costs a single-use invite; the key is already public on `GET /v1/agents`; the reply names
+NO agent id (only the server log does); and `ErrCertFingerprintBound` already makes exactly this trade
+for the certificate axis.
+
+**Why the check is BEFORE the mint.** A refusal placed only in `Roster.Put` (after `minter.Mint`)
+would burn an agent-id suffix on every duplicate, and because a failed enrolment aborts and RELEASES
+its invite reservation, a single invite could drive an unbounded suffix-burn loop with one keypair and
+fresh names — the exact hazard MTLS-BIND records for the certificate check. The pre-mint advisory read
+closes it; `Roster.Put`'s check under its own lock stays the authoritative one. `WALRoster.Apply` does
+NOT run the write-side check (it replays already-durable records; invariant 6), so a damaged log can
+present two agents under one key, and `AgentIDForAuthKey` fails closed with `ErrAuthKeyAmbiguous`
+rather than picking one.
+
+Files: `internal/auth/{errors.go,authkey.go,roster.go,walroster.go,service.go}`,
+`internal/httpapi/auth.go` (the 409 mapping). Docs: `CONTRACTS-HTTP.md`, `AGENT_PROTOCOL.md`. Proven
+by `internal/auth/authkey_test.go` (RED-before confirmed: the three enforcement tests accept the
+duplicate with the checks removed).

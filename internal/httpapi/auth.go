@@ -829,6 +829,24 @@ func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, op strin
 		s.log.Warn("enrolment refused: the client certificate on this connection is already bound to another agent, and one certificate must never name two agents (invariant 11)", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "this client certificate is already bound to an agent; enrol with a fresh client keypair"})
 
+	case errors.Is(err, auth.ErrAuthKeyBound):
+		// 409, and the CONNECTION IS KEPT — the auth-key mirror of
+		// ErrCertFingerprintBound above (AUTH-DUP-ENROL-KEY). Invariant 10's two
+		// questions answer the same way: a merely buggy client reaches this line by
+		// re-enrolling with a keypair it already enrolled, and /v1/enroll is
+		// unauthenticated so the socket identifies no principal to punish.
+		//
+		// Warn, not Debug: one enrolment public key presented for two agent ids is
+		// either a client re-enrolling without regenerating its keypair — benign,
+		// and operator-fixable — or someone attaching one keypair to a second
+		// identity to impersonate. An operator should see both by default.
+		//
+		// The reply does NOT name the agent that already holds the key: enrolment
+		// must not become an oracle mapping a (public) key to an agent id on this
+		// bus. The server LOG names it, which is where an operator can act.
+		s.log.Warn("enrolment refused: this enrolment public key is already bound to another agent, and one keypair must never name two agents (AUTH-DUP-ENROL-KEY, invariant 1)", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "this enrolment public key is already bound to an agent; enrol with a fresh keypair"})
+
 	case errors.Is(err, auth.ErrInviteRequired):
 		// 403, and the CONNECTION IS KEPT (invariant 10's two questions are
 		// answered in full on auth.ErrInviteRequired; the short form is that

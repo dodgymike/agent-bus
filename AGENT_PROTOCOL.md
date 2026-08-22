@@ -590,6 +590,15 @@ stored attempt redeemed an invite — see
 [Enrolment idempotency](#enrolment-idempotency-specifically). Nothing is sent and your key material
 is kept.
 
+Also `7` (**AUTH-DUP-ENROL-KEY, 2026-08-22**): the bus refused with `409` because your enrolment
+**public key is already bound to another agent** (`{"error":"this enrolment public key is already
+bound to an agent; enrol with a fresh keypair"}`). One keypair may hold only ONE agent id — that is
+what makes an id name a single principal — so a second enrolment under the same keypair is rejected
+rather than minting a second identity. This is NOT the idempotent-retry case: a genuine retry (same
+`--idempotency-key` and the same key/name/invite) still replays the original enrolment. If you meant
+to enrol a distinct agent, generate a fresh keypair (a new `enrol` with no reused credential store
+does this). The refusal names no agent id, and the connection is kept.
+
 ### `agent-busctl whoami [--all] [--verify]`
 
 Prints the current identity from the credential store; nothing is sent to the bus unless you pass

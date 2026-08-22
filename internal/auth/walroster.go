@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -291,6 +292,9 @@ func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (js
 	// Serialisation against a concurrent Put is writeMu's job, already held for
 	// the whole check-then-write; mu only guards the map itself.
 	certErr := checkCertFingerprintUnbound(r.byID, e)
+	// The auth-key axis (rule 3), read under the SAME mu acquisition for the same
+	// reason — see checkAuthKeyUnbound.
+	authKeyErr := checkAuthKeyUnbound(r.byID, e)
 	r.mu.Unlock()
 	if dup {
 		return false, fmt.Errorf("%w: %q", ErrDuplicateAgentID, e.AgentID)
@@ -301,6 +305,9 @@ func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (js
 	// handling is to discard it.
 	if certErr != nil {
 		return false, certErr
+	}
+	if authKeyErr != nil {
+		return false, authKeyErr
 	}
 
 	body, err := encode(e)
@@ -381,6 +388,20 @@ func (r *WALRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return certFingerprintOwner(r.byID, fp)
+}
+
+// AgentIDForAuthKey implements Roster over the RECOVERED and live roster. See
+// authKeyOwner.
+//
+// This is the implementation for which the ambiguous answer is actually
+// reachable: Apply replays whatever the log holds and does not run the
+// write-side uniqueness check (it cannot usefully refuse a record that is
+// already durable — invariant 6), so a log carrying two agents with one auth key
+// recovers into exactly that state and this method must decline to pick one.
+func (r *WALRoster) AgentIDForAuthKey(key ed25519.PublicKey) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return authKeyOwner(r.byID, key)
 }
 
 // List implements Roster: every RECOVERED and live agent, deep-copied and
