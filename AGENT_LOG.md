@@ -5771,3 +5771,31 @@ checks neutralised).
 Chain: spec-keeper → implementer (folded into feature-runner) → test-engineer (folded) → reviewer →
 security. Security REQUIRED (auth-identity change; not a docs-and-tests-only change). Reviewer skip:
 NONE. Security skip: NONE. Documentation ran (this entry + the two contract/protocol updates).
+
+## 2026-08-22 — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated credential routes
+
+Added a stdlib per-source token bucket in front of `/v1/enroll`, `/v1/session/begin` and
+`/v1/session/complete` (`internal/httpapi/ratelimit.go`), wired into `httpapi.New` as the innermost
+middleware and configured via `Options.AuthRateLimit`. Enabled by default in `cmd/agent-bus`
+(`-auth-rate-limit 5`, `-auth-rate-burst 60`; burst 0 disables). A throttled source is answered
+429 + `Retry-After`, never disconnected (invariant 10); the limiter sits in front of the allow-list
+and does not change its membership (invariant 3). Keyed on the TCP peer address, port stripped, proxy
+headers ignored — shared-NAT collapse is a documented limitation.
+
+Invariants read IN FULL: 3 (allow-list is the security boundary — not widened; rate limiting sits in
+front), 10 (a rate-limit refusal is a 429/Retry-After, not a disconnect — the two disconnect
+questions re-read). Also 8 (stdlib over x/time/rate).
+
+Files: internal/httpapi/ratelimit.go (new), internal/httpapi/server.go (Options field, Server field,
+New wiring), internal/httpapi/ratelimit_test.go (new, black-box), internal/httpapi/ratelimit_internal_test.go
+(new, bucket+GC unit), cmd/agent-bus/main.go (flags, defaults, validation, wiring),
+cmd/agent-bus/main_test.go (parseFlags cases), CONTRACTS-HTTP.md, CONTRACTS-CLI.md, AGENT_PROTOCOL.md,
+DECISIONS.md.
+
+Proof: `go test -race -run "TestSessionBeginRateLimit" ./internal/httpapi` — proof-check verdict=PASS,
+4 tests ran, non-vacuous. RED-before demonstrated: bypassing the middleware makes the burst assertion
+fail (404, not 429). Full `-race ./...` run once for the review panel.
+
+Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation. This touches
+the auth/security surface (a credential-route guard, and `authmw.go`'s route constants are consumed),
+so **security is REQUIRED, no carve-out** — no skips. Reviewer skip: NONE. Security skip: NONE.

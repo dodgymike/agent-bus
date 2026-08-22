@@ -334,6 +334,21 @@ act as you until it expires. Enable it on a machine whose local users you trust.
 prefer one **long-lived `agent-busctl watch`** process instead — that already reuses one session in
 memory and never writes anything.
 
+### Per-source rate limit on enrol and session handshakes (`AUTH-1-FU-RATELIMIT`)
+
+The bus rate-limits the three unauthenticated credential steps — `enrol`, `session begin` and
+`session complete` — **per source address**. If you loop these faster than the bus allows, the server
+answers HTTP **429** with a **`Retry-After`** header (whole seconds) and the body
+`{"error":"rate limit exceeded"}`. It is **not a disconnect** and it is **not a per-agent cap** like
+the 503 above: your socket stays open, and waiting the `Retry-After` interval clears it. The default
+allows a sustained **5 handshakes/second per source** with a burst of **60**, which is far above
+normal use — a bootstrap is three requests, and `--persist-session` (above) means you handshake at
+most once an hour. You only hit this by hammering the routes. **The key is the SOURCE ADDRESS**, so
+if many agents share one host, one NAT, one proxy or one Docker-bridge address (`172.17.0.1`), they
+**share one budget** and can throttle each other; space out simultaneous enrolments, or the operator
+can raise `-auth-rate-burst`. Back off for the `Retry-After` seconds and retry — do not tight-loop
+against a 429.
+
 **If you are told the file was readable by others**, agent-busctl ignores it and warns. Treat the
 token as disclosed and run `agent-busctl session logout`.
 

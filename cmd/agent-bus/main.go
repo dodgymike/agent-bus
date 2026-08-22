@@ -44,6 +44,23 @@ const (
 	defaultPollTimeout = 30 * time.Second
 	defaultLogLevel    = "info"
 
+	// defaultAuthRateLimitPerSecond and defaultAuthRateLimitBurst configure the
+	// per-source token bucket in front of the three unauthenticated credential
+	// routes (AUTH-1-FU-RATELIMIT). They cap what ONE source can do to
+	// /v1/enroll, /v1/session/begin and /v1/session/complete.
+	//
+	// The numbers: security measured ~137 req/s from a single source as enough
+	// to sustain the session-table denial. 5 req/s sustained is ~27x below that,
+	// so a lone source can no longer keep MaxSessions (16384) or MaxRosterEntries
+	// (4096) exhausted; a burst of 60 absorbs a legitimate cluster of agents
+	// bootstrapping at once from ONE address -- enrol + session/begin +
+	// session/complete is 3 requests per agent, so 60 covers ~20 simultaneous
+	// agents behind a shared NAT before any of them is throttled. Both are
+	// operator-tunable (-auth-rate-limit, -auth-rate-burst); set the burst to 0
+	// to disable.
+	defaultAuthRateLimitPerSecond = 5.0
+	defaultAuthRateLimitBurst     = 60
+
 	// enrolmentInviteRequired turns on INVITE-ONLY ENROLMENT for the shipped
 	// server (invariant 3): an enrolment presenting no invite is refused 403.
 	//
@@ -172,6 +189,12 @@ type Config struct {
 	// seeds that on a first start with an empty -data-dir, or must match what
 	// is already persisted there.
 	BusID string
+	// AuthRateLimitPerSecond is the sustained per-source refill rate, in requests
+	// per second, of the token bucket in front of the three unauthenticated
+	// credential routes (AUTH-1-FU-RATELIMIT). AuthRateLimitBurst is that
+	// bucket's capacity. A burst <= 0 DISABLES the limiter. See httpapi.AuthRateLimit.
+	AuthRateLimitPerSecond float64
+	AuthRateLimitBurst     int
 	// BackfillSuffixFloors is the operator's ONE-TIME opt-in permitting the
 	// agent-id suffix floors to be BACKFILLED from the durable log on a data
 	// directory that has history but no `agent-suffixes` file.
@@ -336,6 +359,8 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 	fs.StringVar(&cfg.Listen, "listen", defaultListen, "TCP address to listen on, e.g. \"127.0.0.1:8080\" (default, loopback-only) or \":8080\" (all interfaces)")
 	fs.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "directory holding the durable store and the append-only log")
 	fs.DurationVar(&cfg.PollTimeout, "poll-timeout", defaultPollTimeout, "maximum time a long-poll waits before returning empty, e.g. 30s")
+	fs.Float64Var(&cfg.AuthRateLimitPerSecond, "auth-rate-limit", defaultAuthRateLimitPerSecond, "sustained per-source request rate for the unauthenticated credential routes (/v1/enroll, /v1/session/begin, /v1/session/complete); a throttled source gets 429 + Retry-After, never a dropped connection")
+	fs.IntVar(&cfg.AuthRateLimitBurst, "auth-rate-burst", defaultAuthRateLimitBurst, "per-source burst capacity for the unauthenticated credential routes; set to 0 to DISABLE per-source rate limiting entirely")
 	fs.StringVar(&logLevel, "log-level", defaultLogLevel, "minimum log severity ("+logging.Levels+")")
 	fs.StringVar(&cfg.BusID, "bus-id", "", "TEST-ONLY: force the bus id. The server is authoritative on every id (invariant 1); a supplied bus id is not a trusted identity. Never use this in production")
 	// NO BACKQUOTES in this usage string, deliberately: flag.UnquoteUsage reads
@@ -377,6 +402,14 @@ func (c Config) validate() error {
 	}
 	if c.PollTimeout <= 0 {
 		return fmt.Errorf("-poll-timeout must be positive, got %s", c.PollTimeout)
+	}
+	// A positive burst with a non-positive rate is a bucket that can hold tokens
+	// but never refills them: it would answer 429 to every request after the
+	// first burst, forever, which locks enrolment out entirely. Reject it at
+	// flag-parse time rather than shipping a bus nobody can join. A burst <= 0
+	// is the documented "disabled" state and needs no rate.
+	if c.AuthRateLimitBurst > 0 && c.AuthRateLimitPerSecond <= 0 {
+		return fmt.Errorf("-auth-rate-limit must be positive when -auth-rate-burst is positive (got rate %g, burst %d); set -auth-rate-burst 0 to disable rate limiting", c.AuthRateLimitPerSecond, c.AuthRateLimitBurst)
 	}
 	// Invariant 1: a supplied bus id is input to be VALIDATED, fail fast at
 	// flag-parse time rather than deep inside run(). ids.ValidateBusID is the
@@ -1712,6 +1745,15 @@ func run(cfg Config) error {
 		// to register for exactly that reason.
 		Peer:           peerSurface,
 		PeerPrincipals: peerPrincipals,
+		// PER-SOURCE RATE LIMIT on the three unauthenticated credential routes
+		// (AUTH-1-FU-RATELIMIT). Enabled by default; -auth-rate-burst 0 disables
+		// it. A throttled source is answered 429 + Retry-After and never
+		// disconnected (invariant 10). It sits in front of the allow-list and
+		// does not change its membership (invariant 3).
+		AuthRateLimit: httpapi.AuthRateLimit{
+			PerSecond: cfg.AuthRateLimitPerSecond,
+			Burst:     cfg.AuthRateLimitBurst,
+		},
 	})
 
 	// THE RESOURCE BOUNDS ON THE SERVER (CORE-9).

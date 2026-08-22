@@ -244,6 +244,20 @@ type Options struct {
 	// Now is the clock, overridable so tests can assert on uptime.
 	// Defaults to time.Now.
 	Now func() time.Time
+
+	// AuthRateLimit configures the per-source token bucket in front of the three
+	// UNAUTHENTICATED credential routes -- /v1/enroll, /v1/session/begin and
+	// /v1/session/complete (AUTH-1-FU-RATELIMIT). Those routes cannot
+	// authenticate (invariant 3 -- they are how a credential is obtained) and
+	// every cap behind them is GLOBAL, so without a per-source cap one anonymous
+	// caller can deny enrolment or session establishment bus-wide.
+	//
+	// The zero value (Burst <= 0) DISABLES the limiter, which is the historical
+	// behaviour and what every test that does not care about rate limiting gets.
+	// The production composition root (cmd/agent-bus) supplies real values. See
+	// AuthRateLimit and ratelimit.go. It never DISCONNECTS a throttled source
+	// (invariant 10) -- the refusal is a 429 with Retry-After.
+	AuthRateLimit AuthRateLimit
 }
 
 // Server is the HTTP surface of the bus. It implements http.Handler, so main
@@ -317,6 +331,12 @@ type Server struct {
 	// afterwards, and never handed out except as bytes written to a response.
 	discoveryJSON []byte
 
+	// authRateLimiter throttles the three unauthenticated credential routes per
+	// source, or nil when Options.AuthRateLimit is disabled (its zero value).
+	// Built once in New, read-only afterwards; rateLimitMiddleware short-circuits
+	// on nil. See ratelimit.go.
+	authRateLimiter *rateLimiter
+
 	// routes is every pattern registered on the mux, in registration order.
 	// Go 1.19's http.ServeMux cannot be enumerated, and an authentication
 	// wrapper that is only claimed to cover the whole surface is worth
@@ -366,6 +386,14 @@ func New(opts Options) *Server {
 	}
 	if s.startedAt.IsZero() {
 		s.startedAt = s.now()
+	}
+
+	// The per-source limiter is built only when configured on. A disabled
+	// AuthRateLimit (its zero value) leaves s.authRateLimiter nil, and
+	// rateLimitMiddleware is then a pass-through -- the three credential routes
+	// are served exactly as they were before this task.
+	if opts.AuthRateLimit.enabled() {
+		s.authRateLimiter = newRateLimiter(opts.AuthRateLimit)
 	}
 
 	// THE ADVERTISED GATE STATE IS READ FROM THE ENFORCING LAYER, not decided
@@ -526,7 +554,15 @@ func New(opts Options) *Server {
 	//
 	// It is not a gate and refuses nothing; see its doc for why absence of a
 	// client certificate is an ordinary case on this build.
-	s.handler = LoggingMiddleware(s.log, s.WithClientCertificate(s.authMiddleware(mux)))
+	// rateLimitMiddleware is INNERMOST, closest to the mux and inside
+	// authMiddleware. The three routes it guards are on authMiddleware's
+	// allow-list, so auth passes them straight through and the throttle is the
+	// only gate they meet -- and placing it here means every OTHER route is a
+	// pass-through with a single map lookup, never a bucket allocation. It does
+	// not touch, read or widen the allow-list (invariant 3); it sits in front of
+	// it. A throttled request is answered 429 + Retry-After, never disconnected
+	// (invariant 10). See ratelimit.go.
+	s.handler = LoggingMiddleware(s.log, s.WithClientCertificate(s.authMiddleware(s.rateLimitMiddleware(mux))))
 	return s
 }
 

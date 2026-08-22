@@ -21,7 +21,24 @@ Two binaries live here:
 | `-data-dir` | `./data` | Directory for the durable store + append-only log; created `0700` if missing |
 | `-poll-timeout` | `30s` | Ceiling on a single long-poll wait (not yet consumed by any handler) |
 | `-log-level` | `info` | `debug`, `warn`, `info`, or `error` |
+| `-auth-rate-limit` | `5` | Sustained per-SOURCE request rate (req/s) of the token bucket in front of the three unauthenticated credential routes `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` (`AUTH-1-FU-RATELIMIT`). A throttled source is answered **429 + `Retry-After`**, never disconnected (invariant 10). Must be `> 0` when `-auth-rate-burst > 0`. |
+| `-auth-rate-burst` | `60` | Per-SOURCE burst capacity (bucket size) for those three routes. **`0` DISABLES rate limiting entirely** (historical unlimited behaviour). |
 | `-bus-id` | *(empty → placeholder `bus-local`)* | **TEST-ONLY.** Validated against `^[A-Za-z0-9_-]{1,64}$`; `.` rejected (qualification separator, invariant 2). Using it logs a runtime `WARN`. See `DECISIONS.md`. |
+
+**Per-source rate limit (`AUTH-1-FU-RATELIMIT`).** The three routes above cannot authenticate
+(invariant 3 — they are how a credential is obtained) and every admission cap behind them is GLOBAL,
+so without a per-source cap one anonymous caller can exhaust `MaxRosterEntries` (4096) with enrols or
+`MaxSessions` (16384) with session/begins and deny the whole bus (security measured ~137 req/s from a
+single source as enough). The limiter is a stdlib token bucket keyed on the TCP **peer address with
+its port stripped** (`X-Forwarded-For` and other proxy headers are IGNORED — they are trivially
+forged). **Honest limitation:** behind a shared NAT, a reverse proxy, an SSH tunnel or the Docker
+bridge (every container appears as e.g. `172.17.0.1`) many distinct clients collapse to ONE key and
+share ONE bucket, so they throttle each other; the burst default of 60 is sized to absorb ~20 agents
+bootstrapping at once (enrol + begin + complete = 3 requests each) from one address before any is
+throttled. It sits IN FRONT of the allow-list and does not change its membership (invariant 3). The
+refusal is a `429` with `Retry-After` and is logged at Info (`request rate-limited: ...`); it is NEVER
+a disconnect (invariant 10). Configuring `-auth-rate-burst > 0` with `-auth-rate-limit <= 0` is
+refused at flag-parse time (a bucket that never refills would 429 forever once drained).
 
 Exit codes: `2` on invalid flags/config (`parseFlags`/`validate` failure), `1` on a startup failure
 (e.g. bind failure), `0` on a clean signal-driven shutdown.

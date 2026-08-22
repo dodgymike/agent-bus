@@ -33,11 +33,13 @@ func TestParseFlags(t *testing.T) {
 			name: "defaults",
 			args: nil,
 			want: Config{
-				Listen:      defaultListen,
-				DataDir:     defaultDataDir,
-				PollTimeout: defaultPollTimeout,
-				LogLevel:    logging.LevelInfo,
-				BusID:       "",
+				Listen:                 defaultListen,
+				DataDir:                defaultDataDir,
+				PollTimeout:            defaultPollTimeout,
+				LogLevel:               logging.LevelInfo,
+				BusID:                  "",
+				AuthRateLimitPerSecond: defaultAuthRateLimitPerSecond,
+				AuthRateLimitBurst:     defaultAuthRateLimitBurst,
 			},
 		},
 		{
@@ -48,14 +50,38 @@ func TestParseFlags(t *testing.T) {
 				"-poll-timeout", "5s",
 				"-log-level", "DEBUG",
 				"-bus-id", "bus_test-01",
+				"-auth-rate-limit", "12.5",
+				"-auth-rate-burst", "40",
 			},
 			want: Config{
-				Listen:      "127.0.0.1:0",
-				DataDir:     "/tmp/agent-bus-test",
-				PollTimeout: 5 * time.Second,
-				LogLevel:    logging.LevelDebug,
-				BusID:       "bus_test-01",
+				Listen:                 "127.0.0.1:0",
+				DataDir:                "/tmp/agent-bus-test",
+				PollTimeout:            5 * time.Second,
+				LogLevel:               logging.LevelDebug,
+				BusID:                  "bus_test-01",
+				AuthRateLimitPerSecond: 12.5,
+				AuthRateLimitBurst:     40,
 			},
+		},
+		{
+			// Burst 0 is the documented "disabled" state and needs no rate.
+			name: "rate limiting disabled by zero burst",
+			args: []string{"-auth-rate-burst", "0"},
+			want: Config{
+				Listen:                 defaultListen,
+				DataDir:                defaultDataDir,
+				PollTimeout:            defaultPollTimeout,
+				LogLevel:               logging.LevelInfo,
+				AuthRateLimitPerSecond: defaultAuthRateLimitPerSecond,
+				AuthRateLimitBurst:     0,
+			},
+		},
+		{
+			// A bucket that can hold tokens but never refills would 429 forever
+			// once drained, locking enrolment out; rejected at parse time.
+			name:    "positive burst with non-positive rate",
+			args:    []string{"-auth-rate-limit", "0", "-auth-rate-burst", "30"},
+			errWant: "-auth-rate-limit must be positive when -auth-rate-burst is positive",
 		},
 		{
 			name:    "bad log level",

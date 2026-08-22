@@ -7658,3 +7658,39 @@ Files: `internal/auth/{errors.go,authkey.go,roster.go,walroster.go,service.go}`,
 `internal/httpapi/auth.go` (the 409 mapping). Docs: `CONTRACTS-HTTP.md`, `AGENT_PROTOCOL.md`. Proven
 by `internal/auth/authkey_test.go` (RED-before confirmed: the three enforcement tests accept the
 duplicate with the checks removed).
+
+## 2026-08-22 — Per-source rate limiting on the unauthenticated credential routes (AUTH-1-FU-RATELIMIT)
+
+The three unauthenticated credential routes — `/v1/enroll`, `/v1/session/begin`,
+`/v1/session/complete` — had no per-source rate limit. Every admission cap behind them is GLOBAL, so
+one anonymous source could exhaust `MaxRosterEntries` (4096) with enrols or `MaxSessions` (16384)
+with session/begins and deny the whole bus. Security measured ~137 req/s from a single source as
+enough to sustain the session-table denial.
+
+**Decision: a stdlib per-source token bucket in front of those three routes, refusing with 429 +
+Retry-After, never a disconnect.**
+
+- **Stdlib, not `golang.org/x/time/rate` (invariant 8).** A token bucket is ~40 lines; a dependency
+  is not justified. `internal/httpapi/ratelimit.go`.
+- **Keying: the TCP peer address with its port stripped (`remoteHost`), proxy headers IGNORED.**
+  Same "source" identity `LoggingMiddleware` already records. `X-Forwarded-For` is trivially forged
+  by the attacker this guards against, so it is not trusted. HONEST LIMITATION, documented and not
+  papered over: clients behind one NAT / reverse proxy / SSH tunnel / Docker bridge (every container
+  is `172.17.0.1`) collapse to ONE key and share ONE bucket, throttling each other. The burst
+  default (60) is sized to absorb ~20 agents bootstrapping at once (3 requests each) from one address.
+- **Refusal is a 429 with an integer `Retry-After`, logged at Info, NEVER a disconnect
+  (invariant 10).** Too-fast is not replay; a merely-busy or merely-buggy client must keep its
+  socket, and one anonymous socket may carry a legitimately busy client. It runs BEFORE any body
+  parse or credential read, so a throttled request consumes no roster/session capacity and touches
+  no token.
+- **It sits IN FRONT of the allow-list and does not change its membership (invariant 3).**
+  `unauthenticatedRoutes` in `authmw.go` is untouched; `rateLimitedRoutes` is a separate set derived
+  from the three route constants. The middleware is innermost, inside `authMiddleware`.
+- **Mechanism in `internal/httpapi` (`Options.AuthRateLimit`), policy in the composition root.**
+  The zero value disables the limiter, so every embedder that does not opt in — and the entire
+  existing test suite — is unchanged. `cmd/agent-bus` enables it by default (`-auth-rate-limit 5`,
+  `-auth-rate-burst 60`; burst 0 disables). A positive burst with a non-positive rate is refused at
+  flag-parse time: a bucket that never refills would 429 forever once drained.
+- **Memory bound:** an opportunistic sweep drops buckets that have refilled to capacity — they hold
+  no throttling state (a fresh bucket admits identically), so removal changes nothing and the map
+  stays proportional to the sources currently being throttled, not to every source ever seen.
