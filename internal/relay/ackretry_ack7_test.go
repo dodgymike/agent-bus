@@ -247,10 +247,33 @@ func (l *a7Log) callCount() int {
 // short-circuit could be neutered so Settle runs on every retry, and this guard
 // stays green.
 //
-// THAT IS NOT A COVERAGE HOLE, because those two drifts are owned elsewhere and
-// caught: cmd/agent-bus/ackwiring_ack3_test.go is the SEQUENCE-AND-SEMANTICS
-// owner for settleAck and goes RED on both. It is cited here so a reader who
-// needs that guarantee knows where it actually lives.
+// A SECOND LIMIT, measured rather than assumed: the positive checks are
+// PRESENCE checks over the whole path, so they catch an identifier disappearing
+// ENTIRELY, not one call site out of several. Removing ONE of the two
+// `return relay.AckSettlement{}, relay.ErrAckNotBound` sites leaves this green;
+// removing BOTH goes red. That is the right sensitivity for a drift detector —
+// it answers "does production still speak this vocabulary", not "is every arm
+// still wired" — but it is not the stronger claim, so it is not stated as one.
+//
+// THAT IS NOT A COVERAGE HOLE, because those drifts are owned elsewhere, in the
+// package that owns settleAck. Both owners were verified by mutating each arm
+// separately rather than assumed:
+//
+//   - cmd/agent-bus/ackwiring_ack3_test.go, TestSettleAckCorrelatesToTheDurableRecord
+//     — the SEQUENCE-AND-SEMANTICS owner for settleAck.
+//   - cmd/agent-bus/acktransit_test.go, TestSettleAckDisposition — WHICH DOES NOT
+//     EXIST YET. It arrives with ACK-5, and it is named here BECAUSE of what ACK-5
+//     changes, not in anticipation of it generally.
+//
+// THE CITATION ABOVE IS TIME-DEPENDENT, AND THAT IS THE POINT OF SPELLING IT OUT.
+// Today ackwiring_ack3_test.go's fixture reaches settleAck's ORIGIN arm and goes
+// red when that arm's uniform refusal is broken. ACK-5 splits that arm three ways
+// (origin / transit / transit-with-no-seam), and that same fixture — keyed
+// ackFedKey = wiringPeerBus + "-1" against busID: wiringLocalBus — then lands on
+// the NO-SEAM arm instead. The ORIGIN arm's only owner after ACK-5 is
+// TestSettleAckDisposition/AT_THE_ORIGIN. So a reader who checks this citation
+// after ACK-5 lands and finds only the ack3 test would be reading a claim that has
+// quietly stopped being true. Measured by the ACK-7 security gate, not inferred.
 type a7Mirror struct {
 	acks *ack.Store
 
@@ -300,6 +323,14 @@ func (m *a7Mirror) settle(_ context.Context, s SettledAck) (AckSettlement, error
 		m.applied.Add(1)
 		return AckSettlement{Duplicate: false}, nil
 	case errors.Is(err, ack.ErrNoRecord):
+		// MIRRORS THE ORIGIN ARM ONLY. In production this arm now delegates to
+		// (*federation).disposeUnrecordedAck, which tells three cases apart: we
+		// are the ORIGIN (return the uniform refusal, what this mirror does),
+		// this bus is in TRANSIT and can carry the outcome one hop back, or it
+		// is in transit with no back-propagation seam wired. This rig is always
+		// the origin — newA7Rig calls Accept for the pair before anything else —
+		// so the origin arm is the only one reachable here, and the transit arms
+		// belong to ACK-5's own tests, not to this file.
 		return AckSettlement{}, ErrAckNotBound
 	case errors.Is(err, ack.ErrTerminal):
 		return AckSettlement{}, fmt.Errorf("%w: %v", ErrAckOutcomeConflict, err)
@@ -1079,38 +1110,22 @@ func a7AssertMirrorMatchesProduction(t *testing.T) {
 		t.Fatalf("parsing %s: %v — the mirror in this file cannot be tied back to production, so every assertion below would be a proof about a copy", path, err)
 	}
 
-	var fn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.FuncDecl)
-		if ok && d.Name.Name == "settleAck" && d.Recv != nil {
-			fn = d
-			break
-		}
-	}
-	if fn == nil {
-		t.Fatalf("cmd/agent-bus/relaywiring.go no longer declares a method named settleAck. a7Mirror in this file MIRRORS it; production has moved and the mirror is now a proof about a copy of nothing. Re-derive both.")
-	}
+	names, visited, hasDefaultArm := a7SettlePath(t, file, "settleAck")
 
-	// Every identifier and selector NAME used in the body, comment-free by
-	// construction.
-	names := map[string]int{}
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case *ast.Ident:
-			names[v.Name]++
-		case *ast.SelectorExpr:
-			names[v.Sel.Name]++
-		}
-		return true
-	})
-
-	// Non-vacuity first: if the walker found nothing, every assertion below
-	// would be a free pass.
+	// Non-vacuity, in three parts. Each one would silently turn every check
+	// below into a free pass.
 	if len(names) == 0 {
-		t.Fatal("the AST walk over settleAck found no identifiers at all; every check below would be vacuous")
+		t.Fatal("the AST walk over the settle path found no identifiers at all; every check below would be vacuous")
 	}
 	if names["a7ThisIdentifierIsNotInProduction"] != 0 {
 		t.Fatal("the AST walk reported an identifier that cannot exist; the scanner is not reading what it claims to")
+	}
+	// The walk MUST have followed at least one delegate. settleAck has called
+	// f.priorTerminal since it was written, so a visited-set of size 1 means the
+	// delegate-following broke and the scan silently narrowed to one function —
+	// which is exactly the failure this rewrite exists to fix.
+	if len(visited) < 2 {
+		t.Fatalf("the settle-path walk visited only %v; it is supposed to follow same-receiver delegates, so this means the follower is broken and the scan has silently narrowed to a single function", visited)
 	}
 
 	for _, want := range []struct {
@@ -1120,18 +1135,110 @@ func a7AssertMirrorMatchesProduction(t *testing.T) {
 		{"DecideAck", "the duplicate/conflict decision. a7Mirror calls it, and mutating its AckReplay arm is one of this file's mutation proofs"},
 		{"AckReplay", "invariant 10's first case: return the original result and re-apply nothing"},
 		{"Settle", "the durable transition itself"},
-		{"ErrNoRecord", "§8.2's \"(none)\" row, re-spelled as the uniform refusal"},
-		{"ErrAckNotBound", "the uniform refusal the \"(none)\" row is answered with"},
+		{"ErrNoRecord", "§8.2's \"(none)\" row"},
+		{"ErrAckNotBound", "the uniform refusal the \"(none)\" row is answered with at the ORIGIN"},
 		{"ErrTerminal", "invariant 10's SECOND case, the permanent conflict"},
 		{"ErrAckOutcomeConflict", "the sentinel the handler maps to 409 CodeIdempotencyViolation"},
 	} {
 		if names[want.name] == 0 {
-			t.Errorf("cmd/agent-bus's settleAck no longer references %s (%s). a7Mirror in this file still does, so the mirror has DRIFTED and its evidence no longer describes production", want.name, want.why)
+			t.Errorf("the settle path in cmd/agent-bus no longer references %s (%s). a7Mirror in this file still does, so the mirror has DRIFTED and its evidence no longer describes production. Path walked: %v", want.name, want.why, visited)
 		}
 	}
 
-	// THE NEGATIVE, AND IT IS THE POINT OF THIS WHOLE FUNCTION.
-	if names["ErrConcurrentTransition"] != 0 {
-		t.Errorf("cmd/agent-bus's settleAck now BRANCHES ON ack.ErrConcurrentTransition in code. A concurrent transition is TRANSIENT — it must fall through to the default arm and be answered 503 (retriable, nothing written). Giving it an arm of its own is how it acquires a 4xx: a 200{duplicate:true} would acknowledge an outcome whose fsync has not completed (INVARIANT 4), and a 409 would tell an honest retrying peer it committed a protocol violation it did not commit (INVARIANT 10). See this file's header.")
+	// THE DEFAULT ARM MUST STILL EXIST, and this is checked BECAUSE of the
+	// negative below rather than beside it.
+	//
+	// The negative asserts that nothing on the settle path BRANCHES on
+	// ErrConcurrentTransition. That sentence only means anything while there is
+	// a default arm for it to fall through TO. Delete the default and the
+	// negative still passes — happily, over code that no longer answers a
+	// concurrent transition at all. A negative assertion whose premise has been
+	// removed is a guard that cannot fire, so the premise is asserted too.
+	if !hasDefaultArm {
+		t.Error("the settle path in cmd/agent-bus no longer has a switch with a DEFAULT arm. ErrConcurrentTransition is answered 503 by FALLING THROUGH to that arm — with no default there is nothing to fall through to, and the negative assertion below would pass while the behaviour it protects had gone.")
 	}
+
+	// THE NEGATIVE, AND IT IS THE POINT OF THIS WHOLE FUNCTION.
+	//
+	// Scoped to the WHOLE settle path, not to settleAck alone: an arm extracted
+	// into a delegate is still an arm.
+	if names["ErrConcurrentTransition"] != 0 {
+		t.Errorf("the settle path in cmd/agent-bus now BRANCHES ON ack.ErrConcurrentTransition in code (walked: %v). A concurrent transition is TRANSIENT — it must fall through to the default arm and be answered 503 (retriable, nothing written). Giving it an arm of its own is how it acquires a 4xx: a 200{duplicate:true} would acknowledge an outcome whose fsync has not completed (INVARIANT 4), and a 409 would tell an honest retrying peer it committed a protocol violation it did not commit (INVARIANT 10). See this file's header.", visited)
+	}
+}
+
+// a7SettlePath walks the SETTLE PATH in cmd/agent-bus/relaywiring.go: the named
+// method, plus every method it calls on its OWN RECEIVER that is declared in the
+// same file, transitively.
+//
+// # WHY IT FOLLOWS DELEGATES INSTEAD OF SCANNING ONE FUNCTION
+//
+// The first version scanned settleAck alone. ACK-5 then extracted the
+// not-bound arm into (*federation).disposeUnrecordedAck — production behaviour
+// unchanged, ErrAckNotBound still returned, still the uniform refusal — and the
+// function-scoped scan stopped finding the identifier and failed. That is a
+// guard constraining the SHAPE of production rather than its BEHAVIOUR, which is
+// backwards: a refactor that preserves behaviour must not break a test whose
+// subject is behaviour. Following the receiver's own delegates makes the guard
+// survive extraction, which is the commonest refactor this code will see.
+//
+// It returns the identifier counts, the functions actually visited (for
+// non-vacuity and for an actionable failure message), and whether any visited
+// function contains a switch with a default arm.
+func a7SettlePath(t *testing.T, file *ast.File, root string) (map[string]int, []string, bool) {
+	t.Helper()
+
+	methods := map[string]*ast.FuncDecl{}
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Recv != nil && d.Body != nil {
+			methods[d.Name.Name] = d
+		}
+	}
+	if methods[root] == nil {
+		t.Fatalf("cmd/agent-bus/relaywiring.go no longer declares a method named %s. a7Mirror in this file MIRRORS it; production has moved and the mirror is now a proof about a copy of nothing. Re-derive both.", root)
+	}
+
+	names := map[string]int{}
+	seen := map[string]bool{}
+	var visited []string
+	hasDefault := false
+
+	var walk func(string)
+	walk = func(name string) {
+		fn := methods[name]
+		if fn == nil || seen[name] {
+			return
+		}
+		seen[name] = true
+		visited = append(visited, name)
+
+		recv := ""
+		if len(fn.Recv.List) > 0 && len(fn.Recv.List[0].Names) > 0 {
+			recv = fn.Recv.List[0].Names[0].Name
+		}
+
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.Ident:
+				names[v.Name]++
+			case *ast.SelectorExpr:
+				names[v.Sel.Name]++
+				// Follow ONLY `recv.method(...)`. `f.acks.Settle` has a
+				// SelectorExpr for X, not an Ident, so it is not followed —
+				// correct, since that leaves this file.
+				if id, ok := v.X.(*ast.Ident); ok && recv != "" && id.Name == recv {
+					walk(v.Sel.Name)
+				}
+			case *ast.SwitchStmt:
+				for _, c := range v.Body.List {
+					if cc, ok := c.(*ast.CaseClause); ok && cc.List == nil {
+						hasDefault = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	walk(root)
+	return names, visited, hasDefault
 }
