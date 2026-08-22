@@ -11,10 +11,25 @@ contract below is fixed — do not make the orchestrator restate it.
 
 ## The chain (mandatory, per CLAUDE.md)
 spec-keeper → implementer → test-engineer → reviewer → security → documentation.
-For ANY code change, reviewer AND security AND documentation MUST run; if you skip one, record the
-one-line justification in AGENT_LOG.md. Restate the task in one sentence before you start, make the
-SMALLEST change that completes only that task, and do not batch unrelated work or refactor unless the
-task explicitly asks.
+For ANY code change, reviewer AND documentation MUST run. Security is SKIPPED by default for a
+change touching ONLY docs and tests AND no GUARD file AND no CONTROL-PLANE file (CLAUDE.md "Agent
+roster"), and MUST run otherwise. **Every skipped step — INCLUDING a security skip taken under the
+carve-out — needs an `AGENT_LOG.md` line naming the skipped tier and the exact paths it covered**;
+without those paths the periodic carve-out sweep has nothing to scope against. GUARD FILE is decided
+by CONTENT as well as by name: any `*guard*_test.go`, any test importing `go/ast`/`go/parser` or
+touching `InsecureSkipVerify`/`VerifyPeerCertificate`, and any test whose removal disables an
+invariant check — `internal/httpapi/authmw_test.go`'s `TestEveryRouteRequiresAuth` (invariant 3's
+allow-list) matches neither pattern and is still a guard. CONTROL PLANE = anything that decides WHAT
+is checked or performs the check — `CLAUDE.md`, `AGENTS.md`, `INVARIANTS.md` (it states what a
+review measures against), `.claude/**`, `scripts/doc-check.sh`, `scripts/proof-check.sh` and any
+other check/gate script, `docs/doc-budgets.tsv`, `docs/doc-preserve.tsv`. `PITFALLS.md` is NOT
+control plane — it records incidents and no gate consults it (stated decision, 2026-08-22).
+**A `.md` extension does not make a file documentation**; editing one of these can disable a check
+with no product code touched, so security ALWAYS runs (`PITFALLS.md` §8). Both lists will go stale —
+apply the principle.
+Restate the task
+in one sentence before you start, make the SMALLEST change that completes only that task, and do not
+batch unrelated work or refactor unless the task explicitly asks.
 
 ## Code-only discipline (you NEVER deploy)
 - NEVER `git commit`, `git push`, or tag a release. You write SOURCE only. The orchestrator commits
@@ -85,11 +100,15 @@ lets several agents document in parallel.
 ## Final report (always this shape)
 
 0. **GATE STATUS — first line, never omitted.** For reviewer and security, state COMPLETED or NOT
-   COMPLETED and the verdict. "Dispatched" is not a status; a gate that has not returned has found
-   nothing yet. The orchestrator commits on this line, and has shipped ungated code three times when
-   it was missing — including a relay SSRF and an unbounded input, both caught by gates still running
-   at the moment of the commit. If a gate returned CHANGES-REQUIRED and you fixed the findings, say
-   so and say whether it re-verified.
+   COMPLETED and the verdict — or, for security only, SKIPPED plus the docs-and-tests-only paths and
+   the confirmation that no guard file AND no control-plane file is among them, plus the
+   `AGENT_LOG.md` line recording the skip (the integrator re-checks all of this from the diff,
+   default-denies any path it cannot classify, and REFUSES if the log entry is missing).
+   "Dispatched" is not a status; a gate that has not returned has found nothing yet. The orchestrator
+   commits on this line, and has shipped ungated code three times when it was missing — including a
+   relay SSRF and an unbounded input, both caught by gates still running at the moment of the commit.
+   If a gate returned CHANGES-REQUIRED and you fixed the findings, say so and say whether it
+   re-verified.
 1. Files changed.
 2. The contract/API surface you added (routes, params, env, helper signatures).
 3. Test result — verbatim output if anything is red.

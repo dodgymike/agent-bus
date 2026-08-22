@@ -342,8 +342,8 @@ agent that touched it has posted at minimum `kind=report` + `kind=model`.
     - No scratch in the repo: temp goes under `/tmp`, never a tracked path.
     - The task is flipped to `done` in the Spec Server by spec-keeper.
     - One logical commit for the task.
-    - The mandated chain actually ran (reviewer AND security AND documentation for code changes), or
-      it is explicitly recorded in `AGENT_LOG.md` WHY one was skipped.
+    - The mandated chain ran (reviewer AND documentation; security per the roster carve-out), and
+      EVERY skip has its `AGENT_LOG.md` line, carve-out included.
 11. Stop and report: files changed · test result · `git status` clean · next recommended task.
 
 Do not batch unrelated tasks. Do not refactor unless the task explicitly asks for it. If the spec is
@@ -375,14 +375,20 @@ feature-runner · integrator.
 
 **`integrator` is the ONLY agent permitted to `git commit`.** Everyone else writes source and stops;
 it verifies the gates are COMPLETED, the commit is pathspec-scoped and HEAD still compiles, then
-commits or REFUSES. This is the rule that keeps ungated code out of `main` — do not commit around it.
+commits or REFUSES. It keeps ungated code out of `main`; do not commit around it.
 
-**Before spawning ANY sub-agent, read `.claude/ORCHESTRATION.md`** — what each agent is for, how to
-pick a model, the review panel, and how to write a brief. It is not injected per-spawn; read it on
-demand.
+**Before spawning ANY sub-agent, read `.claude/ORCHESTRATION.md`** — what each agent is for, model
+choice, the review panel, briefs. Not injected per-spawn.
 
-**ALWAYS pass `model` explicitly** — never let a sub-agent inherit the session model.
+**ALWAYS pass `model`** — never let a sub-agent inherit the session model.
 `sonnet` = mechanical/well-scoped/writing-heavy; `opus` = judgment, design, or correctness-critical.
 
-For ANY code change the chain spec-keeper → implementer → reviewer → security is MANDATORY; skipping
-a step requires an explicit one-line justification in `AGENT_LOG.md`.
+For ANY code change the chain spec-keeper → implementer → reviewer → security is MANDATORY, and EVERY
+skip — carve-out included — needs an `AGENT_LOG.md` line naming the tier and the exact paths; no
+line, no commit. Only SECURITY's default flips: it is **SKIPPED for a change touching ONLY docs and
+tests, with no GUARD file and no CONTROL-PLANE file** — then RUNNING it needs one. GUARD file: an AST
+guard, any `*guard*_test.go`, any test whose removal disables an invariant check
+(`client/guard_test.go`, invariant 11). CONTROL PLANE: anything that decides WHAT is checked or
+performs it — `{CLAUDE,AGENTS,INVARIANTS}.md`, `.claude/**`, `docs/*.tsv`,
+`scripts/{doc,proof}-check.sh`. A `.md` extension does not make a file documentation: editing one can
+disable a check with no product code touched. `PITFALLS.md` §8.

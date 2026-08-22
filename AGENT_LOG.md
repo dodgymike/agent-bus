@@ -5601,3 +5601,69 @@ base `9938eb2` in a side worktree and are landed onto `08a1cfa`. The only substa
 new `PROTOCOL.md` section is **§13, not §12** — `493450f` (ACK-5) took §12 in the interim. The
 `PROTOCOL.md` heading and the two cross-references to it (this file and `AGENT_PROTOCOL.md`'s "How
 long a key lives") were renumbered to match; nothing else in the eight files changed.
+
+---
+
+## 2026-08-22 — `97a315af`: the docs-and-tests security carve-out, narrowed to exclude CONTROL PLANE
+
+**Why this entry exists at all.** This is the change that makes `AGENT_LOG.md` the load-bearing
+record of gate skips — `.claude/agents/integrator.md` step 1 now REFUSES a carve-out commit whose
+`AGENT_LOG.md` entry is missing. Shipping it without its own entry would repeat the pattern it
+exists to fix. It was omitted from the first pass because a concurrent agent held the file; that
+section has since landed (`git status --porcelain -- AGENT_LOG.md` empty), so the reason is gone.
+
+**GATES ON THIS CHANGE: NONE SKIPPED.** Security RAN, and had to: the change is seven `.md` files,
+five of them CONTROL PLANE (`CLAUDE.md`, `AGENTS.md`, `.claude/agents/{integrator,feature-runner,
+spec-keeper}.md`), so it does not qualify for the carve-out it introduces. Reviewer ran.
+Documentation is this pass. That self-disqualification is the point: check (c) over the commit's own
+pathspec prints five paths.
+
+**What changed.** `CLAUDE.md` + `AGENTS.md` ("Agent roster", kept byte-identical): security is
+SKIPPED by default for a change touching ONLY docs and tests, with **no GUARD file and no
+CONTROL-PLANE file**; reviewer and documentation are unchanged and still mandatory; and EVERY skip,
+the carve-out one included, needs an `AGENT_LOG.md` line naming the tier and the exact paths.
+`.claude/agents/integrator.md` step 1 gained the mechanical form — checks (0) and (a)–(d) over the
+exact pathspec, judged by EMPTY OUTPUT, with `--no-renames` — and REFUSES when the log line is
+missing. `.claude/agents/feature-runner.md` (chain statement + GATE STATUS line) and
+`.claude/agents/spec-keeper.md` (definition of done) were brought into line. `DECISIONS.md` carries
+the decision, the measurement behind it and the narrowing; `PITFALLS.md` gained §2.7 (a backtick in a
+`doc-check.sh section` heading is command-substituted), §4.5's carve-out paragraph, and §8 (the rule
+that exempted its own commit, and the three ways its checks read as a pass without checking).
+
+**Gate sequence, in order.** security CHANGES-REQUESTED (F1 rename bypass, F2 fail-open pathspec, F3
+guard-by-filename covering 5 of 16 AST-guard files) → all three fixed → security DELTA re-gate
+PASS-WITH-FINDINGS (fixtures re-run, not re-read; new MEDIUM: `INVARIANTS.md` was not control plane
+under check (c) — fixed) → **reviewer CHANGES-REQUIRED** → this pass.
+
+**Reviewer was skipped in error, and an integrator refused the commit for exactly that.** The chain
+ran spec-keeper → documentation → security without dispatching reviewer; the refusal is what caught
+it. Recorded here rather than in the reviewer's note because this file is where a missing gate is
+supposed to be visible. Reviewer's verdict when it did run was CHANGES-REQUIRED, not PASS, so the
+refusal was not ceremony: it found two tasks in one commit, three surviving statements of the
+pre-narrowing rule, and a roster list deleted to buy budget for content that was leaving.
+
+**Split into two commits on the reviewer's finding.** `PITFALLS.md` §7 (Spec Server listings: `/tasks`
+truncation, the per-endpoint header table, the two notes endpoints, short-id prefixes,
+`on_behalf_of`) and the `CLAUDE.md` bullet pointing at it belong to the open P1
+`SPEC-API-LIST-SILENT-TRUNCATION` (`82f35b73`), not to this task. Both were lifted out of this commit
+and land separately; `PITFALLS.md` therefore runs §6 → §8 until that commit lands.
+
+**Budget.** `CLAUDE.md` 28779 B against its unchanged 28781 B ceiling (`doc-check.sh budget` PASS,
+3 files within ceiling, 5 preserved phrases present); `cmp CLAUDE.md AGENTS.md` identical. Removing
+the out-of-scope pagination bullet freed 301 B, which paid to RESTORE the 14-name roster (235 B) that
+the first pass had deleted — `.claude/ORCHESTRATION.md:8` says `CLAUDE.md` keeps the bare roster, and
+that statement is true again, so `ORCHESTRATION.md` needed no edit.
+
+**Accepted gaps, deliberately not closed here.** (1) The guard classifier is a FLOOR: 22 of 235
+tracked `_test.go` files match checks (b)+(d), so security-bearing tests matching neither remain
+deletable under the carve-out — `internal/httpapi/authmw_test.go`'s `TestEveryRouteRequiresAuth`
+(invariant 3's allow-list) is the worked example. The explicit manifest is owned by `212e695b`
+(T-05); `c9e89d5a` was filed for it and CANCELLED as a duplicate, contributions merged into T-05
+first. (2) F4 — `//go:build ignore` prepended to a `_test.go` removes the file from the build and
+passes every check; residual, named in `DECISIONS.md`. (3) F5 — the durable skip record: closed for
+`CLAUDE.md`/`AGENTS.md` in this pass (both now require the `AGENT_LOG.md` line for every skip), the
+periodic sweep that scopes against it (`ed6853d4`) is still `todo`, so the offset is PLANNED, not in
+place. (4) F6 — `CLAUDE.md:334` and `PITFALLS.md` §4 still say "reviewer AND security gates as
+COMPLETED". That errs STRICT, never loose; the bullet's lead phrase — "A green tree is not a GATED
+tree." — is one of the five rows in `docs/doc-preserve.tsv`, so the bullet cannot simply be deleted,
+and `PITFALLS.md` §4.5 now records that the stricter reading is always safe to follow.

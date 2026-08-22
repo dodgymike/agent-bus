@@ -7472,3 +7472,132 @@ line is the only one present. Impact is bounded: `POST /v1/ack` answers the unif
 key the caller was not a recipient of. The `--json` path carries `correlation_key` as a real field,
 which is the agent-facing surface invariant 7 governs, so the human feed is not the path an agent
 should parse. Rendering the key at column 0 would make it unforgeable; that is the follow-up.
+
+---
+
+## 2026-08-22 — `97a315af`: security is SKIPPED by default for docs-and-tests-only changes with no guard file and no control-plane file
+
+**What changed.** `CLAUDE.md` and `AGENTS.md` ("Agent roster") said the chain
+spec-keeper → implementer → reviewer → security is MANDATORY for ANY code change, and that skipping
+any step needs a one-line `AGENT_LOG.md` justification. Reviewer and documentation are unchanged and
+still mandatory. Only SECURITY's default flips: it is **SKIPPED for a change touching ONLY docs and
+tests AND no GUARD file AND no CONTROL-PLANE file**, and RUNNING it is then what needs the reason.
+The rule is stated here in its FINAL, narrowed form; the control-plane clause was added before this
+entry was committed, and the section "Narrowed the same day" below records how it was arrived at.
+A GUARD file is enumerated concretely so the boundary needs no judgment call — an AST guard, any
+`*guard*_test.go`, and any test whose removal disables an invariant check. A CONTROL-PLANE file is
+anything that decides WHAT is checked or performs the check: `CLAUDE.md`, `AGENTS.md`,
+`INVARIANTS.md`, anything under `.claude/`, `scripts/doc-check.sh`, `scripts/proof-check.sh` and any
+other check or gate script, `docs/doc-budgets.tsv`, `docs/doc-preserve.tsv`.
+**And EVERY skip still needs its `AGENT_LOG.md` line — the carve-out security skip included** —
+naming the skipped tier and the exact paths it covered; that entry is what the periodic sweep
+(`ed6853d4`) scopes against, and `.claude/agents/integrator.md` REFUSES the commit without it.
+
+**Who decided.** The user, on 2026-08-22, answering a proposal backed by measurement. The proposal
+and the decision are on task `97a315af-70b3-4a64-8456-92335d8c9631` as the `kind=request` note by
+`main` (2026-08-22T08:22:14Z).
+
+**The measurement.** A sample of the 1000 most recent project notes held 60 `kind=response` notes
+authored by `security`, spread across 35 distinct tasks: 33 PASS, 16 demanding changes (14
+CHANGES-REQUESTED + 2 CHANGES-REQUIRED), the rest re-audits and addenda. So security demands changes
+on 27% of its verdicts — it is load-bearing, not ceremony. The cost sits elsewhere: 18 of those 35
+tasks (51%) needed two or more security passes, two needed three, one needed four, one needed five,
+and most re-gates re-audit the whole change rather than the delta since the last verdict. **This
+carve-out therefore ROUTES effort; it does not remove the gate.** The waste was in re-gating, not in
+the gate. (Re-measured independently on 2026-08-22 at 08:34Z from the same endpoint: 60 security
+`kind=response` notes, 35 tasks, 18 with two or more passes — identical. The changes-demanding count
+reproduces as 16 or 17 of 60 (27–28%) depending on whether a note whose verdict token is a bare
+`CHANGES` is counted with the CHANGES-REQUESTED class.)
+
+**The alternative that was rejected: fold security into a single commit-time pass, like `integrator`.**
+Refused. The integrator's checks are mechanical and context-free — does HEAD compile, is the deletions
+column zero, is the pathspec scoped — and they lose nothing by running late. Security review needs
+intent and threat model. That is cheap while the implementer is still live and expensive to
+reconstruct afterwards, and the finding it produces can be architectural rather than local.
+
+Evidence, from ACK-5. Security's `kind=response` of 2026-08-21T15:00:17Z returned CHANGES-REQUESTED
+and promoted an unmetered outbound peer request to blocking: the synchronous backward acknowledgement
+hop passed the inbound request context straight to `Propagate` with no deadline, the peer HTTP client
+deliberately sets no `Timeout`, and a stalled upstream therefore held one of only 8 per-peer in-flight
+admission slots — a bucket SHARED with relay message ingest, so the stall denied an honest downstream
+peer its ingest too. The fix was structural: a bounded hop (`cmd/agent-bus/ackback.go:207`
+`ackTransitTimeout`, applied at `:536`) plus a per-upstream in-flight cap taken BEFORE any address
+resolution or dial (`enterUpstream`, `:359`, entered at `:494`), which the 2026-08-21T21:36:19Z
+verdict then re-audited with a nine-mutation battery (7 of 9 KILLED). Found at commit time instead,
+that would have meant shipping the hole or unwinding the work already built on top of it.
+
+**Why the guard-file exception exists.** A test file can be security-relevant, so "docs and tests
+only" alone would be an unsafe rule. The standing example is invariant 11: `client/pin.go` carries the
+repo's single permitted `InsecureSkipVerify: true`, paired with `VerifyPeerCertificate` in the same
+composite literal and enforced by an AST walk in `client/guard_test.go`. Deleting either the line or
+the callback beside it silently disables certificate pinning while every positive test still passes —
+a change that reads as tidying and removes a security property. The rule is therefore "docs and tests
+only **AND** no guard file", never "docs and tests only".
+
+**This is INTERIM.** A tiered chain (T0–T4, keyed off the invariant planes a change touches, with a
+mechanically-computed floor that an implementer may raise but never lower) is being planned now, and
+it will ABSORB this carve-out as its T0/T1 case. Do not read the carve-out as the final shape of the
+rule. No backlog task for the tiering scheme existed when this entry was written (checked 2026-08-22
+against a complete task listing, `X-Total-Count: 808`); the two sibling follow-ups filed alongside
+this one do exist and are both `todo` — `727dc387` (security re-gates must be delta-scoped, citing
+the prior verdict) and `ed6853d4` (a periodic repo-wide security sweep, additive to per-task review).
+
+**Residual risk, accepted deliberately.** Low-tier changes now get less scrutiny, and that is a real
+cost, not a rounding error: the classifier is filename-shaped, and a security-bearing assertion can
+live in a `_test.go` file whose name contains no `guard`. The offset is partial — the periodic
+repo-wide sweep (`ed6853d4`, still `todo` as of 2026-08-22, so the offset is PLANNED and not yet in
+place) catches what a per-task gate skipped. A tiering scheme makes that sweep MORE necessary, not
+less.
+
+**Consumers updated in the same beat**, because the rule is inoperable without them.
+`.claude/agents/integrator.md` step 1 required the report to state reviewer AND security COMPLETED and
+to REFUSE otherwise; since `integrator` is the only agent permitted to commit, that would have refused
+every legitimate carve-out commit. It now requires reviewer COMPLETED always, and security COMPLETED
+unless the carve-out applies — and it **verifies the carve-out mechanically from the diff rather than
+accepting the owning agent's assertion of it**, default-denying any path it cannot classify.
+`.claude/agents/feature-runner.md` (the chain statement and the GATE STATUS report line) and
+`.claude/agents/spec-keeper.md` (definition of done) were corrected to match.
+
+**Narrowed the same day, BEFORE commit: CONTROL PLANE never qualifies.** As first written the
+carve-out was "docs and tests only, and no guard file". The change that introduced it was seven
+files, every one of them `.md`, so **it qualified for its own exemption** and would have been
+committed with no security verdict. Caught reviewing the staged change against HEAD `231b769` on
+2026-08-22:
+
+```
+$ git status --porcelain | sed 's/^...//' | grep -Ev '\.md$|_test\.go$'
+            # no output — every path in the change passed the carve-out's own test
+```
+
+The category error was calling `CLAUDE.md`, `AGENTS.md` and `.claude/agents/*.md` documentation.
+They are CONTROL PLANE: they determine which checks run at all. `scripts/doc-check.sh` and
+`scripts/proof-check.sh` are the same class — they ARE the verification machinery, and security
+review has already found two real defects in `doc-check.sh`: an injectable `TMPDIR` that ran an
+attacker's command while the instrument printed `SELFTEST PASS: 27/27`, and a `sed` option-injection
+where a file named `-n` was eaten as an option so `sed` read the needle from STDIN (both MEDIUM,
+2026-08-21; guards at `scripts/doc-check.sh:1030-1097` and `:335-345`). `docs/doc-budgets.tsv` holds
+the ceilings the budget check enforces, and `docs/doc-preserve.tsv` the phrases it protects.
+
+**The rule, stated so it generalises past the list: a file that determines WHAT is checked, or that
+PERFORMS the check, is control plane. Changing it can disable a check without touching a line of
+product code, and that is exactly the change that needs review.** A `.md` extension does not make a
+file documentation. The enumeration is a floor for the mechanical check
+(`.claude/agents/integrator.md` step 1, check (c)); the principle is what an agent applies to a file
+nobody anticipated, and "it is not on the list" is not an argument.
+
+The carve-out itself stands as the user approved it on 2026-08-22 — this NARROWS it, it does not undo
+it. Applied in all three places it is stated: `CLAUDE.md`/`AGENTS.md` "Agent roster",
+`.claude/agents/integrator.md` step 1, and `.claude/agents/feature-runner.md` +
+`.claude/agents/spec-keeper.md`. The incident, the table of control-plane paths and the reasoning are
+in `PITFALLS.md` §8; `CLAUDE.md` carries the one-liner and the pointer, per its own where-a-warning-
+goes rule. Paying for the `CLAUDE.md` addition inside a 5-byte budget meant tightened sentences, a
+shorter `.claude/ORCHESTRATION.md` pointer, and moving an out-of-scope Spec Server pagination bullet
+to the task that owns it (`SPEC-API-LIST-SILENT-TRUNCATION`, 301 B). The 14-name agent roster was
+cut in a first pass and RESTORED once that 301 B came back: the roster is 235 B, it is what
+`.claude/ORCHESTRATION.md:8` says `CLAUDE.md` keeps, and deleting a list to buy room for content
+that then leaves is a bad trade. `doc-check.sh budget` PASSES: `CLAUDE.md` is 28779 B against its
+unchanged 28781 B ceiling — 2 B of spare, tighter than the 5 B before the change — and `AGENTS.md`
+is byte-identical (`cmp`).
+
+The narrowing is self-demonstrating: check (c) prints five paths for THIS change, so the change that
+narrows the carve-out does not qualify for the carve-out.

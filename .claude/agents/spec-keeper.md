@@ -86,10 +86,18 @@ here.
 ## Definition of done (yours to enforce)
 A task is done only when its status is `done` in the server backlog, its `proof_cmd` and
 `commit_sha`/`test_summary` are recorded via `complete`, the mirror (`SPEC.md` + `SPEC/`) has been
-regenerated, and
-the reviewer + security steps actually ran (or a skip is justified in `AGENT_LOG.md`). Each agent that
-touched the task must have posted at minimum `kind=report` + `kind=model` notes (reviewers also
-`kind=response`). See the notes journal rule above.
+regenerated, and the reviewer step actually ran. Security ran too, unless the change was
+docs-and-tests-only with no guard file AND no control-plane file (CLAUDE.md "Agent roster":
+`CLAUDE.md`, `AGENTS.md`, `INVARIANTS.md`, `.claude/**`, check/gate scripts, `docs/doc-*.tsv` —
+anything that decides WHAT is checked or performs the check, whatever its extension, but NOT
+`PITFALLS.md`, which records incidents and defines no check (stated decision, 2026-08-22); a guard
+is decided by CONTENT as well as by name, so a test importing `go/ast`/`go/parser` or touching
+`InsecureSkipVerify`/
+`VerifyPeerCertificate` counts, and so does one whose removal disables an invariant check however it
+is named). **EVERY skip, the carve-out one included, must be recorded in `AGENT_LOG.md` naming the
+skipped tier and the exact paths** — that entry is what the periodic carve-out sweep scopes against,
+so a skip with no entry is not done. Each agent that touched the task must have posted at minimum `kind=report` +
+`kind=model` notes (reviewers also `kind=response`). See the notes journal rule above.
 
 ### Record your work as Spec Server task notes (REQUIRED)
 

@@ -119,6 +119,27 @@ by the integrator re-running the stored `proof_cmd` (`AGENT_LOG.md:3896`).
 Diagnose whether YOUR change caused it or it is pre-existing, name the exact failing test, and report
 the verdict. Never hand-wave "pre-existing failures" to declare success.
 
+### 2.7 A backtick inside a doc-check heading is command-substituted by the inner shell
+
+Same family as 2.3, different construct. `proof-check.sh` runs the stored command through a shell, so
+a backtick in a `doc-check.sh section` argument is COMMAND SUBSTITUTION, not literal text. Measured
+2026-08-22 while proving the CLAUDE.md carve-out:
+
+```
+# stored proof (single-quoted here, but the inner shell still sees bare backticks)
+bash scripts/doc-check.sh section CLAUDE.md "## Agent roster (`.claude/agents/`)" "<needle>"
+  -> proof-check: verdict=FAIL exit=1        # heading became "## Agent roster ()"
+# the same assertion, backticks escaped as \`
+  -> proof-check: verdict=PASS exit=0
+# and run directly, with no shell re-parse:
+  -> doc-check: PASS: CLAUDE.md — 1/1 needles inside "## Agent roster (`.claude/agents/`)"
+```
+
+The failure direction here was safe (a heading that no longer exists FAILs, per `section`'s
+absence-is-failure rule), but the reverse is available: substitute a backtick pair out of a heading
+that still resolves and the proof scopes a section the author never named. Escape every backtick in a
+stored `proof_cmd`, or choose a heading that has none.
+
 ---
 
 ## 3. Verify in a clean overlay of HEAD, not in your working tree
@@ -204,6 +225,12 @@ each time discovered only when the agent later reported findings against code al
 Do not commit an agent's work until it reports its reviewer AND security gates as COMPLETED, not
 merely dispatched. Committing mid-review has shipped two real security holes here — a relay SSRF and
 an unbounded input — both caught by gates that were still running when the commit landed.
+
+Since 2026-08-22 the security gate alone may legitimately be SKIPPED rather than COMPLETED, under the
+docs-and-tests carve-out (§8). That is the ONLY relaxation: reviewer is still always required, and a
+skip is only valid when it is recorded in `AGENT_LOG.md` naming the skipped tier and the exact paths.
+`CLAUDE.md` and this section still say "reviewer AND security … COMPLETED"; that reading is stricter
+than the carve-out, never looser, so following it verbatim is always safe.
 
 ---
 
@@ -387,3 +414,118 @@ stronger property that does not hold.
 
 When you write "X is always Y" in a contract, test the degenerate argument — `-`, the empty string,
 a name that is only whitespace — before the sentence goes in.
+
+---
+
+## 8. A gate rule that exempts the change which weakens it
+
+### 8.1 The docs-and-tests security carve-out qualified for itself
+
+Measured 2026-08-22 against HEAD `231b769`, while the carve-out recorded in `DECISIONS.md`
+(2026-08-22, `97a315af`) was staged and NOT yet committed. As first written it skipped security
+review for a change touching ONLY docs and tests with no guard file. Its own introduction was seven
+files, every one of them `.md`:
+
+```
+$ git status --porcelain | sed 's/^...//' | grep -Ev '\.md$|_test\.go$'
+            # no output: every path in the change qualified for the carve-out
+```
+
+So the change that WEAKENED the security gate passed the gate's own test for "not security-bearing",
+and would have been committed with no security verdict. Caught in review before the commit, and
+narrowed in the same change that introduced it.
+
+### 8.2 The principle: a `.md` extension does not make a file documentation
+
+**A file that determines WHAT is checked, or that PERFORMS the check, is CONTROL PLANE.** Editing one
+can disable a check without touching a line of product code, and that is exactly the change that
+needs review. Control plane never qualifies for the carve-out, whatever its extension:
+
+| path | why it is control plane |
+|---|---|
+| `CLAUDE.md`, `AGENTS.md` | injected into every spawn; they state which gates run at all |
+| `INVARIANTS.md` | it states what a reviewer and a security pass measure a change AGAINST |
+| `.claude/**` | agent definitions, `ORCHESTRATION.md`, settings — the gates as implemented |
+| `scripts/doc-check.sh`, `scripts/proof-check.sh` | they ARE the verification machinery |
+| `docs/doc-budgets.tsv`, `docs/doc-preserve.tsv` | the ceilings and phrases `doc-check.sh budget` enforces |
+| any script that implements a check or gate | same reason, whatever it is named |
+
+`INVARIANTS.md` was missed by the first version of this list and added 2026-08-22: it matched neither
+the `.md` test nor check (c), so a solo edit narrowing an invariant would have been classified
+docs-only and committed with no security verdict — while every later review then measures the code
+against the narrowed text.
+
+**`PITFALLS.md` is NOT control plane — a stated decision, 2026-08-22, not an omission.** It records
+incidents and reasoning; no gate consults it to decide what to check, so a solo edit here is
+docs-only. Revisit that if it ever becomes the only place a check's scope is defined (the table above
+mirrors `.claude/agents/integrator.md` check (c), which is the mechanical copy).
+
+The list is illustrative and it will go stale. The PRINCIPLE is what you apply to a file nobody
+anticipated: "it is not on the list" is not an argument — ask whether editing the file could make a
+check stop checking, or stop checking the thing it claims to.
+
+The check scripts are not a hypothetical attack surface. Security review has already found two real
+defects in `scripts/doc-check.sh`: an injectable `TMPDIR`, where a hostile value ran an attacker's
+command AND the instrument still printed `SELFTEST PASS: 27/27` (`scripts/doc-check.sh:1030-1045`,
+regression guards to `:1097`), and a `sed` option-injection, where a file NAMED `-n` was eaten as an
+option so `sed` read the needle from STDIN and the verdict line looked perfect for a file that did
+not contain it (fixed with `--` at `:345`, reasoning at `:335-344`, fixture at `:644`). Both are
+`.sh` files that only ever run inside proofs; both were MEDIUM findings, 2026-08-21.
+
+The mechanical form of the exclusion is `.claude/agents/integrator.md` step 1, check (c). Judge it by
+EMPTY OUTPUT, never by exit status — `grep` exits 1 when it matches nothing. Empty output only counts
+once check (0) has confirmed the pathspec matches something — see §8.3.
+
+### 8.3 Three ways the carve-out's own checks read as a pass without checking
+
+Measured 2026-08-22 against the staged carve-out at HEAD `231b769`, before it was committed. Each
+made all of checks (a), (b) and (c) print nothing, which the integrator reads as "carve-out applies,
+security may be SKIPPED".
+
+**Renames were invisible.** `git status --porcelain` prints a rename as ONE line, `R  old -> new`, and
+the `sed 's/^...//'` leaves `old -> new`. Check (a) tests only the line END, so any rename whose
+TARGET ends `.md` or `_test.go` was suppressed whatever the SOURCE was; check (c) is `^`-anchored, so
+it never saw the target at all. All three of these produced three empty checks:
+
+```
+R  CLAUDE.md -> DOCS.md
+R  docs/policy.md -> .claude/agents/newreviewer.md
+R  client/pin.go -> client/pin_test.go
+```
+
+The second lands a new agent definition under `.claude/` with no security verdict, reachable from any
+docs reorganisation done with `git mv`. Fixed by `--no-renames` on every `git status --porcelain` in
+the checks, which prints the rename as a separate `D old` and `A new` so both halves get classified.
+
+**The checks failed OPEN on a pathspec that matched nothing.** `git status --porcelain -- <pathspec
+matching nothing>` prints nothing and exits 0 — unlike `git commit`, which errors. A typo, the wrong
+case, the wrong cwd, or an unquoted pathspec containing a space (`P=(dir with space/x.md)` splits
+into three elements) therefore emptied all three checks. Measured: a staged unreviewed edit to
+`client/pin.go`, checked as `client/Pin.go`, gave SECURITY SKIPPED. Fixed by check (0), which
+REFUSES when any element of the pathspec matches nothing: **empty output now means two different
+things, and only one of them is a pass.**
+
+**"Guard file" was enforced by filename only.** `CLAUDE.md` defines a guard as "an AST guard, any
+`*guard*_test.go`, any test whose removal disables an invariant check", but check (b) grepped PATHS
+for `guard`. Measured over `git ls-files`: 16 tracked code files carry a `go/ast`/`go/parser` walk
+and only 5 have `guard` in the path. Missed: `cmd/agent-bus/tlslisten_test.go` (the
+no-plaintext-listener AST guard, invariant 11) and `client/pinrotate_test.go`'s
+`TestPinIsNeverLearnedFromAHandshake` (no TOFU, invariant 11) — `client/guard_test.go` was protected
+while two siblings enforcing the same invariant were not. Check (d) now greps the touched
+`_test.go` files' CONTENT, on both the HEAD and the index side, for
+`go/ast|go/parser|InsecureSkipVerify|VerifyPeerCertificate`.
+
+**(b) and (d) together are still a FLOOR.** `internal/httpapi/authmw_test.go`'s
+`TestEveryRouteRequiresAuth` pins invariant 3's unauthenticated-route allow-list and matches NEITHER
+pattern, so it remains deletable under the carve-out as written. The definition governs; the regexes
+are a convenience.
+
+**Enumerate with `git ls-files`, never a filesystem walk.** Nested checkouts under
+`.claude/worktrees/` and `.worktrees/` inflate a naive `grep -r`/`find` by a large and VARYING
+factor, which makes the coverage gap look closed when it is not. **Record the METHOD, never an
+absolute walk count** — the count changes as worktrees are created and removed, so anything written
+down here is stale by the next read. Snapshot only, 2026-08-22: the two counts above were recorded as
+148 files / 61 guard-named earlier in the day and measured 114 / 45 later the same day, while
+`git ls-files` gave 16 / 5 both times. Treat those figures as an illustration of the spread, not as
+current; re-measure with `git ls-files` when you need a number. (Same trap as the CLAUDE.md byte
+count in `docs/doc-budgets.tsv`: "do not trust that number: run the check".)
