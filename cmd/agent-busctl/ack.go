@@ -24,9 +24,13 @@ WHAT IT DOES
   you, and settles that message's row for you as the recipient. The sender
   then sees it through ` + "`agent-busctl ack-status`" + `.
 
-  The message id is the ` + "`message_id`" + ` the message arrived with —
-  ` + "`agent-busctl watch --json | jq -r .message_id`" + `. It is the id the ORIGIN bus
-  minted (invariant 1) and it is bus-namespaced.
+  The message id is the CORRELATION KEY, and the correlation key is the id the
+  ORIGIN bus — the SENDER's bus — minted (invariant 1), fully bus-namespaced
+  (invariant 2). For a message sent from YOUR OWN bus that is the
+  ` + "`message_id`" + ` the message arrived with,
+  ` + "`agent-busctl watch --json | jq -r .message_id`" + `. For a message RELAYED
+  to you it is NOT: your bus minted a SECOND id for its own local copy, ` + "`watch`" + `
+  prints that LOCAL id, and this route refuses it.
 
   CORRECTED 2026-08-21 (ACK-12). This paragraph used to end "...so it
   identifies the message across every hop it took to reach you." THAT IS NOT
@@ -43,6 +47,51 @@ WHAT IT DOES
   message you are being asked to acknowledge. Tracked as P0 7d564118
   (destination row) and P0 f423959c (watch correlation key). When those land,
   delete this notice — do not leave it standing once it is stale.
+
+  UPDATED 2026-08-21 (ACK-5). PART of the notice above has landed and part has
+  not, so it stays — corrected beside itself rather than deleted, because a
+  half-true notice reads as freshly checked.
+
+  WHAT LANDED — the BEHAVIOUR P0 7d564118 names. (Its task record was still
+  open in the Spec Server when this was written, 2026-08-21; do not read this
+  as the task being closed.) A message RELAYED to this bus CAN now be
+  acknowledged here, but ONLY under the ORIGIN bus's message id. This bus
+  authorizes you from the relayed message it still retains, writes NO lifecycle
+  row of its own, and carries your outcome one hop back along the path the
+  message took, stopping at the ORIGIN bus — which holds the only
+  sender-visible row. So "a relayed message ... opens no lifecycle row and
+  answers exit 8 unknown" above — and with it "a same-bus DIRECT message, and
+  only that" — is now FALSE under the origin id, and still TRUE under the
+  local id.
+
+  WHAT DID NOT LAND — P0 f423959c, and it is the trap. The id ` + "`watch`" + ` prints is
+  still the LOCAL one, and this route REFUSES a correlation key whose bus half
+  is this bus: the same uniform exit 8 unknown, with nothing recorded anywhere.
+  There is still no way to obtain the origin id from ` + "`watch`" + `, so today it has
+  to reach you OUT OF BAND — the sender captures it from
+  ` + "`agent-busctl send --json | jq -r .message_id`" + ` and tells you.
+
+  BROADCAST IS UNTOUCHED. recordAcceptance still early-returns on broadcast, so
+  a same-bus BROADCAST still opens no lifecycle row and still answers exit 8
+  unknown. That half is tracked separately as ACK-BROADCAST-NO-LIFECYCLE-ROW.
+
+  TWO EXIT CODES CARRY MORE ON THE RELAYED PATH than the table below says on
+  its own. Exit 6 is the backward hop failing: the bus answers 503 with
+  Retry-After, this acknowledgement recorded nothing, and the identical retry
+  is the right FIRST response — but it is NOT guaranteed to succeed, so back
+  off and give up after a bounded number of attempts rather than looping.
+  CORRECTED 2026-08-21 (ACK-5): this paragraph called the retry "the correct
+  remedy" and set no bound. The same 503 is returned when the hop above
+  FINALLY refused with a 409 — a swept row, a recipient the sender never
+  addressed, or a conflicting terminal already standing at the origin — and
+  none of those ever clear. Transient and permanent are byte-identical here
+  BY DESIGN: no bus echoes another bus's verdict back down the chain, so the
+  bus cannot tell you which one you are in. Exit 7 ALSO means this bus has no
+  back-propagation wired at all (501: permanent, do not retry), as well as
+  "already terminal with a different outcome". The message text tells those
+  apart, so do not branch on the number alone.
+
+  Delete this notice only once f423959c AND the broadcast gap have landed too.
 
   IT IS THE MESSAGE ID, NOT THE SEQUENCE. ` + "`seq`" + ` is identity and a delivery
   position is a position; this is correlation. They are three different
@@ -97,6 +146,28 @@ RE-ACKNOWLEDGING IS SAFE; CHANGING YOUR MIND IS NOT
   accepted, ` + "`duplicate`" + ` is true, nothing is re-applied and nobody is
   disconnected. Sending a DIFFERENT outcome for a message you already settled
   is refused with exit 7 and NOTHING is written; retrying cannot change that.
+
+  BOTH SENTENCES ABOVE DESCRIBE A MESSAGE YOUR OWN BUS ORIGINATED. Corrected
+  in place 2026-08-21 (ACK-5): a RELAYED message differs on both counts,
+  because the row lives at the ORIGIN bus and your bus keeps none — it only
+  carries your outcome one hop back toward it.
+
+    ` + "`duplicate`" + ` IS ALWAYS false for a relayed message, even when you
+    re-acknowledge: there is no record here for a retry to be a duplicate OF,
+    and the duplicate is absorbed at the origin, where the record is. Never
+    read ` + "`duplicate:false`" + ` as proof this is your first acknowledgement.
+
+    A DIFFERENT OUTCOME IS NOT exit 7 here. The origin answers 409 and no bus
+    turns that into a 4xx for you, so what you get depends on how many buses
+    the message crossed — and you cannot tell which case you are in:
+      - your bus peers DIRECTLY with the origin: exit 6 (503), every time and
+        for ever. It is NOT transient and no amount of retrying clears it.
+      - an INTERMEDIATE bus sits in between: exit 0, accepted true, and the
+        state printed is the outcome YOU just asserted — while the origin
+        still holds the FIRST one. The intermediate absorbs the origin's 409
+        deliberately (DECISIONS.md, 2026-08-21, ACK-5).
+    So exit 0 on a relayed message means "the next hop back took it", not
+    "the origin recorded exactly this".
 
 "unknown" IS FOUR ANSWERS AT ONCE, AND CANNOT BE NARROWED
   Exit 8 with state ` + "`unknown`" + ` means the bus retains nothing for you and that

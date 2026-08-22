@@ -163,6 +163,18 @@ type AckConfig struct {
 	// working anti-forgery rule and is actually a total outage.
 	Obligations AckObligations
 
+	// NextHopAddress resolves the address THIS BUS would dial to reach a given
+	// bus id, and is the third clause of AuthorizePeerAckVia's indirect arm — the
+	// transit case a multi-hop chain needs, where the acknowledging peer is the
+	// NEXT HOP and the outbox job is keyed on the DESTINATION. Pass
+	// Registry.PeerBaseURL as the METHOD VALUE; it is called concurrently and
+	// takes the registry's RLock.
+	//
+	// Optional. NIL MEANS THE DIRECT ARM ONLY — correct for a bus with no static
+	// routes, and byte-for-byte the pre-ACK-5 behaviour. It never widens a
+	// refusal: a nil table fails closed to AuthorizePeerAck's own answer.
+	NextHopAddress NextHopAddress
+
 	// Admit meters this surface BY THE AUTHENTICATED PEER, before the outbox
 	// mutex is ever taken. It returns a release to call when the request is
 	// done, or an error to refuse with.
@@ -204,6 +216,7 @@ type AckConfig struct {
 type AckHandler struct {
 	busID       string
 	obligations AckObligations
+	nextHop     NextHopAddress
 	admit       func(string) (func(), error)
 	settle      func(context.Context, SettledAck) (AckSettlement, error)
 	log         *logging.Logger
@@ -244,6 +257,7 @@ func NewAckHandler(cfg AckConfig) (*AckHandler, error) {
 	return &AckHandler{
 		busID:       cfg.BusID,
 		obligations: cfg.Obligations,
+		nextHop:     cfg.NextHopAddress,
 		admit:       cfg.Admit,
 		settle:      cfg.SettleAck,
 		log:         log,
@@ -381,7 +395,7 @@ func (h *AckHandler) ServeAuthenticated(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// LAYER 2, THE ANTI-FORGERY CORE (§6.2). peerBusID is the AUTHENTICATED one.
-	obligation, err := AuthorizePeerAck(h.obligations, h.busID, peerBusID, ack.CorrelationKey, ack.Recipient)
+	obligation, err := AuthorizePeerAckVia(h.obligations, h.nextHop, h.busID, peerBusID, ack.CorrelationKey, ack.Recipient)
 	if err != nil {
 		h.refuse(w, peerBusID, req, err)
 		return

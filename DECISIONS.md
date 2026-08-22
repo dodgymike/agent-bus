@@ -6641,6 +6641,322 @@ Adding the version did not make the envelope forward-compatible; it made the NEX
 deploy discipline. The strict decoder stays: an unknown field on a federation surface is a real
 signal.
 
+## 2026-08-21 — ACK-5: a terminal outcome travels backwards, and no intermediate records it
+
+> **NOT LANDED at the time of writing.** The code sits uncommitted in a worktree; the integrator
+> commits. This entry is written in the present tense about the change, not about `main`, and the
+> distinction matters — a dated claim that something IS in `main` when it is not is what the 2026-08-07
+> integrator refusal exists to prevent.
+
+`ACK-5` makes plane C reachable beyond one hop. A terminal outcome raised by a recipient at the far
+end of `A→B→C` now travels backwards, one hop at a time along the traversed `bus_path`, and stops at
+the origin bus — the only bus holding a durable sender-visible lifecycle row. Correlation is §3's key
+(the origin's server-minted message id) and nothing else; no fourth identifier is minted (invariant
+1). Three decisions in it are real, in the sense that a competent implementer would have chosen
+otherwise on at least one.
+
+Invariants read in full before writing: **2** (fully-qualified ids), **4** (nothing acknowledged
+before durable), **6** (metadata and routing only; loud, specific discard), **10** (idempotency, and
+the two questions before any disconnect), **11** (TLS, mutual, and the pinned peer client).
+
+### 1. NO lifecycle row is written at an intermediate or terminal bus
+
+**Decision.** Only the ORIGIN bus writes a sender-visible row. `hub.recordAcceptance` already returns
+early for relayed ingest; `ACK-5` does not change that, writes no row of its own on any surface, and
+adds no durable state whatsoever — no record type, no file, no index.
+
+**The alternative considered: write rows at relayed ingest**, so every bus on the path has something
+to settle and the existing peer-ack path works unchanged at every hop. It is the obvious design and
+it was rejected for three reasons, in descending order of weight.
+
+- **The row would be readable by NOBODY.** §13.3 authorises exactly one reader — the ORIGINAL SENDER,
+  on the origin bus. An intermediate's row has no reader at all, so it is durable state that answers
+  no question anyone is entitled to ask.
+- **The cost lands on a PEER-DRIVEN path.** Each row is a separate two-phase transaction under the
+  global write lock, so it is one fsync per recipient, up to `store.MaxRecipients` (64) per relayed
+  message. `hub.recordAcceptance`'s own cost note already names this as the thing to re-check before
+  any task gives a send several recipients — today the local loop runs exactly once, and relayed
+  ingest is precisely the caller that passes several. Taking that cost for an unreadable row would
+  make the hazard live, driven by a remote bus rather than by a local agent.
+- **It would put SEVERAL rows behind one correlation key**, which `ACK-4-FU-RECIPIENT-BINDING` says
+  must not happen before its fix lands.
+
+**The cost accepted instead** is stated in decision 2: a transit acknowledgement depends on the
+relayed MESSAGE still being retained.
+
+### 2. The recipient acknowledgement boundary now consults the message store — on ONE arm
+
+**Decision.** `internal/hub/ack.go`'s "THIS BOUNDARY NEVER CONSULTS THE MESSAGE STORE" is **narrowed,
+in place and marked**. On `ack.ErrNoRecord` and only there, `hub.transitAck` asks
+`store.RelayProvenanceByOriginMessageID` one routing question: does this bus hold a **relayed** copy
+under this correlation key naming the authenticated principal as a recipient? If so the acknowledgement
+is AUTHORISED and reported as transit; nothing is written.
+
+**The original reasoning (ACK-6), which still governs every row.** The lifecycle row is the authority
+and the message store is not consulted, because the two retention regimes differ — a message is kept
+for 1 day or 1 GiB, whichever bites first, a row for `ack.Retention` (24h) from `accepted_at` — so
+requiring the message to still be held would refuse an acknowledgement for a message the recipient
+demonstrably received and is holding a copy of. And "two fields that must agree are two fields that
+can disagree" applies to two TABLES with far more force.
+
+**Why the narrowing was forced.** A relayed message has no row here, by decision 1. So without a
+second authorisation path the recipient on bus C is told the uniform `unknown`, and §8.4's rule that a
+hop receipt never converts to delivery leaves plane C unreachable beyond one hop. That is the defect,
+not a nicety.
+
+**Why the original reasons do not reach this arm.**
+
+- **The two-tables-can-disagree hazard cannot arise, because the paths are DISJOINT BY
+  CONSTRUCTION.** A message is either relayed or locally originated, never both, and only the
+  locally-originated one ever has a row. `transitAck` refuses a locally-originated message outright —
+  this bus IS its origin, so forwarding would send a terminal outcome to a bus that never owed us one
+  and turn an expired row into an unsolicited network contact. No row is ever settled, reopened or
+  overridden on the strength of a message lookup.
+- **No oracle is added.** The principal comes from the request context and there is no field another
+  agent's id could arrive in, so an agent can only ever ask whether IT was addressed. A non-member and
+  a miss are byte-identical, and ids are compared with `==`, the same rule `store.Message.VisibleTo`
+  used to decide whether the agent could ever have been HANDED the message — matching more loosely
+  here would authorise acknowledging a message never shown. The accessor is body-free by construction
+  (`internal/store/provenance.go`: recipients, `bus_path`, a `relayed` flag; no body, no sender, no
+  signature, no timestamps), which is invariant 6's line drawn at the seam rather than trusted to a
+  caller.
+
+**The cost, accepted rather than argued away.** The retention objection is REAL on this arm: a transit
+acknowledgement stops working once the relayed message is pruned, which the 1 GiB cap can make happen
+well before 24h. The recipient is then told the uniform `unknown`. The alternative is decision 1's
+unreadable rows, and this bus genuinely has nothing else to bind the frame to once the message is gone.
+Two residuals are declared rather than hidden: a coarse TIMING difference between the transit arm
+(which resolves a message and performs network I/O) and the uniform refusal, which is the same
+residual `ACK-4` already declares for `GET /v1/ack/<key>`; and one transient body copy per call,
+because the accessor projects over `ByOriginMessageID` rather than duplicating its subtle
+`byOrigin`-then-local-id fallback.
+
+### 3. Propagation is SYNCHRONOUS, with no durable queue and no retry
+
+**Decision.** Each hop answers only after the next hop has answered. There is no spool, no queue and
+no retry on this path.
+
+**The alternative considered: a durable queue with retry** at each hop — accept locally, answer 200,
+and deliver upstream in the background, which is exactly the shape the existing outbox has for
+messages. Rejected because the outbox's shape solves a different problem: it exists because the
+message must be delivered even if the peer is down for a day, and it pays for that with a record type,
+a resume path and a retry horizon.
+
+**Why synchronous is correct here.** Invariant 4 says nothing is acknowledged before it is durable,
+and on this path the durable write happens at the ORIGIN, possibly several hops away. Answering only
+after the next hop has answered makes **invariant 4 hold END TO END through the chain** rather than
+through a local write — which is precisely what makes it correct for this path to add no durable state
+of its own, and closes the loop with decision 1. A failure is answered **"not now"** (503 on both
+surfaces, with `Retry-After: 1` on the agent surface): nothing was written on any bus, so the
+identical retry is safe and is the correct remedy, and nothing is lost because nothing was
+acknowledged. A 4xx is deliberately never used, because `PeerRefusedError.Retriable` treats every 4xx
+but 408/429 as FINAL and the outcome would be **abandoned** rather than delayed.
+
+**The cost.** A recipient's acknowledgement now has the latency of the whole chain and fails when any
+bus on it is down. That is the honest exchange for a guarantee that holds end to end, and it is
+bounded: nothing is lost, only delayed. **Retry, backoff and bounce remain `ACK-7`/`ACK-14`** and
+belong there — once, beside the durable outbox that already survives a restart. A loop added here
+would be a second retry policy with no durable record behind it: it would survive neither a restart
+nor a crash and would race the real one the moment `ACK-7` lands.
+
+### Two smaller calls, recorded because they look like bugs
+
+- **A FINAL refusal from upstream is answered 200 downstream, not forwarded.** Re-offering a frame the
+  origin has finally refused is the retry amplification §9.3 exists to stop; and forwarding the
+  origin's 409 verbatim would turn the hop into an ORACLE, letting any bound peer ask whether the
+  ORIGIN holds a row for a recipient it names — the uniform-answer property, leaked one hop back. The
+  settlement really is dropped, so it is logged loudly and specifically (invariant 6) with the
+  upstream status, which is what an operator needs to see it.
+- **`duplicate` is always `false` on the transit path.** This bus keeps no record for a relayed
+  message, so there is nothing here for a retry to be a duplicate OF; the duplicate is absorbed where
+  the record is, at the origin, under §8.2 note 2. Labelling it otherwise would mean this bus
+  asserting something about a table it does not hold. The consequence is documented rather than
+  papered over: a recipient CAN infer the transit path from `duplicate:false` on a re-acknowledgement,
+  which is a topology hint to a party that was handed the message, not a message-existence oracle.
+
+**No disconnect is added anywhere** (invariant 10, §12). Both of invariant 10's questions were asked:
+a merely BUGGY client reaches every refusal on these paths (a de-peered neighbour, an upstream bus
+that is simply down, a message swept by retention), and a peer link carries an entire remote roster's
+traffic rather than one principal's.
+
+### Applied after review — the 200 arm is narrowed to 409, and invariant 4 is narrowed with it
+
+The reviewer and security gates on `ACK-5` produced one behavioural correction, and it makes an
+absolute stated five places in the new code slightly untrue. Both halves are recorded here.
+
+**The correction.** The bullet above — "A FINAL refusal from upstream is answered 200 downstream" —
+was implemented as `!refused.Retriable()`, and `PeerRefusedError.Retriable()` calls **every** 4xx
+except 408/429 final. So **404, 403 and 400 all landed in the 200 arm**, and every one of them is an
+upstream that decided *nothing about the frame*: `relay.Client.PeerAck`'s own rollout-ordering note
+says an upstream running a pre-`ACK-5` binary does not serve the route and answers **404**; a **403**
+is an ordinary de-peering; a **400** is `RELAY-51`'s live `DisallowUnknownFields` hazard. Traced end
+to end, each produced `200 accepted:true` to the recipient with the outcome DROPPED and nothing
+durable anywhere — §1.1's sentence, written by the code that exists to prevent it. The arm is now
+`refused.StatusCode == http.StatusConflict` and nothing else; every other final status falls to the
+existing 503. The earlier bullet is left standing rather than edited (this file is append-only) and
+is **superseded by this paragraph**.
+
+**Why 409 is still absorbed.** A 409 is the ONE final refusal meaning the upstream *understood the
+frame and made a decision about it* — no obligation binds that recipient, or a conflicting terminal
+already stands there. Re-offering it is the retry amplification §9.3 exists to stop, and forwarding
+its verdict verbatim would tell any bound peer whether the ORIGIN holds a row for a recipient it
+named: the uniform-answer property, leaked one hop back. A 404/403/400 is instead
+OPERATOR-recoverable — upgrade the binary, re-peer the bus, fix the encoder — so "not now" is
+truthful and a later identical offer can succeed. The anti-oracle property is unchanged either way:
+the 503 is byte-identical to every other "not now" on that route, so a downstream peer still never
+learns the upstream's verdict.
+
+**THE NARROWING, stated plainly.** Five doc sites now assert, and asserted without qualification
+before this change, that *nothing is answered `accepted` before the ORIGIN has fsynced the outcome*
+— `cmd/agent-bus/ackback.go`'s header, `internal/hub/ack.go` (the `RecipientAckResult.Transit`
+contract and the `AcknowledgeDelivery` check-order list), `internal/httpapi/server.go`
+(`Options.AckTransit`) and `internal/httpapi/ack.go` (the `AckTransit` interface and `handleAck`
+step 6). **That is true on every arm except one**, and all five now say so in place rather than
+dropping the claim: an INTERMEDIATE bus absorbs a 409 and answers ITS downstream 200, so across two
+or more backward hops a recipient can be told `accepted` for an outcome the origin refused with a
+409 — and in the "no obligation binds that recipient" case nothing durable exists anywhere. No bus
+does this to its OWN immediate caller: on the agent surface every `TransitAck` error, 409 included,
+is a 503.
+
+**The cost, accepted rather than argued away.** A recipient at the end of a multi-hop chain can be
+told `accepted` for a settlement that was refused at the origin, and it has no way to tell that from
+a recorded one — deliberately, since §13.3's posture is that a recipient learns the outcome of the
+message it was handed and nothing about the federation. The alternative — forwarding the 409 — buys
+the recipient a truthful answer at the price of a row-existence oracle for every bound peer, and is
+the worse trade. It is bounded: it needs the origin to refuse a frame an intermediate was
+legitimately bound to carry, which is the swept-row and never-addressed-recipient case, not the
+steady state.
+
+**AMENDED 2026-08-21 (`ACK-5` documentation pass); the sentence above is left standing beside this
+correction.** "The swept-row and never-addressed-recipient case" **omits the third cause this entry
+names two paragraphs earlier** — a **conflicting terminal already standing at the origin**. That one
+is not exotic: it is what a recipient reaches by changing its mind about a message, and it is
+permanent. Both of its observable shapes were traced through the code rather than assumed. With the
+recipient's bus peered **directly** to the origin there is no intermediate to absorb anything, so
+`handleAck`'s transit arm turns the 409 into a **503**, which the CLI reports as **exit 6** —
+identically and for ever, with `Retry-After: 1` inviting a retry that can never clear. With an
+**intermediate** in between, the recipient gets **exit 0, `accepted:true`, `duplicate:false`, and
+`state` set to the outcome it has just asserted**, while the origin's FIRST outcome still stands. So
+the bound is "not the steady state"; it is **not** "only where nothing was ever recorded anywhere".
+
+**The documentation pass that found it.** `AGENT_PROTOCOL.md`'s exit-6 row called the identical retry
+"safe by construction and … the correct remedy", named only transient causes, and set no bound on the
+attempts — advice that becomes an endless loop on the 409 causes, which are permanent. It now says
+retry with backoff, **bounded**, and states that a transient failure and a permanent refusal are
+byte-identical to a recipient **by design**. The unqualified "not told `accepted` until the origin has it on disk" is narrowed in place
+in `AGENT_PROTOCOL.md`, `PROTOCOL.md` §12, `CONTRACTS-HTTP.md`'s `POST /v1/ack` section and
+`ACK-CONTRACT.md` §9.4.2 — the last of which the review did not name and which carried the same
+unqualified claim. `cmd/agent-busctl/ack.go`'s help now separates the local case from the relayed one.
+Two citations were corrected: `ACK-CONTRACT.md` cited `internal/relay/ackback.go:831` for
+`AuthorizePeerAckVia`, which is a line inside its doc comment (the declaration is `:843`), and
+`CONTRACTS-HTTP.md` cited `internal/httpapi/ack.go:459` for the "ONE arm that carries a Retry-After"
+phrase, which is at `:501`. The same `:831` citation appears later in this entry, in the `ACK-12`
+amendment, and is left as written because this file is append-only.
+
+**One claim in those docs was REFUTED rather than reworded, and it is a real gap.** `UpstreamHop`'s
+end-at-us rule was documented — in `internal/relay/ackback.go`, `cmd/agent-bus/ackback.go`,
+`PROTOCOL.md` §12 and `ACK-CONTRACT.md` §9.4.2 — as stopping a peer from steering this bus's onward
+contact. It does not. `hub.relayedBusPath` checks that the arriving path is non-empty, within
+`store.MaxReceivedBusPath`, that every hop is a valid bus id and that this bus is not already on it,
+then appends this bus; `hub.RelayedIngestRequest` has **no peer-principal field at all**, so nothing
+binds `received[len-1]` to the authenticated peer and an authenticated peer can still name a
+different bus it knows we peer with as our upstream. What the rule DOES buy is narrower and still
+worth having: we contact only the hop adjacent to a position **we** wrote, and only if it is in our
+own peer registry with a base URL — so a fabricated prefix can never name an address, a host or a
+scheme, and an unpeered id means nothing is dialled. The residual is bounded at the far end by §6.2's
+obligation binding. Tracked as **`ACK-5-FU-BUSPATH-SENDER`**, which is now named at each corrected
+site; `cmd/agent-bus/ackback.go` still carries the refuted wording and is owned by another agent in
+the same change.
+
+**Two smaller corrections applied at the same time.** The backward hop is now bounded by
+`ackTransitTimeout = relay.DefaultForwardTimeout` (referenced, not copied, so it cannot drift from
+the forwarder's own per-attempt bound), derived from the INBOUND context so a caller that goes away
+still cancels the outbound hop. It had no deadline at all: the pinned peer HTTP client carries no
+`Timeout`, `ForwarderOptions.Timeout` does not cover this path, the server leaves
+`ReadTimeout`/`WriteTimeout` unset for the long-poll, and `peerDialTimeout` bounds only connect and
+handshake — while a stalled call holds one of eight per-peer in-flight slots **shared with relay
+message ingest**, so an unbounded ACK hop is a denial of service against a neighbour's MESSAGE
+delivery, not merely against its acknowledgements. And `federationOptions.AckTransit`'s doc no
+longer calls a nil one "a LEGITIMATE configuration": `main.go` builds the back-propagator on the
+`peerStore != nil` branch with every failure fatal, and `newFederation` is reached only from
+`bindable > 0`, which implies that branch — so the nil arm is a fail-closed default reachable only
+from a test or a future composition, kept because the alternative is a nil dereference on a
+peer-facing path.
+
+### Applied after the `ACK-12` harness — §6.2's obligation binding is WIDENED by ONE case
+
+The three-bus acceptance harness proved the ACK plane still failed at the LAST hop back, and the
+cause was in `ACK-CONTRACT.md` §6.2 itself rather than only in the code. **The contract is amended in
+place and marked; this is the decision behind that amendment.**
+
+**The defect, measured rather than hypothesised.** On A→B→C with a recipient on C and a sender on A,
+A writes its outbox obligation as `DeriveJobID(C, K)` — `Forwarder.targets` keys the job on
+`Registry.Route(recipient)`, which returns the recipient's HOME bus, not the next hop A dials
+(`internal/relay/forward.go:1044`). But the acknowledgement comes back over A's mutual-TLS link with
+**B**, so `AuthorizePeerAck` looked up `DeriveJobID(B, K)` — a job id nothing ever wrote. **The two
+spellings coincide ONLY on a direct peer link**, which is why every single-hop test was green while A
+answered 409, B's 409-absorbing arm turned that into a 200 for C, and the recipient read "accepted"
+for an outcome nothing recorded anywhere — §1.1's sentence, reached on the happy path.
+`cmd/agent-bus/peer.go`'s `-route-for` documentation predicts it in words: the identity on the wire is
+the NEXT HOP's, the record's bus id is the DESTINATION, "they are not the same field".
+
+**Decision: widen the BINDING RULE, additively, by one case** (`relay.AuthorizePeerAckVia`,
+`internal/relay/ackback.go:831`). A frame from authenticated peer `P` for key `K` naming recipient `R`
+binds if EITHER the DIRECT arm holds (unchanged, tried first: `DeriveJobID(P, K)` names a job we
+wrote) OR an INDIRECT arm does: `D` is the bus half of `R` (invariant 2), `D` is neither `P`
+(case-folded) nor us, **the address this bus would dial for `D` equals the address it would dial for
+`P`** — both resolved, both non-empty — and `DeriveJobID(D, K)` names a job we wrote whose peer bus id
+and origin message id are the two asked for.
+
+**The third clause is the security core, and it is computed from THIS BUS's own peer configuration,
+never from the frame.** `R` is peer-supplied, so it selects WHICH job we look for; it cannot conjure
+one, and it cannot make an unrelated peer the next hop for a destination we route elsewhere. On a
+`-route-for` topology a route record's base URL *is* the address of the next hop for that destination,
+so `PeerBaseURL(D) == PeerBaseURL(P)` is exactly "is `P` the hop we route `D` through", asked of the
+only party entitled to answer it: us.
+
+**The alternative considered — re-key the outbox job on the NEXT HOP instead** (make
+`Forwarder.targets` derive the job id from the peer it actually dials, so one spelling serves both
+sides). Rejected, and not on taste:
+
+- **The job id is a DURABLE id.** Changing its shape orphans every pending job across an upgrade —
+  the records on disk derive and re-verify it (`OutboxRecord.validate`), so old jobs would neither
+  match nor settle, on the one path whose whole purpose is not losing deliveries.
+- **It moves split-horizon and recovery logic**, which live in `internal/relay/outbox.go` and
+  `forward.go` — a far larger change, in a file another task owns, reached by a change whose entire
+  purpose is the ACK plane.
+- The chosen widening **adds no state, no record type and no wire field**, and is computed from state
+  this bus already holds: its own routing table and its own outbox.
+
+**What it costs and what it does not buy.** Two registry `RLock` lookups per otherwise-unbound frame,
+and — only if they agree — a second `Outbox.Lookup` (exclusive mutex, O(n) sweep). The routing checks
+run FIRST deliberately, so a peer can provoke that second sweep only for a destination this bus
+already routes through it (§16 Q3). **Every indirect refusal returns the same `ErrAckNotBound`, by
+identity**, so the uniform 409 acquires no new distinguishable case: the widening adds a way to be
+BOUND, never a new way to be told why you were not. A nil routing resolver fails closed to the direct
+arm's answer, byte-for-byte the pre-`ACK-5` behaviour.
+
+**It does NOT close `ACK-4-FU-RECIPIENT-BINDING`, and the docs say so in those words.** The indirect
+arm does bind the recipient's home bus to the acknowledging peer, which is adjacent to that task and
+easy to mistake for it — but **the DIRECT arm still binds only (peer, key)**, so a peer legitimately
+bound for `K` can still settle any recipient of `K` on a direct link, and the direct arm is the one
+every single-hop delivery takes. That task stays open.
+
+### And: a transit correlation key must name ANOTHER bus
+
+`hub.transitAck` now refuses, before any lookup, a correlation key whose bus half is THIS bus
+(`internal/hub/ack.go:728-730`, folded comparison). Without it the LOCAL id this bus minted resolves —
+through `store.ByOriginMessageID`'s documented local-id fallback — to the same relayed message, the
+principal is a member, and the route answered a **retriable 503 that no client could ever clear**,
+because `relay.DisposeAck` then says `AckStopAtOrigin` for a key whose bus half is ours. The answer is
+the uniform `unknown` instead. **It is reached by doing the obvious thing:** `agent-busctl watch`
+prints the LOCAL `message_id` (`toWireMessage`, `internal/httpapi/messages.go:844`) and no route
+exposes the origin id, so the id a recipient holds is exactly the one refused here — a real usability
+gap, documented as such in `AGENT_PROTOCOL.md` and tracked separately (`f423959c`,
+`ACK-12-FU-WATCH-CORRELATION-KEY`). Nothing here narrows §3: the correlation key was always the
+ORIGIN's server-minted id, and this is that rule enforced at the boundary that was accepting a second
+spelling.
+
 ## Removed on 2026-08-16 — superseded, refuted or overtaken
 
 `DECISIONS.md` is described elsewhere in this repo as append-only. **That convention was SUSPENDED

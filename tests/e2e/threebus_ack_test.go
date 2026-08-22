@@ -665,30 +665,47 @@ const (
 	payloadRelayed      = "ack-12:e2e:a-to-c:relayed:v1"
 	payloadLocalDeliver = "ack-12:e2e:c-to-c:delivered:v1"
 	payloadLocalRefuse  = "ack-12:e2e:c-to-c:refused:v1"
+	payloadRelayRefuse  = "ack-12:e2e:a-to-c:relayed-refused:v1"
 )
 
 // TestThreeBusEndToEndAckNack drives a three-bus federation (A sender -> B
 // transit -> C recipient) entirely through the compiled CLI and asserts the
-// ACK plane AS IT ACTUALLY IS at HEAD — including, explicitly, the two places
-// it does not yet reach.
+// ACK plane AS IT ACTUALLY IS at HEAD — including, explicitly, the one place
+// it still does not reach.
 //
 // WHAT IS TRUE TODAY, in one paragraph, because it is not what the CLI help
-// text implies. Message relay A -> B -> C works and delivers exactly once with
-// a complete bus_path. The delivery-lifecycle (ack) plane, however, is a
-// SINGLE-BUS surface: `Hub.recordAcceptance` returns early for a relayed
-// message (internal/hub/hub.go, `if h.acks == nil || relayed || broadcast`), so
-// the receiving bus opens NO lifecycle row and the recipient of a relayed
-// message cannot acknowledge it at all — `agent-busctl ack` answers `unknown`
-// with exit 8 for BOTH the origin id and the receiving bus's own id. On the
-// origin bus the row exists and stays at `accepted` forever, because
-// `relay.Client.PeerAck` and `ack.Store.MarkInFlight` both have no non-test
-// caller.
+// text implies. AMENDED 2026-08-21 BY ACK-5; the previous version of this
+// paragraph said the ack plane was a SINGLE-BUS surface and that is no longer
+// true, so it is replaced rather than annotated — a stale "not yet implemented"
+// note reads as freshly checked and is more dangerous than none.
 //
-// So the ack/nack/absorbing semantics are asserted here on a SAME-BUS message
-// between two agents on bus C, where the plane is live, and the cross-bus gaps
-// are asserted as gaps. No leaf may t.Skip: a parent that PASSES because every
-// leaf skipped is scored VACUOUS, and a gap that passes silently is how
-// un-fireable guards get shipped.
+// Message relay A -> B -> C works and delivers exactly once with a complete
+// bus_path. The delivery-lifecycle (ack) plane now spans that relay, and it
+// does so WITHOUT a lifecycle row on the receiving bus: `Hub.recordAcceptance`
+// is UNCHANGED and still returns early for a relayed message (internal/hub,
+// `if h.acks == nil || relayed || broadcast`), because a sender-visible row on
+// a bus that is not the origin is readable by nobody (ACK-CONTRACT.md §13.3).
+// What ACK-5 added is a SECOND authorization path — this bus holds a RELAYED
+// copy under this correlation key that NAMES the authenticated principal —
+// after which the outcome travels BACKWARDS one hop at a time along the stored
+// path, C -> B -> A, SYNCHRONOUSLY, and is made durable at the ORIGIN and
+// nowhere else. No hop answers the recipient `accepted` until the origin has
+// fsynced (invariant 4, kept end-to-end by the chain rather than by a local
+// write).
+//
+// Correlation is ACK-CONTRACT.md §3's key — the ORIGIN bus's server-minted
+// message id — and NOTHING else, so the id bus C minted for the very same
+// logical message still settles nothing and still answers exit 8. What remains
+// UNBUILT is the bounce: retry-to-exhaustion and return-to-sender (ACK-13 /
+// ACK-7 / ACK-14) are open, so an outcome that cannot be carried back is
+// answered "not now" (503) and nothing spools it for later.
+//
+// So the ack/nack/absorbing semantics are asserted here BOTH on a SAME-BUS
+// message between two agents on bus C — where the plane has been live longest —
+// AND end to end across the three-bus path, which is the acceptance proof for
+// ACK-5. No leaf may t.Skip: a parent that PASSES because every leaf skipped is
+// scored VACUOUS, and a gap that passes silently is how un-fireable guards get
+// shipped.
 //
 // THERE IS DELIBERATELY NO -short GUARD. One existed and was REMOVED, and the
 // reason is stated from a MEASUREMENT rather than from a worry.
@@ -721,6 +738,14 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 		localDeliveredSeen  bool
 		localRefusedSeen    bool
 		relayedDeliverySeen bool
+
+		// ACK-5 state, carried between the two inverted subtests below: the
+		// origin row's accepted_at read BEFORE anything acknowledged it, and
+		// whether the recipient's ack on bus C was actually accepted. The pair
+		// is what makes the propagation assertion a TRANSITION rather than a
+		// snapshot that a row born `delivered` would also satisfy.
+		relayedAcceptedAt string
+		relayedAckedOnC   bool
 	)
 
 	t.Run("send_relays_a_to_c", func(t *testing.T) {
@@ -764,54 +789,147 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 	})
 
 	// -----------------------------------------------------------------------
-	// THE FIRST HONEST GAP ASSERTION — read this before "fixing" it.
+	// INVERTED 2026-08-21 BY ACK-5 — read this before "fixing" either probe.
 	//
-	// The delivery-lifecycle plane does NOT span the relay. Hub.recordAcceptance
-	// bails on a relayed message, so bus C holds no lifecycle row for anything
-	// that arrived over a peer link, and the recipient CANNOT acknowledge it —
-	// with either id. `agent-busctl ack` help says the message id "identifies
-	// the message across every hop it took to reach you"; today no id works,
-	// because there is nothing on this bus to settle.
+	// THIS SUBTEST WAS `relayed_message_cannot_yet_be_acked_on_the_receiving_bus`
+	// and it asserted the gap: relay ingest opened no lifecycle row, so the
+	// recipient of a relayed message could acknowledge it with NEITHER id and
+	// both answered exit 8 / `unknown`. ACK-5 closed HALF of that. The half it
+	// did NOT close is now the more valuable assertion, which is why this was
+	// INVERTED rather than deleted and why BOTH probes survive with opposite
+	// expectations.
 	//
-	// This is asserted rather than merely written down, because a gap nobody
-	// asserts is indistinguishable from a feature that works. It is EXPECTED TO
-	// GO RED the day relay ingest opens a lifecycle row, at which point it must
-	// be INVERTED to assert that the recipient CAN ack a relayed message — not
-	// deleted, and not loosened.
+	// WHAT IS TRUE NOW. Relay ingest STILL opens no row here — hub's
+	// recordAcceptance is unchanged and still early-returns on
+	// `relayed || broadcast` — and it never will, because a sender-visible row
+	// on a bus that is not the origin is readable by nobody (§13.3). Instead
+	// hub.AcknowledgeDelivery recognises a TRANSIT acknowledgement (this bus
+	// holds a RELAYED copy under this correlation key that NAMES the
+	// authenticated principal), writes NOTHING durable, and the route carries
+	// the outcome one hop back along the STORED bus path — C -> B -> A,
+	// SYNCHRONOUSLY. The recipient is not told `accepted` until the ORIGIN has
+	// fsynced, which is the whole of invariant 4 on this path.
+	//
+	// CORRELATION IS THE ORIGIN BUS'S ID AND NOTHING ELSE (ACK-CONTRACT.md §3).
+	// That is why the negative probe runs FIRST: its answer must not be
+	// explicable as "the message was already terminal".
+	//
+	//   - the id bus C minted and served to the recipient is NOT a correlation
+	//     key. It is exactly the value a recipient holds in its hand, so it is
+	//     the mistake this plane must refuse: uniform `unknown`, exit 8,
+	//     nothing forwarded, nothing written.
+	//   - the ORIGIN id bus A minted settles the message end to end.
+	//
+	// DO NOT "FIX" A FAILURE OF THE FIRST PROBE BY HONOURING C'S OWN ID. Two
+	// spellings of one correlation key defeat idempotency at the origin
+	// (invariant 10), and the frame would be forwarded under a key no upstream
+	// bus can bind — a terminal outcome sent nowhere.
 	// -----------------------------------------------------------------------
-	t.Run("relayed_message_cannot_yet_be_acked_on_the_receiving_bus", func(t *testing.T) {
+	t.Run("relayed_message_is_acked_on_the_receiving_bus_under_the_ORIGIN_id", func(t *testing.T) {
 		if !relayedDeliverySeen {
 			t.Fatalf("no relayed message to probe: send_relays_a_to_c did not establish one")
 		}
-		for _, probe := range []struct {
-			label string
-			id    string
-		}{
-			{"the id bus C minted and served to the recipient", relayedRecipientID},
-			{"the origin id bus A minted for the sender", relayedOriginID},
-		} {
-			res, doc := f.ack(t, probe.id, nil)
-			t.Logf("ack on C using %s (%s): exit=%d doc=%+v", probe.label, probe.id, res.code, doc)
-			if res.code != 8 {
-				t.Fatalf("ack on C using %s (%s) exited %d, want 8 (nothing to record). "+
-					"If relay ingest now opens a delivery-lifecycle row, this subtest has done its "+
-					"job: INVERT it to assert that a relayed message CAN be acknowledged, and update "+
-					"the comment above it. Do not delete it.\nstdout:\n%s\nstderr:\n%s",
-					probe.label, probe.id, res.code, res.stdout, res.stderr)
-			}
-			if doc.State != "unknown" {
-				t.Fatalf("ack on C using %s reported state %q, want %q", probe.label, doc.State, "unknown")
-			}
-			if doc.Accepted {
-				t.Fatalf("ack on C using %s reported accepted=true while state is unknown: %+v",
-					probe.label, doc)
-			}
-			// The recipient is still named in full even when there is nothing
-			// to settle (invariant 2).
-			if doc.Recipient != f.recipient.id {
-				t.Fatalf("ack echoed recipient %q, want the fully-qualified %q", doc.Recipient, f.recipient.id)
-			}
+
+		// THE ORIGIN'S ROW, BEFORE ANYTHING HAS ACKNOWLEDGED ANYTHING. Read
+		// from the SENDER on bus A — the only party §13.3 lets read it — so the
+		// propagation subtest below asserts a TRANSITION and not a snapshot
+		// that a row born `delivered` would also satisfy.
+		bres, bdoc := f.ackStatus(t, f.sender, relayedOriginID)
+		if bres.code != 0 {
+			t.Fatalf("ack-status on A before the recipient acks exited %d, want 0 — the sender's own row must be readable\nstderr:\n%s",
+				bres.code, bres.stderr)
 		}
+		before := soleRow(t, "the cross-bus sender BEFORE the recipient acks", bdoc)
+		if before.State != "accepted" {
+			t.Fatalf("before the recipient acked, the origin row is %q; want %q — durable and fsynced on the "+
+				"origin bus, and acknowledged by nobody", before.State, "accepted")
+		}
+		if before.AcceptedAt == "" {
+			t.Fatalf("the origin's accepted row carries no accepted_at: %+v", before)
+		}
+		if before.SettledAt != "" {
+			t.Fatalf("the origin's unsettled row carries settled_at %q; only a TERMINAL outcome stamps it", before.SettledAt)
+		}
+		if before.AttestedBy != "" {
+			t.Fatalf("the origin's unsettled row is attested by %q; nobody has asserted anything yet", before.AttestedBy)
+		}
+		relayedAcceptedAt = before.AcceptedAt
+
+		// PROBE 1 — THE WRONG ID, AND IT IS STILL REFUSED.
+		wrongRes, wrongDoc := f.ack(t, relayedRecipientID, nil)
+		t.Logf("ack on C using the id bus C minted (%s): exit=%d doc=%+v", relayedRecipientID, wrongRes.code, wrongDoc)
+		if wrongRes.code != 8 {
+			t.Fatalf("ack on C using the id bus C minted for the relayed message (%s) exited %d, want 8 "+
+				"(nothing to settle under that key). §3 says the correlation key is the ORIGIN bus's "+
+				"server-minted id and NOTHING else, so this id names no settleable message on any bus and owes "+
+				"the uniform `unknown`.\n"+
+				"IF THIS IS A 503 (exit 6): the transit authorization has resolved a LOCAL id through "+
+				"store.ByOriginMessageID's local-id fallback, decided the message is relayed (it is — under its "+
+				"OTHER key), and relay.DisposeAck has then answered AckStopAtOrigin because the key's bus half "+
+				"IS this bus, which is a fail-closed arm. That turns a client's wrong-id mistake into a 503 and "+
+				"makes the refusal distinguishable from the uniform one. FIX THE AUTHORIZATION — require the "+
+				"correlation key's bus half to name another bus — and do not relax this assertion.\n"+
+				"stdout:\n%s\nstderr:\n%s", relayedRecipientID, wrongRes.code, wrongRes.stdout, wrongRes.stderr)
+		}
+		if wrongDoc.State != "unknown" {
+			t.Fatalf("ack on C using the id bus C minted reported state %q, want %q", wrongDoc.State, "unknown")
+		}
+		if wrongDoc.Accepted {
+			t.Fatalf("ack on C using the id bus C minted reported accepted=true while state is unknown: %+v", wrongDoc)
+		}
+		// The recipient is still named in full even when there is nothing to
+		// settle (invariant 2).
+		if wrongDoc.Recipient != f.recipient.id {
+			t.Fatalf("ack echoed recipient %q, want the fully-qualified %q", wrongDoc.Recipient, f.recipient.id)
+		}
+
+		// PROBE 2 — THE ORIGIN ID, WHICH NOW SETTLES THE MESSAGE END TO END.
+		res, doc := f.ack(t, relayedOriginID, nil)
+		t.Logf("ack on C using the ORIGIN id bus A minted (%s): exit=%d doc=%+v", relayedOriginID, res.code, doc)
+		if res.code != 0 {
+			t.Fatalf("ack on C using the ORIGIN id %s exited %d, want 0 — ACK-5 authorizes this as a TRANSIT "+
+				"acknowledgement and carries it back C -> B -> A synchronously.\n"+
+				"exit 8 means the transit authorization refused it: either no relayed copy is retained under "+
+				"this key or the recipient is not named in it. exit 6 is a 503: some hop refused or could not be "+
+				"reached, and NOTHING was recorded anywhere — which is honest, but it is a broken federation "+
+				"path, not a passing test.\nstdout:\n%s\nstderr:\n%s",
+				relayedOriginID, res.code, res.stdout, res.stderr)
+		}
+		if !doc.OK || !doc.Accepted {
+			t.Fatalf("the transit ack was not accepted: %+v", doc)
+		}
+		if doc.Outcome != "delivered" {
+			t.Fatalf("transit ack outcome = %q, want %q — delivered is the default assertion", doc.Outcome, "delivered")
+		}
+		if doc.State != "delivered" {
+			t.Fatalf("transit ack state = %q, want %q", doc.State, "delivered")
+		}
+		if doc.Duplicate {
+			t.Fatalf("the FIRST transit ack reported duplicate=true: %+v", doc)
+		}
+		if doc.Class != "" {
+			t.Fatalf("a delivered ack carried class %q; class appears only on a negative terminal", doc.Class)
+		}
+		if doc.Recipient != f.recipient.id {
+			t.Fatalf("transit ack recipient = %q, want the fully-qualified %q (invariant 2)", doc.Recipient, f.recipient.id)
+		}
+
+		// A RECIPIENT CANNOT TELL THE TWO PATHS APART, and that is deliberate:
+		// this document is the same shape the same-bus ack returns below. Which
+		// bus holds the durable row is a fact about the federation's topology,
+		// and §13.3's posture is that a recipient learns the outcome of the
+		// message it was handed and nothing else about the federation.
+		relayedAckedOnC = true
+
+		// BUS B IS NOT PROBED, AND THE OMISSION IS DELIBERATE RATHER THAN AN
+		// OVERSIGHT. B is an intermediate: it writes nothing durable for a
+		// transit acknowledgement, so the property "B recorded nothing" is
+		// worth asserting — but this harness cannot assert it. ack-status
+		// answers the uniform `unknown` to EVERY principal but the original
+		// sender (§13.3), the sender is on A, and no agent is enrolled on B; so
+		// an `unknown` from B would be an authorization answer and would be
+		// byte-identical whether or not B holds a row. A probe that cannot
+		// distinguish the two would read like coverage and provide none.
 	})
 
 	t.Run("recipient_ack_settles_locally", func(t *testing.T) {
@@ -1052,32 +1170,39 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 	})
 
 	// -----------------------------------------------------------------------
-	// THE SECOND HONEST GAP ASSERTION — read this before "fixing" it.
+	// INVERTED 2026-08-21 BY ACK-5 — this is the acceptance proof for it.
 	//
-	// relay.Client.PeerAck (internal/relay/ackhttp.go) is BUILT AND UNWIRED: it
-	// has no non-test caller. ack.Store.MarkInFlight is likewise unwired. So a
-	// recipient's outcome on bus C does not travel back up C -> B -> A, and the
-	// sender's row on A never leaves `accepted` — it does not even reach
-	// `in_flight`, despite a hop having been owed and taken.
+	// THIS SUBTEST WAS `ack_does_not_yet_propagate_to_origin_bus`. It asserted
+	// that relay.Client.PeerAck had no non-test caller, so a recipient's
+	// outcome on bus C never travelled back C -> B -> A and the sender's row on
+	// A stayed at `accepted` forever. ACK-5 wired the emitter and its decision
+	// (internal/relay/ackback.go, cmd/agent-bus/ackback.go), so the assertion is
+	// inverted here rather than deleted: this is the only end-to-end coverage of
+	// the path that was just built.
 	//
-	// Nothing bounces either: retry-to-exhaustion and return-to-sender
-	// (ACK-13 / ACK-7 / ACK-14) are open, so no TERMINAL state of any kind can
-	// reach the origin bus. That absence is asserted here rather than left as a
-	// skipped placeholder, because a skipped leaf makes its parent PASS while
-	// exercising nothing.
+	// WHY THIS IS A TRANSITION AND NOT A SNAPSHOT. The row on A was read as
+	// `accepted`, unsettled and unattested BEFORE the acknowledgement, in the
+	// subtest above. The acknowledgement itself was raised on bus C by a
+	// principal that has no account on A and never contacts A. So a `delivered`
+	// row here can only have arrived along the stored path. accepted_at must NOT
+	// move: settling does not rewrite when the message was accepted.
 	//
-	// This subtest is EXPECTED TO GO RED the day ACK-5 wires the upstream
-	// peer-ACK emitter, at which point it must be INVERTED to assert
-	// propagation — not deleted, and not loosened.
+	// EXACTLY ONCE (invariant 10, first case) IS ASSERTED IN THE SAME PLACE,
+	// because it is the same fact from the other side. The recipient's retry is
+	// a LEGITIMATE retry: it must not error, it must not disconnect anybody, and
+	// it must leave ONE row in the state the first outcome put it in — same
+	// settled_at, same accepted_at, same class. The duplicate is absorbed WHERE
+	// THE RECORD IS, at the origin (§8.2 note 2), because this bus keeps nothing
+	// for a relayed message that a retry could be a duplicate OF.
 	// -----------------------------------------------------------------------
-	t.Run("ack_does_not_yet_propagate_to_origin_bus", func(t *testing.T) {
-		if !relayedDeliverySeen {
-			t.Fatalf("no relayed message to query: send_relays_a_to_c did not establish one")
+	t.Run("recipient_ack_propagates_back_to_the_origin_bus", func(t *testing.T) {
+		if !relayedAckedOnC {
+			t.Fatalf("the relayed message was never acknowledged on bus C; the subtest above did not establish it")
 		}
 
 		res, doc := f.ackStatus(t, f.sender, relayedOriginID)
-		t.Logf("the SENDER's view on bus A of origin id %s, after the message was delivered to "+
-			"the recipient on bus C: exit=%d doc=%+v", relayedOriginID, res.code, doc)
+		t.Logf("the SENDER's view on bus A of origin id %s, after the recipient on bus C acknowledged it: "+
+			"exit=%d doc=%+v", relayedOriginID, res.code, doc)
 
 		if res.code != 0 {
 			t.Fatalf("ack-status on A exited %d, want 0 — the sender's own row must be readable\nstderr:\n%s",
@@ -1091,21 +1216,137 @@ func TestThreeBusEndToEndAckNack(t *testing.T) {
 			t.Fatalf("ack-status on A names recipient %q, want the fully-qualified cross-bus %q (invariant 2)",
 				row.Recipient, f.recipient.id)
 		}
-		// EXACTLY `accepted`: durable and fsynced on the origin bus, and
-		// acknowledged by nobody.
-		if row.State != "accepted" {
-			t.Fatalf("the sender's row on bus A is %q (class %q, attested_by %q), want exactly %q. "+
-				"If the upstream peer-ACK emitter (ACK-5) or the in-flight transition is now wired, "+
-				"this subtest has done its job: INVERT it to assert propagation, and update the "+
-				"comment above it. Do not delete it and do not loosen it.",
-				row.State, row.Class, row.AttestedBy, "accepted")
+		if row.State != "delivered" {
+			t.Fatalf("the sender's row on bus A is %q (class %q, attested_by %q), want %q. The recipient "+
+				"acknowledged this message on bus C, two hops away; the outcome travels BACKWARDS one hop at a "+
+				"time along the stored path and the ORIGIN holds the only sender-visible row. %q means it never "+
+				"arrived — and nothing bounces or retries it (ACK-13 / ACK-7 / ACK-14 are open), so it is lost.",
+				row.State, row.Class, row.AttestedBy, "delivered", row.State)
 		}
-		if row.AttestedBy != "" {
-			t.Fatalf("the sender's row carries attested_by %q; nothing has attested anything to the "+
-				"origin bus, so this must be empty", row.AttestedBy)
+		// FORWARDED VERBATIM: an intermediate re-signs nothing, re-classifies
+		// nothing and re-attests nothing (§9.4). The label that reaches the
+		// origin is therefore the recipient's own, and there is deliberately no
+		// value meaning "verified" — nothing in this system can produce one.
+		if row.AttestedBy != "recipient_signature_unverified" {
+			t.Fatalf("the origin's settled row is attested %q, want %q — the recipient's own label, carried "+
+				"across two hops unchanged; `peer_bus` here would mean a HOP's attestation was substituted for "+
+				"the recipient's", row.AttestedBy, "recipient_signature_unverified")
 		}
 		if row.Class != "" {
-			t.Fatalf("the sender's row carries class %q; an unsettled row has no reason class", row.Class)
+			t.Fatalf("a delivered row carries class %q; class appears only on a negative terminal", row.Class)
+		}
+		if row.AcceptedAt != relayedAcceptedAt {
+			t.Fatalf("settling rewrote accepted_at on the origin from %q to %q; the acceptance happened when it "+
+				"happened, and a terminal outcome arriving two hops later does not move it",
+				relayedAcceptedAt, row.AcceptedAt)
+		}
+		if row.SettledAt == "" {
+			t.Fatalf("the origin's delivered row carries no settled_at: %+v — the terminal outcome must be stamped", row)
+		}
+
+		// EXACTLY ONCE, ABSORBED AT THE ORIGIN (invariant 10, first case).
+		again, againDoc := f.ack(t, relayedOriginID, nil)
+		t.Logf("re-acking the relayed message on C with the ORIGIN id: exit=%d doc=%+v", again.code, againDoc)
+		if again.code != 0 {
+			t.Fatalf("re-acking the SAME outcome across the relay exited %d, want 0 — same key and same payload "+
+				"is a legitimate retry, returned as the original result and re-applied nowhere; punishing it "+
+				"breaks exactly the clients doing the right thing (invariant 10)\nstdout:\n%s\nstderr:\n%s",
+				again.code, again.stdout, again.stderr)
+		}
+		if againDoc.State != "delivered" {
+			t.Fatalf("the re-ack reported state %q, want the original %q to stand", againDoc.State, "delivered")
+		}
+		// `duplicate` IS FALSE ON THE TRANSIT PATH, AND THAT IS HONEST RATHER
+		// THAN A BUG — this bus holds no record for a relayed message, so there
+		// is nothing HERE for the retry to be a duplicate of, and labelling it
+		// would mean this bus asserting something about a table it does not
+		// hold. The absorption happens at the origin, and the assertion that it
+		// happened is the unchanged row below, not this flag.
+		if againDoc.Duplicate {
+			t.Fatalf("the transit re-ack reported duplicate=true: %+v — the bus that answered it holds no "+
+				"lifecycle row for a relayed message, so it has nothing to have recognised", againDoc)
+		}
+
+		after, afterDoc := f.ackStatus(t, f.sender, relayedOriginID)
+		if after.code != 0 {
+			t.Fatalf("could not read ack-status on A after the retry (exit %d) — a duplicate never disconnects "+
+				"anybody (invariant 10, §12)\nstderr:\n%s", after.code, after.stderr)
+		}
+		// ONE ROW, and soleRow is the assertion that the retry did not APPEND a
+		// second one — the failure mode a state-only check would miss entirely.
+		afterRow := soleRow(t, "the sender's view on bus A after the retry", afterDoc)
+		if afterRow != row {
+			t.Fatalf("the retry CHANGED the origin's row.\nbefore: %+v\nafter:  %+v\n"+
+				"A legitimate retry returns the original result and re-applies nothing; a moved settled_at "+
+				"means the outcome was recorded twice.", row, afterRow)
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// THE CLASS SURVIVES THE HOPS VERBATIM (ACK-5, §9.4). ADDED 2026-08-21.
+	//
+	// A NEW relayed message, with its own payload and its own idempotency key,
+	// because a terminal outcome is ABSORBING: neither the message the subtests
+	// above settled `delivered` nor the same-bus one
+	// recipient_nack_is_authenticated_and_classed refuses can be reused here
+	// without weakening one of them.
+	//
+	// THE CLASS IS DELIBERATELY NOT THE ONE THE SAME-BUS SUBTEST USES.
+	// `recipient_refused_undecodable` travels C -> B -> A and must arrive
+	// spelled exactly that way. A class that arrived as
+	// `recipient_refused_policy` — or as a generic refusal, or as a BUS-emitted
+	// routing class — would mean a hop had substituted its own judgement for the
+	// recipient's, which is the forgery §9.4's "forwarded verbatim" rule exists
+	// to prevent. Asserting the same spelling at both ends of a two-hop path is
+	// the only place in this harness that can catch it.
+	// -----------------------------------------------------------------------
+	t.Run("recipient_nack_class_propagates_back_to_the_origin_bus_verbatim", func(t *testing.T) {
+		if !relayedDeliverySeen {
+			t.Fatalf("the relay path was never proved; send_relays_a_to_c did not establish it")
+		}
+		const class = "recipient_refused_undecodable"
+
+		originID := f.send(t, f.sender, f.recipient.id, payloadRelayRefuse, "ack-12-e2e-relayed-refused-v1")
+		f.waitForDelivery(t, payloadRelayRefuse, f.sender.id)
+		assertMessageIDShape(t, "origin id minted by bus A for the refused relayed message", originID, f.a.busID)
+
+		res, doc := f.ack(t, originID, str(class))
+		t.Logf("refusing the relayed message on C with the ORIGIN id %s: exit=%d doc=%+v", originID, res.code, doc)
+		if res.code != 0 {
+			t.Fatalf("ack --refuse %s on C using the ORIGIN id exited %d, want 0 — a NACK crosses the relay by "+
+				"exactly the same route an ACK does\nstdout:\n%s\nstderr:\n%s",
+				class, res.code, res.stdout, res.stderr)
+		}
+		if doc.Outcome != "refused" || doc.State != "refused" {
+			t.Fatalf("transit refusal outcome/state = %q/%q, want refused/refused (%+v)", doc.Outcome, doc.State, doc)
+		}
+		if doc.Class != class {
+			t.Fatalf("transit refusal class = %q, want %q", doc.Class, class)
+		}
+		if !doc.Accepted || doc.Duplicate {
+			t.Fatalf("the first transit refusal must be accepted and not a duplicate: %+v", doc)
+		}
+
+		sres, sdoc := f.ackStatus(t, f.sender, originID)
+		if sres.code != 0 {
+			t.Fatalf("ack-status on A after a transit refusal exited %d, want 0\nstderr:\n%s", sres.code, sres.stderr)
+		}
+		row := soleRow(t, "the cross-bus sender after a transit refusal", sdoc)
+		if row.State != "refused" {
+			t.Fatalf("the sender's row on bus A is %q, want %q — the recipient REFUSED this message on bus C",
+				row.State, "refused")
+		}
+		if row.Class != class {
+			t.Fatalf("the class that reached the origin is %q, want the recipient's own %q, spelled identically. "+
+				"An intermediate forwards the frame verbatim: it re-classifies nothing, and a different value "+
+				"here means a hop substituted its own judgement for the recipient's (§9.4).", row.Class, class)
+		}
+		if row.AttestedBy != "recipient_signature_unverified" {
+			t.Fatalf("the transit refusal's attested_by = %q, want %q — a NACK is attested exactly as an ACK is",
+				row.AttestedBy, "recipient_signature_unverified")
+		}
+		if row.SettledAt == "" {
+			t.Fatalf("the origin's refused row carries no settled_at: %+v", row)
 		}
 	})
 

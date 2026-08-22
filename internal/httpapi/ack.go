@@ -62,6 +62,7 @@ package httpapi
 // and an agent embedding client/ under two enrolments reaches it honestly.
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -154,6 +155,60 @@ type AckResponseBody struct {
 	Class string `json:"class,omitempty"`
 }
 
+// AckTransit carries a terminal outcome ONE HOP BACK toward the origin bus, for
+// a message that was RELAYED to this bus (ACK-CONTRACT.md §9.4, ACK-5).
+//
+// # WHAT A TRANSIT ACKNOWLEDGEMENT IS
+//
+// A recipient here acknowledges a message this bus did not originate. This bus
+// holds no sender-visible lifecycle row for it — the origin bus does — so
+// hub.AcknowledgeDelivery writes NOTHING DURABLE and reports Transit, and the
+// route owes one backward hop before it may answer the recipient "accepted".
+//
+// # THE CALL IS SYNCHRONOUS, AND THAT IS THE WHOLE DURABILITY ARGUMENT
+//
+// Invariant 4 says nothing is acknowledged before it is durable. On this path
+// the durable write happens at the ORIGIN, possibly several hops away, so the
+// only way to keep the invariant is to answer only after the next hop has
+// answered — and it, in turn, only after the hop beyond it. The guarantee
+// therefore holds END TO END through the chain rather than through a local
+// write.
+//
+// # WITH ONE NAMED EXCEPTION, WHICH IS A NARROWING AND NOT A BUG
+//
+// An INTERMEDIATE bus absorbs a 409 from the hop above it and answers its own
+// downstream 200 (cmd/agent-bus/relaywiring.go, disposeUnrecordedAck), so a nil
+// return from this method over two or more backward hops does NOT prove the
+// origin recorded anything: it may have refused with a 409, and in the "no
+// obligation binds that recipient" case nothing durable exists anywhere. A 409
+// is absorbed because it is the one refusal where the upstream UNDERSTOOD the
+// frame and decided about it — re-offering it is the retry amplification §9.3
+// exists to stop, and forwarding the verdict verbatim would make the hop an
+// ORACLE for whether the origin holds a row for a named recipient. Every OTHER
+// final status (404, 403, 400) means the upstream decided nothing, is answered
+// "not now", and the paragraph above holds unchanged. Recorded in DECISIONS.md,
+// 2026-08-21 (ACK-5). It follows that there is NO retry queue behind this seam and there must
+// not be one: a failure at any hop is answered "not now" (503), the party that
+// raised the outcome retries, and nothing is lost because nothing was
+// acknowledged. Retry, backoff and bounce are ACK-7/ACK-14, once, beside the
+// durable outbox — a second, in-memory retry policy here would survive neither a
+// restart nor a crash and would race the real one when it lands.
+//
+// # THE DESTINATION IS RESOLVED BY THE IMPLEMENTATION, NEVER BY THE FRAME
+//
+// NOTHING IN frame NAMES AN ADDRESS, HOST, SCHEME OR DESTINATION BUS, AND
+// NOTHING HERE MAY EVER PASS ONE. The implementation derives the upstream hop
+// from THIS bus's own stored bus path and its address from THIS bus's own peer
+// registry (§9.4: "no bus contacts a bus it is not peered with"). That is the
+// identical SSRF class relay.PeerAckRequest already refuses structurally by
+// having no field such a value could arrive in — see relay.BackPropagator.Propagate.
+//
+// The error is returned for CLASSIFICATION, not for display: the route answers
+// the recipient a uniform "not now" and never echoes an upstream bus's verdict.
+type AckTransit interface {
+	TransitAck(ctx context.Context, frame relay.PeerAckRequest) error
+}
+
 // handleAck serves POST /v1/ack.
 //
 // # THE ORDER OF THE CHECKS IS THE DESIGN
@@ -161,17 +216,45 @@ type AckResponseBody struct {
 //  1. METHOD, then AUTHENTICATION. A route that answered anything to an
 //     unauthenticated caller would describe the messaging surface to somebody
 //     with no business knowing it exists.
+//
 //  2. THE BODY, bounded by relay.MaxAckBytes (4 KiB), which is derived from the
 //     widest legal frame rather than guessed — no field of the frame has a
 //     length a remote party chooses (§5.3).
+//
 //  3. THE RECIPIENT BINDING, before the frame's content is examined. It is an
 //     authorization question and it is answered from the CONTEXT PRINCIPAL.
+//
 //  4. THE FRAME, through relay.ValidatePeerAckRequest with the AGENT surface —
 //     which is where "an agent may not assert a routing outcome" and the
 //     class/outcome half-set rule are enforced.
+//
 //  5. THE HUB, which re-checks all of it (it is the last gate before a durable
 //     write and is reachable by an embedder that never saw a frame) and settles
 //     the row durably before this handler is told anything (invariant 4).
+//
+//  6. THE TRANSIT HOP, and only when the hub reports one. A message RELAYED
+//     here has its sender-visible row at the ORIGIN bus, so the hub wrote
+//     nothing durable and this handler owes one backward hop (ACK-CONTRACT.md
+//     §9.4) before it may say "accepted". INVARIANT 4 IS WHAT PUTS THIS STEP
+//     BEFORE THE 200 AND NOT AFTER IT: the 200 is not written until the origin
+//     has the outcome durably, which — because every intermediate hop answers
+//     only after ITS next hop answers — is exactly what "wait for TransitAck to
+//     return" buys. Nothing durable happened on THIS bus either way, so a
+//     failure is a retriable "not now" rather than a settled fact.
+//
+//     EXCEPT ON ONE ARM, AND IT IS NOT THIS HANDLER'S: an INTERMEDIATE bus
+//     absorbs a 409 from the hop above it and answers its downstream 200, so
+//     over two or more backward hops TransitAck can return nil while the ORIGIN
+//     refused. THIS handler absorbs nothing — every TransitAck error, 409
+//     included, becomes the 503 below — but the 200 it writes on success cannot
+//     promise more than the chain gave it. See the AckTransit doc above for the
+//     argument and DECISIONS.md, 2026-08-21 (ACK-5) for the record.
+//
+// A RECIPIENT CANNOT TELL THE TWO PATHS APART, AND THAT IS DELIBERATE. Step 6's
+// success writes the SAME body as the recorded path. Which bus holds the durable
+// row is a fact about the federation's topology, and §13.3's posture is that a
+// recipient learns the outcome of the message it was handed and nothing else
+// about the federation.
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePOST(w, r) {
 		return
@@ -254,6 +337,67 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeAckError(w, r, recipient, err)
 		return
+	}
+
+	// THE TRANSIT ARM (§9.4). res.Transit means the acknowledged message was
+	// RELAYED here and NOTHING WAS WRITTEN DURABLY on this bus: the
+	// sender-visible row lives at the origin, and this handler owes it one
+	// backward hop before it may answer "accepted". See AckTransit for why the
+	// call is synchronous and why there is no queue behind it.
+	if res.Transit {
+		if s.ackTransit == nil {
+			// 501, THE SAME ANSWER AND THE SAME WORDING AS writeAckError's
+			// ErrNoAckTable arm. It is a fact about this BUILD — no
+			// back-propagation seam is wired — rather than a transient
+			// condition, so there is NO Retry-After: dressing a permanent
+			// refusal as transient is how a client ends up in a retry loop that
+			// cannot end. One vocabulary, not two: a recipient sees the same
+			// sentence whether the lifecycle table or the transit seam is the
+			// missing piece, because from its side the fact is identical — this
+			// bus cannot record its acknowledgement.
+			s.log.Warn("acknowledgement refused: this message was RELAYED to this bus, so its delivery outcome must be carried one hop back toward the origin, and this build has NO back-propagation seam wired. Nothing was recorded here and nothing was sent",
+				"request_id", RequestIDFromContext(r.Context()),
+				"op", "ack",
+				"agent_id", recipient,
+			)
+			s.writeJSON(w, r, http.StatusNotImplemented, ErrorResponse{
+				Error: "delivery acknowledgement is not available on this bus",
+			})
+			return
+		}
+		// v, NEVER body: the frame that goes onward is rebuilt from the
+		// VALIDATED value, so only fields that passed the closed-set validation
+		// can be forwarded and this bus cannot launder an unvalidated byte
+		// string to a peer. relay.AckFrameFrom is the one spelling of that, and
+		// of "forward verbatim" — the recipient's own outcome, class and
+		// signature are reproduced exactly and this bus re-signs, re-classifies
+		// and re-times nothing (§9.4, invariant 2).
+		if err := s.ackTransit.TransitAck(r.Context(), relay.AckFrameFrom(v)); err != nil {
+			// 503 AND NOT A 4xx, for the reason §9.3 gives at length: a 4xx is
+			// FINAL, so a 4xx here would make the recipient ABANDON an
+			// acknowledgement that nothing recorded — the outcome would be lost
+			// outright rather than delayed. Nothing durable changed anywhere, so
+			// the identical retry is safe and lands on the same decision. Same
+			// register as the ErrAckInFlight arm above, Retry-After and all, and
+			// NOBODY IS DISCONNECTED (§12, invariant 10): a merely buggy client,
+			// a de-peered neighbour and an upstream bus that is simply down all
+			// reach this line.
+			//
+			// The upstream's own verdict is NOT echoed: the recipient is told
+			// "not now" and learns nothing about which bus refused or whether a
+			// row exists anywhere else in the federation (§13.3).
+			s.log.Warn("acknowledgement NOT accepted: this message was RELAYED to this bus and its delivery outcome could not be carried one hop back toward the origin. NOTHING was recorded here, so the recipient's retry is safe and loses nothing",
+				"request_id", RequestIDFromContext(r.Context()),
+				"op", "ack",
+				"agent_id", recipient,
+				"err", err,
+			)
+			w.Header().Set("Retry-After", "1")
+			s.writeJSON(w, r, http.StatusServiceUnavailable, ErrorResponse{
+				Error: "this delivery outcome could not be carried toward the origin bus; retry",
+			})
+			return
+		}
 	}
 	s.writeJSON(w, r, http.StatusOK, AckResponseBody{
 		Accepted:  true,

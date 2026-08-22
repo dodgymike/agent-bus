@@ -1063,6 +1063,14 @@ func run(cfg Config) error {
 		relayRegistry  *relay.Registry
 		relayForwarder *relay.Forwarder
 		egressAdapter  *relayEgress
+
+		// ackBackPropagator is the EMITTING half of the acknowledgement plane's
+		// backward path (ACK-5): it is told an upstream bus id and resolves that
+		// id's ADDRESS through the peer registry. Nil on a bus with no peer
+		// store, exactly like the three above, because a back-propagator with no
+		// registry could only get an address from the frame -- which is the SSRF
+		// the peer surface exists to refuse (ACK-CONTRACT.md §9.4).
+		ackBackPropagator *relay.BackPropagator
 	)
 	// Gated on the peer store, exactly as the ingress and the outbox are: with no
 	// peer store this bus can authenticate no peer, verify no relayed message and
@@ -1197,6 +1205,29 @@ func run(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("assembling the cross-bus egress adapter: %w", err)
 		}
+		// THE ACKNOWLEDGEMENT PLANE'S BACKWARD HALF (ACK-5). It is built on this
+		// branch and no other, for the same reason the forwarder is: it dials
+		// peers, so it needs the pinned mutual-TLS client and the ONE routing
+		// table, and a bus with neither has nowhere to send an acknowledgement.
+		ackBackPropagator, err = relay.NewBackPropagator(relay.BackPropagatorConfig{
+			BusID: busID,
+			// THE SAME pinned, mutual-TLS peer client the forwarder relays
+			// through. One transport, one set of pins, one answer to "who did we
+			// just talk to" (invariant 11).
+			Sender: relayClient,
+			// THE REGISTRY'S OWN METHOD, not a closure over it -- the same rule
+			// relay.ForwarderOptions.PeerBaseURL states above: it is called
+			// concurrently and takes the registry's RLock, and hand-writing a
+			// closure over the registry's internals is the defect that method was
+			// added to fix. IT IS THE ONLY SOURCE OF AN ADDRESS ON THIS PATH.
+			PeerBaseURL: relayRegistry.PeerBaseURL,
+			Logger:      lg,
+		})
+		if err != nil {
+			// FATAL: this constructor validates only this build's own wiring, so
+			// a failure here is a fault in this binary, not operator data.
+			return fmt.Errorf("creating the acknowledgement back-propagator: %w", err)
+		}
 		remoteRouter = relayRegistry
 		hubEgress = egressAdapter
 		// THE THIRD CONSUMER OF THE ONE FORWARDER (RELAY-47). The egress adapter
@@ -1293,6 +1324,61 @@ func run(cfg Config) error {
 		// (invariant 5), and a bus that starts with no messaging is the silent
 		// half-outage AUTH-7 exists to make impossible.
 		return fmt.Errorf("opening the messaging hub: %w", err)
+	}
+
+	// THE BACK-PROPAGATION ADAPTER (ACK-5), assembled HERE because it is the
+	// first point at which both halves exist: the emitting back-propagator (built
+	// on the peer-store branch above) and the hub whose store answers "which hop
+	// handed us the message under this correlation key".
+	//
+	// Two consumers, ONE instance: the AGENT surface reaches it when a local
+	// recipient acknowledges a message that was RELAYED here, and the PEER
+	// surface reaches it when a downstream peer propagates an outcome for a key
+	// this bus did not originate. They are two callers of one backward hop, in
+	// the same sense the forwarder has three callers of one Enqueue -- a second
+	// instance would be a second place that decides who this bus contacts.
+	//
+	// httpAckTransit is INTERFACE-TYPED and is assigned ONLY on the branch that
+	// actually built an adapter, exactly as remoteRouter and hubEgress are above:
+	// a nil *ackTransit stored straight into httpapi.Options.AckTransit would be
+	// a NON-nil interface holding a nil pointer, and the route's `== nil` gate
+	// would call dutifully through it on a bus that does not federate at all.
+	// federationOptions.AckTransit is a concrete pointer and does not have that
+	// trap, which is why it takes the pointer directly.
+	var (
+		ackTransitAdapter *ackTransit
+		httpAckTransit    httpapi.AckTransit
+	)
+	if ackBackPropagator != nil {
+		ackTransitAdapter, err = newAckTransit(busID, func(correlationKey string) ([]string, bool) {
+			// LATE-BOUND over h, which is assigned just above; the guards are
+			// the same belt the LocalRoster and RecoverMessage closures wear,
+			// for the same reason -- a refactor that moves this call earlier
+			// would otherwise break it as a nil dereference inside a request.
+			//
+			// It reads the BODY-FREE accessor on purpose: this closure sits on a
+			// path an authenticated agent drives once per POST /v1/ack, and a
+			// routing question gets a routing-only answer (invariant 6). The
+			// path it returns is the STORED one -- origin-first, ending at THIS
+			// bus -- which is the shape relay.UpstreamHop requires; handing it a
+			// wire path would let a peer-fabricated path choose who we contact.
+			if h == nil {
+				return nil, false
+			}
+			st := h.Store()
+			if st == nil {
+				return nil, false
+			}
+			p, ok := st.RelayProvenanceByOriginMessageID(correlationKey)
+			return p.BusPath, ok
+		}, ackBackPropagator, lg)
+		if err != nil {
+			// FATAL, like every other assembly failure here: a bus that federates
+			// messages but silently drops the acknowledgements coming back is the
+			// half-outage that looks like a quiet network for a day.
+			return fmt.Errorf("assembling the acknowledgement back-propagation adapter: %w", err)
+		}
+		httpAckTransit = ackTransitAdapter
 	}
 
 	// STAGE 2 OF THE THREE-STAGE STARTUP ORDERING: peer-store replay (done, by
@@ -1425,6 +1511,13 @@ func run(cfg Config) error {
 			// that could bind nothing.
 			Outbox:       relayOutbox,
 			AckLifecycle: ackStore,
+			// THE SAME backward hop the agent surface uses (ACK-5). An
+			// acknowledgement arriving here for a key this bus RELAYED but did
+			// not originate has no row to settle, and is carried one hop further
+			// back instead of being refused. Non-nil on this branch, because the
+			// back-propagator is built on the same peer-store branch that made
+			// `bindable > 0` reachable.
+			AckTransit: ackTransitAdapter,
 			// The applied-key table's own pressure line, read live. It is what
 			// makes the per-peer share a BOUND rather than a speed limit: below
 			// the line a peer over its share is denying nobody anything and is
@@ -1600,6 +1693,18 @@ func run(cfg Config) error {
 		// replays, so a status read and a peer ACK can never disagree about a
 		// row — there is one table, not a serving copy of one.
 		AckStatus: ackStore,
+		// The BACKWARD hop for a TRANSIT acknowledgement (ACK-5,
+		// ACK-CONTRACT.md §9.4): a local recipient acknowledging a message that
+		// was RELAYED here settles no row on this bus, so POST /v1/ack carries
+		// the outcome one hop back toward the origin and answers only after that
+		// hop has answered -- which is what keeps invariant 4 true end to end
+		// when the durable row lives on another bus.
+		//
+		// Nil on a build with no peer, and then that route answers 501 rather
+		// than claiming to have carried anything. It is assigned from an
+		// INTERFACE-typed variable set only where an adapter was really built;
+		// see the typed-nil note on Options.AckTransit.
+		AckTransit: httpAckTransit,
 		// THE FEDERATION INGRESS. Both are nil on a build with no bindable peer,
 		// and the mount then registers nothing at all — see the switch above.
 		// They are supplied as a PAIR: a surface without the resolver would be

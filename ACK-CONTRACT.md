@@ -330,6 +330,10 @@ bus, and an agent session token MUST NOT be consulted on the peer surface.
 > **RULE: a peer-hop ACK/NACK from peer `P` is authoritative for correlation key `K` and recipient
 > `R` if and only if `DeriveJobID(P, K)` names an outbox job THIS bus durably wrote.**
 
+> **AMENDED — the rule above is now the DIRECT ARM ONLY. See "WIDENED 2026-08-21 BY `ACK-5`" at the
+> end of this section: a second, INDIRECT arm was added, and as written this rule made multi-hop
+> back-propagation impossible.**
+
 This is the anti-forgery core of `ACK-4`, and it is computable entirely from
 `internal/relay/outbox.go`'s existing durable record — no new index. It closes, without a new
 mechanism:
@@ -343,6 +347,70 @@ mechanism:
 Note carefully what layer 2 does **not** try to do: in an A→B→C chain, C's ACK reaches A via B, and
 the bus half of `K` is A's, not C's. A "the bus half must equal the ACKing peer" rule would be wrong
 and would break multi-hop. The job-id binding is the correct test at every hop.
+
+> **AMENDED 2026-08-21 BY `ACK-5`.** The first two sentences hold. The last one does not, as stated:
+> a job-id binding keyed on the **acknowledging peer** is NOT the correct test at every hop, because
+> at the last hop back the job was keyed on the **destination**. What is correct at every hop is the
+> two-armed rule below.
+
+#### WIDENED 2026-08-21 BY `ACK-5` — the indirect arm, and why the contract itself was wrong
+
+**The original rule, reproduced because it still governs the direct arm:**
+
+> **RULE: a peer-hop ACK/NACK from peer `P` is authoritative for correlation key `K` and recipient
+> `R` if and only if `DeriveJobID(P, K)` names an outbox job THIS bus durably wrote.**
+
+**As written it made multi-hop impossible, so this is a correction to the CONTRACT and not only to
+the code.** `ACK-12`'s three-bus harness measured it rather than predicting it: on A→B→C with a
+recipient on C and a sender on A, A writes its outbox obligation as `DeriveJobID(C, K)` —
+`Forwarder.targets` keys the job on `Registry.Route(recipient)` (`internal/relay/forward.go:1044`),
+which returns the recipient's HOME bus and not the next hop A dials — while the acknowledgement comes
+back over A's mutual-TLS link with B, so `AuthorizePeerAck` looked up `DeriveJobID(B, K)`, a job id
+nothing ever wrote. **The two spellings coincide ONLY on a direct peer link**, which is why every
+single-hop test was green while the last hop of a multi-hop path answered 409 and the terminal
+outcome never reached the origin. `cmd/agent-bus/peer.go` predicts it in words for `-route-for`: "the
+identity on the wire is the NEXT HOP's; the record's bus id is the DESTINATION."
+
+**The rule as it now stands** (`relay.AuthorizePeerAckVia`, `internal/relay/ackback.go:843`; the one
+call site is `internal/relay/ackhttp.go:398`). **Citation corrected 2026-08-21 (`ACK-5`): this line
+cited `:831`, a line inside the function's doc comment rather than the declaration.** A peer-hop ACK/NACK from AUTHENTICATED peer `P` for
+correlation key `K` naming recipient `R` is authoritative if **EITHER**:
+
+1. **DIRECT** — unchanged, and tried FIRST: `DeriveJobID(P, K)` names an outbox job this bus durably
+   wrote.
+2. **INDIRECT** — new. Let `D` be the **bus half of `R`** (invariant 2 is what makes that readable at
+   all: a fully-qualified agent id names its home bus). Then ALL of:
+   - `D` is not `P` — compared case-folded, since otherwise one bus would derive two job-id
+     spellings — and `D` is not US;
+   - **the address this bus would dial to reach `D` is the SAME address it would dial to reach `P`**,
+     both resolved and both non-empty;
+   - `DeriveJobID(D, K)` names an outbox job this bus durably wrote, and that record's peer bus id
+     and origin message id are the two we asked for.
+
+**The third clause is the security core: it is computed from THIS BUS's own peer configuration, never
+from anything the frame said.** `R` is peer-supplied, so it selects WHICH job we look for — it cannot
+conjure one, and it cannot make an unrelated peer the next hop for a destination we route somewhere
+else. On a `-route-for` topology a route record's bus id is the DESTINATION and its base URL is the
+address to dial to reach it, so "`PeerBaseURL(D)` == `PeerBaseURL(P)`" is exactly the question *is `P`
+the hop we route `D` through*, asked of the only party entitled to answer it: us. Both lookups must
+resolve and both must be non-empty, so two buses that handshaked and never had an address configured
+cannot become each other's next hop by both being blank.
+
+**The uniform answer is unchanged.** Every indirect refusal returns the SAME `ErrAckNotBound`, by
+identity, byte-identical to the direct arm's, so §9.3's 409 gains **no new distinguishable case**: the
+widening adds a way to be BOUND, never a new way to be told why you were not. Any error from the
+direct arm that is NOT `ErrAckNotBound` — the nil-table wiring fault, and every `ErrInvalidAckFrame`
+from its id validation — is returned unchanged and the indirect arm is never reached. A build that
+passes no routing resolver **fails closed to the direct arm's answer**, byte-for-byte the pre-`ACK-5`
+behaviour (`AckConfig.NextHopAddress`, `internal/relay/ackhttp.go:176`; production passes
+`Registry.PeerBaseURL`, `cmd/agent-bus/relaywiring.go:1396`).
+
+**This does NOT close `ACK-4-FU-RECIPIENT-BINDING`, and must not be read as closing it.** On the
+INDIRECT arm the recipient IS bound to the acknowledging peer — `P` must be the hop we route `R`'s bus
+through — which is adjacent to that task and easily mistaken for it. But **the DIRECT arm still binds
+only (peer, key)**, so a peer legitimately bound for `K` can still settle ANY recipient of `K` on a
+direct link, and the direct arm is the one every single-hop delivery takes. The recipient half of
+authorization remains §8.2's "(none)" row, applied by the caller's `SettleAck`.
 
 ### 6.3 Layer 3 — end-to-end recipient attestation (SHAPE ONLY, and it must be LABELLED as such)
 
@@ -534,6 +602,13 @@ the traffic the mechanism exists to stop.
 
 ### 9.4 Multi-hop back-propagation (`ACK-5`)
 
+> **IMPLEMENTED 2026-08-21. This section is amended IN PLACE**, not rewritten: the four clauses below
+> were the specification and all four hold as built. What follows them is what the sketch did not say
+> and the implementation had to decide. `internal/relay/ackback.go`, `internal/store/provenance.go`,
+> `cmd/agent-bus/ackback.go`, plus the transit arms in `internal/hub/ack.go`,
+> `internal/httpapi/ack.go` and `cmd/agent-bus/relaywiring.go`. **No new record type, wire version,
+> route, flag or environment variable was spent.**
+
 - A terminal outcome propagates **backwards along the traversed `bus_path`, one hop at a time**,
   each hop re-authenticated by §6.1 and re-bound by §6.2. **No bus contacts a bus it is not peered
   with**, and nothing in a peer-supplied frame ever names an address, host or scheme — the same rule
@@ -546,6 +621,107 @@ the traffic the mechanism exists to stop.
 - **Exactly once at the origin** falls out of §8.2 note 4: the first terminal wins, later ones are
   absorbed or rejected as violations. It does **not** require an exactly-once transport, which does
   not exist here.
+
+#### 9.4.1 AS BUILT: no intermediate holds a durable row, and that is the whole shape
+
+**Only the ORIGIN bus writes a sender-visible lifecycle row.** `hub.recordAcceptance` returns early
+for relayed ingest, so an intermediate or terminal bus has none and none is created on this path —
+not at ingest, not at acknowledgement, not anywhere. The reason is §13.3: the row is readable by
+exactly one party, the ORIGINAL SENDER on the origin bus, so a row on any other bus is readable by
+**nobody**. Writing one would cost an fsync per recipient on a **peer-driven** path (up to
+`store.MaxRecipients` = 64 per relayed message, under the global write lock) and buy no observation,
+and it would put several rows behind one correlation key, which `ACK-4-FU-RECIPIENT-BINDING` rules
+must not happen before its fix lands. Full record in `DECISIONS.md`, 2026-08-21.
+
+Two consequences the sketch above did not state:
+
+- **The two entry points are symmetric.** A local recipient acknowledging a **relayed** message
+  (agent surface, `POST /v1/ack`) and a downstream peer propagating an outcome for a key this bus did
+  not originate (peer surface, `POST /v1/peer/ack`) reach the *same* backward hop through the *same*
+  adapter. A second implementation would be a second place that decides who this bus contacts.
+- **"No row" is not by itself evidence of anything.** The origin test — `relay.DisposeAck` with a nil
+  path, the one spelling of "did we mint this key" — is what tells a swept row at the origin (the
+  uniform refusal, §8.2's "(none)" row, unchanged and byte-identical) from an ordinary transit
+  acknowledgement anywhere else.
+
+#### 9.4.2 AS BUILT: propagation is SYNCHRONOUS, and that is how invariant 4 survives
+
+No hop answers "accepted" until the next hop has, and the last one does not answer until the ORIGIN
+has committed and fsynced. **Invariant 4 therefore holds END TO END through the chain rather than
+through a local write**, which is precisely what makes it correct for this path to add no durable
+state of its own.
+
+> **NARROWED IN PLACE 2026-08-21 (`ACK-5`), and the superseded sentence is left above.** "The last one
+> does not answer until the ORIGIN has committed and fsynced" holds on every arm **but one**: §9.4.3's
+> 409 row. An INTERMEDIATE bus absorbs a **409** from the hop above it and answers ITS downstream
+> **200** (`cmd/agent-bus/relaywiring.go`, `disposeUnrecordedAck`), so across **two or more backward
+> hops** a recipient can be told `accepted` for an outcome the origin **refused** — and in the "no
+> obligation binds that recipient" case, with nothing durable anywhere. No bus does this to its own
+> immediate caller: on the agent surface every transit failure, 409 included, is a 503. The trade —
+> retry amplification and the row-existence oracle on one side, a truthful answer on the other — is
+> recorded in `DECISIONS.md`, 2026-08-21 (`ACK-5`).
+
+It follows that **there is no retry queue behind this seam and there must not be one.** Every failure
+is answered "not now", the party that raised the outcome re-offers the identical frame, and nothing is
+lost because nothing was acknowledged. A queue here would be a second retry policy with no durable
+record behind it: it would survive neither a restart nor a crash, and it would race the real one the
+moment `ACK-7`/`ACK-14` land beside the durable outbox.
+
+The **destination** is resolved by the implementation and never by the frame: the upstream bus **id**
+comes from this bus's own stored `bus_path` (`relay.UpstreamHop`, index `len-2`, and the path must
+END at this bus), and its **address** from this bus's own peer registry. `relay.AckFrameFrom` rebuilds
+the onward frame from the **validated** value, so an intermediate cannot launder an unvalidated byte
+string onward under its own TLS identity.
+
+> **CORRECTED 2026-08-21 (`ACK-5`).** The parenthesis above used to read "a *search* would let a
+> peer-fabricated path choose who this bus contacts", which claims more than the rule delivers; the
+> superseded wording is quoted here rather than deleted. **What the end-at-us rule actually buys:**
+> the only hop this bus will ever contact is the one adjacent to a position **it wrote itself**, and
+> it is contacted only if it is in **this bus's own peer registry with a base URL** — so a fabricated
+> prefix can never name an address, a host or a scheme, and an unpeered id means nothing is dialled at
+> all. **What it does NOT buy:** proof that the last hop of the ARRIVING path is the peer that
+> authenticated. `hub.relayedBusPath` checks that the arriving path is non-empty, within
+> `store.MaxReceivedBusPath`, that every hop passes `ids.ValidateBusID` and that this bus is not
+> already on it — then appends this bus; `hub.RelayedIngestRequest` has **no peer-principal field at
+> all**, so nothing binds `received[len-1]` to the authenticated peer, and an authenticated peer can
+> still place a different bus it knows we peer with immediately before us. That gap is tracked as
+> **`ACK-5-FU-BUSPATH-SENDER`**. The residual is bounded at the FAR end rather than here: §6.2's
+> obligation binding means the receiving bus independently refuses an ACK it was never owed, and §12's
+> idempotency absorbs a repeat (invariant 10 — path rules complement idempotency, never substitute for
+> it).
+
+#### 9.4.3 AS BUILT: the status mapping
+
+`POST /v1/ack` (agent surface, a local recipient acknowledging a relayed message):
+
+| Situation | Answer |
+| --- | --- |
+| The hop succeeded | **200**, the **same body** as the locally-recorded case. `duplicate` is always `false` — this bus holds no record for a relayed message, so the duplicate is absorbed at the origin under §8.2 note 2. |
+| The hop failed, for any reason | **503** + `Retry-After: 1`. **Never a 4xx**: a 4xx is FINAL, so it would make the recipient ABANDON an outcome that nothing recorded. The upstream's verdict is not echoed (§13.3). |
+| No back-propagation seam is wired in this build | **501**, the same wording as the missing-lifecycle-table refusal, and no `Retry-After`. |
+
+`POST /v1/peer/ack` (peer surface, an intermediate carrying an outcome further back):
+
+| Situation | Answer |
+| --- | --- |
+| The hop succeeded | **200** `{accepted:true,duplicate:false}` |
+| The upstream failed **retriably** (`PeerRefusedError.Retriable()`) | **503** `unavailable` — nothing was written anywhere; the downstream peer re-offers |
+| The upstream answered **409** — the one final refusal that means it DECIDED something (no obligation binds that recipient, or a conflicting terminal already stands there) | **200**, deliberately. Re-offering a frame the origin has finally refused is the retry amplification §9.3 exists to stop, and forwarding the 409 verbatim would tell any bound peer whether the ORIGIN holds a row for a recipient it named — the uniform-answer property, leaked one hop back. The drop is logged loudly and specifically (invariant 6). |
+| The upstream answered any OTHER final status — **404** (a peer that does not serve the route yet), **403** (a peer that will not talk to us), **400** (a frame it could not parse) | **503** `unavailable`. **AMENDED 2026-08-21 AFTER REVIEW; this row previously read "refused finally -> 200" and swept all four statuses together, which was a defect.** `PeerRefusedError.Retriable()` treats every 4xx except 408/429 as final, so the dividing question is not "was it final" but **"did the upstream DECIDE anything about this frame"**. A 404/403/400 decided nothing — it is OPERATOR-recoverable (upgrade the binary, re-peer the bus, fix the encoder), so "not now" is truthful and a later retry can succeed. Answering 200 would have told a recipient, through the chain, that its acknowledgement was accepted when nothing anywhere recorded it — the one sentence §1.1 exists to stop. `Client.PeerAck`'s rollout-ordering note is the concrete case. |
+| No seam wired | **409**, the uniform refusal — a peer must not learn from the wire whether this bus federates onward — logged at WARN, because from an operator's side the outcome stops here. |
+| **At the ORIGIN**, no row for the pair | **409**, the uniform refusal, **unchanged**. |
+
+**Nobody is disconnected on any arm** (§12, invariant 10): a de-peered neighbour, an upstream bus that
+is down, a message swept by retention and a merely buggy client all reach these lines.
+
+#### 9.4.4 AS BUILT: the accepted cost
+
+A transit acknowledgement **stops working once the relayed MESSAGE is pruned** (1 day or 1 GiB,
+whichever bites first — so the byte cap can bite well before `ack.Retention`'s 24h would have expired
+a row). The recipient is then told the uniform `unknown`, exactly as for a swept row. This bus has
+nothing else to bind the frame to once the message is gone, since the destination comes from the
+stored path and this section forbids taking it from anywhere else. Accepted as a cost rather than
+argued away; the alternative is the unreadable rows §9.4.1 refuses.
 
 ---
 

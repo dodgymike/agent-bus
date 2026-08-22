@@ -40,6 +40,32 @@ WHAT IT DOES
   Tracked as P0 7d564118 and P0 f423959c.
   When those land, delete this notice rather than leaving it to rot.
 
+  UPDATED 2026-08-21 (ACK-5). THE RELAYED HALF ABOVE IS NOW FALSE, and it is
+  the more harmful half to leave standing: it tells you a cross-bus message is
+  untracked when it is now tracked end to end. Mind the subtlety — YOUR bus,
+  the one that minted this key, ALWAYS held the row: recordAcceptance's
+  early-return is about a message a bus merely CARRIED, and your own send is
+  not that. What was missing was anything to SETTLE the row. A terminal outcome
+  raised by a recipient on another bus now travels backwards one hop at a time
+  along the path the message took and stops here, at the origin — the only bus
+  holding a sender-visible row. A three-bus end-to-end run over the compiled
+  CLI settles such a row to state ` + "`delivered`" + `, attested_by
+  ` + "`recipient_signature_unverified`" + `, with settled_at stamped.
+
+  THE BROADCAST HALF IS STILL TRUE: recordAcceptance still early-returns on
+  broadcast, so a same-bus broadcast still has no row here and this command
+  still answers unknown for it. That gap is tracked separately as
+  ACK-BROADCAST-NO-LIFECYCLE-ROW.
+
+  P0 7d564118 is CLOSED. P0 f423959c is STILL OPEN: ` + "`watch`" + ` shows a recipient
+  only the LOCAL message id its own bus minted, so a recipient on another bus
+  cannot learn this correlation key from the bus. Until that lands, send it to
+  them out of band — it is the ` + "`message_id`" + ` ` + "`agent-busctl send --json`" + ` handed
+  you, and it is the id they must pass to ` + "`agent-busctl ack`" + `.
+
+  The exit-code paragraph above is unchanged and still applies. Delete this
+  notice only once f423959c AND the broadcast gap have landed too.
+
 THE FIVE STATES
   accepted       committed and fsynced on your bus. It is durable; nobody has
                  acknowledged it yet.

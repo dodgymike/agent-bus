@@ -5225,3 +5225,169 @@ change, filed as a follow-up rather than edited around them. `AGENT_PROTOCOL.md`
 `agent-a5af74373fb0b1fc3` (ACK-5) and `agent-a3b41d07f84017fc1`. `README.md`, `CONTRACTS.md`,
 `CONTRACTS-CLI.md` were uncontended but deliberately not edited: out of this task's scope and already
 owned by `76879ad1`, `cb4fd330` and `881dae01`.
+## 2026-08-21 — `ACK-5` (`5991ee1a-fc26-443b-a459-428b14dc18da`): multi-hop ACK/NACK back-propagation — documentation gate
+
+A terminal delivery outcome raised by a recipient at the far end of a multi-hop path now travels
+BACKWARDS one hop at a time along the traversed `bus_path` and STOPS at the origin bus — the only bus
+holding a durable sender-visible lifecycle row. Correlation is `ACK-CONTRACT.md` §3's key (the origin
+bus's server-minted message id) and nothing else. **No new record type, wire version, route, CLI
+subcommand, flag or environment variable was spent**, and nothing durable is written at any bus that
+did not mint the key.
+
+### Code (not this agent's; recorded so the docs can be traced to it)
+
+New: `internal/relay/ackback.go` (the pure decision `DisposeAck`/`UpstreamHop`, the emitting
+`BackPropagator`, and `AckFrameFrom`), `internal/store/provenance.go` (the body-free
+`RelayProvenanceByOriginMessageID`), `cmd/agent-bus/ackback.go` (`ackTransit`, the one place the
+decision, the emission and the provenance lookup meet). Changed: `internal/hub/ack.go` (the transit
+arm and `RecipientAckResult.Transit`), `internal/httpapi/ack.go` + `server.go` (the `AckTransit` seam
+and the agent surface's transit arm), `cmd/agent-bus/relaywiring.go` (`disposeUnrecordedAck` on the
+peer surface), `cmd/agent-bus/main.go` (wiring on the peer-store branch).
+
+### Docs changed by this gate
+
+- **`CONTRACTS-HTTP.md`** — new dated subsections on both surfaces (*Back-propagation on the peer
+  surface*, *Transit acknowledgements*), status-code rows for both, and **four existing passages
+  amended in place because this change made them false**: the peer surface's "no ACK row ⇒ 409"
+  status row and its uniform-409 paragraph (both now scoped to the ORIGIN bus), the rollout-ordering
+  claim that "nothing in this build emits one yet", and the `POST /v1/ack` section heading *"What is
+  NOT consulted: the message store"* with its "not read at all" absolute.
+- **`AGENT_PROTOCOL.md`** — a new subsection under `agent-busctl ack` for acknowledging a message
+  that came from another bus (what a **503**+`Retry-After` means: exit 6, retry the identical
+  acknowledgement, nothing was recorded; what a **501** means: exit 7, this build has no
+  back-propagation wired, do not retry; and the honest limitation that it stops working once the
+  relayed message is pruned, after which the recipient gets the uniform `unknown`, exit 8); a new
+  passage under `ack-status` for a cross-bus message now reaching `delivered`/`refused`; and a marked
+  correction to the cross-bus section's *"There is no delivery receipt on this protocol and none is
+  planned"*, which was already false and which this change makes conspicuously so.
+- **`PROTOCOL.md`** — new §12, the maintainer-facing account: the traversal rule, the END-at-us
+  requirement in `UpstreamHop` and why a SEARCH would let a peer-supplied path steer this bus's
+  onward contact, verbatim forwarding of class and attestation, and an explicit statement that **no
+  new wire version is spent** so the next reader does not go looking for one.
+- **`ACK-CONTRACT.md` §9.4 only** — amended in place, marked implemented, with §9.4.1–§9.4.4: no
+  durable row at an intermediate and why, synchronous propagation as the carrier of invariant 4, the
+  full status mapping for both surfaces, and the accepted retention cost.
+- **`DECISIONS.md`** — one new dated section for the three decisions (no row at intermediates; the
+  one-arm narrowing of the "never consults the message store" rule; synchronous propagation instead
+  of a durable queue), each with the alternative considered and the cost accepted.
+
+### The chain
+
+spec-keeper → implementer → test-engineer → reviewer → security → documentation (this entry).
+
+### Verification
+
+`go build ./...` and `go vet ./...` both clean in this worktree (exit 0, no output). Proof commands,
+each run through `scripts/proof-check.sh` and quoted by its verdict:
+
+```
+go test -race -run 'TestThreeBusAckNackPropagation|TestUpstreamHopRefusals|TestDisposeAckOriginAndForward|TestAckFrameFromForwardsVerbatim' ./internal/relay
+  -> proof-check: verdict=PASS class=test exit=0 tests_run=31 top_level=4 skipped=0 failed=0
+
+go test -race -run TestTransitAcknowledgementBoundary ./internal/hub
+  -> proof-check: verdict=PASS class=test exit=0 tests_run=16 top_level=1 skipped=0 failed=0
+
+go test -race -run TestAckRouteTransitStatuses ./internal/httpapi
+  -> proof-check: verdict=PASS class=test exit=0 tests_run=12 top_level=1 skipped=0 failed=0
+```
+
+The third of those asserts the agent surface's status mapping directly — a transit 200 whose body is
+compared **byte for byte** against the locally-recorded arm's, a failed hop as 503 with `Retry-After`
+and no disconnect, a seamless build as 501 with no `Retry-After`, and every non-transit answer
+unchanged and never touching the seam. It is the test the `CONTRACTS-HTTP.md` status table was
+written against.
+
+**Recorded because it changed under this gate:** when the documentation agent began, `git status`
+showed **no test file for `ACK-5` anywhere in the worktree** — a repository-wide
+`grep -rln 'BackPropagator\|DisposeAck\|UpstreamHop\|TransitAck\|AckFrameFrom\|RelayProvenanceByOriginMessageID' --include='*_test.go' .`
+returned nothing. `internal/relay/ackback_test.go`, `internal/hub/acktransit_test.go`,
+`internal/httpapi/acktransit_test.go` and `cmd/agent-bus/acktransit_test.go` all appeared **while the
+docs were being written** — the last of them after the verdicts above were taken, so **the count here
+is a snapshot and `git status` is the authority**. Every one of them is UNTRACKED, as are the three
+new non-test files (`internal/relay/ackback.go`, `internal/store/provenance.go`,
+`cmd/agent-bus/ackback.go`); a pathspec commit naming only the *changed* files would ship the
+consumers without their definitions and leave `main` un-compilable.
+
+**One near-miss worth recording.** `proof-check.sh 'go test -race -run TestAckTransitArm
+./internal/httpapi'` — a test name guessed from the file name — reported
+`VACUOUS … ZERO tests ran` rather than passing. That is the mechanism CLAUDE.md warns about working
+exactly as intended; the real name is `TestAckRouteTransitStatuses`.
+
+**What is still owed, and the docs do not claim otherwise.** These are package-level tests. Nothing
+here exercises the capability the way an agent reaches it — `agent-busctl ack` against a running
+three-bus federation, which is invariant 7's standard and `ACK-12`'s acceptance. Nor does anything
+cover a **re-acknowledgement** on the transit arm, which is where the surfaces measurably differ:
+`duplicate` is always `false` there, so the byte-identical assertion above holds for a first
+acknowledgement and not for a retry. That is documented in `CONTRACTS-HTTP.md` and
+`AGENT_PROTOCOL.md` as an honest exception rather than left to be discovered. The
+`AGENT_PROTOCOL.md` claims about exit **6** (503 + `Retry-After`) and exit **7** (501) were derived by
+reading `client/transport.go`'s status classification and `client/errors.go`'s `ExitCode` mapping, not
+by observing a live bus, and are labelled as such in this entry rather than in the agent-facing text.
+
+### Addendum, 2026-08-21 — the DELTA after the first documentation pass (`documentation`)
+
+Four things changed on `ACK-5` after the entry above was written. One of them **widens a security
+rule**, so it is recorded here as well as in `DECISIONS.md`.
+
+**1. `ACK-CONTRACT.md` §6.2's obligation binding is WIDENED by one case.** `ACK-12`'s harness proved
+multi-hop ACK failed at the LAST hop: on A→B→C, A keys its outbox job on `DeriveJobID(C, K)`
+(`Forwarder.targets` routes on `Registry.Route(recipient)`, the recipient's HOME bus,
+`internal/relay/forward.go:1044`) while the acknowledgement arrives over A's link with **B**, so
+`AuthorizePeerAck` looked up `DeriveJobID(B, K)` — a job id nothing ever wrote. The route now calls
+`relay.AuthorizePeerAckVia` (`internal/relay/ackback.go:831`, from `internal/relay/ackhttp.go:398`),
+which adds an INDIRECT arm gated on the address this bus would dial for the recipient's home bus
+equalling the address it would dial for the authenticated peer — **computed from this bus's own peer
+registry, never from the frame**. §6.2 is amended IN PLACE with the original rule reproduced, and the
+rule is also in `CONTRACTS-HTTP.md`'s `POST /v1/peer/ack` section. Both say explicitly that this
+**does NOT close `ACK-4-FU-RECIPIENT-BINDING`**: the direct arm still binds only (peer, key).
+
+**2. A transit correlation key must name ANOTHER bus** (`internal/hub/ack.go:728-730`). Documented in
+`AGENT_PROTOCOL.md` as the agent-facing rule — acknowledge with the id the SENDER's bus minted, not
+the one your bus shows you — together with the honest statement that **`watch` does not expose the
+origin id at all** (`toWireMessage` sets `MessageID: m.ID`, `internal/httpapi/messages.go:844`), so
+today it must arrive out of band. Tracked separately as `f423959c`
+(`ACK-12-FU-WATCH-CORRELATION-KEY`).
+
+**3. The 200-on-final-refusal arm was narrowed to 409 only.** `ACK-CONTRACT.md` §9.4.3 and
+`DECISIONS.md` were already correct. **`CONTRACTS-HTTP.md` was NOT, in three places**, and all three
+are corrected in place with the superseded text quoted: the status-table row that swept "any other
+4xx, including a 404" into 200; the paragraph headed "Why a FINAL upstream refusal is answered 200
+downstream"; and the rollout-ordering amendment, which told an operator that a 404 from a
+pre-`ACK-3` peer makes the intermediate answer its downstream **200**. It now answers **503**
+(`cmd/agent-bus/relaywiring.go:2078` for the 409-only test, `:2098` for the 404/403/400 log line).
+A fourth stale line in the same file — a nil `federationOptions.AckTransit` called "a **legitimate**
+configuration for a leaf bus" — was corrected against the field's own doc
+(`cmd/agent-bus/relaywiring.go:1133-1143`), which now says the composition root cannot produce one.
+
+**4. The `ACK-12` acceptance subtests are INVERTED and the harness is GREEN.** Two gap subtests now
+assert the fixed behaviour and two were added (exactly-once absorbed at the origin; the NACK class
+propagating verbatim). **Verified by this gate, in this worktree, against three real buses over
+verified mutual TLS, driven entirely through the compiled CLI** (`tests/e2e` contains no HTTP call by
+construction):
+
+```
+bash scripts/proof-check.sh 'go test -race -run TestThreeBusEndToEndAckNack ./tests/e2e'
+  -> proof-check: PASS — 9 test(s) ran (1 top-level), 8 passed, 0 skipped.
+  -> proof-check: verdict=PASS class=test exit=0 tests_run=9 top_level=1 skipped=0 failed=0 empty_pkgs=0
+```
+
+The origin row observed on bus A after the recipient on bus C acknowledged, two hops away:
+
+```
+State:delivered  CorrelationKey:bus-cwigrjybuaj5q2dn-11
+Recipient:bus-wdlmidy7rlj3okp4.e2e-ack-recipient-1  Class:(empty)
+AttestedBy:recipient_signature_unverified  SettledAt:2026-08-21T16:09:19.932198649Z
+```
+
+and, in the same run, the wrong-id probe answering `exit=8 State:unknown` for the id bus C minted
+(`bus-wdlmidy7rlj3okp4-11`) — delta 2's refusal, observed rather than reasoned about.
+
+**THIS IS A LOCAL ACCEPTANCE RUN, NOT PRODUCTION.** Three throwaway buses started by the harness on
+this workstation. **Nothing has been deployed**, and at the time of writing the change is still
+UNCOMMITTED — the code sits in a worktree and the integrator commits.
+
+Docs changed by this addendum: `ACK-CONTRACT.md` (§6.2), `CONTRACTS-HTTP.md` (the `POST /v1/peer/ack`
+binding rule + four in-place corrections), `AGENT_PROTOCOL.md` (`agent-busctl ack`: the correlation-key
+rule, and a correction to the unqualified "it is the id the ORIGIN bus minted"), `DECISIONS.md` (two
+sub-entries appended to the existing dated `ACK-5` section), this file. Invariants read in full first:
+**1**, **2**, **10**, **11**.

@@ -1029,6 +1029,19 @@ key — `agent-busctl ack-status --json <key>` and `agent-busctl ack-status <key
 > (`ACK-12-FU-WATCH-CORRELATION-KEY`).
 > **When those land, delete this notice rather than leaving it to rot.** The same notice is on the
 > `ack` and `ack-status` subcommands' `--help`.
+>
+> **UPDATED 2026-08-21 (`ACK-5`).** The **relayed** half of the paragraph above is now FALSE, and it
+> is corrected beside itself rather than swapped: a message you sent to an agent on **another** bus
+> IS tracked here, end to end. Mind the subtlety — YOUR bus always held the row, because the
+> early-return quoted above is about a message a bus merely *carried* and your own send is not that;
+> what was missing was anything to **settle** it. A terminal outcome raised at the far end now
+> travels backwards one hop at a time along the path the message took and stops at the origin (see
+> the cross-bus paragraph a little further down this section). The **broadcast** half is still true
+> — a same-bus broadcast still opens no row and still answers `unknown` — and is now tracked
+> separately as `ACK-BROADCAST-NO-LIFECYCLE-ROW`. The exit-code sentence above is unchanged. P0
+> `7d564118` is **closed**; P0 `f423959c` is **still open**, so a recipient on another bus still
+> cannot learn this correlation key from `watch` and you must send it to them out of band.
+> **Delete this notice only once `f423959c` AND the broadcast gap have landed too.**
 
 Calls `GET /v1/ack/<correlation-key>` — a **different** route from the recipient-side `POST /v1/ack`
 (which is [`agent-busctl ack`](#acknowledging-a-message-you-received-agent-busctl-ack), shipped
@@ -1051,6 +1064,30 @@ Terminal is **absorbing** — a terminal row is never revisited, reopened or dow
 message; a bus taking responsibility for the next hop does **not** advance this state and is not
 reported here at all. "Another bus has it" and "an agent got it" are different facts, and this
 command reports only the second.
+
+**A CROSS-BUS message can now reach `delivered`/`refused` here — new, 2026-08-21 (`ACK-5`).** Until
+this landed, a message you sent to an agent on **another** bus could only ever be reported `accepted`
+or `in_flight`, however faithfully the recipient acknowledged it: the recipient's bus held no row and
+had no way to tell yours. A terminal outcome raised at the far end now travels **backwards one hop at
+a time along the path the message took** and stops here, at the bus that minted the message id — so
+the same five states mean the same things whether the recipient was on your bus or three hops away.
+
+Three things that have NOT changed, and you must not read this as changing them:
+
+- **A hop ACK still never converts to a delivery**, at any distance. Only the recipient's own terminal
+  outcome (or a bus's routing failure) moves this row.
+- **You are told nothing about the topology.** The row does not disclose the path traversed, which bus
+  refused, or anything about the recipient's roster membership — you learn the outcome for recipients
+  **you named** and nothing else about the federation.
+- **`attested_by` is still a label, not a proof** (below), and it is still
+  `recipient_signature_unverified` for a recipient outcome: every bus on the way forwards the
+  recipient's signature **verbatim** — nobody re-signs it, and nobody verifies it either.
+
+**A terminal outcome can still be lost in transit, and you will not be told.** If a bus on the way
+back cannot reach the next one, or that bus is running a binary too old to serve the acknowledgement
+route, the outcome is dropped and logged there — your row simply stays non-terminal until the 24h
+window sweeps it and this command starts reporting `unknown`. Treat a non-terminal row as "no news",
+never as "not delivered".
 
 **`attested_by` is a label, not a proof.** The two values are `peer_bus` and
 `recipient_signature_unverified` — there is **no value meaning "verified"**, and this system cannot
@@ -1150,9 +1187,18 @@ agent-busctl ack <message-id> --refuse recipient_refused_policy  # refused
 agent-busctl ack <message-id> --json
 ```
 
-The `<message-id>` is the `message_id` the message **arrived with** — `watch --json | jq -r
-.message_id`. It is the id the ORIGIN bus minted (invariant 1) and it is bus-namespaced, so it is
-the same id the sender passes to `ack-status`.
+The `<message-id>` is the id **the SENDER's bus minted** — the correlation key — and it is
+bus-namespaced (invariants 1 and 2), so it is the same id the sender passes to `ack-status`.
+
+**For a message sent by an agent on YOUR OWN bus**, that is the `message_id` the message arrived with:
+`watch --json | jq -r .message_id`.
+
+> **CORRECTED 2026-08-21 (`ACK-5`).** This passage said, without qualification, that the id a message
+> arrives with "is the id the ORIGIN bus minted". **That is true only for a same-bus message.** For a
+> message RELAYED to your bus there are two ids for one logical message — the origin's, and the local
+> one your bus minted for its own copy — and `watch` prints the **local** one. Read the [cross-bus
+> section](#acknowledging-a-message-that-came-from-another-bus--new-2026-08-21-ack-5) before
+> acknowledging anything that came from another bus.
 
 **It is the message id, NOT `seq` and NOT a delivery position.** Those are three different numbers
 (identity, correlation, position); passing the wrong one is refused locally, before anything is
@@ -1212,6 +1258,12 @@ Terminal is **absorbing**: the first outcome recorded for a message stands forev
 - **A different outcome for a message you already settled** — refused with exit `7` and **nothing is
   written**. Retrying cannot change it. Ask `ack-status` what you already recorded.
 
+Both bullets describe a message **your own bus originated**. **Added 2026-08-21 (`ACK-5`): a RELAYED
+message answers differently on both counts** — `duplicate` is always `false`, and a different outcome
+is never exit `7`. See ["Acknowledging a message that came from ANOTHER
+bus"](#acknowledging-a-message-that-came-from-another-bus--new-2026-08-21-ack-5) below before you
+branch on either.
+
 ### `unknown` is four answers at once, and it cannot be narrowed
 
 Exit `8` with `"state":"unknown"` means the bus retains nothing for you and that message: it never
@@ -1219,6 +1271,72 @@ existed, it was swept past the 24h retention window, **you were not addressed in
 malformed. The bus answers all four identically on purpose — an answer that distinguished them would
 confirm to anyone who guessed an id that the message exists. Do not write a script that tries to
 tell them apart.
+
+### Acknowledging a message that came from ANOTHER bus — new, 2026-08-21 (`ACK-5`)
+
+**`agent-busctl ack` now works for a message that was relayed to your bus. It used to answer
+`unknown` (exit `8`), every time.** Nothing about how you call it changes — same subcommand, same
+flags, same output — and that sameness is deliberate: which bus holds the durable record is a fact
+about the operators' topology, and you are told the outcome of the message you were handed and
+nothing else about the federation.
+
+#### The id you must pass is the SENDER's, not the one your bus shows you (added 2026-08-21)
+
+**Acknowledge with the id the SENDER's bus minted — the ORIGIN id — never the id your own bus minted
+for its local copy.** A relayed message has two ids for one logical message, and only the origin's is
+the correlation key (`ACK-CONTRACT.md` §3). Passing your bus's local id answers the uniform `unknown`
+(exit `8`) and **records nothing anywhere**. Your bus refuses any correlation key whose bus half is
+its own before it looks anything up, deliberately: without that refusal the local id would resolve to
+the very same relayed message, and you would have been handed a **503 that no retry could ever
+clear** — a "try again" for something that can never succeed.
+
+**Today there is no way to get the origin id out of `watch`, and you should plan around that.**
+`watch --json`'s `message_id` is the id **your** bus minted, and no field on that record carries the
+origin id — so for a relayed message the id in your hand is precisely the one that will be refused.
+That is a real usability gap, not a solved problem: it is tracked separately (`f423959c`,
+`ACK-12-FU-WATCH-CORRELATION-KEY`), and until it lands **the origin id has to reach you out of band**
+— from the sender, in the message body, or from whoever coordinates the two agents. You can *tell the
+two apart* by their bus half — the origin id begins with the sender's bus id (the first half of the
+`from` field), the local one with yours — but you cannot **derive** it: the sequence half of the id
+your bus minted is its own, unrelated to the origin's, and no field on the delivered record carries
+the origin's.
+
+What changed underneath: your bus never held a status row for a message it merely carried. The row
+lives on the **origin** bus — the one whose agent sent it, and whose id is the first half of the
+message id. Your bus now authorises your acknowledgement (you are a named recipient of a relayed copy
+it is holding) and **carries the outcome one hop back** toward that origin, waiting for it to be made
+durable there before it answers you. **You are not told `accepted` until the origin has it on disk.**
+
+> **That last sentence is NARROWED in place, 2026-08-21 (`ACK-5`).** It stood here unqualified, and it
+> is not true on every path. It holds exactly when your bus hands the outcome straight to the origin.
+> It does NOT hold across **two or more backward hops** (three or more buses): an INTERMEDIATE bus
+> absorbs a **409** from the hop above it and answers ITS downstream `200`, so you can be told
+> `accepted` for an outcome the **origin refused** — and in the "no obligation binds that recipient"
+> case, with nothing durable recorded anywhere. It is deliberate: re-offering a finally-refused
+> outcome for ever is the amplification the status table exists to stop, and passing the origin's
+> verdict back down the chain would tell every bus on it whether the origin holds a row for a
+> recipient it named. **Your OWN bus absorbs nothing** — every failure it meets is the exit `6` below.
+
+**Two exit codes mean something specific on this path. Handle them.**
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| **Exit `6`** (`--json`: `"exit_code":6`, `"error"` ending *"this delivery outcome could not be carried toward the origin bus; retry"*, remedy *"retry in a few seconds"*). The bus answered **503** with `Retry-After: 1`. | The backward hop did not complete, and **your acknowledgement recorded nothing on your bus** — it holds no row for a relayed message at all. On the transient causes nothing was recorded upstream either: the next bus back is down, refusing, no longer peered, or your bus already has its limit of backward hops in flight toward it. **CORRECTED 2026-08-21 (`ACK-5`): this cell used to name only transient causes, and that was wrong.** The SAME 503 is also returned when the hop above **finally refused with a 409** — a row swept by retention at the origin, a recipient the sender never addressed, or a **conflicting terminal already standing there** — and none of those ever clear. The two are **byte-identical to you on purpose**: the upstream's verdict is never echoed back down, so a bus cannot be used to ask whether another bus holds a row. That is by design, not an omission, and the bus cannot tell you which case you are in. | **Retry the identical acknowledgement** — same id, same outcome, same class. It is safe by construction and it is the right FIRST response, but it is **not guaranteed to succeed**. Honour `Retry-After`, back off a second or two, and **stop after a bounded number of attempts — a handful, not a loop**: on the 409 causes every attempt fails identically, and an unbounded retry loop is exactly the amplification this status table exists to stop. When your attempts are used up, report it to whoever operates the two buses; there is nothing further you can do from your side. |
+| **Exit `7`** (`--json`: `"exit_code":7`, `"error"` ending *"delivery acknowledgement is not available on this bus"*, remedy *"this is not a bus fault and not transient; do not retry"*). The bus answered **501**. | This bus has **no back-propagation wired at all** — a leaf deployment with no peer configuration. It is a fact about the build, not a passing condition. | **Do not retry**; it will fail identically for ever. Report it to whoever operates the bus. Note exit `7` also means "already terminal with a different outcome" — but **only for a message your own bus originated**. **Corrected 2026-08-21 (`ACK-5`):** on THIS path a different outcome never reaches exit `7`. The origin answers 409, and your bus turns that into exit `6` when it peers directly with the origin, or into exit `0` with `accepted:true` when an intermediate bus absorbed the 409 — in which case the `state` printed is what YOU just asserted while the origin still holds the first outcome. The message text tells the two exit-`7` meanings apart, so branch on the text, not on the number alone. |
+
+**The one honest limitation, and it will bite you eventually.** A message body is retained for **24
+hours or 1 GiB, whichever runs out first**, so on a busy bus messages are pruned well before a day is
+up. Once the relayed message is gone, your bus has nothing left to work out where to send the outcome
+— and you get the uniform `unknown` (exit `8`), exactly as for a message that was swept. **Acknowledge
+promptly**; do not queue acknowledgements for hours and expect them to land. (Exit `8` is the steady
+state for a pruned message, which is why pruning is NOT listed as a cause of exit `6` above. Only the
+narrow race — pruned in the instant between your bus authorising the acknowledgement and resolving the
+hop — lands on exit `6`, and the retry after it lands on exit `8`.)
+
+Note too that `duplicate` is **always `false`** on this path, even when you re-acknowledge. Your bus
+keeps no record for a relayed message, so there is nothing there for a retry to be a duplicate *of* —
+the retry is absorbed at the origin, where the record is, and the first outcome still stands. **Do not
+treat `duplicate:false` as proof that this is your first acknowledgement.**
 
 ### Output
 
@@ -1456,11 +1574,26 @@ agent-busctl send busB.alice-1 'hello from another bus'
   A message for `busB.nobody-9` is accepted here and refused by `busB` at ingest. You will not hear
   about it.
 - **Not that the message will EVER arrive.** Retries stop at a bounded horizon; a permanently refused
-  or expired delivery is recorded on this bus as abandoned and logged there. There is no delivery
-  receipt on this protocol and none is planned. **If your workflow needs confirmation, get it the
-  same way agents get everything else: have the recipient send you a reply, and time out on its
-  absence.**
+  or expired delivery is recorded on this bus as abandoned and logged there. **If your workflow needs
+  confirmation, ask for it — see the correction below — and if you need the recipient's own words as
+  well, have it send you a reply and time out on the reply's absence.**
 - **Not that it took one hop.** Nothing tells you the topology, and you must not depend on it.
+
+> **CORRECTED 2026-08-21, and the correction is stated rather than swapped.** The bullet above used to
+> end: *"There is no delivery receipt on this protocol and none is planned. If your workflow needs
+> confirmation, get it the same way agents get everything else: have the recipient send you a reply,
+> and time out on its absence."* **Both halves of the first sentence are now false.** There IS a
+> delivery receipt — `agent-busctl ack` (the recipient declares it, `ACK-15`) and `agent-busctl
+> ack-status` (you read it, `ACK-9`) — and since `ACK-5` (2026-08-21) it works **across buses**, one
+> hop at a time back along the path the message took. The line is corrected in place rather than
+> deleted because it was true for as long as it was written, and a stale absolute that reads as
+> freshly checked is the failure this repo keeps paying for.
+>
+> **What is still true, and is why the reply advice survives:** a 2xx from `send` is still not a
+> receipt, a non-terminal row still means "no news" rather than "not delivered", a terminal outcome
+> can still be silently lost on the way back (see `ack-status` above), and the acknowledgement tells
+> you only `delivered`/`refused` plus a closed-set class — never what the recipient made of the
+> content. For that you still need a reply.
 
 ### Multi-hop works — but a hop in flight does not survive a restart
 
@@ -1498,8 +1631,13 @@ to the bus upstream of it.
 
 So the rule from ["What you must NOT infer from a 2xx"](#what-you-must-not-infer-from-a-2xx) is not
 softened by multi-hop working — it is exactly why it is written that way. **If your workflow needs
-confirmation that a message arrived, have the recipient reply and time out on its absence.** That is
-more important across two hops than one, not less.
+confirmation that a message arrived, ask for it: since `ACK-5` (2026-08-21) `agent-busctl ack-status`
+reports a terminal outcome raised on another bus, carried back one hop at a time.** (Amended
+2026-08-21; this sentence used to say only *"have the recipient reply and time out on its absence"*,
+which was the sole option at the time.) It is still a
+*positive* signal only — a non-terminal row means "no news", never "not delivered" — so time out on
+its absence exactly as before, and have the recipient reply if you need more than
+`delivered`/`refused`. That is more important across two hops than one, not less.
 
 ## The OPERATOR PRINCIPAL exists, and it is not you — `agent-bus operator` is an OPERATOR command
 

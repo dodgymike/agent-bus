@@ -170,6 +170,44 @@ type Options struct {
 	// that cmd/agent-bus cannot make.
 	AckStatus AckStatusSource
 
+	// AckTransit forwards a terminal outcome ONE HOP BACK toward the origin bus,
+	// for an acknowledgement this bus holds no durable row for because the
+	// message was RELAYED here (ACK-CONTRACT.md §9.4, ACK-5). POST /v1/ack calls
+	// it when hub.AcknowledgeDelivery reports a TRANSIT acknowledgement; see
+	// AckTransit in ack.go for what the implementation owes.
+	//
+	// IT IS SYNCHRONOUS, AND THAT IS THE DURABILITY ARGUMENT (invariant 4). The
+	// 200 this route writes is an acknowledgement, and on the transit path
+	// NOTHING WAS WRITTEN HERE — so it may not be sent until the ORIGIN bus has
+	// fsynced the outcome, which is exactly what waiting for this call to return
+	// means, hop by hop, all the way back. There is no queue behind it and there
+	// must not be one here: a failure at any hop is answered "not now" (503) and
+	// the recipient retries, so nothing is lost because nothing was acknowledged.
+	// Retry and bounce are ACK-7/ACK-14.
+	//
+	// THE "UNTIL THE ORIGIN HAS FSYNCED" CLAIM HAS EXACTLY ONE EXCEPTION, and it
+	// is not this route's doing: an INTERMEDIATE bus absorbs a 409 from the hop
+	// above it and answers ITS downstream 200 (cmd/agent-bus/relaywiring.go,
+	// disposeUnrecordedAck). So over two or more backward hops this call can
+	// return nil while the ORIGIN refused with a 409 — nothing durable anywhere
+	// in the "no obligation binds that recipient" case — and this route then
+	// writes a 200. This route itself never absorbs anything: EVERY error from
+	// this seam, 409 included, becomes a 503. The narrowing is deliberate and
+	// recorded (DECISIONS.md, 2026-08-21, ACK-5); see the AckTransit interface
+	// doc in ack.go for the argument.
+	//
+	// It is OPTIONAL and is nil on a non-federating build, which then answers 501
+	// to a transit acknowledgement rather than pretending to have carried it.
+	//
+	// BEING AN INTERFACE, IT HAS THE TYPED-NIL TRAP, exactly as AckStatus above
+	// does: assigning a nil *T to it yields a NON-nil interface, so the route
+	// would find a seam here and dutifully call through it. Pass an
+	// implementation or pass nothing; do not pass a nil-valued variable of a
+	// concrete type. cmd/agent-bus assigns it from an interface-typed local set
+	// only on the branch that actually built one, the same way it handles
+	// hub.Options.Egress and hub.Options.RemoteRouter.
+	AckTransit AckTransit
+
 	// PeerPrincipals resolves an inbound peer bus's TLS client certificate to
 	// the one adjacent bus principal it names (RELAY-45). It is satisfied by
 	// *relay.PeerStore.
@@ -236,6 +274,12 @@ type Server struct {
 	// Options.AckStatus and ackstatus.go.
 	ackStatus AckStatusSource
 
+	// ackTransit carries a terminal outcome one hop back toward the origin bus
+	// for a message that was RELAYED here, or nil when this build cannot
+	// federate an acknowledgement onward; see Options.AckTransit and the
+	// transit arm of handleAck.
+	ackTransit AckTransit
+
 	// peerPrincipals resolves an inbound peer bus's client certificate; see
 	// Options.PeerPrincipals. A nil value means this bus can authorise no peer
 	// bus, and RequirePeerPrincipal refuses everything.
@@ -295,8 +339,12 @@ func New(opts Options) *Server {
 		auth:        opts.Auth,
 		invites:     opts.Invites,
 		ackStatus:   opts.AckStatus,
-		ackWaiters:  newAckWaiterCount(),
-		now:         opts.Now,
+		// NO DEFAULT: a stand-in that answered nil would report a terminal
+		// outcome as carried while nothing left this bus, which is the silent
+		// loss the whole ACK plane exists to prevent. Nil means 501, loudly.
+		ackTransit: opts.AckTransit,
+		ackWaiters: newAckWaiterCount(),
+		now:        opts.Now,
 		// NO DEFAULT: see Options.PeerPrincipals. A nil resolver is the
 		// fail-closed state, not a gap to be filled in with a permissive one.
 		peerPrincipals: opts.PeerPrincipals,

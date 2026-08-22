@@ -1190,3 +1190,128 @@ that forfeits invariant 1.
 log writer (`wal.OpenWriter`, `wal.KindAudit`) attaches none, so an audit log's discarded tail
 record index can still be reissued; this file protects the WAL's record indices and, through
 `internal/hub`'s derivation, message ids — it does not protect the audit trail.
+
+## 12. Backward propagation of a terminal delivery outcome (`ACK-5`, 2026-08-21)
+
+Reference implementation: `internal/relay/ackback.go` (the decision and the emission),
+`internal/store/provenance.go` (the body-free provenance accessor), `cmd/agent-bus/ackback.go` (the
+one place the two meet). The wire frame itself is `POST /v1/peer/ack`, unchanged, and is specified in
+`CONTRACTS-HTTP.md`; `ACK-CONTRACT.md` §9.4 is the ruling. This section is the maintainer-facing
+account of the **traversal**, which is the part with a failure mode worth writing down.
+
+**NO NEW WIRE VERSION IS SPENT, and no new record type, route, on-disk file, flag or environment
+variable.** Do not go looking for one. The frame is `relay.PeerAckRequest` at
+`relay.AckWireVersion` = the already-reserved `relay-wire-version = 1` (`CONTRACTS-ONDISK.md`,
+"Record types / wire protocol versions"); this task adds an emitter for a frame that already existed
+and a **second reader** of the path §10 already stores. The one thing it adds to the *system* is a
+direction of travel.
+
+**The traversal rule.** A terminal outcome travels **backwards, one hop at a time, along the traversed
+`bus_path`, and stops at the ORIGIN bus.** In `A→B→C`: `C` hands the outcome to `B`, `B` hands its
+copy to `A`, and `A` — which minted the correlation key — keeps it. Nothing fans out, and nothing
+skips a hop to reach the origin directly: **a bus contacts only the bus that handed it the message**,
+and only if that bus is in its own peer registry. The correlation is `ACK-CONTRACT.md` §3's key — the
+ORIGIN bus's server-minted message id, `<origin-bus-id>-<seq>`, `store.Message.OriginID()` — and
+nothing else. It is the same value that is already the relay wire idempotency key (§10) and already
+`OutboxRecord.OriginMessageID`; **no fourth identifier is minted** (invariant 1).
+
+**Two decisions, in this order, and the order is the design** (`relay.DisposeAck`):
+
+1. **Our own bus id is validated first.** An empty or malformed local id compares unequal to the
+   origin half of *every* correlation key, so a bus with a broken id would classify its OWN
+   settlements as "forward upstream" and emit the origin's private rows onto the network.
+2. **The correlation key is PARSED, never trusted** (`ids.ParseMessageID`, invariant 1). Its bus half
+   *is* the origin bus, by construction (invariants 1 and 2), which is what makes the stop condition
+   computable with no registry and no lookup.
+3. **If we are the origin, the path is not consulted at all.** This is §8.4's rule at the correlation
+   layer, and it is what makes a terminal outcome incapable of orbiting the federation: the one bus
+   that could turn an inbound ACK back into an outbound one is the bus that minted the key, and it
+   never does. Consulting the path first — "forward unless the upstream is missing" — would leave the
+   stop condition dependent on a stored field, and a wrong or malicious path would restore the loop.
+   Idempotency would absorb the duplicate *settlements*, but the **traffic** would be unbounded: the
+   same complement-not-substitute distinction §10 draws for message loop prevention (invariant 10).
+
+Bus ids are compared with `strings.EqualFold` throughout, because `ids.BusIDPattern` admits both
+cases and §10's `PathContains` and `hub.relayedBusPath` already fold for the same reason. Folding
+widens what counts as "us", which is the safe direction for a **stop** condition.
+
+**The loop rule: the stored path must END at us, and the hop is an INDEX, never a search**
+(`relay.UpstreamHop`). The stored path is origin-first and ends with this bus, because
+`hub.relayedBusPath` validates the path as it arrived and appends this bus — it is **not** the path as
+it came off the wire. So the upstream hop is always index `len-2`.
+
+> **Read this before "making it robust".** The obvious generalisation — find our own id *anywhere* in
+> the path and take the hop before it — would let **any** position in a peer-supplied path decide who
+> we POST a terminal outcome to; the prefix of a stored path is bytes a peer sent (§10: "Not
+> guaranteed: that any of it is true"). Requiring the path to END at us means the only hop we ever
+> contact is the one adjacent to a position **we** wrote, and we contact it only if it is in **this
+> bus's own peer registry with a base URL** (`relay.BackPropagator.Propagate` re-resolves the address
+> on every emission and dials nothing when the lookup misses). A fabricated prefix therefore cannot
+> name an address, a host or a scheme, and an unpeered id is the end of the road for that hop.
+>
+> **CORRECTED 2026-08-21 (`ACK-5`).** This passage previously said the rule stops a peer steering this
+> bus's onward contact, full stop; the superseded claim is left visible here because the narrowing
+> matters. **It does not prove the last hop of the ARRIVING path is the peer that authenticated.**
+> `hub.relayedBusPath` checks that the path is non-empty, within `store.MaxReceivedBusPath`, that every
+> hop passes `ids.ValidateBusID`, and that this bus is not already on it — then appends our own hop.
+> `hub.RelayedIngestRequest` carries no peer-principal field at all, so **nothing binds
+> `received[len-1]` to the authenticated peer**: an authenticated peer can still place a *different
+> bus it knows we peer with* immediately before us and have the settlement delivered there. That gap
+> is tracked as **`ACK-5-FU-BUSPATH-SENDER`** and is not closed by this rule. The residual is bounded
+> at the FAR end instead: `ACK-CONTRACT.md` §6.2's obligation binding means the receiving bus
+> independently refuses an ACK it was never owed, and its §12 idempotency absorbs a repeat — loop
+> prevention over the path is a complement to idempotency, never a substitute (invariant 10).
+>
+> When the shape is not what we wrote, the honest answer is to refuse: refusing costs one settlement an
+> operator can see in the log, guessing costs a contact the graph never authorised.
+
+Four further refusals guard the same seam, each naming an **index and a length, never the offending
+value** (the convention `hub.relayedBusPath` and `validateHops` already follow, because a hop that
+failed validation is unbounded input): a path shorter than two hops; any hop that is not a valid bus
+id, checked before any of them is compared; this bus appearing **twice** (a fabricated second visit —
+the rule §10 enforces on ingest and egress, applied here to the record that survived them); and the
+resolved hop being **us**, which is unreachable after the previous check and is kept only because it
+states the post-condition the function exists to guarantee.
+
+**Nothing in a frame ever names a destination, and that is the security property.** The upstream bus
+**id** comes from this bus's own stored path; its **address** comes from this bus's own peer registry
+(`relay.Registry.PeerBaseURL`), re-resolved on every emission so a de-peering takes effect on the next
+one. `relay.PeerAckRequest` has no field an address, host, scheme or bus id could arrive in — the same
+structural argument the relay envelope already makes. If a future task wants an ACK to reach somewhere
+the registry does not name, the answer is a peering change by an operator, **never a field on the
+frame**. "Not peered" is the end of the road for that hop and is never a reason to look for another
+route to the origin.
+
+**Class and attestation are forwarded VERBATIM** (`relay.AckFrameFrom`). The frame is rebuilt from the
+**validated** value — so only fields that passed the closed-set validation can be forwarded, and this
+bus cannot launder an unvalidated byte string onward under its own TLS identity — and the recipient's
+outcome, class, `emitted_at` and 64-byte signature are reproduced exactly. **An intermediate re-signs
+nothing, re-classifies nothing and re-times nothing** (invariant 2), exactly as it re-attests nothing
+when forwarding a message. The attestation is opaque bytes over the ORIGINAL canonical ACK bytes, so
+touching any covered field would silently invalidate a signature **nobody in this federation can
+verify yet** (`ACK-CONTRACT.md` §6.3, §16 Q1) — the corruption would be undetectable end to end.
+Restamping `emitted_at` would additionally make every hop look like the origin of the outcome in an
+operator's log. The one field deliberately **not** preserved is `protocol_version`: `Client.PeerAck`
+overwrites it with the version **this** bus speaks, which is what makes an absent version
+unambiguously mean "written before the field existed".
+
+**Durability comes from the chain, not from a local write.** No bus on the path writes anything durable
+for an outcome it did not originate — `hub.recordAcceptance` returns early for relayed ingest, so
+there is no row to settle and none is created. Invariant 4 is kept because **each hop is
+synchronous**: no hop answers "accepted" until the next hop has, and the last one does not answer
+until the origin has fsynced. **NARROWED IN PLACE 2026-08-21 (`ACK-5`) — that sentence stood here
+unqualified and is true on every arm but one.** An INTERMEDIATE bus absorbs a **409** from the hop
+above it and answers ITS downstream `200` (`cmd/agent-bus/relaywiring.go`, `disposeUnrecordedAck`),
+so across **two or more backward hops** a recipient can be told `accepted` for an outcome the origin
+**refused** — and in the "no obligation binds that recipient" case with nothing durable anywhere. No
+bus does this to its own immediate caller: on the agent surface every transit failure, 409 included,
+is the 503 below. The rationale — retry amplification, and not leaking the origin's verdict back down
+the chain — is in `DECISIONS.md`, 2026-08-21 (`ACK-5`), and the status mapping is `ACK-CONTRACT.md`
+§9.4.3. **There is therefore no retry queue on this path and there must not be
+one**: a failure at any hop is answered "not now", the party that raised the outcome re-offers the
+identical frame, and nothing is lost because nothing was acknowledged. Retry, backoff and bounce are
+`ACK-7`/`ACK-14`, once, beside the durable outbox that already survives a restart. Every drop is
+logged loudly and specifically (invariant 6) with the local bus, the peer bus, the elided correlation
+key and recipient, and the outcome — **the bus path is deliberately never logged**, because §13.3
+forbids disclosing the traversed path and an operator log is where such a detail leaks into an export
+without anybody deciding to disclose it.

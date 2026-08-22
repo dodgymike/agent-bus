@@ -66,6 +66,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1122,6 +1123,37 @@ type federationOptions struct {
 	// shape every other required callback in this file exists to prevent.
 	AckLifecycle *ack.Store
 
+	// AckTransit carries a terminal outcome ONE HOP FURTHER BACK toward the
+	// origin bus, for a correlation key this bus RELAYED but did not originate
+	// (ACK-CONTRACT.md §9.4, ACK-5). settleAck reaches it in exactly one place:
+	// the arm where ack.Store.Settle answered ErrNoRecord and this bus is NOT
+	// the origin of the key, which is what a TRANSIT acknowledgement looks like
+	// from an intermediate bus.
+	//
+	// OPTIONAL IN THE TYPE, BUT THE COMPOSITION ROOT CANNOT PRODUCE A NIL ONE.
+	// This doc used to call nil "a LEGITIMATE configuration rather than a
+	// mistake", in the same sense Onward above is. That over-stated it, and was
+	// corrected against main.go: the back-propagator is built on the
+	// `peerStore != nil` branch and every failure there is FATAL, while
+	// newFederation is reached only from the `bindable > 0` case, which implies
+	// that same branch. So on every path that assembles a federation this field
+	// is non-nil. THE NIL ARM IS A FAIL-CLOSED DEFAULT REACHABLE ONLY FROM A
+	// TEST OR A FUTURE COMPOSITION, and it is kept rather than asserted away
+	// because the alternative — assuming non-nil on a PEER-FACING path — is a
+	// nil dereference served to a remote party.
+	//
+	// The cost of nil is stated rather than hidden — a transit acknowledgement
+	// then gets the uniform refusal and the outcome stops here — and settleAck
+	// says so at Warn so the case is audible instead of silent, which is
+	// warnIfCarriedNoFurther's discipline applied to the ACK plane.
+	//
+	// IT IS A CONCRETE POINTER, NOT AN INTERFACE, so a nil one is genuinely nil
+	// and the `== nil` test below means what it says. That is the opposite
+	// choice from Onward, deliberately: Onward must be an interface because the
+	// acceptor is driven by tests without a forwarder, while this seam has
+	// exactly one implementation and the typed-nil trap is the larger hazard.
+	AckTransit *ackTransit
+
 	// Logger is optional; nil discards.
 	Logger *logging.Logger
 
@@ -1146,6 +1178,14 @@ type federationOptions struct {
 
 // federation owns the assembled ingress: the routing table, the acceptor, the
 // meter, and the complete surface handed to httpapi.
+//
+// # IT IS NOT ONLY A SINK FOR PEER ACKNOWLEDGEMENTS (ACK-5)
+//
+// An acknowledgement arriving on the peer surface settles a durable row HERE
+// only when this bus ORIGINATED the correlation key. When it did not — this bus
+// relayed the message on from some upstream hop — there is no row to settle and
+// the outcome is carried ONE HOP FURTHER BACK instead, synchronously, through
+// ackTransit. See settleAck and disposeUnrecordedAck.
 type federation struct {
 	busID     string
 	registry  *relay.Registry
@@ -1160,6 +1200,12 @@ type federation struct {
 	// obligation this bus wrote: ack.Store.Settle takes NO PRINCIPAL and says so
 	// in its own doc, so the authorization it cannot do is owed by every caller.
 	acks *ack.Store
+
+	// ackTransit carries a terminal outcome one hop further back when this bus
+	// is NOT the origin of the correlation key, or nil on a build that carries
+	// none further; see federationOptions.AckTransit. It is reached from exactly
+	// one place, disposeUnrecordedAck.
+	ackTransit *ackTransit
 
 	// onward is the wrapper handed to the acceptor, or nil on a LEAF build. It is
 	// kept here for one reason: warnIfCarriedNoFurther must say something
@@ -1297,6 +1343,7 @@ func newFederation(opts federationOptions) (*federation, error) {
 		acceptor:   acceptor,
 		admission:  admission,
 		acks:       opts.AckLifecycle,
+		ackTransit: opts.AckTransit,
 		log:        log,
 		onward:     wrapped,
 		rosterMemo: make(map[string]rosterMemoEntry),
@@ -1336,6 +1383,17 @@ func newFederation(opts federationOptions) (*federation, error) {
 		// here without an outbox fails loudly rather than serving a route that
 		// refuses every acknowledgement.
 		Obligations: opts.Outbox,
+		// THE INDIRECT ARM OF THE BINDING RULE (AuthorizePeerAckVia). On a
+		// `-route-for` topology the obligation is keyed on the DESTINATION bus
+		// while the acknowledgement comes back over the link with the NEXT HOP, so
+		// the two job-id spellings differ and the direct rule alone refuses every
+		// transit acknowledgement. THE REGISTRY'S OWN METHOD, not a closure over
+		// it: PeerBaseURL takes the registry's RLock and is called concurrently,
+		// the same requirement ForwarderOptions.PeerBaseURL and
+		// BackPropagatorConfig.PeerBaseURL state. It is the SAME registry every
+		// other seam here routes on, so there is no second answer to "where would
+		// this bus dial to reach that destination".
+		NextHopAddress: registry.PeerBaseURL,
 		// THE METER, AND IT IS THE EXISTING ONE. peerAdmission.enter is the
 		// per-authenticated-peer in-flight bound RELAY-22 already built for relay
 		// ingest, keyed on the same certificate-resolved principal. ACK-3
@@ -1789,8 +1847,20 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // The peer acknowledgement callback (ACK-3)
 // ---------------------------------------------------------------------------
 
-// settleAck is relay.AckConfig.SettleAck: it makes an ALREADY-AUTHORIZED
-// peer-hop terminal outcome durable, and reports whether it was a duplicate.
+// settleAck is relay.AckConfig.SettleAck: it disposes of an ALREADY-AUTHORIZED
+// peer-hop terminal outcome, and reports whether it was a duplicate.
+//
+// # THERE ARE TWO DISPOSITIONS, NOT ONE, AND WHICH ONE APPLIES IS NOT A CHOICE
+//
+// If this bus ORIGINATED the correlation key, it holds the durable
+// sender-visible row and the outcome is SETTLED here — that is the whole of the
+// path below, and it is what this comment described when only that case existed.
+// If it did not — this bus relayed the message on from an upstream hop, so no
+// row was ever written here — the outcome is instead carried ONE HOP FURTHER
+// BACK toward the origin, synchronously, and nothing durable changes on this bus
+// at all (ACK-CONTRACT.md §9.4, ACK-5). ack.Store.Settle answering ErrNoRecord
+// is where the two part company; see disposeUnrecordedAck for why "no row" is
+// NOT by itself evidence of either case.
 //
 // # WHAT HAS ALREADY HAPPENED BY THE TIME THIS IS CALLED, AND WHAT HAS NOT
 //
@@ -1821,7 +1891,13 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // fsync. This function adds no ordering of its own, and must not: a second,
 // separately ordered write here would leave exactly the window invariant 10
 // exists to close.
-func (f *federation) settleAck(_ context.Context, s relay.SettledAck) (relay.AckSettlement, error) {
+//
+// ON THE TRANSIT ARM IT IS SATISFIED SOMEWHERE ELSE ENTIRELY: at the ORIGIN
+// bus, and this hop's 200 is not written until the hop it forwarded to has
+// answered — which it does not do until ITS next hop has. The guarantee holds
+// end to end through the chain rather than through a local write, which is why
+// that arm needs no durable state of its own and must not grow a retry queue.
+func (f *federation) settleAck(ctx context.Context, s relay.SettledAck) (relay.AckSettlement, error) {
 	state, class, attested, err := ackVocabulary(s.Ack)
 	if err != nil {
 		// OUR bug, not the peer's: the frame passed relay's closed-set validation
@@ -1864,11 +1940,12 @@ func (f *federation) settleAck(_ context.Context, s relay.SettledAck) (relay.Ack
 		return relay.AckSettlement{Duplicate: false}, nil
 
 	case errors.Is(err, ack.ErrNoRecord):
-		// §8.2's "(none)" row. Translated into relay's UNIFORM refusal so that a
-		// key we never held, a key held for a DIFFERENT recipient, and a key that
-		// has been swept are byte-identical on the wire. Told apart only in the
-		// log, by the handler's own redaction point.
-		return relay.AckSettlement{}, relay.ErrAckNotBound
+		// §8.2's "(none)" row — AND, on a bus that is not the origin of this
+		// key, the ordinary shape of a TRANSIT acknowledgement rather than a
+		// refusal at all. disposeUnrecordedAck tells the two apart and owns the
+		// whole of that reasoning; at the origin it still returns the UNIFORM
+		// refusal, unchanged and byte-identical.
+		return f.disposeUnrecordedAck(ctx, s)
 
 	case errors.Is(err, ack.ErrTerminal):
 		// The advisory read above lost a race with another transition. Still
@@ -1883,6 +1960,171 @@ func (f *federation) settleAck(_ context.Context, s relay.SettledAck) (relay.Ack
 		// the terminal outcome is not lost.
 		return relay.AckSettlement{}, err
 	}
+}
+
+// disposeUnrecordedAck decides what an authorized peer acknowledgement means
+// when this bus holds NO durable row for it — the one case where "no row" is not
+// a refusal.
+//
+// # THE ORIGIN TEST IS THE WHOLE OF THE DECISION, AND IT IS DisposeAck's OWN
+//
+// A missing row means two completely different things depending on which bus
+// this is. At the ORIGIN of the correlation key it means the row never existed,
+// was swept, or names a recipient the sender did not address — §8.2's "(none)"
+// row, and the answer is the UNIFORM refusal. At an INTERMEDIATE bus it means
+// something entirely ordinary: this bus relayed the message on and never wrote a
+// sender-visible row for it at all, so the outcome belongs one hop further back
+// (§9.4).
+//
+// The test is relay.DisposeAck WITH A NIL PATH. With no path it answers
+// AckStopAtOrigin for a key whose bus half is ours and errors for anything else,
+// which is exactly "are we the origin" — and it reuses the ONE spelling of that
+// question, including its case-insensitive bus-id comparison and its refusal to
+// trust a correlation key it has not parsed. A second, hand-written comparison
+// here would be a second answer to the question that decides whether a
+// settlement is kept or forwarded.
+//
+// # AT THE ORIGIN, THE REFUSAL MUST STAY BYTE-IDENTICAL
+//
+// relay.ErrAckNotBound is returned UNCHANGED. A peer must not be able to tell
+// "no such key" from "not addressed to that recipient" from "swept" — ack.go's
+// ErrAckNotBound doc has the argument, and it is the deliberate analogue of the
+// 409 no-matching-reservation indistinguishability invariant 10 preserves.
+//
+// # AND THE UPSTREAM'S VERDICT MUST NOT LEAK DOWNSTREAM
+//
+// TransitAck returns nil when the hop was accepted upstream and an error
+// otherwise, and the errors are answered on THREE arms, not two. The dividing
+// question is NOT "was the refusal final" — it is WHETHER THE UPSTREAM DECIDED
+// ANYTHING ABOUT THIS FRAME:
+//
+//   - a RETRIABLE failure ("the origin is busy", "the neighbour is down") →
+//     return the error → 503 CodeUnavailable, "not now". Nothing was written
+//     anywhere, the downstream peer re-offers the identical terminal outcome
+//     later, and nothing is lost.
+//
+//   - a 409 FROM UPSTREAM, AND ONLY A 409 → answer the downstream peer 200. A
+//     409 is the ONE final refusal that means the upstream UNDERSTOOD the frame
+//     and MADE A DECISION about it: no obligation binds that recipient, or a
+//     conflicting terminal already stands there. Two reasons to absorb it, and
+//     both are load-bearing. Re-offering a frame the origin has FINALLY refused
+//     is exactly the retry amplification §9.3 exists to stop. And forwarding the
+//     origin's 409 verbatim would turn this hop into an ORACLE: any bound peer
+//     could ask whether the ORIGIN holds a row for a recipient it names, which
+//     is the uniform-answer property ErrAckNotBound protects, leaked one hop
+//     back.
+//
+//   - ANY OTHER final status — 404, 403, 400 → "not now" (503), through the
+//     same arm as a retriable failure. The upstream decided NOTHING about the
+//     frame here: it does not serve the route, it will not talk to us, or it
+//     could not parse us. All three are OPERATOR-RECOVERABLE — upgrade the
+//     binary, re-peer the bus, fix the encoder — so "not now" is TRUTHFUL and a
+//     later retry can actually succeed. The concrete case is
+//     relay.Client.PeerAck's own ROLLOUT ORDERING note: an upstream running a
+//     pre-ACK-5 binary does not serve PeerAckPath and answers 404, and
+//     Retriable() calls every 4xx except 408/429 final, so a Retriable()-only
+//     test would sweep it into the 200 arm. A 403 is an ordinary de-peering at
+//     the upstream; a 400 is RELAY-51's live DisallowUnknownFields hazard.
+//     Answering 200 on any of them would tell a recipient its acknowledgement
+//     was ACCEPTED when nothing anywhere recorded it — precisely the sentence
+//     §1.1 says this contract must never let anyone write.
+//
+// THE ANTI-ORACLE PROPERTY SURVIVES THE SPLIT. The downstream peer still never
+// learns the upstream's verdict: the 503 on the third arm is BYTE-IDENTICAL to
+// every other "not now" this route emits, so it discloses only that this hop
+// could not complete right now — which a merely busy origin already discloses.
+//
+// Both refusal arms ARE a settlement failing to reach the origin, so BOTH are
+// logged loudly and specifically (invariant 6) — an operator must be able to
+// see WHICH settlement, and on the third arm which status and what to do about
+// it. NOBODY IS DISCONNECTED on any arm (§12, invariant 10).
+func (f *federation) disposeUnrecordedAck(ctx context.Context, s relay.SettledAck) (relay.AckSettlement, error) {
+	if disp, _, err := relay.DisposeAck(f.busID, s.Ack.CorrelationKey, nil); err == nil && disp == relay.AckStopAtOrigin {
+		// WE ARE THE ORIGIN: §8.2's "(none)" row. The uniform refusal, unchanged.
+		// Told apart from the other two cases only in the log, by the handler's
+		// own redaction point.
+		return relay.AckSettlement{}, relay.ErrAckNotBound
+	}
+
+	if f.ackTransit == nil {
+		// A build that carries nothing further. The refusal is the uniform one —
+		// a peer must not learn from the wire whether this bus federates onward
+		// — but the case is made AUDIBLE here, because from an operator's side
+		// it is not a refusal at all: a terminal outcome reached this bus and
+		// stops, and the origin never learns it.
+		f.log.Warn("peer acknowledgement REFUSED and the terminal outcome STOPS HERE: this bus holds no durable row for the key because it did not originate it, and this build has NO back-propagation seam wired, so the outcome cannot be carried one hop further back toward the origin",
+			"local_bus", f.busID,
+			"peer_bus", s.PeerBusID,
+			"correlation_key", elideAckTransit(s.Ack.CorrelationKey, ids.MaxMessageIDLen),
+			"recipient", elideAckTransit(s.Ack.Recipient, ids.MaxAgentIDLen),
+			"outcome", s.Ack.Outcome.String(),
+		)
+		return relay.AckSettlement{}, relay.ErrAckNotBound
+	}
+
+	// A TRANSIT ACKNOWLEDGEMENT. The frame is rebuilt from the VALIDATED value
+	// and forwarded verbatim: this bus re-signs nothing, re-classifies nothing
+	// and re-times nothing (§9.4, invariant 2).
+	if err := f.ackTransit.TransitAck(ctx, relay.AckFrameFrom(s.Ack)); err != nil {
+		var refused *relay.PeerRefusedError
+		isRefusal := errors.As(err, &refused)
+
+		// THE ONE ABSORBING ARM, AND IT IS 409 AND NOTHING ELSE. The test is the
+		// STATUS, never Retriable(): Retriable() calls every 4xx except 408/429
+		// final, so testing it here would sweep 404, 403 and 400 — each of them
+		// an upstream that decided NOTHING — into a 200 the recipient reads as
+		// "accepted". See the doc above for why the two are not the same
+		// question.
+		if isRefusal && refused.StatusCode == http.StatusConflict {
+			f.log.Warn("peer acknowledgement forwarded one hop back and FINALLY REFUSED there WITH A DECISION about the frame (409): the terminal outcome is DROPPED and the origin's row is unchanged. The downstream peer is answered 200 rather than 503 deliberately — re-offering a frame the upstream has finally refused is the retry amplification the status table exists to stop, and forwarding its verdict verbatim would tell any bound peer whether the ORIGIN holds a row for a recipient it named",
+				"local_bus", f.busID,
+				"peer_bus", s.PeerBusID,
+				"correlation_key", elideAckTransit(s.Ack.CorrelationKey, ids.MaxMessageIDLen),
+				"recipient", elideAckTransit(s.Ack.Recipient, ids.MaxAgentIDLen),
+				"outcome", s.Ack.Outcome.String(),
+				"upstream_status", refused.StatusCode,
+			)
+			return relay.AckSettlement{Duplicate: false}, nil
+		}
+
+		if isRefusal && !refused.Retriable() {
+			// A FINAL STATUS THAT DECIDED NOTHING — 404 (the upstream does not
+			// serve this route yet), 403 (it will not talk to this bus) or 400
+			// (it could not parse the frame). Answered "not now" through the
+			// arm below, exactly like a retriable failure, because all three are
+			// OPERATOR-recoverable and a later identical offer can succeed —
+			// but logged SEPARATELY from the retriable case, because nothing
+			// here improves on its own and an operator is the remedy.
+			f.log.Warn("peer acknowledgement forwarded one hop back and FINALLY REJECTED there WITHOUT A DECISION about the frame: the upstream does not serve the route, will not talk to this bus, or could not parse the frame. The terminal outcome has NOT reached the origin and NOTHING was recorded anywhere. The downstream peer is answered 503 'not now' and never 200, because telling it 'accepted' for an outcome nobody recorded is the one sentence this contract exists to prevent. This does NOT resolve itself: 404 means an upstream running a pre-ACK-5 binary (upgrade RECEIVERS before senders), 403 means the peering was removed at the upstream, 400 means the frame encoding has drifted between the two builds",
+				"local_bus", f.busID,
+				"peer_bus", s.PeerBusID,
+				"correlation_key", elideAckTransit(s.Ack.CorrelationKey, ids.MaxMessageIDLen),
+				"recipient", elideAckTransit(s.Ack.Recipient, ids.MaxAgentIDLen),
+				"outcome", s.Ack.Outcome.String(),
+				"upstream_status", refused.StatusCode,
+				"remedy", "upgrade the upstream bus so it serves POST /v1/peer/ack, restore the peering, or align the two builds' ACK frame version — then the downstream peer's next identical offer succeeds",
+			)
+		}
+
+		// "NOT NOW" (503 CodeUnavailable). Nothing was written on this bus or on
+		// any bus upstream of it, so the downstream peer's identical retry is
+		// safe and is the correct remedy. Already logged, loudly and
+		// specifically, by relay.BackPropagator.fail, by TransitAck itself, or
+		// by the non-409 final arm just above.
+		return relay.AckSettlement{}, err
+	}
+
+	// Debug: this is the ORDINARY steady state of an intermediate bus, one line
+	// per acknowledgement in flight, and BackPropagator already logs the
+	// successful hop at Info with the same identifiers.
+	f.log.Debug("peer acknowledgement carried one hop further back toward the origin bus; nothing was recorded here because this bus did not originate the correlation key",
+		"local_bus", f.busID,
+		"peer_bus", s.PeerBusID,
+		"correlation_key", elideAckTransit(s.Ack.CorrelationKey, ids.MaxMessageIDLen),
+		"recipient", elideAckTransit(s.Ack.Recipient, ids.MaxAgentIDLen),
+		"outcome", s.Ack.Outcome.String(),
+	)
+	return relay.AckSettlement{Duplicate: false}, nil
 }
 
 // priorTerminal reports the TERMINAL outcome already recorded for this pair, if
