@@ -5459,3 +5459,145 @@ go run ./cmd/agent-busctl ack-status --help             -> rendered and read end
 
 `gofmt -l .` also lists `.worktrees/fu-relay/...`, which is a separate gitignored worktree
 (`.gitignore:178`) and predates this change.
+
+## 2026-08-21 — `IDEM-12` — idempotent send/broadcast: proving what was already true
+
+**Test-only.** No production code changed — the behaviour required by the task ("retries return the
+original result, no new sequence, no second audit record") was already implemented; what was missing
+was the proof. `internal/hub/idem_test.go` (+303) and `internal/httpapi/messages_test.go` (+95).
+
+The task's stored `proof_cmd` named `TestIdempotentSend`, which did not exist anywhere in the repo,
+so it graded `verdict=VACUOUS class=test exit=0 tests_run=0 empty_pkgs=2` — an exit-0 command proving
+nothing. Re-run in a clean overlay of HEAD, through the overlay's own `scripts/proof-check.sh`, it
+now grades:
+
+```
+proof-check: verdict=PASS class=test exit=0 tests_run=4 top_level=2 skipped=0 failed=0 empty_pkgs=0
+```
+
+New coverage, precisely: a same-key/same-payload retry of `/v1/send` returns the ORIGINAL message id
+and sequence verbatim; the replayed ack carries `Idempotency-Replayed` and is otherwise
+**byte-identical** to the original (that assertion already existed for `/v1/mint` and `/v1/enroll` but
+not for `/v1/send`); the append-only audit log gains **no second record**, counted with
+`wal.ScanAll(log.AuditPath(), wal.KindAudit)`; and **no new sequence is allocated**, asserted against
+the bus's own id authority (the next mint must be `first.Seq+1`) — an echoed sequence looks identical
+on the wire whether or not a number was also burned behind it, so only a next-mint probe catches that
+mutant.
+
+**Concurrent in-flight decision (IDEM-12 required this be picked AND documented).** Two same-key
+requests racing with no stored result yet: the second caller **BLOCKS** rather than getting a
+retriable "in progress" answer. `hub.publish` holds `writeMu` (`internal/hub/hub.go:1485`) across both
+the applied-key lookup (~1512) and the durable write, and the reservation is deleted at ~1826 —
+lookup strictly precedes deletion, in one critical section — so the loser is always answered from the
+applied-key table and can never observe `ErrUnknownMint`. This is the chosen answer, not an accident.
+
+**Broadcast half deliberately NOT delivered.** `POST /v1/broadcast` is 501 by design
+(`internal/httpapi/messages.go:452`), and `hub.Broadcast` itself fails closed for every broadcast
+because `signing.Canonicalize` rejects an empty recipient set (`internal/hub/audit.go:169-193`), so
+every existing broadcast idempotency test in the repo skips via `skipIfBroadcastHasNoSigningDigest`
+(`internal/hub/hub_test.go:113`). An added broadcast test would all-skip, and `proof-check.sh` grades
+an all-skip leaf set VACUOUS — it would have poisoned this task's own proof. Gated on `SIGN-3`;
+tracked as `IDEM-12-FU-BROADCAST`. This respects the standing 2026-08-08 operator ruling against
+rewriting those skips to assert the refusal instead.
+
+**Gates.** Reviewer: COMPLETED, CHANGES-REQUIRED on one MINOR non-code item — a test comment asserted
+a follow-up had been filed when it had not; remedied by actually filing `IDEM-12-FU-BROADCAST`, which
+makes the comment true as written. Security: COMPLETED, PASS, no P0/P1. One finding that IMPROVED on
+the brief's assumption: the violation error naming the prior message id (`hub.go:1526`) never reaches
+a caller — `writeHubError` answers with a fixed string and logs the detail
+(`internal/httpapi/messages.go:1042`).
+
+**Pre-existing failure found while baselining, not caused by this task:** `TestCLIEnrolEndToEnd`
+fails under whole-repo parallel load (`enrol_test.go:88: the priming server exited badly: signal:
+terminated`) while passing in isolation and as a whole package, both confirmed in a clean
+`git archive HEAD` overlay. Filed as `IDEM-12-FU-FLAKY-ENROL-E2E`.
+
+Mutation-proof: every assertion was broken and observed RED before being accepted; the sharpest —
+a mutant that silently burns a sequence while returning an unchanged ack — is caught only by the
+next-mint probe.
+
+No invariant was weakened (reviewer finding), so no `DECISIONS.md` entry is added. No route, flag,
+env var, record type or on-disk format changed, so no `CONTRACTS-*.md` file is touched.
+
+## 2026-08-21 — `IDEM-18` (documentation half): the header rule was documented too broadly, and the stored status note was stale
+
+**What the task actually needed, versus what its stored note claimed.** IDEM-18 is "wrappers generate
+the idempotency key ONCE and reuse it across retries, + `AGENT_PROTOCOL.md` / `PROTOCOL.md` /
+`CONTRACTS.md`". The client/CLI half was already done and verified: `client/transport.go` marshals
+the request body BEFORE the retry loop, so every attempt reuses the same bytes and the key inside
+them cannot be re-minted per attempt; `newIdempotencyKey` (`client/enrol.go`) is 16 bytes of
+`crypto/rand`, hex, prefixed `busctl-`; `TestCLISendReusesIdempotencyKeyOnRetry`
+(`cmd/agent-busctl/send_test.go`) forces a real 503 + `Retry-After` retry and asserts byte-identical
+bodies.
+
+The task's stored status note asserted that `AGENT_PROTOCOL.md` had **ZERO** idempotency mentions. At
+HEAD it has **31**, in a section rewritten by `c673d2a` that already covers the key-minted-once rule,
+both non-collapsible outcomes, the 2026-08-08 no-disconnect narrowing and the retention boundary.
+The note reads as freshly checked and is not — the same failure mode `CLAUDE.md`'s own invite-gate
+paragraph warns about. Recorded here so the next agent does not rewrite a correct document on the
+strength of it.
+
+**The defect that was real: the `Idempotency-Key` header rule is documented too broadly, in three
+places.** `idem.HeaderName` is used on the **relay/roster (bus-to-bus) plane ONLY** — set in
+`internal/relay/client.go` and `relayhttp.go`, read in `relayhttp.go`, `rosterhttp.go` and
+`handshake.go`. **`internal/httpapi` never reads it** (verified by grep: zero non-test hits). The
+AGENT plane carries the key as the JSON body field `idempotency_key`
+(`httpapi.SendRequestBody`/`BroadcastRequestBody`/`MintRequestBody`/`EnrolRequestBody`). An
+implementer or agent trusting the old wording would set a header `/v1/send` ignores and then see a
+400 for a key it believes it supplied. Narrowed, prose only, no behaviour changed:
+
+1. `CONTRACTS.md` — "Every mutating surface carries the key in `idem.HeaderName`" → the header is the
+   bus-to-bus carrier; the agent routes use the body field. The correct and load-bearing half of that
+   paragraph (on the relay surface the key MUST equal the origin's `message_id`, enforced by
+   `ValidateRelayRequest`/`ErrRelayKeyMismatch`) is preserved unchanged.
+2. `internal/idem/key.go` — `HeaderName`'s "the ONE canonical carrier" comment, narrowed to the
+   relay/roster plane, with the old claim recorded rather than silently deleted.
+3. `internal/idem/doc.go` point 1 — same narrowing, "ONE canonical carrier PER PLANE"; the original
+   2026-08-02 reasoning is kept below it because it is the record of why the header was chosen for
+   the plane that did adopt it.
+
+Two adjacent false claims in the same file were corrected with it: doc.go's "exact `CONTRACTS.md`
+entry to paste in when that file is free" was never pasted and its first sentence is now false, and
+point 6's read-only rejection is described as landing "with the httpapi route handlers that consume
+`FromRequest`" — a wiring that never happened, so it is a rule still OWED, not shipped behaviour.
+
+**`idem.FromRequest` has ZERO production callers** (only `internal/idem/idem_test.go`). Its comment
+said the httpapi wiring task would pass `r.Header`; httpapi chose the body field instead and relay
+reads the header directly. Stated plainly at the function. **Not deleted** — that is a code change
+beyond this documentation task, filed as a follow-up.
+
+**`PROTOCOL.md` gained §13** — "A LOCAL send's idempotency — the scope tuple, the fingerprint, and
+the window". §10 already covered the relay half (`relayFingerprint`, why it excludes `bus_path`);
+there was no equivalent for a local send. It documents the `(agent, operation, key)` applied-key
+scope (`idem.NewAgentScope`, built in `internal/hub/hub.go`) and why neither extra component is
+decoration; `publishFingerprint`'s exact field list, which is what makes "same payload" content-
+addressed rather than approximate and is therefore the whole test separating invariant 10's
+legitimate retry from its protocol violation; that the applied-key record rides in `Entry.Idem` and
+so commits in the SAME prepare→commit→fsync transaction as the message (field-by-field JSON shape
+cross-referenced to `CONTRACTS-ONDISK.md` rather than duplicated, since two copies drift); and the
+retention window as the honest boundary — **50h10m22s, duplicates suppressed within it, a later retry
+applied as a NEW operation, not unconditional exactly-once**. The document's stated on-disk-only scope
+is respected: key TRANSPORT is left to `CONTRACTS-HTTP.md`.
+
+**One false statement was found in `AGENT_PROTOCOL.md` and fixed** (the doc is otherwise correct and
+was not rewritten). "How long a key lives" said a key is remembered "only as long as the message it
+produced is retained (1 day, or until 1 GiB of messages pushes it out)". Those are the MESSAGE
+store's bounds (`internal/store`: `DefaultMaxAge` 24 h, `DefaultMaxBytes` 1 GiB). The applied-key
+table is a separate table with its own, LONGER window: `internal/hub` builds it via
+`idem.NewStoreForBus` and leaves `StoreOptions.Window` unset, so the package default
+`idem.RetentionWindow` = 50h10m22s applies. Capacity pressure does
+not shorten it either — the bus-wide cap and the per-agent fair share fail CLOSED, refusing a new
+operation with a 503 (`internal/httpapi/messages.go` maps `hub.ErrCapacity` to 503 + `Retry-After`)
+rather than evicting an old key. The old sentence named the wrong mechanism and the wrong number.
+
+**Verification.** `go build ./...` and `go vet ./...` clean; `"$(go env GOROOT)/bin/gofmt" -l .`
+empty output (judged by output, never by exit status). Prose and comments only — no identifier, no
+signature, no behaviour changed. `internal/relay/*` deliberately untouched (held by another agent);
+no relay file needs a change for this, since the relay usage of the header is the usage the
+narrowing declares correct.
+
+**Landed later than written (2026-08-22, rebase by hand).** Both entries above were produced against
+base `9938eb2` in a side worktree and are landed onto `08a1cfa`. The only substantive adjustment: the
+new `PROTOCOL.md` section is **§13, not §12** — `493450f` (ACK-5) took §12 in the interim. The
+`PROTOCOL.md` heading and the two cross-references to it (this file and `AGENT_PROTOCOL.md`'s "How
+long a key lives") were renumbered to match; nothing else in the eight files changed.

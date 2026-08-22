@@ -913,3 +913,98 @@ func waitForWaiters(t *testing.T, srv *httpapi.Server, n int) {
 type errStatus int
 
 func (e errStatus) Error() string { return "unexpected status " + strconv.Itoa(int(e)) }
+
+// auditRecordsOnDisk counts what is in the server's append-only audit log,
+// through the same strict decoder an fsck would use.
+//
+// It reads the LIVE file rather than closing the log first, which is safe rather
+// than lucky: wal.Writer.Append is a single WriteAt followed by an fsync with no
+// buffering, and invariant 4 means the handler cannot have answered before that
+// fsync returned. So by the time a response recorder is back in this goroutine,
+// every audit record the request caused is whole on disk.
+func auditRecordsOnDisk(t *testing.T, srv *httpapi.Server) int {
+	t.Helper()
+	log, ok := srv.Durable().(*wal.Log)
+	if !ok {
+		t.Fatalf("the server's durable log is %T, not a *wal.Log; this helper cannot count audit records and every assertion built on it would be vacuous", srv.Durable())
+	}
+	path := log.AuditPath()
+	if path == "" {
+		t.Fatal("the server's durable log has no audit log open; invariant 6 says every message is written to the trail, so a count of it can never be 'not applicable'")
+	}
+	recs, _, err := wal.ScanAll(path, wal.KindAudit)
+	if err != nil {
+		t.Fatalf("scanning the append-only audit log %s: %v", path, err)
+	}
+	return len(recs)
+}
+
+// TestIdempotentSend is IDEM-12 at the ROUTE: a same-key, same-payload retry of
+// POST /v1/send.
+//
+// The retry contract is already partly covered next door -- TestSignRejection...
+// asserts the 201, the replayed header, the unchanged durable record count and
+// the single delivery. THIS test adds the two properties nothing else asserts,
+// and they are the two IDEM-12 names in its own words:
+//
+//   - THE APPEND-ONLY AUDIT LOG GAINS NO SECOND ENTRY (invariant 6). A retry must
+//     not create a phantom second row for what is, to the trail, ONE logical
+//     send. The audit log is a SEPARATE FILE from the WAL, written inside the
+//     same transaction, so a durable-record count says nothing about it: a
+//     defect that wrote the audit record outside the idempotency check would
+//     leave the WAL count at 1 and the trail at 2, and every existing assertion
+//     would stay green.
+//   - THE RESPONSE BODY IS BYTE-IDENTICAL (item (b)). The replay is signalled
+//     OUT OF BAND, in Idempotency-Replayed, precisely so the body does not have
+//     to change -- a client comparing acks must see the original, field for
+//     field, whitespace included. /v1/mint and /v1/enroll both have this
+//     assertion; /v1/send did not.
+//
+// Broadcast is deliberately absent: /v1/broadcast answers 501 by design until
+// SIGN-3 defines a canonical broadcast audience, so there is no accepted
+// broadcast here to retry.
+func TestIdempotentSend(t *testing.T) {
+	srv, _ := newMessagingServer(t)
+	alpha := enrolAndAuthenticate(t, srv, "alpha")
+	beta := enrolAndAuthenticate(t, srv, "beta")
+
+	// ONE request value, sent twice verbatim. Rebuilding the second request
+	// could differ by a byte and would quietly turn this into IDEM-14's
+	// key-reuse test instead of IDEM-12's retry test.
+	req := wellFormedSend(t, srv, alpha, beta.id, "k-idem12-http-retry")
+	auditBefore := auditRecordsOnDisk(t, srv)
+	durableBefore := durableMessageRecords(t, srv)
+
+	first := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend, req.json())
+	if first.Code != http.StatusCreated {
+		t.Fatalf("the first send = %d, want 201; body %s", first.Code, first.Body.String())
+	}
+	if got := first.Header().Get(httpapi.IdempotencyReplayedHeader); got != "" {
+		t.Errorf("%s = %q on a FIRST send; the header is how a client learns nothing was applied, and a fresh send that sets it makes it useless", httpapi.IdempotencyReplayedHeader, got)
+	}
+	if got := auditRecordsOnDisk(t, srv); got != auditBefore+1 {
+		t.Fatalf("the audit log went %d -> %d across ONE accepted send, want exactly one more (invariant 6: every message is written to the trail)", auditBefore, got)
+	}
+
+	// --- THE RETRY: the same request bytes, after a lost acknowledgement ----
+	retry := authed(t, srv, alpha, http.MethodPost, httpapi.RouteSend, req.json())
+	if retry.Code != http.StatusCreated {
+		t.Errorf("the retry = %d, want 201; same key + same payload is a legitimate retry and must not be punished (invariant 10). body %s", retry.Code, retry.Body.String())
+	}
+	if got := retry.Header().Get(httpapi.IdempotencyReplayedHeader); got != "true" {
+		t.Errorf("%s = %q on the retry, want \"true\": the out-of-band signal is the ONLY way a client learns nothing was re-applied", httpapi.IdempotencyReplayedHeader, got)
+	}
+	if retry.Body.String() != first.Body.String() {
+		t.Errorf("the retry body is\n  %s\nwant the ORIGINAL, byte for byte\n  %s\nonly the out-of-band header may differ between an ack and its replay",
+			retry.Body.String(), first.Body.String())
+	}
+	if got := auditRecordsOnDisk(t, srv); got != auditBefore+1 {
+		t.Errorf("the append-only audit log went %d -> %d across ONE send and its retry, want exactly one more in total: a retry must not create a phantom second entry for what is ONE logical send (invariant 6)", auditBefore, got)
+	}
+	if got := durableMessageRecords(t, srv); got != durableBefore+1 {
+		t.Errorf("durable message records went %d -> %d across one send and its retry, want exactly one more; the retry was re-applied", durableBefore, got)
+	}
+	if got := len(visibleMessages(t, srv, beta)); got != 1 {
+		t.Errorf("beta can read %d messages after one send and one retry, want exactly 1", got)
+	}
+}

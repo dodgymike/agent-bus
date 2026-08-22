@@ -1315,3 +1315,98 @@ logged loudly and specifically (invariant 6) with the local bus, the peer bus, t
 key and recipient, and the outcome — **the bus path is deliberately never logged**, because §13.3
 forbids disclosing the traversed path and an operator log is where such a detail leaks into an export
 without anybody deciding to disclose it.
+
+## 13. A LOCAL send's idempotency — the scope tuple, the fingerprint, and the window (IDEM-11 / IDEM-18, 2026-08-21)
+
+Reference implementation: `internal/idem` (the scope type, the fingerprint, the retention derivation
+and the table) and `internal/hub/hub.go` (`publishFingerprint`, and the applied-key path around
+`idem.NewAgentScope`). §10 already states the relay half of invariant 10 — the origin `message_id`
+as the key, and why `relayFingerprint` excludes `bus_path`. This section is the LOCAL half: what a
+`send` or `broadcast` originating on this bus durably remembers, so that a retry of it is answered
+from the record rather than applied twice.
+
+**Scope of this section, per this document's own scope note above.** How a key REACHES the bus is
+wire protocol and lives in `CONTRACTS-HTTP.md`, not here. What follows is only what is remembered,
+what "the same payload" means in bytes, and how long the memory lasts.
+
+**The applied-key lookup is the 3-tuple `(agent, operation, key)` — never the key alone.**
+`idem.NewAgentScope(sender, op, key)` builds it (`internal/hub/hub.go`, in the send path), with `op`
+one of `idem.OpSend`, `idem.OpBroadcast` or `idem.OpRelay` — chosen by what the request IS, not by
+what it says it is. Both extra components are load-bearing:
+
+- **The AGENT component** is what stops one agent colliding with, or probing, another's keys. Two
+  agents that both mint `"k"` — sequential counters, a shared library default — would, under a
+  key-only table, each corrupt the other's retry bookkeeping; and a key-only table also answers "does
+  key X exist?" for a key the asker never generated, which is an oracle over another agent's traffic.
+  Per-agent scoping closes both with one fix, and it is the same `<bus-id>.<agent-id>` namespacing
+  invariant 2 requires everywhere else.
+- **The OPERATION component is DOMAIN SEPARATION, not a label.** Without it one agent collides with
+  ITSELF across routes: a `send` retried under `"k"`, then a `broadcast` that reuses `"k"`, would be
+  read as a retry of the first. The op is part of the scope AND of the fingerprint, so a relayed
+  message can never share a scope with — or be mistaken for a retry of — a local send under the same
+  key.
+
+`idem.Scope`'s fields are unexported and the only constructors are `NewAgentScope` and
+`NewEnrolScope`, both of which demand a non-key component. **A key-only lookup is therefore not
+expressible in Go**, not merely discouraged.
+
+**"The same payload" is a content-addressed digest, not an approximation.** `publishFingerprint`
+(`internal/hub/hub.go`) hashes, in this fixed order, via `idem.ComputeFingerprint` (SHA-256,
+`crypto/sha256`):
+
+```
+[ op ("send" | "broadcast" | "relay"),
+  8-byte big-endian recipient COUNT,
+  each recipient, in order,
+  body ]
+```
+
+Every field is length-prefixed by `ComputeFingerprint`, so `("ab","c")` and `("a","bc")` cannot digest
+alike; the recipient count is hashed in addition, so a directed send to N recipients cannot collide
+with one to N-1 split differently. This digest is the ENTIRE test that separates invariant 10's two
+non-collapsible cases — same key + same fingerprint is a legitimate retry, answered from the stored
+result with nothing re-applied and **nobody disconnected**; same key + a different fingerprint is a
+protocol violation, rejected and logged, and **still nobody disconnected** (narrowed 2026-08-08). An
+approximate comparison here would get both wrong at once: a real payload change would slip through as
+a "retry", and an honest resend would be logged as an attack.
+
+The digest is **stored on disk** (`fp`, hex, in the applied-key record) rather than recomputed at
+replay, so changing that field list changes the MEANING of records already written — a retry of an
+unchanged request would stop matching its own record and be reported as a violation. Any change to
+the list needs a migration, not just a code change.
+
+**The applied-key record commits in the SAME transaction as the message it records.** It rides in
+`Entry.Idem`, the optional `idem` field of the PREPARE payload (§3), and a `wal.Entry` is exactly one
+transaction — so the record is made durable by the same prepare → commit → fsync pair that makes the
+message durable, never by a second write. There is consequently no window in which a message is
+durable and its key is not, which is exactly the gap a crash-plus-retry would turn into a duplicate.
+No record type and no `ondisk-format-version` value were reserved for it. **The record's
+field-by-field JSON shape is in `CONTRACTS-ONDISK.md`'s "The durable applied-key store (IDEM-11)"
+section and is deliberately not repeated here** — two copies of a field table drift, and that one is
+the copy of record. Recovery rebuilds the table from the log (`hub.Apply`), which is what makes it
+recovered state rather than a cache a crash empties.
+
+**The retention window is the HONEST BOUNDARY of the guarantee, and it is stated here as a limit
+rather than implied away.** An applied-key record is remembered for `idem.RetentionWindow` —
+**50h10m22s** — and then evicted. **Duplicates are suppressed WITHIN that window. This is not
+unconditional exactly-once, and nothing in this document should be read as promising it: a retry
+that arrives after its key has been evicted is applied as a NEW operation** — a second message, with
+its own id and sequence — and the bus cannot tell it apart from genuinely new content, because an
+opaque client-supplied key carries no verifiable mint time to check it against.
+
+Three things make that boundary honest rather than merely accepted:
+
+- **The window is DERIVED, term by term, not picked** (`internal/idem/retention.go`): a 24 h peer
+  outage budget, plus a full 1 h session lifetime (invariant 3's cap — a client returning from an
+  outage must re-establish a session before it can retry), plus a 5 min parked long poll, plus an
+  11 s client-side transport retry horizon = 25h5m11s, doubled for margin. **It is deliberately not a
+  round number, because a round number is evidence that it was chosen rather than derived.**
+- **Eviction is a pure predicate** — `now - committed_at > window`, and nothing else. Nothing is
+  written to disk to record an eviction, so the live path and the replay path derive the same live
+  set from the same bytes and cannot disagree about which keys are still remembered.
+- **Capacity pressure never shortens the window.** The bus-wide cap (`idem.MaxEntries`, 65536) and
+  the per-agent fair share fail CLOSED — they refuse a NEW operation with a 503 — and evict nothing.
+  Time is the only thing that ends a key's life, so the window above is the whole statement.
+
+`idem.Stats.Expired` (cumulative evictions) and `Stats.OldestAge` make the margin observable rather
+than assumed.

@@ -5,10 +5,28 @@ import (
 	"net/http"
 )
 
-// HeaderName is the ONE canonical carrier for a client-supplied idempotency
-// key (doc.go point 1). This package defines no body field and no fallback:
-// a key that could arrive by two routes would eventually disagree with
-// itself.
+// HeaderName is the canonical carrier for a client-supplied idempotency key on
+// the BUS-TO-BUS (relay and roster) plane — doc.go point 1 describes the intent,
+// and this comment records what actually shipped.
+//
+// NARROWED 2026-08-21 (IDEM-18). It was written as "the ONE canonical carrier"
+// for every mutating call, and that is not what the code does: the only
+// production readers and writers of this header are in internal/relay
+// (relayhttp.go, rosterhttp.go, handshake.go, client.go). No internal/httpapi
+// HANDLER reads it. That package does MOUNT /v1/peer/enroll, /v1/peer/relay and
+// /v1/peer/roster (peermount.go), but their handlers are internal/relay's, so
+// those routes are this same bus-to-bus plane and not an exception to it. On the
+// AGENT-facing plane the key arrives instead as the
+// `idempotency_key` JSON body field (httpapi.SendRequestBody,
+// BroadcastRequestBody, MintRequestBody and EnrolRequestBody), which is what
+// cmd/agent-busctl and the client package send.
+//
+// This is deliberately recorded rather than silently corrected: an implementer
+// who trusted the old wording would set a header /v1/send ignores, and then see
+// a 400 for a missing key it believes it supplied. One key still never arrives
+// by two routes on the same plane — the relay surface reads only this header,
+// the agent surface reads only the body field — which is the property the
+// original "no fallback" sentence was protecting.
 const HeaderName = "Idempotency-Key"
 
 // MaxKeyLen is the exact byte-length cap on a client-supplied idempotency
@@ -66,7 +84,17 @@ func ValidateKey(key string) error {
 //
 // h is a net/http.Header rather than a full *http.Request so this package
 // stays independent of any particular router or handler signature; the HTTP
-// wiring task (httpapi, out of this task's scope) passes r.Header.
+// wiring task (httpapi, out of this task's scope) was expected to pass r.Header.
+//
+// IT NEVER DID, AND THIS FUNCTION HAS ZERO PRODUCTION CALLERS (stated plainly
+// 2026-08-21, IDEM-18; verified by grep — the only callers are in
+// internal/idem/idem_test.go). httpapi chose the `idempotency_key` JSON body
+// field instead (see HeaderName above), and internal/relay reads the header
+// directly with r.Header.Get(idem.HeaderName) rather than through this helper.
+// So the sentence above describes a plan, not a live path. It is left standing,
+// with this correction beside it, because the paragraph explains WHY the
+// signature is http.Header — and removing the function is a code change beyond
+// the documentation task that found this, filed as a follow-up instead.
 func FromRequest(h http.Header) (string, error) {
 	raw := h.Get(HeaderName)
 	if raw == "" {

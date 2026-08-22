@@ -38,7 +38,32 @@
 //	space. See `internal/idem` (IDEM-10) for the validator and scope type, and
 //	IDEM-11 for the durable store this key shape feeds.
 //
-// # 1. The wire field name and carrier: ONE canonical carrier
+// THAT PASTE BLOCK WAS NEVER PASTED, AND ITS FIRST SENTENCE IS NOW FALSE
+// (2026-08-21, IDEM-18). CONTRACTS-HTTP.md documents the shipped contract
+// instead, and the shipped contract is that the agent-facing mutating routes
+// take the key in the `idempotency_key` JSON body field — only the relay and
+// roster routes use the header. The block is left above verbatim as the record
+// of what IDEM-10 intended; do not paste it anywhere now.
+//
+// # 1. The wire field name and carrier: ONE canonical carrier PER PLANE
+//
+// NARROWED 2026-08-21 (IDEM-18) — read this before the paragraph it corrects.
+// What this section describes shipped on the BUS-TO-BUS plane only. The key
+// travels in the `Idempotency-Key` header on the relay and roster surfaces
+// (internal/relay: relayhttp.go, rosterhttp.go, handshake.go, client.go), and
+// no internal/httpapi HANDLER reads that header at all. (That package MOUNTS
+// /v1/peer/enroll, /v1/peer/relay and /v1/peer/roster in peermount.go, but their
+// handlers are internal/relay's, so those routes are this same bus-to-bus plane.)
+// There the key is a JSON BODY FIELD, `idempotency_key`
+// (httpapi.SendRequestBody, BroadcastRequestBody, MintRequestBody,
+// EnrolRequestBody), which is what cmd/agent-busctl and the client package
+// send. The "one carrier, never two" property still holds where it matters —
+// no single route accepts the key by both routes — but it holds PER PLANE, not
+// bus-wide, and the header's bounded-size argument below therefore does not
+// apply to the agent plane, whose body size is bounded by the request-body cap
+// instead (CONTRACTS-HTTP.md). Everything from here to the end of this section
+// is the original 2026-08-02 reasoning, kept because it is the record of why
+// the header was chosen for the plane that did adopt it.
 //
 // The key travels as the `Idempotency-Key` HTTP request header (HeaderName in
 // this package), never in the request body. This is the conventional choice
@@ -182,7 +207,10 @@
 //
 // FromRequest is the only way this package extracts a key from an inbound
 // request, and it returns ErrMissingKey when the header is absent or empty —
-// it never generates one. There is no exported function anywhere in this
+// it never generates one. (FromRequest has ZERO production callers as of
+// 2026-08-21 — see its own doc comment in key.go. The never-mint property below
+// is structural and holds regardless, since it is about what this package does
+// NOT export.) There is no exported function anywhere in this
 // package that mints, derives or defaults an idempotency key; the only keys
 // that exist are ones a client supplied. This is a structural guarantee, not
 // a runtime check: a caller cannot "fall back" to a generated key because no
@@ -208,10 +236,12 @@
 //	GET /v1/info
 //
 // This package does not wire the read-only rejection itself (there is no HTTP
-// layer here) — that lands with the httpapi route handlers that consume
-// FromRequest. It is enumerated here so the rule is exhaustive in both
-// directions rather than a list of what requires a key with everything else
-// left to guesswork.
+// layer here) — it was expected to land with the httpapi route handlers that
+// consume FromRequest, which is a wiring that never happened (see key.go's
+// FromRequest, 2026-08-21). Treat the read-only half of this list as a RULE
+// STILL OWED, not as shipped behaviour. It is enumerated here so the rule is
+// exhaustive in both directions rather than a list of what requires a key with
+// everything else left to guesswork.
 //
 // # 7. Invariant 1, stated explicitly for this key
 //

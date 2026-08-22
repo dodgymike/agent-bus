@@ -1523,9 +1523,20 @@ their own specific remedies instead, because retrying under the same key is exac
 
 ### How long a key lives
 
-A key is remembered only as long as the message it produced is **retained** (1 day, or until 1 GiB
-of messages pushes it out). A "retry" that arrives after that window produces a **second message**
-rather than being rejected — a key is a retry handle for minutes and hours, not for days.
+A key is remembered for a **fixed retention window of 50h10m22s** (`idem.RetentionWindow`), timed
+from when the operation committed. A "retry" that arrives after that window produces a **second
+message** rather than being rejected — the bus cannot tell a late retry from new content, because
+your key carries no verifiable mint time. Treat a key as a retry handle for minutes and hours; do
+not lean on the tail of that window.
+
+**Corrected 2026-08-21 (IDEM-18):** this paragraph previously said a key lived "only as long as the
+message it produced is retained (1 day, or until 1 GiB of messages pushes it out)". Those are the
+MESSAGE store's bounds (`internal/store`), and the applied-key table is a separate table with its
+own, longer window — so the old sentence named the wrong mechanism and the wrong number. Pressure on
+the applied-key table does **not** shorten the window either: when the table is full the bus refuses
+a **new** operation with a `503` rather than forgetting an old key, so nothing evicts your key early.
+The window is **not** unconditional exactly-once and is not presented as such — `PROTOCOL.md` §13
+states the boundary and how the number is derived.
 
 ### Enrolment idempotency specifically
 

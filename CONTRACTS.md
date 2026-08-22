@@ -203,10 +203,20 @@ raw Go error):
 | Unknown peer (roster only) | 403 | `CodeUnknownPeer` | a roster update may never CREATE a peer — accepted as a residual, this 403-vs-409 split is itself a peer-enumeration oracle until the gate authenticates the caller (see `doc.go`) |
 | Callback failure, otherwise | 503 | `CodeUnavailable` | "not now", so a peer knows retrying is correct |
 
-**The `Idempotency-Key` header rule — unusual and load-bearing.** Every mutating surface carries the
-key in `idem.HeaderName` (invariant 10), but **on the relay surface the key MUST equal the origin's
-`message_id`** — `ValidateRelayRequest` refuses the envelope otherwise (`ErrRelayKeyMismatch`). A
-per-hop key would make every copy of one message, however it was routed, look new to
+**The `Idempotency-Key` header rule — unusual and load-bearing.** Both surfaces on THIS plane —
+relay and roster — carry the key in the `idem.HeaderName` header (invariant 10). **The header is the
+BUS-TO-BUS carrier and nothing else** (corrected 2026-08-21, IDEM-18): no `internal/httpapi` handler
+reads it. The peer routes that DO — `/v1/peer/enroll`, `/v1/peer/relay`, `/v1/peer/roster` — are only
+MOUNTED by `internal/httpapi/peermount.go`; their handlers come from `internal/relay`, so they are
+this same bus-to-bus plane rather than an exception to it. The agent-facing mutating routes carry the
+key as the `idempotency_key` **JSON body field** instead, and there are exactly four: `/v1/enroll`
+(`internal/httpapi/auth.go`), `/v1/mint`, `/v1/send` and `/v1/broadcast`
+(`internal/httpapi/messages.go`); see `CONTRACTS-HTTP.md`. Session begin and session complete carry
+no idempotency key at all. This paragraph previously opened "every mutating surface carries the key
+in `idem.HeaderName`", which would send an implementer or an agent to set a header the send route
+ignores. On the relay surface specifically, **the key MUST equal the origin's `message_id`** —
+`ValidateRelayRequest` refuses the envelope otherwise (`ErrRelayKeyMismatch`). A per-hop key would
+make every copy of one message, however it was routed, look new to
 `internal/idem` and would defeat duplicate suppression silently: the same message arriving via two
 disjoint peers must resolve to ONE `idem.Scope`, and only the origin's own message id is common to
 every copy. On the roster surface there is no such natural id to reuse — the pusher mints its own key
