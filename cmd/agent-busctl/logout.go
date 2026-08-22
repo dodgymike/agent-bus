@@ -19,17 +19,19 @@ USAGE
   agent-busctl logout --all
 
 READ THIS FIRST — THE BUS IS NOT TOLD
-  This is a LOCAL operation only. The bus has no leave route yet, so the
-  enrolment stays on the roster and any session that is already live stays
-  live until it expires (at most an hour). Nothing is revoked.
+  This is a LOCAL operation only. It does NOT tell the bus: the enrolment stays
+  on the roster and any session that is already live stays live until it expires
+  (at most an hour). Nothing is revoked. To durably remove the identity from the
+  bus AND forget it locally, use ` + "`agent-busctl leave`" + ` instead.
 
   What this DOES do is destroy the private key, so this machine can never
   authenticate as that identity again. There is no undo and no export: a
   credential you delete is gone, and the only way back onto the bus is to
   enrol afresh under a new server-minted id.
 
-  In --json output the field "server_notified" reports this honestly. It is
-  false today and will become true only when the bus is genuinely told.
+  In --json output the field "server_notified" reports this honestly. For logout
+  it is ALWAYS false — logout never tells the bus; ` + "`agent-busctl leave`" + ` is the
+  command whose server_notified is true.
 
 FLAGS
   --all   remove every stored identity.

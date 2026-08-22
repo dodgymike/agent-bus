@@ -11,15 +11,38 @@ package auth_test
 //
 // # BE PRECISE ABOUT WHAT CHANGED, BECAUSE MOST OF IT DID NOT
 //
-// The composition was four individually-reasonable facts. THREE ARE UNCHANGED
+// The composition was four individually-reasonable facts. TWO ARE UNCHANGED
 // and are still asserted below, because they are the design and not the bug:
 //
 //  2. The roster is capped and FAILS CLOSED at the cap (TestRosterDoSRosterCapacityFailsClosed).
 //  3. That cap is DefaultMaxRosterEntries = 4096 (TestRosterDoSProductionCapIsFourZeroNineSix).
-//  4. NOTHING reclaims a slot — no removal method on the Roster interface
-//     (TestRosterDoSRosterInterfaceHasNoReclamationMethod), the refusal is not
-//     TTL-bounded (TestRosterDoSCapacityRefusalIsNotSelfHealing), and the
-//     entries survive a restart (TestRosterDoSCapacitySurvivesRestart).
+//
+// Fact 4 MOVED with AUTH-4. It used to read "NOTHING reclaims a slot — no removal
+// method on the Roster interface". A slot CAN now be freed: an agent can LEAVE
+// (Roster.Remove, POST /v1/leave), and a departed agent's slot returns to the
+// pool. What is UNCHANGED, and is what actually made the exhaustion permanent, is
+// that NOTHING AUTOMATIC reclaims a slot — there is no TTL and no eviction
+// (TestRosterDoSCapacityRefusalIsNotSelfHealing still advances the clock a
+// century and the refusal stands), an attacker who fills the roster and does not
+// leave keeps it full across a restart (TestRosterDoSCapacitySurvivesRestart),
+// and a freed slot NEVER re-issues the departed id — the per-name suffix floor is
+// not reclaimed on leave (invariant 1), which
+// TestRosterLeaveDoesNotReclaimSuffixFloor pins.
+//
+// # THE SUFFIX-COUNTER GROWTH AUTH-4 HAD TO ADDRESS
+//
+// Before leave existed, the per-name suffix counters (ids.NameSuffixes, one entry
+// per distinct name EVER enrolled, never reclaimed — point 5 of its doc) were
+// bounded because the roster never shrank, so DefaultMaxRosterEntries capped the
+// distinct names too. Leave breaks that coupling: an enrol/leave loop over
+// distinct names keeps roster.Len() low while the suffix map grows one entry per
+// NEW name. AUTH-4's answer is invariant 3's gate, NOT reclamation (reclamation
+// would reuse ids): on a gated bus every enrolment costs one operator-minted,
+// SINGLE-USE invite, and the invite gate sits ABOVE the mint (service.go), so a
+// refused enrolment burns no suffix. Distinct-name growth is therefore bounded by
+// invites redeemed, a controlled resource — not by an anonymous loop.
+// TestRosterLeaveDoesNotReclaimSuffixFloor and the invite gate
+// (invitegate_enforce_test.go) are the two halves of that bound.
 //
 // Fact 1 is the one that moved. It was "POST /v1/enroll is unauthenticated, so
 // Service.Enrol accepts a request with NO invite, NO session and NO client
@@ -48,12 +71,15 @@ package auth_test
 //     cmd/agent-bus/invitegate_enforce_test.go, and demonstrated end to end
 //     against the compiled server.
 //
-// The structural guard in TestRosterDoSRosterInterfaceHasNoReclamationMethod is
-// deliberately KEPT and still passes: the gate did NOT add reclamation, and
-// reclamation is still the wrong fix (invariant 1 — freeing a slot by reusing an
-// id is precisely what must never happen). It remains designed to fail the day
-// someone adds a reclamation verb. There is precedent for a structural guard of
-// this shape in client/guard_test.go.
+// The structural guard USED TO assert the interface had no reclamation verb at
+// all (TestRosterDoSRosterInterfaceHasNoReclamationMethod). AUTH-4 added exactly
+// one — Remove — so that guard was rewritten, as its own instructions required,
+// into TestRosterReclamationIsLeaveOnly: it now asserts the ONE sanctioned verb
+// is present and that no OTHER, AUTOMATIC reclamation verb (evict, expire, prune,
+// compact) has crept in beside it — because auto-reclamation, unlike a
+// deliberate self-leave, would drop or reuse ids without the holder's action
+// (invariant 1). There is precedent for a structural guard of this shape in
+// client/guard_test.go.
 //
 // # Why this is filable rather than "INVITE-GATE is unfinished" restated
 //
@@ -83,6 +109,7 @@ import (
 	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
+	"github.com/dodgymike/agent-bus/internal/ids"
 )
 
 // uninvitedEnrol makes the exact call an unauthenticated attacker makes: a name,
@@ -282,41 +309,48 @@ func TestRosterDoSProductionCapIsFourZeroNineSix(t *testing.T) {
 	})
 }
 
-// reclamationVerbs are the names a method that FREES A ROSTER SLOT would
-// plausibly carry. Matched case-insensitively as substrings, so Remove,
-// RemoveAgent, Unenrol... anything of the shape trips it.
-var reclamationVerbs = []string{
-	"remove", "delete", "evict", "leave", "revoke", "expire", "prune", "compact",
+// autoReclamationVerbs are the names a method that frees a slot AUTOMATICALLY —
+// on a timer, on capacity pressure, or by garbage-collecting history — would
+// plausibly carry. Matched case-insensitively as substrings. They are STILL
+// forbidden on the Roster interface after AUTH-4: a deliberate self-leave
+// (Remove) returns a slot with the holder's action and never reuses the id,
+// whereas an evict/expire/prune/compact drops or reclaims an agent WITHOUT its
+// action, which is where id reuse and silent identity loss come from (invariant
+// 1). "delete" and "revoke" are also here: operator-initiated revocation of
+// ANOTHER agent is AUTH-7's concern with a different authority model, and must
+// not arrive on this interface as an unremarked verb.
+var autoReclamationVerbs = []string{
+	"delete", "evict", "revoke", "expire", "prune", "compact",
 }
 
-// TestRosterDoSRosterInterfaceHasNoReclamationMethod is the PERMANENT half,
-// structurally: the auth.Roster interface offers no way to give a slot back.
+// TestRosterReclamationIsLeaveOnly is the rewrite of the pre-AUTH-4 guard
+// TestRosterDoSRosterInterfaceHasNoReclamationMethod, which asserted the
+// interface had NO reclamation verb at all and was designed to go RED the day one
+// was added. AUTH-4 added exactly one — Remove (self-leave) — so this now
+// characterises the new, narrower rule:
 //
-// This is the assertion that makes "permanent" a property of the TYPE rather
-// than of a code path someone might have missed. A capacity refusal is a
-// transient outage if anything anywhere can free a slot; it is a permanent one
-// if the abstraction the service holds has no such verb at all — and it does
-// not. Both shipped rosters (MemoryRoster, WALRoster) implement exactly this
-// method set, and Service holds the interface, not a concrete type.
+//   - EXACTLY ONE reclamation verb is present, and it is Remove. Its absence
+//     would mean leave is gone; a second one would mean some other reclamation
+//     path crept onto the interface unreviewed.
+//   - NONE of the AUTOMATIC reclamation verbs (autoReclamationVerbs) is present.
+//     Those are the dangerous shape: they free a slot without the holder acting,
+//     which is how a slot gets re-issued under a live id (invariant 1). Remove is
+//     safe precisely because it is a deliberate act by the agent leaving and it
+//     does NOT reclaim the suffix floor — TestRosterLeaveDoesNotReclaimSuffixFloor
+//     pins that behavioural half.
 //
-// # IT IS DESIGNED TO GO RED WHEN RECLAMATION IS ADDED
-//
-// That is the whole value. The day someone adds Remove, Evict or Revoke to this
-// interface, this test names it and this file must be rewritten to characterise
-// the new, better behaviour. Do not "fix" it by widening the allow-list.
+// It is DESIGNED TO GO RED again if a SECOND reclamation method (an Evict, a
+// Prune, an operator Revoke) is added to the interface: at that point the
+// exhaustion and id-reuse reasoning in this file must be re-characterised.
 //
 // # WHAT THIS GUARD DOES NOT COVER — stated so it is not mistaken for total
 //
-// It reflects over the auth.Roster INTERFACE, which is the abstraction Service
-// actually holds, and that is the right locus for the claim above. It is NOT a
-// module-wide proof that nothing can free a slot. Reclamation would slip past it
-// in at least two shapes: a method added only to a CONCRETE roster
-// (*WALRoster, *MemoryRoster) and never promoted to the interface, and an
-// OFFLINE operator tool that edits the data directory without going through this
-// package at all — which is exactly the shape AUTH-ROSTER-RECLAIM
-// (b418638c-e9bc-4666-9998-6806f110e357) proposes, in cmd/. Whoever lands that
-// must update this file deliberately; it will not be caught here.
-func TestRosterDoSRosterInterfaceHasNoReclamationMethod(t *testing.T) {
+// It reflects over the auth.Roster INTERFACE, the abstraction Service holds. It
+// is NOT a module-wide proof: a method on a CONCRETE roster never promoted to the
+// interface, or an OFFLINE operator tool that edits the data directory directly
+// (the shape AUTH-ROSTER-RECLAIM proposes, in cmd/), would slip past it. Whoever
+// lands those must update this file deliberately.
+func TestRosterReclamationIsLeaveOnly(t *testing.T) {
 	rt := reflect.TypeOf((*auth.Roster)(nil)).Elem()
 	if rt.Kind() != reflect.Interface {
 		t.Fatalf("auth.Roster is a %s, not an interface; this guard reflects over the interface method set and cannot say anything useful about a %s", rt.Kind(), rt.Kind())
@@ -326,28 +360,123 @@ func TestRosterDoSRosterInterfaceHasNoReclamationMethod(t *testing.T) {
 	for i := 0; i < rt.NumMethod(); i++ {
 		methods = append(methods, rt.Method(i).Name)
 	}
-	// A method set of zero would make every assertion below vacuously true.
 	if len(methods) == 0 {
 		t.Fatal("auth.Roster has an EMPTY method set; this guard would pass vacuously, so it fails instead")
 	}
 
+	// EXACTLY ONE sanctioned reclamation verb, named Remove. "leave" is the
+	// concept; "Remove" is the method that implements it (Roster.Remove, called by
+	// Service.Leave). A reclamation method under any other name has bypassed this
+	// guard's expectation and must be reviewed here.
+	reclaimers := make([]string, 0, 1)
 	for _, name := range methods {
 		lower := strings.ToLower(name)
-		for _, verb := range reclamationVerbs {
+		if strings.Contains(lower, "remove") || strings.Contains(lower, "leave") {
+			reclaimers = append(reclaimers, name)
+		}
+	}
+	if len(reclaimers) != 1 || reclaimers[0] != "Remove" {
+		t.Errorf("auth.Roster reclamation methods = %v, want exactly [Remove] (AUTH-4 self-leave).\n"+
+			"  full method set: %v\n"+
+			"If leave was removed or a second reclamation verb was added, the exhaustion and id-reuse reasoning in this file must be re-characterised. Do NOT silence this by editing the match set.",
+			reclaimers, methods)
+	}
+
+	// NO automatic reclamation verb. These free a slot without the holder acting,
+	// which is the id-reuse hazard invariant 1 forbids; Remove is exempt because it
+	// is deliberate and floor-preserving.
+	for _, name := range methods {
+		lower := strings.ToLower(name)
+		for _, verb := range autoReclamationVerbs {
 			if strings.Contains(lower, verb) {
-				t.Errorf("auth.Roster now has method %q, which looks like roster-slot RECLAMATION (matched %q).\n"+
+				t.Errorf("auth.Roster now has method %q, which looks like AUTOMATIC roster-slot reclamation (matched %q).\n"+
 					"  full method set: %v\n"+
-					"If a slot can now be freed, the capacity exhaustion recorded in this file is no longer PERMANENT and every assertion here must be rewritten to characterise the new behaviour. Do NOT silence this by editing reclamationVerbs.",
+					"Automatic reclamation frees a slot without the holder's action and is exactly how an id gets re-issued under a live identity (invariant 1). A deliberate self-leave (Remove) is the ONLY sanctioned reclamation. Do NOT silence this by editing autoReclamationVerbs.",
 					name, verb, methods)
 			}
 		}
 	}
 
-	// Reported unconditionally so a reader of a passing run still sees exactly
-	// what was inspected, and so a method set that shrank to something
-	// meaningless is visible rather than silently green. It states what was
-	// inspected, NOT the verdict — the assertions above own the verdict.
-	t.Logf("auth.Roster method set inspected against %v: %v", reclamationVerbs, methods)
+	t.Logf("auth.Roster method set inspected: %v (sanctioned reclaimer: Remove; forbidden auto-reclamation verbs: %v)", methods, autoReclamationVerbs)
+}
+
+// TestRosterLeaveDoesNotReclaimSuffixFloor is the behavioural half of AUTH-4's
+// answer to "how does leave bound suffix-counter growth without reusing ids".
+//
+// It proves the two facts that make leave safe under invariant 1:
+//
+//  1. Leaving FREES A ROSTER SLOT: a roster filled to its cap admits a new
+//     enrolment once one agent leaves. This is the reclamation the pre-AUTH-4
+//     guard said could never exist.
+//  2. Leaving does NOT reclaim the per-name SUFFIX FLOOR: re-enrolling the SAME
+//     name after a leave mints a STRICTLY HIGHER suffix, never the departed id.
+//     That is invariant 1 — the id is never reused, including after leave — and it
+//     is what stops an enrol/leave loop from ever handing a new agent a departed
+//     agent's routing and authorization identity.
+//
+// The suffix map growing by one per distinct name is the accepted, invite-bounded
+// cost documented in the file header: eviction is forbidden (point 5 of the
+// ids.NameSuffixes doc), so the map is bounded by invites redeemed, not reclaimed.
+func TestRosterLeaveDoesNotReclaimSuffixFloor(t *testing.T) {
+	const cap = 2
+
+	roster := auth.NewMemoryRoster()
+	svc, _ := newService(t, auth.Options{Roster: roster, MaxRosterEntries: cap})
+
+	// Fill the roster to its cap with one name; the server mints alice-1, alice-2.
+	first, err := uninvitedEnrol(t, svc, "alice", "leave-floor-1")
+	if err != nil {
+		t.Fatalf("first enrolment of alice: %v", err)
+	}
+	if _, err := uninvitedEnrol(t, svc, "bob", "leave-floor-2"); err != nil {
+		t.Fatalf("enrolment of bob to reach the cap: %v", err)
+	}
+	if got := roster.Len(); got != cap {
+		t.Fatalf("roster holds %d after filling, want %d", got, cap)
+	}
+
+	// At the cap, a new enrolment is refused.
+	if _, err := uninvitedEnrol(t, svc, "carol", "leave-floor-atcap"); !errors.Is(err, auth.ErrCapacity) {
+		t.Fatalf("enrolment at the cap returned %v, want auth.ErrCapacity", err)
+	}
+
+	// alice-1 LEAVES. Its slot must come back.
+	res, err := svc.Leave(first.AgentID)
+	if err != nil {
+		t.Fatalf("leave of %q: %v", first.AgentID, err)
+	}
+	if res.AlreadyLeft {
+		t.Fatalf("a fresh leave of %q reported AlreadyLeft; it was enrolled", first.AgentID)
+	}
+	if _, ok := roster.Get(first.AgentID); ok {
+		t.Fatalf("agent %q is still on the roster after leaving", first.AgentID)
+	}
+	if got := roster.Len(); got != cap-1 {
+		t.Fatalf("roster holds %d after one leave, want %d; the slot was not freed", got, cap-1)
+	}
+
+	// FACT 1: the freed slot admits a new enrolment.
+	reenrol, err := uninvitedEnrol(t, svc, "alice", "leave-floor-reenrol")
+	if err != nil {
+		t.Fatalf("re-enrolment of alice after a leave was refused: %v; leaving did not free a slot", err)
+	}
+
+	// FACT 2: the re-enrolment did NOT get alice-1 back. The suffix floor was not
+	// reclaimed, so alice's next id is strictly higher than the departed one.
+	if reenrol.AgentID == first.AgentID {
+		t.Fatalf("re-enrolling alice after a leave re-issued the DEPARTED id %q; an agent id is never reused, including after leave (invariant 1)", first.AgentID)
+	}
+	_, _, firstN, err := ids.ParseAgentID(first.AgentID)
+	if err != nil {
+		t.Fatalf("parsing the first alice id %q: %v", first.AgentID, err)
+	}
+	_, _, reN, err := ids.ParseAgentID(reenrol.AgentID)
+	if err != nil {
+		t.Fatalf("parsing the re-enrolled alice id %q: %v", reenrol.AgentID, err)
+	}
+	if reN <= firstN {
+		t.Fatalf("re-enrolled alice suffix %d is not strictly greater than the departed %d; the suffix floor was reclaimed on leave, which reuses an id (invariant 1)", reN, firstN)
+	}
 }
 
 // TestRosterDoSCapacityRefusalIsNotSelfHealing is the PERMANENT half,

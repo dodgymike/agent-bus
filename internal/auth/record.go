@@ -51,7 +51,22 @@ const RecordVersion = 1
 //	 "cert_bindings":[{"fp":"<hex, 32 bytes>",
 //	                   "bound_at":"<RFC3339Nano UTC>",
 //	                   "retired_at":"<RFC3339Nano UTC>"}],  // omitted while live
-//	 "enrolled_at":"<RFC3339Nano UTC>"}
+//	 "enrolled_at":"<RFC3339Nano UTC>",
+//	 "left_at":"<RFC3339Nano UTC>"}          // omitted unless this is a LEAVE record
+//
+// left_at (AUTH-4) is the ONE field whose PRESENCE changes what the record
+// means. Absent — the ordinary case — the record is an ENROLMENT and
+// WALRoster.Apply inserts the agent. Present, the record is a TOMBSTONE: it
+// names an agent that has LEFT the bus, and Apply REMOVES it from the serving
+// roster. A tombstone carries the full enrolment fields (it is built from the
+// agent's own entry) so it is self-describing and reuses Decode's whole
+// validation, but its effect is removal, not insertion. It uses the SAME
+// wal.Entry.Kind ("agent") as an enrolment on purpose: the roster already owns
+// that kind, so a leave needs no new checkpoint participant, no applier-map
+// entry and no MultiplexApplier change, and EnrolmentSuffixesInWAL folds it
+// exactly like an enrol record — which keeps the departed agent's burned suffix
+// visible so it is never re-issued (invariant 1). A leave record is NEVER
+// rewritten in place and NEVER truncates history (invariant 6): it is an append.
 //
 // The encodings match the precedents already on disk rather than being picked
 // per field: times are RFC3339Nano in UTC exactly as idem.Record writes
@@ -73,6 +88,7 @@ type recordJSON struct {
 	Epoch      string            `json:"epoch"`
 	CertBinds  []certBindingJSON `json:"cert_bindings,omitempty"`
 	EnrolledAt string            `json:"enrolled_at"`
+	LeftAt     string            `json:"left_at,omitempty"`
 }
 
 // certBindingJSON is the on-disk shape of one CertBinding. retired_at is
@@ -132,6 +148,12 @@ func Encode(e RosterEntry) (json.RawMessage, error) {
 		rec.MsgPub = base64.StdEncoding.EncodeToString(e.MessagingPublicKey)
 	}
 	rec.InviteID = e.InviteID
+	if e.LeftAt != nil {
+		// A LEAVE/TOMBSTONE record (AUTH-4). Its presence — not its value — is
+		// what makes Apply remove rather than insert. Omitted entirely for an
+		// enrolment, so a live record is byte-identical to a pre-AUTH-4 one.
+		rec.LeftAt = e.LeftAt.UTC().Format(time.RFC3339Nano)
+	}
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -221,6 +243,18 @@ func Decode(raw json.RawMessage) (RosterEntry, error) {
 	if err != nil {
 		return RosterEntry{}, fmt.Errorf("%w: enrolled_at is not RFC3339Nano: %v", ErrInvalidRecord, err)
 	}
+	// left_at (AUTH-4) is absent on an enrolment record and present on a leave
+	// tombstone. When present it must parse: a record that claims to be a leave
+	// but carries an unparseable instant is corruption, not a leave.
+	var leftAt *time.Time
+	if j.LeftAt != "" {
+		t, err := time.Parse(time.RFC3339Nano, j.LeftAt)
+		if err != nil {
+			return RosterEntry{}, fmt.Errorf("%w: left_at is not RFC3339Nano: %v", ErrInvalidRecord, err)
+		}
+		u := t.UTC()
+		leftAt = &u
+	}
 
 	if len(j.CertBinds) > MaxCertBindings {
 		// Checked BEFORE the loop allocates: this is a length off DISK, and the
@@ -266,6 +300,7 @@ func Decode(raw json.RawMessage) (RosterEntry, error) {
 		Epoch:              epoch.UTC(),
 		CertBindings:       binds,
 		EnrolledAt:         enrolledAt.UTC(),
+		LeftAt:             leftAt,
 	}
 	// Re-validated through the SAME predicate Encode used, so "cannot be
 	// stored" and "cannot be trusted" are the same rule read in both
@@ -322,6 +357,14 @@ func validateRosterEntry(e RosterEntry) error {
 	}
 	if e.EnrolledAt.IsZero() {
 		return fmt.Errorf("%w: agent %q has a zero enrolled_at", ErrInvalidRecord, e.AgentID)
+	}
+	if e.LeftAt != nil && e.LeftAt.IsZero() {
+		// A leave tombstone (AUTH-4) marked with the zero instant is worse than
+		// none: it says "left" while carrying no instant. Presence of left_at is
+		// what makes Apply remove the agent, so an unset-but-present marker must
+		// be refused rather than silently treated as "not left" — same rule as a
+		// certificate binding's retired_at.
+		return fmt.Errorf("%w: agent %q is marked left at the zero time; a leave record carries the instant it happened, and an enrolment carries no left_at at all", ErrInvalidRecord, e.AgentID)
 	}
 	for i, b := range e.CertBindings {
 		if b.BoundAt.IsZero() {

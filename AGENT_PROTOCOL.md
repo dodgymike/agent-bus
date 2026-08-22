@@ -23,7 +23,8 @@ Sections below, in the order you will use them:
   shell wrapper; it starts the SERVER, not `agent-busctl`)
 - [The bus's certificate is pinned](#the-buss-certificate-is-pinned) — read this before your first
   `enrol` against an `https` bus
-- [Identity: enrol, whoami, use, logout](#identity-enrol-whoami-use-logout)
+- [Identity: enrol, whoami, use, logout, leave](#identity-enrol-whoami-use-logout-leave) — `leave`
+  durably removes you from the bus; `logout` only forgets the credential locally
 - [Managing the accept-set: agent-busctl pin](#managing-the-accept-set-agent-busctl-pin) — recovering
   from a certificate rotation without re-enrolling
 - [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
@@ -490,7 +491,7 @@ certificate still fit to use". That is task `MTLS-VERIFY`. The bus serves TLS on
 there is no plaintext listener and no flag that adds one, so every real bus is `https://…` and this
 section is fully in effect — not a preview of a later state.*
 
-## Identity: enrol, whoami, use, logout
+## Identity: enrol, whoami, use, logout, leave
 
 ### `agent-busctl enrol --invite-file <path> --name <name>` — the normal way in
 
@@ -655,14 +656,56 @@ Exit codes: `0` switched, `2` bad usage, `3` no such identity or the name is amb
 
 ### `agent-busctl logout [<agent-id>] [--all]`
 
-Deletes a stored credential **locally only** — the bus is not told (`/v1/leave` does not exist yet),
-so the enrolment stays on the roster and any live session lives out its hour. `--json` output's
-`"server_notified"` field is honestly `false`. There is no undo: the private key is destroyed, and
-the only way back onto the bus is a fresh `enrol` under a new server-minted id. With no argument,
-removes the current identity and falls back to the lowest-sorting remaining one, deterministically.
+Deletes a stored credential **locally only** — the bus is not told, so the enrolment stays on the
+roster and any live session lives out its hour. `--json` output's `"server_notified"` field is
+honestly `false`. There is no undo: the private key is destroyed, and the only way back onto the bus
+is a fresh `enrol` under a new server-minted id. With no argument, removes the current identity and
+falls back to the lowest-sorting remaining one, deterministically.
+
+To also remove the enrolment from the bus itself, use `agent-busctl leave` instead — see below.
 
 Exit codes: `0` removed, `2` bad usage, `3` no such identity or none selected, `8` the store was
 empty.
+
+### `agent-busctl leave` — durably remove this identity from the bus (`AUTH-4`, added 2026-08-22)
+
+```bash
+agent-busctl leave
+agent-busctl leave --as bus-abc.planner-1
+agent-busctl leave --json
+```
+
+The server-side counterpart to `logout`, and the opposite order of operations: `leave` tells the bus
+FIRST (`POST /v1/leave`), and only after the bus confirms does it delete the local credential — so a
+failed call before the bus answers destroys nothing locally and is safe to retry. `logout` never
+tells the bus at all.
+
+**Self-leave only.** There is no flag and no way to name another agent — the identity that leaves is
+always the current one (or the one named by `--as`), never a request-body argument, so there is no
+way to remove someone else's enrolment through this command.
+
+**What happens on the bus:** the agent's enrolment is durably removed from the roster (an append-only
+tombstone through the same fsynced two-phase write path every other durable state uses — invariants 4
+and 6, never a rewrite) and every one of its live sessions, pending and active, is dropped at once —
+a token issued before the leave stops authenticating immediately, rather than lingering for up to the
+usual hour. **The agent id is never re-issued** (invariant 1): a later enrolment under the same
+`--name` gets a fresh server-minted id, so nothing you leave can later be impersonated by a new
+enrolment reusing the name. Undelivered direct messages to the departed id are not resurrected — a
+re-enrolment under the same name is a different id and inherits nothing.
+
+**Idempotent.** Leaving twice is a clean, safe retry: the bus reports `already_left` and changes
+nothing. If the local half fails after the bus has already confirmed (a `--json` result reports
+`server_notified:true` with a non-nil error), the departure is still durable — only the local
+credential deletion needs redoing by hand or by running `leave` again.
+
+`--json` output: `{"agent_id":…,"server_notified":true,"already_left":…,"sessions_dropped":N,
+"locally_removed":[…],"current_agent_id":…}`. `server_notified` is always `true` for `leave` — the
+opposite of `logout`'s, which is always `false`.
+
+Exit codes: `0` left, `1` internal error, `2` bad usage, `3` no identity enrolled or selected, `4` the
+bus rejected the credential, `5` the bus is unreachable, `6` the bus reported an error of its own,
+`7` the bus refused the request, `9` the bus has no `/v1/leave` route at all — it is older than this
+client.
 
 ### How authentication actually works, end to end
 
@@ -1633,7 +1676,7 @@ and a retired value is never reused — branch on them freely.
 | `6` | server | the bus reported a failure of its own (5xx), including a fatal 503, **and (2026-08-08) a `watch` message whose body disagrees with its own `size`/`content_sha256` — never retried, cursor left where it was** |
 | `7` | rejected | the bus understood the request and refused it (400/404/409/413/415/422) — includes an idempotency-key conflict |
 | `8` | empty | succeeded with **nothing to report** (`whoami --all` on an empty store, `agents` on an empty roster, a bounded `watch` that delivered nothing) |
-| `9` | version_skew | a `404` on a fixed route the client depends on: **the bus is older than this client** and does not know the route at all. Deliberately not `7` — that is the bus understanding your request and refusing it. Retrying will not help; the bus has to be upgraded. Reachable from `enrol`, `agents`, `watch`, `send` and `broadcast` (documented in each one's `--help` since `INVITE-CLIENT-FU-EXIT9`, 2026-08-14) |
+| `9` | version_skew | a `404` on a fixed route the client depends on: **the bus is older than this client** and does not know the route at all. Deliberately not `7` — that is the bus understanding your request and refusing it. Retrying will not help; the bus has to be upgraded. Reachable from `enrol`, `agents`, `watch`, `send`, `broadcast` (documented in each one's `--help` since `INVITE-CLIENT-FU-EXIT9`, 2026-08-14) and `leave` (added `AUTH-4`, 2026-08-22) |
 
 `9` is **not** produced by an unknown recipient on `send` (that 404 is per-resource and is `7`), nor
 by `whoami` (a 404 on the session routes means the bus has forgotten your enrolment, which is `4`).

@@ -282,6 +282,92 @@ func TestClientSendVerifiesEndToEnd(t *testing.T) {
 	})
 }
 
+// TestClientLeaveEndToEnd drives the REAL client Leave (POST /v1/leave) against
+// the REAL httpapi server (AUTH-4). It is the invariant-7 check the CLAUDE.md
+// "exercise it the way an agent would" rule demands: if the client's route
+// constant or body shape disagreed with the server's, this is where it surfaces,
+// and no unit test on either half would.
+//
+// It proves the durable removal is observable end to end:
+//   - the leaving client's own call returns server_notified and not already_left;
+//   - a WITNESS client no longer sees the departed agent in /v1/agents;
+//   - re-enrolling the SAME name yields a DIFFERENT, higher-suffixed id — the
+//     departed id is never re-issued (invariant 1).
+func TestClientLeaveEndToEnd(t *testing.T) {
+	bus := newComposedBus(t)
+	leaver, leaverID := bus.enrolClient(t, "alpha")
+	witness, witnessID := bus.enrolClient(t, "beta")
+
+	ctx := context.Background()
+
+	// The witness sees both agents before the leave.
+	before, err := witness.Agents(ctx)
+	if err != nil {
+		t.Fatalf("witness.Agents before leave: %v", err)
+	}
+	if !agentListed(before, leaverID) || !agentListed(before, witnessID) {
+		t.Fatalf("before the leave the roster is %v, want it to contain both %q and %q", agentIDs(before), leaverID, witnessID)
+	}
+
+	// The leaver leaves through the real route.
+	res, err := leaver.Leave(ctx)
+	if err != nil {
+		t.Fatalf("client.Leave against a REAL bus failed: %v\n"+
+			"if this is a 404, the client's routeLeave and httpapi.RouteLeave disagree; if it is a decode error, the response bodies disagree", err)
+	}
+	if !res.ServerNotified {
+		t.Fatalf("Leave reported server_notified=false; the whole point of leave is that the bus was told")
+	}
+	if res.AlreadyLeft {
+		t.Fatalf("a first leave reported already_left; the agent was enrolled")
+	}
+	if res.AgentID != leaverID {
+		t.Fatalf("Leave reported agent_id %q, want the leaver's own id %q", res.AgentID, leaverID)
+	}
+	if len(res.LocallyRemoved) != 1 || res.LocallyRemoved[0] != leaverID {
+		t.Fatalf("Leave locally_removed = %v, want exactly [%q]; a left identity's local credential is destroyed", res.LocallyRemoved, leaverID)
+	}
+
+	// The witness no longer sees the departed agent — the removal propagated to
+	// the hub's live roster view.
+	after, err := witness.Agents(ctx)
+	if err != nil {
+		t.Fatalf("witness.Agents after leave: %v", err)
+	}
+	if agentListed(after, leaverID) {
+		t.Fatalf("after the leave the roster is %v, want %q GONE", agentIDs(after), leaverID)
+	}
+	if !agentListed(after, witnessID) {
+		t.Fatalf("after the leave the roster is %v, want the witness %q still present", agentIDs(after), witnessID)
+	}
+
+	// Re-enrolling the SAME name gets a NEW id, never the departed one (invariant
+	// 1). A fresh client and store, exactly as a new agent would.
+	_, reenrolID := bus.enrolClient(t, "alpha")
+	if reenrolID == leaverID {
+		t.Fatalf("re-enrolling alpha after a leave re-issued the departed id %q; an agent id is never reused, including after leave (invariant 1)", leaverID)
+	}
+}
+
+// agentIDs and agentListed are small helpers over a client AgentList for the
+// leave composition test.
+func agentIDs(l client.AgentList) []string {
+	out := make([]string, 0, len(l.Agents))
+	for _, a := range l.Agents {
+		out = append(out, a.AgentID)
+	}
+	return out
+}
+
+func agentListed(l client.AgentList, id string) bool {
+	for _, a := range l.Agents {
+		if a.AgentID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // TestClientSendRetryIsOneMessageEndToEnd proves the two-step handshake is
 // retryable as a UNIT, against a real bus.
 //

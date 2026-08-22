@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dodgymike/agent-bus/internal/auth"
 	"github.com/dodgymike/agent-bus/internal/wal"
@@ -175,6 +176,16 @@ func (r *igCompositeRoster) Get(agentID string) (auth.RosterEntry, bool) {
 	defer r.mu.Unlock()
 	e, ok := r.byID[agentID]
 	return e, ok
+}
+
+func (r *igCompositeRoster) Remove(agentID string, _ time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byID[agentID]; !ok {
+		return false, nil
+	}
+	delete(r.byID, agentID)
+	return true, nil
 }
 
 func (r *igCompositeRoster) Len() int {

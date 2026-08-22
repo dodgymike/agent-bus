@@ -944,6 +944,114 @@ func (s *Service) Enrol(req EnrolRequest) (EnrolResult, error) {
 	return result, nil
 }
 
+// LeaveResult reports the outcome of a self-leave (AUTH-4).
+type LeaveResult struct {
+	// AgentID is the agent that left (or was already gone). It is the caller's
+	// own authenticated id — leave is SELF-service only; operator-initiated
+	// revocation of ANOTHER agent is a separate concern (AUTH-7).
+	AgentID string
+
+	// AlreadyLeft is true when the agent was already absent from the roster: an
+	// idempotent leave retry, or a departure recorded by an earlier call whose
+	// acknowledgement was lost. No tombstone is written in that case and no error
+	// is returned (invariant 10).
+	AlreadyLeft bool
+
+	// LeftAt is the instant the departure was stamped with. It is set on a fresh
+	// leave; on an AlreadyLeft retry it carries this call's clock and callers
+	// should not treat it as the original departure instant.
+	LeftAt time.Time
+
+	// SessionsDropped is how many of the agent's live sessions this call removed
+	// from the in-memory table. It is 0 on an AlreadyLeft retry (there is nothing
+	// left to drop) or when the agent held none.
+	SessionsDropped int
+}
+
+// Leave durably removes the caller's OWN agent from the roster (AUTH-4) and
+// drops its live sessions, so a departed agent stays gone across a restart and
+// stops authenticating at once on the running bus.
+//
+// agentID is the AUTHENTICATED principal's id — internal/httpapi passes
+// PrincipalFromContext, never a request-body field, so this is always
+// self-leave. A malformed id is refused with ErrUnknownAgent; a well-formed id
+// that is already absent is the idempotent retry (invariant 10) and succeeds
+// with AlreadyLeft true, writing nothing.
+//
+// # Durability and the tombstone
+//
+// The removal is a durable APPEND through Roster.Remove (invariants 4, 6): a
+// tombstone record, never a log rewrite or truncation. Recovery replays it and
+// the agent ends up absent. The id is never reused (invariant 1): a later
+// enrolment under the same NAME gets a new server-minted suffix, and the
+// per-name suffix floor is deliberately not reclaimed.
+//
+// # Sessions
+//
+// Sessions are opaque, memory-only handles (invariant 3). A restart already
+// drops every session, so the "stays gone across a restart" half is automatic;
+// what this call adds is that the agent's live sessions die AT ONCE on the
+// running bus rather than lingering until they expire. The sweep runs even on an
+// AlreadyLeft retry, where it is free.
+//
+// # Undelivered direct messages
+//
+// A departed agent's undelivered DMs are NOT erased — the log is append-only
+// (invariant 6) and message bodies are held by the hub, not here. They simply
+// become undeliverable: the recipient id is gone from the roster, so the hub's
+// read paths fail closed for it, and a re-enrolment under the same name is a
+// NEW id (invariant 1) that does not inherit them.
+//
+// enrolMu is held across Remove so a leave and an enrolment cannot interleave,
+// the same lock Enrol holds across its roster write; the durable Remove fsyncs
+// twice under it, exactly as Enrol's Put does.
+func (s *Service) Leave(agentID string) (LeaveResult, error) {
+	if _, _, _, err := ids.ParseAgentID(agentID); err != nil {
+		return LeaveResult{}, fmt.Errorf("%w: %s", ErrUnknownAgent, err)
+	}
+
+	now := s.now()
+
+	s.enrolMu.Lock()
+	removed, err := s.roster.Remove(agentID, now)
+	s.enrolMu.Unlock()
+	if err != nil {
+		return LeaveResult{}, err
+	}
+
+	// After the durable removal, drop the agent's live sessions. AFTER, never
+	// before: a session dropped for a departure that then failed to commit would
+	// be a credential revoked with no durable record behind it. Dropping them
+	// afterwards can at worst leave a session live for a few microseconds, and
+	// BeginSession/CompleteSession both re-read the roster and refuse a departed
+	// id anyway.
+	dropped := s.revokeAgentSessions(agentID)
+
+	return LeaveResult{
+		AgentID:         agentID,
+		AlreadyLeft:     !removed,
+		LeftAt:          now,
+		SessionsDropped: dropped,
+	}, nil
+}
+
+// revokeAgentSessions drops every pending and active session belonging to
+// agentID and reports how many were removed. It is the agent-plane twin of
+// OperatorRegistry.revokeSessions: a departed principal must not keep
+// authenticating off a token issued before it left.
+func (s *Service) revokeAgentSessions(agentID string) int {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	n := 0
+	for hash, sess := range s.sessions {
+		if sess.AgentID == agentID {
+			delete(s.sessions, hash)
+			n++
+		}
+	}
+	return n
+}
+
 // inviteIDOf is the invite id an enrolment asserts, or "" for an un-invited
 // one. It is what the idempotency replay check compares, so a nil Invite and an
 // invite id are never confused.

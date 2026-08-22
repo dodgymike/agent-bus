@@ -246,6 +246,18 @@ func (r *stubRoster) Get(agentID string) (auth.RosterEntry, bool) {
 	return e, ok
 }
 
+// Remove implements auth.Roster: a plain idempotent map delete, since this
+// double writes nothing durable (AUTH-4).
+func (r *stubRoster) Remove(agentID string, _ time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byID[agentID]; !ok {
+		return false, nil
+	}
+	delete(r.byID, agentID)
+	return true, nil
+}
+
 // Len implements auth.Roster.
 func (r *stubRoster) Len() int {
 	r.mu.Lock()

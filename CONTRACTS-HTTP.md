@@ -62,6 +62,10 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 413 | request body exceeds `httpapi.MaxAuthRequestBytes` (8 KiB) |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 415 | `Content-Type` is not `application/json` (a `charset` parameter is accepted) |
 | `POST` | `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` | none | 429 | **NEW (`AUTH-1-FU-RATELIMIT`).** `{"error":"rate limit exceeded"}` with **`Retry-After: <whole seconds>`** — the PER-SOURCE token bucket in front of these three routes is empty for this source. Keyed on the TCP **peer address, port stripped** (proxy headers ignored — trivially forged). Enabled by default (`cmd/agent-bus` `-auth-rate-limit 5` / `-auth-rate-burst 60`; set burst `0` to disable). It sits in front of the allow-list and does NOT change its membership (invariant 3). **The connection is KEPT — never a disconnect** (invariant 10: too-fast is not replay, and one anonymous socket may carry a legitimately-busy client). Runs BEFORE any body parse or credential read, so a throttled request consumes no roster/session capacity. Logged at Info (`request rate-limited: per-source cap on an unauthenticated credential route`). **Honest limitation:** clients behind one NAT/proxy/Docker-bridge address (`172.17.0.1`) share one bucket and throttle each other — see `CONTRACTS-CLI.md`. The limiter is OFF unless `httpapi.Options.AuthRateLimit` is configured, so every build that does not opt in (and the whole test suite) is unchanged. |
+| `POST` | `/v1/leave` | bearer — **AUTHENTICATED**, and deliberately **NOT** on `unauthenticatedRoutes`; only registered when `Options.Auth != nil` | 200 | **NEW (AUTH-4).** `{"agent_id":"...","left":true,"already_left":false,"sessions_dropped":N}` — self-leave only: the subject is always the AUTHENTICATED principal (`PrincipalFromContext`), never a request-body field, and the route reads no body at all. Durably removes the caller's own agent from the roster — a tombstone through the two-phase prepare→commit write path (invariants 4, 6) — and drops every one of its live sessions, pending and active, at once. `left` is always `true` on a 200. |
+| `POST` | `/v1/leave` | bearer | 200 | A repeat call after the agent has already left answers the identical shape with `already_left:true` and `sessions_dropped:0` — no new tombstone is written and nothing is re-applied (invariant 10). Leaving twice is a legitimate retry, never a 409 and never a disconnect. |
+| `POST` | `/v1/leave` | bearer | 500 | An unexpected roster-write failure. `ErrUnknownAgent` (a malformed id) is unreachable on this route — `agent_id` is the server-minted authenticated principal, never client input. |
+| `POST` | `/v1/leave` | bearer | 405 | any method but `POST`; `Allow: POST`. No 400/413/415 on this route — it reads no request body, so there is nothing to reject the shape, size or `Content-Type` of. |
 | any | any path off the six-entry allow-list (`/healthz`, `/v1/info`, `/v1/discovery`, `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`) | `Authorization: Bearer <token>` required — see `## Authentication` below | 401 | `{"error":"authentication required"}` when no usable credential was presented at all (missing or duplicate `Authorization` header, a scheme other than `Bearer`, an empty/spaced/oversized/non-base64url token — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_request"`), or `{"error":"invalid or expired credential"}` when a well-formed token failed to authenticate (unknown, pending, or expired — deliberately indistinguishable, see `## Authentication` — `WWW-Authenticate: Bearer realm="agent-bus", error="invalid_token"`) |
 | any | any path off the six-entry allow-list | `Authorization: Bearer <token>` that DID authenticate | 403 | **NEW (MTLS-CROSSCHECK, 2026-08-14, `2ea7dfb`).** `{"error":"this credential was not presented over the client certificate it is bound to"}` — invariant 11's cross-check, applied in `authMiddleware` **after the token authenticates but before the principal is attached to the context**, so no handler can ever see a principal the cross-check did not accept. Same four causes and same fixed body as the two session rows above; the agent id here is server-minted (out of the roster via `Authenticate`), never client-supplied. **No `WWW-Authenticate`** — unlike the 401 rows either side of this one, the caller already authenticated and re-presenting a bearer token cannot help. **Never `Connection: close`.** The acknowledged trade: 403 here versus those 401s does let a caller separate "valid token, wrong certificate" from "invalid token", which is accepted because reaching this row at all requires already holding a valid session token, and collapsing it would cost an honest client its only signal to re-enrol. |
 | any | unregistered path, no credential (or one that does not authenticate) | — | 401 | `authMiddleware` wraps the whole mux and refuses before the mux is ever consulted, so an anonymous caller cannot enumerate which paths this bus serves by probing unknown ones; same body/header shape as the row above |
@@ -731,6 +735,43 @@ is no such flag in this repo's own client, `client/pin.go`, but a hand-rolled on
 pre-TLS threat model. The token's unguessability therefore stays load-bearing against both of those,
 and against the fact that there is still no per-agent or per-source rate limiting on this route.
 
+### `POST /v1/leave` — agent self-leave (AUTH-4)
+
+`internal/httpapi/leave.go`. Registered in the same `if s.auth != nil` block as the three routes
+above, but it is **not** on `unauthenticatedRoutes` — leaving the bus is an authenticated action, and
+adding it to the allow-list would let an anonymous caller name and remove any agent id it likes.
+
+**Self-leave only, structurally.** The route reads no request body at all — there is no field to name
+a victim — and the agent removed is always `PrincipalFromContext(r.Context())`, the same principal
+`authMiddleware` attached before the handler ran. Operator-initiated revocation of a **different**
+agent is a separate, not-yet-built capability (AUTH-7 / AUTH-ROSTER-RECLAIM) with a different
+authority model; this route does not provide it and must not be read as a step toward it without a
+new decision.
+
+**What one call does, in order:** a durable tombstone append to the roster (`Roster.Remove`, under the
+same `enrolMu` `Enrol` holds, two fsyncs — invariants 4, 6), THEN the agent's live sessions (pending
+and active) are dropped from the in-memory table. The order is load-bearing: a session dropped ahead
+of a departure that failed to commit would be a credential revoked with no durable record behind it.
+
+**Idempotent, never a disconnect (invariant 10).** A second `POST /v1/leave` for an already-departed
+agent returns the same 200 shape with `already_left:true`, `sessions_dropped:0`, and writes nothing.
+A retry whose first attempt already succeeded has, by then, lost its session — it meets
+`authMiddleware`'s ordinary 401 on the next call, a clean refusal, never a dropped socket.
+
+**The id is never re-issued (invariant 1).** A leave reuses the enrolment's own WAL kind
+(`auth.RecordKind = "agent"`) with `left_at` set rather than minting a new record kind; `Apply` folds
+it as a removal, and the departed agent's burned name-suffix floor stays visible so a later enrolment
+under the same name gets a fresh server-minted id — see `CONTRACTS-ONDISK.md` and `PROTOCOL.md` §9.
+
+**Undelivered direct messages are not erased.** The append-only log never rewrites (invariant 6) and
+message bodies live in the hub, not the roster; a departed agent's undelivered DMs simply become
+undeliverable — the recipient id is gone from the roster, so the read paths fail closed for it, and a
+re-enrolment under the same name is a new id (invariant 1) that inherits nothing.
+
+`LeaveResponseBody` lives in `internal/httpapi/leave.go` alongside `HealthResponse` / `InfoResponse` /
+`ErrorResponse` in `internal/httpapi/server.go` and the other typed bodies named at the end of the
+messaging-routes section above.
+
 ### Durability of the roster and sessions (CORRECTED 2026-08-07 by AUTH-7)
 
 **The passage that stood here — "Nothing here is durable — do not claim otherwise" — is now FALSE
@@ -791,7 +832,13 @@ routes above are UNAUTHENTICATED by necessity — they are the calls that ISSUE 
 - **Every route off the allow-list now enforces a session token** (AUTH-2 — see `## Authentication`
   below). `auth.Service.Authenticate` is the seam `authMiddleware` calls on every request; it is no
   longer unwired.
-- **There is no revocation** (AUTH-4). A session is valid until it expires, at most one hour.
+- **PARTIALLY CLOSED (AUTH-4, this task): `POST /v1/leave` gives an agent SELF-service revocation.**
+  An agent that leaves has its live sessions (pending and active) dropped at once, rather than left to
+  expire. **What is still absent: OPERATOR-initiated revocation of a DIFFERENT agent** — there is no
+  route that lets anyone but the agent itself end its own session or remove its own enrolment early; a
+  session belonging to an agent that has not called `/v1/leave` is still valid until it expires, at
+  most one hour (filed as AUTH-7 / AUTH-ROSTER-RECLAIM). Do not read `/v1/leave` as closing this gap in
+  general — it closes exactly the self-leave case.
 - **SHARPENED, NOT CLOSED (INVITE-GATE, 2026-08-14): `POST /v1/enroll` is STILL unauthenticated, and
   that is the point — it is how a credential is obtained at all, and invariant 3 requires it stay
   reachable with nothing in hand.** What changed is that a presented invite is no longer decorative: an

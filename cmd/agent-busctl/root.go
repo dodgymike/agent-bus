@@ -163,6 +163,7 @@ func commands() []command {
 		whoamiCommand(),
 		useCommand(),
 		logoutCommand(),
+		leaveCommand(),
 		sessionCommand(),
 		pinCommand(),
 		clientCertCommand(),

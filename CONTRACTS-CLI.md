@@ -1404,6 +1404,7 @@ widen the stored set. The flag itself never widens anything.
 | `whoami [--all] [--verify]` | Show the identity commands act as; `--all` lists them; `--verify` performs a real session handshake | only with `--verify` |
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
+| `leave` | (added 2026-08-22, `AUTH-4`) Tell the bus to durably remove the CURRENT identity from its roster, then delete the credential locally — the server-side counterpart to `logout` | yes — `POST /v1/leave` |
 | `pin list \| add <fingerprint> \| remove <fingerprint>` | (added 2026-08-07, `MTLS-ROTATE`) List, widen or narrow the bus certificates an identity accepts — see "Certificate pinning" below | **no — purely local**, reads/writes the credential store only |
 | `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
 | `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
@@ -1413,11 +1414,12 @@ widen the stored set. The flag itself never widens anything.
 | `ack <message-id>` | (`ACK-15`, added 2026-08-21) Acknowledge a message you RECEIVED: `delivered` by default, `--refuse <class>` for one of the three recipient classes. Signs the canonical acknowledgement bytes with the agent's **messaging** key. **Nothing else can move a row to `delivered`.** | yes — `POST /v1/ack` |
 
 **There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand.** `cmd/agent-busctl/root.go`
-registers **thirteen** commands: the eleven rows above (nine before `ack-status`, `ACK-9`,
-2026-08-16; ten before `ack`, `ACK-15`, 2026-08-21) plus `session` and `client-cert`, which have
-their own sections. **The count above previously said the table WAS the registry, which it never
-was** — corrected 2026-08-21 (`ACK-15` reviewer, minor/pre-existing). What matters is the claim the
-paragraph is actually making: `keygen` and `trust` are in NEITHER list. This matters because several error remedies in
+registers **fourteen** commands: the twelve rows above (nine before `ack-status`, `ACK-9`,
+2026-08-16; ten before `ack`, `ACK-15`, 2026-08-21; twelve after `leave`, `AUTH-4`, 2026-08-22) plus
+`session` and `client-cert`, which have their own sections. **The count above previously said the
+table WAS the registry, which it never was** — corrected 2026-08-21 (`ACK-15` reviewer,
+minor/pre-existing). What matters is the claim the paragraph is actually making: `keygen` and `trust`
+are in NEITHER list. This matters because several error remedies in
 `client/store.go`, `client/client.go` and `client/keyring.go` tell the operator to "run
 `agent-busctl keygen`" or to add a key with `agent-busctl trust` — **those commands do not exist**. The
 capabilities exist only as Go API (`Client.MessagingPublicKey()`, `Client.TrustPeer()`,
@@ -1702,9 +1704,14 @@ durable `(correlation key, recipient)` row and the absorbing-terminal rule over 
 retryable by construction — every attempt asserts the same outcome for the same pair, which the bus
 answers as `duplicate` rather than as a conflict.
 
-**`logout` is LOCAL ONLY.** `/v1/leave` does not exist yet, so nothing is revoked: the enrolment
-stays on the roster and any live session lives out its hour. The JSON field `server_notified` reports
-this honestly and is `false` today.
+**`logout` is LOCAL ONLY, and stays that way — `leave` is the server-side counterpart.** `logout`
+does not tell the bus: the enrolment stays on the roster and any live session lives out its hour. The
+JSON field `server_notified` reports this honestly and is `false` on every `logout`, always. **As of
+`AUTH-4` (2026-08-22), `POST /v1/leave` exists and `agent-busctl leave` durably removes the identity
+from the bus AND deletes the local credential — its `server_notified` is `true`.** Use `logout` to
+stop this machine from acting as an identity while leaving the enrolment standing; use `leave` when
+the identity itself is done for good. See the `leave` row in the subcommands table above and
+`AGENT_PROTOCOL.md`.
 
 ### Exit codes — CONTRACT
 
@@ -1730,12 +1737,14 @@ codes without copying a switch.
 **`9` was reachable and documented NOWHERE until `INVITE-CLIENT-FU-EXIT9` (2026-08-14).** It is
 produced by the single `KindVersionSkew` assignment in `client/transport.go`, and the subcommands
 that can return it are `enrol` (`POST /v1/enroll`), `agents` (`GET /v1/agents`), `watch`
-(`POST /v1/wait`, `GET /v1/messages`), `send` (`POST /v1/mint` — the id reservation it signs) and
-`broadcast` (`POST /v1/broadcast`); each of their `--help` EXIT CODES tables now carries the row, and
-`TestEveryVersionSkewCommandDocumentsExitNine` (`cmd/agent-busctl/cli_test.go`) fails if one drops
-it. **Deliberately absent: `send`'s own `/v1/send` 404**, which is a per-resource "unknown recipient"
-carved out to `KindRejected`/`7`; and `whoami`, whose only remote calls are the session routes, where
-`annotateSessionError` overrides a 404 to `KindAuth`/`4`.
+(`POST /v1/wait`, `GET /v1/messages`), `send` (`POST /v1/mint` — the id reservation it signs),
+`broadcast` (`POST /v1/broadcast`) and — **added `AUTH-4`, 2026-08-22** — `leave`
+(`POST /v1/leave`, a fixed non-session call, so a bus too old to serve it 404s and that 404 is version
+skew like every other fixed route); each of their `--help` EXIT CODES tables now carries the row, and
+`TestEveryVersionSkewCommandDocumentsExitNine` (`cmd/agent-busctl/cli_test.go`,
+`versionSkewCommands`) fails if one drops it. **Deliberately absent: `send`'s own `/v1/send` 404**,
+which is a per-resource "unknown recipient" carved out to `KindRejected`/`7`; and `whoami`, whose only
+remote calls are the session routes, where `annotateSessionError` overrides a 404 to `KindAuth`/`4`.
 
 No code changes meaning; some commands give one a more specific sense:
 
@@ -1811,6 +1820,7 @@ No code changes meaning; some commands give one a more specific sense:
 | `whoami --all` | `identities` (array), `current_agent_id` (string), and `pending` (array of `idempotency_key`/`name`/`bus_url`/`invite_id` (**`omitempty`**, added `INVITE-CLIENT-FU-PENDINGINVITE` 2026-08-14 — the invite's **id**, never its secret; absent when the attempt presented no invite AND when the record predates the field)/`created_at`) when any enrolment is unfinished |
 | `use` | the identity fields, plus `is_current` (bool) |
 | `logout` | `removed` (array of agent ids), `current_agent_id` (string), `server_notified` |
+| `leave` | (added 2026-08-22, `AUTH-4`) `agent_id`, `server_notified` (always `true` — the opposite of `logout`'s), `already_left`, `sessions_dropped`, `locally_removed` (array of agent ids), `current_agent_id` |
 | `pin` (`list`/`add`/`remove`) | `agent_id`, `bus_url`, `bus_fingerprints` (array, **never null** — an empty accept-set prints `[]`), `max_bus_fingerprints` (int, `client.MaxBusPins`). See "Certificate pinning" above. |
 | `agents` | `agents` (array of `agent_id`/`bus_id`/`name`/`enrolled_at`), `count`, `ok` |
 | `send`, `broadcast` | `message_id`, `seq`, `from`, `broadcast`, `to`, `sent_at`, `content_sha256`, `replayed`, `idempotency_key`, `ok` |
@@ -2353,9 +2363,9 @@ Exported surface as of 2026-08-02:
 | `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint` | (2026-08-07, `MTLS-PIN`) One certificate fingerprint. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not a certificate I accept" without parsing a message; `BusFingerprintError` carries both the accepted set and the presented fingerprint. There is **no** exported (or unexported) way to turn the check off. |
 | `BusPinSet`, `NewBusPinSet`, `ParseBusPinSet`, `MaxBusPins`, `Identity.BusFingerprints`, `Client.AddBusPin`, `Client.RemoveBusPin` | (2026-08-07, `MTLS-ROTATE`) The accept-**set**. `BusPinSet` replaces a bare `BusFingerprint` wherever an identity's accepted certificates are resolved or verified against (`Client.doer`, `pinnedTLSConfig`); it is bounded at `MaxBusPins` = 2 and every membership change goes through `With`/`Without`, never direct mutation. **`Identity.BusFingerprint` (singular) no longer exists** — see the BREAKING JSON CHANGE note above. `Client.AddBusPin`/`RemoveBusPin` are the Go API the `pin add`/`pin remove` subcommands are a thin shell over, so an embedding agent can survive a rotation without shelling out. |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
-| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()`, and (2026-08-07, `MTLS-ROTATE`) `AddBusPin()`, `RemoveBusPin()` |
+| `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Leave()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()`, and (2026-08-07, `MTLS-ROTATE`) `AddBusPin()`, `RemoveBusPin()` |
 | `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |
-| `EnrolOptions`, `EnrolResult`, `SessionInfo`, `LogoutResult` | Operation inputs and results |
+| `EnrolOptions`, `EnrolResult`, `SessionInfo`, `LogoutResult`, `LeaveResult` | Operation inputs and results. `LeaveResult` (added 2026-08-22, `AUTH-4`) is `client.Leave`'s result — see the `leave` JSON shape above; it is the server-notified counterpart to `LogoutResult`. |
 | `SendOptions`, `BroadcastOptions`, `SendResult`, `AgentSummary`, `AgentList`, `ReadOptions`, `Batch`, `Message`, `WatchOptions`, `WatchStats` | Messaging inputs, results and the wire-faithful `Message`/`Batch` types |
 | `Error`, `Kind` (+ the `Kind*` constants), `KindOf`, `ExitCode`, `ErrorPayload`, `NewErrorPayload`, the `Exit*` constants, `IsFatalUnavailable`, `IdempotencyKeyOf` | Errors and the exit-code contract |
 | `SessionSigningContext`, `AgentNamePattern` | Pinned protocol constants |

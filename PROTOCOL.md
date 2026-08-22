@@ -928,6 +928,17 @@ minter and the auth service — so every enrolment goes through the durable allo
 suffixes` file **is** written and read by a running bus today, and a restart does **not** re-mint a
 live agent id.
 
+**A departed agent's suffix floor is never lowered or reclaimed (`AUTH-4`, 2026-08-22).** `POST
+/v1/leave` durably removes an agent from the roster by appending a TOMBSTONE — the same `auth.RecordKind
+= "agent"` WAL entry a fresh enrolment writes, with one added, optional field, `left_at` (RFC3339Nano
+UTC; absent on a live enrolment, present only on a leave — see `CONTRACTS-ONDISK.md`'s "The JSON
+shape" for the full `recordJSON` table). `EnrolmentSuffixesInWAL` folds a leave record exactly like an
+enrol record when rebuilding suffix floors from the log, so the departed agent's burned suffix stays
+visible and is never re-issued: a later enrolment under the same `name` gets the NEXT suffix, a new
+server-minted id, and inherits nothing of the departed agent's history. This is the same invariant-1
+guarantee this section already states for an ordinary restart, extended to cover a deliberate
+departure rather than only a crash.
+
 ## 10. Loop prevention and the relay envelope (RELAY-2 / RELAY-3 / SIGN-7, 2026-08-07 — NOT SERVED)
 
 Reference implementation: `internal/relay` (`path.go`, `message.go`, `signed.go`). **Nothing in this section is on

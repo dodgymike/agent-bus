@@ -671,13 +671,13 @@ type LogoutResult struct {
 	// and a string in another makes `jq .current` unpredictable across the CLI.
 	Current string `json:"current_agent_id"`
 
-	// ServerNotified reports whether the BUS was told. It is ALWAYS false
-	// today: /v1/leave does not exist yet, so logout is a purely local
-	// operation and the enrolment remains on the bus.
+	// ServerNotified reports whether the BUS was told. For logout it is ALWAYS
+	// false: logout is a purely local operation and the enrolment remains on the
+	// bus. The command that DOES tell the bus is Leave (POST /v1/leave, AUTH-4),
+	// whose LeaveResult.ServerNotified is true.
 	//
-	// The field exists now, rather than being added when /v1/leave lands,
-	// precisely so a consumer written today cannot mistake local deletion for
-	// revocation. It flips to true only when the bus has actually been told.
+	// The field exists on this local-only result precisely so a consumer cannot
+	// mistake local deletion for revocation.
 	ServerNotified bool `json:"server_notified"`
 }
 

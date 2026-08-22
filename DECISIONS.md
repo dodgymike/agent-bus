@@ -7694,3 +7694,78 @@ Retry-After, never a disconnect.**
 - **Memory bound:** an opportunistic sweep drops buckets that have refilled to capacity — they hold
   no throttling state (a fresh bucket admits identically), so removal changes nothing and the map
   stays proportional to the sources currently being throttled, not to every source ever seen.
+
+---
+
+## 2026-08-22 — AUTH-4: `POST /v1/leave` and durable roster removal (the tombstone, sessions, self-vs-operator, suffix growth)
+
+**Context.** The AUTH epic stalled on this: `WALRoster` had no durable remove path, so an agent
+could not leave the bus and AUTH-5 could only prove token-recovery, not agent-revocation-recovery.
+AUTH-4 adds a `POST /v1/leave` route, `auth.Service.Leave`, `Roster.Remove`, the `agent-busctl
+leave` subcommand and `client.Leave`. Invariants read in full before writing: **1** (ids never
+reused, incl. across restart — the departed id is not re-issued), **3** (roster is the authoritative
+identity set; sessions are memory-only opaque handles; `/v1/leave` is AUTHENTICATED and is NOT on
+`unauthenticatedRoutes`), **4/5/6** (durable two-phase write; recover to a prefix; append-only log,
+metadata only), **10** (idempotency — leaving twice is a clean retry).
+
+**Decision — removal is a TOMBSTONE, reusing the enrolment wal kind.** `Roster.Remove` APPENDS an
+`auth.RecordKind` ("agent") record carrying the departing agent's own entry with a new `left_at`
+field set. `WALRoster.Apply` deletes the agent when it decodes a record whose `LeftAt != nil`.
+Recovery replays enrol-then-leave to "absent". Nothing is rewritten or truncated (invariant 6).
+
+- **Why reuse the "agent" kind rather than a new one.** A new wal kind would need registration in
+  `cmd/agent-bus/main.go`'s applier map, `cmd/agent-bus/operator.go`, a `MultiplexApplier` entry and
+  — the day checkpoints are wired — a `CheckpointParticipant.Kinds()` entry. Reusing "agent" needs
+  none of that: the roster already owns the kind. It is also STRICTLY BETTER for invariant 1 — the
+  leave record carries the departed agent id, so `EnrolmentSuffixesInWAL` folds it exactly like an
+  enrol record and the departed suffix stays in the derived floor even if the enrol record is later
+  compacted.
+- **`left_at` is optional and omitempty**, so a live enrolment record is byte-identical to a
+  pre-AUTH-4 one and `RecordVersion` does NOT move (adding an optional field is the same
+  no-bump precedent INVITE/MTLS set). `RosterEntry.LeftAt` is nil on every serving entry; it is only
+  ever non-nil transiently in the tombstone body that `Apply` consumes to delete.
+
+**Decision — sessions are DROPPED at leave; a restart drops them anyway.** Sessions are opaque,
+memory-only handles (invariant 3). `Service.Leave` sweeps the session table for the departing agent
+AFTER the durable removal, so its live tokens stop authenticating at once on the running bus; a
+restart loses all sessions regardless, so "stays gone across a restart" is automatic.
+`CompleteSession`/`BeginSession` already re-read the roster and refuse a departed id.
+
+**Decision — SELF-LEAVE ONLY.** `/v1/leave` acts on the AUTHENTICATED principal
+(`PrincipalFromContext`), never a body field, so there is no way to name a victim. Operator-initiated
+revocation of ANOTHER agent is a separate concern (AUTH-7 / AUTH-ROSTER-RECLAIM) with a different
+authority model and is deliberately NOT built here.
+
+**Decision — undelivered direct messages to a departed agent are NOT erased.** The log is
+append-only and bodies live in the hub, not the roster. They become undeliverable (the recipient id
+is gone from the roster, so the hub's read paths fail closed for it), and a re-enrolment under the
+same name is a NEW id (invariant 1) that does not inherit them.
+
+**Decision — suffix-counter growth is bounded by INVITES, not by reclamation (the AUTH-4 acceptance
+criterion).** The per-name suffix floors (`ids.NameSuffixes`, one entry per distinct name ever
+enrolled) are NEVER reclaimed on leave — point 5 of that type's doc forbids forgetting a name, and
+reclaiming would reuse an id (invariant 1). Before leave, distinct-name growth was bounded because
+the roster never shrank and admission capped `roster.Len()`. Leave breaks that coupling, so the bound
+moves to invariant 3's invite gate: on a gated bus every enrolment costs one operator-minted,
+single-use invite, and the gate sits ABOVE the mint (`service.go`), so a refused enrolment burns no
+suffix. Distinct-name growth is therefore bounded by invites redeemed — a controlled resource — not
+by an anonymous enrol/leave loop. Eviction was rejected (invariant 1); an unbounded-but-slow argument
+was rejected in favour of this concrete invite bound. `TestRosterLeaveDoesNotReclaimSuffixFloor`
+pins that a re-enrolment gets a strictly higher suffix; the pre-AUTH-4 guard
+`TestRosterDoSRosterInterfaceHasNoReclamationMethod` was rewritten (as its own doc required) into
+`TestRosterReclamationIsLeaveOnly`, which now asserts exactly ONE sanctioned reclamation verb
+(`Remove`) and forbids the AUTOMATIC ones (evict/expire/prune/compact) that would free a slot without
+the holder acting.
+
+**Consequences.**
+- New durable behaviour: a `left_at` record can appear in any WAL. A binary older than AUTH-4 would
+  fail to decode it (strict `DisallowUnknownFields`) and discard it — the agent would stay enrolled
+  after a downgrade. Downgrade is unsupported (forward-only, one container), the same posture INVITE
+  and MTLS took.
+- `Roster.Remove` is on the interface, so every implementation (MemoryRoster, WALRoster, the three
+  in-package test doubles) implements it.
+- Operators: rebuild the binary and restart to serve `/v1/leave`. Existing logs and enrolments are
+  unaffected — no format bump, no migration.
+- Paired durability proof `TestLeaveRevocation` (crash-injection + idempotency + session-drop) and
+  end-to-end `TestClientLeaveEndToEnd` (real client against real server) close
+  AUTH-5-FU-REVOCATION's realizable half and unblock AUTH-7.

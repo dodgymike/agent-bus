@@ -316,12 +316,16 @@ func validExitCodes() map[int]string {
 //	           whose 404 is a per-resource "unknown recipient" and is
 //	           deliberately carved out to KindRejected.
 //	broadcast  POST /v1/broadcast
+//	leave      POST /v1/leave — a 404 on it is version skew like every fixed
+//	           route except routeSend (AUTH-4)
 //
 // Deliberately ABSENT: whoami, whose only remote calls are the two session
 // routes, where client/session.go's annotateSessionError overrides a 404 to
 // KindAuth ("the bus does not know this agent"); and use/logout/pin/client-cert,
-// which make no HTTP call at all.
-var versionSkewCommands = []string{"enrol", "agents", "watch", "send", "broadcast"}
+// which make no HTTP call at all. leave is NOT in that group: it makes a fixed
+// non-session call (POST /v1/leave), so a bus too old to serve it 404s and the
+// client reports version skew.
+var versionSkewCommands = []string{"enrol", "agents", "watch", "send", "broadcast", "leave"}
 
 // TestEveryVersionSkewCommandDocumentsExitNine is the OTHER direction of the
 // help-table check, and the reviewer gate proved it was missing: deleting the

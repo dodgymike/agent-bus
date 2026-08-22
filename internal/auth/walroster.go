@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
@@ -176,6 +178,40 @@ func (r *WALRoster) Apply(c wal.Committed) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if e.LeftAt != nil {
+		// A LEAVE/TOMBSTONE record (AUTH-4). Its effect is REMOVAL, not
+		// insertion: the agent has left the bus, so it is deleted from the serving
+		// copy. Replay of enrol-then-leave therefore ends with the agent ABSENT,
+		// which is what makes a left agent stay gone across a restart (invariants
+		// 4, 5). The id is not reissued — the suffix floor is durable in
+		// ids.OpenNameSuffixes and is never reclaimed on leave (invariant 1).
+		if _, ok := r.byID[e.AgentID]; ok {
+			delete(r.byID, e.AgentID)
+			r.log.Info("agent LEFT the bus and was removed from the serving roster; its id is never reused (invariant 1), so a re-enrolment under the same name gets a new suffix",
+				"prepare_index", c.PrepareIndex,
+				"commit_index", c.CommitIndex,
+				"agent_id", e.AgentID,
+				"left_at", e.LeftAt.UTC().Format(time.RFC3339Nano),
+			)
+			return nil
+		}
+		// The agent is ALREADY ABSENT. This is a legitimate idempotent leave retry
+		// (invariant 10) or a leave whose enrolment record was itself discarded
+		// earlier — either way there is nothing to remove and the record is
+		// benign. Logged at INFO for audit, NOT at ERROR: it is not damage, and
+		// treating a harmless retry as an alarm trains an operator to ignore the
+		// line. It does not return an error — that would poison the log / abort
+		// recovery for a no-op.
+		r.log.Info("a leave record names an agent already absent from the roster; nothing to remove (an idempotent leave retry, or a leave whose enrolment was discarded)",
+			"prepare_index", c.PrepareIndex,
+			"commit_index", c.CommitIndex,
+			"agent_id", e.AgentID,
+			"left_at", e.LeftAt.UTC().Format(time.RFC3339Nano),
+		)
+		return nil
+	}
+
 	if prev, ok := r.byID[e.AgentID]; ok {
 		r.log.Error("DISCARDING a DUPLICATE enrolment record: this agent id is already in the roster, so the later record is dropped and the FIRST is kept; an agent id is never reused (invariant 1) and overwriting one would rebind a live identity to a different keypair",
 			"prepare_index", c.PrepareIndex,
@@ -351,6 +387,92 @@ func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (js
 		// copy, and a caller holding an invite reservation must not un-spend an
 		// invite over it.
 		return true, fmt.Errorf("auth: the enrolment of %q committed durably but is ABSENT from the serving roster; the record is on disk and will be replayed at the next start, but this roster is not the applier of the log it was attached to (check the wal.Open Applier wiring) or the record was discarded by Apply", e.AgentID)
+	}
+	return true, nil
+}
+
+// Remove implements Roster: it records that agentID has LEFT the bus DURABLY —
+// a TOMBSTONE appended through the two-phase write path — and returns only once
+// the departure is on stable storage and the agent is gone from the serving
+// copy (invariants 4, 6). It is the durable half of AUTH-4's leave.
+//
+// The tombstone is an APPEND, never an in-place edit and never a truncation
+// (invariant 6: the log is append-only in the strict sense). It reuses the
+// enrolment record's wal kind (RecordKind) with left_at set, carrying the
+// departing agent's own entry, so Apply — the single insertion/removal path —
+// deletes it at replay. The id is never reused (invariant 1): the per-name
+// suffix floor lives in ids.OpenNameSuffixes and is NOT reclaimed here.
+//
+// The order mirrors put and must not be rearranged:
+//
+//  1. parse the id, outside every lock;
+//  2. take writeMu, which serialises the whole check-then-write;
+//  3. reject an unattached roster (fail-closed, never a silent memory success);
+//  4. if the agent is ALREADY ABSENT, return (false, nil) — the idempotent leave
+//     retry (invariant 10) writes NOTHING and never reaches Apply;
+//  5. encode the tombstone from the agent's current entry, then hand it to the
+//     log, which fsyncs the prepare, fsyncs the commit and THEN calls Apply,
+//     which does the map DELETE.
+//
+// A Write failure is returned wrapped and the agent is NOT removed from memory:
+// Apply never ran, so memory still matches disk. ErrDiverged means the commit
+// record was fsynced before a neighbouring applier failed, so the departure IS
+// durable and removed=true is reported for it.
+func (r *WALRoster) Remove(agentID string, at time.Time) (bool, error) {
+	if _, _, _, err := ids.ParseAgentID(agentID); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrUnknownAgent, err)
+	}
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	if r.w == nil {
+		// NOT a silent success in memory: that would claim the departure is
+		// durable when nothing was written — the exact false claim this type
+		// exists to remove.
+		return false, fmt.Errorf("%w: cannot record the departure of %q", ErrNotAttached, agentID)
+	}
+
+	r.mu.Lock()
+	prev, present := r.byID[agentID]
+	r.mu.Unlock()
+	if !present {
+		// IDEMPOTENT LEAVE RETRY (invariant 10): the agent is already absent — a
+		// retry whose first attempt succeeded, or a departure of an agent that was
+		// never here. Nothing is written, no fsync is burned, no error is
+		// returned, and Apply is never reached.
+		return false, nil
+	}
+
+	// The tombstone is the agent's own entry with left_at set. Built from the
+	// stored entry so it is self-describing and reuses Encode's whole validation.
+	tomb := copyRosterEntry(prev)
+	u := at.UTC()
+	tomb.LeftAt = &u
+
+	body, err := Encode(tomb)
+	if err != nil {
+		return false, err
+	}
+	if _, err := r.w.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
+		// ErrDiverged means the commit record was appended and FSYNCED before the
+		// failure: the departure is durable and only a neighbouring applier
+		// failed. Reported as removed so a caller does not treat a durable
+		// departure as un-done.
+		removed := errors.Is(err, wal.ErrDiverged)
+		return removed, fmt.Errorf("auth: recording the departure of %q durably: %w", agentID, err)
+	}
+
+	// CONFIRM THE AGENT IS NOW ABSENT from the serving copy — the mirror of put's
+	// presence check. Apply deletes on a left_at record, so after a successful
+	// write the agent must be gone. If it is still present the log was opened
+	// with a different applier (the mis-wiring put's doc describes), so the
+	// removal committed durably but the serving copy did not reflect it.
+	r.mu.Lock()
+	_, still := r.byID[agentID]
+	r.mu.Unlock()
+	if still {
+		return true, fmt.Errorf("auth: the departure of %q committed durably but the agent is STILL in the serving roster; the record is on disk and will remove it at the next start, but this roster is not the applier of the log it was attached to (check the wal.Open Applier wiring)", agentID)
 	}
 	return true, nil
 }

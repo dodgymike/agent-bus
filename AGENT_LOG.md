@@ -5799,3 +5799,42 @@ fail (404, not 429). Full `-race ./...` run once for the review panel.
 Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation. This touches
 the auth/security surface (a credential-route guard, and `authmw.go`'s route constants are consumed),
 so **security is REQUIRED, no carve-out** — no skips. Reviewer skip: NONE. Security skip: NONE.
+
+## 2026-08-22 — AUTH-4: `POST /v1/leave` and durable roster removal (leave / revocation)
+
+Added agent self-leave: a durable roster tombstone (`Roster.Remove` → an `auth.RecordKind` "agent"
+record with a new `left_at` field; `WALRoster.Apply` deletes on it), `auth.Service.Leave` (drops the
+agent's live sessions after the durable removal), the authenticated `POST /v1/leave` route, and the
+`client.Leave` + `agent-busctl leave` client half. Recovery replays enrol-then-leave to "absent"; the
+removal is an APPEND, never a rewrite or truncation (invariant 6). The departed id is never re-issued
+(invariant 1): the per-name suffix floor is not reclaimed, and a re-enrolment under the same name gets
+a new suffix. Leaving twice is a clean retry (invariant 10). Self-leave only — operator revocation of
+another agent is AUTH-7, deliberately not built here.
+
+Suffix-counter growth (the AUTH-4 acceptance criterion): NOT bounded by reclamation (that would reuse
+ids). Bounded by invariant 3's invite gate — each enrolment costs one single-use invite and the gate
+sits above the mint, so an enrol/leave loop over distinct names is invite-bounded, not anonymous. The
+pre-AUTH-4 guard `TestRosterDoSRosterInterfaceHasNoReclamationMethod` was rewritten (per its own
+instructions) into `TestRosterReclamationIsLeaveOnly`; `TestRosterLeaveDoesNotReclaimSuffixFloor` pins
+the higher-suffix re-enrolment.
+
+Invariants read IN FULL: 1 (ids never reused incl. after leave), 3 (roster is the authoritative
+identity set; sessions memory-only; `/v1/leave` is authenticated and NOT on `unauthenticatedRoutes`),
+4/5/6 (durable tombstone, recover-to-prefix, append-only metadata log), 10 (idempotent retry).
+
+Files: internal/auth/record.go, roster.go, walroster.go, service.go (Leave + revokeAgentSessions),
+internal/httpapi/leave.go (new), server.go (route registration), client/leave.go (new), client/client.go
+(LogoutResult doc), cmd/agent-busctl/leave.go (new), root.go (register), logout.go (help reconcile).
+Tests: internal/auth/leave_test.go (new — `TestLeaveRevocation`: crash-injection + idempotency +
+session-drop), rosterdos_test.go (guard rewrite + suffix-floor test), the 3 in-package roster doubles
+(auth_test.go, invitegate_service_test.go, operatorprincipal_test.go) gained `Remove`,
+internal/httpapi/composition_test.go (`TestClientLeaveEndToEnd`), cmd/agent-busctl/cli_test.go
+(versionSkewCommands += leave). Docs: DECISIONS.md, CONTRACTS-HTTP.md, CONTRACTS-CLI.md,
+CONTRACTS-AGENT.md, AGENT_PROTOCOL.md, PROTOCOL.md.
+
+Proof: `go test -race -run "TestLeaveRevocation" ./internal/auth` — proof-check verdict=PASS, 4 tests
+ran (1 top-level), 0 skipped, non-vacuous. Full `-race ./...` run once for the review panel.
+
+Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation. New
+AUTHENTICATED route + durable roster mutation → **security REQUIRED, no carve-out**. Reviewer skip:
+NONE. Security skip: NONE.

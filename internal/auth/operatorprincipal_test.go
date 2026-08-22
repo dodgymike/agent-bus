@@ -123,6 +123,16 @@ func (r *opCompositeRoster) Get(agentID string) (auth.RosterEntry, bool) {
 	return e, ok
 }
 
+func (r *opCompositeRoster) Remove(agentID string, _ time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byID[agentID]; !ok {
+		return false, nil
+	}
+	delete(r.byID, agentID)
+	return true, nil
+}
+
 func (r *opCompositeRoster) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

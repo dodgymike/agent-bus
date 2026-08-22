@@ -168,6 +168,18 @@ type RosterEntry struct {
 
 	// EnrolledAt is when the server accepted the enrolment.
 	EnrolledAt time.Time
+
+	// LeftAt marks a LEAVE/TOMBSTONE record (AUTH-4). It is nil on every live
+	// enrolment record and on every entry held in the serving roster; it is set
+	// ONLY in the record a leave appends (WALRoster.Remove), whose sole effect at
+	// replay is to REMOVE the agent from the serving copy — departed agents are
+	// DELETED, never stored with this field set. A caller that finds it non-nil
+	// on an entry returned by Get or List has encountered a bug.
+	//
+	// It is a pointer so "not left" (nil) and "left at some instant" are
+	// distinct, and never confusable with a zero time — the same shape and reason
+	// as CertBinding.RetiredAt.
+	LeftAt *time.Time
 }
 
 // Roster is the set of enrolled agents, as this package needs it.
@@ -227,6 +239,24 @@ type Roster interface {
 
 	// Get returns the entry for agentID and whether it was found.
 	Get(agentID string) (RosterEntry, bool)
+
+	// Remove records that agentID has LEFT the bus (AUTH-4) and removes it from
+	// the serving roster. On a durable implementation the removal is a TOMBSTONE
+	// appended through the two-phase write path (invariants 4, 6) — never an
+	// in-place edit or a truncation of history — so a departed agent stays gone
+	// across a restart. `at` is the instant the departure is stamped with.
+	//
+	// It is IDEMPOTENT (invariant 10): removing an agent that is already absent —
+	// a retry of a leave, or a leave whose enrolment was earlier discarded — is a
+	// legitimate no-op that WRITES NOTHING, returns removed=false and a nil error,
+	// and must NOT be treated as a failure. It reports removed=true only when an
+	// agent was actually present and has now been removed durably.
+	//
+	// The agent id is NEVER reused after removal (invariant 1): a later enrolment
+	// under the same NAME gets a NEW server-minted suffix. The per-name suffix
+	// floor is deliberately NOT reclaimed here — that is ids.NameSuffixes' job and
+	// point 5 of its doc forbids forgetting a name.
+	Remove(agentID string, at time.Time) (removed bool, err error)
 
 	// AgentIDForCertFingerprint resolves a client-certificate fingerprint to the
 	// ONE agent id holding it as a live binding (MTLS-BIND). It is the read half
@@ -344,6 +374,20 @@ func (r *MemoryRoster) Put(e RosterEntry) error {
 	return nil
 }
 
+// Remove implements Roster. MemoryRoster is memory-only, so removal is just a
+// map delete — nothing is written, and `at` is unused (there is no durable
+// tombstone to stamp). It is idempotent: removing an absent agent returns
+// (false, nil).
+func (r *MemoryRoster) Remove(agentID string, _ time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byID[agentID]; !ok {
+		return false, nil
+	}
+	delete(r.byID, agentID)
+	return true, nil
+}
+
 // AgentIDForCertFingerprint implements Roster. See certFingerprintOwner for the
 // three answers and why two of them are refusals.
 func (r *MemoryRoster) AgentIDForCertFingerprint(fp [32]byte) (string, error) {
@@ -434,6 +478,12 @@ func validateRosterEntryKeys(e RosterEntry) error {
 // returned value shares no mutable memory with e.
 func copyRosterEntry(e RosterEntry) RosterEntry {
 	out := e
+	if e.LeftAt != nil {
+		// Freshly allocated so the copy shares no mutable time pointer with e,
+		// exactly as each CertBinding.RetiredAt pointer is copied below.
+		t := *e.LeftAt
+		out.LeftAt = &t
+	}
 	out.AuthPublicKey = append(ed25519.PublicKey(nil), e.AuthPublicKey...)
 	if len(e.MessagingPublicKey) != 0 {
 		out.MessagingPublicKey = append(ed25519.PublicKey(nil), e.MessagingPublicKey...)

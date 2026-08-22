@@ -924,7 +924,8 @@ copied from a summary):
  "cert_bindings":[{"fp":"<hex, 32 bytes>",
                    "bound_at":"<RFC3339Nano UTC>",
                    "retired_at":"<RFC3339Nano UTC>"}],  // omitted while live
- "enrolled_at":"<RFC3339Nano UTC>"}
+ "enrolled_at":"<RFC3339Nano UTC>",
+ "left_at":"<RFC3339Nano UTC>"}             // omitted unless this is a LEAVE (tombstone) record
 ```
 
 | field | Go type | on-disk encoding | omitted when |
@@ -941,6 +942,7 @@ copied from a summary):
 | `cert_bindings[].bound_at` | `time.Time` | `RFC3339Nano`, UTC | never (present in every element) |
 | `cert_bindings[].retired_at` | `*time.Time` | `RFC3339Nano`, UTC | the binding is LIVE (`RetiredAt == nil`) |
 | `enrolled_at` | `time.Time` | `RFC3339Nano`, UTC | never |
+| `left_at` | `*time.Time` | `RFC3339Nano`, UTC | **absent on a live enrolment (the ordinary case); present ONLY on a leave/tombstone record** — see below |
 
 The encodings match the precedents already on disk rather than being picked per field: times are
 `RFC3339Nano` in UTC exactly as `idem.Record` writes `committed_at`; the certificate fingerprint is
@@ -981,6 +983,36 @@ rather than binds. `Decode` accepts the absent key, replay stores the entry, and
 is **unchanged at `1`** — the key was reserved by ENROL-SHAPE, so no build reads a record differently
 than it did before. Read empty as "this agent has no certificate to cross-check against", never as
 "this agent is unauthenticated".
+
+**`left_at` IS WRITTEN NOW — `AUTH-4`, 2026-08-22 — and it too cost NO on-disk format change, NO new
+`Entry.Kind` and NO `RecordVersion` bump.** It is the ONE field whose PRESENCE changes what the whole
+record MEANS, not merely what it carries. Absent — every record before this task, and every ordinary
+enrolment since — the record is an ENROLMENT and `WALRoster.Apply` inserts the agent. Present, the
+record is a TOMBSTONE: it names an agent that has LEFT the bus (`POST /v1/leave`,
+`CONTRACTS-HTTP.md`), and `Apply` REMOVES it from the serving roster instead. A tombstone carries the
+full enrolment field set — it is built from the agent's own existing entry, `left_at` added — so it is
+self-describing and reuses `Decode`'s whole validation; only its EFFECT on replay differs. It rides the
+SAME `wal.Entry.Kind = "agent"` as an ordinary enrolment on purpose: the roster applier already owns
+that kind, so a leave needs no new checkpoint participant, no new entry in the multiplex applier map,
+and `EnrolmentSuffixesInWAL` folds it exactly like an enrol record when rebuilding suffix floors —
+which is what keeps the departed agent's burned name-suffix visible so it is never re-issued
+(invariant 1; see `PROTOCOL.md` §9). Like every other record in this log, a leave is an APPEND: it is
+never written in place over the agent's original enrolment record and never truncates history
+(invariant 6). A `left_at` present but reading the ZERO time is refused as malformed on decode
+(`ErrInvalidRecord`) — a leave record carries the instant it happened, or it carries no `left_at` at
+all; there is no third spelling.
+
+**`left_at`'s downgrade consequence is the OPPOSITE of the generic case the paragraph below states,
+because it is not on every record.** `msg_pub`/`invite_id`/`cert_bindings` are optional fields on
+EVERY enrolment record, so an older binary meeting one it cannot decode discards THAT AGENT's
+enrolment and the id must re-enrol. `left_at` appears ONLY on a tombstone — the agent's ORIGINAL
+enrolment record, written before this task, decodes exactly as it always did. A binary built before
+`AUTH-4`, reading a log a newer binary appended a leave tombstone to, cannot decode that ONE
+tombstone record (`DisallowUnknownFields`), discards it at replay, and never applies the removal —
+**the departed agent stays enrolled and reachable on the downgraded binary**, the opposite of "must
+re-enrol". Downgrade past `AUTH-4` is unsupported, the same posture INVITE and MTLS took; this is
+recorded here because "stays enrolled" is a materially different failure mode from "must re-enrol"
+and an operator debugging a downgrade needs to know which one they are looking at.
 
 `cert_bindings` is `MaxCertBindings = 16`, a BOUNDED HISTORY and not a current-value field — the same
 class of bound as the applied-key table's `MaxEntries`, for the same reason (an agent rotating a
