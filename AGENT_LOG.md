@@ -5698,3 +5698,49 @@ Reviewer skip: NONE — reviewer ran. Security skip: NONE — security ran (cont
 This entry itself closes the step-10 `AGENT_LOG.md` hygiene gap the integrator flagged: the commit
 landed without a log line because `AGENT_LOG.md` was not in the pathspec, and the reasoning otherwise
 lived only in the Spec journal — which is not visible in-repo while the mirror is stale.
+
+---
+
+## 2026-08-22 — AUTH-5: Auth crash/recovery test (end-to-end, through the token path)
+
+**Chain run: spec-keeper → implementer (feature-runner) → reviewer → security → documentation.**
+No step skipped. Test-only, single new file.
+
+- **AUTH-5** — added `internal/auth/authcrashrecovery_test.go` (+384). AUTH-5's stored `proof_cmd`
+  (`go test -race -run TestAuthCrashRecovery ./internal/auth`) was VACUOUS at HEAD — the test did not
+  exist. `TestAuthCrashRecovery` injects a REAL SIGKILL (child verified to die by signal, exit 137)
+  at points in the auth durable write path, restarts a fresh `WALRoster` + `auth.Service` from the
+  WAL alone, and drives the REAL token path (`BeginSession` → sign → `CompleteSession` →
+  `Authenticate`). Three sub-tests: (1) a durably committed enrolment yields a valid token after the
+  crash, and an impostor key is refused (`ErrBadSignature`); (2) an enrolment whose prepare fsynced
+  but never committed is absent and `BeginSession` returns `ErrUnknownAgent` — the iff; (3) a live
+  session token captured immediately before the crash is rejected (`ErrUnknownSession`) after
+  recovery and the agent re-establishes without re-enrolling (invariant 3, sessions memory-only).
+  Distinct from `crash_test.go` (asserts only the roster MAP) and `TestAUTH3Acceptance...` (graceful
+  close, not a crash). Deterministic Ed25519 keypairs from fixed seeds so the parent can sign after
+  the child dies. Invariants read IN FULL and exercised: **4** (nothing acknowledged before durable),
+  **5** (memory serving copy, disk truth, recover to a prefix), **3** (roster is the authoritative
+  identity set; sessions do not survive restart).
+  - Proof: `bash scripts/proof-check.sh 'go test -race -run TestAuthCrashRecovery ./internal/auth'`
+    → `verdict=PASS class=test tests_run=5 top_level=2 skipped=1 failed=0` (the 1 skip is the
+    `TestAuthCrashRecoveryChild` stub in the parent process). HEAD-overlay build + proof PASS;
+    `go build`/`go vet`/`gofmt` clean.
+  - Full `-race ./...` run ONCE for the review panel: `internal/auth` ok; 18 pkgs ok incl
+    `tests/e2e`. Two failures in UNTOUCHED packages — `client/TestStoreConcurrentMutationsLoseNothing`
+    (credential-store file-lock timeout) and `cmd/agent-busctl/TestCLIEnrolEndToEnd` ("priming server
+    exited badly: signal: terminated") — both PASS on isolated re-run (1.570s / 0.641s):
+    environmental flakes on a saturated box (`cmd/agent-bus` alone took 581s), not caused by this
+    test-only `internal/auth` change.
+  - **Scope note:** durable AGENT revocation does not exist yet (AUTH-4 leave/revocation is still
+    `todo`; `WALRoster` has no remove path), so the "revoke an agent, crash, token stays rejected"
+    clause is realized as the invariant-3 session-non-persistence property (sub-test 3). Follow-up
+    **AUTH-5-FU-REVOCATION** proposed, blocked on AUTH-4; the OPERATOR plane, which DOES have durable
+    revocation, already carries its own revocation-recovery coverage.
+  - No `CONTRACTS-*.md` / `AGENT_PROTOCOL.md` change: a test adds no HTTP/CLI/on-disk/agent-facing
+    surface.
+
+Reviewer skip: NONE — reviewer ran (PASS). Security skip: NONE — security ran (PASS). The
+docs-and-tests carve-out would have PERMITTED skipping security (one test file; not a guard file —
+no `*guard*` name, no AST guard, removal disables no invariant check; not control-plane); security
+was RUN anyway because the change drives the Ed25519 sign/verify + session-token path
+(auth-recovery, security-adjacent).
