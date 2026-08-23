@@ -6274,3 +6274,57 @@ to contradict `main`.
 
 Security skip: CARVE-OUT APPLIES — exact touched paths are `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`,
 `AGENT_LOG.md`, all docs only, with no GUARD file and no CONTROL-PLANE file in scope.
+
+
+## 2026-08-23 — MTLS-MIGRATE (`59883178-6bcd-4996-91aa-3c5c3322d6ea`, P0): code and local proof for legacy HTTP identity TLS migration
+
+Task restatement: a pre-TLS HTTP-enrolled identity with a still-valid auth key/session can acquire its first explicit bus fingerprint and first client certificate while keeping the existing server-minted agent id, without spending an invite or re-enrolling.
+
+Spec-keeper step performed through the Spec Server API: claimed/re-fetched the task and corrected its non-runnable proof to `go test -race -run "^TestPreTLSMigrationBootstrapsFingerprintAndClientCertificate$" ./client ./internal/httpapi` before implementation. The task is intentionally not marked done in this pass because the formal reviewer/security/documentation agents and integrator commit are not callable from this sub-agent context.
+
+Invariants read in full before editing: 1, 3, 7, 9, 10, and 11.
+
+Authority model implemented: the operator supplies the HTTPS bus URL and bus certificate fingerprint out of band; the existing auth key completes the normal server-token session handshake over pinned TLS; the server derives the agent id from the authenticated bearer principal and the client-certificate fingerprint from the TLS connection, then appends the first live binding to that existing roster entry. The request body carries only an idempotency key. No invite is presented or consumed, no agent id is minted, and no client-supplied id or fingerprint is trusted as an identity fact.
+
+Implementation summary:
+- `internal/httpapi`: added authenticated `POST /v1/client-cert/bootstrap`, not on `UnauthenticatedRoutes()`, requiring a bearer principal and a usable TLS client certificate from context.
+- `internal/auth`: added first-client-certificate binding support for `MemoryRoster` and `WALRoster`; WAL replay accepts only the narrow duplicate-agent-id update shape with unchanged identity fields and exactly one appended live certificate binding.
+- `client` and `cmd/agent-busctl`: added `Client.BootstrapClientCertificate` and `agent-busctl --bus https://... pin bootstrap <fingerprint>`.
+- Contracts/docs updated in `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`, `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, and `DECISIONS.md`.
+
+Proof and verification run in the live worktree:
+- `bash scripts/proof-check.sh 'go test -race -run "^TestPreTLSMigrationBootstrapsFingerprintAndClientCertificate$" ./client ./internal/httpapi'` → `proof-check: PASS — 2 test(s) ran (2 top-level), 2 passed, 0 skipped.`
+- `go test -race ./client ./cmd/agent-busctl ./internal/auth ./internal/httpapi` → PASS.
+- `go vet ./client ./cmd/agent-busctl ./internal/auth ./internal/httpapi` → PASS.
+- `test -z "$("$(go env GOROOT)/bin/gofmt" -l client cmd/agent-busctl internal/auth internal/httpapi)"` → PASS.
+- Scoped `scripts/doc-check.sh section ...` assertions passed for `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`, `CONTRACTS-HTTP.md`, and `CONTRACTS-ONDISK.md`.
+
+Clean HEAD overlay verification used `/tmp/tmp.H4ahVJs9yL`, made from `git archive HEAD` plus only the MTLS-MIGRATE owned paths. The overlay passed the same proof-check command, the touched-package race tests, vet, gofmt output check, scoped doc checks, and `go build ./...`.
+
+Formal gate status: reviewer NOT COMPLETED, security NOT COMPLETED, documentation NOT COMPLETED, integrator NOT COMPLETED. Justification: this sub-agent runtime exposes no collaboration tools or `.claude/agents` dispatch mechanism, and project rules reserve commits for integrator. The code is left staged for coordinated commit and the Spec Server task is left `in_progress` with a status note instead of being marked done.
+
+
+## 2026-08-23 — MTLS-MIGRATE gate fixes (`59883178-6bcd-4996-91aa-3c5c3322d6ea`): auth-key proof, post-accept persistence, durable idempotency
+
+Gate feedback addressed after reviewer/security/documentation returned CHANGES/FAIL:
+- HIGH security: `POST /v1/client-cert/bootstrap` now requires a fresh Ed25519 proof by the enrolled AUTH key over `agent-bus:client-cert-bootstrap:v1:` plus the active session token, idempotency key, and TLS-derived client certificate fingerprint. A stolen bearer token plus an attacker certificate now fails without binding anything.
+- Client persistence: `agent-busctl pin bootstrap` now uses the operator-supplied bus fingerprint in memory for the migration connection and writes the HTTPS URL/first pin to the credential store only after the server accepts the binding. Server or ambiguous failures leave the legacy HTTP identity retryable.
+- Invariant 10: the successful bootstrap idempotency key is stored durably on the roster entry as `cert_bootstrap_idem`. Same key plus same presented certificate replays the original accepted response with `Idempotency-Replayed: true`; same key plus a different certificate is refused without disconnect; WAL recovery retains the key and binding.
+
+Additional implementation details: updated `auth.RecordVersion = 1` JSON shape with optional `cert_bootstrap_idem`; kept the existing `auth.RecordKind = "agent"` and no new WAL kind/type/version. `WALRoster.Apply` still accepts only the narrow MTLS-MIGRATE duplicate-agent-id update shape, now requiring prior `cert_bootstrap_idem` empty and new one present. The HTTP handler scopes bootstrap bad-signature responses to 403 without changing `/v1/session/complete`'s existing 401 mapping.
+
+Additional tests incorporated and extended: `internal/httpapi/mtls_migrate_test.go` now covers missing session/cert, stolen bearer plus attacker proof, idempotency replay header/body, conflicting certificate without disconnect, and WAL restart retention. `client/mtls_migrate_test.go` verifies bootstrap signature construction and failure leaves the store unmodified. `cmd/agent-busctl/pin_test.go` keeps the explicit HTTPS bus guard.
+
+Verification:
+- `bash scripts/proof-check.sh 'go test -race -run "^TestPreTLSMigration|^TestPinBootstrap" ./client ./cmd/agent-busctl ./internal/httpapi'` → `proof-check: PASS — 7 test(s) ran (7 top-level), 7 passed, 0 skipped.`
+- `go test -race ./client ./cmd/agent-busctl ./internal/auth ./internal/httpapi` → PASS.
+- `go vet ./client ./cmd/agent-busctl ./internal/auth ./internal/httpapi` → PASS.
+- `test -z "$("$(go env GOROOT)/bin/gofmt" -l client cmd/agent-busctl internal/auth internal/httpapi)"` → PASS.
+- Scoped `scripts/doc-check.sh section ...` assertions passed for `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`, `CONTRACTS-HTTP.md`, and `CONTRACTS-ONDISK.md`.
+- Clean HEAD overlay `/tmp/tmp.aEtxy8xtbv`, populated only with MTLS-MIGRATE owned paths, passed the same proof, touched-package race tests, vet, gofmt output check, scoped doc checks, and `go build ./...`.
+
+Formal gate status after fixes: reviewer/security/documentation re-review still NOT COMPLETED in this sub-agent runtime. The task remains `in_progress` awaiting re-gates and integrator commit.
+
+## 2026-08-23 — MTLS-MIGRATE docs correction after reviewer mismatch
+
+Corrected the client-certificate bootstrap docs to match shipped behavior: after first binding, a different presented certificate is refused by authMiddleware cert/session cross-check as 403 before bootstrap idempotency handling and without Connection: close; same-key/same-cert replay returns the original body, including already_bound:false for the first binding, with Idempotency-Replayed:true as the replay signal. Scope: CONTRACTS-HTTP.md, CONTRACTS-CLI.md, AGENT_PROTOCOL.md, DECISIONS.md. Awaiting reviewer/documentation re-gates; no commit.

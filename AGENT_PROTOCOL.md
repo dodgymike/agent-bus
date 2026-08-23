@@ -787,13 +787,12 @@ restart, stop: that mints a **new** agent id and abandons the old one's message 
 
 ## Managing the accept-set: `agent-busctl pin`
 
-*(added 2026-08-07, task `MTLS-ROTATE`)* — **purely local**, nothing is sent to the bus. `pin` only
-reads and writes the credential store for the current identity (or `--as <agent-id>`, which must come
-**before** the action word: `agent-busctl pin --as <id> add <hex>`).
+*(added 2026-08-07, task `MTLS-ROTATE`; `bootstrap` added 2026-08-23, task `MTLS-MIGRATE`)*. `pin list`, `pin add` and `pin remove` are **purely local** and send nothing to the bus. `pin bootstrap` is the exception: it uses the explicit TLS URL and first pin for the migration request, then records them locally only after the bus accepts the client-certificate binding. All actions act on the current identity, or `--as <agent-id>`, which must come **before** the action word: `agent-busctl pin --as <id> add <hex>`.
 
 ```bash
 agent-busctl pin list                 # print the current accept-set, no change
 agent-busctl pin add <fingerprint>    # widen the accept-set by one (confirm out of band FIRST)
+agent-busctl --bus https://127.0.0.1:18090 pin bootstrap <fingerprint>
 agent-busctl pin remove <fingerprint> # narrow it by one
 ```
 
@@ -811,12 +810,23 @@ agent-busctl pin add <new-fingerprint>       # before or during the rollover; no
 agent-busctl pin remove <old-fingerprint>    # back down to one accepted certificate
 ```
 
+A legacy HTTP-enrolled identity, migrated without spending an invite or changing agent id:
+
+```bash
+agent-busctl --bus https://127.0.0.1:18090 pin bootstrap <fingerprint>
+```
+
+`<fingerprint>` is still copied from an out-of-band source, normally the bus startup log. The command uses that pin in memory for the migration connection, completes the normal session handshake over pinned TLS, signs the bootstrap intent with the enrolled AUTH private key, and calls `POST /v1/client-cert/bootstrap`. The local credential store is updated only after the server accepts, so a failed attempt leaves the legacy HTTP identity retryable. The server binds the client certificate presented on that TLS connection to the authenticated session principal. The request body carries an idempotency key and AUTH-key signature; the agent id comes from the bearer session and the certificate fingerprint comes from TLS. On a same-key/same-certificate retry, the HTTP hop carries `Idempotency-Replayed:true` and the JSON body is the original one, including `already_bound:false` for the first binding.
+
+
 - **`pin add` of a fingerprint already held succeeds as a no-op** — safe to re-run after an
   interrupted rollover.
 - **`pin add` at the cap (2) is REFUSED**, never evicting the oldest — eviction would silently decide,
   on your behalf, which certificate stops being trusted. Remove one first.
 - **`pin add` on an identity enrolled against a plaintext `http://` bus is REFUSED** — there is no
-  certificate on that connection for a pin to check, so re-enrol against the `https://` URL instead.
+  certificate on that connection for a pin to check. If this is a pre-TLS identity on the same bus,
+  use `agent-busctl --bus https://<host:port> pin bootstrap <fingerprint>` to keep the same agent id;
+  otherwise enrol a new identity against the `https://` URL.
 - **`pin remove` of the LAST pin is REFUSED.** An `https://` identity with an empty accept-set cannot
   connect at all, so removing the last one would be a lockout dressed up as a tidy-up.
   `agent-busctl logout <agent-id>` is the command that means "stop using this identity" — use that
@@ -834,6 +844,12 @@ driving a rollover can read the state directly rather than reconstruct it from a
 $ agent-busctl pin add 3a1f… --json
 {"agent_id":"bus1.planner","bus_url":"https://bus.example:8080",
  "bus_fingerprints":["9f2c…","3a1f…"],"max_bus_fingerprints":2,"ok":true}
+
+$ agent-busctl --bus https://bus.example:8080 pin bootstrap 9f2c… --json
+{"agent_id":"bus1.legacy-1","bus_url":"https://bus.example:8080",
+ "bus_fingerprints":["9f2c…"],"max_bus_fingerprints":2,
+ "client_cert_fingerprint":"7c4d…","bound_at":"2026-08-23T12:00:00Z",
+ "already_bound":false,"idempotency_key":"busctl-...","ok":true}
 ```
 
 `bus_fingerprints` is **always present and never null** — an accept-set of zero (only reachable on a
@@ -842,7 +858,7 @@ reported so a script can tell "one slot free" from "the next `pin add` will be r
 hard-coding the number.
 
 Exit codes: `0` ok, `2` bad usage, an unknown subcommand, a fingerprint not currently held (`remove`),
-or the maximum already reached (`add`), `3` no identity enrolled or selected.
+the maximum already reached (`add`), or using `bootstrap` without an explicit `https:// --bus`; `3` no identity enrolled or selected. `bootstrap` can also return the normal network/auth/server/version codes because it performs a session handshake and authenticated server write.
 
 ## Listing agents: `agent-busctl agents`
 

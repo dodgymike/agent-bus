@@ -244,6 +244,29 @@ func TestPinAddSucceedsAndIsIdempotent(t *testing.T) {
 	assertFingerprints(t, pinListJSON(t, dir).BusFingerprints, []string{testPins[0], testPins[1]})
 }
 
+func TestPinBootstrapRequiresExplicitHTTPSBus(t *testing.T) {
+	const agentID = "bus-x.agent-1"
+	dir := seedPinIdentityAt(t, agentID, "http://127.0.0.1:18080", nil)
+
+	missingBus := runCLI(t, emptyEnv, "--identity", dir, "pin", "bootstrap", testPins[0])
+	if missingBus.Code != client.ExitUsage {
+		t.Fatalf("pin bootstrap without --bus: code = %d, want %d; stdout=%q stderr=%q", missingBus.Code, client.ExitUsage, missingBus.Stdout, missingBus.Stderr)
+	}
+	if !strings.Contains(missingBus.Stderr, "--bus https://") {
+		t.Fatalf("pin bootstrap without --bus did not print the HTTPS remedy: %q", missingBus.Stderr)
+	}
+	assertFingerprints(t, pinListJSON(t, dir).BusFingerprints, nil)
+
+	plaintextBus := runCLI(t, emptyEnv, "--identity", dir, "--bus", "http://127.0.0.1:18090", "pin", "bootstrap", testPins[0])
+	if plaintextBus.Code != client.ExitUsage {
+		t.Fatalf("pin bootstrap with plaintext --bus: code = %d, want %d; stdout=%q stderr=%q", plaintextBus.Code, client.ExitUsage, plaintextBus.Stdout, plaintextBus.Stderr)
+	}
+	if !strings.Contains(plaintextBus.Stderr, "requires an https bus URL") || !strings.Contains(plaintextBus.Stderr, "bus_cert_fingerprint") {
+		t.Fatalf("pin bootstrap with plaintext --bus did not print the HTTPS/fingerprint remedy: %q", plaintextBus.Stderr)
+	}
+	assertFingerprints(t, pinListJSON(t, dir).BusFingerprints, nil)
+}
+
 // TestPinAddAtCapRefused checks that growing an accept-set already at
 // client.MaxBusPins is refused (exit 2), the remedy names `pin remove`, and
 // the store is left completely unchanged — no partial write, no eviction.

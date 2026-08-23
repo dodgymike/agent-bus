@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -213,6 +214,15 @@ func (r *WALRoster) Apply(c wal.Committed) error {
 	}
 
 	if prev, ok := r.byID[e.AgentID]; ok {
+		if next, ok := certBindingRecordUpdate(prev, e); ok {
+			r.byID[e.AgentID] = next
+			r.log.Info("applied a client certificate binding update for an existing agent id; identity fields were unchanged and exactly one live certificate binding was appended",
+				"prepare_index", c.PrepareIndex,
+				"commit_index", c.CommitIndex,
+				"agent_id", e.AgentID,
+			)
+			return nil
+		}
 		r.log.Error("DISCARDING a DUPLICATE enrolment record: this agent id is already in the roster, so the later record is dropped and the FIRST is kept; an agent id is never reused (invariant 1) and overwriting one would rebind a live identity to a different keypair",
 			"prepare_index", c.PrepareIndex,
 			"commit_index", c.CommitIndex,
@@ -391,6 +401,49 @@ func (r *WALRoster) put(e RosterEntry, kind string, encode func(RosterEntry) (js
 	return true, nil
 }
 
+// BindClientCertificate records the first live client-certificate binding for an
+// already-enrolled agent DURABLY. It appends a full roster record whose identity
+// fields match the original entry and whose CertBindings list has exactly one
+// additional live binding; Apply accepts only that duplicate-agent-id shape.
+func (r *WALRoster) BindClientCertificate(agentID string, fp [32]byte, idempotencyKey string, at time.Time) (RosterEntry, bool, error) {
+	if _, _, _, err := ids.ParseAgentID(agentID); err != nil {
+		return RosterEntry{}, false, fmt.Errorf("%w: %v", ErrUnknownAgent, err)
+	}
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	if r.w == nil {
+		return RosterEntry{}, false, fmt.Errorf("%w: cannot bind a client certificate for %q", ErrNotAttached, agentID)
+	}
+
+	r.mu.Lock()
+	next, changed, err := appendFirstClientCertificateBinding(r.byID, agentID, fp, idempotencyKey, at)
+	r.mu.Unlock()
+	if err != nil {
+		return RosterEntry{}, false, err
+	}
+	if !changed {
+		return copyRosterEntry(next), false, nil
+	}
+
+	body, err := Encode(next)
+	if err != nil {
+		return RosterEntry{}, false, err
+	}
+	if _, err := r.w.Write(wal.Entry{Kind: RecordKind, Body: body}); err != nil {
+		return RosterEntry{}, false, fmt.Errorf("auth: binding a client certificate for %q durably: %w", agentID, err)
+	}
+
+	r.mu.Lock()
+	applied, ok := r.byID[agentID]
+	r.mu.Unlock()
+	if !ok || !hasLiveCertBinding(applied, fp) {
+		return RosterEntry{}, false, fmt.Errorf("auth: the client certificate binding for %q committed durably but is ABSENT from the serving roster; check wal.Open Applier wiring", agentID)
+	}
+	return applied, true, nil
+}
+
 // Remove implements Roster: it records that agentID has LEFT the bus DURABLY —
 // a TOMBSTONE appended through the two-phase write path — and returns only once
 // the departure is on stable storage and the agent is gone from the serving
@@ -475,6 +528,47 @@ func (r *WALRoster) Remove(agentID string, at time.Time) (bool, error) {
 		return true, fmt.Errorf("auth: the departure of %q committed durably but the agent is STILL in the serving roster; the record is on disk and will remove it at the next start, but this roster is not the applier of the log it was attached to (check the wal.Open Applier wiring)", agentID)
 	}
 	return true, nil
+}
+
+func certBindingRecordUpdate(prev, next RosterEntry) (RosterEntry, bool) {
+	if prev.AgentID != next.AgentID || prev.Name != next.Name || prev.InviteID != next.InviteID {
+		return RosterEntry{}, false
+	}
+	if prev.ClientCertBootstrapIdempotencyKey != "" || next.ClientCertBootstrapIdempotencyKey == "" {
+		return RosterEntry{}, false
+	}
+	if !bytes.Equal(prev.AuthPublicKey, next.AuthPublicKey) || !bytes.Equal(prev.MessagingPublicKey, next.MessagingPublicKey) {
+		return RosterEntry{}, false
+	}
+	if !prev.Epoch.Equal(next.Epoch) || !prev.EnrolledAt.Equal(next.EnrolledAt) || next.LeftAt != nil {
+		return RosterEntry{}, false
+	}
+	if len(next.CertBindings) != len(prev.CertBindings)+1 {
+		return RosterEntry{}, false
+	}
+	for i := range prev.CertBindings {
+		if !certBindingEqual(prev.CertBindings[i], next.CertBindings[i]) {
+			return RosterEntry{}, false
+		}
+	}
+	added := next.CertBindings[len(prev.CertBindings)]
+	if added.Fingerprint == ([32]byte{}) || added.RetiredAt != nil || hasLiveCertBinding(prev, added.Fingerprint) {
+		return RosterEntry{}, false
+	}
+	if err := validateRosterEntry(next); err != nil {
+		return RosterEntry{}, false
+	}
+	return copyRosterEntry(next), true
+}
+
+func certBindingEqual(a, b CertBinding) bool {
+	if a.Fingerprint != b.Fingerprint || !a.BoundAt.Equal(b.BoundAt) {
+		return false
+	}
+	if a.RetiredAt == nil || b.RetiredAt == nil {
+		return a.RetiredAt == nil && b.RetiredAt == nil
+	}
+	return a.RetiredAt.Equal(*b.RetiredAt)
 }
 
 // Get implements Roster. The returned entry is a DEEP COPY, exactly as

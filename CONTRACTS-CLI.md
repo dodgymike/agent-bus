@@ -1468,7 +1468,7 @@ damaged.
 | `use <agent-id\|name>` | Change the stored selection | no |
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
 | `leave` | (added 2026-08-22, `AUTH-4`) Tell the bus to durably remove the CURRENT identity from its roster, then delete the credential locally — the server-side counterpart to `logout` | yes — `POST /v1/leave` |
-| `pin list \| add <fingerprint> \| remove <fingerprint>` | (added 2026-08-07, `MTLS-ROTATE`) List, widen or narrow the bus certificates an identity accepts — see "Certificate pinning" below | **no — purely local**, reads/writes the credential store only |
+| `pin list \| add <fingerprint> \| bootstrap <fingerprint> \| remove <fingerprint>` | (added 2026-08-07, `MTLS-ROTATE`; `bootstrap` added 2026-08-23, `MTLS-MIGRATE`) List, widen, bootstrap or narrow the bus certificates an identity accepts — see "Certificate pinning" below | `list`/`add`/`remove`: no, local store only. `bootstrap`: yes — session handshake plus `POST /v1/client-cert/bootstrap` |
 | `client-cert` | (added 2026-08-07, `MTLS-CLIENTCERT`) Report the TLS certificate this agent PRESENTS to the bus, minting it on first use | **no — purely local**, reads/writes `<identity-dir>/client-tls/` only |
 | `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
 | `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
@@ -1543,32 +1543,40 @@ of the two-certificate rollover `DECISIONS.md` E3 describes.
   already in the stored set (the connection then accepts only that one), and a fingerprint **outside**
   the set is still a hard refusal, not a precedence question. Widening is only ever `pin add`.
 
-#### `agent-busctl pin` — list / add / remove accepted certificates
+#### `agent-busctl pin` — list / add / bootstrap / remove accepted certificates
 
 ```
 agent-busctl pin list
 agent-busctl pin add <fingerprint>
+agent-busctl --bus https://127.0.0.1:18090 pin bootstrap <fingerprint>
 agent-busctl pin remove <fingerprint>
 ```
 
-**Purely LOCAL** — nothing is sent to the bus. `pin` only reads and writes the credential store
-(`client.Store.AddBusPin` / `Store.RemoveBusPin`, via `Client.AddBusPin` / `Client.RemoveBusPin`). It
-takes no flags of its own beyond the globals (`--as` / `--identity` / `--json`).
+`pin list`, `pin add` and `pin remove` are **purely LOCAL** — nothing is sent to the bus. They read and write the credential store (`client.Store.AddBusPin` / `Store.RemoveBusPin`, via `Client.AddBusPin` / `Client.RemoveBusPin`). `pin bootstrap` is different: it uses the supplied fingerprint as an in-memory trust anchor, authenticates over pinned TLS, signs the bootstrap intent with the enrolled AUTH key, calls `POST /v1/client-cert/bootstrap`, and only then writes the explicit TLS URL and first pin locally. It takes no flags of its own beyond the globals (`--bus`, `--as`, `--identity`, `--json`).
 
 - `pin list` — prints the current accept-set; makes no change.
 - `pin add <fingerprint>` — confirm the value **out of band** first (the bus's
   `bus_cert_fingerprint=…` startup log line, or the invite), then widen the accept-set by one.
   Re-adding a fingerprint already held succeeds as a no-op — the obvious retry after an interrupted
   rollover. Refused at `MaxBusPins`, and refused on an identity enrolled against an `http` bus (a
-  plaintext connection presents no certificate, so a pin there would be a check that never runs —
-  re-enrol against the `https` URL instead). The gate is the **scheme, not an empty accept-set**: an
-  `https` identity that holds *no* pin — which a downgrade can produce, see below — may gain one, and
-  `pin add` is its recovery rather than a full re-enrolment.
+  plaintext connection presents no certificate, so a pin there would be a check that never runs). The
+  gate is the **scheme, not an empty accept-set**: an `https` identity that holds *no* pin — which a
+  downgrade can produce, see below — may gain one, and `pin add` is its recovery rather than a full
+  re-enrolment.
+- `pin bootstrap <fingerprint>` — for a pre-TLS identity whose stored bus URL is `http://` and whose
+  roster entry has no live certificate binding. Requires global `--bus https://...`; the fingerprint
+  is still operator-supplied and parsed before any network I/O. The server call authenticates with
+  the existing auth key/session, requires a fresh AUTH-key signature over the session token,
+  idempotency key and TLS-derived client certificate fingerprint, derives the agent id from that
+  bearer principal, derives the client certificate fingerprint from TLS, and appends the first
+  binding on the existing roster entry. Only after that 200 does the local store change the existing
+  identity's `bus_url` to the HTTPS URL and write the first pin; it never creates a new credential.
+  No invite is presented or spent.
 - `pin remove <fingerprint>` — retire one certificate. Refused if it is the last one held, and refused
   (not a silent no-op) if the fingerprint given is not currently held, so a mistyped value cannot be
   reported as success while the real one stays accepted.
 
-All three forms answer with the identity's **full resulting accept-set**, never a diff, so a script
+All four forms answer with the identity's **full resulting accept-set**, never a diff, so a script
 driving a rollover reads the resulting state instead of reconstructing it:
 
 ```json
@@ -1576,12 +1584,14 @@ driving a rollover reads the resulting state instead of reconstructing it:
  "bus_fingerprints":["<old-64-hex>","<new-64-hex>"],"max_bus_fingerprints":2}
 ```
 
+`pin bootstrap` adds `client_cert_fingerprint`, `bound_at`, `already_bound` and `idempotency_key` to that JSON object. A true retry with the same idempotency key and same certificate replays the original response (for a first binding, `already_bound:false`) and carries `Idempotency-Replayed: true` on the HTTP hop. `already_bound:true` means the bus already held the same live certificate binding for this agent under a different or older successful attempt, so this call appended nothing.
+
 `bus_fingerprints` is **always present and never null** (an empty accept-set prints `[]`), and
 `max_bus_fingerprints` is the cap (`client.MaxBusPins`), so a caller can tell "one slot free" from
 "add will be refused" without hard-coding the number.
 
 Exit codes: `0` ok; `2` `usage` — unknown subcommand, wrong argument count, a malformed fingerprint,
-`pin add` at the cap, or `pin remove` of the last pin; `3` `config` — no identity enrolled or selected.
+`pin add` at the cap, `pin remove` of the last pin, or `pin bootstrap` without an explicit `https:// --bus`; `3` `config` — no identity enrolled or selected. `pin bootstrap` can also return the normal network/auth/server/version exit codes because it performs a session handshake and an authenticated server write.
 
 **Recovery from a genuine rotation**, in order:
 
@@ -1886,6 +1896,7 @@ No code changes meaning; some commands give one a more specific sense:
 | `logout` | `removed` (array of agent ids), `current_agent_id` (string), `server_notified` |
 | `leave` | (added 2026-08-22, `AUTH-4`) `agent_id`, `server_notified` (always `true` — the opposite of `logout`'s), `already_left`, `sessions_dropped`, `locally_removed` (array of agent ids), `current_agent_id` |
 | `pin` (`list`/`add`/`remove`) | `agent_id`, `bus_url`, `bus_fingerprints` (array, **never null** — an empty accept-set prints `[]`), `max_bus_fingerprints` (int, `client.MaxBusPins`). See "Certificate pinning" above. |
+| `pin bootstrap` | Same fields as `pin`, plus `client_cert_fingerprint`, `bound_at`, `already_bound`, `idempotency_key`. |
 | `agents` | `agents` (array of `agent_id`/`bus_id`/`name`/`enrolled_at`), `count`, `ok` |
 | `send`, `broadcast` | `message_id`, `seq`, `from`, `broadcast`, `to`, `sent_at`, `content_sha256`, `replayed`, `idempotency_key`, `ok` |
 
@@ -2427,7 +2438,7 @@ Exported surface as of 2026-08-02:
 | `Config`, `DefaultConfig`, `Config.ApplyEnv`, `DefaultIdentityDir`, `RetryPolicy`, `HTTPDoer` | Configuration and the transport escape hatch |
 | `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout`, `EnvBusFingerprint` | The env var names above |
 | `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint` | (2026-08-07, `MTLS-PIN`) One certificate fingerprint. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not a certificate I accept" without parsing a message; `BusFingerprintError` carries both the accepted set and the presented fingerprint. There is **no** exported (or unexported) way to turn the check off. |
-| `BusPinSet`, `NewBusPinSet`, `ParseBusPinSet`, `MaxBusPins`, `Identity.BusFingerprints`, `Client.AddBusPin`, `Client.RemoveBusPin` | (2026-08-07, `MTLS-ROTATE`) The accept-**set**. `BusPinSet` replaces a bare `BusFingerprint` wherever an identity's accepted certificates are resolved or verified against (`Client.doer`, `pinnedTLSConfig`); it is bounded at `MaxBusPins` = 2 and every membership change goes through `With`/`Without`, never direct mutation. **`Identity.BusFingerprint` (singular) no longer exists** — see the BREAKING JSON CHANGE note above. `Client.AddBusPin`/`RemoveBusPin` are the Go API the `pin add`/`pin remove` subcommands are a thin shell over, so an embedding agent can survive a rotation without shelling out. |
+| `BusPinSet`, `NewBusPinSet`, `ParseBusPinSet`, `MaxBusPins`, `Identity.BusFingerprints`, `Client.AddBusPin`, `Client.RemoveBusPin`, `Client.BootstrapClientCertificate` | (2026-08-07, `MTLS-ROTATE`; bootstrap added 2026-08-23, `MTLS-MIGRATE`) The accept-**set**. `BusPinSet` replaces a bare `BusFingerprint` wherever an identity's accepted certificates are resolved or verified against (`Client.doer`, `pinnedTLSConfig`); it is bounded at `MaxBusPins` = 2 and every membership change goes through `With`/`Without`, never direct mutation. **`Identity.BusFingerprint` (singular) no longer exists** — see the BREAKING JSON CHANGE note above. `Client.AddBusPin`/`RemoveBusPin` are the Go API the `pin add`/`pin remove` subcommands are a thin shell over. `Client.BootstrapClientCertificate` is the Go API for migrating a legacy HTTP identity to a pinned HTTPS bus and binding its first client certificate without changing agent id. |
 | `ClientCertificate`, `LoadOrCreateClientCertificate`, `Client.ClientCertificate`, `ClientTLSDirName`, `ClientCertFileName`, `ClientKeyFileName`, `ClientCertValidity`, `ErrClientCertIncomplete` | (2026-08-07, `MTLS-CLIENTCERT`) The agent's own TLS client-certificate surface. `LoadOrCreateClientCertificate` is **idempotent and non-destructive**: it mints `<identity-dir>/client-tls/{cert.pem,key.pem}` once (both `0600` inside `0700`), later loads the same material, and refuses damaged or half-populated state instead of minting over it. `ClientCertificate.Created` reports whether THIS call installed the material; `Fingerprint()` is SHA-256 over the leaf DER in **64 lowercase hex**; `IsExpired()` reports without refusing. `Client.ClientCertificate()` is the cached wrapper the CLI and embedders call. |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
 | `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Leave()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()`, and (2026-08-07, `MTLS-ROTATE`) `AddBusPin()`, `RemoveBusPin()` |

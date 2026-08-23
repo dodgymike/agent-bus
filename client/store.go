@@ -747,6 +747,56 @@ func (s *Store) AddBusPin(ref string, pin BusFingerprint) (Identity, error) {
 	return out, nil
 }
 
+// BootstrapTLSPin migrates a pre-TLS identity to an explicitly pinned TLS bus
+// URL. It is narrower than AddBusPin: it may change only a plaintext, unpinned
+// identity into an https identity with its first pin, or replay the same result
+// for an identity already migrated to that exact URL and pin.
+func (s *Store) BootstrapTLSPin(ref, busURL string, pin BusFingerprint) (Identity, error) {
+	u, err := parseBusURL(busURL)
+	if err != nil {
+		return Identity{}, err
+	}
+	if u.Scheme != "https" {
+		return Identity{}, newError(KindUsage, "pin",
+			"client certificate bootstrap requires an https bus URL, got "+u.String(),
+			"pass --bus https://<host:port> and the fingerprint the bus logs as bus_cert_fingerprint=...")
+	}
+
+	var out Identity
+	err = s.update(func(d *storeData) error {
+		i, cred, err := locateForPin(*d, ref)
+		if err != nil {
+			return err
+		}
+		current, err := ParseBusPinSet(cred.BusFingerprints)
+		if err != nil {
+			return err
+		}
+		switch {
+		case isPlaintextBusURL(cred.BusURL) && current.IsEmpty():
+			updated := NewBusPinSet(pin)
+			d.Credentials[i].BusURL = u.String()
+			d.Credentials[i].BusFingerprints = updated.Strings()
+		case cred.BusURL == u.String() && current.Contains(pin):
+			// Idempotent retry after a previous local migration. Preserve any
+			// existing rotation pins instead of collapsing the set to one.
+		case cred.BusURL == u.String() && current.IsEmpty():
+			updated := NewBusPinSet(pin)
+			d.Credentials[i].BusFingerprints = updated.Strings()
+		default:
+			return newError(KindUsage, "pin",
+				"identity "+cred.AgentID+" is not an unpinned pre-TLS identity for "+u.String(),
+				"use this only for a legacy http identity migrating to its first TLS certificate. For certificate rotation on an already-TLS identity, use `agent-busctl pin add <fingerprint>`")
+		}
+		out = d.Credentials[i].Identity
+		return nil
+	})
+	if err != nil {
+		return Identity{}, err
+	}
+	return out, nil
+}
+
 // RemoveBusPin retires pin from ref's accept-set, under the store lock.
 //
 // Removing the LAST pin is refused. An https identity with an empty set cannot

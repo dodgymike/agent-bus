@@ -54,12 +54,13 @@ func writePinnedCerts(w io.Writer, label string, fingerprints []string) {
 func pinCommand() command {
 	return command{
 		name:    "pin",
-		summary: "list, add or retire the bus certificates an identity accepts",
+		summary: "list, add, bootstrap or retire the bus certificates an identity accepts",
 		help: `agent-busctl pin — manage the bus certificates an identity will accept.
 
 USAGE
   agent-busctl pin list
   agent-busctl pin add <fingerprint>
+  agent-busctl --bus https://<host:port> pin bootstrap <fingerprint>
   agent-busctl pin remove <fingerprint>
 
 WHY THIS EXISTS
@@ -104,6 +105,12 @@ A ROLLOVER, START TO FINISH
   ...                              # the bus finishes serving the old cert
   agent-busctl pin remove <old>    # back to one accepted certificate
 
+LEGACY HTTP-ENROLLED IDENTITY MIGRATION
+  agent-busctl --bus https://127.0.0.1:18090 pin bootstrap <fingerprint>
+  This records the explicit TLS URL and first pin locally, then asks the bus to
+  bind this identity's local client certificate to the existing agent id. It
+  does not spend an invite and does not enrol a replacement identity.
+
 EXIT CODES
   0 ok                          3 no identity enrolled or selected
   2 bad usage, an unknown fingerprint, or the maximum is already reached
@@ -145,7 +152,37 @@ func newPinListResult(id client.Identity) pinListResult {
 	}
 }
 
-func runPin(_ context.Context, env *cliEnv, args []string) error {
+// pinBootstrapResult is pinListResult plus the server-side client certificate
+// binding established by `pin bootstrap`.
+type pinBootstrapResult struct {
+	AgentID               string   `json:"agent_id"`
+	BusURL                string   `json:"bus_url"`
+	BusFingerprints       []string `json:"bus_fingerprints"`
+	MaxBusFingerprints    int      `json:"max_bus_fingerprints"`
+	ClientCertFingerprint string   `json:"client_cert_fingerprint"`
+	BoundAt               string   `json:"bound_at"`
+	AlreadyBound          bool     `json:"already_bound"`
+	IdempotencyKey        string   `json:"idempotency_key"`
+}
+
+func newPinBootstrapResult(res client.ClientCertificateBootstrapResult) pinBootstrapResult {
+	pins := res.BusFingerprints
+	if pins == nil {
+		pins = []string{}
+	}
+	return pinBootstrapResult{
+		AgentID:               res.AgentID,
+		BusURL:                res.BusURL,
+		BusFingerprints:       pins,
+		MaxBusFingerprints:    client.MaxBusPins,
+		ClientCertFingerprint: res.ClientCertFingerprint,
+		BoundAt:               res.BoundAt,
+		AlreadyBound:          res.AlreadyBound,
+		IdempotencyKey:        res.IdempotencyKey,
+	}
+}
+
+func runPin(ctx context.Context, env *cliEnv, args []string) error {
 	fs, diagnostics := newCommandFlagSet("pin", env.g)
 	if err := fs.Parse(args); err != nil {
 		if err == flagErrHelp {
@@ -161,7 +198,7 @@ func runPin(_ context.Context, env *cliEnv, args []string) error {
 			Kind:    client.KindUsage,
 			Op:      "pin",
 			Message: "no subcommand",
-			Remedy:  "run `agent-busctl pin list`, `agent-busctl pin add <fingerprint>` or `agent-busctl pin remove <fingerprint>`",
+			Remedy:  "run `agent-busctl pin list`, `agent-busctl pin add <fingerprint>`, `agent-busctl pin bootstrap <fingerprint>` or `agent-busctl pin remove <fingerprint>`",
 		}
 	}
 
@@ -173,14 +210,14 @@ func runPin(_ context.Context, env *cliEnv, args []string) error {
 		if len(operands) != 0 {
 			return pinUsage(fmt.Sprintf("unexpected argument %q", operands[0]), "run `agent-busctl pin list`")
 		}
-	case "add", "remove":
+	case "add", "bootstrap", "remove":
 		if len(operands) != 1 {
 			return pinUsage(
 				fmt.Sprintf("`pin %s` takes exactly one fingerprint, got %d", action, len(operands)),
-				"run `agent-busctl pin "+action+" <fingerprint>` with the 64 lowercase hex characters the bus logs as `bus_cert_fingerprint=…`")
+				"run `agent-busctl pin "+action+" <fingerprint>` with the 64 lowercase hex characters the bus logs as `bus_cert_fingerprint=...`")
 		}
 	default:
-		return pinUsage(fmt.Sprintf("unknown subcommand %q", action), "known subcommands: add, list, remove")
+		return pinUsage(fmt.Sprintf("unknown subcommand %q", action), "known subcommands: add, bootstrap, list, remove")
 	}
 
 	c, err := env.client()
@@ -195,11 +232,20 @@ func runPin(_ context.Context, env *cliEnv, args []string) error {
 	ref := c.Config().AgentID
 
 	var id client.Identity
+	var bootstrap *pinBootstrapResult
 	switch action {
 	case "list":
 		id, err = c.Identity()
 	case "add":
 		id, err = c.AddBusPin(ref, operands[0])
+	case "bootstrap":
+		boot, berr := c.BootstrapClientCertificate(ctx, operands[0])
+		if berr != nil {
+			return berr
+		}
+		b := newPinBootstrapResult(boot)
+		bootstrap = &b
+		id = boot.Identity
 	case "remove":
 		id, err = c.RemoveBusPin(ref, operands[0])
 	}
@@ -223,10 +269,16 @@ func runPin(_ context.Context, env *cliEnv, args []string) error {
 		}
 	}
 
-	return env.out.Emit(res, func(w io.Writer) {
+	jsonRes := interface{}(res)
+	if bootstrap != nil {
+		jsonRes = *bootstrap
+	}
+	return env.out.Emit(jsonRes, func(w io.Writer) {
 		switch action {
 		case "add":
 			fmt.Fprintf(w, "%s now accepts %s\n", res.AgentID, echo)
+		case "bootstrap":
+			fmt.Fprintf(w, "%s migrated to TLS and bound client certificate %s\n", res.AgentID, bootstrap.ClientCertFingerprint)
 		case "remove":
 			fmt.Fprintf(w, "%s no longer accepts %s\n", res.AgentID, echo)
 		}

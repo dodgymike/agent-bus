@@ -51,6 +51,7 @@ const RecordVersion = 1
 //	 "cert_bindings":[{"fp":"<hex, 32 bytes>",
 //	                   "bound_at":"<RFC3339Nano UTC>",
 //	                   "retired_at":"<RFC3339Nano UTC>"}],  // omitted while live
+//	 "cert_bootstrap_idem":"<idempotency key>", // omitted unless MTLS-MIGRATE bound the first certificate
 //	 "enrolled_at":"<RFC3339Nano UTC>",
 //	 "left_at":"<RFC3339Nano UTC>"}          // omitted unless this is a LEAVE record
 //
@@ -79,16 +80,17 @@ const RecordVersion = 1
 // byte-for-byte the record a pre-INVITE, pre-MTLS build would have written, and
 // the reserved keys appear on disk only once something actually populates them.
 type recordJSON struct {
-	V          int               `json:"v"`
-	AgentID    string            `json:"agent_id"`
-	Name       string            `json:"name"`
-	AuthPub    string            `json:"auth_pub"`
-	MsgPub     string            `json:"msg_pub,omitempty"`
-	InviteID   string            `json:"invite_id,omitempty"`
-	Epoch      string            `json:"epoch"`
-	CertBinds  []certBindingJSON `json:"cert_bindings,omitempty"`
-	EnrolledAt string            `json:"enrolled_at"`
-	LeftAt     string            `json:"left_at,omitempty"`
+	V                    int               `json:"v"`
+	AgentID              string            `json:"agent_id"`
+	Name                 string            `json:"name"`
+	AuthPub              string            `json:"auth_pub"`
+	MsgPub               string            `json:"msg_pub,omitempty"`
+	InviteID             string            `json:"invite_id,omitempty"`
+	Epoch                string            `json:"epoch"`
+	CertBinds            []certBindingJSON `json:"cert_bindings,omitempty"`
+	CertBootstrapIdemKey string            `json:"cert_bootstrap_idem,omitempty"`
+	EnrolledAt           string            `json:"enrolled_at"`
+	LeftAt               string            `json:"left_at,omitempty"`
 }
 
 // certBindingJSON is the on-disk shape of one CertBinding. retired_at is
@@ -136,13 +138,14 @@ func Encode(e RosterEntry) (json.RawMessage, error) {
 	}
 
 	rec := recordJSON{
-		V:          RecordVersion,
-		AgentID:    e.AgentID,
-		Name:       e.Name,
-		AuthPub:    base64.StdEncoding.EncodeToString(e.AuthPublicKey),
-		Epoch:      e.Epoch.UTC().Format(time.RFC3339Nano),
-		CertBinds:  binds,
-		EnrolledAt: e.EnrolledAt.UTC().Format(time.RFC3339Nano),
+		V:                    RecordVersion,
+		AgentID:              e.AgentID,
+		Name:                 e.Name,
+		AuthPub:              base64.StdEncoding.EncodeToString(e.AuthPublicKey),
+		Epoch:                e.Epoch.UTC().Format(time.RFC3339Nano),
+		CertBinds:            binds,
+		CertBootstrapIdemKey: e.ClientCertBootstrapIdempotencyKey,
+		EnrolledAt:           e.EnrolledAt.UTC().Format(time.RFC3339Nano),
 	}
 	if len(e.MessagingPublicKey) != 0 {
 		rec.MsgPub = base64.StdEncoding.EncodeToString(e.MessagingPublicKey)
@@ -292,15 +295,16 @@ func Decode(raw json.RawMessage) (RosterEntry, error) {
 	}
 
 	e := RosterEntry{
-		AgentID:            j.AgentID,
-		Name:               j.Name,
-		AuthPublicKey:      authPub,
-		MessagingPublicKey: msgPub,
-		InviteID:           j.InviteID,
-		Epoch:              epoch.UTC(),
-		CertBindings:       binds,
-		EnrolledAt:         enrolledAt.UTC(),
-		LeftAt:             leftAt,
+		AgentID:                           j.AgentID,
+		Name:                              j.Name,
+		AuthPublicKey:                     authPub,
+		MessagingPublicKey:                msgPub,
+		InviteID:                          j.InviteID,
+		Epoch:                             epoch.UTC(),
+		CertBindings:                      binds,
+		ClientCertBootstrapIdempotencyKey: j.CertBootstrapIdemKey,
+		EnrolledAt:                        enrolledAt.UTC(),
+		LeftAt:                            leftAt,
 	}
 	// Re-validated through the SAME predicate Encode used, so "cannot be
 	// stored" and "cannot be trusted" are the same rule read in both
@@ -365,6 +369,14 @@ func validateRosterEntry(e RosterEntry) error {
 		// be refused rather than silently treated as "not left" — same rule as a
 		// certificate binding's retired_at.
 		return fmt.Errorf("%w: agent %q is marked left at the zero time; a leave record carries the instant it happened, and an enrolment carries no left_at at all", ErrInvalidRecord, e.AgentID)
+	}
+	if e.ClientCertBootstrapIdempotencyKey != "" {
+		if err := validateIdempotencyKey(e.ClientCertBootstrapIdempotencyKey); err != nil {
+			return fmt.Errorf("%w: client certificate bootstrap idempotency key: %v", ErrInvalidRecord, err)
+		}
+		if len(e.CertBindings) == 0 {
+			return fmt.Errorf("%w: agent %q has a client certificate bootstrap idempotency key but no certificate binding", ErrInvalidRecord, e.AgentID)
+		}
 	}
 	for i, b := range e.CertBindings {
 		if b.BoundAt.IsZero() {

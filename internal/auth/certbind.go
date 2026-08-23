@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"sort"
 	"time"
@@ -89,6 +90,66 @@ import (
 // a refusal. See certFingerprintOwner.
 func (s *Service) AgentIDForClientCertificate(fp [32]byte) (string, error) {
 	return s.roster.AgentIDForCertFingerprint(fp)
+}
+
+// ClientCertificateBootstrapResult is the durable result of binding the first
+// client certificate to an existing pre-TLS agent id.
+type ClientCertificateBootstrapResult struct {
+	AgentID      string
+	Binding      CertBinding
+	AlreadyBound bool
+	Replayed     bool
+}
+
+// ClientCertificateBootstrapSigningContext is the pinned domain separator for
+// the fresh auth-key proof on POST /v1/client-cert/bootstrap.
+const ClientCertificateBootstrapSigningContext = "agent-bus:client-cert-bootstrap:v1:"
+
+type clientCertificateBinder interface {
+	BindClientCertificate(agentID string, fp [32]byte, idempotencyKey string, at time.Time) (RosterEntry, bool, error)
+}
+
+// ClientCertificateBootstrapSigningBytes returns the exact byte string an agent
+// signs with its enrolled AUTH private key to bind a bootstrap request to the
+// active bearer token, idempotency key and TLS-derived client certificate.
+func ClientCertificateBootstrapSigningBytes(sessionToken, idempotencyKey string, fp [32]byte) []byte {
+	return []byte(ClientCertificateBootstrapSigningContext + sessionToken + ":" + idempotencyKey + ":" + fmt.Sprintf("%x", fp[:]))
+}
+
+// BindClientCertificate binds fp to an already-enrolled agent without minting a
+// new agent id. It is used only after the HTTP layer has authenticated the
+// existing session and extracted fp from the mTLS connection. The signature is a
+// fresh proof by the enrolled auth private key over the bootstrap intent; a
+// stolen bearer token alone is not enough.
+func (s *Service) BindClientCertificate(agentID, sessionToken, idempotencyKey string, fp [32]byte, signature []byte) (ClientCertificateBootstrapResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return ClientCertificateBootstrapResult{}, err
+	}
+	if len(signature) != ed25519.SignatureSize {
+		return ClientCertificateBootstrapResult{}, fmt.Errorf("%w: got a %d-byte signature, want exactly %d", ErrBadSignature, len(signature), ed25519.SignatureSize)
+	}
+	entry, ok := s.roster.Get(agentID)
+	if !ok {
+		return ClientCertificateBootstrapResult{}, fmt.Errorf("%w: %q", ErrUnknownAgent, agentID)
+	}
+	if !ed25519.Verify(entry.AuthPublicKey, ClientCertificateBootstrapSigningBytes(sessionToken, idempotencyKey, fp), signature) {
+		return ClientCertificateBootstrapResult{}, ErrBadSignature
+	}
+	binder, ok := s.roster.(clientCertificateBinder)
+	if !ok {
+		return ClientCertificateBootstrapResult{}, fmt.Errorf("%w: roster cannot bind a client certificate for %q", ErrNotAttached, agentID)
+	}
+	entry, changed, err := binder.BindClientCertificate(agentID, fp, idempotencyKey, s.now().UTC())
+	if err != nil {
+		return ClientCertificateBootstrapResult{}, err
+	}
+	for _, b := range entry.CertBindings {
+		if b.RetiredAt == nil && b.Fingerprint == fp {
+			replayed := entry.ClientCertBootstrapIdempotencyKey == idempotencyKey && !changed
+			return ClientCertificateBootstrapResult{AgentID: entry.AgentID, Binding: b, AlreadyBound: !changed && !replayed, Replayed: replayed}, nil
+		}
+	}
+	return ClientCertificateBootstrapResult{}, fmt.Errorf("%w: certificate binding for %q committed but is absent from the serving roster", ErrInvalidRecord, agentID)
 }
 
 // certFingerprintOwner resolves a client-certificate fingerprint to the single
@@ -207,6 +268,49 @@ func checkCertFingerprintUnbound(byID map[string]RosterEntry, e RosterEntry) err
 		}
 	}
 	return nil
+}
+
+// appendFirstClientCertificateBinding returns the roster entry that binds fp to
+// agentID, without mutating byID. The caller must hold the roster lock and must
+// apply the returned entry atomically with the durable write.
+func appendFirstClientCertificateBinding(byID map[string]RosterEntry, agentID string, fp [32]byte, idempotencyKey string, at time.Time) (RosterEntry, bool, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return RosterEntry{}, false, err
+	}
+	if fp == ([32]byte{}) {
+		return RosterEntry{}, false, fmt.Errorf("%w: the zero fingerprint is the absence of a client certificate", ErrCertBindingUnknown)
+	}
+	prev, ok := byID[agentID]
+	if !ok {
+		return RosterEntry{}, false, fmt.Errorf("%w: %q", ErrUnknownAgent, agentID)
+	}
+	if prev.ClientCertBootstrapIdempotencyKey == idempotencyKey {
+		if hasLiveCertBinding(prev, fp) {
+			return copyRosterEntry(prev), false, nil
+		}
+		return RosterEntry{}, false, fmt.Errorf("%w: key %q was applied for a different client certificate", ErrIdempotencyKeyReused, idempotencyKey)
+	}
+	if hasLiveCertBinding(prev, fp) {
+		return copyRosterEntry(prev), false, nil
+	}
+	for _, b := range prev.CertBindings {
+		if b.RetiredAt == nil {
+			return RosterEntry{}, false, fmt.Errorf("%w: agent %q already has a different live client certificate binding", ErrCertBindingAlreadyExists, agentID)
+		}
+	}
+	if len(prev.CertBindings) >= MaxCertBindings {
+		return RosterEntry{}, false, fmt.Errorf("%w: agent %q already carries %d certificate bindings, the limit is %d", ErrCapacity, agentID, len(prev.CertBindings), MaxCertBindings)
+	}
+	next := copyRosterEntry(prev)
+	next.CertBindings = append(next.CertBindings, newCertBinding(fp, at))
+	next.ClientCertBootstrapIdempotencyKey = idempotencyKey
+	if err := checkCertFingerprintUnbound(byID, next); err != nil {
+		return RosterEntry{}, false, err
+	}
+	if err := validateRosterEntry(next); err != nil {
+		return RosterEntry{}, false, err
+	}
+	return next, true, nil
 }
 
 // hasLiveCertBinding reports whether e accepts fp right now: a binding with this

@@ -31,6 +31,12 @@ const (
 
 	// RouteSessionComplete verifies the signature and activates the token.
 	RouteSessionComplete = "/v1/session/complete"
+
+	// RouteClientCertBootstrap binds the first client certificate to an
+	// authenticated pre-TLS agent without minting a new agent id. It is
+	// authenticated by the default-deny middleware and is deliberately NOT on the
+	// unauthenticated credential-route allow-list.
+	RouteClientCertBootstrap = "/v1/client-cert/bootstrap"
 )
 
 // MaxAuthRequestBytes bounds the body of an auth route.
@@ -189,6 +195,28 @@ type SessionCompleteResponseBody struct {
 	// against the server's clock with no skew grace.
 	LifetimeSeconds     int `json:"lifetime_seconds"`
 	RefreshAfterSeconds int `json:"refresh_after_seconds"`
+}
+
+// ClientCertBootstrapRequestBody is the body of POST /v1/client-cert/bootstrap.
+type ClientCertBootstrapRequestBody struct {
+	// IdempotencyKey makes the migration call safe for clients to retry after a
+	// lost acknowledgement. The successful key is remembered in the durable roster
+	// entry with the first binding.
+	IdempotencyKey string `json:"idempotency_key"`
+
+	// Signature is standard-base64 Ed25519 over
+	// auth.ClientCertificateBootstrapSigningBytes(sessionToken, idempotencyKey, fp),
+	// using the enrolled AUTH private key. It prevents a stolen bearer token from
+	// binding an attacker's client certificate.
+	Signature string `json:"signature"`
+}
+
+// ClientCertBootstrapResponseBody is the 200 body of POST /v1/client-cert/bootstrap.
+type ClientCertBootstrapResponseBody struct {
+	AgentID               string `json:"agent_id"`
+	ClientCertFingerprint string `json:"client_cert_fingerprint"`
+	BoundAt               string `json:"bound_at"`
+	AlreadyBound          bool   `json:"already_bound"`
 }
 
 // handleEnroll serves POST /v1/enroll.
@@ -757,6 +785,83 @@ func (s *Server) handleSessionComplete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleClientCertBootstrap serves POST /v1/client-cert/bootstrap.
+func (s *Server) handleClientCertBootstrap(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePOST(w, r) {
+		return
+	}
+	var body ClientCertBootstrapRequestBody
+	if !s.decodeAuthRequest(w, r, &body) {
+		return
+	}
+	sig, err := base64.StdEncoding.Strict().DecodeString(body.Signature)
+	if err != nil {
+		s.log.Debug("client certificate bootstrap signature rejected before verification",
+			"request_id", RequestIDFromContext(r.Context()),
+			"err", err,
+		)
+		s.writeJSON(w, r, http.StatusBadRequest, ErrorResponse{Error: "invalid signature"})
+		return
+	}
+	sessionToken, err := bearerToken(r)
+	if err != nil {
+		s.log.Error("authenticated client certificate bootstrap reached the handler without a usable bearer token",
+			"request_id", RequestIDFromContext(r.Context()),
+			"err", err,
+		)
+		s.writeJSON(w, r, http.StatusInternalServerError, ErrorResponse{Error: "internal error"})
+		return
+	}
+
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		s.log.Error("authenticated client certificate bootstrap reached the handler without an authenticated principal",
+			"request_id", RequestIDFromContext(r.Context()),
+		)
+		s.writeJSON(w, r, http.StatusInternalServerError, ErrorResponse{Error: "internal error"})
+		return
+	}
+	fp, ok := ClientCertFingerprintFromContext(r.Context())
+	if !ok {
+		s.log.Info("client certificate bootstrap refused because the request carried no usable client certificate",
+			"request_id", RequestIDFromContext(r.Context()),
+			"agent_id", principal.AgentID,
+		)
+		s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "client certificate required"})
+		return
+	}
+
+	res, err := s.auth.BindClientCertificate(principal.AgentID, sessionToken, body.IdempotencyKey, [32]byte(fp), sig)
+	if err != nil {
+		if errors.Is(err, auth.ErrBadSignature) {
+			s.log.Warn("client certificate bootstrap refused: auth-key proof did not verify",
+				"request_id", RequestIDFromContext(r.Context()),
+				"agent_id", principal.AgentID,
+				"client_cert_fingerprint", fp.String(),
+			)
+			s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "bootstrap signature does not verify"})
+			return
+		}
+		s.writeAuthError(w, r, "client certificate bootstrap", err, "agent_id", principal.AgentID, "client_cert_fingerprint", fp.String())
+		return
+	}
+	if res.Replayed {
+		w.Header().Set(IdempotencyReplayedHeader, "true")
+	}
+	s.log.Info("client certificate bootstrapped for existing agent",
+		"request_id", RequestIDFromContext(r.Context()),
+		"agent_id", res.AgentID,
+		"client_cert_fingerprint", fp.String(),
+		"already_bound", res.AlreadyBound,
+	)
+	s.writeJSON(w, r, http.StatusOK, ClientCertBootstrapResponseBody{
+		AgentID:               res.AgentID,
+		ClientCertFingerprint: fp.String(),
+		BoundAt:               formatInstant(res.Binding.BoundAt),
+		AlreadyBound:          res.AlreadyBound,
+	})
+}
+
 // writeAuthError maps an internal/auth failure to a status code and answers.
 //
 // The mapping is by SENTINEL (errors.Is), never by matching error text: the
@@ -809,6 +914,10 @@ func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, op strin
 		// there is no principal to hold responsible — not key ownership.
 		s.log.Warn("enrolment idempotency key reused with different key material; rejected, and the connection is KEPT because this route is unauthenticated and the socket identifies no principal to punish", kv...)
 		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "idempotency key already used with a different payload"})
+
+	case errors.Is(err, auth.ErrCertBindingAlreadyExists):
+		s.log.Warn("client certificate bootstrap refused: the authenticated agent already has a different live client certificate binding", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{Error: "agent already has a different client certificate binding; use certificate rotation"})
 
 	case errors.Is(err, auth.ErrCertFingerprintBound):
 		// 409, and the CONNECTION IS KEPT (invariant 10's two questions: a

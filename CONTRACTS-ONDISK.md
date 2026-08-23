@@ -938,6 +938,7 @@ copied from a summary):
 | `invite_id` | `string` | verbatim | `RosterEntry.InviteID` is empty (reserved, unpopulated) |
 | `epoch` | `time.Time` | `RFC3339Nano`, UTC | never |
 | `cert_bindings` | `[]CertBinding` | array of `{"fp","bound_at","retired_at"}`, bounded to `MaxCertBindings` | `RosterEntry.CertBindings` is empty — **the enrolling connection presented no client certificate, or the agent enrolled before `MTLS-BIND` (2026-08-14)**. Both are ordinary; see below |
+| `cert_bootstrap_idem` | `string` | same bounded idempotency-key syntax as the HTTP request | absent unless `MTLS-MIGRATE` appended the first client-certificate binding for a legacy identity |
 | `cert_bindings[].fp` | `[32]byte` | **hex** (`encoding/hex`), the fingerprint `sha256.Sum256(cert.Raw)` | never (present in every element) |
 | `cert_bindings[].bound_at` | `time.Time` | `RFC3339Nano`, UTC | never (present in every element) |
 | `cert_bindings[].retired_at` | `*time.Time` | `RFC3339Nano`, UTC | the binding is LIVE (`RetiredAt == nil`) |
@@ -963,8 +964,7 @@ keypair, a migration here is not a schema edit but a FORCED RE-ENROLMENT OF EVER
 change and NO migration.** This paragraph said "nothing writes them yet" until that commit made it
 false for this field. What enrolment writes is exactly ONE binding, live (`retired_at` absent), whose
 `bound_at` is the SAME instant as the record's `epoch` and `enrolled_at` — one event, three fields,
-deliberately not three clock reads (`auth.newCertBinding`). Nothing else writes the array and nothing
-retires a binding yet, so on this build a record carries **zero or one** element.
+deliberately not three clock reads (`auth.newCertBinding`). `MTLS-MIGRATE` (2026-08-23) adds the second writer: `POST /v1/client-cert/bootstrap` appends a full `auth.RecordKind = "agent"` roster record for the same agent id with the identity fields unchanged, exactly one additional live certificate binding, and `cert_bootstrap_idem` set to the idempotency key that produced that first binding. It keeps `auth.RecordVersion = 1` and allocates no new WAL kind because `cert_bindings` was already in the reserved record shape and optional additive fields are permitted under this record version. Nothing retires a binding yet.
 
 **Where the fingerprint comes from is the load-bearing part: the TLS CONNECTION, never the request
 body.** `internal/httpapi`'s `WithClientCertificate` middleware reads `r.TLS.PeerCertificates[0]`,
@@ -974,15 +974,7 @@ request body, which lists every accepted key and does not include one. A client-
 would be a claim anyone could make about anyone's certificate, and binding it would durably record a
 fact that was never established (invariants 1 and 11).
 
-**A record with NO `cert_bindings` is ORDINARY, not damaged, and needs no migration** — the operator
-question this raises. Three populations have none and all three are healthy: every agent enrolled
-before 2026-08-14; every agent that enrols over a connection presenting no client certificate (the
-listener only **requests** one, `tls.RequestClientCert`, so that is the common case today); and any
-future enrolment whose certificate was outside its own validity window, which the middleware ignores
-rather than binds. `Decode` accepts the absent key, replay stores the entry, and `auth.RecordVersion`
-is **unchanged at `1`** — the key was reserved by ENROL-SHAPE, so no build reads a record differently
-than it did before. Read empty as "this agent has no certificate to cross-check against", never as
-"this agent is unauthenticated".
+**A record with NO `cert_bindings` is ORDINARY, not damaged** — the operator question this raises. Three populations have none and all three are healthy before migration: every agent enrolled before 2026-08-14; every agent that enrols over a connection presenting no client certificate (the listener only **requests** one, `tls.RequestClientCert`); and any enrolment whose certificate was outside its own validity window, which the middleware ignores rather than binds. `Decode` accepts the absent key, replay stores the entry, and `auth.RecordVersion` is **unchanged at `1`** — the key was reserved by ENROL-SHAPE, so no build reads a record differently than it did before. Read empty as "this agent has no certificate to cross-check against", never as "this agent is unauthenticated". `MTLS-MIGRATE` can later append that agent's first binding without changing its agent id.
 
 **`left_at` IS WRITTEN NOW — `AUTH-4`, 2026-08-22 — and it too cost NO on-disk format change, NO new
 `Entry.Kind` and NO `RecordVersion` bump.** It is the ONE field whose PRESENCE changes what the whole
@@ -1039,10 +1031,7 @@ their field and its decoder together, in one build.
 - The roster is rebuilt entirely by REPLAY: `WALRoster` is constructed first (empty), handed to
   `wal.Open` as the `Applier`, and every committed `"agent"`-kind entry is folded in before `Open`
   returns — the same construction order `hub.Apply` uses for messages.
-- A DUPLICATE agent id KEEPS THE FIRST record and never overwrites. An overwrite would rebind a live
-  identity to a different keypair — the worst outcome available on this path (invariants 1 and 3), since
-  every DM addressed to that id would then route to the new key holder. The later record is logged at
-  ERROR and dropped; `Apply` does not return an error for it.
+- A DUPLICATE agent id KEEPS THE FIRST record and never overwrites, except for the single `MTLS-MIGRATE` update shape: the same `agent_id`, `name`, auth key, messaging key, invite id, epoch and enrolled-at, `left_at` absent, prior `cert_bootstrap_idem` empty, new `cert_bootstrap_idem` present and valid, and `cert_bindings` equal to the stored prefix plus exactly one additional live non-zero fingerprint. That narrow shape updates the serving roster and is logged at INFO. Every other duplicate is still logged at ERROR and dropped. An unrestricted overwrite would rebind a live identity to a different keypair — the worst outcome available on this path (invariants 1 and 3), since every DM addressed to that id would then route to the new key holder.
 - An undecodable record is discarded LOUDLY, at ERROR, with its prepare and commit indices, and the
   bus still starts. This is invariant 6's recovery contract (2026-08-02): recovery always reaches a
   running server, damaged records are discarded, and the absolute requirement is that every discard is

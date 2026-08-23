@@ -33,9 +33,10 @@ var agentNameRegexp = regexp.MustCompile(AgentNamePattern)
 // Route paths on the bus. Pinned here for the same reason as
 // AgentNamePattern.
 const (
-	routeEnroll          = "/v1/enroll"
-	routeSessionBegin    = "/v1/session/begin"
-	routeSessionComplete = "/v1/session/complete"
+	routeEnroll              = "/v1/enroll"
+	routeSessionBegin        = "/v1/session/begin"
+	routeSessionComplete     = "/v1/session/complete"
+	routeClientCertBootstrap = "/v1/client-cert/bootstrap"
 )
 
 // EnrolOptions is the input to Enrol.

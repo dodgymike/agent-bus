@@ -159,6 +159,12 @@ var (
 	// keypair.
 	ErrCertFingerprintBound = errors.New("auth: client certificate is already bound to another agent")
 
+	// ErrCertBindingAlreadyExists reports an attempt to bootstrap the FIRST
+	// client certificate for an agent that already has a DIFFERENT live
+	// certificate binding. It is a client conflict: the caller must use a
+	// rotation path, not the pre-TLS migration path.
+	ErrCertBindingAlreadyExists = errors.New("auth: agent already has a live client certificate binding")
+
 	// ErrCertBindingUnknown reports a client-certificate fingerprint that no
 	// enrolled agent holds a live binding for. It is the ordinary negative
 	// answer, not a malfunction: on this build most connections present no

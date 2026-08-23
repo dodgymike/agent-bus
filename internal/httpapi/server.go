@@ -456,6 +456,7 @@ func New(opts Options) *Server {
 		s.route(mux, RouteEnroll, s.handleEnroll)
 		s.route(mux, RouteSessionBegin, s.handleSessionBegin)
 		s.route(mux, RouteSessionComplete, s.handleSessionComplete)
+		s.route(mux, RouteClientCertBootstrap, s.handleClientCertBootstrap)
 		// POST /v1/leave (AUTH-4). Unlike the three above it is AUTHENTICATED —
 		// it is NOT on unauthenticatedRoutes, so authMiddleware's default-deny
 		// requires a bearer session. It is registered here because its authority

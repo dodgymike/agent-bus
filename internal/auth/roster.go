@@ -166,6 +166,13 @@ type RosterEntry struct {
 	// only when a future task makes a certificate mandatory per agent.
 	CertBindings []CertBinding
 
+	// ClientCertBootstrapIdempotencyKey is the key that produced the first
+	// client-certificate bootstrap binding for this legacy identity. It is stored
+	// on the same durable roster record as that binding so a lost response can be
+	// replayed after restart without appending a second binding. Empty means no
+	// bootstrap route has bound this identity.
+	ClientCertBootstrapIdempotencyKey string
+
 	// EnrolledAt is when the server accepted the enrolment.
 	EnrolledAt time.Time
 
@@ -372,6 +379,22 @@ func (r *MemoryRoster) Put(e RosterEntry) error {
 	}
 	r.byID[e.AgentID] = copyRosterEntry(e)
 	return nil
+}
+
+// BindClientCertificate records the first live client-certificate binding for
+// an already-enrolled agent. MemoryRoster is memory-only, so the update is only
+// protected by the roster lock.
+func (r *MemoryRoster) BindClientCertificate(agentID string, fp [32]byte, idempotencyKey string, at time.Time) (RosterEntry, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next, changed, err := appendFirstClientCertificateBinding(r.byID, agentID, fp, idempotencyKey, at)
+	if err != nil {
+		return RosterEntry{}, false, err
+	}
+	if changed {
+		r.byID[agentID] = copyRosterEntry(next)
+	}
+	return copyRosterEntry(next), changed, nil
 }
 
 // Remove implements Roster. MemoryRoster is memory-only, so removal is just a

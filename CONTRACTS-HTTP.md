@@ -546,27 +546,21 @@ passes the hub as the WAL's `Applier`:
 | `Idempotency-Replayed` | out | **NEW (INVITE-GATE, 2026-08-14).** Also `true` on `POST /v1/enroll`'s 201 when the INVITE REDEMPTION itself (not the roster-level enrolment) was a legitimate retry — same invite id, same idempotency key, same payload — sourced from the invite's own stored consumption record (`internal/invite`'s `Record.Result`), a DIFFERENT table from the roster's applied-key table the row above reads. The body is still byte-identical to the original either way. |
 | `Connection` | out | `close` on **exactly one** response: the **403** from `POST /v1/send` when `sender` is a well-formed fully-qualified agent id naming an agent that is not the authenticated caller (a malformed or absent `sender` is 403 WITHOUT a disconnect — it names nobody and is a client bug). That is invariant 10's REPLAY clause — an accepted signed message can be resent verbatim by anyone who has seen it and the bytes still verify, and what identifies the replayer is that the sender inside those bytes is not the agent on the session. The server closes the socket after the response. **NARROWED 2026-08-08:** this header was previously sent on the 409 key-reuse conflicts from `POST /v1/enroll` and `POST /v1/send`, and is not any more — those keys are the caller's OWN (keys are scoped per agent), so the conflict is a client bug rather than an attack, and dropping the socket destroyed every other request the client had pipelined on it, including its long poll. Those paths now reject and log. The SIGN-6 409s (`ErrUnknownMint`, `ErrMintMismatch`) do **not** disconnect either — see the `hub.ErrUnknownMint` row in the sentinel table for why the hostile and honest cases are currently indistinguishable there. |
 | `Retry-After` | out | `5` (seconds) on a 503 from any of the three auth routes (a roster, idempotency-table, or session-table capacity limit; **added INVITE-GATE 2026-08-14: also the invite table's own 8192-entry capacity limit, `invite.MaxInvites`, on `POST /v1/enroll` when an invite is presented**), on a 503 from `/v1/send` caused by the applied-key table being at capacity, and on a 503 from `/v1/mint` caused by the outstanding-reservation bounds. Short deliberately: every cap here is a live in-memory bound that a departing agent, an expiring session, an expiring reservation, or a message ageing out of the retention window relieves within seconds. It is deliberately **absent** from the 503 a poisoned or non-durable hub returns — that one is not transient and dressing it up as retryable would be a lie. It is also deliberately **absent from every SIGN-6 4xx**, which are terminal for their idempotency key. |
-| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/mint`, `/v1/broadcast` or `/v1/send`. |
+| `Allow` | out | Also set to `POST` on a 405 from `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, `/v1/client-cert/bootstrap`, `/v1/mint`, `/v1/broadcast` or `/v1/send`. |
 | `Cache-Control` | out | `no-store` on `POST /v1/session/begin` only. That response body carries a LIVE credential (the session token); the other two auth responses carry none, so the header is deliberately not set on them and its presence stays meaningful. |
 
 ## Enrolment and sessions (added 2026-08-02)
 
-AUTH-1 adds the three credential-issuing routes documented in `## Routes` and `## Headers` above:
-`POST /v1/enroll`, `POST /v1/session/begin`, `POST /v1/session/complete`. This section is the prose
-that does not fit a table row. No `scripts/bus-*.sh` wrapper and no `AGENT_PROTOCOL.md` entry are
-added by this task — invariant 7 was amended so a Go CLI replaces the shell wrappers, and wiring
-these routes to that agent-facing surface is a separate, later task. Do not infer a wrapper or CLI
-subcommand exists for enrolment or sessions from this document.
+AUTH-1 added the three credential-issuing routes documented in `## Routes` and `## Headers` above:
+`POST /v1/enroll`, `POST /v1/session/begin`, `POST /v1/session/complete`. MTLS-MIGRATE adds the authenticated `POST /v1/client-cert/bootstrap` route in the same auth-service registration block. This section is the prose that does not fit a table row.
 
 **`Options.Auth` gates route registration, not route behaviour.** `internal/httpapi.Options.Auth`
 (`*auth.Service`) has no default and is `nil` unless the caller supplies one. When it is `nil`, `New`
-does not register `/v1/enroll`, `/v1/session/begin`, or `/v1/session/complete` on the mux at all —
+does not register `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete`, or `/v1/client-cert/bootstrap` on the mux at all —
 they 404 through the same `net/http.ServeMux` catch-all as any other unknown path, not a 503. That is
 deliberate: a route that exists and refuses is a claim that the capability is present, and a server
 built without an auth service does not have it. `cmd/agent-bus`'s `run()` always constructs one
-(`auth.NewService(auth.Options{Minter: minter})`), so the shipped binary always registers these three
-routes; a `nil` `Options.Auth` is reachable only by a caller of the `httpapi` package directly (tests,
-or a future build that intentionally omits the auth surface).
+(`auth.NewService(auth.Options{Minter: minter})`), so the shipped binary always registers these auth routes; a `nil` `Options.Auth` is reachable only by a caller of the `httpapi` package directly (tests, or a future build that intentionally omits the auth surface).
 
 ### `POST /v1/enroll` request body (RELAY-13, 2026-08-08)
 
@@ -688,6 +682,29 @@ grace window is just a longer lifetime with a less honest name. `ExpiresAt` is s
 at the first successful `POST /v1/session/complete`, and is **never** extended by re-completing an
 already-active session: a repeat completion re-verifies the signature and returns the identical
 `expires_at`, so a client cannot hold one session open indefinitely off a single signature.
+
+### `POST /v1/client-cert/bootstrap` — first certificate binding for a legacy identity (`MTLS-MIGRATE`, 2026-08-23)
+
+This route migrates a pre-TLS identity that already exists in the roster but has no live client-certificate binding. It is **authenticated** by the ordinary bearer middleware and is **not** on `UnauthenticatedRoutes()`, but the bearer is not sufficient authority by itself: the request must also carry a fresh Ed25519 signature by the enrolled AUTH key over the bootstrap intent. The server reads no agent id or certificate fingerprint from the body: the agent id is the `auth.Principal` attached by `authMiddleware`, and the certificate fingerprint is the `ClientCertFingerprintFromContext` value attached by `WithClientCertificate` from the TLS connection.
+
+Request body:
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `idempotency_key` | string | yes | 1-128 bytes of `[A-Za-z0-9._-]`. A successful key is stored durably on the roster entry with the first binding. Same key + same presented certificate replays the original 200 body with `Idempotency-Replayed: true`; for the first successful binding that original body has `already_bound:false`. After that binding, presenting a different certificate with the same session is refused earlier by `authMiddleware`'s certificate/session cross-check as `403` with no `Connection: close`, so bootstrap idempotency handling is not reached. |
+| `signature` | string | yes | Standard-base64 Ed25519 signature by the enrolled AUTH private key over `auth.ClientCertificateBootstrapSigningBytes(sessionToken, idempotency_key, tls_client_cert_fingerprint)`, whose pinned context is `agent-bus:client-cert-bootstrap:v1:`. This is what makes stolen bearer + attacker certificate fail. |
+
+Response body, 200:
+
+| Field | Meaning |
+| --- | --- |
+| `agent_id` | The existing fully-qualified agent id from the authenticated session. No new id is minted. |
+| `client_cert_fingerprint` | The SHA-256 fingerprint of the TLS client certificate presented on this request. |
+| `bound_at` | Server timestamp for the binding. |
+| `already_bound` | `true` when this call presents the already-live certificate but is not the stored idempotent replay. A same-key replay returns the original body, so a first-binding replay keeps `already_bound:false` and uses `Idempotency-Replayed: true` for the replay signal. |
+
+Status codes specific to this route: `403 {"error":"client certificate required"}` when the request carries no usable in-date client certificate; `403 {"error":"bootstrap signature does not verify"}` when the bearer session is valid but the AUTH-key proof is absent or wrong; `403 {"error":"this credential was not presented over the client certificate it is bound to"}` when a later request presents a different certificate after the first binding. That last refusal is returned by `authMiddleware` before the bootstrap handler, keeps the connection open, and performs no bootstrap idempotency lookup. `409` means the certificate is already live on another agent, or this agent already has a different live binding and must use a future rotation path. `400` covers an invalid `idempotency_key` or malformed base64 signature; `404` is only for an impossible authenticated principal that no longer exists. It spends no invite and never calls enrolment.
+
 
 **Admission-control caps** (`internal/auth/service.go` `Options`, all overridable, `0` means "use the
 default", there is no "unlimited"):
@@ -929,6 +946,7 @@ those are client-supplied claims (invariant 1: the server is authoritative on ev
 | `AllowGET` | `"GET, HEAD"` — added 2026-08-08 (CORE-7). The `Allow` header value every `requireGET` route sends with its 405. |
 | `RouteCatchAll` | `"/"` — added 2026-08-08 (CORE-8). The pattern the JSON-404 handler is registered at. **Never** on the allow-list; `IsUnauthenticatedRoute("/")` is false and a test asserts it, because a catch-all outside the auth wrapper would turn the whole server into a route oracle. |
 | `PanickedField` / `PanicAfterWriteField` / `HijackedField` | `"panicked"` / `"panic_after_write"` / `"hijacked"` — added 2026-08-08 (CORE-14). Log keys, not HTTP; see `### Panic log records` below. |
+| `RouteClientCertBootstrap` | `"/v1/client-cert/bootstrap"` — authenticated first-binding route for `MTLS-MIGRATE`; registered only when `Options.Auth` is non-nil and never on the allow-list. Requires an AUTH-key signature in addition to the bearer session. |
 | `RouteAgents` / `RouteMint` / `RouteBroadcast` / `RouteSend` / `RouteMessages` / `RouteWait` | `/v1/agents`, `/v1/mint`, `/v1/broadcast`, `/v1/send`, `/v1/messages`, `/v1/wait` — the messaging surface. `RouteMint` added 2026-08-07. All are registered only when the server has a hub; **never** on the allow-list. `/v1/broadcast` is registered and authenticates, and then answers 501. |
 | `MaxMessageRequestBytes` | `128 << 10` — the request-body cap on `/v1/mint`, `/v1/broadcast` and `/v1/send`. The real payload limit is `store.MaxBodyBytes` (64 KiB decoded); this one only stops an unbounded stream reaching the decoder. |
 | `hub.SeqFloorRecordKind` / `hub.MintBatchSize` | `"seqfloor"` / `256` — the durable sequence floor that makes the mint safe across a restart. See `CONTRACTS-ONDISK.md`. |
@@ -1033,8 +1051,8 @@ as compliance with it.
   agent enrolled before it has none, and refusing them all would be a flag day rather than a
   migration. **For such an agent a stolen session token is still replayable from a connection
   presenting no certificate** — read that plainly, it is the one part of the old paragraph above that
-  survives, narrowed to unbound agents. It closes agent by agent as they re-enrol under
-  `MTLS-CLIENTCERT`.
+  survives, narrowed to unbound agents. It closes agent by agent as they either re-enrol under
+  `MTLS-CLIENTCERT` or run the authenticated `POST /v1/client-cert/bootstrap` migration.
 - A presented certificate that is a live binding on a **different** agent is refused **regardless** of
   whether the named agent has a binding of its own, and so is one that is live on **two** agents at
   once (reachable from a damaged or hand-edited durable record; it names nobody until an operator
