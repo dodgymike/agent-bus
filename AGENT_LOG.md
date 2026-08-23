@@ -6031,3 +6031,39 @@ on the investigation is the review of record — precedent: AUTH-8_DEEPDIVE.md a
 CRYPTO_DEEPDIVE.md, ID2_WIRING_DEEPDIVE.md). security — SKIPPED under the docs-and-tests carve-out
 (docs-only, no guard file, no control-plane file); paths covered: `DONE-NOT-FLIPPED_DEEPDIVE.md`,
 `AGENT_LOG.md`. No `.go`, no wire/on-disk change; nothing to deploy.
+
+## 2026-08-23 — `ACK-3` (`263c47fe-0675-4b6a-b842-8c8b909f35b7`): R4 closure — the three rulings that supersede `ACK-CONTRACT.md` reach `DECISIONS.md`
+
+`ACK-3`'s CODE landed in `7e73c20` and its security gate passed (2026-08-16), but the last reviewer
+verdict was CHANGES-REQUESTED and the orchestrator (`main`) held the task open on ONE item — R4: the
+three rulings that supersede `ACK-CONTRACT.md` lived only in code comments and the `CONTRACTS-*.md`
+plane files, and `DECISIONS.md` recorded none of them (`main`, task journal, 2026-08-16T14:53). This
+is that closure — a pure documentation append.
+
+Change (documentation-only): `DECISIONS.md` gains one dated 2026-08-23 section recording the three R4
+rulings, each with its superseded `ACK-CONTRACT.md` statement and the file:line where the shipped code
+implements it: (1) the frame field is spelled `protocol_version`, not §9.2/§10's `wire_version`
+(`internal/relay/ackframe.go:232`); (2) a distinct `unsupported_ack_version` code
+(`internal/relay/handshake.go:105`, `ackframe.go:116`, `peer.go:411`, `client.go:331`) rather than
+§9.3's fold into `CodeInvalidRequest`; (3) the both-frames versioning obligation of §10 is SPLIT — the
+relay-envelope half deferred to RELAY-23 (a `blocks` edge, and verified NOT landed at HEAD:
+`relay.WireVersion` absent from `internal/relay/message.go`), ACK-3 spending `relay-wire-version = 1`
+with no second reservation and the collapse deferred to `ACK-3-FU-COLLAPSE-WIREVERSION`.
+
+Invariants read IN FULL: **1** (server-authoritative ids/sequence — the version is a reserved value,
+spent not chosen) and **10** (idempotency — an unrecognised version is refused, never defaulted,
+because the ACK frame carries an ABSORBING terminal). No product code touched; `ACK-CONTRACT.md`
+needed NO correction — its §9.2/§9.3/§10 statements are the original design sketch these rulings
+deliberately superseded, preserved as history, and the supersession is now recorded in the right
+place (`DECISIONS.md`) as well as the code comments.
+
+Proof: `doc-check.sh section DECISIONS.md '## 2026-08-23 — ACK-3 R4: …' protocol_version
+unsupported_ack_version both-frames` — RED at HEAD `a7420dc` (heading not found, exit 1), PASS after
+the append (3/3 needles, lines 7605-7686). Append-only confirmed: `git diff HEAD --numstat --
+DECISIONS.md` = `83  0` (deletions 0). `doc-check.sh budget` exit 0.
+
+Security skip: CARVE-OUT APPLIES — the change touches ONLY `DECISIONS.md` and `AGENT_LOG.md` (docs),
+no GUARD file and no CONTROL-PLANE file, so security is skipped by default (roster carve-out). Reviewer
+skip: NONE — a reviewer re-confirmation is required to close the held R4 item (does the entry
+accurately record the three rulings and satisfy the precondition `main` set); verdict posted to the
+ACK-3 Spec journal.

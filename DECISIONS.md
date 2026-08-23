@@ -7769,3 +7769,86 @@ the holder acting.
 - Paired durability proof `TestLeaveRevocation` (crash-injection + idempotency + session-drop) and
   end-to-end `TestClientLeaveEndToEnd` (real client against real server) close
   AUTH-5-FU-REVOCATION's realizable half and unblock AUTH-7.
+
+## 2026-08-23 — ACK-3 R4: the ACK wire frame version field, error code, and the both-frames obligation split
+
+`ACK-3` (peer-hop ACK/NACK, `POST /v1/peer/ack`) shipped and its security gate passed, but the last
+reviewer verdict was CHANGES-REQUESTED (2026-08-16), and the orchestrator (`main`) held the task open
+on one item, R4: three rulings that the CODE already implements but that **supersede
+`ACK-CONTRACT.md`** live only in the code comments and the `CONTRACTS-*.md` plane files, and
+`DECISIONS.md` records none of them. Superseding a contract document is exactly what `DECISIONS.md`
+is for. This entry records the three, each with the superseded contract statement and the file:line
+where the shipped code implements it, so a later reader can check the decision against the code. main's
+words for the three (task journal, 2026-08-16T14:53): "the protocol_version spelling, a distinct
+unsupported_ack_version code, and the both-frames obligation split."
+
+Invariants read IN FULL before writing this: **Invariant 1** (server-authoritative ids/sequence,
+never reused — the version is a RESERVED value, spent not chosen) and **Invariant 10** (idempotency,
+and specifically that an unrecognised version is REFUSED, never defaulted, because a terminal outcome
+is absorbing and a frame mis-read under the wrong version could durably settle an outcome that can
+never be revisited).
+
+### Ruling 1 — the field is spelled `protocol_version`, not `wire_version`
+
+`ACK-CONTRACT.md` §9.2 (the frame sketch, line 576) and §10 (the versioning ruling, line 730) both
+name the field `wire_version`. The shipped frame names it `protocol_version` — JSON key
+`protocol_version`, `omitempty` — at `internal/relay/ackframe.go:232`, with the supersession recorded
+in the field comment at `ackframe.go:211-225`.
+
+Rationale: the key `version` is already taken on a neighbouring peer envelope by `RosterUpdate`, where
+it is a monotonic ROSTER EPOCH and **not** a protocol version; two meanings on one key is how a peer
+ends up applying a roster epoch as a format number (`ackframe.go:211-215`). The two frames of one peer
+protocol must not disagree about the name of their version field, and RELAY-23 pins the same
+`protocol_version` spelling on the relay envelope, so that is the spelling that wins. This engages
+invariant 1: a client-declared version is validated input, never a trusted identity.
+
+### Ruling 2 — a distinct `unsupported_ack_version` code, not the existing `invalid_request`
+
+`ACK-CONTRACT.md` §9.3 (status table, line 600) folds "unknown `wire_version`" into "**400**, existing
+`CodeInvalidRequest`". The shipped code instead returns a distinct wire code
+`CodeUnsupportedAckVersion = "unsupported_ack_version"` (`internal/relay/handshake.go:105`), backed by
+its own sentinel `ErrUnsupportedAckVersion` (`internal/relay/ackframe.go:116`), mapped to the wire
+code at `internal/relay/peer.go:411`.
+
+Rationale (`ackframe.go:104-115`): an unsupported version and a malformed field are different OPERATOR
+problems with different remedies, and only the stable code crosses the wire. Folded together, a peer's
+operator reads `invalid_request` and hunts a malformed field that does not exist, when the real remedy
+is to upgrade one of the two buses. It stays a **400, not a 503**: a retry cannot install a new binary
+at either end, so the verdict is final. The code was also added to the sending side's
+`peerErrorCode` allow-list (`internal/relay/client.go:331`) so a sending bus surfaces it verbatim
+rather than reporting "unrecognised error code" — this was the security gate's low finding 3, fixed in
+ACK-3.
+
+### Ruling 3 — the both-frames versioning obligation is SPLIT: ACK-3 ships the ACK frame, RELAY-23 owns the relay envelope
+
+`ACK-CONTRACT.md` §10 (line 730) ruled that `ACK-3` MUST add the version field to **BOTH** the
+existing relay envelope AND the new ACK frame in the same change, spending the already-reserved
+`relay-wire-version = 1`. §10 also stated the fallback (lines 758-760): "If the reviewer rules this
+outside `ACK-3`'s file boundary, it becomes a separate task that `ACK-3` is blocked by. It does not
+get skipped, and `ACK-3` does not ship an unversioned frame in the meantime."
+
+The reviewer exercised exactly that fallback: the relay-envelope half was ruled outside ACK-3's file
+boundary (a separate frame, and RELAY-23 holds the `relay-wire-version` reservation). So the both-frames
+obligation is **split**:
+
+- ACK-3 ships only the versioned ACK frame. The relay envelope's version field is deferred to
+  RELAY-23, recorded as a `blocks` edge RELAY-23 -> ACK-3 in the Spec Server (created
+  2026-08-16T13:50:48Z, per the spec-keeper journal note). RELAY-23 has NOT landed: verified at HEAD
+  that `relay.WireVersion` / `RelayRequest.ProtocolVersion` are absent from
+  `internal/relay/message.go`, and `RelayedMessage` still carries no version field.
+- ACK-3 spends `relay-wire-version = 1` with NO second reservation. `AckWireVersion = 1`
+  (`internal/relay/ackframe.go:92`) IS that reserved value, deliberately a separate constant only until
+  RELAY-23 lands `relay.WireVersion` — a sequencing call, not a claim that two constants are
+  acceptable (`ackframe.go:77-91`). The collapse onto `relay.WireVersion` is deferred to the follow-up
+  `ACK-3-FU-COLLAPSE-WIREVERSION`.
+- The version-READING rules ACK-3 owns hold whichever constant survives (invariant 10): an ABSENT
+  version reads as 1 via a LITERAL that must never be respelled as the constant
+  (`resolveAckWireVersion`, `ackframe.go:132-153`), and an UNRECOGNISED version is REFUSED, never
+  defaulted (`ackframe.go:146-154`). Refusing rather than guessing matters here because the ACK frame
+  carries a TERMINAL outcome and terminal is absorbing (§8.1) — a future-format frame read under
+  version 1's rules could durably write a `delivered` or `refused` that can never be corrected.
+
+Cross-references: `ACK-CONTRACT.md` §9.2, §9.3 and §10 are the superseded statements; the
+`CONTRACTS-*.md` plane files already carried these three as built; RELAY-23 (the relay-envelope
+version field) and `ACK-3-FU-COLLAPSE-WIREVERSION` (collapse the duplicated constant) are the open
+follow-ups.
