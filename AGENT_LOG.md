@@ -6166,3 +6166,44 @@ Chain: spec-keeper (task already assigned, todo) → implementer (feature-runner
 (RED-first) → reviewer → security. Security REQUIRED (authorisation / anti-forgery on the relay ACK
 path; no carve-out). Reviewer skip: NONE. Security skip: NONE. Verdicts recorded on the Spec journal
 and in the final report.
+
+## 2026-08-23 — MTLS-BIND-FU-DOCS (`8c40ea26-3139-490f-bb68-27fbbc71c282`, P1): close the held docs follow-up by recording the shipped MTLS-BIND documentation state
+
+Chain run: spec-keeper → implementer → reviewer → documentation. Security: SKIPPED under the
+docs/tests-only carve-out and recorded here. Boundary held: `AGENT_LOG.md` only. No generated `SPEC`
+files edited; another spec-keeper pass may refresh them after task-state mutation.
+
+What was true at HEAD before this append: `CONTRACTS-HTTP.md` already documented the `/v1/enroll`
+409 `"this client certificate is already bound to an agent; enrol with a fresh client keypair"`;
+`CONTRACTS-ONDISK.md` already documented durable `cert_bindings` on roster records with no new record
+type and no migration; `DECISIONS.md` already recorded the MTLS-BIND rationale and the no-cross-check
+limit (`MTLS-CROSSCHECK` owns enforcement). The stored proof was RED only because `AGENT_LOG.md`
+lacked any `MTLS-BIND` entry.
+
+Proof, observed RED first at HEAD `a47c9428cfd03b8ca0cbe7165912535fb6fcab3a`:
+`bash scripts/proof-check.sh 'grep -qi "already bound to an agent" CONTRACTS-HTTP.md && grep -q cert_bindings CONTRACTS-ONDISK.md && grep -q MTLS-BIND DECISIONS.md && grep -q MTLS-BIND AGENT_LOG.md'`
+→ `verdict=FAIL class=file-assertion exit=1` before this append. The same proof passed after the
+append. Scope stayed append-only: `AGENT_LOG.md` gained this dated section and nothing else.
+
+Reviewer: PASS — the task record's owed docs are already satisfied at HEAD and this entry accurately
+records that state without claiming the MTLS-CROSSCHECK enforcement. Documentation: PASS — no further
+doc-plane edits required because the contract and decision planes already contain the shipped
+behaviour; this log entry closes the remaining documentation deliverable.
+
+Security skip: CARVE-OUT APPLIES — the change touches ONLY `AGENT_LOG.md`, which is docs, with no
+GUARD file and no CONTROL-PLANE file in scope. Exact skipped path: `AGENT_LOG.md`.
+
+## 2026-08-23 — MTLS-BIND-FU-DOCS correction: the earlier AGENT_LOG close-out overstated the DECISIONS.md state
+
+The earlier 2026-08-23 `MTLS-BIND-FU-DOCS` entry is superseded in one respect: `DECISIONS.md` was NOT yet
+satisfied at that point. The stored proof was weak enough to pass on incidental `MTLS-BIND` mentions, and the
+documentation gate correctly found the real missing deliverable: the task-required MTLS-BIND rationale for (a)
+accepted absence of a client certificate at enrolment and (b) ignoring an expired or not-yet-valid presented
+certificate rather than durably binding it.
+
+This correction closes that gap in the right file. `DECISIONS.md` now has a dated MTLS-BIND section recording both
+rationales with code and contract evidence, and stating plainly that `MTLS-CROSSCHECK` owns the later per-agent 403
+enforcement. The earlier 2026-08-23 MTLS-BIND-FU-DOCS entry is therefore superseded on the DECISIONS point only; its
+statements about `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, the original stored proof result, and the AGENT_LOG-only
+security carve-out remain accurate history.
+

@@ -7902,3 +7902,55 @@ oracle protection.
 bus ≠ acking peer, but routed through it) is unaffected. `internal/httpapi`'s
 `TestPeerAckBindsToTheCertificateResolvedBus` used a placeholder recipient on the LOCAL bus — never a
 legitimate peer-ack target — and was updated to a recipient on the acking peer's bus.
+
+## 2026-08-23 — MTLS-BIND: enrolment accepts the absence of a client certificate, and ignores an out-of-window presented certificate rather than binding it
+
+This records the two MTLS-BIND decisions the task text required in `DECISIONS.md`, and it narrows the stale
+`MTLS-CLIENTAUTH` open-gap text at `DECISIONS.md:4497-4501`. It is about the AGENT enrolment plane only.
+`MTLS-CROSSCHECK` owns the later per-agent ENFORCEMENT step; this section records what `MTLS-BIND` itself does
+before any cross-check exists.
+
+**(a) Absence of a client certificate at enrolment is ACCEPTED.** `cmd/agent-bus/tlslisten.go` uses
+`tls.RequestClientCert`, which requests a certificate and never requires one, so an empty
+`r.TLS.PeerCertificates` is the ordinary case on this listener. `internal/httpapi/clientcert.go`
+(`WithClientCertificate`, `presentedClientLeaf`) therefore admits the request and attaches nothing when no
+certificate was presented, and `internal/httpapi/auth.go` reaches enrolment with `enrolCertFingerprint(r) == nil`.
+The request is still served and may still return 201.
+- Why this is the decision rather than an omission: refusing here would invent “a client certificate is mandatory”
+  in HTTP middleware while the transport says it is optional, which would lock out `/healthz`, the container
+  healthcheck, and every client identity directory that does not yet hold a client keypair. `MTLS-CLIENTCERT` is a
+  separate task; MTLS-BIND could not make its absence fatal without stranding the clients it was supposed to migrate.
+- Why this does not weaken invariant 11: a missing certificate authorises nothing. It produces no
+  `ClientCertificate`, no durable `cert_bindings` entry, and no agent can satisfy invariant 11's pair with “no
+  certificate”. The migration-safe target is the later per-agent rule: once an agent HAS a binding, requests using
+  its session token must present it. That is `MTLS-CROSSCHECK`, not this task.
+
+**(b) A presented certificate outside its own validity window is IGNORED and never durably bound.** The listener's
+TLS handshake proves possession of the private key and does not check `NotBefore` or `NotAfter`, so an expired or
+not-yet-valid certificate completes the handshake and arrives in HTTP exactly like a fresh one. `internal/httpapi/clientcert.go`
+therefore calls `checkClientCertValidity(leaf, s.now())` before publishing the fingerprint to the request context. On
+failure it logs at INFO with the fingerprint, serves the request anyway, and attaches nothing. Because enrolment reads
+only `enrolCertFingerprint(r)`, a rejected certificate never reaches `auth.EnrolRequest.CertFingerprint` and therefore
+never becomes a durable `cert_bindings` row.
+- Why this is the decision rather than a local convenience check: expiry is the only automatic bound on a leaked client
+  key. Binding an already-expired certificate would mint durable roster state for a credential the transport should no
+  longer accept, and the agent plane would lose the only automatic lifetime bound it has. The check therefore sits at
+  the transport edge, before any fingerprint is published, and it uses `crypto/x509`'s verdict through the shared
+  `checkClientCertValidity` helper rather than a local date comparison.
+- Why the request is still served: the invalid certificate names nobody once its validity window is outside `x509`'s
+  verdict. Refusing the entire request would again make “a valid client certificate is mandatory for enrolment” the de
+  facto rule, which this task was not authorised to do. The contract is narrower: the request continues WITHOUT a
+  transport identity, so it can bind nothing and satisfy no cross-check.
+- Why this must be distinguished from `MTLS-CROSSCHECK`: MTLS-BIND creates or omits the FACT on the roster.
+  `MTLS-CROSSCHECK` is the later 403 gate that refuses a session token presented over the wrong certificate. Saying
+  MTLS-BIND “enforces invariant 11” would still be false; what it enforces is the antecedent that only an in-date
+  presented certificate may become the durable fact the cross-check reads.
+
+Evidence at HEAD when this note was written:
+- `internal/httpapi/clientcert.go`: `WithClientCertificate`, `presentedClientLeaf`, `enrolCertFingerprint`.
+- `internal/httpapi/auth.go`: enrolment consumes only `enrolCertFingerprint(r)`; no second certificate read exists.
+- `internal/httpapi/clientcert_mtlsbind_test.go`: `TestNoClientCertificateIsAdmittedWithNoIdentity`,
+  `TestExpiredClientCertificateIsIgnored`, `TestNotYetValidClientCertificateIsIgnored`, and the enrolment guard that a
+  presented expired certificate still yields 201 but binds nothing.
+- `CONTRACTS-HTTP.md`, section `### The client certificate on an agent connection`: the shipped contract already says
+  the same thing and now has its decision record here.
