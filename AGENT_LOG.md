@@ -6004,3 +6004,30 @@ qualifies for the docs-and-tests security carve-out (only `CONTRACTS-AGENT.md` +
 no guard file, no control-plane file), but security was RUN per the orchestrator brief given the
 federation-adjacent surface; both gate agents independently confirmed the carve-out would have
 applied.
+
+## 2026-08-23 — DONE-NOT-FLIPPED deep-dive: why tasks land but never flip to done
+
+Analysis only, no product code. Deliverable `DONE-NOT-FLIPPED_DEEPDIVE.md` (repo root). Root cause
+(confirmed): the git COMMIT and the Spec Server done-FLIP are owned by two different agents dispatched
+at different times with nothing binding them — `feature-runner`/`implementer` are code-only and
+forbidden to flip; `integrator` is the only committer but is forbidden to mutate task state (its
+report ends at the sha); the flip falls to a separately-dispatched `spec-keeper` that is often never
+summoned. Smoking gun: spec-keeper "IN-PROGRESS AUDIT" notes (2026-08-08) bucket tasks as "SHIPPED,
+left in_progress" — the responsible agent saw it was done and still did not call `complete`. Rate
+(sample = all 23 in_progress, 100% of that population): ~48% (11/23) fully done with only the
+`complete` call missing; ~91% code-present at HEAD with gates passed; of 9 in_progress P0s, 7
+effectively done. A distinct and worse variant found this session: ACK-17 is GATED-BUT-NEVER-COMMITTED
+— reviewer/security PASS were recorded against an uncommitted overlay whose tests are absent at HEAD,
+so a proof-passing atomic flip would not catch it. Highest-leverage fix filed `7befde72` (P1, PROCESS)
+— the integrator flips the task atomically after a successful commit + HEAD-compiles check, scoped to
+fully-done reports; BLOCKED-ON `48be31d6` (the complete-URL guard would refuse the integrator's own
+`complete` under isolation). Also filed `315899be` (P2) — `scripts/backlog-drift.sh`, a read-only
+drift detector (catches the gated-but-not-committed variant the atomic flip cannot). Referenced not
+duplicated: `48be31d6` (guard), `43d14776` (existing manual sweep — re-scope), `0f4a0736` (unfreeze
+mirror, the rework amplifier).
+
+Gate record: reviewer — NOT RUN (standalone analysis doc, no product code; the deep-diver's own report
+on the investigation is the review of record — precedent: AUTH-8_DEEPDIVE.md at `61db229`,
+CRYPTO_DEEPDIVE.md, ID2_WIRING_DEEPDIVE.md). security — SKIPPED under the docs-and-tests carve-out
+(docs-only, no guard file, no control-plane file); paths covered: `DONE-NOT-FLIPPED_DEEPDIVE.md`,
+`AGENT_LOG.md`. No `.go`, no wire/on-disk change; nothing to deploy.
