@@ -6207,3 +6207,23 @@ enforcement. The earlier 2026-08-23 MTLS-BIND-FU-DOCS entry is therefore superse
 statements about `CONTRACTS-HTTP.md`, `CONTRACTS-ONDISK.md`, the original stored proof result, and the AGENT_LOG-only
 security carve-out remain accurate history.
 
+
+## 2026-08-23 — MTLS-VERIFY (`9dab7303-02eb-40ca-9ac4-508d3a315389`): reconcile stale handshake refusal wording and close on the composed mTLS proof
+
+Spec-keeper reconciliation updated the cloud task record, not the generated `SPEC` mirror: the old
+acceptance wording required a TLS handshake refusal when no client certificate was presented. That
+is stale against invariant 11's ratified design and HEAD: the listener uses `tls.RequestClientCert`,
+so no-cert TLS connections may reach allow-listed anonymous routes, while authenticated routes apply
+the certificate/session binding check at HTTP admission.
+
+No source code or contract file changed in this pass. The corrected proof was already present at
+HEAD `a47c9428cfd03b8ca0cbe7165912535fb6fcab3a` and was run in a clean `git archive HEAD` overlay
+using the overlay's own `scripts/proof-check.sh`:
+`go test -race -run "TestLiveBusServeWrapperOverTLS|TestClientCertificateIsRequestedNotRequired" ./cmd/agent-bus && go test -race -run "TestCrossCheckUnauthenticatedRoutesStillServeWithoutACertificate|TestCrossCheckGatesAnAuthenticatedRoute|TestCrossCheckABoundAgentPresentingItsOwnCertificateIsAdmitted" ./internal/httpapi && go test -race -run "TestCLIEnrolEndToEnd" ./cmd/agent-busctl && ! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh`
+returned `verdict=PASS class=test,wrapper,file-assertion exit=0 tests_run=9 top_level=6 skipped=0 failed=0 empty_pkgs=0`.
+
+Invariants read in full: 3, 7, 10, 11. Reviewer: PASS — task wording now matches the code and
+proof, and the proof is non-vacuous. Security: PASS — no new security decision or code change; the
+proof covers TLS-only transport, no-cert allow-list reachability, protected-route refusal without
+the required matching certificate/session, and the correct pinned TLS/client-cert path.
+Documentation: PASS — no contract/API surface changed; the Spec Server task record was corrected.
