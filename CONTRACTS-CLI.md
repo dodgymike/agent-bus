@@ -1397,6 +1397,68 @@ widen the stored set. The flag itself never widens anything.
 
 `--help` / `-h` / `agent-busctl help <command>` print help and exit `0`.
 
+### The agent's own TLS certificate — `agent-busctl client-cert`
+
+```
+agent-busctl client-cert [--identity <dir>] [--json]
+```
+
+**Purely local. No HTTP at all.** This command never contacts the bus and does not need a session.
+It reads or mints the certificate this identity PRESENTS to the bus through
+`client.pinnedTLSConfig`'s `GetClientCertificate` callback: `<identity-dir>/client-tls/cert.pem`
+plus `key.pem`, both **0600**, inside a **0700** `client-tls/` directory. The CLI path is a thin
+shell over `client.ClientCertificate()` / `LoadOrCreateClientCertificate()`, so an embedder sees the
+same material and semantics.
+
+**Idempotent and non-destructive by contract.** The first successful call mints a fresh Ed25519 key
+and self-signed certificate; every later call loads the same material and reports `created=false`.
+Existing material is NEVER overwritten. A shared identity directory therefore means one shared client
+certificate, and a concurrent loser reports the winner's certificate rather than silently replacing
+it.
+
+**If the directory is damaged, it refuses instead of "repairing" it.** One file without the other,
+garbage PEM, a non-regular file, unreadable material, or a vanished directory entry is exit `3`
+(`config`) with a remedy. The missing half is never regenerated in place, because doing so would
+change the fingerprint the bus binds while looking like a fix.
+
+**If the certificate is expired, it is REPORTED and still returned.** `expired=true` means the
+validity window excludes `time.Now()`, not that the file was refused. Automatic renewal does not
+exist yet; the current deliberate replacement is "move the whole `client-tls/` directory aside and
+re-enrol".
+
+Human output is the fingerprint first, then the cert path, key path, and validity window. `minted`
+appears only when `created=true`; `EXPIRED` appears only when `expired=true`. The key path line ends
+with `"(never leaves this machine)"`, which is a contract statement, not decoration.
+
+`--json` emits **ONE object**:
+
+```json
+{
+  "ok": true,
+  "fingerprint": "64-lowercase-hex",
+  "cert_path": "/path/to/client-tls/cert.pem",
+  "key_path": "/path/to/client-tls/key.pem",
+  "not_before": "2026-08-07T12:00:00Z",
+  "not_after": "2027-08-07T12:00:00Z",
+  "created": true,
+  "expired": false
+}
+```
+
+Field contract:
+
+| Field | Meaning |
+| --- | --- |
+| `ok` | Always `true` on success. The CLI's success JSON shape leads with it, so a caller can branch on one stable field before reading command-specific payload. |
+| `fingerprint` | SHA-256 of the certificate DER, **64 lowercase hex** — the same construction and spelling the bus uses for certificate bindings. |
+| `cert_path`, `key_path` | The on-disk files under `<identity-dir>/client-tls/`. |
+| `not_before`, `not_after` | RFC3339 UTC validity bounds taken from the parsed leaf certificate. |
+| `created` | `true` only when THIS invocation installed the material. Losing a concurrent create race reports `false`. |
+| `expired` | `true` when the certificate is outside its validity window at command time. Report-only, not a refusal. |
+
+Exit codes: `0` ok · `2` bad usage · `3` local client-certificate material is missing, unreadable or
+damaged.
+
 ### Subcommands (as of 2026-08-02)
 
 | Command | Purpose | Network? |
@@ -1407,6 +1469,7 @@ widen the stored set. The flag itself never widens anything.
 | `logout [<agent-id>] [--all]` | Delete a credential **locally** | no |
 | `leave` | (added 2026-08-22, `AUTH-4`) Tell the bus to durably remove the CURRENT identity from its roster, then delete the credential locally — the server-side counterpart to `logout` | yes — `POST /v1/leave` |
 | `pin list \| add <fingerprint> \| remove <fingerprint>` | (added 2026-08-07, `MTLS-ROTATE`) List, widen or narrow the bus certificates an identity accepts — see "Certificate pinning" below | **no — purely local**, reads/writes the credential store only |
+| `client-cert` | (added 2026-08-07, `MTLS-CLIENTCERT`) Report the TLS certificate this agent PRESENTS to the bus, minting it on first use | **no — purely local**, reads/writes `<identity-dir>/client-tls/` only |
 | `agents` | List every agent enrolled on the bus, fully-qualified id first | yes — `GET /v1/agents` |
 | `send <to-agent-id> [body]` | Send one direct message, **signed**, durable before it returns (invariant 4) | yes — `POST /v1/mint` **then** `POST /v1/send` (two calls, one idempotency key — see "Signed sends" below) |
 | `broadcast [body]` | **BROKEN as of 2026-08-07.** The subcommand is still registered and still builds a request; the bus answers **501** because a broadcast has no canonical audience under signing format v1. Surfaces as **exit 6** — see below. | yes — `POST /v1/mint` then `POST /v1/broadcast`, which refuses |
@@ -1415,9 +1478,9 @@ widen the stored set. The flag itself never widens anything.
 | `ack <message-id>` | (`ACK-15`, added 2026-08-21) Acknowledge a message you RECEIVED: `delivered` by default, `--refuse <class>` for one of the three recipient classes. Signs the canonical acknowledgement bytes with the agent's **messaging** key. **Nothing else can move a row to `delivered`.** | yes — `POST /v1/ack` |
 
 **There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand.** `cmd/agent-busctl/root.go`
-registers **fourteen** commands: the twelve rows above (nine before `ack-status`, `ACK-9`,
-2026-08-16; ten before `ack`, `ACK-15`, 2026-08-21; twelve after `leave`, `AUTH-4`, 2026-08-22) plus
-`session` and `client-cert`, which have their own sections. **The count above previously said the
+registers **fourteen** commands: the thirteen rows above (eleven before `ack-status`, `ACK-9`,
+2026-08-16; twelve before `ack`, `ACK-15`, 2026-08-21; thirteen after `leave`, `AUTH-4`, 2026-08-22)
+plus `session`, which has its own section. **The count above previously said the
 table WAS the registry, which it never was** — corrected 2026-08-21 (`ACK-15` reviewer,
 minor/pre-existing). What matters is the claim the paragraph is actually making: `keygen` and `trust`
 are in NEITHER list. This matters because several error remedies in
@@ -2340,8 +2403,10 @@ a *later* retry the same logical send rather than a second message.
   (2026-08-07). The transport is now built **lazily**, on the first request, once the bus URL and its
   pin have been resolved together (`Client.endpoint` → `Client.doer`), and is rebuilt when the pin
   changes. `enrol`, `use` and `logout` drop it, so no connection verified under one identity's pin is
-  reused under another's. The remaining half of the original note stands: the per-identity **client
-  certificate** still has no home, and `MTLS-CLIENTCERT` gives it one.
+  reused under another's. The remaining half no longer stands: `MTLS-CLIENTCERT` gave the per-identity
+  **client certificate** its home in `client/clientcert.go`, exposed it through
+  `Client.ClientCertificate()`, and wired it into `client.pinnedTLSConfig`'s
+  `GetClientCertificate` callback. `agent-busctl client-cert` is the local inspection surface.
 
 ### The client package (`github.com/dodgymike/agent-bus/client`)
 
@@ -2363,6 +2428,7 @@ Exported surface as of 2026-08-02:
 | `EnvBusURL`, `EnvIdentityDir`, `EnvAgentID`, `EnvTimeout`, `EnvBusFingerprint` | The env var names above |
 | `BusFingerprint`, `BusFingerprintSize`, `ParseBusFingerprint`, `BusFingerprintError`, `ErrBusFingerprintMismatch`, `ErrBusPresentedNoCertificate`, `Config.BusFingerprint` | (2026-08-07, `MTLS-PIN`) One certificate fingerprint. `BusFingerprint` is a comparable `[32]byte`, a **pinned mirror** of `internal/buscert.Fingerprint` under the same no-`internal/`-import rule as `SessionSigningContext`. `errors.Is(err, ErrBusFingerprintMismatch)` is how an embedder branches on "this is not a certificate I accept" without parsing a message; `BusFingerprintError` carries both the accepted set and the presented fingerprint. There is **no** exported (or unexported) way to turn the check off. |
 | `BusPinSet`, `NewBusPinSet`, `ParseBusPinSet`, `MaxBusPins`, `Identity.BusFingerprints`, `Client.AddBusPin`, `Client.RemoveBusPin` | (2026-08-07, `MTLS-ROTATE`) The accept-**set**. `BusPinSet` replaces a bare `BusFingerprint` wherever an identity's accepted certificates are resolved or verified against (`Client.doer`, `pinnedTLSConfig`); it is bounded at `MaxBusPins` = 2 and every membership change goes through `With`/`Without`, never direct mutation. **`Identity.BusFingerprint` (singular) no longer exists** — see the BREAKING JSON CHANGE note above. `Client.AddBusPin`/`RemoveBusPin` are the Go API the `pin add`/`pin remove` subcommands are a thin shell over, so an embedding agent can survive a rotation without shelling out. |
+| `ClientCertificate`, `LoadOrCreateClientCertificate`, `Client.ClientCertificate`, `ClientTLSDirName`, `ClientCertFileName`, `ClientKeyFileName`, `ClientCertValidity`, `ErrClientCertIncomplete` | (2026-08-07, `MTLS-CLIENTCERT`) The agent's own TLS client-certificate surface. `LoadOrCreateClientCertificate` is **idempotent and non-destructive**: it mints `<identity-dir>/client-tls/{cert.pem,key.pem}` once (both `0600` inside `0700`), later loads the same material, and refuses damaged or half-populated state instead of minting over it. `ClientCertificate.Created` reports whether THIS call installed the material; `Fingerprint()` is SHA-256 over the leaf DER in **64 lowercase hex**; `IsExpired()` reports without refusing. `Client.ClientCertificate()` is the cached wrapper the CLI and embedders call. |
 | `DefaultTimeout`, `DefaultRetryAttempts`, `DefaultRetryBaseDelay`, `DefaultRetryMaxDelay` | Defaults |
 | `New`, `Client` | The client; `Config()`, `Store()`, `Identity()`, `Identities()`, `Use()`, `Logout()`, `LogoutAll()`, `Leave()`, `Enrol()`, `EnsureSession()`, `Send()`, `Broadcast()`, `Agents()`, `Read()`, `Watch()`, plus (2026-08-07) `MessagingPublicKey()`, `TrustPeer()`, `TrustedKeys()`, and (2026-08-07, `MTLS-ROTATE`) `AddBusPin()`, `RemoveBusPin()` |
 | `Identity`, `Credential`, `PendingEnrolment`, `Store` (`OpenStore`, `Dir`, `Path`, `Warnings`, `List`, `ListPending`, `Resolve`, `SetCurrent`, `Remove`, `RemoveAll`, `FindApplied`, `PromotePending`, `Cursor`, `SetCursor`, `ClearCursor`, `CursorPath`) | Credential storage, plus `watch`'s persisted read position (`cursors.json` — see above). The in-flight-enrolment methods that take the unexported record type (`ClaimEnrolment`, `FindPending`, `DropPending`) are effectively package-internal and are NOT part of the embeddable surface. |

@@ -25,6 +25,8 @@ Sections below, in the order you will use them:
   `enrol` against an `https` bus
 - [Identity: enrol, whoami, use, logout, leave](#identity-enrol-whoami-use-logout-leave) — `leave`
   durably removes you from the bus; `logout` only forgets the credential locally
+- [Your own TLS certificate: `agent-busctl client-cert`](#your-own-tls-certificate-agent-busctl-client-cert)
+  — local inspection of the certificate this identity presents to the bus
 - [Managing the accept-set: agent-busctl pin](#managing-the-accept-set-agent-busctl-pin) — recovering
   from a certificate rotation without re-enrolling
 - [Listing agents](#listing-agents-agent-busctl-agents) — `agent-busctl agents`
@@ -368,6 +370,51 @@ Exit `0` removed · `8` nothing to remove · `3` no usable identity.
 > told — there is no route to tell it — so it keeps the session and its slot until it expires. Use
 > it to reduce exposure of a token at rest, not to recover from a lockout. To recover from a
 > lockout you must wait, or ask an operator (`AUTH-7`).
+
+
+## Your own TLS certificate: `agent-busctl client-cert`
+
+Use this when you need to know which TLS certificate fingerprint this identity PRESENTS to the bus,
+or where that local material lives:
+
+```bash
+agent-busctl client-cert [--identity <dir>] [--json]
+agent-busctl client-cert
+agent-busctl client-cert --json
+agent-busctl --identity /path/to/store client-cert
+```
+
+This command is **LOCAL ONLY**. It does not contact the bus, does not need a session, and does not
+care whether the bus is up. It reads or mints `<identity-dir>/client-tls/{cert.pem,key.pem}` — the
+same material every TLS-using command presents automatically through `client/pin.go`. You rarely
+need to run it because `enrol`, `agents`, `send` and `watch` all mint the same certificate on first
+TLS use; this command exists so an agent can answer "which certificate am I presenting" and "where
+is it on disk" without making a network call.
+
+What it reports:
+
+- `fingerprint` — SHA-256 of the certificate DER, exactly **64 lowercase hex characters**. This is
+  the value a bus records when it binds a client certificate to an agent.
+- `cert_path`, `key_path` — the on-disk files under `client-tls/`.
+- `not_before`, `not_after` — RFC3339 UTC validity bounds.
+- `created` — `true` only when **this invocation** minted the material. Re-running against an
+  existing directory is intentionally idempotent and reports `false`.
+- `expired` — whether the certificate is outside its validity window **right now**. It is reported,
+  not refused.
+
+The first run creates a fresh Ed25519 key and a self-signed certificate, both **0600**, inside a
+`client-tls/` directory created **0700**. Existing material is **never overwritten**. If several
+processes share one identity directory, they share **one** client certificate; losing the creation
+race loads the winner's certificate and reports `created=false`.
+
+If the certificate is expired, the command still succeeds and tells you so. The current repair is
+deliberate replacement: move the **whole** `client-tls/` directory aside and re-enrol, so the bus
+sees the new fingerprint as a new TLS identity. If one file is missing, unreadable, not an ordinary
+file, or otherwise damaged, the command refuses instead of "repairing" it over the top — minting a
+replacement half would silently change the fingerprint the bus binds.
+
+Exit codes: `0` ok · `2` bad usage · `3` local client-certificate material missing, unreadable or
+damaged.
 
 
 ## The bus's certificate is pinned

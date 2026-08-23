@@ -6227,3 +6227,50 @@ proof, and the proof is non-vacuous. Security: PASS — no new security decision
 proof covers TLS-only transport, no-cert allow-list reachability, protected-route refusal without
 the required matching certificate/session, and the correct pinned TLS/client-cert path.
 Documentation: PASS — no contract/API surface changed; the Spec Server task record was corrected.
+
+
+## 2026-08-23 — MTLS-CLIENTCERT (`0bc7a2eb-c436-49ca-92d3-17be58fdd5bd`, P1): land the missing invariant-7 docs for `agent-busctl client-cert`
+
+Chain run on this doc-only completion: spec-keeper → implementer → reviewer → documentation.
+Security: SKIPPED under the docs/tests-only carve-out and recorded here. Boundary held:
+`AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`, `AGENT_LOG.md` only.
+
+Spec-keeper check first: re-fetched the authoritative task record and note journal from the Spec
+Server. They confirmed the shipped code state at commit `9418a48` is still accurate at HEAD: the
+client-certificate mint/store/present path and `agent-busctl client-cert` command are already in
+`main`, reviewer/security gates already PASS on the final code, and the only blocker left in the task
+record is invariant 7's missing docs.
+
+Invariants read in full before editing: invariant 7 (the compiled Go CLI is the client, with the
+agent-facing and embedding surfaces documented in the same task) and invariant 11 (TLS required,
+mutual, self-signed, no TOFU; the client certificate is presented through the pinned TLS path, not a
+separate trust store).
+
+Implementer/doc pass:
+- `AGENT_PROTOCOL.md`: added the missing agent-facing `client-cert` section and TOC entry, documented
+  local-only behaviour, on-disk location, `created` / `expired`, and the exact exit-code family
+  (`0`, `2`, `3`).
+- `CONTRACTS-CLI.md`: added the command contract section, the subcommand-table row, the exact JSON
+  shape, the local-only/no-network contract, the idempotent/non-destructive rules, and the exported
+  client-package row for `ClientCertificate` / `LoadOrCreateClientCertificate` / `Client.ClientCertificate()`.
+  Also corrected the stale forward reference that still said the per-identity client certificate had
+  "no home" after `MTLS-CLIENTCERT` had already shipped.
+
+RED-first doc proof, observed before the edit:
+- `scripts/doc-check.sh section AGENT_PROTOCOL.md 'Your own TLS certificate: agent-busctl client-cert' 'agent-busctl client-cert [--identity <dir>] [--json]'`
+  → `doc-check: FAIL: heading not found in AGENT_PROTOCOL.md: Your own TLS certificate: agent-busctl client-cert`
+- `scripts/doc-check.sh section CONTRACTS-CLI.md 'The agents own TLS certificate - agent-busctl client-cert' 'created'`
+  → `doc-check: FAIL: heading not found in CONTRACTS-CLI.md: The agents own TLS certificate - agent-busctl client-cert`
+
+Reviewer verdict: PASS on the doc delta. The added text matches the shipped command in
+`cmd/agent-busctl/clientcert.go`, the exported client surface in `client/clientcert.go`, and the
+standing task notes: local-only, same material auto-presented by other TLS commands, `created` means
+THIS invocation installed the material, `expired` is report-only, and damaged half-state refuses
+instead of minting over a bound fingerprint.
+
+Documentation verdict: PASS. The task's missing deliverable is now present in both the agent-facing
+usage doc and the CLI contract plane, and the stale post-ship wording is corrected rather than left
+to contradict `main`.
+
+Security skip: CARVE-OUT APPLIES — exact touched paths are `AGENT_PROTOCOL.md`, `CONTRACTS-CLI.md`,
+`AGENT_LOG.md`, all docs only, with no GUARD file and no CONTROL-PLANE file in scope.
