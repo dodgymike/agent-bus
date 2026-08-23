@@ -5960,3 +5960,47 @@ Reviewer skip: reviewer N/A — this task made NO code change (verification + th
 Security skip: N/A for the same reason; the only file touched is `AGENT_LOG.md`, which is neither a
 guard nor a control-plane file. The code being verified (`7c96f2b`) carried its own gates when it was
 committed.
+
+---
+
+## 2026-08-23 — RELAY-51: discharge the last held-back rollout-doc obligation (`FED_SMOKE_SERVE_A/B/C`)
+
+RELAY-51 (the RELAY-23 wire-version ROLLOUT) was ~95% already-landed — the done-but-not-flipped
+pattern. Verified against HEAD `a7420dc`: the READERS-FIRST decision (`DECISIONS.md` L6578, dated
+2026-08-21), the mixed-version rehearsal harness (`scripts/fed-smoke.sh`, commit `14ed009`), and the
+rollout section incl. the failure-mode reproduction (`docs/THREE-BUS-DOCKER.md`) are all present.
+
+Scope decision: RELAY-51 is **scope 1 — documentation of the safe rollout order/surface**, NOT a
+code-behaviour change. The wire-version FIELD code is RELAY-23 (still `todo`/unmerged, NOT built in
+this tree; `internal/relay/message.go`'s `RelayRequest` has no `ProtocolVersion`). The one remaining
+obligation — flagged in `14ed009`'s own commit message as held back — was: `CONTRACTS-AGENT.md` must
+document `FED_SMOKE_SERVE_A/_B/_C` and correct the stale "fails at the first unavailable step" claim
+on its two `scripts/fed-smoke.sh` table rows.
+
+Change (docs-only, `CONTRACTS-AGENT.md`, 35 insertions / 2 deletions): corrected both stale table
+rows (fed-smoke's dependencies have all landed, so it now PASSES) and added a subsection documenting
+the three per-bus server-build override env vars, verified accurate against `scripts/fed-smoke.sh`
+(defaults L62-64; A=sender/B=transit/C=recipient; server-build-only, CLI always this checkout;
+`serve_for_run_dir` dies on an unknown run dir; unconditional provenance banner).
+
+Invariants read in full: **2** (fully-qualified cross-bus ids), **6** (metadata+routing log; loud
+specific discard — the abandonment hazard the rollout guards), **10** (a version-mismatched/old peer
+is REFUSED, never disconnected), **11** (version negotiation is AFTER the pinned mTLS handshake, not
+a downgrade vector). None is weakened by a docs change; the abandonment hazard is documented, not
+introduced.
+
+Proof: stored `proof_cmd` `bash scripts/fed-smoke.sh` → `proof-check` verdict=PASS class=wrapper
+exit=0 (three loopback buses, exactly-once A→B→C idempotent delivery). Doc-check RED-before/GREEN-
+after in a clean HEAD overlay: heading absent in HEAD → FAIL; with the change → PASS 4/4 needles
+(lines 106-138). `doc-check.sh budget` PASS. No Go source changed, so no `-race` suite applies.
+
+Dependency note: RELAY-51's failure-mode reproduction against REAL repo builds hard-depends on
+RELAY-23; it was done at `14ed009` against SIMULATED accept-only/emitting builds in `/tmp` and stays
+PROSPECTIVE until RELAY-23 lands (recorded as such in `DECISIONS.md`). This does not block RELAY-51's
+deliverables (plan + rehearsal + docs), which are complete.
+
+Reviewer skip: NONE — reviewer ran, PASS. Security skip: NONE — security ran, PASS. The change
+qualifies for the docs-and-tests security carve-out (only `CONTRACTS-AGENT.md` + this `AGENT_LOG.md`;
+no guard file, no control-plane file), but security was RUN per the orchestrator brief given the
+federation-adjacent surface; both gate agents independently confirmed the carve-out would have
+applied.

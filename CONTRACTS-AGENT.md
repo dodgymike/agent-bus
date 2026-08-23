@@ -26,7 +26,7 @@ scripts/` lists six), and only one of them is agent-facing:
 | `scripts/proof-check.sh` | no | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something |
 | `scripts/proof-check_test.sh` | no | Guard test for `proof-check.sh` — pins the caller-cwd resolution fix (`535876c`) |
 | `scripts/gen-spec-mirror.sh` | no | Regenerates the backlog mirror: `SPEC.md` (epic index) **and** the `SPEC/` tree. The ONLY supported way to write either. |
-| `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Deliberately describes the surface as it SHOULD be, so it fails loudly at the first unavailable step. |
+| `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Every compiled surface it depends on has since landed, so it now PASSES (`verdict=PASS`); it still fails loudly at the first UNAVAILABLE step, but none is unavailable. Also the mixed-version rollout VERIFIER — `FED_SMOKE_SERVE_A/_B/_C` run each bus on a DIFFERENT build (RELAY-51). See its subsection below. |
 
 ### `scripts/bus-serve.sh` — the health probe is now https, and verified (`MTLS-LISTENER`/`MTLS-VERIFY`, 2026-08-07)
 
@@ -101,7 +101,40 @@ it to talk to a bus.
 | `scripts/proof-check.sh` | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something. |
 | `scripts/proof-check_test.sh` | Guard test for the above: proves proofs resolve against the CALLER's cwd, not the script's tree. |
 | `scripts/gen-spec-mirror.sh` | Regenerates `SPEC.md` + the `SPEC/` tree from the Spec Server. |
-| `scripts/fed-smoke.sh` | Three-bus federation smoke test (RELAY-25); currently expected to fail at the first unavailable step. |
+| `scripts/fed-smoke.sh` | Three-bus federation smoke test (RELAY-25); its dependencies have all landed, so it now PASSES rather than failing at a first unavailable step. `FED_SMOKE_SERVE_A/_B/_C` run the three buses on different builds to rehearse a mixed-version wire rollout (RELAY-51). |
+
+### `scripts/fed-smoke.sh` — the smoke test and the mixed-version rollout verifier (RELAY-25, RELAY-51)
+
+Runs one direct `sender-agent → recipient-agent` message across three loopback buses A → B → C,
+proving the compiled CLI and server wiring, durable/idempotent send, exactly-once delivery, and
+progressive `bus_path`. All compiled surfaces it depends on have landed, so it now PASSES; the
+`proof_cmd` for RELAY-51 is `bash scripts/fed-smoke.sh`.
+
+By default all three buses run THIS checkout's build. Three environment variables override the
+per-bus server lifecycle command so each bus can run a DIFFERENT build, which is the only way to
+rehearse a wire-version rollout — the window in which two buses run different binaries. A rollout
+that was never rehearsed is a rollout nobody has tested (RELAY-51).
+
+| Env var | Bus | Default |
+| --- | --- | --- |
+| `FED_SMOKE_SERVE_A` | A — the SENDER (origin) | this checkout's `scripts/bus-serve.sh` |
+| `FED_SMOKE_SERVE_B` | B — the TRANSIT bus | this checkout's `scripts/bus-serve.sh` |
+| `FED_SMOKE_SERVE_C` | C — the RECIPIENT | this checkout's `scripts/bus-serve.sh` |
+
+- Each value is a path to a `bus-serve.sh` under another checkout; `bus-serve.sh` builds the server
+  from the repository root it itself lives in, so naming a different one runs that bus on a different
+  build. `A-new/B-old` is the emitter-meets-old-reader case; `A-old/B-new` is the readers-first case
+  (see `docs/THREE-BUS-DOCKER.md` "Rolling out a wire change").
+- **Unset behaviour is byte-for-byte the single-build run** every existing invocation and `proof_cmd`
+  relies on.
+- **They override the SERVER build ONLY.** The agent CLI is always built from this checkout, so a
+  mixed run varies the three bus binaries against ONE client — the right shape for a bus-to-bus wire
+  change, but a rehearsal of an AGENT-FACING wire change would go falsely green. Do not use them for
+  that.
+- An unrecognised run directory is fatal (`serve_for_run_dir` dies) rather than defaulting, so a
+  typo cannot silently run a bus on the wrong build while reporting success. The provenance banner
+  naming each bus's build is UNCONDITIONAL: a mistyped variable (`FED_SMOKE_SERVE_1=…`) is ignored,
+  all three buses default, and the banner is the only surviving evidence that no mixed run happened.
 
 ### `scripts/gen-spec-mirror.sh` — the backlog mirror (restructured 2026-08-14)
 
