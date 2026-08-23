@@ -3,6 +3,8 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -624,5 +626,169 @@ func TestAckStatusOmitsSettledAtBeforeSettlement(t *testing.T) {
 	// be there: the fix for the above is not to omit both.
 	if row["accepted_at"] == nil {
 		t.Errorf("the accepted row carries no accepted_at: %v", row)
+	}
+}
+
+// enrolAckAgentWithKey enrols name (with a caller-supplied UNIQUE idempotency
+// key and a fresh keypair) and returns the minted id plus the private key, so a
+// test can open MORE THAN ONE session for the SAME principal.
+//
+// It keeps the private key that enrolAndAuthenticate discards: a second session
+// for one agent must be signed with the SAME enrolment key, and that is the only
+// way to build the "one agent, two sessions" fixture the per-agent cap needs.
+func enrolAckAgentWithKey(t *testing.T, srv *httpapi.Server, name, idemKey string) (agentID string, priv ed25519.PrivateKey) {
+	t.Helper()
+	_, priv, pubB64 := newAuthKeypair(t)
+	agentID = enrolOverHTTP(t, srv, name, pubB64, idemKey)
+	return agentID, priv
+}
+
+// openAckSession runs session begin/complete for an already-enrolled agent and
+// returns a fresh bearer token. Called twice for the same (agentID, priv) it
+// yields two DISTINCT live sessions for ONE principal — DefaultMaxActiveSessions-
+// PerAgent is 32 and internal/auth's own suite documents two overlapping sessions
+// as the compliant steady state, so this is an ordinary client shape, not abuse.
+func openAckSession(t *testing.T, srv *httpapi.Server, agentID string, priv ed25519.PrivateKey) string {
+	t.Helper()
+	beginRec := postJSON(t, srv, httpapi.RouteSessionBegin, `{"agent_id":"`+agentID+`"}`)
+	if beginRec.Code != http.StatusOK {
+		t.Fatalf("session begin for %s = %d, want 200; body %s", agentID, beginRec.Code, beginRec.Body.String())
+	}
+	token, _ := decodeBody(t, beginRec)["token"].(string)
+	if token == "" {
+		t.Fatalf("session begin for %s returned no token", agentID)
+	}
+	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(auth.SessionSigningContext+token)))
+	completeRec := postJSON(t, srv, httpapi.RouteSessionComplete, `{"token":"`+token+`","signature":"`+sig+`"}`)
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("session complete for %s = %d, want 200; body %s", agentID, completeRec.Code, completeRec.Body.String())
+	}
+	return token
+}
+
+// TestAckStatusParkedWaitCapBindsAcrossSessionsOfOneAgent is the SESSION-vs-AGENT
+// half of the parked-wait cap, and it is the assertion that pins what the bucket
+// is keyed on.
+//
+// # WHY A SECOND SESSION WAS NEEDED
+//
+// handleAckStatus admits a parked ?wait= request by calling
+// s.ackWaiters.acquire(sender), where sender is AgentIDFromContext — the
+// authenticated, fully-qualified agent id (invariant 2), NOT the session. Every
+// existing cap test drives one session per agent, so keying the bucket on the
+// SESSION instead — acquire(r.Header.Get("Authorization")) — passes all of them:
+// each agent still has exactly one bucket because it has exactly one token. But a
+// well-behaved client keeps DefaultMaxActiveSessionsPerAgent (32) sessions
+// overlapping, so a session-keyed bucket would admit up to 32*32 = 1024 parked
+// waits for ONE agent, contradicting the per-agent cap CONTRACTS-HTTP.md
+// publishes ("Self-starvation between two connections of the SAME agent is
+// possible and accepted").
+//
+// This test gives ONE agent a SECOND session, fills the bucket through session A
+// until the AGENT is at its cap, and asserts session B of the SAME agent is
+// refused too — proving the cap binds across sessions, i.e. is keyed on the
+// agent, not the token.
+//
+// MUTATION (run, RED): replacing acquire(sender) with
+// acquire(r.Header.Get("Authorization")) in handleAckStatus leaves every other
+// test in this package GREEN and fails this one — session B carries a different
+// token, gets its own empty bucket, and is admitted 200 where 429 is required.
+func TestAckStatusParkedWaitCapBindsAcrossSessionsOfOneAgent(t *testing.T) {
+	srv, _ := newAckStatusServer(t)
+
+	agentID, priv := enrolAckAgentWithKey(t, srv, "twosession", "idem-enrol-twosession")
+	tokenA := openAckSession(t, srv, agentID, priv)
+	tokenB := openAckSession(t, srv, agentID, priv)
+	if tokenA == tokenB {
+		t.Fatalf("the two sessions share a token; the fixture is not exercising two DISTINCT sessions of one agent")
+	}
+	sessionA := testAgent{id: agentID, token: tokenA}
+	sessionB := testAgent{id: agentID, token: tokenB}
+
+	// Session A fills the bucket until the AGENT is at its cap (the refusal
+	// returned to A's own probe is proof it is AT the cap, not merely near it).
+	_, stop := parkAckWaitsUntilCapped(t, srv, sessionA)
+	defer stop()
+
+	// Session B is the SAME agent on a DIFFERENT session. It must be refused too:
+	// the cap is per-AGENT, so B shares A's bucket. Under a session-keyed bucket B
+	// would be admitted, and one agent could park far more than the published cap.
+	over := authed(t, srv, sessionB, http.MethodGet, ackStatusPath(ackProbeKey)+"?wait=1", "")
+	if over.Code != http.StatusTooManyRequests {
+		t.Fatalf("a SECOND session of the SAME agent was answered %d, want 429.\n"+
+			"The parked-wait cap is keyed on the SESSION, not the agent: with %d sessions per agent that admits up to %d parked waits for ONE agent, contradicting the per-agent cap CONTRACTS-HTTP.md publishes. acquire() must take the authenticated agent id (AgentIDFromContext), never the Authorization header.\nbody: %s",
+			over.Code, auth.DefaultMaxActiveSessionsPerAgent,
+			maxParkedAckStatusPerAgentForTest*auth.DefaultMaxActiveSessionsPerAgent, over.Body.String())
+	}
+}
+
+// TestAckStatusParkedWaitCapKeyIncludesTheNameSuffix pins that the bucket key is
+// the WHOLE server-minted agent id, not a prefix of it (invariant 2: an id is
+// "never shortened").
+//
+// # WHAT IT ADDS OVER TestAckStatusParkedWaitCapIsPerPrincipal
+//
+// That test uses two agents with DIFFERENT names (flooder, neighbour), so a key
+// truncated to the first name component still tells them apart and the test stays
+// GREEN. This one uses two agents that share the NAME "worker" and differ only by
+// the server-minted suffix — bus-msg-test.worker-1 vs bus-msg-test.worker-2. A
+// key truncated to bus.<name> collapses them into one bucket, so filling worker-1
+// would refuse worker-2. Asserting worker-2 is SERVED kills that truncation.
+//
+// # THE RESIDUAL, STATED HONESTLY
+//
+// The strongest invariant-2 mutation — stripping the bus-id prefix so two
+// same-suffix agents on DIFFERENT buses collide — is NOT observable on any
+// single-bus fixture. ackWaiters is a field of one *Server, every principal it
+// authenticates carries THIS server's one bus-id, and stripping a constant prefix
+// is injective over a single-bus keyspace, so that mutation is a behavioural
+// no-op here. Observing it would need one counter fed by two buses' principals,
+// which the per-server counter structurally prevents. This test pins the largest
+// part of qualified keying a single-bus fixture can reach; the residual is
+// recorded in the task report rather than pinned with a disproportionate
+// two-bus federation fixture.
+//
+// MUTATION (run, RED): keying acquire() on a bus.<name> truncation of sender
+// refuses worker-2 while worker-1 is at its cap and fails this test.
+func TestAckStatusParkedWaitCapKeyIncludesTheNameSuffix(t *testing.T) {
+	srv, _ := newAckStatusServer(t)
+
+	// Same NAME, distinct idempotency keys and distinct keypairs, so the server
+	// mints two DIFFERENT ids that differ only by suffix.
+	firstID, firstPriv := enrolAckAgentWithKey(t, srv, "worker", "idem-enrol-worker-a")
+	secondID, secondPriv := enrolAckAgentWithKey(t, srv, "worker", "idem-enrol-worker-b")
+	if firstID == secondID {
+		t.Fatalf("two enrolments of name %q collapsed to one id %q; the fixture cannot distinguish suffix keying", "worker", firstID)
+	}
+	first := testAgent{id: firstID, token: openAckSession(t, srv, firstID, firstPriv)}
+	second := testAgent{id: secondID, token: openAckSession(t, srv, secondID, secondPriv)}
+
+	_, stop := parkAckWaitsUntilCapped(t, srv, first)
+	defer stop()
+
+	// worker-2 must be SERVED while worker-1 sits at its cap. Three probes on three
+	// keys: one success could catch a slot a collapsed bucket had just released,
+	// three consecutive ones could not.
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("bus-msg-test-91%02d", i)
+		rec := authed(t, srv, second, http.MethodGet, ackStatusPath(key)+"?wait=1", "")
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("probe %d: worker-2 was refused 429 while worker-1 sat at its cap.\n"+
+				"The parked-wait bucket is keyed on a bus.<name> truncation and drops the server-minted suffix, collapsing two distinct principals into one bucket (invariant 2: an id is never shortened).\nbody: %s",
+				i+1, rec.Body.String())
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("probe %d: worker-2 wait = %d, want 200; body %s", i+1, rec.Code, rec.Body.String())
+		}
+		rows := decodeAckRows(t, rec)
+		if len(rows) != 1 || rows[0]["state"] != "unknown" {
+			t.Fatalf("probe %d: worker-2 answered 200 with %v, want the single unknown row", i+1, rows)
+		}
+	}
+
+	// And worker-1 is STILL capped, so worker-2's admissions were not a side
+	// effect of worker-1's slots draining mid-test.
+	if still := authed(t, srv, first, http.MethodGet, ackStatusPath(ackProbeKey)+"?wait=1", ""); still.Code != http.StatusTooManyRequests {
+		t.Errorf("worker-1 was answered %d, want 429; it stopped being at its cap during the run, so the probes above prove nothing", still.Code)
 	}
 }

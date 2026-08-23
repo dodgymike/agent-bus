@@ -380,3 +380,121 @@ func TestAckStatusAPIAndCLI(t *testing.T) {
 		}
 	})
 }
+
+// TestAckStatusHumanRenderingPairsLabelsAndValues pins that each timestamp is
+// SHORTENED and sits under its OWN label.
+//
+// # WHY THE FIELD-PRESENCE TEST DOES NOT COVER THIS
+//
+// "the human rendering carries every field of every row" counts accepted: and
+// settled: LINES but deliberately does not pin their VALUES (shortTimestamp
+// renders in the local zone, so a hard-coded string would assert the test box's
+// TZ). That leaves two mutations invisible:
+//
+//   - shortTimestamp(x) -> x: the raw RFC3339 instant is printed instead of the
+//     shortened form. Still one accepted: line, still one settled: line.
+//   - swapping the two values between their labels: accepted: shows the settled
+//     time and vice versa. Still one line each.
+//
+// This test defeats both by computing the EXPECTED shortened value with the same
+// shortTimestamp the code uses (this test is package main), so it is TZ-robust,
+// and by asserting the right value under the right label. The two fixture
+// timestamps are 30 minutes apart so they do NOT collapse to the same minute —
+// otherwise the swap would be invisible even here.
+//
+// MUTATIONS (each run, each RED):
+//   - shortTimestamp(x) -> x in agents.go: the accepted:/settled: lines carry the
+//     raw "2026-08-16T..." form, matching neither expected value, and the
+//     raw-form guard below fires.
+//   - swapping AcceptedAt/SettledAt between the two Fprintf calls: the accepted:
+//     line carries the settled value and its regexp no longer matches.
+func TestAckStatusHumanRenderingPairsLabelsAndValues(t *testing.T) {
+	const acceptedRaw = "2026-08-16T09:00:00Z"
+	const settledRaw = "2026-08-16T09:30:00Z"
+
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, ackStatusRoute) {
+			http.NotFound(w, r)
+			return
+		}
+		stubWriteJSON(w, http.StatusOK, ackStubRows(map[string]interface{}{
+			"correlation_key": "bus-x-7", "recipient": "bus-y.beta-1",
+			"state": "delivered", "attested_by": "recipient_signature_unverified",
+			"accepted_at": acceptedRaw, "settled_at": settledRaw,
+		}))
+	})
+
+	res := bus.run(t, "", true, false, "ack-status", "bus-x-7")
+	if res.Code != client.ExitOK {
+		t.Fatalf("exit = %d, want 0; stderr %s", res.Code, res.Stderr)
+	}
+	out := res.Stdout
+
+	// Expected values computed the SAME way the code shortens them, so this is
+	// robust to the test box's local zone.
+	wantAccepted := shortTimestamp(acceptedRaw)
+	wantSettled := shortTimestamp(settledRaw)
+	if wantAccepted == wantSettled {
+		t.Fatalf("the two fixture timestamps collapsed to the same minute (%q); the swap mutation would be invisible", wantAccepted)
+	}
+
+	if !regexp.MustCompile(`(?m)^accepted:\s+` + regexp.QuoteMeta(wantAccepted) + `$`).MatchString(out) {
+		t.Errorf("no `accepted:` line carrying %q (the SHORTENED AcceptedAt); a value swapped between labels or an un-shortened raw instant would fail here:\n%s", wantAccepted, out)
+	}
+	if !regexp.MustCompile(`(?m)^settled:\s+` + regexp.QuoteMeta(wantSettled) + `$`).MatchString(out) {
+		t.Errorf("no `settled:` line carrying %q (the SHORTENED SettledAt):\n%s", wantSettled, out)
+	}
+
+	// No RAW RFC3339 instant may reach the human output: shortTimestamp(x)->x
+	// would leak "2026-08-16T09:00:00Z", which the shortened form never contains.
+	for _, raw := range []string{acceptedRaw, settledRaw} {
+		if strings.Contains(out, raw) {
+			t.Errorf("a raw RFC3339 instant %q reached the human output; shortTimestamp was bypassed:\n%s", raw, out)
+		}
+	}
+}
+
+// TestAckStatusHumanRenderingSuppressesEmptyFields pins the two empty-guards in
+// writeAckStatus: `if r.Recipient != ""` and `if r.AttestedBy != ""`.
+//
+// Every other human-rendering fixture populates both fields, so removing either
+// guard — printing the line unconditionally — leaves those tests GREEN while a
+// row with an empty field grows a dangling "to:" or "attested:" line with nothing
+// after the label. A row CAN legally carry neither: validateAckStatus skips empty
+// fields (they are omitempty on the wire), so an accepted row with no recipient
+// and no attested_by is a shape the bus can send.
+//
+// MUTATION (each run, each RED): deleting `if r.Recipient != ""` prints an empty
+// `to:` line; deleting `if r.AttestedBy != ""` prints an empty `attested:` line.
+func TestAckStatusHumanRenderingSuppressesEmptyFields(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, ackStatusRoute) {
+			http.NotFound(w, r)
+			return
+		}
+		// A real, non-unknown row with recipient and attested_by ABSENT.
+		stubWriteJSON(w, http.StatusOK, ackStubRows(map[string]interface{}{
+			"correlation_key": "bus-x-7", "state": "accepted",
+			"accepted_at": "2026-08-16T09:00:00Z",
+		}))
+	})
+
+	res := bus.run(t, "", true, false, "ack-status", "bus-x-7")
+	if res.Code != client.ExitOK {
+		t.Fatalf("exit = %d, want 0; stderr %s", res.Code, res.Stderr)
+	}
+	out := res.Stdout
+
+	if regexp.MustCompile(`(?m)^to:`).MatchString(out) {
+		t.Errorf("a row with no recipient still printed a `to:` line; the empty-recipient guard is gone:\n%s", out)
+	}
+	if regexp.MustCompile(`(?m)^attested:`).MatchString(out) {
+		t.Errorf("a row with no attested_by still printed an `attested:` line; the empty-attested_by guard is gone:\n%s", out)
+	}
+	// Suppressing the guarded lines must not suppress the ROW: the state is still
+	// rendered, so this is a row that was shown with its optional fields omitted,
+	// not a row that vanished.
+	if !regexp.MustCompile(`(?m)^state:\s+accepted$`).MatchString(out) {
+		t.Errorf("the accepted row lost its state line:\n%s", out)
+	}
+}
