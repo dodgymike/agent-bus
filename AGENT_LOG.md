@@ -5838,3 +5838,54 @@ ran (1 top-level), 0 skipped, non-vacuous. Full `-race ./...` run once for the r
 Chain: spec-keeper → implementer → test-engineer → reviewer → security → documentation. New
 AUTHENTICATED route + durable roster mutation → **security REQUIRED, no carve-out**. Reviewer skip:
 NONE. Security skip: NONE.
+
+## 2026-08-22 — operator-list read-only mint fix (Spec `b5089ddf`)
+
+`agent-bus operator list` is read-only but replayed the WAL through `openOperatorRegistry`'s
+`!writable` path, and `wal.macKeyFor` MINTS `wal-mac.key` when it is missing — silently, because
+`wal.Replay` takes no logger. Reproduced at HEAD `a7420dc`: `operator list` on a dir holding a valid
+`bus-id` + a 3-byte `bus.wal` + no key exited 1 and left BOTH a 65-byte `wal-mac.key` and a
+`bus.lock` behind. That fabricates the keyed-MAC key that authenticates the operator registry (the
+authorisation plane) it is about to read (invariant 6) and converts a recoverable
+`wal.ErrMACKeyMissing` into an unrecoverable `wal.ErrMACKeyMismatch`; a key created as an accident of
+a list command is not a considered key lifecycle (invariant 9). Invariants 6 and 9 read in full.
+
+Fix (`cmd/agent-bus/operator.go`, +64): new `exitOperatorUnverifiable = 6` (deliberately NOT 5 —
+that is `exitOperatorUnknown`, "operator not registered"; one code, two meanings breaks a scripted
+caller); new `operatorMACKeyGuard` adapter over the shared `checkMACKeyPresent` (`auditlog.go`),
+mirroring `outbox.go`'s `outboxMACKeyGuard`; a PRE-lock and a POST-lock MAC-key guard in
+`openOperatorRegistry`, BOTH gated on `!writable`. Pre-lock so a refusal writes nothing at all (not
+even the `bus.lock` `dirlock.Acquire` creates); post-lock re-check is the load-bearing one against a
+concurrent-delete race. The writable path (`add`/`revoke`) is exempt on purpose: registering the
+first operator on a fresh bus legitimately creates the key. Documented in the command's EXIT CODES
+help text and in `CONTRACTS-CLI.md`. AFTER fix, the same fixture exits 6 and the directory is
+unchanged (no key, no lock).
+
+Tests (`cmd/agent-bus/operator_mackey_test.go`, new): `TestOperatorListMACKeyGuard` (fixture =
+`bus-id` + 3-byte `bus.wal` + no key; asserts exit 6, NO `wal-mac.key` minted, NO `bus.lock`, both
+text and `-json`, mint-absence asserted BEFORE the exit code so a neutered guard fails on the mint)
+and `TestOperatorListMACKeyFixtureMintsControl` (unguarded `wal.Replay` over both minting shapes DOES
+create the key, so the guard fixture is not vacuous). RED-before demonstrated: neutering both guard
+call sites makes the guard test fail on the mint assertion (key minted, exit 1).
+`cmd/agent-bus/operator_test.go` (+22): `operatorDataDir` now materialises `wal-mac.key` + `bus.wal`
+by opening/closing a real `wal.Log`, honouring its own docstring ("the way a first server start would
+leave it") — a real start creates the key. Without it, `TestOperatorAddRefusedWhileTheDataDirIsLocked`'s
+`list` case hit the new pre-lock guard (exit 6) before reaching the lock (exit 3); a real running bus
+always has the key on disk, so the fixture was simply unrealistic.
+
+Verify: overlay (clean HEAD + owned files) `proof-check.sh` — guards verdict=PASS (8 tests, 0
+skipped), `TestOperatorAddRefusedWhileTheDataDirIsLocked` verdict=PASS; `go build ./...` OK, `go vet
+./cmd/agent-bus` clean, `gofmt` empty on all changed `.go` files. Full `go test -race ./...` run once:
+all packages green except `cmd/agent-busctl`'s `TestCLIEnrolEndToEnd`, which failed once with "the
+priming server exited badly: signal: terminated" during the ~7-min parallel run (`cmd/agent-bus`
+alone took 434 s) and PASSES in isolation (0.649 s) — a pre-existing load-induced flake in a package
+this change does not touch. `cmd/agent-bus` full package `-race`: ok, 379 s.
+
+Reviewer skip: NONE — reviewer ran (opus, verdict PASS). Security skip: NONE — security ran (opus,
+verdict PASS; REQUIRED, key-material/WAL-integrity, no carve-out). Both confirmed no residual minting
+path in the `!writable` branch, correct `!writable` gating (`runOperatorList` passes `false`), and no
+crypto/TLS/guard regression (`client/pin.go` and `client/guard_test.go` untouched). Both noted the
+same OUT-OF-SCOPE follow-up: the writable `add`/`revoke` path can still mint the key via `wal.Open`
+on a keyless dir with an intact `bus.wal` — but that write path passes a logger (not silent) and
+fails loudly, and is excluded from this task. Sibling peer-list defect (`8cfd52e7`) is still open and
+was NOT touched. This is code-complete for the integrator; not committed here.

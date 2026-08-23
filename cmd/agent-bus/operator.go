@@ -136,6 +136,14 @@ const (
 	// list the operators — and a caller that cannot tell them apart has to parse
 	// English to know which.
 	exitOperatorUnknown = 5
+	// exitOperatorUnverifiable: the data directory holds no wal-mac.key, so
+	// NOTHING in the write-ahead log can be authenticated and the operator
+	// registry was NOT read. This is deliberately NOT 5: `log` and `outbox` use
+	// 5 for "unverifiable", but 5 is already exitOperatorUnknown here ("the
+	// named operator is not registered"), and giving one code two meanings would
+	// break a caller that scripts against it. See operatorMACKeyGuard for why a
+	// read-only command must REFUSE rather than let wal mint the key.
+	exitOperatorUnverifiable = 6
 )
 
 // runOperatorCommand dispatches `agent-bus operator <subcommand>`.
@@ -243,6 +251,8 @@ EXIT CODES
   3  the data directory is locked — a bus is running; stop it and retry
   4  the data directory does not hold a usable bus identity. Nothing is written
   5  the named operator is not registered
+  6  (list) the data directory holds no wal-mac.key, so the write-ahead log
+     cannot be authenticated; the registry was NOT read and no key was created
 `
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1086,24 @@ func openOperatorRegistry(dataDir string, writable bool, lg *logging.Logger) (*a
 		return nil, nil, nil, "", cmdErr
 	}
 
+	// PRE-lock MAC-key guard, READ-ONLY path only. wal.Replay below (the
+	// !writable branch) reaches wal's macKeyFor, which MINTS wal-mac.key as a
+	// side effect of a read whenever the key is missing — silently, because
+	// Replay takes no logger. A read-only inspection command must not
+	// manufacture the authority to authenticate the very log it is about to
+	// judge (invariant 6): a key minted now verifies nothing written under the
+	// real one, and it escalates a recoverable "the key is missing" into an
+	// unrecoverable "the key does not match". Refusing BEFORE the lock means the
+	// refusal writes nothing at all — not even the bus.lock dirlock.Acquire
+	// creates, which a virgin directory reads as "this directory has history".
+	// The WRITABLE path is exempt on purpose: registering the first operator on
+	// a fresh bus legitimately creates the key on its way to the first append.
+	if !writable {
+		if cmdErr := operatorMACKeyGuard(dataDir); cmdErr != nil {
+			return nil, nil, nil, "", cmdErr
+		}
+	}
+
 	lock, err := dirlock.Acquire(dataDir)
 	if err != nil {
 		if errors.Is(err, dirlock.ErrLocked) {
@@ -1098,6 +1126,17 @@ func openOperatorRegistry(dataDir string, writable bool, lg *logging.Logger) (*a
 	if cmdErr := checkOperatorBusIDPresent(dataDir); cmdErr != nil {
 		releaseLock()
 		return nil, nil, nil, "", cmdErr
+	}
+
+	// RE-CHECK the MAC key under the lock, READ-ONLY path only. The pre-lock
+	// guard above races a concurrent delete of wal-mac.key; this second check,
+	// serialised against a writer, is the load-bearing one — it is what actually
+	// stands between wal.Replay and minting the key.
+	if !writable {
+		if cmdErr := operatorMACKeyGuard(dataDir); cmdErr != nil {
+			releaseLock()
+			return nil, nil, nil, "", cmdErr
+		}
 	}
 
 	// A LOAD, never a create: the check immediately above, taken under the lock,
@@ -1212,6 +1251,31 @@ func checkOperatorBusIDPresent(dataDir string) *operatorCmdError {
 		}
 	}
 	return nil
+}
+
+// operatorMACKeyGuard is checkMACKeyPresent (auditlog.go) with its error
+// translated into operator's code space.
+//
+// The GUARD ITSELF IS REUSED, deliberately and not out of tidiness: it is the
+// one check standing between a read-only command and wal minting the key that
+// authenticates the log it is about to judge (invariant 6), and two copies of
+// it would drift. outbox.go reuses it the same way (outboxMACKeyGuard). Only
+// the message is restated, because auditlog's names bus.audit while the
+// artefact here is the operator registry inside the write-ahead log; the remedy
+// is reused verbatim, since "restore the key, do not let anything create one"
+// is the same advice for both files.
+func operatorMACKeyGuard(dataDir string) *operatorCmdError {
+	e := checkMACKeyPresent(dataDir)
+	if e == nil {
+		return nil
+	}
+	return &operatorCmdError{
+		code: exitOperatorUnverifiable,
+		msg: fmt.Sprintf("this data directory holds no MAC key (%q), so NOTHING in %s can be authenticated; the operator registry was NOT read and no key was created",
+			filepath.Join(dataDir, wal.MACKeyFileName), wal.WALFileName),
+		remedy: e.remedy,
+		cause:  e.cause,
+	}
 }
 
 // operatorRecordToResult renders one durable operator as the CLI reports it.

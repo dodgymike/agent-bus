@@ -29,8 +29,22 @@ import (
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
+// operatorNoopApplier materialises a keyed, empty write-ahead log without
+// caring what is in it: opening a wal.Log is what creates wal-mac.key and
+// bus.wal, and an empty log needs no applier logic.
+type operatorNoopApplier struct{}
+
+func (operatorNoopApplier) Apply(wal.Committed) error { return nil }
+
 // operatorDataDir builds a data directory holding a bus identity, the way a
 // first server start would leave it.
+//
+// A first start opens the write-ahead log, which creates BOTH wal-mac.key and
+// bus.wal, so this fixture creates them too — by opening and closing a real
+// wal.Log. Without the key the read-only `operator list` guard (invariant 6)
+// would refuse before it ever reached the lock, and any test that runs `list`
+// on this fixture without first writing through the log would exercise that
+// refusal instead of the behaviour it meant to.
 func operatorDataDir(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -40,6 +54,14 @@ func operatorDataDir(t *testing.T) (string, string) {
 	}
 	if _, err := buscert.LoadOrCreate(dir, buscert.Options{BusID: busID, Hosts: []string{"127.0.0.1"}}); err != nil {
 		t.Fatalf("buscert.LoadOrCreate: %v", err)
+	}
+	lg := logging.New(&bytes.Buffer{}, logging.LevelError)
+	log, err := wal.Open(wal.LogOptions{Dir: dir, Logger: lg, Applier: operatorNoopApplier{}})
+	if err != nil {
+		t.Fatalf("wal.Open (materialising wal-mac.key): %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("closing the materialising log: %v", err)
 	}
 	return dir, busID
 }

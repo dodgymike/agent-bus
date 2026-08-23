@@ -1082,6 +1082,7 @@ Numbered to **match** `invite` and `peer`, so an operator scripting against all 
 | `3` | The data directory is locked — a bus is running. | Stop the bus, run the command, start it again. |
 | `4` | The data directory does not hold a usable bus identity (missing, not a directory, or no `bus-id` file). **Nothing is written**, including no `bus.lock`. | Start the bus once if it has never run; restore `bus-id` from backup if it has. |
 | `5` | The named operator is not registered. | `agent-bus operator list -all` |
+| `6` | (`list` only) The data directory holds no `wal-mac.key`, so the write-ahead log cannot be authenticated (invariant 6); the operator registry was **NOT read** and **no key was created**. **Nothing is written**, including no `bus.lock` — the refusal is pre-lock. Deliberately not `5`: `log`/`outbox` use `5` for "unverifiable", but `5` is already "operator not registered" here, and one code with two meanings breaks a scripted caller. | Restore `wal-mac.key` from backup; do not start the bus or let anything mint a key here first (a fresh key turns a recoverable "missing" into an unrecoverable "mismatch"). |
 
 #### `--json` shapes — CONTRACT
 
