@@ -5918,3 +5918,45 @@ Gate record: reviewer — NOT RUN (standalone analysis doc, no product code; the
 report on task AUTH-8 is the review of record). security — SKIPPED under the docs-and-tests carve-out
 (docs-only, no guard file, no control-plane file); path covered: `AUTH-8_DEEPDIVE.md`, `AGENT_LOG.md`.
 No `.go`, no wire/on-disk change; nothing to deploy.
+
+## 2026-08-23 — `RELAY-54` verified ALREADY SATISFIED at HEAD (code landed `7c96f2b`); no code change
+
+`RELAY-54` ("an abandoned outbox job is invisible to every subcommand") was `in_progress` with its
+code already committed as `7c96f2b` but never logged here and never marked done. Verified at HEAD
+`a7420dc`; made NO code change. Invariants read in full: **6** (append-only log records metadata +
+routing only, and a discard/abandonment must be recorded LOUDLY and specifically — the silent case is
+the defect), **7** (the compiled CLI is THE client; operator/inspection commands belong on the
+`agent-bus` SERVER binary, not `agent-busctl`), **1** (server-authoritative ids are never reused; an
+abandoned job's id is not recycled).
+
+- **Half A (operator-facing outbox view + terminal states via CLI): DONE by `7c96f2b`.** That commit
+  landed `cmd/agent-bus/outbox.go` (+`outbox_test.go`), the `main.go` dispatch (present at HEAD,
+  `cmd/agent-bus/main.go:276-277`), `CONTRACTS-CLI.md`, `AGENT_PROTOCOL.md`, and
+  `internal/relay/outbox.go`'s `Outbox.Jobs(states...)`. `agent-bus outbox [-json] [-peer] [-state]`
+  surfaces, per job, `job_id`, `peer_bus_id`, `origin_message_id`, `state`, `enqueued_at`,
+  `settled_at`, `reason`, `size`, `content_sha256`, plus `pending_by_peer` / `abandoned_by_peer`
+  breakdowns and exit codes `0` drained / `6` pending / `7` abandoned / `1`,`8` damaged-or-unverified.
+  Proven by `TestOutboxCommandVerdict` (fixture `ob54Abandoned` → exit `7`) and
+  `TestOutboxCommandJSONShape`.
+- **Half B (the origin records its OWN failed hand-off): ALREADY TRUE, and the residual gap is out of
+  scope.** When a relay forward is permanently refused, the origin forwarder settles the outbox job
+  `OutboxAbandoned` durably with a specific reason (`internal/relay/forward.go:1183`), proven by
+  `internal/relay/crashloop_test.go:1109` ("a permanent refusal settles the job ABANDONED, with a
+  reason") and `internal/relay/retry_test.go:465` (de-peer → `NoRoute` abandonment). `agent-bus
+  outbox` then surfaces that record. The task's "in A→B→C the ORIGIN logs NOTHING" premise is the
+  three-bus ONWARD-hop case (B→C), which is STRUCTURAL — `relay.Client.PeerAck` has zero production
+  callers (`AGENT_LOG.md:4657`) — and is owned by `ACK-5`, scoped OUT (spec-keeper status note
+  2026-08-21). An A→B direct refusal is NOT silent: A writes the durable abandoned record above.
+- **Behavioural proof through the compiled binary.** Built `agent-bus` and a throwaway harness that
+  writes a durable ABANDONED outbox record via the real two-phase durable path into a real data dir;
+  `agent-bus outbox -data-dir <dir> -json` on the ORIGIN returned `exit_code=7`, `counts.abandoned=1`,
+  `abandoned_by_peer=[{peer_bus_id:"bus-relay54-peer",jobs:1}]`, `jobs[0].state="abandoned"` carrying
+  the reason/size/content_sha256, and emitted the invariant-6 loud WARN naming the job/peer/reason on
+  stderr. Harness removed; tree left clean.
+
+Stored proof `go test -race ./cmd/agent-bus ./internal/relay` re-run through `scripts/proof-check.sh`.
+
+Reviewer skip: reviewer N/A — this task made NO code change (verification + this log line only).
+Security skip: N/A for the same reason; the only file touched is `AGENT_LOG.md`, which is neither a
+guard nor a control-plane file. The code being verified (`7c96f2b`) carried its own gates when it was
+committed.
