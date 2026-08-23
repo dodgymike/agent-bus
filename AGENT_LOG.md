@@ -6122,3 +6122,18 @@ Reviewer skip: NONE — reviewer ran. Security skip: NONE — security ran (deli
 docs-and-tests carve-out applying to `internal/httpapi/ackstatus_test.go` and
 `cmd/agent-busctl/ackstatus_test.go`). Documentation skip: no agent-facing/contract surface changed
 (paths: the same two `_test.go` files); this log line records it.
+
+## 2026-08-23 — ACK-FAILURE-WAVE-HANDOVER.md: living handover for the serial ACK failure-handling wave
+
+Process scaffolding, no product code. New doc `ACK-FAILURE-WAVE-HANDOVER.md` (repo root) records the
+orchestrator's state for the serial ACK failure-handling wave so the next session resumes cleanly if
+the token budget runs out mid-wave: HEAD, unpushed status, operational facts, the ordered wave plan
+(with a 2026-08-23 REORDER — `ec4a1ac8` ACK-4-FU-RECIPIENT-BINDING is now the prerequisite before the
+`7d564118` destination-row P0, which came back BLOCKED because a per-recipient ack row is a cross-peer
+forgery hazard until AuthorizePeerAck binds the recipient), and a progress log. Also records the
+concurrency incident (two integrators dispatched on AGENT_LOG.md at once — caught, one stopped, tree
+reverted clean, nothing lost; lesson: one integrator at a time on shared append-only files).
+
+Gate record: reviewer — NOT RUN (orchestrator-authored operational scaffolding, its own record).
+security — SKIPPED under the docs-and-tests carve-out (docs-only, no guard file, no control-plane
+file); paths covered: `ACK-FAILURE-WAVE-HANDOVER.md`, `AGENT_LOG.md`. No `.go`, no wire/on-disk change.
