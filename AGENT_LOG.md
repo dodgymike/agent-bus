@@ -5889,3 +5889,32 @@ same OUT-OF-SCOPE follow-up: the writable `add`/`revoke` path can still mint the
 on a keyless dir with an intact `bus.wal` — but that write path passes a logger (not silent) and
 fails loudly, and is excluded from this task. Sibling peer-list defect (`8cfd52e7`) is still open and
 was NOT touched. This is code-complete for the integrator; not committed here.
+
+## 2026-08-23 — AUTH-8 deep-dive: the usability-vs-abuse posture study (`b65948b7`)
+
+Study only, no product code. Deliverable `AUTH-8_DEEPDIVE.md` (repo root): a control inventory
+(control / location / default / fail-mode / what a legit agent sees at the boundary), a
+compose-vs-fight-vs-gap analysis, and a prioritised recommendation set. Findings: the auth controls
+compose deliberately as a cheapest-first funnel (rate-limit charges the SOURCE, invite-gate the
+CREDENTIAL, roster/session caps the global backstop); the per-agent PENDING cap was removed on
+purpose because `/v1/session/begin` takes an attacker-supplied id so any per-id bucket is a lockout
+primitive, while the ACTIVE cap is safe only because `/v1/session/complete` keys on a PROVEN id
+(`session.go:400-424`). Verified frictions (all recoverable, no security hole): shared-source
+rate-limit starvation behind the Docker bridge / NAT / tunnel (the shipped runtime is a container, so
+this is the common case); the active-cap 503 sends `Retry-After: 5` where real recovery is up to 1h
+(`auth.go:884`); enrol-key 409 + (pre-AUTH-4) no leave route could brick a legit re-enrol — that half
+is now fixed by AUTH-4. Gaps: the MESSAGING key takes no proof-of-possession (`service.go:681-684`).
+Invariants read IN FULL and cited: 3 (invite-only, opaque revocable sessions, the allow-list is the
+boundary), 10 (idempotency / a refusal is not a disconnect), 11 (mTLS + session/cert cross-check);
+also 1 and 8 where load-bearing. Follow-ups filed: `fe0245a3` (AUTH-8-FU-RATELIMIT-SHAREDSRC, P1),
+`576a794d` (AUTH-8-FU-MSGKEY-POP, P2), `46ede035` (AUTH-8-FU-POSTURE-DOCS, P3).
+
+The deep-diver wrote the doc with two stray leaked tool-invocation XML lines (`</content>`,
+`</invoke>`) at the tail; an integrator refused to publish the corrupted content, the orchestrator
+stripped exactly those two lines (doc now ends at the `internal/hub/hub.go:88,99` appendix), and the
+integrator re-verified `grep -cE '^</(content|invoke)>$' == 0` before committing.
+
+Gate record: reviewer — NOT RUN (standalone analysis doc, no product code; the deep-diver's own
+report on task AUTH-8 is the review of record). security — SKIPPED under the docs-and-tests carve-out
+(docs-only, no guard file, no control-plane file); path covered: `AUTH-8_DEEPDIVE.md`, `AGENT_LOG.md`.
+No `.go`, no wire/on-disk change; nothing to deploy.
