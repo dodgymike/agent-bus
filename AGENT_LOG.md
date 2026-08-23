@@ -6137,3 +6137,32 @@ reverted clean, nothing lost; lesson: one integrator at a time on shared append-
 Gate record: reviewer — NOT RUN (orchestrator-authored operational scaffolding, its own record).
 security — SKIPPED under the docs-and-tests carve-out (docs-only, no guard file, no control-plane
 file); paths covered: `ACK-FAILURE-WAVE-HANDOVER.md`, `AGENT_LOG.md`. No `.go`, no wire/on-disk change.
+
+## 2026-08-23 — ACK-4-FU-RECIPIENT-BINDING (`ec4a1ac8`, P1): bind the recipient's home bus into the peer-ACK direct arm
+
+Closed a cross-recipient / cross-peer ACK forgery. `relay.AuthorizePeerAck`'s DIRECT arm bound only
+`(peer, key)`: the outbox job is keyed on the recipient's HOME bus, so a peer legitimately bound for
+one recipient of key `K` could settle ANY sibling recipient of `K` (terminal is ABSORBING →
+uncorrectable, incl. burning a LOCAL recipient's outcome). Latent today (no key has >1 row) but a
+prerequisite the P0 `ACK-12-FU-DESTINATION-ROW` is blocked on. Fix: the direct arm now also requires
+`EqualFold(homeBus(R), P)`; a mismatch returns the uniform `ErrAckNotBound` and cascades to
+`AuthorizePeerAckVia`'s routing-based indirect arm for legitimate multi-hop. No on-disk format change;
+`DeriveJobID` unchanged. Rationale in `DECISIONS.md` (2026-08-23), contract in `ACK-CONTRACT.md` §6.2.
+
+Invariants read IN FULL: 2 (recipient bound as its qualified id's bus half, never a bare name — the
+crux), 3 (authorisation is off the certificate-resolved peer, not a frame field), 6 (the binding is
+metadata/routing over the existing durable outbox record — no new state), 10 (refuse-and-log with the
+uniform error, NO disconnect: an ACK frame is not a signed message and the peer link carries a whole
+roster's traffic — the one disconnect case does not apply).
+
+Files: `internal/relay/ack.go` (fix + docstring), `internal/relay/ack_test.go` (RED-first forgery test
+`TestAckDirectArmBindsRecipientHomeBus`; replaced the documented-gap subtest in
+`TestAckDoesNotLeakRecipientState` with a real negative case), `internal/httpapi/peermount_relay20_test.go`
+(placeholder recipient was on the LOCAL bus — never a legitimate peer-ack target — moved onto the acking
+peer's bus so `TestPeerAckBindsToTheCertificateResolvedBus` stays coherent), `ACK-CONTRACT.md`,
+`DECISIONS.md`, this log.
+
+Chain: spec-keeper (task already assigned, todo) → implementer (feature-runner) → test-engineer
+(RED-first) → reviewer → security. Security REQUIRED (authorisation / anti-forgery on the relay ACK
+path; no carve-out). Reviewer skip: NONE. Security skip: NONE. Verdicts recorded on the Spec journal
+and in the final report.

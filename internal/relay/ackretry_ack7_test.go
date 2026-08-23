@@ -419,12 +419,18 @@ func newA7Rig(t *testing.T) *a7Rig {
 	}
 
 	r := &a7Rig{
-		t:         t,
-		store:     store,
-		dlog:      dlog,
-		mirror:    &a7Mirror{acks: store},
-		key:       ackMessageID(t, 7),
-		recipient: ackAgentID(t, ackLocalBus, "bravo"),
+		t:      t,
+		store:  store,
+		dlog:   dlog,
+		mirror: &a7Mirror{acks: store},
+		key:    ackMessageID(t, 7),
+		// The recipient lives on the ACKING PEER's bus (ackPeerBus): this bus owes
+		// ackPeerBus a copy and ackPeerBus is the peer that settles it, so since
+		// ACK-4-FU-RECIPIENT-BINDING the recipient's home bus must equal that peer
+		// for the direct arm to bind. A recipient on ackLocalBus (the acking never
+		// happens for a recipient on the bus RECEIVING the ack) would now be
+		// refused, and the retry loop would spin against a permanent 409.
+		recipient: ackAgentID(t, ackPeerBus, "bravo"),
 		sender:    ackAgentID(t, ackOriginBus, "alpha"),
 	}
 

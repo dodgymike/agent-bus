@@ -602,10 +602,12 @@ type AckObligations interface {
 //     field read out of the frame. If ACK-3 takes it from JSON, the binding
 //     rule authorises the NAME a peer chose rather than the peer that sent it,
 //     and every guarantee below evaporates while every test still passes.
-//  2. THIS FUNCTION IS ONLY HALF OF AUTHORIZATION, despite its name. It binds
-//     the PEER to the KEY. It does NOT bind the RECIPIENT — see the "what it
-//     deliberately does not do" section. A nil error here means "this peer may
-//     speak about this key", NOT "this peer may settle this recipient".
+//  2. THIS FUNCTION BINDS THE PEER TO THE KEY AND THE RECIPIENT'S HOME BUS TO
+//     THE PEER (ACK-4-FU-RECIPIENT-BINDING). A nil error means "this peer may
+//     speak about this key AND the named recipient lives on this peer". It does
+//     NOT prove the recipient was one the SENDER ADDRESSED — that remaining
+//     conjunct is §8.2's "(none)" row, applied by the caller's SettleAck. See
+//     the "what it deliberately does not do" section.
 //
 // # DENIAL OF SERVICE: A QUOTA MUST SIT IN FRONT OF THIS CALL (ACK-CONTRACT §16 Q3)
 //
@@ -632,24 +634,41 @@ type AckObligations interface {
 //   - RESURRECTION AFTER RETENTION — *Outbox.Lookup sweeps first and reports
 //     false for an expired record, so a key whose window closed is refused with
 //     the same uniform answer rather than reopened.
+//   - CROSS-RECIPIENT / CROSS-PEER FORGERY (ACK-4-FU-RECIPIENT-BINDING) — peer P
+//     legitimately bound for one recipient of K settling a SIBLING recipient of
+//     K whose home bus is a DIFFERENT bus. The outbox job is keyed on the
+//     recipient's HOME bus, so DeriveJobID(P, K) is the job for recipients on P;
+//     a frame naming a recipient whose home bus is not P is not covered by it,
+//     even when a sibling recipient of the same key made that job exist. Without
+//     this, one absorbed terminal could burn another recipient's outcome (incl.
+//     a LOCAL recipient's) uncorrectably. Bound by EqualFold(homeBus(R), P).
 //
 // # WHAT IT DELIBERATELY DOES NOT DO — READ THIS BEFORE "STRENGTHENING" IT
 //
-// It does NOT require the correlation key's bus half to equal the ACKing peer.
+// It does NOT require the correlation KEY's bus half to equal the ACKing peer.
 // In an A->B->C chain, C's ACK reaches A VIA B, and the bus half of K is A's,
-// not C's. A "bus half must equal the peer" rule would be wrong and would break
-// multi-hop (ACK-5). The job-id binding is the correct test AT EVERY HOP.
+// not C's. A "KEY's bus half must equal the peer" rule would be wrong and would
+// break multi-hop (ACK-5). The recipient binding above is on the RECIPIENT's
+// home bus, not the key's, precisely because those are different buses on a
+// multi-hop path: at bus A the key's bus half is A while the recipient's home
+// bus is C, and it is C that must route through the acking peer.
 //
-// It does NOT bind the RECIPIENT, because the outbox record does not carry one:
-// an OutboxRecord is (peer, origin message id) and nothing else identifying.
-// The recipient half of the binding is ACK-2's, and the two tests are
-// CONJUNCTIVE: §8.2's "(none)" row requires that a frame naming a (key,
-// recipient) pair for which NO ACK RECORD EXISTS is rejected with this same
-// uniform answer. The ACK record is created for the recipients the SENDER
-// NAMED, so that row is what stops a legitimately-bound peer settling on behalf
-// of an agent that was never addressed. NEITHER HALF IS SUFFICIENT ALONE. This
-// function validates the recipient's SHAPE (invariant 2) so a malformed one
-// never reaches that table, and stops there.
+// It does NOT prove the recipient was one the SENDER ADDRESSED. The outbox
+// record carries no recipient set — it is (peer, origin message id) — so it can
+// bind the recipient's home bus but not that a row was ever created for that
+// exact agent. That remaining conjunct is ACK-2's: §8.2's "(none)" row requires
+// that a frame naming a (key, recipient) pair for which NO ACK RECORD EXISTS is
+// rejected with this same uniform answer, and the ACK record is created only for
+// the recipients the SENDER NAMED. The two tests are CONJUNCTIVE and neither is
+// sufficient alone; this function now supplies the home-bus half and validates
+// the recipient's SHAPE (invariant 2), and SettleAck supplies the row-exists
+// half.
+//
+// It does NOT re-key the outbox job on the recipient. DeriveJobID stays
+// (peer/home-bus, origin message id): the job is a durable id, one per
+// destination bus shared by all recipients on it, and per-recipient job ids
+// would multiply fsync cost and orphan every pending job across an upgrade for
+// no extra security the home-bus binding does not already give.
 //
 // localBusID is required so a peer claiming OUR bus id is refused before
 // anything else: ValidatePeerBusID compares case-insensitively and a peer may
@@ -696,12 +715,15 @@ func AuthorizePeerAck(obligations AckObligations, localBusID, peerBusID, correla
 		return OutboxRecord{}, fmt.Errorf("%w: correlation key: %v", ErrInvalidAckFrame, err)
 	}
 	// Invariant 2: every agent id on the wire is fully qualified. ParseAgentID
-	// enforces the <bus-id>.<agent-id> form and one spelling per id.
+	// enforces the <bus-id>.<agent-id> form and one spelling per id, and its bus
+	// half — the recipient's HOME bus — is what the recipient binding below is
+	// computed from.
 	if len(recipient) > ids.MaxAgentIDLen {
 		return OutboxRecord{}, fmt.Errorf("%w: recipient is %d bytes, but an agent id is at most %d; it is not echoed here because it is oversized",
 			ErrInvalidAckFrame, len(recipient), ids.MaxAgentIDLen)
 	}
-	if _, _, _, err := ids.ParseAgentID(recipient); err != nil {
+	recipientBusID, _, _, err := ids.ParseAgentID(recipient)
+	if err != nil {
 		return OutboxRecord{}, fmt.Errorf("%w: recipient: %v", ErrInvalidAckFrame, err)
 	}
 
@@ -718,6 +740,28 @@ func AuthorizePeerAck(obligations AckObligations, localBusID, peerBusID, correla
 	// the UNIFORM refusal, not a distinguishable one, so it cannot be used to
 	// probe the table either.
 	if rec.PeerBusID != peerBusID || rec.OriginMessageID != correlationKey {
+		return OutboxRecord{}, ErrAckNotBound
+	}
+	// ACK-4-FU-RECIPIENT-BINDING: the DIRECT arm binds the RECIPIENT, not only
+	// (peer, key). The outbox job is keyed on the recipient's HOME bus, because
+	// Forwarder.targets keys it on Registry.Route(recipient) (outbox.go and
+	// ackback.go's AuthorizePeerAckVia doc both state this), so DeriveJobID(P, K)
+	// is the job for recipients whose home bus is P. A frame naming a recipient
+	// whose home bus is NOT the acking peer is therefore NOT covered by the job
+	// found above, even when that job exists for a SIBLING recipient of the same
+	// key: without this check a peer legitimately bound for one recipient of K
+	// could settle ANY recipient of K, and terminal is ABSORBING, so the wrong
+	// outcome could never be corrected — a cross-recipient/cross-peer forgery
+	// that includes burning a LOCAL recipient's terminal. Invariant 2 makes the
+	// binding computable: the recipient is fully qualified, so its bus half names
+	// its home bus. EqualFold matches the case-folded comparison the indirect arm
+	// (AuthorizePeerAckVia) already makes for D-vs-P and the system-wide bus-id
+	// folding; DeriveJobID is case-sensitive, so a bare == here would refuse a
+	// legitimate mixed-case settlement. A mismatch answers the UNIFORM refusal,
+	// which also lets AuthorizePeerAckVia fall through to its routing-based
+	// indirect arm for the legitimate multi-hop case where the recipient's home
+	// bus is not the peer but IS routed through it.
+	if !strings.EqualFold(recipientBusID, peerBusID) {
 		return OutboxRecord{}, ErrAckNotBound
 	}
 	return rec, nil

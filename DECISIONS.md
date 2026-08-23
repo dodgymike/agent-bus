@@ -7852,3 +7852,53 @@ Cross-references: `ACK-CONTRACT.md` §9.2, §9.3 and §10 are the superseded sta
 `CONTRACTS-*.md` plane files already carried these three as built; RELAY-23 (the relay-envelope
 version field) and `ACK-3-FU-COLLAPSE-WIREVERSION` (collapse the duplicated constant) are the open
 follow-ups.
+
+## 2026-08-23 — ACK-4-FU-RECIPIENT-BINDING: the direct arm binds the recipient's HOME bus to the peer
+
+**Decision.** `relay.AuthorizePeerAck`'s DIRECT arm now requires, in addition to
+`DeriveJobID(P, K)` naming an outbox job this bus durably wrote, that the recipient `R`'s home bus
+equals the authenticated peer `P`, compared case-insensitively (`strings.EqualFold`). On a mismatch
+it returns the SAME uniform `ErrAckNotBound`. No on-disk format changes; `DeriveJobID` is unchanged.
+
+**The defect it closes.** The direct arm previously bound only `(peer, key)`. The outbox job is keyed
+on the recipient's HOME bus (`Forwarder.targets` → `Registry.Route(recipient)`), so `DeriveJobID(P, K)`
+is the job for recipients whose home bus is `P`. When a correlation key has more than one recipient
+row — which a destination-side or broadcast-side lifecycle row (`ACK-12-FU-DESTINATION-ROW`, P0)
+introduces, and the outbox already fans one key to several peers — a peer legitimately bound for its
+OWN recipient of `K` could name any SIBLING recipient of `K` and be authorised on the `(peer, key)`
+job alone; `SettleAck` then found that sibling's row and settled it. A terminal outcome is ABSORBING
+(the first terminal stands, never revisited), so this was an uncorrectable cross-recipient /
+cross-peer forgery, including burning a LOCAL recipient's terminal. Found by the security gate during
+ACK-3 (2026-08-16); "must land before any task creates a second row for one correlation key."
+
+**Keying — why home-bus and not a per-recipient job id.** The security property required is "a peer
+may settle only the recipients it was routed." The peer→recipient routing fact this bus holds is the
+outbox job, keyed on the recipient's home bus. Binding `EqualFold(homeBus(R), P)` on the direct arm
+gets exactly that property (a peer whose obligation names bus `P` may settle only recipients on `P`)
+with zero durable-format change. Re-keying `DeriveJobID` on the recipient was rejected: the job id is
+durable, one job per destination bus is deliberately shared by all recipients on it, and a
+per-recipient id would (a) multiply the peer-driven fsync cost per recipient, (b) orphan every
+pending job across an upgrade, and (c) add no security the home-bus binding does not already give.
+The recipient's home bus is readable because invariant 2 makes `R` fully qualified. `EqualFold`
+(not `==`) because `DeriveJobID` is case-sensitive while bus ids are folded everywhere else, and it
+matches the case-folded `D`-vs-`P` comparison the INDIRECT arm (`AuthorizePeerAckVia`) already makes.
+
+**Locus — direct arm, not `SettleAck`.** The original filing suggested making "the second half"
+(`SettleAck`'s `(key, recipient)` existence check) recipient-aware. That check lives in `ack.Store`,
+which holds no peer/routing information, so it cannot answer "was this peer routed this recipient."
+The routing knowledge is the outbox, in the relay layer, so the peer↔recipient binding belongs in
+`AuthorizePeerAck(Via)`. `SettleAck`'s existence check remains the conjunctive complement.
+
+**Invariant 10 — refuse, do not disconnect.** The mismatch is refused with `ErrAckNotBound` and NO
+disconnect: an ACK frame is not a signed message and must never reach the one disconnect path; a
+merely buggy or mis-routed peer can reach this line, and a peer link carries its whole roster's
+traffic. The refusal is byte-identical to every other unbound cause, preserving the uniform-answer
+oracle protection.
+
+**Verification.** RED-first: `TestAckDirectArmBindsRecipientHomeBus/cross_recipient_forgery_*` and
+`.../forgery_is_refused_end_to_end_through_AuthorizePeerAckVia` both FAILED against unmodified
+`ack.go` (returned `nil`), then passed after the fix. The three-bus e2e ack test
+(`TestThreeBusEndToEndAckNack`) still passes, confirming multi-hop back-propagation (recipient home
+bus ≠ acking peer, but routed through it) is unaffected. `internal/httpapi`'s
+`TestPeerAckBindsToTheCertificateResolvedBus` used a placeholder recipient on the LOCAL bus — never a
+legitimate peer-ack target — and was updated to a recipient on the acking peer's bus.

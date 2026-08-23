@@ -305,11 +305,18 @@ func newABPChain(t *testing.T, seq uint64) *abpChain {
 	}
 	c.peered.Store(true)
 
-	// THE OBLIGATIONS, which are what §6.2 binds each hop on. A relayed the
-	// message to B, so A owes B a copy; B relayed it to C, so B owes C one.
-	// Neither bus owes anything to anybody else, which is what makes the
-	// forgery arms of AuthorizePeerAck live rather than decorative.
-	c.tableA.owe(abpBusB, c.key)
+	// THE OBLIGATIONS, which are what §6.2 binds each hop on. The outbox job is
+	// keyed on the RECIPIENT'S HOME BUS (Forwarder.targets -> Registry.Route,
+	// forward.go:886), NOT on the next hop dialled. The recipient lives on C, so
+	// BOTH A and B key their job for it on C: A reaches C through its peer B (the
+	// nextHop wired into handlerA below), and B reaches C directly. At A the ACK
+	// therefore arrives from peer B while the job is keyed on C — the DIRECT arm
+	// MISSES and the INDIRECT arm binds it (this is the multi-hop shape ACK-5's
+	// indirect arm exists for; the pre-ACK-4-FU keying on abpBusB let the direct
+	// arm hit at A for a recipient it was never routed, which is exactly the
+	// binding ACK-4-FU-RECIPIENT-BINDING closes). Neither bus owes anything to
+	// anybody else, which is what makes the forgery arms of AuthorizePeerAck live.
+	c.tableA.owe(abpBusC, c.key)
 	c.tableB.owe(abpBusC, c.key)
 
 	// ----- Bus A: the origin, with the durable row behind it. -----
@@ -318,7 +325,18 @@ func newABPChain(t *testing.T, seq uint64) *abpChain {
 		Obligations: c.tableA,
 		Admit:       func(string) (func(), error) { return func() {}, nil },
 		SettleAck:   c.origin.settle,
-		Logger:      logging.New(c.logsA, logging.LevelDebug),
+		// A routes the recipient's home bus C through its peer B, so both resolve
+		// to the same dial address — the INDIRECT arm's binding question. This is
+		// A's OWN routing table (Registry.PeerBaseURL in production), never
+		// anything the frame carries. The address value is irrelevant; only the
+		// EQUALITY of the two answers is, and both being non-empty.
+		NextHopAddress: func(busID string) (string, bool) {
+			if strings.EqualFold(busID, abpBusB) || strings.EqualFold(busID, abpBusC) {
+				return "https://hop-b.abp.invalid", true
+			}
+			return "", false
+		},
+		Logger: logging.New(c.logsA, logging.LevelDebug),
 	})
 	if err != nil {
 		t.Fatalf("NewAckHandler(bus A): %v", err)
@@ -1357,20 +1375,37 @@ func TestAuthorizePeerAckViaIndirectHop(t *testing.T) {
 		wantNoRouting bool
 	}{
 		{
+			// The recipient lives ON the acknowledging peer, so the direct arm's
+			// recipient binding (ACK-4-FU-RECIPIENT-BINDING) is satisfied and the
+			// arm binds without ever consulting routing.
 			name:          "direct job present short-circuits before any routing lookup",
 			jobs:          directJob,
 			routes:        abvRoutes{destD: viaB, peerP: viaB},
-			recipient:     onD,
+			recipient:     onP,
 			wantBoundTo:   peerP,
 			wantNoRouting: true,
 		},
 		{
+			// Recipient on the peer: the direct arm binds peerP and short-circuits
+			// even though an indirect job for destD also sits in the table.
 			name:          "direct job wins even when an indirect one also exists",
 			jobs:          bothJobs,
 			routes:        abvRoutes{destD: viaB, peerP: viaB},
-			recipient:     onD,
+			recipient:     onP,
 			wantBoundTo:   peerP,
 			wantNoRouting: true,
+		},
+		{
+			// ACK-4-FU-RECIPIENT-BINDING at the Via level: a direct job for the
+			// peer does NOT let it settle a recipient whose home bus is a DIFFERENT
+			// bus. The direct arm refuses (home bus destD != peer), and the indirect
+			// arm cannot rescue it because destD routes to a different address than
+			// the acking peer. Before the binding this bound to peerP — the forgery.
+			name:      "direct job does NOT let the peer settle a recipient on another bus",
+			jobs:      directJob,
+			routes:    abvRoutes{destD: viaX, peerP: viaB},
+			recipient: onD,
+			wantErr:   ErrAckNotBound,
 		},
 		{
 			name:        "indirect: job for the destination and one shared next hop",
@@ -1443,10 +1478,12 @@ func TestAuthorizePeerAckViaIndirectHop(t *testing.T) {
 			wantErr:   ErrInvalidAckFrame,
 		},
 		{
+			// Recipient on the peer, so the direct arm binds; the nil routing table
+			// must reproduce that exact answer.
 			name:        "nil routing table reproduces the direct arm: bound",
 			jobs:        directJob,
 			nilNextHop:  true,
-			recipient:   onD,
+			recipient:   onP,
 			wantBoundTo: peerP,
 		},
 		{

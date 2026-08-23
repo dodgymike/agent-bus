@@ -1444,7 +1444,7 @@ A frame from AUTHENTICATED peer `P` for key `K` naming recipient `R` binds if **
 
 | Arm | Test |
 | --- | --- |
-| **DIRECT** (unchanged, tried FIRST) | `DeriveJobID(P, K)` names an outbox job this bus durably wrote. |
+| **DIRECT** (tried FIRST) | `DeriveJobID(P, K)` names an outbox job this bus durably wrote **AND the recipient `R`'s home bus equals `P`** (case-folded). The recipient conjunct is `ACK-4-FU-RECIPIENT-BINDING` (2026-08-23): the outbox job is keyed on the recipient's home bus, so `DeriveJobID(P, K)` covers only recipients on `P`; a frame naming a recipient on a DIFFERENT bus is refused (falls through to INDIRECT). Without it, once a key has more than one recipient row a peer bound for one recipient could settle any sibling recipient of `K`, uncorrectably (terminal is absorbing). |
 | **INDIRECT** (new) | Let `D` be the **bus half of `R`** (invariant 2). ALL of: `D` is not `P` (case-folded) and `D` is not this bus; **the address this bus would dial for `D` equals the address it would dial for `P`**, both resolved and both non-empty; and `DeriveJobID(D, K)` names an outbox job this bus durably wrote whose peer bus id and origin message id are the two we asked for. |
 
 **The address comparison is the security core, and it is computed from THIS BUS's own peer
@@ -1464,11 +1464,13 @@ unchanged with the indirect arm never reached. A build that passes no routing re
 (`AckConfig.NextHopAddress` nil, `internal/relay/ackhttp.go:176`) **fails closed to the direct arm's
 answer** — byte-for-byte the pre-`ACK-5` behaviour.
 
-**It does NOT close `ACK-4-FU-RECIPIENT-BINDING`.** The indirect arm does bind the recipient's home
-bus to the acknowledging peer, but **the direct arm still binds only (peer, key)** — so a peer
-legitimately bound for `K` can still settle any recipient of `K` on a direct link, which is the arm
-every single-hop delivery takes. The recipient half of authorization remains the "no ACK row for that
-pair" refusal at the origin.
+**`ACK-4-FU-RECIPIENT-BINDING` is CLOSED (2026-08-23).** Both arms now bind the recipient's home bus
+to the acknowledging peer: the INDIRECT arm always did (`P` must be the hop we route `R`'s bus
+through), and the DIRECT arm now requires `EqualFold(homeBus(R), P)` (the table above). A peer bound
+for `K` can therefore settle only recipients whose home bus is the one its obligation names — not any
+sibling recipient of `K`, which mattered the moment a key gained a second recipient row
+(`ACK-12-FU-DESTINATION-ROW`). The still-separate second conjunct is that a row exists for a recipient
+the SENDER named ("no ACK row for that pair" refusal at the origin); the two are conjunctive.
 
 **Cost.** The indirect arm adds two registry lookups (`RLock`) and, only if they agree, a **second**
 `Outbox.Lookup` — the exclusive-mutex O(n) sweep the rate-limiting note below is about. The routing

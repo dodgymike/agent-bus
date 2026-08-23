@@ -1160,10 +1160,16 @@ func (pmNullDurable) Write(wal.Entry) (wal.Committed, error) { return wal.Commit
 // lets a test add a header an attacker might hope the mount reads.
 func pmAckRequest(t *testing.T, certs []*x509.Certificate, extraHeaders map[string]string) *http.Request {
 	t.Helper()
+	// The recipient lives on pmRemoteBus, the peer that is acking. Since
+	// ACK-4-FU-RECIPIENT-BINDING the direct arm binds the recipient's HOME bus to
+	// the acking peer, so a peer may only settle a recipient that lives on it (or
+	// one it is the routed next hop for; this surface wires no NextHopAddress).
+	// A recipient on pmLocalBus — the bus RECEIVING the ack — is never a
+	// legitimate peer-ack target and is now refused, so it would make arm 1 a 409.
 	body, err := json.Marshal(relay.PeerAckRequest{
 		ProtocolVersion:    relay.AckWireVersion,
 		CorrelationKey:     pmAckCorrelationKey,
-		Recipient:          pmLocalBus + ".bravo-1",
+		Recipient:          pmRemoteBus + ".bravo-1",
 		Outcome:            "undeliverable",
 		Class:              "no_route",
 		EmittedAtUnixMilli: 1_700_000_000_000,

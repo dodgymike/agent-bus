@@ -376,8 +376,9 @@ call site is `internal/relay/ackhttp.go:398`). **Citation corrected 2026-08-21 (
 cited `:831`, a line inside the function's doc comment rather than the declaration.** A peer-hop ACK/NACK from AUTHENTICATED peer `P` for
 correlation key `K` naming recipient `R` is authoritative if **EITHER**:
 
-1. **DIRECT** — unchanged, and tried FIRST: `DeriveJobID(P, K)` names an outbox job this bus durably
-   wrote.
+1. **DIRECT** — tried FIRST: `DeriveJobID(P, K)` names an outbox job this bus durably wrote **AND the
+   recipient `R`'s home bus equals `P`** (case-folded). The second clause is `ACK-4-FU-RECIPIENT-BINDING`
+   (CLOSED 2026-08-23); see the "recipient binding" note at the end of this section.
 2. **INDIRECT** — new. Let `D` be the **bus half of `R`** (invariant 2 is what makes that readable at
    all: a fully-qualified agent id names its home bus). Then ALL of:
    - `D` is not `P` — compared case-folded, since otherwise one bus would derive two job-id
@@ -405,12 +406,33 @@ passes no routing resolver **fails closed to the direct arm's answer**, byte-for
 behaviour (`AckConfig.NextHopAddress`, `internal/relay/ackhttp.go:176`; production passes
 `Registry.PeerBaseURL`, `cmd/agent-bus/relaywiring.go:1396`).
 
-**This does NOT close `ACK-4-FU-RECIPIENT-BINDING`, and must not be read as closing it.** On the
-INDIRECT arm the recipient IS bound to the acknowledging peer — `P` must be the hop we route `R`'s bus
-through — which is adjacent to that task and easily mistaken for it. But **the DIRECT arm still binds
-only (peer, key)**, so a peer legitimately bound for `K` can still settle ANY recipient of `K` on a
-direct link, and the direct arm is the one every single-hop delivery takes. The recipient half of
-authorization remains §8.2's "(none)" row, applied by the caller's `SettleAck`.
+#### The recipient binding — `ACK-4-FU-RECIPIENT-BINDING`, CLOSED 2026-08-23
+
+**Superseding the paragraph this replaced, which said the direct arm bound only (peer, key).** The
+INDIRECT arm always bound the recipient to the acknowledging peer — `P` must be the hop we route `R`'s
+bus through. The DIRECT arm did NOT, so on a direct link a peer legitimately bound for `K` could settle
+ANY recipient of `K`. That was harmless only while no correlation key had more than one recipient row;
+it becomes a **cross-recipient / cross-peer forgery** the moment a key has N rows (a destination-side or
+broadcast-side lifecycle row, `ACK-12-FU-DESTINATION-ROW`), because a terminal outcome is ABSORBING —
+the first terminal stands and can never be corrected — so a peer bound for its own recipient of `K`
+could burn a SIBLING recipient's outcome, including a LOCAL recipient's.
+
+**The fix** (`relay.AuthorizePeerAck`, `internal/relay/ack.go`): the DIRECT arm now also requires
+`EqualFold(homeBus(R), P)`. The outbox job is keyed on the recipient's HOME bus (`Forwarder.targets` →
+`Registry.Route(recipient)`), so `DeriveJobID(P, K)` is the job for recipients whose home bus is `P`; a
+frame naming a recipient whose home bus is not `P` is not covered by it, even when a sibling recipient of
+`K` made that job exist. Invariant 2 makes the binding computable: `R` is fully qualified, so its bus half
+names its home bus. `DeriveJobID` is **not** re-keyed on the recipient — it stays `(peer/home-bus, origin
+message id)`, one durable job per destination bus shared by all recipients on it, so there is **no on-disk
+format change and no migration**; per-recipient job ids would multiply fsync cost and orphan pending jobs
+across an upgrade for no security the home-bus binding does not already give.
+
+A mismatch answers the SAME uniform `ErrAckNotBound` (no new distinguishable case, no disconnect — an ACK
+frame is not a signed message, invariant 10), and returning it is also what lets `AuthorizePeerAckVia`
+fall through to the routing-based INDIRECT arm for the legitimate multi-hop case where `homeBus(R)` is not
+`P` but IS the bus this bus routes through `P`. The remaining conjunct — that a row exists for a recipient
+the SENDER NAMED — is still §8.2's "(none)" row, applied by the caller's `SettleAck`; the two are
+conjunctive and neither is sufficient alone.
 
 ### 6.3 Layer 3 — end-to-end recipient attestation (SHAPE ONLY, and it must be LABELLED as such)
 

@@ -257,7 +257,11 @@ func errorCodeOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 // nowhere a peer can influence.
 func TestRelayHopAckNackAuthentication(t *testing.T) {
 	key := ackMessageID(t, 7)
-	recipient := ackAgentID(t, ackLocalBus, "bravo")
+	// The recipient lives on the ACKING PEER's bus. Since ACK-4-FU-RECIPIENT-BINDING
+	// the direct arm requires the recipient's home bus to equal the authenticated
+	// peer, which is exactly the single-hop shape these tests drive (this bus owes
+	// ackPeerBus a copy, so the recipient it delivers for lives on ackPeerBus).
+	recipient := ackAgentID(t, ackPeerBus, "bravo")
 
 	// -----------------------------------------------------------------------
 	t.Run("the frame carries NO field a peer bus id could be read from", func(t *testing.T) {
@@ -750,7 +754,11 @@ func TestRelayHopAckNackAuthentication(t *testing.T) {
 // WAL, so the correlation is proved end to end rather than against a stub that
 // might agree with the handler by construction.
 func TestRelayHopAckNackCorrelation(t *testing.T) {
-	recipient := ackAgentID(t, ackLocalBus, "bravo")
+	// The recipient lives on the ACKING PEER's bus. Since ACK-4-FU-RECIPIENT-BINDING
+	// the direct arm requires the recipient's home bus to equal the authenticated
+	// peer, which is exactly the single-hop shape these tests drive (this bus owes
+	// ackPeerBus a copy, so the recipient it delivers for lives on ackPeerBus).
+	recipient := ackAgentID(t, ackPeerBus, "bravo")
 
 	// newRealOutbox builds an outbox over a real durable log and enqueues one
 	// obligation, exactly as Forwarder.Enqueue does on the egress path.
@@ -1010,7 +1018,11 @@ func TestMaxAckBytesFitsAMaximumFrame(t *testing.T) {
 // call reachable at all.
 func TestPeerAckRoundTripsThroughTheClient(t *testing.T) {
 	key := ackMessageID(t, 21)
-	recipient := ackAgentID(t, ackLocalBus, "bravo")
+	// The recipient lives on the ACKING PEER's bus. Since ACK-4-FU-RECIPIENT-BINDING
+	// the direct arm requires the recipient's home bus to equal the authenticated
+	// peer, which is exactly the single-hop shape these tests drive (this bus owes
+	// ackPeerBus a copy, so the recipient it delivers for lives on ackPeerBus).
+	recipient := ackAgentID(t, ackPeerBus, "bravo")
 
 	rig := newAckRig(t, nil)
 	rig.table.owe(ackPeerBus, key)

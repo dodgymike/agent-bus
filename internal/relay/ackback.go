@@ -829,18 +829,19 @@ type NextHopAddress func(busID string) (string, bool)
 // handshaked and never had an address configured must not become each other's
 // next hop by both being blank.
 //
-// # WHAT THIS BUYS, AND WHAT IT EXPLICITLY DOES NOT
+// # WHAT THIS BUYS
 //
-// On the INDIRECT arm the recipient IS bound to the acknowledging peer — P must
-// be the hop we route R's bus through — which is adjacent to, and often mistaken
-// for, ACK-4-FU-RECIPIENT-BINDING.
+// On BOTH arms the recipient is now bound to the acknowledging peer. The INDIRECT
+// arm binds it by routing — P must be the hop we route R's bus through. The
+// DIRECT arm binds it by home bus — AuthorizePeerAck requires EqualFold(homeBus(R),
+// P) (ACK-4-FU-RECIPIENT-BINDING, CLOSED 2026-08-23). Together they mean a peer
+// bound for K may settle only recipients whose home bus is the one its obligation
+// names, never a sibling recipient of K on another bus, which matters the moment a
+// key gains a second recipient row (ACK-12-FU-DESTINATION-ROW).
 //
-// IT DOES NOT CLOSE ACK-4-FU-RECIPIENT-BINDING. The DIRECT arm still binds only
-// (peer, key), so a peer legitimately bound for K can still settle ANY recipient
-// of K, and the direct arm is the one every single-hop delivery takes. That task
-// stays open and this is not its fix. The half of authorization that binds the
-// recipient remains ACK-CONTRACT.md §8.2's "(none)" row, applied by the caller's
-// SettleAck.
+// The still-separate second conjunct — that a row exists for a recipient the
+// SENDER named — remains ACK-CONTRACT.md §8.2's "(none)" row, applied by the
+// caller's SettleAck. The two are conjunctive and neither is sufficient alone.
 //
 // # UNIFORMITY, ORDER AND COST
 //

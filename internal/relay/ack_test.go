@@ -283,6 +283,98 @@ func TestAckRejectsForgery(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestAckDirectArmBindsRecipientHomeBus — ACK-4-FU-RECIPIENT-BINDING
+// ---------------------------------------------------------------------------
+
+// TestAckDirectArmBindsRecipientHomeBus pins the recipient conjunct that
+// ACK-4-FU-RECIPIENT-BINDING adds to the DIRECT arm: a peer P legitimately
+// holding an obligation for key K may settle ONLY a recipient whose home bus is
+// P, never a SIBLING recipient of the SAME K whose home bus is a DIFFERENT bus.
+//
+// Why the old (peer, key)-only direct arm was a forgery the moment a key has
+// more than one recipient row: the outbox job is keyed on the recipient's HOME
+// bus (Forwarder.targets -> Registry.Route(recipient)), so DeriveJobID(P, K) is
+// the job for recipients whose home bus is P. Before this binding a peer bound
+// for its OWN recipient of K could name any sibling recipient of K and the
+// direct arm authorised it on the (peer, key) job alone; SettleAck then found
+// that sibling's row and — terminal being ABSORBING — burned an outcome the peer
+// was never routed, uncorrectably. Invariant 2 makes the fix computable: R is
+// fully qualified, so its bus half names its home bus, and the rule is
+// EqualFold(homeBus(R), P), the same case-folded comparison the indirect arm
+// already makes.
+//
+// The refusal is the UNIFORM ErrAckNotBound and NEVER a disconnect (invariant
+// 10: an ACK frame is not a signed message, and this link carries a whole
+// roster's traffic).
+func TestAckDirectArmBindsRecipientHomeBus(t *testing.T) {
+	t.Parallel()
+
+	ours := akMessageID(t, akOriginBus, 7)
+	// This bus wrote exactly one obligation: a copy of `ours` owed to akPeerBus,
+	// the home bus of every recipient it delivers for.
+	table := akTable{DeriveJobID(akPeerBus, ours): akObligation(akPeerBus, ours)}
+
+	onPeer := akAgentID(t, akPeerBus, "callee")    // home bus == the acking peer
+	sibling := akAgentID(t, akThirdBus, "sibling") // home bus is a DIFFERENT bus
+
+	if _, _, _, err := ids.ParseAgentID(sibling); err != nil {
+		t.Fatalf("fixture sibling id is malformed, so this proves nothing: %v", err)
+	}
+
+	t.Run("recipient_on_the_acking_peer_is_authorised", func(t *testing.T) {
+		rec, err := AuthorizePeerAck(table, akLocalBus, akPeerBus, ours, onPeer)
+		if err != nil {
+			t.Fatalf("AuthorizePeerAck refused the peer settling a recipient that lives ON it: %v — this is the golden single-hop path and refusing it would break every direct acknowledgement", err)
+		}
+		if rec.JobID != DeriveJobID(akPeerBus, ours) {
+			t.Fatalf("bound record has JobID %q, want %q", rec.JobID, DeriveJobID(akPeerBus, ours))
+		}
+		// The binding rule is a pure read: a legitimate retry of the SAME
+		// (peer, key, recipient) returns the identical answer, no error and no
+		// state change — the authorization half of invariant 10's first case,
+		// and never a disconnect.
+		rec2, err2 := AuthorizePeerAck(table, akLocalBus, akPeerBus, ours, onPeer)
+		if err2 != nil || rec2.JobID != rec.JobID {
+			t.Fatalf("a retry of the SAME (peer, key, recipient) must return the ORIGINAL binding: got (%q, %v)", rec2.JobID, err2)
+		}
+	})
+
+	t.Run("cross_recipient_forgery_on_the_direct_arm_is_REFUSED", func(t *testing.T) {
+		// akPeerBus is legitimately bound for `ours` (it holds the obligation),
+		// then names a SIBLING recipient of the same key whose home bus is
+		// akThirdBus — a recipient this bus routed through a DIFFERENT peer.
+		// BEFORE ACK-4-FU-RECIPIENT-BINDING this returned nil: THE VULNERABILITY.
+		_, err := AuthorizePeerAck(table, akLocalBus, akPeerBus, ours, sibling)
+		if err == nil {
+			t.Fatal("AuthorizePeerAck AUTHORISED a peer to settle a sibling recipient whose home bus it is not — the cross-recipient/cross-peer forgery ACK-4-FU-RECIPIENT-BINDING closes; terminal is ABSORBING so the wrong outcome could never be corrected")
+		}
+		if !errors.Is(err, ErrAckNotBound) {
+			t.Fatalf("the forgery must be refused with the UNIFORM ErrAckNotBound — no distinguishable oracle, no disconnect (invariant 10): got %v", err)
+		}
+	})
+
+	t.Run("forgery_is_refused_end_to_end_through_AuthorizePeerAckVia", func(t *testing.T) {
+		// The one production call site is AuthorizePeerAckVia. With a routing
+		// table where the sibling's home bus and the acking peer dial to
+		// DIFFERENT addresses, the indirect arm cannot rescue the forgery.
+		nextHop := func(busID string) (string, bool) {
+			switch busID {
+			case akPeerBus:
+				return "https://peer.example:8443", true
+			case akThirdBus:
+				return "https://third.example:8443", true
+			default:
+				return "", false
+			}
+		}
+		_, err := AuthorizePeerAckVia(table, nextHop, akLocalBus, akPeerBus, ours, sibling)
+		if !errors.Is(err, ErrAckNotBound) {
+			t.Fatalf("the full authorisation path authorised the cross-recipient forgery: got %v, want ErrAckNotBound", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // TestAckRejectsReplay — invariant 10's three cases, and NO DISCONNECT (§12)
 // ---------------------------------------------------------------------------
 
@@ -697,22 +789,20 @@ func TestAckDoesNotLeakRecipientState(t *testing.T) {
 		}
 	})
 
-	t.Run("recipient_binding_is_NOT_provided_here_and_that_gap_is_pinned", func(t *testing.T) {
-		// A DOCUMENTED-GAP TEST. AuthorizePeerAck binds the PEER to the KEY; the
-		// outbox record carries no recipient, so it cannot bind the RECIPIENT.
-		// A peer legitimately holding ONE obligation for key K is accepted here
-		// while naming ANY well-formed agent id. That conjunct is §8.2's
-		// "(none)" row and it lives in ACK-2's (key, recipient) table.
-		//
-		// This asserts the CURRENT, DELIBERATE behaviour so the gap cannot be
-		// mistaken for closed — and so that whoever closes it has to come here
-		// and say so, rather than discovering it in production.
+	t.Run("recipient_on_a_different_bus_is_bound_out_the_uniform_way", func(t *testing.T) {
+		// FORMERLY the documented-gap test that PINNED the missing recipient
+		// binding (ACK-4-FU-RECIPIENT-BINDING). The gap is now CLOSED: the direct
+		// arm binds the recipient's HOME bus to the acking peer, so a peer holding
+		// an obligation for K may no longer settle a sibling recipient whose home
+		// bus is a different bus. It must be refused with the SAME uniform
+		// ErrAckNotBound as every other unbound cause — telling this apart from
+		// "no such key" would reopen the oracle this test's neighbours protect.
+		// The forgery reproduction and the golden positive live in
+		// TestAckDirectArmBindsRecipientHomeBus; this asserts the REFUSAL stays on
+		// the uniform-answer path here in the leak test.
 		stranger := akAgentID(t, akThirdBus, "never-addressed")
-		if _, err := AuthorizePeerAck(table, akLocalBus, akPeerBus, ours, stranger); err != nil {
-			t.Fatalf("AuthorizePeerAck refused a recipient it has no way to check: %v — if this now REFUSES, the recipient conjunct has been implemented and this test must be replaced by a real negative case, not deleted", err)
-		}
-		if !strings.Contains(akReadSource(t, "ack.go"), "It does NOT bind the RECIPIENT") {
-			t.Fatal("ack.go no longer states that the recipient half is NOT bound here: a nil error from a function called AuthorizePeerAck reads as full authorization, and the doc is the only thing saying otherwise")
+		if _, err := AuthorizePeerAck(table, akLocalBus, akPeerBus, ours, stranger); !errors.Is(err, ErrAckNotBound) {
+			t.Fatalf("a peer settling a recipient whose home bus is a DIFFERENT bus got %v, want the uniform ErrAckNotBound: the recipient binding must refuse on the SAME path as every other unbound cause", err)
 		}
 	})
 
