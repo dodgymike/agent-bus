@@ -6067,3 +6067,58 @@ no GUARD file and no CONTROL-PLANE file, so security is skipped by default (rost
 skip: NONE — a reviewer re-confirmation is required to close the held R4 item (does the entry
 accurately record the three rulings and satisfy the precondition `main` set); verdict posted to the
 ACK-3 Spec journal.
+
+---
+
+## 2026-08-23 — Wave: ACK-17
+
+**Chain run: spec-keeper → test-engineer (in-runner) → reviewer → security.** Documentation: not
+run — no agent-facing surface, no route/CLI/protocol/contract change (test-only). Invariants read in
+full: **2** (fully-qualified ids, never shortened), **3** (sessions are opaque handles; the per-agent
+active-session cap and the parked-wait cap are DIFFERENT limits), **10** (a capped waiter is refused,
+not disconnected).
+
+Replaced a VAPOR gate. ACK-17 was `in_progress` with reviewer+security PASS notes, but those ran
+against an uncommitted overlay that never reached HEAD: the approved tests do not exist at HEAD
+(`internal/httpapi/ackstatus_test.go` is 628 lines; the prior PASS cited a new test at line 748).
+Wrote the four mutation-killing tests for real and re-gated genuinely.
+
+- **ACK-17** — four mutation-killing tests, TEST-ONLY (no production `.go` changed). Files:
+  `internal/httpapi/ackstatus_test.go` (+ helpers `enrolAckAgentWithKey`, `openAckSession`;
+  `TestAckStatusParkedWaitCapBindsAcrossSessionsOfOneAgent`,
+  `TestAckStatusParkedWaitCapKeyIncludesTheNameSuffix`) and `cmd/agent-busctl/ackstatus_test.go`
+  (`TestAckStatusHumanRenderingPairsLabelsAndValues`,
+  `TestAckStatusHumanRenderingSuppressesEmptyFields`).
+  - **Finding:** mutation 1 (parked-wait cap keyed on SESSION vs AGENT) is ALREADY-CORRECT at HEAD —
+    `ackstatus.go:292` calls `acquire(sender)` where `sender = AgentIDFromContext` (fully-qualified
+    agent id), matching the published cap in `CONTRACTS-HTTP.md` ("keyed on the authenticated
+    principal"; "Self-starvation between two connections of the SAME agent is possible and
+    accepted"). No production bug; all four tests are regression pins, not fixes. The task's
+    "CONTRACTS-HTTP.md:456" was a stale line reference.
+  - **RED-first, each demonstrated:** Mut1 `acquire(sender)`→`acquire(r.Header.Get("Authorization"))`
+    → test1 RED (session B answered 200, want 429). Mut2 `acquire(sender[:LastIndex(sender,"-")])` →
+    test2 RED (worker-2 refused) while existing `TestAckStatusParkedWaitCapIsPerPrincipal` stayed
+    GREEN (proves added coverage). Mut3a shortTimestamp→full RFC3339 → test3 RED; Mut3b swap
+    AcceptedAt/SettledAt → test3 RED. Mut4a/4b drop the `Recipient`/`AttestedBy` empty-guards →
+    test4 RED (empty label lines).
+  - **Mutation 2 residual (stated, not half-done):** the genuine cross-bus same-suffix collision is
+    NOT observable on a single-bus fixture — `ackWaiters` is per-`*Server`, every principal carries
+    one bus-id, and stripping a constant prefix is injective on a single-bus keyspace, so that
+    mutation is a behavioural no-op there. Pinned the largest single-bus part (suffix truncation) and
+    documented the residual in-code; no two-bus federation fixture (disproportionate for a test-only
+    change). Both gates judged this the correct call; no follow-up required.
+  - Proof (clean-HEAD overlay + owned files, overlay's own `proof-check.sh`): verdict **PASS**,
+    tests_run=4, non-vacuous. Full `-race ./...` @ `a7420dc`: all PASS except a flake
+    `TestMissingSeqFloorWithADamagedLogRefusesToStart` in `cmd/agent-bus` (untouched package; passes
+    in isolation ×3 on clean HEAD).
+
+Security ran (NOT skipped): the subject is auth keying (invariants 2/3) and the task exists to
+replace a vapor security gate; running it produces a real gate. It touches only two `_test.go` files
+— the carve-out would have permitted a skip — but running was the deliberate, safer call.
+Gate cycle: reviewer PASS + security PASS, both confirming RED-under-mutation independently (reviewer
+via `go test -overlay`, security by mutate-and-restore). No CHANGES raised.
+
+Reviewer skip: NONE — reviewer ran. Security skip: NONE — security ran (deliberately, despite the
+docs-and-tests carve-out applying to `internal/httpapi/ackstatus_test.go` and
+`cmd/agent-busctl/ackstatus_test.go`). Documentation skip: no agent-facing/contract surface changed
+(paths: the same two `_test.go` files); this log line records it.
