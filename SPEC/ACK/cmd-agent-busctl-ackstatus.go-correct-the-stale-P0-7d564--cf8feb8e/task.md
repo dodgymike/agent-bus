@@ -46,7 +46,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (todo)
+- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (done)
 - [ACK-5](../ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 
 ---

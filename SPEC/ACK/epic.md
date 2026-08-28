@@ -2,15 +2,14 @@
 
 [← all epics](../../SPEC.md)
 
-**38 open / 56 total.** Full records live in `SPEC/ACK/<task>/task.md`.
+**37 open / 56 total.** Full records live in `SPEC/ACK/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (38)
+## Open tasks (37)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| ACK-12-FU-DESTINATION-ROW | ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… | todo | P0 | [task.md](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
 | ACK-10 | ACK-10: ACK/NACK compatibility, version negotiation and downgrade safety | todo | P1 | [task.md](ACK-10--cf417e18/task.md) | _not fetched_ | — |
 | ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY | ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY: client.Message.signingMessage feeds the L… | todo | P1 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY--7e23e90f/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
 | ACK-14 | ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… | todo | P1 | [task.md](ACK-14--1884218d/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) [ACK-RETRY-ENGINE](ACK-RETRY-ENGINE--81ce7331/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
@@ -49,12 +48,13 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | ACK-5-FU-REGISTRY-BASEURL-GUARD | ACK-5-FU-REGISTRY-BASEURL-GUARD: guard test: a peer must never be able to write its own R… | todo | P3 | [task.md](ACK-5-FU-REGISTRY-BASEURL-GUARD--699c108f/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
 | ACK-6-FU-SETTLE-WALERR-SENTINEL | ACK-6-FU-SETTLE-WALERR-SENTINEL: a WAL failure in ack.Store.Settle answers 500, not 503 | todo | P3 | [task.md](ACK-6-FU-SETTLE-WALERR-SENTINEL--c4dc6b6b/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
 
-## Closed tasks (18) — done, cancelled, superseded
+## Closed tasks (19) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | ACK-1 | ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine | done | P0 | [task.md](ACK-1--e0ac42e1/task.md) | _not fetched_ | — |
 | ACK-12 | ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance | done | P0 | [task.md](ACK-12--17406b3a/task.md) | _not fetched_ | [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |
+| ACK-12-FU-DESTINATION-ROW | ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… | done | P0 | [task.md](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
 | ACK-12-FU-WATCH-CORRELATION-KEY | ACK-12-FU-WATCH-CORRELATION-KEY: \`watch\` never exposes the origin message id, so a recipi… | done | P0 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) | _not fetched_ | [ACK-12](ACK-12--17406b3a/task.md) [ACK-12-FU-DESTINATION-ROW](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
 | ACK-2 | ACK-2: Durable local send acceptance and ACK/NACK lifecycle record | done | P0 | [task.md](ACK-2--9564f953/task.md) | _not fetched_ | [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) |
 | ACK-3 | ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation | done | P0 | [task.md](ACK-3--263c47fe/task.md) | _not fetched_ | — |

@@ -5,19 +5,19 @@
 | Public id | `7d564118-e513-43b4-ba20-76e04dee48e6` |
 | Key | _(null in the export)_ |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T14:33:06.675594+00:00 |
-| Updated | 2026-08-22T06:19:29.069174+00:00 |
-| Completed | — |
+| Updated | 2026-08-28T22:27:48.279133+00:00 |
+| Completed | 2026-08-28T22:27:48.279116+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestThreeBusEndToEndAckNack$ ./tests/e2e'
+go test -race -run "TestTransitAckResolvesAfterMessageBodyPruned|TestDestinationRowSurvivesRestart|TestDuplicateRelayedIngestOpensNoSecondRow" ./internal/hub
 ```
 
 ## Status note

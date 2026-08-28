@@ -6430,3 +6430,10 @@ not a local write). The 5 red guards encoded the superseded pre-ACK-12 `ErrNoRec
 - Gates: reliability-reviewer, security, reviewer — verdicts recorded in the task journal. The
   documented 409-absorb arm (an intermediate answers its downstream 200 for an outcome the origin refused with
   409) was weighed by reliability-reviewer against ACK-5.
+
+## 2026-08-28 — SPEC mirror refresh after ACK-12-FU-DESTINATION-ROW (7d564118) close
+
+Regenerated SPEC.md / SPEC/ (gen-spec-mirror.sh --no-relations) to reflect the destination-row P0 close
+(commit 2622a25) — ACK epic now 0 open P0. Mirror-only housekeeping, generated artifact. security —
+SKIPPED under the docs-and-tests carve-out (generated docs, no guard/control-plane path); paths: SPEC.md,
+SPEC/, AGENT_LOG.md. No product code.

@@ -51,7 +51,7 @@ _Unknown._
 
 
 - [ACK-12](../ACK-12--17406b3a/task.md) — ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance (done)
-- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (todo)
+- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (done)
 - [ACK-5](../ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -61,7 +61,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (todo)
+- [ACK-12-FU-DESTINATION-ROW](../ACK-12-FU-DESTINATION-ROW--7d564118/task.md) — ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… (done)
 - [ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT](../ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT--dcf87771/task.md) — ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT: render the human watch "ack key" line at… (todo)
 - [ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT](../ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT--cc26db9c/task.md) — ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT: cmd/agent-bus/relayegress.go asserts no… (todo)
 - [ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT](../ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT--a74dd477/task.md) — ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT: exit 8 unknown is four answers at once… (todo)

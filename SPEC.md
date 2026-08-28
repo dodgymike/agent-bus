@@ -9,11 +9,11 @@
 > - `SPEC/<EPIC>/epic.md` — every task in the epic, open first, then closed
 > - `SPEC/<EPIC>/<task>/task.md` — the full record for one task
 
-**849 tasks in 32 epics — 556 open, 293 closed.**
+**849 tasks in 32 epics — 555 open, 294 closed.**
 
 | Epic | Open | Total | Summary | Tasks |
 | --- | ---: | ---: | --- | --- |
-| ACK | 38 | 56 | Planning epic for end-to-end message acknowledgement. Assumption: the user’s “ack/ack” means ACK/NACK (positi… | [SPEC/ACK/epic.md](SPEC/ACK/epic.md) |
+| ACK | 37 | 56 | Planning epic for end-to-end message acknowledgement. Assumption: the user’s “ack/ack” means ACK/NACK (positi… | [SPEC/ACK/epic.md](SPEC/ACK/epic.md) |
 | ADMIN | 14 | 14 | The local operator console for a set of agent-bus nodes. Ships as a NEW BINARY \`agent-busadm\` | [SPEC/ADMIN/epic.md](SPEC/ADMIN/epic.md) |
 | AGENTIF | 4 | 13 | scripts/bus-*.sh wrappers (serve, enrol, agents, send, broadcast, wait, leave, peer) plus AGENT_PROTOCOL.md,… | [SPEC/AGENTIF/epic.md](SPEC/AGENTIF/epic.md) |
 | ART | 18 | 18 | Planning epic for secure small inline and resumable chunked artifact transfer, including federated buses. Git… | [SPEC/ART/epic.md](SPEC/ART/epic.md) |
