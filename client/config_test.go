@@ -92,6 +92,39 @@ func TestParseBusURLTable(t *testing.T) {
 	}
 }
 
+// TestParseBusURLCanonicalisesRedundantPathSegments pins the invariant-10 scope
+// key bug filed as bd662bae: redundant slashes and literal "."/".." segments in
+// the base URL path must collapse so equivalent spellings hit the same stored
+// idempotency scope.
+func TestParseBusURLCanonicalisesRedundantPathSegments(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty path stays empty", raw: "https://bus.example:8443", want: "https://bus.example:8443"},
+		{name: "single trailing slash drops", raw: "https://bus.example:8443/", want: "https://bus.example:8443"},
+		{name: "double trailing slash drops", raw: "https://bus.example:8443//", want: "https://bus.example:8443"},
+		{name: "dot path drops", raw: "https://bus.example:8443/.", want: "https://bus.example:8443"},
+		{name: "mixed redundant path drops", raw: "https://bus.example:8443//./", want: "https://bus.example:8443"},
+		{name: "prefix collapses repeated slash and dot", raw: "https://bus.example:8443/prefix//./", want: "https://bus.example:8443/prefix"},
+		{name: "prefix parent segment collapses", raw: "https://bus.example:8443/prefix/../", want: "https://bus.example:8443"},
+		{name: "ipv6 host stays bracketed while path cleans", raw: "https://[::1]:443//prefix/../", want: "https://[::1]"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := parseBusURL(tt.raw)
+			if err != nil {
+				t.Fatalf("parseBusURL(%q): unexpected error: %v", tt.raw, err)
+			}
+			if got := u.String(); got != tt.want {
+				t.Fatalf("parseBusURL(%q).String() = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCanonicalHostIPv6DefaultPort pins 2cf20abf: canonicalHost's default-port
 // early return used to strip the brackets net.SplitHostPort removes and never
 // put them back, turning "[::1]:443" into the bare "::1" — not a legal URL

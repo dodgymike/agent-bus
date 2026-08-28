@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -359,7 +360,9 @@ func DefaultIdentityDir() (string, error) {
 //     dropping a query string a caller thought was meaningful is worse than
 //     refusing it.
 //
-// A trailing slash is trimmed so joining a path is unambiguous.
+// The path is canonicalised: redundant literal slashes and dot segments are
+// collapsed, and an empty-or-root result becomes "" so equivalent base URLs
+// share one scope key.
 func parseBusURL(raw string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -429,8 +432,41 @@ func parseBusURL(raw string) (*url.URL, error) {
 	// 2026-08-08), caused entirely by capitalisation.
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = canonicalHost(u.Scheme, u.Host)
-	u.Path = strings.TrimSuffix(u.Path, "/")
+	setCanonicalURLPath(u)
 	return u, nil
+}
+
+// setCanonicalURLPath collapses redundant literal slashes and dot segments so
+// equivalent base URLs share one idempotency scope key, while preserving any
+// escaped spelling the caller used for non-dot path bytes.
+func setCanonicalURLPath(u *url.URL) {
+	escaped := u.EscapedPath()
+	if escaped == "" {
+		u.Path = ""
+		u.RawPath = ""
+		return
+	}
+	cleaned := path.Clean(escaped)
+	if cleaned == "." || cleaned == "/" {
+		u.Path = ""
+		u.RawPath = ""
+		return
+	}
+	decoded, err := url.PathUnescape(cleaned)
+	if err != nil {
+		// url.Parse accepted the path and path.Clean only removed separators and
+		// literal dot segments, so this should be unreachable. Fail closed to the
+		// cleaned string if it ever happens rather than keeping two scope keys.
+		u.Path = cleaned
+		u.RawPath = ""
+		return
+	}
+	u.Path = decoded
+	if cleaned == decoded {
+		u.RawPath = ""
+		return
+	}
+	u.RawPath = cleaned
 }
 
 // canonicalHost lower-cases the host and drops the port when it is the

@@ -6328,3 +6328,26 @@ Formal gate status after fixes: reviewer/security/documentation re-review still 
 ## 2026-08-23 — MTLS-MIGRATE docs correction after reviewer mismatch
 
 Corrected the client-certificate bootstrap docs to match shipped behavior: after first binding, a different presented certificate is refused by authMiddleware cert/session cross-check as 403 before bootstrap idempotency handling and without Connection: close; same-key/same-cert replay returns the original body, including already_bound:false for the first binding, with Idempotency-Replayed:true as the replay signal. Scope: CONTRACTS-HTTP.md, CONTRACTS-CLI.md, AGENT_PROTOCOL.md, DECISIONS.md. Awaiting reviewer/documentation re-gates; no commit.
+
+
+## 2026-08-23 — MTLS bd662bae-4c6c-426d-a736-7830d2d21037: canonicalise redundant bus URL path segments
+
+Task restatement: make `client.parseBusURL` collapse redundant literal path slashes and `.` / `..` segments so equivalent `--bus` spellings share one idempotency scope key, without changing the existing userinfo/query/fragment/loopback-HTTP/IPv6 rules.
+
+Invariants read in full before editing: 7 and 10.
+
+RED-first proof observed before the fix:
+- `go test -run TestParseBusURLCanonicalisesRedundantPathSegments ./client` failed on `https://bus.example:8443//`, `https://bus.example:8443/.`, `https://bus.example:8443//./`, `https://bus.example:8443/prefix//./`, `https://bus.example:8443/prefix/../`, and `https://[::1]:443//prefix/../` because `parseBusURL` only trimmed one trailing slash and left the rest of the path spelling in the scope key.
+
+Implementation summary:
+- `client/config.go`: replaced the one-slash trim with `setCanonicalURLPath`, which cleans the escaped path with `path.Clean`, maps empty/root results back to `""`, and preserves non-dot escaped path bytes by rebuilding `Path` / `RawPath` together.
+- `client/config_test.go`: added `TestParseBusURLCanonicalisesRedundantPathSegments` covering empty, trailing-slash, repeated-slash, dot-segment, parent-segment, prefix, and IPv6-bracket cases.
+
+Verification:
+- `go test -race -run 'Test(NewRejectsMalformedBusURL|ParseBusURLTable|ParseBusURLCanonicalisesRedundantPathSegments|CanonicalHostIPv6DefaultPort)$' ./client` → PASS.
+- Clean HEAD overlay proof via the overlay's own `scripts/proof-check.sh`: `go test -race -run 'TestParseBusURLCanonicalisesRedundantPathSegments' ./client/...` → `proof-check: verdict=PASS class=test exit=0 tests_run=9 top_level=1 skipped=0 failed=0 empty_pkgs=0`.
+
+Gate verdicts:
+- Reviewer: COMPLETED, PASS. Scope stayed inside `client/config.go` and `client/config_test.go`; the patch is minimal and leaves the existing scheme/host/userinfo/query/fragment/loopback/IPv6 behavior covered by the pre-existing tests plus the new regression.
+- Security: COMPLETED, PASS. The change narrows idempotency scope-key ambiguity and does not relax any transport/auth checks.
+- Documentation: COMPLETED, PASS with no product-doc delta required. No CLI/HTTP/agent-facing contract changed; only the local code comment in `client/config.go` was updated to match the canonicalization behavior.
