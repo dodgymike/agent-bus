@@ -2130,19 +2130,30 @@ func (h *Hub) forwardOnward(m store.Message) {
 // The recorder's own capacity refusals are logged loudly and specifically at the
 // point of refusal (invariant 6), and anything unexpected is logged here.
 //
-// # WHICH MESSAGES GET A ROW, AND WHY THE OTHER TWO DO NOT
+// # WHICH MESSAGES GET A ROW, AND WHY BROADCAST DOES NOT
 //
-//   - BROADCAST: none. A broadcast has NO canonical audience under signing
-//     format v1 — store.Message keeps it as a FLAG, deliberately not an expanded
-//     roster — so there is no (message, recipient) pair to key a row on.
-//     Inventing one would settle SIGN-3 by accident, in a place nobody would
-//     look. /v1/broadcast answers 501 today, so this arm is unreachable from the
-//     agent surface; it is written as a guard rather than an assumption.
-//   - RELAYED INGEST: none, in this build. An intermediate bus holds a copy of
-//     somebody else's message: the sender is not ours, cannot read a row here
-//     (§13.3 authorises the ORIGINAL SENDER only), and the rows an intermediate
-//     needs are the back-propagation rows that ACK-5 designs. Writing them now
-//     would put a shape on disk before the task that has to live with it exists.
+//   - BROADCAST: none, and this is a DELIBERATE NON-GOAL, not an omission. A
+//     broadcast has NO canonical audience under signing format v1 —
+//     store.Message keeps it as a FLAG, deliberately not an expanded roster — so
+//     there is no (message, recipient) pair to key a row on. Inventing one would
+//     settle SIGN-3 by accident, in a place nobody would look. /v1/broadcast
+//     answers 501 today, so this arm is unreachable from the agent surface; it is
+//     written as a guard rather than an assumption. The same reasoning is stated
+//     at transitAck's empty-recipient-list arm and in
+//     internal/store/provenance.go; do NOT drop the broadcast early-return
+//     silently.
+//   - RELAYED INGEST: ONE ROW PER RECIPIENT, as of ACK-12-FU-DESTINATION-ROW.
+//     The row is keyed on the ORIGIN message id (m.OriginID() ==
+//     m.OriginMessageID for a relayed copy, invariant 1 — the origin bus's id,
+//     never re-minted or adopted here) and the recipient, and charged to
+//     m.Sender (the origin agent's fully-qualified id, invariant 2). The original
+//     sender on the ORIGIN bus still cannot read THIS bus's row (§13.3), so the
+//     row buys no sender-visible observation on an intermediate or terminal bus;
+//     what it buys is transit-ack AUTHORISATION that outlives message-body
+//     pruning — hub.transitAck reads it, bounding the ack window by ack.Retention
+//     (24h) rather than by the byte/age message retention that prunes the body
+//     first. This became correct once ACK-4-FU-RECIPIENT-BINDING landed (several
+//     rows behind one correlation key is now bound to the authenticated peer).
 //
 // # THE CORRELATION KEY IS READ THROUGH OriginID(), NEVER RE-SPELLED
 //
@@ -2151,23 +2162,22 @@ func (h *Hub) forwardOnward(m store.Message) {
 // branch at a call site. For a locally-originated message it returns the
 // message's own id, which IS the origin id.
 //
-// # THE COST, MEASURED RATHER THAN ESTIMATED — ONE EXTRA FSYNC CYCLE PER SEND
+// # THE COST, MEASURED RATHER THAN ESTIMATED — UP TO 64 FSYNCS PER RELAYED INGEST
 //
 // The loop below is over m.Recipients, and each row is a separate two-phase
-// transaction through the same log, under writeMu. TODAY THAT LOOP RUNS EXACTLY
-// ONCE, because the two callers that reach it with more than one recipient are
-// both excluded above: SendRequest carries a single `To`
-// (publish is called with `[]string{req.To}`), a broadcast has no recipient list
-// at all, and only IngestRelayed passes several — and relayed ingest writes no
-// row in this build.
+// transaction through the same log, under writeMu. A LOCAL send still runs it
+// EXACTLY ONCE: SendRequest carries a single `To` (publish is called with
+// `[]string{req.To}`) and a broadcast is excluded above.
 //
-// So the exposure an authenticated agent has is 1 extra fsync per send, not
-// store.MaxRecipients (64) of them. THAT IS THE THING TO RE-CHECK before any
-// task gives a local send several recipients: at 64 this becomes 64 serial
-// fsyncs with the global write lock held, repeatable by any enrolled agent —
-// exactly the latent hazard forwardOnward names above for the outbox, except
-// live. Batching the rows into one wal.Entry would be the fix, and it is a
-// record-shape change rather than a tidy-up.
+// THE RELAYED MULTI-RECIPIENT CASE IS NOW LIVE (ACK-12-FU-DESTINATION-ROW).
+// A relayed ingest carries 1..store.MaxRecipients (64) recipients, so this loop
+// can now run up to 64 times = up to 64 serial two-phase fsyncs under the global
+// writeMu, and it is driven by an authenticated PEER, not by the local sender.
+// That is exactly the latent hazard the earlier version of this note told the
+// next task to re-check "before any task gives a local send several recipients"
+// — except it arrived on the relay ingest path instead. The fix is to BATCH the
+// rows into ONE wal.Entry, which is a record-shape change and is OUT OF SCOPE
+// here; this task deliberately does not implement it.
 //
 // # THE CRASH WINDOW, NAMED RATHER THAN HIDDEN
 //
@@ -2195,7 +2205,15 @@ func (h *Hub) forwardOnward(m store.Message) {
 // reads yet. If ACK-8 judges the window unacceptable, that is the shape to
 // reach for.
 func (h *Hub) recordAcceptance(m store.Message, relayed, broadcast bool) {
-	if h.acks == nil || relayed || broadcast {
+	// BROADCAST STAYS A DELIBERATE NON-GOAL — see "WHICH MESSAGES GET A ROW"
+	// above. It has no canonical audience under signing format v1, so there is no
+	// (message, recipient) pair to key a row on; do NOT drop this early-return
+	// silently. RELAYED ingest, by contrast, NOW writes rows (removing `relayed`
+	// from this guard is ACK-12-FU-DESTINATION-ROW): m.OriginID() ==
+	// m.OriginMessageID for a relayed copy and m.Sender is the origin agent's
+	// fully-qualified id, so the existing loop writes one row per recipient keyed
+	// (OriginMessageID, recipient), charged to the origin sender.
+	if h.acks == nil || broadcast {
 		return
 	}
 	correlationKey := m.OriginID()
@@ -2203,10 +2221,9 @@ func (h *Hub) recordAcceptance(m store.Message, relayed, broadcast bool) {
 		// THE RECOVER IS PER RECIPIENT, NOT AROUND THE LOOP. A panic recovered
 		// outside the loop would abandon rows 2..N as well as the one that
 		// panicked, turning one bad recipient into a silent loss of status for
-		// every other recipient of the same message. It has no effect today —
-		// the loop runs exactly once, see the cost note above — and that is
-		// precisely why it has to be right now rather than when a multi-recipient
-		// local send makes it observable.
+		// every other recipient of the same message. This is now LIVE on the
+		// relayed-ingest path (up to 64 recipients, see the cost note above), so
+		// the per-recipient scope is load-bearing rather than latent.
 		err := h.acceptOne(m, correlationKey, recipient)
 		if err == nil {
 			continue

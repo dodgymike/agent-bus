@@ -6376,3 +6376,57 @@ in worktree `agent-a8064db9b21f37235`. Resolution requires a DECISIONS.md ruling
 review: (a) destination rows are non-settleable via the relay-settle path → update the 5 guards + record
 the decision, keep relaywiring.go; or (b) narrow the settleAck divert so it does not forward a foreign-origin
 key this bus holds a settleable row for. Task left todo.
+
+---
+
+## 2026-08-28 — ACK-12-FU-DESTINATION-ROW: design ruling executed, guards reconciled, gated (recovery close-out)
+
+**Chain run: (design ruling by orchestrator, OPTION (a)) → feature-runner reconstruct-onto-HEAD →
+DECISIONS.md → guard rewrite → reliability-reviewer → security → reviewer.** No step skipped; this is a
+code change touching production + guard test files, so security ran (no carve-out).
+
+Closes the blocker recorded in the entry above. Orchestrator provisional ruling (task journal, `author=main`,
+2026-08-28) = OPTION (a): the recovered implementation is CORRECT; a destination/intermediate ack row is
+NON-SETTLEABLE; a foreign-origin ack is a TRANSIT acknowledgement (authorised locally off the destination
+row, forwarded one hop back, settled ONLY at the origin — invariant 4 met by the synchronous forward chain,
+not a local write). The 5 red guards encoded the superseded pre-ACK-12 `ErrNoRecord` transit signal.
+
+- Reconstructed the 6-file recovered impl onto HEAD `daeef48` (6-file diff `daeef48`↔`fbfa825` is empty, so
+  the recovered set applies byte-identically): `internal/hub/ack.go`, `internal/hub/hub.go`,
+  `cmd/agent-bus/relaywiring.go`, `internal/hub/ackdestrow_relay12fu_test.go`,
+  `internal/hub/acktransit_test.go`, `internal/httpapi/acktransit_test.go`. Reformatted one doc-comment in
+  `internal/hub/ack.go` (rewrapped a line beginning `409)` that go1.19.4 gofmt's doc-comment reflow mangled;
+  meaning preserved, `gofmt -l` output now empty).
+- DECISIONS.md: recorded the semantic change — the transit-vs-settle decision moves off the `ack.Store.Settle`
+  `ErrNoRecord` signal (erased now that relay-ingest writes destination rows on intermediates) and onto the
+  correlation key's bus half, decided BEFORE Settle on both the agent surface (`hub.AcknowledgeDelivery`) and
+  the peer surface (`cmd/agent-bus/relaywiring.go settleAck`); destination rows are non-settleable; only the
+  origin settles; invariant 4 holds via the synchronous chain. Cited `internal/hub/ack.go:110-140`.
+- Guards updated, safety property PRESERVED, not deleted:
+  - `cmd/agent-bus/acktransit_test.go` `TestSettleAckDisposition`: the "a row that DOES exist still settles
+    here" subtest is split into (1) a FOREIGN-origin row (`atForeignKey`, bus half = peer) — now asserts
+    authorise + forward as transit exactly once and the destination row is NOT settled locally; and (2) a new
+    LOCAL-origin row (`atOriginKey`, bus half = ours) — re-asserts the original safety property: the row is the
+    sole authority, settled locally and NOT also forwarded (the disposition is not moved above the settle for a
+    bus's OWN keys).
+  - `cmd/agent-bus/ackwiring_ack3_test.go` `TestSettleAckCorrelatesToTheDurableRecord`: `ackFedKey` changed
+    from `wiringPeerBus+"-1"` (foreign) to `wiringLocalBus+"-1"` (local origin), because the Settle/DecideAck
+    correlation these subtests protect (apply / duplicate / conflict / durability-not-a-4xx) is now reachable
+    ONLY by a local-origin key. Foreign-origin disposition is guarded separately in `TestSettleAckDisposition`.
+- Non-vacuity proven by mutation (both directions): disabling the foreign-origin divert makes the foreign
+  transit subtest RED (row settled locally, 0 forwards); diverting local keys above Settle makes the
+  local-origin re-assertion AND all 4 correlation subtests RED (ErrAckNotBound instead of settle). Guards
+  restored after each mutation.
+- Verify: `go build ./...`, `go vet ./...` clean; `gofmt -l` empty output. Mandatory acceptance
+  proof `bash scripts/proof-check.sh 'go test -race -run "TestTransitAckResolvesAfterMessageBodyPruned|TestDestinationRowSurvivesRestart|TestDuplicateRelayedIngestOpensNoSecondRow" ./internal/hub'`
+  = verdict=PASS (3 ran, 3 passed, 0 skipped). Full `go test -race ./...` (working-tree @ `daeef48`) = 19
+  packages ok, 0 failures, 0 data races.
+- Invariants read in full: 1 (destination row keyed on the server-minted ORIGIN message id, no re-mint or
+  adopt), 2 (fully-qualified recipient/sender; the key's bus half is the transit discriminator), 4 (nothing
+  acked before durable — satisfied on the transit arm by the SYNCHRONOUS forward chain to the origin's fsync,
+  not by a local write), 5/6 (recover-to-prefix; the row is metadata-only durable state replayed on restart;
+  expiry is loud), 10 (duplicate relayed ingest opens no second row; every ack refusal is reject-and-log with
+  no new disconnect).
+- Gates: reliability-reviewer, security, reviewer — verdicts recorded in the task journal. The
+  documented 409-absorb arm (an intermediate answers its downstream 200 for an outcome the origin refused with
+  409) was weighed by reliability-reviewer against ACK-5.

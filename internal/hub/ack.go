@@ -92,29 +92,36 @@ package hub
 //
 // ## WHAT ACK-5 CHANGED, AND WHY NONE OF THE REASONS ABOVE REACH IT
 //
-// A RELAYED message has NO lifecycle row here and never gets one:
-// hub.recordAcceptance returns early for relayed ingest, deliberately, because
-// the sender-visible row is read by exactly one party — the ORIGINAL SENDER on
-// the ORIGIN bus (§13.3) — so a row on an intermediate or terminal bus is
-// readable by NOBODY. It would cost an fsync per recipient (peer-driven, up to
-// store.MaxRecipients = 64 per relayed message, under the global write lock —
-// the hazard recordAcceptance's own cost note tells the next task to re-check)
-// and buy no observation. It would also put SEVERAL rows behind one correlation
-// key, which is what ACK-4-FU-RECIPIENT-BINDING says must not happen before it
-// lands.
+// AMENDED AGAIN 2026-08-23 BY ACK-12-FU-DESTINATION-ROW. The paragraph this
+// replaces stated that a RELAYED message "has NO lifecycle row here and never
+// gets one" because a row on an intermediate or terminal bus is readable by
+// nobody, costs an fsync per recipient, and would put several rows behind one
+// correlation key before ACK-4-FU-RECIPIENT-BINDING landed. That premise is now
+// FALSE and it is corrected rather than deleted: ACK-4-FU-RECIPIENT-BINDING HAS
+// landed, and hub.recordAcceptance now writes ONE ROW PER RECIPIENT for a relayed
+// ingest, keyed (origin message id, recipient) and charged to the origin sender.
+// The original sender still cannot read this bus's row (§13.3), so it buys no
+// sender-visible observation on an intermediate; what it buys is transit-ack
+// authorisation bounded by ack.Retention (24h) rather than by the byte/age
+// message retention that prunes the body first. The fsync cost is real and named
+// at recordAcceptance's own cost note (up to store.MaxRecipients = 64 peer-driven
+// fsyncs under the global write lock).
 //
 // So without a second authorization path a terminal outcome could never
 // ORIGINATE at the far end of a multi-hop route: the recipient on bus C would
-// find no row and be told the uniform `unknown`, and §8.4's rule — that a hop
-// receipt never converts to delivery — would leave plane C unreachable beyond
-// one hop. That is the defect ACK-5 exists to fix.
+// otherwise be told the uniform `unknown`, and §8.4's rule — that a hop receipt
+// never converts to delivery — would leave plane C unreachable beyond one hop.
+// That is the defect ACK-5 exists to fix.
 //
-// THE NARROW ARM: on ack.ErrNoRecord ONLY, transitAck asks store.Store whether
-// this bus holds a RELAYED copy under this correlation key that NAMES THE
-// AUTHENTICATED PRINCIPAL as a recipient. If it does, this bus AUTHORIZES the
-// acknowledgement and reports it as TRANSIT (RecipientAckResult.Transit); the
+// THE TRANSIT DECISION IS NOW MADE UP FRONT, off the correlation key's bus half,
+// BEFORE Settle (reordered by ACK-12-FU-DESTINATION-ROW). For a key whose bus
+// half is NOT ours, transitAck AUTHORIZES the acknowledgement — primarily off the
+// DESTINATION lifecycle row for (key, recipient), with retained relay provenance
+// as a fallback — and reports it as TRANSIT (RecipientAckResult.Transit); the
 // caller forwards it one hop back along the stored path and the ORIGIN makes it
-// durable. NOTHING DURABLE IS WRITTEN HERE.
+// durable. NOTHING IS SETTLED HERE. Deciding this BEFORE Settle is what stops
+// the new destination row from being settled locally — which would strand the
+// origin's row non-terminal and break back-propagation.
 //
 // INVARIANT 4 IS SATISFIED END TO END BY THE CHAIN RATHER THAN BY A LOCAL
 // WRITE. The recipient is not told "accepted" until the origin has fsynced,
@@ -138,22 +145,26 @@ package hub
 //
 // WHY THE ORIGINAL REASONS DO NOT APPLY TO THIS ARM:
 //
-//   - THE TWO-TABLES-CAN-DISAGREE HAZARD CANNOT ARISE, because the two paths are
-//     DISJOINT BY CONSTRUCTION: a message is either relayed or locally
-//     originated, never both, and only the locally-originated one has a row.
-//     transitAck refuses a locally-originated message outright — this bus IS
-//     its origin, so forwarding would send a terminal outcome to a bus that
-//     never owed us one, and a swept row would silently become a network event.
-//     No row is ever settled, reopened or overridden on the strength of a
-//     message lookup.
-//   - THE RETENTION OBJECTION IS REAL HERE AND IS ACCEPTED AS A COST, not
-//     argued away: a transit acknowledgement STOPS WORKING once the relayed
-//     MESSAGE is pruned (1 day or 1 GiB, whichever bites first), which can
-//     happen well before ack.Retention would have expired a row. The recipient
-//     is then told the uniform `unknown`, exactly as it is for a swept row. The
-//     alternative — writing unreadable rows on every bus — is the cost the
-//     paragraph above refuses, and this bus genuinely has nothing else to bind
-//     the frame to once the message is gone (§6.2).
+//   - THE TWO-TABLES-CAN-DISAGREE HAZARD CANNOT ARISE, because the two PATHS are
+//     DISJOINT BY CONSTRUCTION even though both a relayed and a local message now
+//     have a row. A message is either relayed or locally originated, never both,
+//     and the correlation key's bus half decides which path it takes: a RELAYED
+//     key (bus half not ours) is handled up-front by transitAck and NEVER reaches
+//     Settle; a LOCAL key reaches Settle and NEVER reaches transitAck (transitAck
+//     refuses it outright — this bus IS its origin, so forwarding would send a
+//     terminal outcome to a bus that never owed us one). No row is ever settled,
+//     reopened or overridden on the strength of a message lookup, and no row is
+//     both settled locally and forwarded.
+//   - THE RETENTION OBJECTION IS NOW MOSTLY CLOSED, and the residue is accepted as
+//     a cost rather than argued away. Since ACK-12-FU-DESTINATION-ROW the primary
+//     authorisation is the DESTINATION lifecycle row, which lives for
+//     ack.Retention (24h) INDEPENDENT of message-body pruning — so a transit
+//     acknowledgement keeps working after the relayed message body is pruned (1
+//     day or 1 GiB, whichever bites first). The message-provenance FALLBACK still
+//     stops working once the body is pruned AND the row is also swept, after which
+//     the recipient is told the uniform `unknown`, exactly as for a swept row.
+//     That residual window is bounded by ack.Retention, not by body retention
+//     (§6.2).
 //
 // # AN OFFLINE RECIPIENT IS A NO-OP, ON PURPOSE
 //
@@ -474,26 +485,37 @@ func (h *Hub) ackSettler() (AckSettler, error) {
 //  2. The SHAPE — outcome, class, attestation — before the table is touched, so
 //     a malformed acknowledgement writes nothing, logs no attacker-chosen
 //     string, and cannot be used to probe which rows exist by timing.
-//  3. The LOOKUP, whose miss IS the authorization refusal and the retention
-//     refusal and the never-addressed refusal, all wearing the same face.
-//  4. The SETTLE, which is durable (invariant 4: the transition is committed and
-//     fsynced before this method returns, and therefore before the recipient is
-//     told anything).
-//  5. THE TRANSIT CHECK (ACK-5) — A SECOND AUTHORIZATION PATH, USED ONLY WHEN
-//     THERE IS NO ROW, AND ONLY FOR A RELAYED COPY. It is fifth because it is
-//     reachable from exactly one place: the ack.ErrNoRecord arm of step 4. A
-//     row, when one exists, remains the only authority for settling it, and this
-//     step never settles anything — it authorizes an outcome this bus will not
-//     record and reports Transit so the caller propagates it one hop back
-//     toward the bus that will. "Toward", not "to": the hop this bus makes is
-//     to its own upstream neighbour, and RecipientAckResult.Transit names the
-//     one case (an intermediate absorbing a 409) in which a successful hop does
-//     NOT mean the origin recorded anything. Every miss that is not a transit answers ErrAckNotRetained
-//     byte-identically to before, so the uniform answer (§13.3) is unchanged for
-//     every non-transit case. Moving this check ABOVE the settle would make a
-//     store lookup precede the row lookup on every acknowledgement and would
-//     hand the message store a say in settling rows — read the file header's
-//     amendment before considering it.
+//  3. THE TRANSIT DECISION (ACK-5, REORDERED BY ACK-12-FU-DESTINATION-ROW) — made
+//     UP FRONT for a RELAYED correlation key, i.e. one whose bus half is not
+//     ours. Such a message must be FORWARDED one hop back toward its origin
+//     (transit), never settled here, because the origin owns the row a terminal
+//     outcome makes durable. transitAck authorizes this off the DESTINATION
+//     lifecycle row (bounded by ack.Retention, independent of body pruning), with
+//     retained relay provenance as a fallback; it never settles anything and
+//     reports Transit so the caller propagates it. "Toward", not "to": the hop
+//     this bus makes is to its own upstream neighbour, and
+//     RecipientAckResult.Transit names the one case (an intermediate absorbing
+//     a 409 from the hop above) in which a successful hop does NOT mean the
+//     origin recorded anything. Every relayed-key miss answers ErrAckNotRetained
+//     byte-identically, so the uniform answer (§13.3) is unchanged.
+//  4. The LOOKUP (LOCAL keys only), whose miss IS the authorization refusal and
+//     the retention refusal and the never-addressed refusal, all wearing the
+//     same face.
+//  5. The SETTLE (LOCAL keys only), which is durable (invariant 4: the transition
+//     is committed and fsynced before this method returns, and therefore before
+//     the recipient is told anything). Its ack.ErrNoRecord arm no longer consults
+//     transitAck — a relayed key was already decided at step 3.
+//
+// WHY THE REORDER IS SAFE, AND IS A FAITHFUL PRESERVATION. Before
+// ACK-12-FU-DESTINATION-ROW a relayed message had NO row, so it fell through
+// Settle to ack.ErrNoRecord and only then to transitAck; the transit decision
+// was made LATE because there was nothing on this bus to decide it earlier.
+// Relayed ingest now writes a DESTINATION row (hub.recordAcceptance), so Settle
+// would FIND that row and settle it LOCALLY — stranding the origin's row
+// non-terminal and breaking back-propagation. Deciding the transit case on the
+// correlation key's bus half BEFORE Settle keeps the exact prior semantic — "a
+// relayed message's ack is forwarded, never settled locally" — now that relayed
+// messages have a row. A LOCAL key still takes steps 4 and 5 unchanged.
 //
 // Nothing here disconnects anybody (§12).
 func (h *Hub) AcknowledgeDelivery(req RecipientAckRequest) (RecipientAckResult, error) {
@@ -503,6 +525,44 @@ func (h *Hub) AcknowledgeDelivery(req RecipientAckRequest) (RecipientAckResult, 
 	}
 	if err := validateRecipientAck(req); err != nil {
 		return RecipientAckResult{}, err
+	}
+
+	// A RELAYED CORRELATION KEY IS DECIDED UP FRONT, OFF THE DESTINATION ROW, AND
+	// IS NEVER SETTLED LOCALLY. The key is the ORIGIN bus's server-minted message
+	// id (§3, invariant 1); if its bus half is NOT ours, the message was RELAYED
+	// to this bus and its outcome must be FORWARDED one hop back toward the origin
+	// (transit) rather than settled here — the origin owns the row a terminal
+	// outcome makes durable (§8.4).
+	//
+	// This PRESERVES the prior behaviour rather than weakening it. Before
+	// ACK-12-FU-DESTINATION-ROW a relayed message had NO row, so it fell through
+	// Settle to ack.ErrNoRecord and only then to transitAck. Now that relayed
+	// ingest writes a DESTINATION row (hub.recordAcceptance), Settle would FIND
+	// that row and settle it locally — which would strand the origin's row
+	// non-terminal and break back-propagation. Discriminating on the bus half
+	// BEFORE Settle keeps "a relayed message's ack is forwarded, never settled
+	// locally" exactly true. Folded comparison (strings.EqualFold), matching
+	// transitAck's own rule so two spellings of one bus id are not two buses.
+	if originBus, _, perr := ids.ParseMessageID(req.CorrelationKey); perr == nil && !strings.EqualFold(originBus, h.busID) {
+		if h.transitAck(req) {
+			h.log.Debug("recipient acknowledgement is a TRANSIT acknowledgement: the message was RELAYED to this bus, so its outcome is forwarded one hop back along the stored path and NOTHING WAS SETTLED HERE. The caller must not answer the recipient until the origin has made it durable",
+				"correlation_key", elideAckField(req.CorrelationKey),
+				"recipient", req.Recipient,
+				"state", req.Outcome.String(),
+				"class", string(req.Class),
+			)
+			// The bus path is DELIBERATELY NOT LOGGED (§13.3).
+			return RecipientAckResult{State: req.Outcome, Class: req.Class, Transit: true}, nil
+		}
+		// A relayed key this bus can authorise off NEITHER a destination row NOR
+		// retained relay provenance: never accepted here, swept, or not addressed
+		// to this principal. The uniform refusal (§13.3), byte-identical to every
+		// other miss, and NOBODY IS DISCONNECTED (§12).
+		h.log.Debug("recipient acknowledgement refused: relayed correlation key with no destination lifecycle row and no retained relay provenance for this (correlation key, recipient). The causes are deliberately indistinguishable (§13.3), and NOBODY IS DISCONNECTED",
+			"correlation_key", elideAckField(req.CorrelationKey),
+			"recipient", req.Recipient,
+		)
+		return RecipientAckResult{}, ErrAckNotRetained
 	}
 
 	// The pre-lookup serves ONE purpose: labelling a duplicate. It is NOT the
@@ -530,25 +590,15 @@ func (h *Hub) AcknowledgeDelivery(req RecipientAckRequest) (RecipientAckResult, 
 		return RecipientAckResult{State: req.Outcome, Class: req.Class, Duplicate: duplicate}, nil
 
 	case errors.Is(err, ack.ErrNoRecord):
-		// ACK-5: NO ROW HERE MAY MEAN THE ROW IS SOMEWHERE ELSE. A message
-		// relayed to this bus never gets a lifecycle row (see the file header's
-		// amendment), so its recipient would otherwise be told the uniform
-		// `unknown` and a terminal outcome could never originate at the far end
-		// of a multi-hop path. This is the ONLY place transitAck is consulted,
-		// and it settles nothing.
-		if h.transitAck(req) {
-			h.log.Debug("recipient acknowledgement is a TRANSIT acknowledgement: the message was RELAYED to this bus, so no lifecycle row exists here and NOTHING WAS WRITTEN. The caller must forward this outcome one hop back along the stored path and must not answer the recipient until the origin has made it durable",
-				"correlation_key", elideAckField(req.CorrelationKey),
-				"recipient", req.Recipient,
-				"state", req.Outcome.String(),
-				"class", string(req.Class),
-			)
-			// The bus path is DELIBERATELY NOT LOGGED: §13.3 forbids disclosing
-			// the traversed path to the parties on this surface, and an operator
-			// log line is not the place to start.
-			return RecipientAckResult{State: req.Outcome, Class: req.Class, Transit: true}, nil
-		}
-
+		// A LOCAL correlation key with no row: never accepted here, swept by
+		// §11's retention, not addressed to this principal, or malformed.
+		// transitAck is NOT consulted here anymore — a RELAYED key is
+		// discriminated on its bus half and handled BEFORE Settle (see the top of
+		// this method and the file header's amendment), so by construction only a
+		// LOCAL key reaches Settle. A local key never forwards a transit outcome:
+		// this bus IS its origin, and forwarding one would send a terminal outcome
+		// to a bus that never owed us one. The uniform refusal (§13.3).
+		//
 		// DEBUG, not WARN, and the four causes are NOT distinguished in the log
 		// either — an operator hunting a probe wants the request id and the
 		// principal, both of which the route's own line carries, and this bus
@@ -621,16 +671,34 @@ func (h *Hub) AcknowledgeDelivery(req RecipientAckRequest) (RecipientAckResult, 
 // RELAYED to this bus and names the authenticated principal as a recipient —
 // ACK-5's second authorization path (ACK-CONTRACT.md §9.4).
 //
-// It is consulted from ONE place, the ack.ErrNoRecord arm of
-// AcknowledgeDelivery, and it authorizes only. It writes nothing, settles
-// nothing, sends nothing and never touches the lifecycle table.
+// It is consulted from ONE place, the up-front relayed-key branch of
+// AcknowledgeDelivery (reached only when the correlation key's bus half is NOT
+// ours), and it authorizes only. It writes nothing, settles nothing, sends
+// nothing and never touches the lifecycle table as a settle target.
+//
+// # AUTHORISATION IS NOW PRIMARILY THE DESTINATION LIFECYCLE ROW (ACK-12-FU-DESTINATION-ROW)
+//
+// hub.recordAcceptance now writes one row per recipient for a RELAYED ingest,
+// keyed (origin message id, recipient) — the same pair this function is asked
+// about. So the FIRST authorisation is a Lookup of that row: a row existing for
+// (foreign-bus key, this recipient) means THIS bus accepted this relayed message
+// for this recipient, which IS the membership authorisation, and it lives for
+// ack.Retention (24h) INDEPENDENT of message-body pruning.
+//
+// The message-provenance path (RelayProvenanceByOriginMessageID) is kept as a
+// FALLBACK, for messages accepted before this change or whose row has been
+// swept while the relayed message body is still retained. It authorises the same
+// membership question off store.Store instead of the ack table.
 //
 // THREE CONDITIONS, ALL REQUIRED, AND EACH ONE REFUSES INTO THE SAME UNIFORM
-// ANSWER (§13.3): the correlation key names ANOTHER bus, the message it names is
-// a RELAYED copy this bus still retains, and the authenticated principal is one
-// of its named recipients. The first is the one that looks redundant and is not
-// — it is the difference between the uniform `unknown` and a 503 no client can
-// ever clear; the block at the check itself has the whole argument.
+// ANSWER (§13.3): the correlation key names ANOTHER bus, then EITHER a
+// destination row exists for (key, recipient) OR the message it names is a
+// RELAYED copy this bus still retains that names the principal as a recipient.
+// The bus-half check is the one that looks redundant and is not — it is the
+// difference between the uniform `unknown` and a 503 no client can ever clear;
+// the block at the check itself has the whole argument. A Lookup miss and a
+// non-member remain indistinguishable (Lookup returns (Record{}, false) for a
+// swept, absent or malformed pair), so this adds no status oracle.
 //
 // # THE MEMBERSHIP TEST IS THE ENTIRE AUTHORIZATION, AND IT IS STRUCTURAL
 //
@@ -660,12 +728,12 @@ func (h *Hub) AcknowledgeDelivery(req RecipientAckRequest) (RecipientAckResult, 
 //
 // # THE RELAYED TEST IS A POST-CONDITION, NOT THE DISCRIMINATOR — AMENDED 2026-08-21
 //
-// WHAT IT IS FOR. A LOCALLY-ORIGINATED message ALWAYS had a row written for it
-// (hub.recordAcceptance), so reaching ack.ErrNoRecord for one means the row was
-// swept or never created — and that must keep the uniform refusal. Letting a
-// local message take the transit path would make this bus forward a terminal
-// outcome for a message it is the ORIGIN of, to a bus that never owed it one,
-// turning an expired row into an unsolicited network contact.
+// WHAT IT IS FOR. A LOCALLY-ORIGINATED message must never take the transit path,
+// because that would make this bus forward a terminal outcome for a message it is
+// the ORIGIN of, to a bus that never owed it one, turning an expired row into an
+// unsolicited network contact. A local key is kept off this path up-front by the
+// bus-half check (its bus half is OURS); this post-condition is the defence in
+// depth for the fallback provenance path, where a local id nonetheless resolves.
 //
 // WHAT ACTUALLY ENFORCES IT IS THE BUS-HALF CHECK ABOVE, AND THIS COMMENT SAID
 // OTHERWISE UNTIL A MUTATION PROVED IT. Deleting `!prov.Relayed` leaves the
@@ -730,12 +798,28 @@ func (h *Hub) transitAck(req RecipientAckRequest) bool {
 		return false
 	}
 
+	// AUTHORISE OFF THE DESTINATION LIFECYCLE ROW FIRST (ACK-12-FU-DESTINATION-ROW).
+	// A row for (foreign-bus key, this recipient) exists iff this bus accepted
+	// this relayed message for this recipient at ingest — that IS the membership
+	// authorisation, and it is bounded by ack.Retention rather than by the
+	// byte/age message retention that prunes the body first. ack.Store.Lookup
+	// already validates the pair and returns (Record{}, false) on any miss, so no
+	// second validation is added here and a miss is indistinguishable from a
+	// non-member (§13.3). h.ackSettler() cannot error on this path — the caller
+	// obtained it successfully before reaching here — but is failed-closed anyway.
+	if settler, serr := h.ackSettler(); serr == nil {
+		if _, ok := settler.Lookup(req.CorrelationKey, req.Recipient); ok {
+			return true
+		}
+	}
+
 	prov, ok := h.store.RelayProvenanceByOriginMessageID(req.CorrelationKey)
 	if !ok {
-		// Never accepted here, or the MESSAGE has been pruned by retention. The
-		// second is the accepted cost the file header names: a transit
-		// acknowledgement stops working once the relayed message ages out, and
-		// the recipient is then told `unknown`.
+		// FALLBACK, for a message accepted before destination rows existed or
+		// whose row was swept while the message is still retained. Never accepted
+		// here, or the MESSAGE has been pruned by retention: once BOTH the row and
+		// the message body are gone the transit acknowledgement stops working and
+		// the recipient is told `unknown`, the same uniform answer as a swept row.
 		return false
 	}
 	if !prov.Relayed {

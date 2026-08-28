@@ -1855,12 +1855,21 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // If this bus ORIGINATED the correlation key, it holds the durable
 // sender-visible row and the outcome is SETTLED here — that is the whole of the
 // path below, and it is what this comment described when only that case existed.
-// If it did not — this bus relayed the message on from an upstream hop, so no
-// row was ever written here — the outcome is instead carried ONE HOP FURTHER
-// BACK toward the origin, synchronously, and nothing durable changes on this bus
-// at all (ACK-CONTRACT.md §9.4, ACK-5). ack.Store.Settle answering ErrNoRecord
-// is where the two part company; see disposeUnrecordedAck for why "no row" is
-// NOT by itself evidence of either case.
+// If it did not — this bus relayed the message on from an upstream hop — the
+// outcome is instead carried ONE HOP FURTHER BACK toward the origin,
+// synchronously, and nothing durable changes on this bus at all
+// (ACK-CONTRACT.md §9.4, ACK-5).
+//
+// WHICH DISPOSITION APPLIES IS DECIDED UP FRONT ON THE CORRELATION KEY'S BUS
+// HALF (ACK-12-FU-DESTINATION-ROW), not by ack.Store.Settle answering
+// ErrNoRecord. It used to be discovered by that ErrNoRecord — an intermediate
+// held no row, so Settle missed and the miss WAS the transit signal. That signal
+// is now gone: relay-ingest writes a (non-settleable) DESTINATION row on the
+// intermediate too, so Settle would SUCCEED there and wrongly settle the outcome
+// locally. So a FOREIGN-ORIGIN key is diverted to disposeUnrecordedAck before
+// Settle is ever called, and only a key this bus originated reaches the settle
+// path below. disposeUnrecordedAck still owns the origin-vs-intermediate
+// decision for the keys that reach it, via relay.DisposeAck's one spelling.
 //
 // # WHAT HAS ALREADY HAPPENED BY THE TIME THIS IS CALLED, AND WHAT HAS NOT
 //
@@ -1908,6 +1917,22 @@ func (f *federation) settleAck(ctx context.Context, s relay.SettledAck) (relay.A
 		f.log.Error("REFUSING to record a peer acknowledgement: its outcome or class passed the wire vocabulary and could not be mapped onto the DURABLE one. The two spellings of the closed set have drifted; nothing was written",
 			"local_bus", f.busID, "peer_bus", s.PeerBusID, "err", err.Error())
 		return relay.AckSettlement{}, err
+	}
+
+	// ACK-12-FU-DESTINATION-ROW: a FOREIGN-ORIGIN correlation key is a TRANSIT
+	// acknowledgement and must be carried ONE HOP FURTHER BACK, never settled
+	// locally. Before destination rows existed this was discovered by Settle
+	// answering ErrNoRecord on an intermediate; now that relay-ingest writes a
+	// (non-settleable) DESTINATION row here, Settle would SUCCEED and settle it
+	// locally — stranding the origin's row non-terminal and breaking
+	// back-propagation. Decide it up front on the bus half, exactly as
+	// hub.AcknowledgeDelivery does on the agent surface. A malformed key
+	// (perr != nil) is deliberately LEFT to the Settle path's own validatePair,
+	// whose uniform refusal is unchanged; disposeUnrecordedAck assumes a validated
+	// key and this keeps that assumption. disposeUnrecordedAck re-checks origin via
+	// relay.DisposeAck and, on this bus not being the origin, forwards.
+	if originBus, _, perr := ids.ParseMessageID(s.Ack.CorrelationKey); perr == nil && !strings.EqualFold(originBus, f.busID) {
+		return f.disposeUnrecordedAck(ctx, s)
 	}
 
 	// READ-THEN-SETTLE, and the read is ADVISORY. ack.Store.Settle re-decides

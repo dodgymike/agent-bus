@@ -220,8 +220,23 @@ func newAckFed(t *testing.T) (*federation, *ack.Store) {
 	}, st
 }
 
+// ackFedKey is a LOCAL-ORIGIN correlation key (bus half == wiringLocalBus, the
+// fed's own busID). It MUST be local-origin, and this changed with
+// ACK-12-FU-DESTINATION-ROW (DECISIONS.md, 2026-08-28): settleAck now decides
+// transit-vs-settle UP FRONT on the key's bus half, BEFORE Settle. Only a key
+// this bus ORIGINATED reaches the Settle/relay.DecideAck correlation path this
+// file exercises (apply / duplicate / conflict / durability-not-a-4xx). A
+// FOREIGN-origin key is diverted to disposeUnrecordedAck and never reaches
+// Settle at all, so keying these correlation guards on a foreign bus would test
+// the transit divert, not the settle correlation they exist to protect. The
+// foreign-origin disposition — authorise + forward, never settle locally — is
+// guarded separately in acktransit_test.go's TestSettleAckDisposition.
+// ackFedSender is left on the peer bus because it is SHARED with
+// acktransit_test.go's foreign-origin scenarios; the settle path reads only the
+// key's bus half and carries the sender through unchanged, so the sender's bus
+// is not what any assertion here turns on.
 const (
-	ackFedKey       = wiringPeerBus + "-1"
+	ackFedKey       = wiringLocalBus + "-1"
 	ackFedSender    = wiringPeerBus + ".alpha-1"
 	ackFedRecipient = wiringLocalBus + ".bravo-1"
 )

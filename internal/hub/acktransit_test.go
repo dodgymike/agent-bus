@@ -2,20 +2,25 @@ package hub_test
 
 // ACK-5 — THE TRANSIT ARM OF THE RECIPIENT ACKNOWLEDGEMENT BOUNDARY.
 //
-// hub.AcknowledgeDelivery gained a SECOND authorization path, reachable from
-// exactly one place: the ack.ErrNoRecord arm. A message RELAYED to this bus
-// never gets a lifecycle row (hub.recordAcceptance returns early for relayed
-// ingest, because the sender-visible row is read by the ORIGINAL SENDER on the
-// ORIGIN bus and by nobody else — §13.3), so without that path a terminal
-// outcome could never ORIGINATE at the far end of a multi-hop route.
+// hub.AcknowledgeDelivery gained a SECOND authorization path for a RELAYED
+// correlation key. AMENDED 2026-08-23 BY ACK-12-FU-DESTINATION-ROW: a relayed
+// ingest NOW writes a DESTINATION lifecycle row per recipient
+// (hub.recordAcceptance no longer early-returns for relayed), keyed (origin id,
+// recipient) and left `accepted`, and the transit decision is now made UP FRONT
+// off the correlation key's bus half BEFORE Settle. transitAck authorises off
+// that destination row first, with retained relay provenance as a fallback.
+// Without this path a terminal outcome could never ORIGINATE at the far end of a
+// multi-hop route.
 //
-// What this file must prove is therefore TWO-SIDED. The new arm has to OPEN for
-// a named recipient of a relayed copy — and it has to stay SHUT for everything
-// else, byte-identically to before, because every non-transit miss is still
-// §13.3's uniform answer. And nothing durable may be written on the way
-// through: the whole design rests on the origin being the only writer, with
-// invariant 4 held end to end by the caller's SYNCHRONOUS forward rather than by
-// a local commit.
+// What this file must prove is therefore TWO-SIDED. The transit arm has to OPEN
+// for a named recipient of a relayed copy — and it has to stay SHUT for
+// everything else, byte-identically to before, because every non-transit miss is
+// still §13.3's uniform answer. And the transit ACK must SETTLE NOTHING locally:
+// deciding transit before Settle is what keeps the origin's row the only writer,
+// with invariant 4 held end to end by the caller's SYNCHRONOUS forward rather
+// than by a local commit. The destination row itself, written at INGEST, and its
+// authorisation surviving message-body pruning and a restart, are covered by
+// ackdestrow_relay12fu_test.go.
 //
 // The fixtures come from ack_boundary_test.go (newAckBoundaryHub, deliveredAck,
 // ackedState, sendTo, testClock), relayingest_relay24blocker_test.go (riIngest,
@@ -109,13 +114,19 @@ func testATNamedRecipientTransits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			key := atRelayedTo(t, h, tc.seq, bob)
 
-			// THE PRECONDITION, ASSERTED RATHER THAN ASSUMED. If a relayed
-			// ingest ever started writing a lifecycle row, this subtest would
-			// be exercising the ORDINARY settle path while claiming to prove
-			// the transit one — the vacuity this epic has already shipped
-			// three times.
-			if r, ok := ackedState(t, acks, key, bob); ok {
-				t.Fatalf("a RELAYED message already has a lifecycle row %+v; the transit arm is unreachable and this subtest proves nothing", r)
+			// THE PRECONDITION, ASSERTED RATHER THAN ASSUMED. Since
+			// ACK-12-FU-DESTINATION-ROW a relayed ingest writes a DESTINATION
+			// lifecycle row per recipient, keyed (origin id, recipient) and left
+			// `accepted`. The transit arm authorises off THAT row and must still
+			// FORWARD the outcome rather than settle it here — so the row must
+			// exist and be accepted before the ack, and (asserted after the ack)
+			// must be UNCHANGED by it.
+			r, ok := ackedState(t, acks, key, bob)
+			if !ok {
+				t.Fatalf("a relayed ingest wrote NO destination lifecycle row for %s; the transit arm has nothing to authorise off and this subtest proves nothing", bob)
+			}
+			if r.State != ack.StateAccepted {
+				t.Fatalf("the destination row is %s, want accepted; a relayed ingest must leave it non-terminal", r.State)
 			}
 
 			res, err := h.AcknowledgeDelivery(tc.req(key, bob))
@@ -139,6 +150,16 @@ func testATNamedRecipientTransits(t *testing.T) {
 			// duplicate is absorbed WHERE THE RECORD IS, at the origin.
 			if res.Duplicate {
 				t.Error("Duplicate = true on the transit path; labelling it here would mean this bus asserting something about a table it does not hold")
+			}
+
+			// AND THE DESTINATION ROW WAS NOT SETTLED LOCALLY. A relayed key is
+			// forwarded, never settled here — deciding transit BEFORE Settle is
+			// the whole point of the ACK-12-FU-DESTINATION-ROW reorder. Settling
+			// the destination row locally would strand the origin's row
+			// non-terminal and break back-propagation, so the row must still read
+			// `accepted` after a transit ack.
+			if after, ok := ackedState(t, acks, key, bob); !ok || after.State != ack.StateAccepted {
+				t.Fatalf("after a transit ack the destination row is (%+v, %v), want STILL accepted; a relayed ack must be forwarded, not settled locally", after, ok)
 			}
 
 			// AND A RETRY IS THE SAME ANSWER, not an error and not a conflict.
@@ -308,19 +329,25 @@ func testATUnknownKeyRefused(t *testing.T) {
 	}
 }
 
-// testATTransitWritesNothing is the durability half, and it is the property the
-// whole design rests on: NOTHING DURABLE HAPPENS ON THIS BUS.
+// testATTransitWritesNothing is the durability half: the transit ACKNOWLEDGEMENT
+// writes nothing and settles nothing. AMENDED for ACK-12-FU-DESTINATION-ROW —
+// the destination row is now written at INGEST, so "nothing durable happens on
+// this bus" no longer holds for the ingest; what still holds, and is the whole
+// point, is that the ACK PATH neither appends a record nor settles the row.
 //
 // Invariant 4 is satisfied END TO END by the caller's synchronous forward — the
 // recipient is not told "accepted" until the ORIGIN has fsynced — which is only
-// correct if this bus really did write nothing. A local write here would put a
-// second, unreadable row behind one correlation key and would cost an fsync per
-// peer-driven acknowledgement.
+// correct if the transit ack itself writes nothing here. Settling the
+// destination row locally would put a terminal outcome on this bus for a message
+// the origin owns, stranding the origin's row non-terminal.
 func testATTransitWritesNothing(t *testing.T) {
 	h, acks, dir := newAckBoundaryHub(t, ackBoundaryOptions{}, "bob")
 	bob := agentID(t, testBusID, "bob")
 	key := atRelayedTo(t, h, 131, bob)
 
+	// Captured AFTER the ingest, so these baselines already include the one
+	// destination row the relayed ingest wrote. The assertions below are about
+	// what the three ACKS add, which must be nothing.
 	rowsBefore := acks.Len()
 	walBefore := len(ackEntriesIn(t, dir))
 
@@ -332,11 +359,13 @@ func testATTransitWritesNothing(t *testing.T) {
 	}
 
 	if got := acks.Len(); got != rowsBefore {
-		t.Errorf("the lifecycle table went from %d rows to %d across three transit acknowledgements, want unchanged. A row on an intermediate or terminal bus is readable by NOBODY (§13.3) and would put several rows behind one correlation key",
+		t.Errorf("the lifecycle table went from %d rows to %d across three transit acknowledgements, want unchanged. The transit ack settles nothing and opens no new row",
 			rowsBefore, got)
 	}
-	if _, ok := ackedState(t, acks, key, bob); ok {
-		t.Error("a transit acknowledgement created a lifecycle row")
+	// The destination row is STILL there and STILL accepted: a transit ack
+	// settles nothing locally (the transit case is decided before Settle).
+	if r, ok := ackedState(t, acks, key, bob); !ok || r.State != ack.StateAccepted {
+		t.Errorf("after three transit acks the destination row is (%+v, %v), want STILL accepted and unsettled", r, ok)
 	}
 	if got := len(ackEntriesIn(t, dir)); got != walBefore {
 		t.Errorf("three transit acknowledgements appended %d lifecycle records to the durable log, want 0", got-walBefore)
@@ -383,8 +412,13 @@ func testATLocalIDOfARelayedMessageIsRefused(t *testing.T) {
 	if localID == originKey {
 		t.Fatalf("the local id and the origin id are both %q; this bus did not mint its own (invariant 1) and the case under test does not exist here", localID)
 	}
-	if r, ok := ackedState(t, acks, originKey, bob); ok {
-		t.Fatalf("a RELAYED message already has a lifecycle row %+v; the transit arm is unreachable and this subtest proves nothing", r)
+	// The DESTINATION row exists under the ORIGIN key (ACK-12-FU-DESTINATION-ROW),
+	// which is exactly why acking under the LOCAL id must still be refused: the
+	// local id names THIS bus and must never resolve to a transit. Asserted so a
+	// broken ingest that wrote no row cannot make the refusal below pass
+	// vacuously.
+	if r, ok := ackedState(t, acks, originKey, bob); !ok || r.State != ack.StateAccepted {
+		t.Fatalf("the relayed ingest wrote no accepted destination row under the origin key %q (got %+v, %v); the control for this subtest is broken", originKey, r, ok)
 	}
 	// The ORIGIN key MUST work, or "the local id is refused" would be proved by
 	// a bus on which nothing works at all.

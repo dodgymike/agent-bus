@@ -524,26 +524,75 @@ func TestSettleAckDisposition(t *testing.T) {
 	})
 
 	// -----------------------------------------------------------------------
-	t.Run("a row that DOES exist still settles here, seam or no seam", func(t *testing.T) {
-		// The transit arm is reachable from ONE place — the ErrNoRecord arm —
-		// and a row, when one exists, remains the only authority for settling
-		// it. This is the assertion that goes red if the disposition is ever
-		// moved above the settle.
+	t.Run("a FOREIGN-origin row is a DESTINATION row: authorised and FORWARDED as transit, NOT settled here", func(t *testing.T) {
+		// UPDATED FOR ACK-12-FU-DESTINATION-ROW (DECISIONS.md, 2026-08-28). Before
+		// destination rows existed, a foreign-origin key held no row here and the
+		// ONLY way to reach the transit arm was Settle answering ErrNoRecord; a
+		// row, when one existed, meant this bus was the origin and settled locally.
+		// That is no longer true: relay-ingest now writes a NON-SETTLEABLE
+		// destination row on the intermediate too, keyed (origin id, recipient).
+		// The transit-vs-settle decision therefore moves UP FRONT onto the key's
+		// bus half. atForeignKey's bus half is the PEER, so even WITH a row present
+		// the outcome is a TRANSIT acknowledgement: authorised off the destination
+		// row and carried one hop further back, and NOTHING is settled here. If the
+		// divert regressed to settle-first, Settle would SUCCEED on this row and
+		// strand the origin's own row non-terminal.
 		f := newATFed(t, true)
 		if err := f.acks.Accept(atForeignKey, ackFedSender, ackFedRecipient); err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
 		got, err := f.fed.settleAck(ctx, atSettled(atForeignKey, relay.AckDelivered, ""))
 		if err != nil {
-			t.Fatalf("settleAck with a real row = %v, want nil", err)
+			t.Fatalf("settleAck for a foreign-origin destination row = %v, want nil (forwarded as transit)", err)
+		}
+		if got.Duplicate {
+			t.Error("a first transit forward reported duplicate:true")
+		}
+		if n := f.sender.count(); n != 1 {
+			t.Fatalf("a foreign-origin destination row was forwarded %d times, want exactly 1: it is a TRANSIT ack that must be carried one hop back, not settled here", n)
+		}
+		frame, ok := f.sender.last()
+		if !ok {
+			t.Fatal("nothing was forwarded for a foreign-origin key")
+		}
+		if frame.CorrelationKey != atForeignKey || frame.Recipient != ackFedRecipient {
+			t.Errorf("the forwarded frame is (%q,%q), want (%q,%q)", frame.CorrelationKey, frame.Recipient, atForeignKey, ackFedRecipient)
+		}
+		// THE DESTINATION ROW IS NON-SETTLEABLE: it was NOT moved to a terminal
+		// state here. Only the ORIGIN settles.
+		rec, ok := f.acks.Lookup(atForeignKey, ackFedRecipient)
+		if !ok {
+			t.Fatal("the destination row vanished")
+		}
+		if rec.State == ack.StateDelivered {
+			t.Errorf("the destination row was settled to delivered locally; a foreign-origin row must NOT be settled here, only forwarded (state=%v)", rec.State)
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	t.Run("a LOCAL-origin row STILL settles here and is NOT also forwarded", func(t *testing.T) {
+		// THE SAFETY PROPERTY THE PREVIOUS FOREIGN-KEY ASSERTION PROTECTED, kept
+		// alive on the case where it still holds. A key this bus ORIGINATED
+		// (atOriginKey's bus half is ours) reaches Settle and the row is the sole
+		// authority: it is settled locally and must NOT ALSO be forwarded — a
+		// settle-AND-forward double action would send the origin's own outcome back
+		// out. This is the assertion that goes RED if the disposition is ever moved
+		// ABOVE the settle for a bus's OWN keys.
+		f := newATFed(t, true)
+		if err := f.acks.Accept(atOriginKey, ackFedSender, ackFedRecipient); err != nil {
+			t.Fatalf("Accept: %v", err)
+		}
+		got, err := f.fed.settleAck(ctx, atSettled(atOriginKey, relay.AckDelivered, ""))
+		if err != nil {
+			t.Fatalf("settleAck with a real LOCAL row = %v, want nil", err)
 		}
 		if got.Duplicate {
 			t.Error("the FIRST terminal reported duplicate:true")
 		}
 		if n := f.sender.count(); n != 0 {
-			t.Fatalf("a settled row was ALSO forwarded upstream (%d dials). The row is the authority; forwarding as well would make the origin's own outcome travel back out", n)
+			t.Fatalf("a settled LOCAL-origin row was ALSO forwarded upstream (%d dials). The row is the authority; forwarding as well would make the origin's own outcome travel back out", n)
 		}
-		rec, ok := f.acks.Lookup(atForeignKey, ackFedRecipient)
+		rec, ok := f.acks.Lookup(atOriginKey, ackFedRecipient)
 		if !ok || rec.State != ack.StateDelivered {
 			t.Errorf("durable row = (%+v,%v), want delivered", rec, ok)
 		}

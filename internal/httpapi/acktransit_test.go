@@ -2,11 +2,13 @@ package httpapi_test
 
 // ACK-5 — THE TRANSIT ARM OF POST /v1/ack.
 //
-// When hub.AcknowledgeDelivery reports a TRANSIT acknowledgement, NOTHING WAS
-// WRITTEN DURABLY ON THIS BUS: the sender-visible row lives at the ORIGIN,
-// possibly several hops away, and this route owes one backward hop before it
-// may say "accepted". The three things only the ROUTE can be wrong about are
-// what this file proves:
+// When hub.AcknowledgeDelivery reports a TRANSIT acknowledgement, THE ACK ITSELF
+// SETTLES NOTHING ON THIS BUS: the settleable sender-visible row lives at the
+// ORIGIN, possibly several hops away, and this route owes one backward hop before
+// it may say "accepted". (Since ACK-12-FU-DESTINATION-ROW a relayed INGEST does
+// write a destination row here, left `accepted`, which transitAck authorises off
+// — but the ack forwards the outcome and never settles that row locally.) The
+// three things only the ROUTE can be wrong about are what this file proves:
 //
 //  1. the hop is taken BEFORE the 200 (invariant 4 end to end — the 200 is not
 //     written until the origin has the outcome durably, which is exactly what
@@ -195,9 +197,10 @@ func atOriginAttestation(sender string) attest.Attestation {
 // and returns its correlation key — the ORIGIN bus's server-minted message id.
 //
 // It goes through hub.IngestRelayed because that is what writes the stored bus
-// path ORIGIN-FIRST AND ENDING AT THIS BUS, and because a relayed ingest is
-// precisely what leaves NO lifecycle row here (hub.recordAcceptance returns
-// early for it) — which is the only way the transit arm becomes reachable.
+// path ORIGIN-FIRST AND ENDING AT THIS BUS. Since ACK-12-FU-DESTINATION-ROW a
+// relayed ingest also writes a DESTINATION lifecycle row per recipient, left
+// `accepted`; transitAck authorises off that row, and the transit arm forwards
+// the outcome and settles the row nowhere.
 func atIngestRelayed(t *testing.T, r *atRig, seq uint64, recipient string) string {
 	t.Helper()
 	key, err := ids.MessageID(atOriginBus, seq)
@@ -263,9 +266,12 @@ func TestAckRouteTransitStatuses(t *testing.T) {
 		if frame.ProtocolVersion != 0 {
 			t.Errorf("the forwarded frame declares protocol_version %d; relay.Client.PeerAck stamps it, and a second assignment would be a second place to update at the next bump", frame.ProtocolVersion)
 		}
-		// NOTHING DURABLE HAPPENED HERE.
-		if _, ok := r.acks.Lookup(key, beta.id); ok {
-			t.Error("the transit path created a lifecycle row on this bus; the row is read by the ORIGINAL SENDER on the ORIGIN bus and by nobody else (§13.3), so a row here is readable by NOBODY")
+		// THE TRANSIT ACK SETTLED NOTHING LOCALLY. The relayed INGEST wrote the
+		// destination row (ACK-12-FU-DESTINATION-ROW), left `accepted`; the transit
+		// ack forwards the outcome and must leave that row untouched — the ORIGIN
+		// holds the only settleable row (§13.3).
+		if r, ok := r.acks.Lookup(key, beta.id); !ok || r.State != ack.StateAccepted {
+			t.Errorf("after a transit ack the destination row is (%+v,%v), want STILL accepted; the transit ack must settle nothing locally", r, ok)
 		}
 
 		// ---- THE LOCALLY-RECORDED ARM, on a fresh rig, for comparison. ----
@@ -353,9 +359,11 @@ func TestAckRouteTransitStatuses(t *testing.T) {
 		if bytes.Contains(raw, []byte(atUpstreamSecret)) {
 			t.Errorf("the 503 body echoed the upstream's own error: %s", raw)
 		}
-		// AND NOTHING WAS RECORDED, so the identical retry is safe.
-		if _, ok := r.acks.Lookup(key, beta.id); ok {
-			t.Error("a failed hop left a lifecycle row behind")
+		// AND THE ACK RECORDED NOTHING, so the identical retry is safe. The
+		// destination row the relayed ingest wrote is untouched — still `accepted`
+		// — because a failed hop settles nothing.
+		if r, ok := r.acks.Lookup(key, beta.id); !ok || r.State != ack.StateAccepted {
+			t.Errorf("a failed hop changed the destination row to (%+v,%v), want STILL accepted; the ack settles nothing, so the identical retry is safe", r, ok)
 		}
 
 		mu.Lock()
@@ -410,8 +418,10 @@ func TestAckRouteTransitStatuses(t *testing.T) {
 		if got, _ := body["error"].(string); got != "delivery acknowledgement is not available on this bus" {
 			t.Errorf("the 501 says %q; it must be the same sentence writeAckError's ErrNoAckTable arm uses", got)
 		}
-		if _, ok := r.acks.Lookup(key, beta.id); ok {
-			t.Error("the 501 left a lifecycle row behind")
+		// The 501 settled nothing; the relayed ingest's destination row is
+		// untouched — still `accepted`.
+		if r, ok := r.acks.Lookup(key, beta.id); !ok || r.State != ack.StateAccepted {
+			t.Errorf("the 501 changed the destination row to (%+v,%v), want STILL accepted", r, ok)
 		}
 	})
 
