@@ -40,9 +40,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [10e93262-8e34-4738-b435-bfe23d880057](../../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (in_progress)
+- [10e93262-8e34-4738-b435-bfe23d880057](../../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (done)
 - [MTLS-LISTENER](../../MTLS/MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
-- [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 
 ---
 

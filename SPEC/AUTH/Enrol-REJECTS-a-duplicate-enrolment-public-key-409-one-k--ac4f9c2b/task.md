@@ -1,18 +1,24 @@
-# Enrol accepts a duplicate enrolment public key -- one keypair can hold unlimited agent ids
+# Enrol REJECTS a duplicate enrolment public key (409) -- one keypair can no longer hold two identities
 
 | Field | Value |
 | --- | --- |
 | Public id | `ac4f9c2b-5460-4e83-997d-0e433194752f` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:04:05.276632+00:00 |
-| Updated | 2026-08-08T10:29:38.101534+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T22:56:00.694713+00:00 |
+| Completed | 2026-08-22T22:55:44.374412+00:00 |
+
+## Proof command
+
+```sh
+go test -race -run "TestEnrolRejectsDuplicateAuthKey" ./internal/auth
+```
 
 ## Description
 
@@ -35,7 +41,7 @@ _Unknown._
 
 
 - [AUTH-1-FU-ACTIVECAP](../AUTH-1-FU-ACTIVECAP--2d92b699/task.md) — AUTH-1-FU-ACTIVECAP: cap ACTIVE sessions per agent -- the one place an agent-id-keyed cap… (done)
-- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
+- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (done)
 
 ---
 

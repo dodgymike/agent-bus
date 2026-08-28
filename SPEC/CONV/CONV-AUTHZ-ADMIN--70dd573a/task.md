@@ -85,8 +85,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
-- [AUTH-10-WIRING-DOCS](../../AUTH/AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (todo)
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (done)
+- [AUTH-10-WIRING-DOCS](../../AUTH/AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (done)
 - [CONV-AUTHZ-CREATOR](../CONV-AUTHZ-CREATOR--4abd8589/task.md) — CONV-AUTHZ-CREATOR: only the creator may change the recipient list -- the arm that can sh… (todo)
 
 ---

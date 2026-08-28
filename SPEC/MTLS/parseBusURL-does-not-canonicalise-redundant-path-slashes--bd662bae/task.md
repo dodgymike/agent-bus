@@ -5,19 +5,19 @@
 | Public id | `bd662bae-4c6c-426d-a736-7830d2d21037` |
 | Key | _(null in the export)_ |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T19:42:12.435912+00:00 |
-| Updated | 2026-08-07T19:42:12.435912+00:00 |
-| Completed | — |
+| Updated | 2026-08-28T12:45:45.202442+00:00 |
+| Completed | 2026-08-28T12:45:45.202424+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestParseBusURLCanonicalisesRedundantPathSegments' ./client/...
+go test -race -run "TestParseBusURLCanonicalisesRedundantPathSegments" ./client
 ```
 
 ## Description

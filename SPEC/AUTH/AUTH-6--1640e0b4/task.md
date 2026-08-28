@@ -64,6 +64,7 @@ _Unknown._
 
 - [CORE-8](../../CORE/CORE-8--1e9dae04/task.md) — CORE-8: Unmatched paths return ServeMux's text/plain 404, breaking the JSON error contract (done)
 - [IDEM-10](../../IDEM/IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
+- [c9e89d5a-6f6f-475e-8c8e-24f663a060bc](../../PROCESS/Explicit-manifest-of-security-bearing-test-files-as-a-th--c9e89d5a/task.md) — Explicit manifest of security-bearing test files, as a third guard check alongside the tw… (cancelled)
 
 ---
 

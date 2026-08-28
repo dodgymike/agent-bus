@@ -94,7 +94,7 @@ _Unknown._
 
 - [ACK-1](../ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
 - [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
-- [ACK-6-FU-CLI](../ACK-6-FU-CLI--836c9ff8/task.md) — ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign (in_progress)
+- [ACK-6-FU-CLI](../ACK-6-FU-CLI--836c9ff8/task.md) — ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign (done)
 - [ACK-9](../ACK-9--08f9987f/task.md) — ACK-9: Sender CLI/API acknowledgement status and observability (done)
 
 ## Referenced by other tasks (derived, not authoritative)

@@ -64,7 +64,7 @@ _Unknown._
 
 
 - [CONTEXT-CLI-SECTIONS](../CONTEXT-CLI-SECTIONS--3b4bd434/task.md) — CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… (todo)
-- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [CONTEXT-PROTOCOL-WALFLOOR-DEDUP](../CONTEXT-PROTOCOL-WALFLOOR-DEDUP--1e9cec15/task.md) — CONTEXT-PROTOCOL-WALFLOOR-DEDUP: one file owns the WAL-index-floor bytes, not two that ca… (todo)
 - [CONTEXT-READRULE](../CONTEXT-READRULE--202ad8d7/task.md) — CONTEXT-READRULE: tell agents to grep and range-read the big docs, in the one file every… (todo)
 

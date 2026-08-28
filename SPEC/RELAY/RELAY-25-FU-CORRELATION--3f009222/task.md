@@ -5,14 +5,14 @@
 | Public id | `3f009222-e31e-404a-9c77-3e7966741b82` |
 | Key | RELAY-25-FU-CORRELATION |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | tooling |
 | Section | backlog |
 | Tags | relay, fed-smoke, test-harness, invariant-1, relay-47-followup |
 | Created | 2026-08-15T12:56:32.608122+00:00 |
-| Updated | 2026-08-15T13:47:55.319402+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T10:06:35.999616+00:00 |
+| Completed | 2026-08-23T10:06:35.999600+00:00 |
 
 ## Proof command
 
@@ -80,7 +80,7 @@ _Unknown._
 
 
 - [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md) — RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE: three-bus federation smoke test (fed-smoke.sh, both… (done)
-- [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
+- [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (done)
 - [RELAY-47](../RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
 - [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
 

@@ -150,10 +150,10 @@ _Unknown._
 
 
 - [ACK-1](../../ACK/ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
-- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (in_progress)
+- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 - [ACK-6](../../ACK/ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
 - [RELAY-21](../RELAY-21--f5ce883e/task.md) — RELAY-21: AcceptRelay callback: roster-check before durable write, re-forward on OutcomeN… (done)
-- [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
+- [RELAY-25](../RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (done)
 - [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -163,7 +163,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (in_progress)
+- [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (done)
 - [RELAY-47-FU-DOCS](../RELAY-47-FU-DOCS--6f7281e8/task.md) — RELAY-47-FU-DOCS: three shipped docs still tell agents multi-hop relay does not work, aft… (done)
 - [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md) — RELAY-47-FU-FANOUT: refine the onward fan-out bound -- maxOnwardBusesPerMessage counts DE… (todo)
 - [RELAY-47-FU-IDEMFINGERPRINT](../RELAY-47-FU-IDEMFINGERPRINT--b666cd5a/task.md) — RELAY-47-FU-IDEMFINGERPRINT: the ENFORCED idempotency fingerprint is not the one internal… (todo)

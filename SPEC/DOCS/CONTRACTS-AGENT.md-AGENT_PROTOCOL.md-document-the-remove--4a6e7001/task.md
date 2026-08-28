@@ -44,7 +44,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [10e93262-8e34-4738-b435-bfe23d880057](../../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (in_progress)
+- [10e93262-8e34-4738-b435-bfe23d880057](../../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (done)
 
 ---
 

@@ -6351,3 +6351,28 @@ Gate verdicts:
 - Reviewer: COMPLETED, PASS. Scope stayed inside `client/config.go` and `client/config_test.go`; the patch is minimal and leaves the existing scheme/host/userinfo/query/fragment/loopback/IPv6 behavior covered by the pre-existing tests plus the new regression.
 - Security: COMPLETED, PASS. The change narrows idempotency scope-key ambiguity and does not relax any transport/auth checks.
 - Documentation: COMPLETED, PASS with no product-doc delta required. No CLI/HTTP/agent-facing contract changed; only the local code comment in `client/config.go` was updated to match the canonicalization behavior.
+
+## 2026-08-28 — SPEC mirror regeneration + destination-row P0 (7d564118) blocker finding
+
+Regenerated the SPEC.md / SPEC/ mirror (gen-spec-mirror.sh --no-relations) to reflect this session's
+closes (ACK-3, ACK-6-FU-CLI, 3e542d14, ACK-17, ACK-4-FU-RECIPIENT-BINDING, bd662bae). Mirror-only
+housekeeping; generated artifact, never hand-edited. security — SKIPPED under the docs-and-tests
+carve-out (generated docs; SPEC/ is not a control-plane or guard path); paths: SPEC.md, SPEC/,
+AGENT_LOG.md. No product code.
+
+**Destination-row P0 `7d564118` (ACK-12-FU-DESTINATION-ROW) — recovered but BLOCKED on a design ruling.**
+The prior author's implementation (destination-side ack lifecycle row for relayed messages, keyed on
+origin message id + recipient) was recovered onto HEAD `fbfa825` and its three mandatory tests verified
+RED-first (retention-window `TestTransitAckResolvesAfterMessageBodyPruned`, restart
+`TestDestinationRowSurvivesRestart`, idempotency `TestDuplicateRelayedIngestOpensNoSecondRow`); no new
+on-disk record type (reuses the existing ack lifecycle path, no reservation). BUT the `settleAck`
+reorder in `cmd/agent-bus/relaywiring.go` diverts ALL foreign-origin correlation keys to
+`disposeUnrecordedAck` (forward) BEFORE `Settle`, turning 5 guard subtests RED that are green on HEAD
+(`TestSettleAckDisposition`, `TestSettleAckCorrelatesToTheDurableRecord`) — those assert a bus holding a
+row for a foreign-origin key must settle LOCALLY, not forward. The author changed a shared relay-settle
+semantic with no DECISIONS.md rationale and did not reconcile the guards. Isolated: revert relaywiring.go
+alone → both suites green, so it is the sole regressor. NOT committed (red suite). Recovered work preserved
+in worktree `agent-a8064db9b21f37235`. Resolution requires a DECISIONS.md ruling + reliability/architecture
+review: (a) destination rows are non-settleable via the relay-settle path → update the 5 guards + record
+the decision, keep relaywiring.go; or (b) narrow the settleAck divert so it does not forward a foreign-origin
+key this bus holds a settleable row for. Task left todo.

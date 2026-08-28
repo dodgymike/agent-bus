@@ -63,7 +63,7 @@ _Unknown._
 - [55fe0e43-3cd1-40a6-8f18-73f0fbea69d3](../CONTRACTS-ONDISK.md-1294-1297-retire-the-composition-wit--55fe0e43/task.md) — CONTRACTS-ONDISK.md:1294-1297: retire the "composition with the forwarder remains RELAY-1… (todo)
 - [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) — Bound retained outbox tombstone resources without reopening replay resurrection (done)
 - [8fb219ca-1236-4058-9020-afd52a7e93f3](../../UNASSIGNED/WAL-checkpoint-follow-up-exhaustive-in-operation-crash-p--8fb219ca/task.md) — WAL checkpoint follow-up: exhaustive in-operation crash-path evidence (todo)
-- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (in_progress)
+- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 - [LIVE-11](../../LIVE/LIVE-11--3662e698/task.md) — LIVE-11: Federation ownership, multi-hop liveness and partition semantics (todo)
 - [RELAY-15](../RELAY-15--663be37c/task.md) — RELAY-15: Durable outbox record + replay (part 1 of 2) (done)
 - [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md) — RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per… (done)

@@ -5,14 +5,14 @@
 | Public id | `b11ef24c-3791-456f-a45f-1223cce5b50b` |
 | Key | AUTH-10-WIRING |
 | Epic | [AUTH](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T14:25:29.698768+00:00 |
-| Updated | 2026-08-21T10:04:30.597353+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T22:00:09.603824+00:00 |
+| Completed | 2026-08-22T22:00:09.603804+00:00 |
 
 ## Proof command
 
@@ -92,9 +92,9 @@ _Unknown._
 
 
 - [ACK-9](../../ACK/ACK-9--08f9987f/task.md) — ACK-9: Sender CLI/API acknowledgement status and observability (done)
-- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
-- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (todo)
-- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (todo)
+- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (done)
+- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (done)
+- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (done)
 - [RELAY-48](../../RELAY/RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -104,9 +104,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
-- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (todo)
-- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (todo)
+- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (done)
+- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (done)
+- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (done)
 
 ---
 

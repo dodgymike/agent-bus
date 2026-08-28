@@ -115,8 +115,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
-- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (todo)
+- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (done)
+- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (done)
 - [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -127,8 +127,8 @@ _Unknown._
 
 
 - [6fd8c8c5-b653-4d35-af83-8c9d1b82dedd](../../PROCESS/Correct-stale-wave-label-AUTH-7-to-its-real-task-identit--6fd8c8c5/task.md) — Correct stale wave label AUTH-7 to its real task identity across code and docs (todo)
-- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
-- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (todo)
+- [AUTH-10](../AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (done)
+- [AUTH-10-WIRING-DOCS](../AUTH-10-WIRING-DOCS--82724d91/task.md) — AUTH-10-WIRING-DOCS: six published sites still say the operator plane is unwired - correc… (done)
 - [AUTH-9](../AUTH-9--483ee09b/task.md) — AUTH-9: Opt-in session persistence (--persist-session) + agent-busctl session logout (done)
 - [DOCS-10](../../DOCS/DOCS-10--d6c84ff8/task.md) — DOCS-10: \`client\` package documents fail-closed verification while shipping fail-open (todo)
 - [DOCS-11](../../DOCS/DOCS-11--a434830e/task.md) — DOCS-11: Invite revocation is documented in three places and implemented in none (todo)

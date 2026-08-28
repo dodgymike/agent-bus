@@ -100,7 +100,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-17](../ACK-17--d4a2d828/task.md) — ACK-17: four keying mutations still leave internal/httpapi green -- session-keyed is the… (in_progress)
+- [ACK-17](../ACK-17--d4a2d828/task.md) — ACK-17: four keying mutations still leave internal/httpapi green -- session-keyed is the… (done)
 - [ACK-18](../ACK-18--ac5f5fb2/task.md) — ACK-18: no GLOBAL ceiling on parked ack-status waits -- 32 x enrolled principals (todo)
 
 ---

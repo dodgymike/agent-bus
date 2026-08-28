@@ -61,8 +61,18 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [DOCS-4](../../DOCS/DOCS-4--a24c33cd/task.md) — DOCS-4: CLAUDE.md is stale on invariant 3 -- enrolment IS invite-gated at HEAD (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [3d1b47d9-1395-4f61-a848-e1c06ced2ff8](../PITFALLS.md-has-no-row-in-doc-budgets.tsv-so-the-prose-r--3d1b47d9/task.md) — PITFALLS.md has no row in doc-budgets.tsv, so the prose relocated out of CLAUDE.md is unm… (todo)
+- [f4bd3c9f-3af8-4438-bcb0-18203b857255](../../PROCESS/Deep-dive-audit-and-refactor-the-repo-s-tracked-.md-file--f4bd3c9f/task.md) — Deep-dive: audit and refactor the repo's tracked .md files, CLAUDE.md primary, fix AGENTS… (done)
 
 ---
 

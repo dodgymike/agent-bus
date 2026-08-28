@@ -63,9 +63,9 @@ _Unknown._
 - [CONTEXT-LOG-RETIRE](../../CONTEXT/CONTEXT-LOG-RETIRE--116179c8/task.md) — CONTEXT-LOG-RETIRE: AGENT_LOG.md freezes its narrative and moves to one line per task (todo)
 - [MTLS-EXPIRY](../MTLS-EXPIRY--3604af80/task.md) — MTLS-EXPIRY: the client never checks the pinned bus certificate validity period -- the 36… (done)
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
-- [MTLS-MIGRATE](../MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (todo)
+- [MTLS-MIGRATE](../MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (done)
 - [MTLS-ROTATE-FU-SERVERSIDE](../MTLS-ROTATE-FU-SERVERSIDE--b624915b/task.md) — MTLS-ROTATE-FU-SERVERSIDE: the bus serves ONE certificate, so DECISIONS.md E3's two-certi… (todo)
-- [bd662bae-4c6c-426d-a736-7830d2d21037](../parseBusURL-does-not-canonicalise-redundant-path-slashes--bd662bae/task.md) — parseBusURL does not canonicalise redundant path slashes/segments, so a differently-spell… (todo)
+- [bd662bae-4c6c-426d-a736-7830d2d21037](../parseBusURL-does-not-canonicalise-redundant-path-slashes--bd662bae/task.md) — parseBusURL does not canonicalise redundant path slashes/segments, so a differently-spell… (done)
 - [cbfb7d88-1bb0-4ade-b1d1-f287b4c0c179](../../PROCESS/Triage-dispatched-two-concurrent-agents-with-overlapping--cbfb7d88/task.md) — Triage dispatched two concurrent agents with overlapping ownership of CONTRACTS-CLI.md (todo)
 
 ---

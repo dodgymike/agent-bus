@@ -71,7 +71,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [3d1b47d9-1395-4f61-a848-e1c06ced2ff8](../PITFALLS.md-has-no-row-in-doc-budgets.tsv-so-the-prose-r--3d1b47d9/task.md) — PITFALLS.md has no row in doc-budgets.tsv, so the prose relocated out of CLAUDE.md is unm… (todo)
 - [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) — CONTEXT-CLAUDE-TRIM: the agent roster descriptions and model-selection rationale leave CL… (done)
+- [f4bd3c9f-3af8-4438-bcb0-18203b857255](../../PROCESS/Deep-dive-audit-and-refactor-the-repo-s-tracked-.md-file--f4bd3c9f/task.md) — Deep-dive: audit and refactor the repo's tracked .md files, CLAUDE.md primary, fix AGENTS… (done)
 
 ---
 

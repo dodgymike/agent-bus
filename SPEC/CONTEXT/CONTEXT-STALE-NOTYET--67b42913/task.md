@@ -100,7 +100,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md) — INVITE-GATE-ENFORCE-FU-CLIENTREMEDY: fix client/enrol.go remedy text for the no-invite 403 (todo)
 - [PROOF-CHECK-FU-RECURSION](../../TOOLING/PROOF-CHECK-FU-RECURSION--69eb6f56/task.md) — PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes wh… (todo)
 

@@ -54,7 +54,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (in_progress)
+- [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (done)
 - [CRYPTO-9](../../CRYPTO/CRYPTO-9--0a4562fc/task.md) — CRYPTO-9: Cross-bus relay of encrypted messages -- what an intermediate bus can and canno… (deferred)
 - [IDEM-15](../../IDEM/IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-7](../../IDEM/IDEM-7--1c490a08/task.md) — IDEM-7: Exactly-once application on the relay path -- dedupe on the ORIGIN's identity, co… (superseded)

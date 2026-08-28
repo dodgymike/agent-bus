@@ -51,7 +51,7 @@ _Unknown._
 
 
 - [637fca2f-0fa6-439a-b6eb-361b681cdf80](../../TOOLING/ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) — ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known,… (todo)
-- [ACK-12](../../ACK/ACK-12--17406b3a/task.md) — ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance (in_progress)
+- [ACK-12](../../ACK/ACK-12--17406b3a/task.md) — ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance (done)
 - [ART-18](../../ART/ART-18--ef028209/task.md) — ART-18: Single-bus and three-bus artifact failure/restart/partition acceptance (todo)
 - [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) — DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… (done)
 - [DEPLOY-6](../DEPLOY-6--e12b75cd/task.md) — DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook (done)

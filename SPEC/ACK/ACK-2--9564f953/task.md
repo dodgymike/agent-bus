@@ -50,7 +50,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (in_progress)
+- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (done)
 - [IDEM-19](../../IDEM/IDEM-19--82b79094/task.md) — IDEM-19: expiry-queue compaction is O(retained) -- 48.4s vs 32ms measured, on the every-s… (done)
 - [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 

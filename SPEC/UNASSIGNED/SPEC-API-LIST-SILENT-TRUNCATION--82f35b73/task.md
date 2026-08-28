@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T15:34:36.231306+00:00 |
-| Updated | 2026-08-14T19:45:44.774614+00:00 |
+| Updated | 2026-08-22T09:23:40.808811+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -116,6 +116,26 @@ It passes once the response carries `total`/`count`/`has_more`/`next`/`truncated
 == RELATED (not a duplicate) ==
 
 Task 73b29060-f595-4f4d-90a9-3f13d231b909 ("Spec Server: warn on likely-duplicate task titles at create/claim-next time", P3) attacks the SYMPTOM from the other end: fuzzy title-similarity warnings at create time, motivated by the same RELAY-44/45 and RELAY-43/46 incidents. It assumes those pairs came from a filing RACE. Findings 6-9 above show a second, independent cause that a similarity warner does not address: the pre-filing check itself cannot see the thing it is checking for. The two tasks are complements -- that one detects near-duplicate TITLES, this one makes the underlying LOOKUP sound. Finding 8 in particular explains why RELAY-44 was invisible to any key-based check: it has no key.
+== CORRECTION 2026-08-22 (spec-keeper) -- point 1 of the "MEASURED FACTS" section above is now FALSE ==
+
+Re-measured against the live cloud API, GET /api/v1/projects/agent-bus/tasks?limit=5:
+
+  x-has-more: true
+  x-total-count: 831
+  link: </api/v1/projects/agent-bus/tasks?offset=5&limit=5>; rel="next"
+
+The API now DOES carry a total (X-Total-Count), an explicit truncation marker (X-Has-More) and a
+Link: rel="next" header -- exactly the fix ASK 1 in this task requested. The 2026-08-14 statement
+"No pagination response headers either (checked: only x-content-type-options is present; no Link,
+no Content-Range, no X-Total-Count)" no longer holds; do not rely on it, and do not re-file the
+"no total/no next" defect as new -- it is fixed.
+
+NOT closing this task: it is left open because the wider discoverability asks may still stand and
+have not been re-measured here -- specifically ask 2 (documenting the interim ?offset= paging rule
+in CLAUDE.md's Spec Server section), the ?q= field-coverage gap (finding 6: key field not indexed),
+and the large-?limit? 500 (finding 5). Whoever picks this up next should re-measure ALL of the
+original numbered findings against the current API before deciding what remains, not assume only
+finding 1 changed.
 
 ## Relations (authoritative)
 

@@ -47,7 +47,7 @@ _Unknown._
 
 
 - [DEPLOY-6](../../DEPLOY/DEPLOY-6--e12b75cd/task.md) — DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook (done)
-- [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (in_progress)
+- [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (done)
 
 ---
 

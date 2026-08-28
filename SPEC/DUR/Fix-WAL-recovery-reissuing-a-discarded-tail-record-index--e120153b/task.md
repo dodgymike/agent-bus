@@ -66,6 +66,7 @@ _Unknown._
 
 
 - [18eac796-d1fd-4619-94cb-1164bf989634](../seq-floor-guard-predicate-keys-on-discard-not-on-account--18eac796/task.md) — seq-floor guard predicate keys on discard, not on accounting -- boundary-exact truncation… (todo)
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2](../Expose-on-wal.Recovered-the-highest-index-a-record-actua--9fd58deb/task.md) — Expose on wal.Recovered the highest index a record actually CONSUMED (todo)
 - [DUR-11-FU-CONTRACTS](../../DOCS/DUR-11-FU-CONTRACTS--5b178dde/task.md) — DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy… (todo)
 - [HANDOVER-CHECK](../../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) — HANDOVER-CHECK: one command that tells you the health of this repo, plus its recorded out… (todo)

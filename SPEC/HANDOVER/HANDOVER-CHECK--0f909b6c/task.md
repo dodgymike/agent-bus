@@ -61,7 +61,7 @@ _Unknown._
 
 - [DOCS-2](../../DOCS/DOCS-2--41c52cfa/task.md) — DOCS-2: PROTOCOL.md -- wire protocol + on-disk format (todo)
 - [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
-- [MTLS-MIGRATE](../../MTLS/MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (todo)
+- [MTLS-MIGRATE](../../MTLS/MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (done)
 - [MTLS-VERIFY-FU-DOCSCHEME](../../DOCS/MTLS-VERIFY-FU-DOCSCHEME--cb4fd330/task.md) — MTLS-VERIFY-FU-DOCSCHEME: README + AGENT_PROTOCOL still tell agents to dial http:// a bus… (todo)
 - [PROOF-CHECK-FU-RECURSION](../../TOOLING/PROOF-CHECK-FU-RECURSION--69eb6f56/task.md) — PROOF-CHECK-FU-RECURSION: bash scripts/proof-check.sh hangs / spawns runaway processes wh… (todo)
 - [cea09b96-72db-40f1-84b4-c2e227eae1cf](../../TOOLING/proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md) — proof-check.sh: subtest SKIP/PASS lines invisible to plain-text counter -- parent-PASS/al… (done)
@@ -75,7 +75,7 @@ _Unknown._
 
 
 - [CONTEXT-BUDGET-WIRE](../../CONTEXT/CONTEXT-BUDGET-WIRE--be76c7e2/task.md) — CONTEXT-BUDGET-WIRE: the byte ceilings from this whole epic become a standing, wired-in c… (todo)
-- [CONTEXT-DOCCHECK](../../CONTEXT/CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../../CONTEXT/CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [HANDOVER-CONTRIBUTING](../HANDOVER-CONTRIBUTING--39484b80/task.md) — HANDOVER-CONTRIBUTING: CONTRIBUTING.md -- how this repo is actually developed, and how to… (todo)
 - [HANDOVER-MAP-CHECK](../HANDOVER-MAP-CHECK--dce30493/task.md) — HANDOVER-MAP-CHECK: make the invariant map executable, not prose (todo)
 - [HANDOVER-MAP-DOC](../HANDOVER-MAP-DOC--a52d4a99/task.md) — HANDOVER-MAP-DOC: INVARIANTS.md -- each of the 11 invariants, its real status at HEAD, an… (todo)

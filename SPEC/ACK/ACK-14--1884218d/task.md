@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T12:50:03.379906+00:00 |
-| Updated | 2026-08-16T12:50:03.379906+00:00 |
+| Updated | 2026-08-21T21:44:51.114492+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -92,6 +92,33 @@ is what keeps these two layers honest.
   - a test drives a real horizon expiry (shortened horizon, not a 24h wait) and asserts the bounce
   - the ruling on (a) vs (b) is recorded in DECISIONS.md
 
+
+--- CLAIM NARROWED 2026-08-21 (spec-keeper, at the coordinator's request, following filing of ACK-RETRY-ENGINE). The paragraph
+above is the ORIGINAL text and is kept verbatim; this section records a correction to one claim in it.
+
+THE CLAIM ABOVE ("The RETRY half is largely built at the transport layer and must be reused, not
+duplicated", citing internal/relay/forward.go's RetryHorizonCeiling/backoff and outbox.go's
+horizon_expired NACK class) is ACCURATE about transport retry and MISLEADING about ack retry. Read
+literally it invites whoever picks up this task to conclude the retry half needs no new work --
+that is false, and it is exactly the kind of stale-but-freshly-cited claim CLAUDE.md warns costs
+this project the most, because it reads as freshly verified and names real code.
+
+Verified by reading the code (read-only, 2026-08-21): outbox.OutboxDelivered ("the peer accepted...
+or settled as a final, non-retriable outcome") settles a job the moment the NEXT HOP's HTTP
+response accepts custody of the bytes -- internal/relay/forward.go:1347-1353, comment "OutboxDelivered
+means the peer answered finally, and there is acceptance". The retry loop cited above retries
+getting ONE HOP to take custody. It stops the instant that hop accepts, and it never retries because
+an END-TO-END ACK/NACK failed to arrive afterwards -- that is a separate, later event on the
+ACK-3/ACK-5 correlation plane, not something forward.go's loop observes at all.
+
+So: TRANSPORT retry (getting a peer to accept the bytes) exists and should indeed be reused, not
+duplicated -- the original claim is right about that. ACK retry (retrying because the terminal
+ack/nack for an ALREADY-ACCEPTED message never came back) is UNBUILT. That gap is now owned by
+ACK-RETRY-ENGINE (81ce7331-e66e-46ee-92af-7571439e971c), filed 2026-08-21, which this task should
+consume rather than reimplement: ACK-RETRY-ENGINE's exhaustion signal is what this task's bounce
+must fire on, not forward.go's horizon_expired in isolation. Whoever implements this task's bounce
+must not assume the sentence above already covers ack-timeout retry -- it does not.
+
 ## Relations (authoritative)
 
 > **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
@@ -108,9 +135,21 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
+- [ACK-5](../ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 - [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
 - [ACK-9](../ACK-9--08f9987f/task.md) — ACK-9: Sender CLI/API acknowledgement status and observability (done)
+- [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-7](../ACK-7--b7bf9631/task.md) — ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling (done)
+- [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
 
 ---
 

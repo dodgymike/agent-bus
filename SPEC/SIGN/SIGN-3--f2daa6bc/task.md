@@ -54,9 +54,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [ACK-BROADCAST-NO-LIFECYCLE-ROW](../../ACK/ACK-BROADCAST-NO-LIFECYCLE-ROW--e8510bb3/task.md) — ACK-BROADCAST-NO-LIFECYCLE-ROW: a same-bus BROADCAST opens no lifecycle row, so agent-bus… (todo)
 - [COMMS-MULTI-DESIGN](../../COMMS/COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
 - [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md) — CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path (deferred)
+- [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)
+- [IDEM-12-FU-BROADCAST](../../IDEM/IDEM-12-FU-BROADCAST--facdd241/task.md) — IDEM-12-FU-BROADCAST: broadcast idempotency is untestable until SIGN-3 defines a canonica… (todo)
 - [RATCHET-4](../../RATCHET/RATCHET-4--58fd8bc3/task.md) — RATCHET-4: Broadcast fan-out under pairwise ratchets (superseded)
 - [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../../RELAY/RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md) — RELAY-24-BLOCKER-EGRESS-HANDSHAKE: this bus never DIALS a peer, so its relay Registry nev… (todo)
 - [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)

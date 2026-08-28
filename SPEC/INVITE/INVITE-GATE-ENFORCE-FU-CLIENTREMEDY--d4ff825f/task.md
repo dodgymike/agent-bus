@@ -42,7 +42,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-1-FU-RATELIMIT](../../AUTH/AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (todo)
+- [AUTH-1-FU-RATELIMIT](../../AUTH/AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (done)
 - [INVITE-GATE-ENFORCE](../INVITE-GATE-ENFORCE--8297d7e2/task.md) — INVITE-GATE-ENFORCE: enforce invite-only enrolment (P0: anonymous roster exhaustion) (in_progress)
 
 ## Referenced by other tasks (derived, not authoritative)

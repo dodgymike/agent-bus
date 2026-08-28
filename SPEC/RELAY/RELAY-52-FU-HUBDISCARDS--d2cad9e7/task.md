@@ -5,14 +5,14 @@
 | Public id | `d2cad9e7-cbf2-4cab-b0cd-6ddb1ed5433a` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P2 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T10:29:10.547619+00:00 |
-| Updated | 2026-08-21T14:22:06.544750+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T09:50:27.217287+00:00 |
+| Completed | 2026-08-23T09:50:27.217270+00:00 |
 
 ## Proof command
 
@@ -102,6 +102,9 @@ _Unknown._
 
 
 - [RELAY-52](../RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
+- [RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK](../RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK--2c7da802/task.md) — RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK: cross-check test fixture appliedSeq against… (todo)
+- [RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED](../RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED--52196a49/task.md) — RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED: apply-branch discard increments no cou… (todo)
+- [RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED](../RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED--d858bf19/task.md) — RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED: the two applied-key discard lines are un… (todo)
 - [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (in_progress)
 
 ---

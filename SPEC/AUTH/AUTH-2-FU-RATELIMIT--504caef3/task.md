@@ -38,7 +38,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-1-FU-RATELIMIT](../AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (todo)
+- [AUTH-1-FU-RATELIMIT](../AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (done)
 - [AUTH-2](../AUTH-2--4b45a6d8/task.md) — AUTH-2: Token verification middleware (done)
 
 ---

@@ -5,14 +5,14 @@
 | Public id | `263c47fe-0675-4b6a-b842-8c8b909f35b7` |
 | Key | ACK-3 |
 | Epic | [ACK](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:37.472178+00:00 |
-| Updated | 2026-08-16T14:33:17.255263+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T10:41:14.076965+00:00 |
+| Completed | 2026-08-23T10:41:14.076947+00:00 |
 
 ## Proof command
 
@@ -48,8 +48,9 @@ _Unknown._
 - [ACK-14](../ACK-14--1884218d/task.md) — ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… (todo)
 - [ACK-3-FU-COLLAPSE-WIREVERSION](../ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) — ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… (todo)
 - [ACK-3-FU-SETTLEACK-RACE-ARM](../ACK-3-FU-SETTLEACK-RACE-ARM--d829afb2/task.md) — ACK-3-FU-SETTLEACK-RACE-ARM: the ack.ErrTerminal arm of federation.settleAck is unreachab… (todo)
-- [ACK-4-FU-RECIPIENT-BINDING](../ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) — ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… (todo)
-- [RELAY-51](../../RELAY/RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (todo)
+- [ACK-4-FU-RECIPIENT-BINDING](../ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) — ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… (done)
+- [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
+- [RELAY-51](../../RELAY/RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (done)
 - [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
 
 ---

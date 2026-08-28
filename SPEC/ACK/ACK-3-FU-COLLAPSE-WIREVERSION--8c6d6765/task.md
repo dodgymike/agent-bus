@@ -35,7 +35,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
 - [RELAY-23](../../RELAY/RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

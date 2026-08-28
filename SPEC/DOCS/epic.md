@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**43 open / 49 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
+**44 open / 50 total.** Full records live in `SPEC/DOCS/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (43)
+## Open tasks (44)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -44,6 +44,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | c716f8e7-ad9c-4af9-9fac-1bdb75c8f900 | PROTOCOL.md:1002 says internal/relay is 'imported by nothing' -- false since ed77bba (int… | todo | P2 | [task.md](PROTOCOL.md-1002-says-internal-relay-is-imported-by-noth--c716f8e7/task.md) | _not fetched_ | [SIGN-7](../SIGN/SIGN-7--aeb90793/task.md) [RELAY-24](../RELAY/RELAY-24--e303c624/task.md) [RELAY-13](../RELAY/RELAY-13--97f3f1b4/task.md) [RELAY-13-FU-DOCS](../RELAY/RELAY-13-FU-DOCS--7f3a4b80/task.md) [MTLS-CLIENTCERT](../MTLS/MTLS-CLIENTCERT--0bc7a2eb/task.md) [RELAY-21](../RELAY/RELAY-21--f5ce883e/task.md) |
 | f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78 | Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:12… | todo | P2 | [task.md](Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md) | _not fetched_ | [CONTRACTS-SPLIT](CONTRACTS-SPLIT--360a2679/task.md) [DUR-11-FU-CONTRACTS](DUR-11-FU-CONTRACTS--5b178dde/task.md) |
 | ff38f871-988a-4f2c-aa9a-febee4f3b15a | AGENT_LOG entry + skipped-doc-gate justification for the 2026-08-14 internal/idem comment… | todo | P2 | [task.md](AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md) | _not fetched_ | [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) [IDEM-17-FU-CROSSAGENT](../IDEM/IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) [IDEM-11-FU-PAPERTRAIL](IDEM-11-FU-PAPERTRAIL--c416a458/task.md) |
+| 4547cb42-f7a2-4cf0-8f5c-8220b2f76246 | DECISIONS.md: dated correction beneath the ACK-5 "NOT LANDED" caveat, now false | todo | P3 | [task.md](DECISIONS.md-dated-correction-beneath-the-ACK-5-NOT-LAND--4547cb42/task.md) | _not fetched_ | [ACK-5](../ACK/ACK-5--5991ee1a/task.md) |
 | 6b44ee89-612a-4d3d-9c39-1302c07d3c39 | AGENT_PROTOCOL.md error-block label says remedy: but the CLI prints try: | todo | P3 | [task.md](AGENT_PROTOCOL.md-error-block-label-says-remedy-but-the--6b44ee89/task.md) | _not fetched_ | [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
 | 88781750-0005-4c2f-8375-2d93dc1560b8 | DECISIONS.md:1302 cites a superseded bus-serve.sh line for the plaintext-probe follow-on | todo | P3 | [task.md](DECISIONS.md-1302-cites-a-superseded-bus-serve.sh-line-f--88781750/task.md) | _not fetched_ | [MTLS-LISTENER](../MTLS/MTLS-LISTENER--17e70a7e/task.md) [MTLS-VERIFY](../MTLS/MTLS-VERIFY--9dab7303/task.md) [10e93262-8e34-4738-b435-bfe23d880057](../MTLS/Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) |
 | DOCS-12 | DOCS-12: 8 error remedies name \`agent-busctl keygen\` / \`trust\`, which do not exist | todo | P3 | [task.md](DOCS-12--7b363ccf/task.md) | _not fetched_ | [AUTH-7](../AUTH/AUTH-7--4ba67a7b/task.md) [CONTEXT-STALE-NOTYET](../CONTEXT/CONTEXT-STALE-NOTYET--67b42913/task.md) |

@@ -5,20 +5,24 @@
 | Public id | `17406b3a-c2b3-4219-9040-569672b7c3fb` |
 | Key | ACK-12 |
 | Epic | [ACK](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:39.689719+00:00 |
-| Updated | 2026-08-21T14:18:12.481163+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T15:11:50.940218+00:00 |
+| Completed | 2026-08-21T15:11:30.197470+00:00 |
 
 ## Proof command
 
 ```sh
 bash scripts/proof-check.sh 'go test -race -run ^TestThreeBusEndToEndAckNack$ ./tests/e2e'
 ```
+
+## Status note
+
+Complete. Commit 5417852 landed; proof-check PASS re-verified at that HEAD in a clean overlay (see completion test_summary/commit for full detail). Superseded status_note removed: previously said awaiting coordinated commit — the commit has landed.
 
 ## Description
 
@@ -41,6 +45,16 @@ _Unknown._
 
 
 - [DEPLOY-3](../../DEPLOY/DEPLOY-3--9eaf2d19/task.md) — DEPLOY-3: multi-bus Compose profile (2+ peered buses) for RELAY end-to-end testing (todo)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-12-FU-HARNESS-HARDENING](../ACK-12-FU-HARNESS-HARDENING--1c12dcb9/task.md) — ACK-12-FU-HARNESS-HARDENING: apply the five LOW security findings and reviewer nits to th… (todo)
+- [ACK-12-FU-WATCH-CORRELATION-KEY](../ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) — ACK-12-FU-WATCH-CORRELATION-KEY: \`watch\` never exposes the origin message id, so a recipi… (done)
 
 ---
 

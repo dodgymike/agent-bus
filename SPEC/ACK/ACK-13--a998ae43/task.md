@@ -5,14 +5,14 @@
 | Public id | `a998ae43-60e3-4713-9212-71b3c7380c80` |
 | Key | ACK-13 |
 | Epic | [ACK](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T11:35:36.829158+00:00 |
-| Updated | 2026-08-21T14:17:42.914439+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T15:54:13.257829+00:00 |
+| Completed | 2026-08-21T15:54:13.257812+00:00 |
 
 ## Proof command
 

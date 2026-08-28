@@ -5,14 +5,14 @@
 | Public id | `911841af-83d7-445f-bf46-9097eeb0661d` |
 | Key | RELAY-54 |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T10:09:02.870792+00:00 |
-| Updated | 2026-08-21T11:10:09.811988+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T09:11:28.084930+00:00 |
+| Completed | 2026-08-23T09:11:28.084881+00:00 |
 
 ## Proof command
 
@@ -75,9 +75,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (in_progress)
+- [ACK-5](../../ACK/ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
 - [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
-- [RELAY-51](../RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (todo)
+- [RELAY-51](../RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -87,8 +87,10 @@ _Unknown._
 
 
 - [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md) — agent-bus peer list mints wal-mac.key as a side effect of a read-only command (todo)
+- [ACK-RETRY-ENGINE](../../ACK/ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
 - [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (in_progress)
-- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (todo)
+- [a9bcdc54-fe1c-4497-9294-13efe2fca8fc](../agent-bus-outbox-bound-the-replay-tally-maps-which-are-k--a9bcdc54/task.md) — agent-bus outbox: bound the replay tally maps, which are keyed off attacker-influenced fi… (todo)
+- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (done)
 - [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---

@@ -71,7 +71,7 @@ _Unknown._
 
 - [INVITE-GATE](../INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 - [INVITE-GATE-ENFORCE-FU-CONTRACTS](../INVITE-GATE-ENFORCE-FU-CONTRACTS--df04ed54/task.md) — INVITE-GATE-ENFORCE-FU-CONTRACTS: update CONTRACTS-HTTP.md/CONTRACTS-ONDISK.md to reflect… (todo)
-- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-CROSSCHECK](../../MTLS/MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
 - [RELAY-24](../../RELAY/RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 
 ## Referenced by other tasks (derived, not authoritative)

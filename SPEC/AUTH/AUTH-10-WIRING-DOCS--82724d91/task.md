@@ -5,14 +5,20 @@
 | Public id | `82724d91-4e6b-4c78-b264-967966fb449d` |
 | Key | AUTH-10-WIRING-DOCS |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T10:04:51.096094+00:00 |
-| Updated | 2026-08-21T10:04:51.096094+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T23:05:26.869297+00:00 |
+| Completed | 2026-08-22T23:05:26.869282+00:00 |
+
+## Proof command
+
+```sh
+bash scripts/doc-check.sh section CONTRACTS-CLI.md "#### Wiring status — BOTH GAPS ARE CLOSED (`AUTH-10-WIRING`, 2026-08-21)" "BOTH GAPS ARE CLOSED" && bash scripts/doc-check.sh section AGENT_PROTOCOL.md "## The OPERATOR PRINCIPAL exists, and it is not you — `agent-bus operator` is an OPERATOR command" "REACHABLE FROM `argv` since `AUTH-10-WIRING`" && bash scripts/doc-check.sh section CONTRACTS-CLI.md "### `agent-bus operator keygen|add|list|revoke` — the OPERATOR/ADMIN principal (`AUTH-10`, 2026-08-16)" "REACHABLE FROM `argv` since `AUTH-10-WIRING`"
+```
 
 ## Description
 
@@ -48,7 +54,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 - [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
 
@@ -59,7 +65,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 
 ---
 

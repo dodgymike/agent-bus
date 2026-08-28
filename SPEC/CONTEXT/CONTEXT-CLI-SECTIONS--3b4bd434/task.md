@@ -62,7 +62,7 @@ _Unknown._
 
 
 - [083c468e-7dbd-4d1f-93fc-53617e28421f](../../MTLS/CONTRACTS-CLI.md-client-export-table-is-missing-the-thre--083c468e/task.md) — CONTRACTS-CLI.md client export table is missing the three symbols MTLS-EXPIRY added (todo)
-- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [CONTEXT-PLANE-TOC](../CONTEXT-PLANE-TOC--463afaf6/task.md) — CONTEXT-PLANE-TOC: a generated heading index at the top of every large reference doc (todo)
 - [MTLS-EXPIRY](../../MTLS/MTLS-EXPIRY--3604af80/task.md) — MTLS-EXPIRY: the client never checks the pinned bus certificate validity period -- the 36… (done)
 

@@ -5,13 +5,13 @@
 | Public id | `74cb9c06-09f8-447d-80a6-b44d811b8176` |
 | Key | ZZB-firsthal |
 | Epic | [UNASSIGNED](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | — |
 | Component | — |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T11:09:35.839870+00:00 |
-| Updated | 2026-08-16T11:09:35.839870+00:00 |
+| Updated | 2026-08-21T14:30:12.624040+00:00 |
 | Completed | — |
 
 ## Description

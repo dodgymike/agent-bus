@@ -58,7 +58,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (in_progress)
+- [3e542d14-81ea-4b86-8b95-a8ea6cfc4a79](../../RELAY/internal-relay-doc.go-still-specifies-per-connection-dis--3e542d14/task.md) — internal/relay/doc.go still specifies per-connection disconnect on idempotency-key-reuse-… (done)
 - [IDEM-14-FU-CLIENTTEXT](../IDEM-14-FU-CLIENTTEXT--30a9e4f6/task.md) — IDEM-14-FU-CLIENTTEXT: client remedy text (messages.go:1175) asserts a server disconnect… (done)
 - [INVITE-CLIENT-FU-PENDINGINVITE](../../INVITE/INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md) — INVITE-CLIENT-FU-PENDINGINVITE: pendingEnrolment does not record the invite id, so a mism… (done)
 - [RELAY-13](../../RELAY/RELAY-13--97f3f1b4/task.md) — RELAY-13: Enrolment registers the agent's messaging public key (done)

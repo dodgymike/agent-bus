@@ -5,19 +5,19 @@
 | Public id | `3e542d14-81ea-4b86-8b95-a8ea6cfc4a79` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P2 |
 | Component | relay |
 | Section | backlog |
 | Tags | spec-defect, invariant-10, doc-only |
 | Created | 2026-08-08T10:22:17.911272+00:00 |
-| Updated | 2026-08-08T11:35:07.370351+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T10:33:03.397644+00:00 |
+| Completed | 2026-08-23T10:33:03.397626+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestPackageDocDoesNotReviveTheWithdrawnDisconnect ./internal/relay
+go test -race -run "TestPackageDocDoesNotReviveTheWithdrawnDisconnect" ./internal/relay
 ```
 
 ## Status note

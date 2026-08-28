@@ -5,24 +5,28 @@
 | Public id | `bc12541b-e3be-44bc-8f22-e28fe820e229` |
 | Key | ACK-8 |
 | Epic | [ACK](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-09T08:25:38.693266+00:00 |
-| Updated | 2026-08-21T14:19:20.836025+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T09:50:26.878669+00:00 |
+| Completed | 2026-08-23T09:50:26.878654+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'go test -race -run ^TestAckCrashRecoveryMatrix$ ./internal/relay'
+bash scripts/proof-check.sh 'go test -race -count=1 -run "^TestAck(RestartOnARealWAL|RestartCannotResurrect|TornTail|AcknowledgedRowLost|Undecodable|Replaying|RetryAndConflict|SettleCrashed)" ./internal/ack'
 ```
 
 ## Description
 
 Crash-inject every local/hop/recipient acknowledgement boundary and prove restart reconstructs the same terminal state without resurrection, lost accepted ACK/NACK, or index reuse. Reuse WAL checkpoint generations rather than adding an independent snapshot. Invariants: 1,4,5,6,10. Prospective files: internal/relay/, internal/hub/, internal/wal/ tests.
+
+**NARROWED 2026-08-21 (reviewer gate, accepted).** Delivered scope is the LOCAL-ACCEPT and SETTLE boundaries in `internal/ack`, proven against a real on-disk `wal.Log`: restart reproduces all five states exactly; a settled row cannot be resurrected by a post-restart retry; a torn tail and a bit-flipped *acknowledged* record are both discarded LOUDLY at ERROR while the bus still starts, and the WAL index advances past the hole rather than rewinding; SIGKILL at three points in the settle write path (before-write / after prepare-fsync / after commit-fsync) recovers to a prefix of accepted history. Also closed a real gap: every prior test in `internal/ack` used an in-memory `fakeLog` stub that structurally could not produce a torn record, a discard, or an index — nothing in the package had ever opened a file.
+
+NOT in this task, each carrying its own follow-up: the HOP boundary (`internal/relay` has no test importing `internal/ack` at all); §14 D2 `obligation_lost`; and bounding replay time via WAL checkpoints.
 
 ## Relations (authoritative)
 
@@ -32,6 +36,20 @@ Crash-inject every local/hop/recipient acknowledgement boundary and prove restar
 
 
 _Unknown._
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-7](../ACK-7--b7bf9631/task.md) — ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling (done)
+- [ACK-8-FU-CHECKPOINTS](../ACK-8-FU-CHECKPOINTS--832da689/task.md) — ACK-8-FU-CHECKPOINTS: wire WAL checkpoints so ack replay time is bounded (todo)
+- [ACK-8-FU-D2-OBLIGATIONLOST](../ACK-8-FU-D2-OBLIGATIONLOST--6926fb51/task.md) — ACK-8-FU-D2-OBLIGATIONLOST: detect and emit obligation_lost (todo)
+- [ACK-8-FU-HOPBOUNDARY](../ACK-8-FU-HOPBOUNDARY--6ca0c4f5/task.md) — ACK-8-FU-HOPBOUNDARY: crash-inject the HOP acknowledgement boundary (todo)
+- [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
+- [CLIENT-CREDSTORE-CONCURRENCY-FLAKE](../../UNASSIGNED/CLIENT-CREDSTORE-CONCURRENCY-FLAKE--c3095855/task.md) — client.TestStoreConcurrentMutationsLoseNothing is flaky and may be reporting a real lost… (todo)
 
 ---
 

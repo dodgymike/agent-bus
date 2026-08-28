@@ -5,19 +5,19 @@
 | Public id | `10e93262-8e34-4738-b435-bfe23d880057` |
 | Key | _(null in the export)_ |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T21:00:46.117556+00:00 |
-| Updated | 2026-08-08T10:29:32.165234+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T19:10:32.246210+00:00 |
+| Completed | 2026-08-23T19:10:32.246192+00:00 |
 
 ## Proof command
 
 ```sh
-bash scripts/proof-check.sh 'bash /tmp/claude-1000/-mnt-sdb4-mike-mike-source-agent-bus/b828c013-a5a5-4da0-b21c-d56d21066f9e/scratchpad/fp-proof.sh' -- a live run of scripts/bus-serve.sh start against a real bus with an attacker-planted bus_cert_fingerprint= line in the log, asserting the printed fingerprint equals the sha256 of the DER in $DATA_DIR/bus-tls.crt and NOT the planted value.
+bash -lc 'set -euo pipefail; T=$(mktemp -d); port=$(python3 -c "import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()"); export AGENT_BUS_RUN_DIR="$T/run" AGENT_BUS_DATA_DIR="$T/data" AGENT_BUS_LISTEN="127.0.0.1:$port" AGENT_BUS_LOG_LEVEL=info; trap "scripts/bus-serve.sh stop >/dev/null 2>&1 || true" EXIT; fake=ba5eba11ba5eba11ba5eba11ba5eba11ba5eba11ba5eba11ba5eba11ba5eba11; mkdir -p "$AGENT_BUS_RUN_DIR"; (while :; do printf "bus_cert_fingerprint=%s\n" "$fake" >>"$AGENT_BUS_RUN_DIR/agent-bus.log"; sleep 0.02; done) & poison=$!; out=$(scripts/bus-serve.sh start 2>&1); kill "$poison" 2>/dev/null || true; wait "$poison" 2>/dev/null || true; printed=$(printf "%s\n" "$out" | sed -n "s/^agent-bus:[[:space:]]*fingerprint[[:space:]]*//p" | head -1); cert=$(openssl x509 -in "$AGENT_BUS_DATA_DIR/bus-tls.crt" -outform DER | sha256sum | cut -d" " -f1); test -n "$printed"; test "$printed" = "$cert"; test "$printed" != "$fake"'
 ```
 
 ## Status note
@@ -63,6 +63,7 @@ _Unknown._
 
 - [320d4a73-8b75-4f87-afca-ba23ec69a590](../No-regression-guard-exists-for-the-bus-fingerprint-trust--320d4a73/task.md) — No regression guard exists for the bus-fingerprint trust-anchor fix (todo)
 - [4a6e7001-ca2a-430a-a5e6-39e922d7325f](../../DOCS/CONTRACTS-AGENT.md-AGENT_PROTOCOL.md-document-the-remove--4a6e7001/task.md) — CONTRACTS-AGENT.md/AGENT_PROTOCOL.md document the removed log-scrape as bus-serve.sh star… (todo)
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [88781750-0005-4c2f-8375-2d93dc1560b8](../../DOCS/DECISIONS.md-1302-cites-a-superseded-bus-serve.sh-line-f--88781750/task.md) — DECISIONS.md:1302 cites a superseded bus-serve.sh line for the plaintext-probe follow-on (todo)
 - [ae594fa8-03bb-4d51-aa31-641f5ddcae66](../../AGENTIF/RUN_DIR-created-with-no-ownership-check-enables-binary-s--ae594fa8/task.md) — RUN_DIR created with no ownership check -- enables binary swap and pidfile symlink attack (todo)
 

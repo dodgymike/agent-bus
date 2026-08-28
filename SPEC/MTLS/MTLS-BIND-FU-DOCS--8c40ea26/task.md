@@ -5,19 +5,19 @@
 | Public id | `8c40ea26-3139-490f-bb68-27fbbc71c282` |
 | Key | MTLS-BIND-FU-DOCS |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T19:18:35.866541+00:00 |
-| Updated | 2026-08-14T19:18:35.866541+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T19:46:02.376571+00:00 |
+| Completed | 2026-08-23T19:46:02.376554+00:00 |
 
 ## Proof command
 
 ```sh
-grep -qi "already bound to an agent" CONTRACTS-HTTP.md && grep -q cert_bindings CONTRACTS-ONDISK.md && grep -q MTLS-BIND DECISIONS.md && grep -q MTLS-BIND AGENT_LOG.md
+bash scripts/doc-check.sh section DECISIONS.md '## 2026-08-23 — MTLS-BIND: enrolment accepts the absence of a client certificate, and ignores an out-of-window presented certificate rather than binding it' 'Absence of a client certificate at enrolment is ACCEPTED.' 'A presented certificate outside its own validity window is IGNORED and never durably bound.' 'MTLS-CROSSCHECK` owns the later per-agent ENFORCEMENT step' && bash scripts/doc-check.sh section AGENT_LOG.md '## 2026-08-23 — MTLS-BIND-FU-DOCS correction: the earlier AGENT_LOG close-out overstated the DECISIONS.md state' 'satisfied at that point.' 'owns the later per-agent 403'
 ```
 
 ## Description
@@ -49,8 +49,8 @@ _Unknown._
 
 
 - [ENROL-SHAPE](../../INVITE/ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
-- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
-- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (done)
+- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
 - [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 
 ---

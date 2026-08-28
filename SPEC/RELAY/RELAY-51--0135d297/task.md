@@ -5,14 +5,14 @@
 | Public id | `0135d297-5902-400a-b074-e79feedd7ff4` |
 | Key | RELAY-51 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T11:46:18.209673+00:00 |
-| Updated | 2026-08-16T11:46:18.209673+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T10:06:32.796296+00:00 |
+| Completed | 2026-08-23T10:06:32.796278+00:00 |
 
 ## Proof command
 
@@ -88,7 +88,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
 - [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -98,7 +98,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
+- [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
 - [RELAY-55](../RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
 
 ---

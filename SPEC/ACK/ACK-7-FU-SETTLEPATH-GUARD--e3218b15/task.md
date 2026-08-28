@@ -1,0 +1,107 @@
+# ACK-7-FU-SETTLEPATH-GUARD: a7SettlePath's default-arm assertion accepts the wrong switch, and keys methods by name only
+
+| Field | Value |
+| --- | --- |
+| Public id | `e3218b15-edcf-4801-aef2-4d0dee83b79b` |
+| Key | ACK-7-FU-SETTLEPATH-GUARD |
+| Epic | [ACK](../epic.md) |
+| Status | todo |
+| Priority | P2 |
+| Component | BE |
+| Section | backlog |
+| Tags | — |
+| Created | 2026-08-22T00:08:06.717635+00:00 |
+| Updated | 2026-08-22T00:08:06.717635+00:00 |
+| Completed | — |
+
+## Proof command
+
+```sh
+go test -race -run ^TestAckTerminalExactlyOnceUnderRetry$/the_mirrored ./internal/relay
+```
+
+## Description
+
+FILED 2026-08-21 by the ACK-7 reviewer gate, re-gating the a7SettlePath re-point that unblocked
+ACK-5. Both findings are LOW and LATENT. Neither blocked that change: both are strictly ADDITIVE
+versus the committed baseline 04dde85, which had no default-arm assertion at all.
+
+# 1. hasDefault is satisfied by ANY switch on the path, not by the RIGHT one
+
+internal/relay/ackretry_ack7_test.go, a7SettlePath. The assertion "the settle path still has a
+switch with a default arm" exists because the negative assertion -- nothing on the path branches on
+ack.ErrConcurrentTransition -- only means something while there is a default for it to fall through
+TO. Delete the default and the negative passes over code that no longer answers a concurrent
+transition.
+
+But hasDefault is set true by any *ast.SwitchStmt with a default clause in any visited function. The
+reviewer MEASURED the hole: adding an unrelated switch with a default: to disposeUnrecordedAck while
+DELETING settleAck's err-switch default passes GREEN.
+
+Latent only, today: no other switch is on the path, so the plain deletion is correctly RED (proven in
+both trees).
+
+FIX: require the default in the switch that CONTAINS the Settle call, not in any switch. Walk the
+SwitchStmt subtree for a SelectorExpr named Settle and assert the default on that switch alone.
+
+# 2. a7SettlePath keys methods by NAME ONLY, ignoring receiver type
+
+Same file. cmd/agent-bus/relaywiring.go declares 8 receiver types. No duplicate method names exist
+today -- verified on HEAD and on ACK-5's worktree -- and every failure mode is fail-loud RED rather
+than a silent wrong answer. But a future method with a colliding name on a different receiver would
+make the walk follow the wrong body.
+
+FIX: key by (receiver type, method name), or detect a duplicate name and fail loudly naming both
+declarations.
+
+# Why this is a follow-up and not a fix in place
+
+The reviewer ruled the presence-check sensitivity itself must NOT be strengthened: any check that
+counts call sites or pins their location reintroduces the SHAPE constraint the a7SettlePath rewrite
+exists to remove. That ruling is not in scope here. These two items are about the guard reading the
+RIGHT code, which is a different question from how sensitive it is.
+
+# Acceptance
+  - the default-arm assertion is scoped to the switch containing the Settle call
+  - the reviewer's exact mutation goes RED: unrelated switch-with-default added to
+    disposeUnrecordedAck AND settleAck's err-switch default deleted
+  - a duplicate method name on a different receiver is detected and named, or made impossible
+  - every existing mutation in the ACK-7 table still goes RED afterwards
+
+# Do NOT
+  - do not strengthen the positive PRESENCE checks into call-site counting. The reviewer measured
+    that both ErrAckNotBound arms already have behavioural owners which go RED on single-arm removal
+    (cmd/agent-bus TestSettleAckDisposition, TestSettleAckCorrelatesToTheDurableRecord). That is a
+    division of labour, not a coverage hole.
+
+## Relations (authoritative)
+
+> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
+> with `--no-relations`, which skips one rate-limited request per task. Re-run
+> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+
+
+_Unknown._
+
+## Referenced in description (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-5](../ACK-5--5991ee1a/task.md) — ACK-5: Multi-hop relay ACK/NACK propagation and correlation (done)
+- [ACK-7](../ACK-7--b7bf9631/task.md) — ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-7-FU-MIRROR-REPOINT](../ACK-7-FU-MIRROR-REPOINT--ee253a27/task.md) — ACK-7-FU-MIRROR-REPOINT: a7AssertMirrorMatchesProduction must follow the settle path, not… (done)
+
+---
+
+_Generated by `scripts/gen-spec-mirror.sh` from the Spec Server. Never hand-edit; the server is the source of truth._

@@ -59,7 +59,7 @@ _Unknown._
 - [AUTH-1-FU-ACTIVECAP-RETRYAFTER](../AUTH-1-FU-ACTIVECAP-RETRYAFTER--03a8512b/task.md) — AUTH-1-FU-ACTIVECAP-RETRYAFTER: a per-agent cap 503 tells the client the wrong thing and… (todo)
 - [AUTH-1-FU-SESSIONSCALE](../AUTH-1-FU-SESSIONSCALE--067b80cf/task.md) — AUTH-1-FU-SESSIONSCALE: session-table O(n) scans and refuse-not-evict policy cause CPU/lo… (todo)
 - [CONTRACTS-SPLIT](../../DOCS/CONTRACTS-SPLIT--360a2679/task.md) — CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every pro… (done)
-- [ac4f9c2b-5460-4e83-997d-0e433194752f](../Enrol-accepts-a-duplicate-enrolment-public-key-one-keypa--ac4f9c2b/task.md) — Enrol accepts a duplicate enrolment public key -- one keypair can hold unlimited agent ids (todo)
+- [ac4f9c2b-5460-4e83-997d-0e433194752f](../Enrol-REJECTS-a-duplicate-enrolment-public-key-409-one-k--ac4f9c2b/task.md) — Enrol REJECTS a duplicate enrolment public key (409) -- one keypair can no longer hold tw… (done)
 
 ---
 

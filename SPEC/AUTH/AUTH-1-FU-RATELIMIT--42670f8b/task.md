@@ -5,19 +5,19 @@
 | Public id | `42670f8b-ab58-491d-a8cf-04a6e92185f1` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T18:33:44.587868+00:00 |
-| Updated | 2026-08-02T18:33:44.587868+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T22:55:55.474812+00:00 |
+| Completed | 2026-08-22T22:55:55.474795+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestSessionBeginRateLimit ./internal/httpapi
+go test -race -run "TestSessionBeginRateLimit" ./internal/httpapi
 ```
 
 ## Description
@@ -49,9 +49,10 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [855dd855-2017-43eb-8d22-d1127387a8f3](../Rate-limiter-GC-sweep-maybeGCLocked-is-O-n-under-the-mut--855dd855/task.md) — Rate limiter GC sweep (maybeGCLocked) is O(n) under the mutex once per 60s -- revisit onl… (todo)
 - [AUTH-1-FU-ACTIVECAP-DOCS](../AUTH-1-FU-ACTIVECAP-DOCS--27a811c9/task.md) — AUTH-1-FU-ACTIVECAP-DOCS: document the per-agent ACTIVE-session cap in CONTRACTS-HTTP.md… (todo)
 - [AUTH-2-FU-RATELIMIT](../AUTH-2-FU-RATELIMIT--504caef3/task.md) — AUTH-2-FU-RATELIMIT: Rate-limit the unauthenticated routes and the 401 path (superseded)
-- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (todo)
+- [AUTH-8](../AUTH-8--b65948b7/task.md) — AUTH-8: DEEP DIVE — the balance between usability and security / abuse protection (done)
 - [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md) — INVITE-GATE-ENFORCE-FU-CLIENTREMEDY: fix client/enrol.go remedy text for the no-invite 403 (todo)
 
 ---

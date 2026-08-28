@@ -5,14 +5,14 @@
 | Public id | `836c9ff8-fc58-4989-95cb-7e2086f0eae4` |
 | Key | _(null in the export)_ |
 | Epic | [ACK](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | cli |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T16:01:51.307970+00:00 |
-| Updated | 2026-08-21T10:08:33.076053+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T10:36:35.637218+00:00 |
+| Completed | 2026-08-23T10:36:35.637200+00:00 |
 
 ## Proof command
 

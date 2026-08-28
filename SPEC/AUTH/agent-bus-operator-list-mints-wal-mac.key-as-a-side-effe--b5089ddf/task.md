@@ -5,14 +5,14 @@
 | Public id | `b5089ddf-5a5a-41e0-8278-036f6a195e2a` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T14:14:52.446319+00:00 |
-| Updated | 2026-08-21T14:15:23.409690+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T00:05:10.041491+00:00 |
+| Completed | 2026-08-23T00:05:10.041474+00:00 |
 
 ## Proof command
 
@@ -164,9 +164,9 @@ _Unknown._
 
 
 - [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../../RELAY/agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md) — agent-bus peer list mints wal-mac.key as a side effect of a read-only command (todo)
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 - [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
-- [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
+- [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -176,6 +176,7 @@ _Unknown._
 
 
 - [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../../RELAY/agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md) — agent-bus peer list mints wal-mac.key as a side effect of a read-only command (todo)
+- [a9bcdc54-fe1c-4497-9294-13efe2fca8fc](../../RELAY/agent-bus-outbox-bound-the-replay-tally-maps-which-are-k--a9bcdc54/task.md) — agent-bus outbox: bound the replay tally maps, which are keyed off attacker-influenced fi… (todo)
 
 ---
 

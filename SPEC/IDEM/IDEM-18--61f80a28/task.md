@@ -5,19 +5,19 @@
 | Public id | `61f80a28-b177-4224-be5d-dce0418bfd2f` |
 | Key | IDEM-18 |
 | Epic | [IDEM](../epic.md) |
-| Status | todo |
+| Status | in_progress |
 | Priority | P1 |
 | Component | agentif |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T13:17:45.425457+00:00 |
-| Updated | 2026-08-14T23:02:31.320403+00:00 |
+| Updated | 2026-08-22T08:14:58.080522+00:00 |
 | Completed | — |
 
 ## Proof command
 
 ```sh
-go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/... && grep -qi idempotency AGENT_PROTOCOL.md && grep -qi idempotency CONTRACTS-CLI.md && grep -qi idempotency PROTOCOL.md
+go test -race -run TestCLISendReusesIdempotencyKeyOnRetry ./cmd/agent-busctl/... && grep -q "BUS-TO-BUS carrier and nothing else" CONTRACTS.md && grep -q "ONE canonical carrier PER PLANE" internal/idem/doc.go && grep -q "^## 13. A LOCAL send" PROTOCOL.md && grep -q "fixed retention window of 50h10m22s" AGENT_PROTOCOL.md
 ```
 
 ## Status note
@@ -28,7 +28,12 @@ NOT DONE (bookkeeping reconciliation pass, 2026-08-07). The old proof_cmd was un
 
 (1) STALE OWNER CLEARED, status reset in_progress -> todo. The stored owner was the generic slug 'feature-runner', which names NOBODY: the feature-runner on this pass did not claim this task and confirms no agent is on it. Left as-was it was neither being worked nor claimable. It is now claimable.
 
-(2) SCOPE CONFIRMED for whoever picks it up: the remaining half is DOC + CLI SURFACE, not server code -- a rewrite of AGENT_PROTOCOL.md against `busctl send/broadcast --idempotency-key` (not the retired scripts/bus-*.sh wrappers) plus the CLI surface that delivers it. That is entirely outside the internal/idem boundary the feature-runner works within, which is why this pass audited it and left the work untouched rather than half-doing it.
+(2) SCOPE CONFIRMED for whoever picks it up: the remaining half is DOC + CLI SURFACE, not server code -- a rewrite of AGENT_PROTOCOL.md against busctl send/broadcast --idempotency-key (not the retired scripts/bus-*.sh wrappers) plus the CLI surface that delivers it. That is entirely outside the internal/idem boundary the feature-runner works within, which is why this pass audited it and left the work untouched rather than half-doing it.
+
+--- APPENDED 2026-08-21 (feature-runner, on claiming). The 2026-08-07 paragraph above is STALE and must not be actioned as written. AGENT_PROTOCOL.md was rewritten against agent-busctl by commit c673d2a: at HEAD 9938eb2, grep -c -i idempot AGENT_PROTOCOL.md = 31 (not 0), grep -c busctl AGENT_PROTOCOL.md = 112, and references to bus-send.sh/bus-broadcast.sh = 0. Its idempotency section covers all five points deliverable (4) asks for: the CLI mints the key and agents do not craft it; what a replayed ack means; that retrying under the SAME key after an ambiguous failure is correct; that key reuse with DIFFERENT content is a violation that is rejected and logged but does NOT disconnect (the 2026-08-08 narrowing); and the retention window as the honest boundary of the guarantee. The AGENT_PROTOCOL half of this task is therefore ALREADY SATISFIED. Remaining work is narrower: PROTOCOL.md, and a verified doc defect in CONTRACTS.md.
+
+
+--- APPENDED 2026-08-21 (feature-runner, on finishing). CODE COMPLETE, GATES PASS, AWAITING COORDINATED COMMIT -- do not read as shipped. Documentation-only change; the client/CLI half was already done and proven before this pass. Files: CONTRACTS.md (the header-vs-body correction), PROTOCOL.md (new section 12 "A LOCAL send's idempotency"), internal/idem/key.go + internal/idem/doc.go (COMMENTS ONLY -- verified at AST level by the reviewer: parsing both revisions with comments discarded yields IDENTICAL output), AGENT_PROTOCOL.md (one false statement corrected), AGENT_LOG.md. THE DEFECT FIXED: CONTRACTS.md claimed "every mutating surface carries the key in idem.HeaderName". False -- idem.HeaderName is the BUS-TO-BUS (relay/roster) carrier only; no internal/httpapi handler reads it, and the four agent-facing mutating routes (/v1/enroll, /v1/mint, /v1/send, /v1/broadcast) carry the key as the idempotency_key JSON body field. An agent trusting the old wording would set a header /v1/send ignores, losing idempotency silently and turning every retry into a second delivered message. Same over-broad claim corrected at internal/idem/key.go and internal/idem/doc.go. ALSO corrected in AGENT_PROTOCOL.md: "How long a key lives" cited the MESSAGE store's bounds (1 day / 1 GiB, internal/store) for the APPLIED-KEY table's window; the real value is idem.RetentionWindow = 50h10m22s, and capacity fails CLOSED (503) rather than evicting early, so nothing shortens it. GATES: reviewer COMPLETED (PASS -- verified the comment-only claim at AST level, all section-12 facts against code, and that the old AGENT_PROTOCOL statement was false and the new one true); security COMPLETED (PASS -- no P0/P1; three P2s, all pre-existing). Three reviewer/security precision advisories were APPLIED after the gates: the peer-mount clause (internal/httpapi MOUNTS /v1/peer/* whose handlers are internal/relay's), the enumeration of exactly four key-carrying routes plus the note that session begin/complete carry none, and a dangling-word reflow in CONTRACTS.md. Complete this task with the real commit_sha once the integrator lands it.
 
 ## Description
 
@@ -54,7 +59,7 @@ _Unknown._
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
 - [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
-- [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (todo)
+- [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)
 - [IDEM-14](../IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
 - [IDEM-17](../IDEM-17--8b1e85fd/task.md) — IDEM-17: Crash-injection test -- restart mid-retry-window still yields exactly one effect (done)
@@ -66,9 +71,11 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [IDEM-10](../IDEM-10--b28e5153/task.md) — IDEM-10: Idempotency key -- format, client-supplied untrusted validation, scoped per-agent (done)
 - [IDEM-11](../IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
+- [IDEM-18-FU-FROMREQUEST-DEAD](../IDEM-18-FU-FROMREQUEST-DEAD--3b9a65d4/task.md) — IDEM-18-FU-FROMREQUEST-DEAD: idem.FromRequest has zero production callers, leaving two va… (todo)
 - [IDEM-9](../IDEM-9--b0dc4a12/task.md) — IDEM-9: Wrappers generate the key ONCE and reuse it on retry, + AGENT_PROTOCOL.md / PROTO… (superseded)
 
 ---

@@ -5,20 +5,24 @@
 | Public id | `b3b28f45-54b3-4d0e-bde7-933c9c3923b2` |
 | Key | CONTEXT-DOCCHECK |
 | Epic | [CONTEXT](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | tooling |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T15:24:33.007888+00:00 |
-| Updated | 2026-08-08T15:24:33.007888+00:00 |
-| Completed | — |
+| Updated | 2026-08-21T21:18:08.030675+00:00 |
+| Completed | 2026-08-21T21:18:08.030657+00:00 |
 
 ## Proof command
 
 ```sh
 bash scripts/proof-check.sh 'bash scripts/doc-check.sh --selftest'
 ```
+
+## Status note
+
+Awaiting a security round-4 verdict on commit e2c9cd0 (scripts/doc-check.sh, round-4 fixes for the round-3 CHANGES-REQUESTED at 2026-08-21T20:22:33) before completion. Round-4 has a reviewer delta PASS only; no security re-gate has been posted since round-3.
 
 ## Description
 
@@ -83,11 +87,17 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [5cf1edd0-a678-4072-98f9-4c1cb08c7c92](../doc-check.sh-s-re-entry-probe-reports-suppressed-asserti--5cf1edd0/task.md) — doc-check.sh's re-entry probe reports "suppressed assertions" while quoting two equal cou… (todo)
 - [CONTEXT-AGENTDESC-TRIM](../CONTEXT-AGENTDESC-TRIM--eaea0581/task.md) — CONTEXT-AGENTDESC-TRIM: budget the 14 frontmatter description: fields, the real per-spawn… (done)
 - [CONTEXT-CLAUDE-TRIM](../CONTEXT-CLAUDE-TRIM--6ef1d88e/task.md) — CONTEXT-CLAUDE-TRIM: the agent roster descriptions and model-selection rationale leave CL… (done)
 - [CONTEXT-CLI-SECTIONS](../CONTEXT-CLI-SECTIONS--3b4bd434/task.md) — CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… (todo)
 - [CONTEXT-CONTRACTS-PARKING](../CONTEXT-CONTRACTS-PARKING--881dae01/task.md) — CONTEXT-CONTRACTS-PARKING: CONTRACTS.md admits, in its own text, that it is 90% parking l… (todo)
 - [CONTEXT-DEEPDIVE-CONVENTION](../CONTEXT-DEEPDIVE-CONVENTION--cea3880c/task.md) — CONTEXT-DEEPDIVE-CONVENTION: stop the next 75 KB deep-dive from landing at the repo root (todo)
+- [CONTEXT-DOCCHECK-FU-BREAKCOUNT](../CONTEXT-DOCCHECK-FU-BREAKCOUNT--a9e66edb/task.md) — CONTEXT-DOCCHECK-FU-BREAKCOUNT: doc-check.sh:344's 'breaks 20 assertions' is unsourceable… (todo)
+- [CONTEXT-DOCCHECK-FU-COUNTPIN](../CONTEXT-DOCCHECK-FU-COUNTPIN--5f3a3cd6/task.md) — CONTEXT-DOCCHECK-FU-COUNTPIN: the outer doc-check.sh --selftest run's assertion count is… (todo)
+- [CONTEXT-DOCCHECK-FU-DASHFILE](../CONTEXT-DOCCHECK-FU-DASHFILE--1b997e84/task.md) — CONTEXT-DOCCHECK-FU-DASHFILE: a file argument of a lone '-' is accepted by containment, c… (todo)
+- [CONTEXT-DOCCHECK-FU-ENVIRON](../CONTEXT-DOCCHECK-FU-ENVIRON--a9bf1905/task.md) — CONTEXT-DOCCHECK-FU-ENVIRON: the environment can turn any doc-check.sh verdict green -- d… (todo)
+- [CONTEXT-DOCCHECK-SYMLINK](../CONTEXT-DOCCHECK-SYMLINK--d7277d6f/task.md) — CONTEXT-DOCCHECK-SYMLINK: physical (realpath) containment for cmd_section -- a symlink st… (todo)
 - [CONTEXT-DONEGATE-CANON](../CONTEXT-DONEGATE-CANON--b9b0c654/task.md) — CONTEXT-DONEGATE-CANON: 'do not mark done when the behaviour is not yet live' said once,… (todo)
 - [CONTEXT-DRIFT-PHANTOM](../CONTEXT-DRIFT-PHANTOM--08e38aec/task.md) — CONTEXT-DRIFT-PHANTOM: two agent defs instruct writing to SESSION_REPORT.md, which has ne… (todo)
 - [CONTEXT-DRIFT-WRAPPERS](../CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md) — CONTEXT-DRIFT-WRAPPERS: two per-spawn files still call the retired shell wrappers 'the ON… (todo)
@@ -101,7 +111,7 @@ _Unknown._
 - [CONTEXT-SPEC-BRIEF](../CONTEXT-SPEC-BRIEF--4b0f5e57/task.md) — CONTEXT-SPEC-BRIEF: the SPEC.md mirror carries the lede of each task, not the full 382 KB… (superseded)
 - [CONTEXT-STALE-NOTYET](../CONTEXT-STALE-NOTYET--67b42913/task.md) — CONTEXT-STALE-NOTYET: a doc-check \`forbid\` mode, so a "not yet implemented" note cannot o… (todo)
 - [DOCS-4-FU-BUDGET](../DOCS-4-FU-BUDGET--721b51ef/task.md) — DOCS-4-FU-BUDGET: aade191 grew CLAUDE.md 678 bytes past its own recorded 28781-byte ratch… (todo)
-- [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (in_progress)
+- [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (done)
 - [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../../RELAY/RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md) — RELAY-25-FU-CORRELATION-FU-AGENTDOCS: CONTRACTS-AGENT.md still says fed-smoke.sh is 'expe… (todo)
 
 ---

@@ -41,7 +41,7 @@ _Unknown._
 
 
 - [CORE-12](../../CORE/CORE-12--ae000d92/task.md) — CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 (superseded)
-- [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [MTLS-VERIFY](../../MTLS/MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 
 ---
 

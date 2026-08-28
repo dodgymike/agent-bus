@@ -223,7 +223,7 @@ _Unknown._
 - [ACK-15](../../ACK/ACK-15--a63b133d/task.md) — ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… (done)
 - [ACK-18](../../ACK/ACK-18--ac5f5fb2/task.md) — ACK-18: no GLOBAL ceiling on parked ack-status waits -- 32 x enrolled principals (todo)
 - [ACK-2](../../ACK/ACK-2--9564f953/task.md) — ACK-2: Durable local send acceptance and ACK/NACK lifecycle record (done)
-- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (in_progress)
+- [AUTH-10](../../AUTH/AUTH-10--37993b49/task.md) — AUTH-10: An operator/admin principal -- the missing noun blocking AUTH-7, INVMINT and CON… (done)
 - [AUTH-9](../../AUTH/AUTH-9--483ee09b/task.md) — AUTH-9: Opt-in session persistence (--persist-session) + agent-busctl session logout (done)
 - [CONTEXT-RESERVE-CANON](../../CONTEXT/CONTEXT-RESERVE-CANON--3aea21a7/task.md) — CONTEXT-RESERVE-CANON: the reservation guidance stops disagreeing with itself across four… (todo)
 - [DOCS-30](../../DOCS/DOCS-30--a311a067/task.md) — DOCS-30: clientcert help says the bus ignores the client certificate; the bus refuses 409… (todo)
@@ -232,7 +232,7 @@ _Unknown._
 - [RELAY-45-FU-CLI](../../RELAY/RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (done)
 - [RELAY-52](../../RELAY/RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
 - [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
-- [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
+- [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
 - [RELAY-55](../../RELAY/RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
 - [TOOLING-1](../../TOOLING/TOOLING-1--eeb4109b/task.md) — TOOLING-1: read-only linter for mechanically broken stored proof_cmd values (done)
 - [TOOLING-2](../../TOOLING/TOOLING-2--87d9e8d1/task.md) — TOOLING-2: make docs/THREE-BUS-DOCKER.md's bash blocks a repeatable executable check (todo)
@@ -246,6 +246,8 @@ _Unknown._
 
 - [017304e6-a088-40c9-b6c2-5cac4bc0fb66](../proof-check.sh-head_token-word-splits-the-LITERAL-text-o--017304e6/task.md) — proof-check.sh head_token word-splits the LITERAL text of a VAR=$(...) proof_cmd, mis-ref… (todo)
 - [0f4a0736-979b-4a20-b75f-0b2950f2181c](../../PROCESS/gen-spec-mirror.sh-REFUSES-TO-WRITE-unexpected-non-blank--0f4a0736/task.md) — gen-spec-mirror.sh REFUSES TO WRITE ("unexpected non-blank column-0 lines") -- markdown e… (todo)
+- [3d1b47d9-1395-4f61-a848-e1c06ced2ff8](../../CONTEXT/PITFALLS.md-has-no-row-in-doc-budgets.tsv-so-the-prose-r--3d1b47d9/task.md) — PITFALLS.md has no row in doc-budgets.tsv, so the prose relocated out of CLAUDE.md is unm… (todo)
+- [f4bd3c9f-3af8-4438-bcb0-18203b857255](../../PROCESS/Deep-dive-audit-and-refactor-the-repo-s-tracked-.md-file--f4bd3c9f/task.md) — Deep-dive: audit and refactor the repo's tracked .md files, CLAUDE.md primary, fix AGENTS… (done)
 
 ---
 

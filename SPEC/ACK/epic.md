@@ -2,46 +2,75 @@
 
 [← all epics](../../SPEC.md)
 
-**20 open / 27 total.** Full records live in `SPEC/ACK/<task>/task.md`.
+**38 open / 56 total.** Full records live in `SPEC/ACK/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (20)
+## Open tasks (38)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| ACK-12 | ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance | in_progress | P0 | [task.md](ACK-12--17406b3a/task.md) | _not fetched_ | [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |
-| ACK-3 | ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation | in_progress | P0 | [task.md](ACK-3--263c47fe/task.md) | _not fetched_ | — |
-| ACK-7 | ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling | todo | P0 | [task.md](ACK-7--b7bf9631/task.md) | _not fetched_ | — |
-| ACK-8 | ACK-8: ACK/NACK restart, replay and crash-consistency recovery | in_progress | P0 | [task.md](ACK-8--bc12541b/task.md) | _not fetched_ | — |
+| ACK-12-FU-DESTINATION-ROW | ACK-12-FU-DESTINATION-ROW: a relayed message gets no ack row on the DESTINATION bus, so i… | todo | P0 | [task.md](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
 | ACK-10 | ACK-10: ACK/NACK compatibility, version negotiation and downgrade safety | todo | P1 | [task.md](ACK-10--cf417e18/task.md) | _not fetched_ | — |
-| ACK-13 | ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types | in_progress | P1 | [task.md](ACK-13--a998ae43/task.md) | _not fetched_ | [ACK-4](ACK-4--aeb32123/task.md) [ACK-1](ACK-1--e0ac42e1/task.md) [ACK-2](ACK-2--9564f953/task.md) |
-| ACK-14 | ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… | todo | P1 | [task.md](ACK-14--1884218d/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
-| ACK-4-FU-RECIPIENT-BINDING | ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… | todo | P1 | [task.md](ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) |
-| ACK-5 | ACK-5: Multi-hop relay ACK/NACK propagation and correlation | in_progress | P1 | [task.md](ACK-5--5991ee1a/task.md) | _not fetched_ | [RELAY-19](../RELAY/RELAY-19--24e0bd11/task.md) |
-| ACK-6-FU-CLI | ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign | in_progress | P1 | [task.md](ACK-6-FU-CLI--836c9ff8/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY | ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY: client.Message.signingMessage feeds the L… | todo | P1 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY--7e23e90f/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
+| ACK-14 | ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… | todo | P1 | [task.md](ACK-14--1884218d/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) [ACK-RETRY-ENGINE](ACK-RETRY-ENGINE--81ce7331/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-TRANSIT-503-IS-PERMANENT | ACK-5-FU-TRANSIT-503-IS-PERMANENT: a permanent origin 409 reaches the recipient as a retr… | todo | P1 | [task.md](ACK-5-FU-TRANSIT-503-IS-PERMANENT--ce287d71/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-8-FU-D2-OBLIGATIONLOST | ACK-8-FU-D2-OBLIGATIONLOST: detect and emit obligation_lost | todo | P1 | [task.md](ACK-8-FU-D2-OBLIGATIONLOST--6926fb51/task.md) | _not fetched_ | [ACK-8](ACK-8--bc12541b/task.md) [RELAY-48](../RELAY/RELAY-48--9887b0eb/task.md) [ACK-11](ACK-11--5567f490/task.md) |
+| ACK-8-FU-HOPBOUNDARY | ACK-8-FU-HOPBOUNDARY: crash-inject the HOP acknowledgement boundary | todo | P1 | [task.md](ACK-8-FU-HOPBOUNDARY--6ca0c4f5/task.md) | _not fetched_ | [ACK-8](ACK-8--bc12541b/task.md) |
+| ACK-RETRY-ENGINE | ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… | todo | P1 | [task.md](ACK-RETRY-ENGINE--81ce7331/task.md) | _not fetched_ | [ACK-14](ACK-14--1884218d/task.md) [ACK-7](ACK-7--b7bf9631/task.md) [ACK-5](ACK-5--5991ee1a/task.md) [ACK-3](ACK-3--263c47fe/task.md) [ACK-8](ACK-8--bc12541b/task.md) [RELAY-54](../RELAY/RELAY-54--911841af/task.md) +2 more |
 | ACK-11 | ACK-11: Document ACK/NACK semantics, operations and privacy limits | todo | P2 | [task.md](ACK-11--5567f490/task.md) | _not fetched_ | [ACK-1](ACK-1--e0ac42e1/task.md) |
-| ACK-17 | ACK-17: four keying mutations still leave internal/httpapi green -- session-keyed is the… | in_progress | P2 | [task.md](ACK-17--d4a2d828/task.md) | _not fetched_ | [ACK-16](ACK-16--f60cdd30/task.md) |
+| ACK-17-FU-ENROL-FLAKE | ACK-17-FU-ENROL-FLAKE: TestCLIEnrolEndToEnd is flaky at HEAD (SIGTERM race before handler… | todo | P2 | [task.md](ACK-17-FU-ENROL-FLAKE--c20c15c8/task.md) | _not fetched_ | [ACK-17](ACK-17--d4a2d828/task.md) |
+| ACK-17-FU-FOREIGNPREFIX | ACK-17-FU-FOREIGNPREFIX: tripwire -- auth.WALRoster.Apply does not filter foreign bus pre… | todo | P2 | [task.md](ACK-17-FU-FOREIGNPREFIX--f9c6d8b0/task.md) | _not fetched_ | [ACK-17](ACK-17--d4a2d828/task.md) |
 | ACK-3-FU-COLLAPSE-WIREVERSION | ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… | todo | P2 | [task.md](ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) [RELAY-23](../RELAY/RELAY-23--220d36f4/task.md) |
+| ACK-5-FU-AGENTACK-METER | ACK-5-FU-AGENTACK-METER: POST /v1/ack is an unmetered origination point for federation wo… | todo | P2 | [task.md](ACK-5-FU-AGENTACK-METER--058673d6/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-BUSPATH-SENDER | ACK-5-FU-BUSPATH-SENDER: relayedBusPath never requires the arriving path to END at the au… | todo | P2 | [task.md](ACK-5-FU-BUSPATH-SENDER--57fe695f/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-EXIT7-AMBIGUOUS | ACK-5-FU-EXIT7-AMBIGUOUS: agent-busctl exit 7 now carries two unrelated meanings on POST… | todo | P2 | [task.md](ACK-5-FU-EXIT7-AMBIGUOUS--26c0b25f/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-PROVENANCE-BODYCOPY | ACK-5-FU-PROVENANCE-BODYCOPY: the transit authorization deep-copies a message body per PO… | todo | P2 | [task.md](ACK-5-FU-PROVENANCE-BODYCOPY--eea4f722/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-STALEWATCHCOMMENT | ACK-5-FU-STALEWATCHCOMMENT: internal/hub/ack.go still says agent-busctl watch does not ex… | todo | P2 | [task.md](ACK-5-FU-STALEWATCHCOMMENT--b5ffc730/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-5-FU-TRANSIT-DUPLICATE | ACK-5-FU-TRANSIT-DUPLICATE: an intermediate discards the origins duplicate flag and alway… | todo | P2 | [task.md](ACK-5-FU-TRANSIT-DUPLICATE--cb10d713/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
 | ACK-6-FU-ACKVOCAB-ENUM | ACK-6-FU-ACKVOCAB-ENUM: export a class enumerator from internal/ack so the frozen signing… | todo | P2 | [task.md](ACK-6-FU-ACKVOCAB-ENUM--a08571b1/task.md) | _not fetched_ | — |
 | ACK-6-FU-PROTOCOL-DOC | ACK-6-FU-PROTOCOL-DOC: PROTOCOL.md carries no normative byte table for the ACK format or… | todo | P2 | [task.md](ACK-6-FU-PROTOCOL-DOC--cd5a022a/task.md) | _not fetched_ | [RELAY-14](../RELAY/RELAY-14--7db695ee/task.md) |
 | ACK-6-FU-SETTLE-ERRORLOG | ACK-6-FU-SETTLE-ERRORLOG: throttle the terminal-conflict ERROR in ack.Store.Settle | todo | P2 | [task.md](ACK-6-FU-SETTLE-ERRORLOG--dc58e7ee/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
 | ACK-6-FU-VERIFYACK-ASTGUARD | ACK-6-FU-VERIFYACK-ASTGUARD: an AST guard so no bus ingest path calls signing.VerifyAck o… | todo | P2 | [task.md](ACK-6-FU-VERIFYACK-ASTGUARD--19af3033/task.md) | _not fetched_ | — |
+| ACK-7-FU-SETTLEPATH-GUARD | ACK-7-FU-SETTLEPATH-GUARD: a7SettlePath's default-arm assertion accepts the wrong switch,… | todo | P2 | [task.md](ACK-7-FU-SETTLEPATH-GUARD--e3218b15/task.md) | _not fetched_ | [ACK-7](ACK-7--b7bf9631/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-8-FU-CHECKPOINTS | ACK-8-FU-CHECKPOINTS: wire WAL checkpoints so ack replay time is bounded | todo | P2 | [task.md](ACK-8-FU-CHECKPOINTS--832da689/task.md) | _not fetched_ | [ACK-8](ACK-8--bc12541b/task.md) |
+| ACK-BROADCAST-NO-LIFECYCLE-ROW | ACK-BROADCAST-NO-LIFECYCLE-ROW: a same-bus BROADCAST opens no lifecycle row, so agent-bus… | todo | P2 | [task.md](ACK-BROADCAST-NO-LIFECYCLE-ROW--e8510bb3/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [SIGN-3](../SIGN/SIGN-3--f2daa6bc/task.md) |
+| ACK-TRANSIT-CAP-BOUNDS-CONCURRENCY-NOT-RATE | the outbound ACK transit cap bounds CONCURRENCY, not RATE | todo | P2 | [task.md](ACK-TRANSIT-CAP-BOUNDS-CONCURRENCY-NOT-RATE--2b63d938/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-5-FU-BUSPATH-SENDER](ACK-5-FU-BUSPATH-SENDER--57fe695f/task.md) |
+| cf8feb8e-b845-43d7-bd5f-7b5e9074e4d2 | cmd/agent-busctl/ackstatus.go: correct the stale "P0 7d564118 is CLOSED" comment | todo | P2 | [task.md](cmd-agent-busctl-ackstatus.go-correct-the-stale-P0-7d564--cf8feb8e/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-12-FU-DESTINATION-ROW](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) |
+| ACK-12-FU-HARNESS-HARDENING | ACK-12-FU-HARNESS-HARDENING: apply the five LOW security findings and reviewer nits to th… | todo | P3 | [task.md](ACK-12-FU-HARNESS-HARDENING--1c12dcb9/task.md) | _not fetched_ | [ACK-12](ACK-12--17406b3a/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT | ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT: render the human watch "ack key" line at… | todo | P3 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-ACKKEYINDENT--dcf87771/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT | ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT: cmd/agent-bus/relayegress.go asserts no… | todo | P3 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-EGRESSCOMMENT--cc26db9c/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT | ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT: exit 8 unknown is four answers at once… | todo | P3 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-EXITEIGHTCOUNT--a74dd477/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY-FU-OMITEMPTYDOC | ACK-12-FU-WATCH-CORRELATION-KEY-FU-OMITEMPTYDOC: correct the never-omitempty rationale to… | todo | P3 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-OMITEMPTYDOC--80056e00/task.md) | _not fetched_ | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
+| ACK-17-FU-CONTRACT-CITATION | ACK-17-FU-CONTRACT-CITATION: pin CONTRACTS-HTTP.md per-principal parked-wait cap claim to… | todo | P3 | [task.md](ACK-17-FU-CONTRACT-CITATION--327f7cf7/task.md) | _not fetched_ | [ACK-17](ACK-17--d4a2d828/task.md) |
 | ACK-18 | ACK-18: no GLOBAL ceiling on parked ack-status waits -- 32 x enrolled principals | todo | P3 | [task.md](ACK-18--ac5f5fb2/task.md) | _not fetched_ | [ACK-16](ACK-16--f60cdd30/task.md) |
 | ACK-3-FU-SETTLEACK-RACE-ARM | ACK-3-FU-SETTLEACK-RACE-ARM: the ack.ErrTerminal arm of federation.settleAck is unreachab… | todo | P3 | [task.md](ACK-3-FU-SETTLEACK-RACE-ARM--d829afb2/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) |
+| ACK-5-FU-ONDISK-STALEREF | ACK-5-FU-ONDISK-STALEREF: CONTRACTS-ONDISK.md still forward-references intermediate ACK r… | todo | P3 | [task.md](ACK-5-FU-ONDISK-STALEREF--a299d922/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-4-FU-RECIPIENT-BINDING](ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) |
+| ACK-5-FU-REGISTRY-BASEURL-GUARD | ACK-5-FU-REGISTRY-BASEURL-GUARD: guard test: a peer must never be able to write its own R… | todo | P3 | [task.md](ACK-5-FU-REGISTRY-BASEURL-GUARD--699c108f/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) |
 | ACK-6-FU-SETTLE-WALERR-SENTINEL | ACK-6-FU-SETTLE-WALERR-SENTINEL: a WAL failure in ack.Store.Settle answers 500, not 503 | todo | P3 | [task.md](ACK-6-FU-SETTLE-WALERR-SENTINEL--c4dc6b6b/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
 
-## Closed tasks (7) — done, cancelled, superseded
+## Closed tasks (18) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | ACK-1 | ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine | done | P0 | [task.md](ACK-1--e0ac42e1/task.md) | _not fetched_ | — |
+| ACK-12 | ACK-12: Three-bus end-to-end ACK/NACK smoke acceptance | done | P0 | [task.md](ACK-12--17406b3a/task.md) | _not fetched_ | [DEPLOY-3](../DEPLOY/DEPLOY-3--9eaf2d19/task.md) |
+| ACK-12-FU-WATCH-CORRELATION-KEY | ACK-12-FU-WATCH-CORRELATION-KEY: \`watch\` never exposes the origin message id, so a recipi… | done | P0 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) | _not fetched_ | [ACK-12](ACK-12--17406b3a/task.md) [ACK-12-FU-DESTINATION-ROW](ACK-12-FU-DESTINATION-ROW--7d564118/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |
 | ACK-2 | ACK-2: Durable local send acceptance and ACK/NACK lifecycle record | done | P0 | [task.md](ACK-2--9564f953/task.md) | _not fetched_ | [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md) [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../RELAY/Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md) |
+| ACK-3 | ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation | done | P0 | [task.md](ACK-3--263c47fe/task.md) | _not fetched_ | — |
 | ACK-4 | ACK-4: ACK/NACK authorization, anti-forgery and privacy review implementation | done | P0 | [task.md](ACK-4--aeb32123/task.md) | _not fetched_ | — |
+| ACK-7 | ACK-7: ACK/NACK retry, idempotency and exactly-once terminal handling | done | P0 | [task.md](ACK-7--b7bf9631/task.md) | _not fetched_ | [ACK-5](ACK-5--5991ee1a/task.md) [ACK-8](ACK-8--bc12541b/task.md) [ACK-14](ACK-14--1884218d/task.md) |
+| ACK-8 | ACK-8: ACK/NACK restart, replay and crash-consistency recovery | done | P0 | [task.md](ACK-8--bc12541b/task.md) | _not fetched_ | — |
+| ACK-13 | ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types | done | P1 | [task.md](ACK-13--a998ae43/task.md) | _not fetched_ | [ACK-4](ACK-4--aeb32123/task.md) [ACK-1](ACK-1--e0ac42e1/task.md) [ACK-2](ACK-2--9564f953/task.md) |
 | ACK-15 | ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… | done | P1 | [task.md](ACK-15--a63b133d/task.md) | _not fetched_ | [ACK-9](ACK-9--08f9987f/task.md) [ACK-6](ACK-6--d3c50d33/task.md) [ACK-1](ACK-1--e0ac42e1/task.md) [ACK-6-FU-CLI](ACK-6-FU-CLI--836c9ff8/task.md) |
 | ACK-16 | ACK-16: the per-principal wait cap is untested -- a global bucket passes the whole package | done | P1 | [task.md](ACK-16--f60cdd30/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
+| ACK-4-FU-RECIPIENT-BINDING | ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… | done | P1 | [task.md](ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) | _not fetched_ | [ACK-3](ACK-3--263c47fe/task.md) |
+| ACK-5 | ACK-5: Multi-hop relay ACK/NACK propagation and correlation | done | P1 | [task.md](ACK-5--5991ee1a/task.md) | _not fetched_ | [RELAY-19](../RELAY/RELAY-19--24e0bd11/task.md) |
 | ACK-6 | ACK-6: Recipient delivery acknowledgement boundary | done | P1 | [task.md](ACK-6--d3c50d33/task.md) | _not fetched_ | [ACK-1](ACK-1--e0ac42e1/task.md) |
+| ACK-6-FU-CLI | ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign | done | P1 | [task.md](ACK-6-FU-CLI--836c9ff8/task.md) | _not fetched_ | [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) |
+| ACK-7-FU-MIRROR-REPOINT | ACK-7-FU-MIRROR-REPOINT: a7AssertMirrorMatchesProduction must follow the settle path, not… | done | P1 | [task.md](ACK-7-FU-MIRROR-REPOINT--ee253a27/task.md) | _not fetched_ | [ACK-7](ACK-7--b7bf9631/task.md) [ACK-5](ACK-5--5991ee1a/task.md) [ACK-7-FU-SETTLEPATH-GUARD](ACK-7-FU-SETTLEPATH-GUARD--e3218b15/task.md) |
 | ACK-9 | ACK-9: Sender CLI/API acknowledgement status and observability | done | P1 | [task.md](ACK-9--08f9987f/task.md) | _not fetched_ | — |
+| ACK-17 | ACK-17: four keying mutations still leave internal/httpapi green -- session-keyed is the… | done | P2 | [task.md](ACK-17--d4a2d828/task.md) | _not fetched_ | [ACK-16](ACK-16--f60cdd30/task.md) [ACK-17-FU-ENROL-FLAKE](ACK-17-FU-ENROL-FLAKE--c20c15c8/task.md) |
 
 ## Epic description
 

@@ -5,14 +5,20 @@
 | Public id | `b65948b7-cd1d-4728-9f8e-10a76a1e50a3` |
 | Key | AUTH-8 |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T07:31:27.747616+00:00 |
-| Updated | 2026-08-16T07:31:27.747616+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T00:08:26.462457+00:00 |
+| Completed | 2026-08-23T00:08:26.462441+00:00 |
+
+## Proof command
+
+```sh
+bash scripts/doc-check.sh section AUTH-8_DEEPDIVE.md '## 1. Control inventory' 'Control inventory'
+```
 
 ## Description
 
@@ -105,7 +111,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-1-FU-RATELIMIT](../AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (todo)
+- [AUTH-1-FU-RATELIMIT](../AUTH-1-FU-RATELIMIT--42670f8b/task.md) — AUTH-1-FU-RATELIMIT: per-source rate limiting on the three unauthenticated auth routes (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -114,8 +120,11 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 - [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
+- [AUTH-8-FU-MSGKEY-POP](../AUTH-8-FU-MSGKEY-POP--576a794d/task.md) — AUTH-8-FU-MSGKEY-POP: enrolment does not prove possession of the MESSAGING private key (A… (todo)
+- [AUTH-8-FU-POSTURE-DOCS](../AUTH-8-FU-POSTURE-DOCS--46ede035/task.md) — AUTH-8-FU-POSTURE-DOCS: document the composed anonymous-surface abuse posture (what each… (todo)
+- [AUTH-8-FU-RATELIMIT-SHAREDSRC](../AUTH-8-FU-RATELIMIT-SHAREDSRC--fe0245a3/task.md) — AUTH-8-FU-RATELIMIT-SHAREDSRC: co-located honest agents share one rate-limit bucket behin… (todo)
 - [AUTH-9](../AUTH-9--483ee09b/task.md) — AUTH-9: Opt-in session persistence (--persist-session) + agent-busctl session logout (done)
 
 ---

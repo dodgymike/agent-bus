@@ -5,14 +5,14 @@
 | Public id | `1c4d3dea-b4f6-4f68-b823-78bb76a6b5aa` |
 | Key | _(null in the export)_ |
 | Epic | [AUTH](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-07T21:25:59.907505+00:00 |
-| Updated | 2026-08-14T20:59:08.840552+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T21:59:51.599962+00:00 |
+| Completed | 2026-08-22T21:59:51.599943+00:00 |
 
 ## Proof command
 
@@ -57,7 +57,7 @@ _Unknown._
 
 
 - [AUTH-3](../AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (done)
-- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
+- [AUTH-4](../AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (done)
 - [AUTH-ROSTER-RECLAIM](../AUTH-ROSTER-RECLAIM--b418638c/task.md) — AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove &lt;id&gt;" escape hatch -- filesys… (todo)
 - [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 

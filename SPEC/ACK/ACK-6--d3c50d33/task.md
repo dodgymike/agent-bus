@@ -52,7 +52,7 @@ _Unknown._
 - [ACK-14](../ACK-14--1884218d/task.md) — ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… (todo)
 - [ACK-15](../ACK-15--a63b133d/task.md) — ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… (done)
 - [ACK-16](../ACK-16--f60cdd30/task.md) — ACK-16: the per-principal wait cap is untested -- a global bucket passes the whole package (done)
-- [ACK-6-FU-CLI](../ACK-6-FU-CLI--836c9ff8/task.md) — ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign (in_progress)
+- [ACK-6-FU-CLI](../ACK-6-FU-CLI--836c9ff8/task.md) — ACK-6-FU-CLI: agent-busctl ack, and the canonical ACK bytes it must sign (done)
 - [ACK-6-FU-SETTLE-ERRORLOG](../ACK-6-FU-SETTLE-ERRORLOG--dc58e7ee/task.md) — ACK-6-FU-SETTLE-ERRORLOG: throttle the terminal-conflict ERROR in ack.Store.Settle (todo)
 - [ACK-6-FU-SETTLE-WALERR-SENTINEL](../ACK-6-FU-SETTLE-WALERR-SENTINEL--c4dc6b6b/task.md) — ACK-6-FU-SETTLE-WALERR-SENTINEL: a WAL failure in ack.Store.Settle answers 500, not 503 (todo)
 - [RELAY-47](../../RELAY/RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)

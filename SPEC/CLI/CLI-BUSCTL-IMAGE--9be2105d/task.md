@@ -57,7 +57,7 @@ _Unknown._
 - [DEPLOY-REDEPLOY](../../DEPLOY/DEPLOY-REDEPLOY--f801d128/task.md) — DEPLOY-REDEPLOY: recreate the Compose bus fresh (volume included) and prove two agents ex… (todo)
 - [ORCH-5](../../ORCH/ORCH-5--c4634621/task.md) — ORCH-5: the sidecar and Kubernetes manifests themselves (todo)
 - [ORCH-6](../../ORCH/ORCH-6--6cfe7288/task.md) — ORCH-6: STANDALONE — verify and document what DEPLOY already ships; do NOT rebuild it (todo)
-- [ZZB-secondha](../../UNASSIGNED/ZZB-secondha--95c580aa/task.md) — probe (todo)
+- [ZZB-secondha](../../UNASSIGNED/ZZB-secondha--95c580aa/task.md) — probe (cancelled)
 
 ---
 

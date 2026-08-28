@@ -5,14 +5,14 @@
 | Public id | `2b2af075-a295-4cf3-9826-b1a3554c8795` |
 | Key | MTLS-CROSSCHECK |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:50.814945+00:00 |
-| Updated | 2026-08-14T20:58:02.757745+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T19:15:09.831025+00:00 |
+| Completed | 2026-08-23T19:15:09.831008+00:00 |
 
 ## Proof command
 
@@ -47,9 +47,9 @@ _Unknown._
 
 
 - [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
-- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
-- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
-- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (done)
+- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (done)
+- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 - [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
@@ -64,16 +64,16 @@ _Unknown._
 - [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md) — AUTH-2-FU-POLLEXPIRY: A long-poll can outlive its session, quietly contradicting immediat… (todo)
 - [INVITE-GATE-ENFORCE](../../INVITE/INVITE-GATE-ENFORCE--8297d7e2/task.md) — INVITE-GATE-ENFORCE: enforce invite-only enrolment (P0: anonymous roster exhaustion) (in_progress)
 - [INVITE-GATE-ENFORCE-FU-CONTRACTS](../../INVITE/INVITE-GATE-ENFORCE-FU-CONTRACTS--df04ed54/task.md) — INVITE-GATE-ENFORCE-FU-CONTRACTS: update CONTRACTS-HTTP.md/CONTRACTS-ONDISK.md to reflect… (todo)
-- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
-- [MTLS-BIND-FU-DOCS](../MTLS-BIND-FU-DOCS--8c40ea26/task.md) — MTLS-BIND-FU-DOCS: document the enrolment certificate binding -- CONTRACTS-HTTP.md 409, D… (todo)
+- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (done)
+- [MTLS-BIND-FU-DOCS](../MTLS-BIND-FU-DOCS--8c40ea26/task.md) — MTLS-BIND-FU-DOCS: document the enrolment certificate binding -- CONTRACTS-HTTP.md 409, D… (done)
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-CROSSCHECK-FU-CERTEXPIRY](../MTLS-CROSSCHECK-FU-CERTEXPIRY--b5d86daa/task.md) — A bound agent whose client certificate expires is locked out permanently, including from… (todo)
-- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (todo)
+- [MTLS-CROSSCHECK-FU-DOCS](../MTLS-CROSSCHECK-FU-DOCS--a4f3d06a/task.md) — CONTRACTS-HTTP.md still says invariant 11's cross-check is NOT ENFORCED -- it is, as of M… (done)
 - [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (superseded)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
-- [ca356fde-0613-42cb-ac85-a629609d9c78](../Client-certificate-expiry-is-not-enforced-anywhere-Requi--ca356fde/task.md) — Client-certificate expiry is not enforced anywhere: RequireAnyClientCert does no chain ve… (todo)
+- [ca356fde-0613-42cb-ac85-a629609d9c78](../Certificate-expiry-enforcement-is-now-present-on-the-pin--ca356fde/task.md) — Certificate-expiry enforcement is now present on the pinned-bus, agent, peer, and bus-sta… (todo)
 
 ---
 

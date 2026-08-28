@@ -153,8 +153,8 @@ _Unknown._
 
 
 - [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
-- [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (in_progress)
-- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (todo)
+- [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
+- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -163,7 +163,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (todo)
+- [a9bcdc54-fe1c-4497-9294-13efe2fca8fc](../agent-bus-outbox-bound-the-replay-tally-maps-which-are-k--a9bcdc54/task.md) — agent-bus outbox: bound the replay tally maps, which are keyed off attacker-influenced fi… (todo)
+- [b5089ddf-5a5a-41e0-8278-036f6a195e2a](../../AUTH/agent-bus-operator-list-mints-wal-mac.key-as-a-side-effe--b5089ddf/task.md) — agent-bus operator list mints wal-mac.key as a side effect of a read-only command (done)
 
 ---
 

@@ -94,7 +94,7 @@ _Unknown._
 
 
 - [0ba2372a-09f7-4f05-bd33-98a5f80e0e6f](../../DOCS/Journal-catch-up-DECISIONS.md-AGENT_LOG.md-entries-owed--0ba2372a/task.md) — Journal catch-up: DECISIONS.md + AGENT_LOG.md entries owed by INVITE-MINT and MTLS-ROTATE (todo)
-- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (todo)
+- [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [CONTEXT-DONEGATE-CANON](../CONTEXT-DONEGATE-CANON--b9b0c654/task.md) — CONTEXT-DONEGATE-CANON: 'do not mark done when the behaviour is not yet live' said once,… (todo)
 - [HANDOVER-CONTRIBUTING](../../HANDOVER/HANDOVER-CONTRIBUTING--39484b80/task.md) — HANDOVER-CONTRIBUTING: CONTRIBUTING.md -- how this repo is actually developed, and how to… (todo)
 - [INVITE-MINT](../../INVITE/INVITE-MINT--1d0d0e60/task.md) — INVITE-MINT: an operator mints a single-use, expiring invite -- the server is authoritati… (done)

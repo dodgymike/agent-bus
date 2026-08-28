@@ -5,20 +5,24 @@
 | Public id | `59883178-6bcd-4996-91aa-3c5c3322d6ea` |
 | Key | _(null in the export)_ |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P0 |
 | Component | client |
 | Section | backlog |
 | Tags | field-evidence, migration, tls |
 | Created | 2026-08-07T21:18:12.234038+00:00 |
-| Updated | 2026-08-07T21:18:12.234038+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T21:09:40.690020+00:00 |
+| Completed | 2026-08-23T21:09:40.690003+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestPinAdd_PreTLSMigration ./client/... (test to be written: enrol an identity against a plaintext bus, flip that data dir to TLS-only, assert `pin add`/an equivalent migration path lets the SAME agent id acquire a first client cert and bus-fingerprint pin without re-enrolling). Until written, the CURRENT dead-end is reproducible manually exactly as quoted in this task's description via agent-busctl against a bus flipped from http to https mid-lifetime.
+go test -race -run "^TestPreTLSMigration|^TestPinBootstrap" ./client ./cmd/agent-busctl ./internal/httpapi
 ```
+
+## Status note
+
+Docs correction complete 2026-08-23: CONTRACTS-HTTP/CLI/AGENT_PROTOCOL/DECISIONS now match shipped cert/session cross-check ordering and replay body semantics; clean-overlay proof/docs/build passed; awaiting reviewer/documentation re-gates and integrator commit.
 
 ## Description
 
@@ -97,8 +101,8 @@ _Unknown._
 
 
 - [7a197025-93f9-470b-a69b-bad494eeae94](../MTLS-re-bind-route-an-agent-renews-its-client-certificat--7a197025/task.md) — MTLS re-bind route: an agent renews its client certificate against its EXISTING agent id,… (todo)
-- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (in_progress)
-- [MTLS-CLIENTCERT](../MTLS-CLIENTCERT--0bc7a2eb/task.md) — MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certif… (in_progress)
+- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (done)
+- [MTLS-CLIENTCERT](../MTLS-CLIENTCERT--0bc7a2eb/task.md) — MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certif… (done)
 - [MTLS-ROTATE](../MTLS-ROTATE--c2e8df5b/task.md) — MTLS-ROTATE: a client accepts a SET of pinned bus certificates so a rotation does not for… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

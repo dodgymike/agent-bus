@@ -91,7 +91,7 @@ _Unknown._
 - [ADMIN-10](../ADMIN-10--958d66e8/task.md) — ADMIN-10: online invite mint from the console (BLOCKED -- ruled out for now by D6; filed… (blocked)
 - [ADMIN-11](../ADMIN-11--07926508/task.md) — ADMIN-11: remove an agent from the console (BLOCKED on AUTH-4) (blocked)
 - [ADMIN-9](../ADMIN-9--8bb10db2/task.md) — ADMIN-9: the console enrols by redeeming an invite blob (BLOCKED on INVITE-GATE) (blocked)
-- [AUTH-4](../../AUTH/AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (todo)
+- [AUTH-4](../../AUTH/AUTH-4--a853261d/task.md) — AUTH-4: POST /v1/leave -- leave / revocation (done)
 - [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

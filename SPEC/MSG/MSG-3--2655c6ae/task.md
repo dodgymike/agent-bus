@@ -47,7 +47,7 @@ _Unknown._
 - [7bdf6c98-a1a5-488c-af70-4b2332b101df](../Acceptance-criterion-for-the-first-durable-write-HTTP-ha--7bdf6c98/task.md) — Acceptance criterion for the first durable-write HTTP handler (MSG-2/MSG-3): wal.ErrClose… (todo)
 - [CORE-9](../../CORE/CORE-9--a1f74fcc/task.md) — CORE-9: Set IdleTimeout + MaxHeaderBytes on http.Server -- and deliberately leave Read/Wr… (done)
 - [CRYPTO-6](../../CRYPTO/CRYPTO-6--260e6003/task.md) — CRYPTO-6: Double Ratchet encrypt/decrypt on the direct-message send path (deferred)
-- [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (todo)
+- [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)
 - [IDEM-4](../../IDEM/IDEM-4--d9c00d0d/task.md) — IDEM-4: Idempotent send and broadcast -- a legitimate retry returns the ORIGINAL result a… (superseded)
 - [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 

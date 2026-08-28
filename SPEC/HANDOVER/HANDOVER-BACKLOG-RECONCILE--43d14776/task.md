@@ -71,6 +71,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [315899be-dd43-4462-baf4-eae2fd94364b](../../PROCESS/scripts-backlog-drift.sh-read-only-detector-listing-in_p--315899be/task.md) — scripts/backlog-drift.sh: read-only detector listing in_progress/todo tasks whose stored… (todo)
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md) — HANDOVER-REGISTER: KNOWN_ISSUES.md, the known-defect register (todo)
 
 ---

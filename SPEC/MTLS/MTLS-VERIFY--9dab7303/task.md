@@ -1,28 +1,28 @@
-# MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is TLS-only and mutually authenticated (committed is not running)
+# MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert plus application-layer cert/session binding design
 
 | Field | Value |
 | --- | --- |
 | Public id | `9dab7303-02eb-40ca-9ac4-508d3a315389` |
 | Key | MTLS-VERIFY |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:51.494963+00:00 |
-| Updated | 2026-08-08T14:47:54.155127+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T19:26:12.237657+00:00 |
+| Completed | 2026-08-23T19:26:12.237640+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestLiveBusServeWrapperOverTLS' ./cmd/agent-bus && ! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh
+go test -race -run "TestLiveBusServeWrapperOverTLS|TestClientCertificateIsRequestedNotRequired" ./cmd/agent-bus && go test -race -run "TestCrossCheckUnauthenticatedRoutesStillServeWithoutACertificate|TestCrossCheckGatesAnAuthenticatedRoute|TestCrossCheckABoundAgentPresentingItsOwnCertificateIsAdmitted" ./internal/httpapi && go test -race -run "TestCLIEnrolEndToEnd" ./cmd/agent-busctl && ! grep -q 'HEALTH_URL="http://' scripts/bus-serve.sh
 ```
 
 ## Status note
 
-SEQUENCING (from the MTLS-PIN security gate, 2026-08-07, MED-1): MTLS-VERIFY must land WITH OR BEFORE MTLS-LISTENER. MTLS-PIN's client pins sha256-of-DER but does NOT check the certificate's validity period -- disabling the default chain check disables expiry with it. The gate demonstrated empirically that a certificate whose NotAfter is a day in the past is pinned, accepted, and enrolled against. DECISIONS.md chose a 365-day certificate lifetime explicitly as a leak-containment bound, and only the client can enforce that bound on the BUS's certificate, so until this lands that lifetime decision is decoration. Minimal fix named by the gate: after the pin matches in client/pin.go's verifyPinnedBusCertificate, x509.ParseCertificate(rawCerts[0]) and reject outside NotBefore..NotAfter.
+2026-08-23 spec-keeper reconciliation: the old handshake-level 'TLS client with NO client certificate is refused' acceptance text is stale and conflicts with invariant 11's current ratified design. The server uses tls.RequestClientCert so no-cert connections can reach only allow-listed anonymous routes, while authenticated agent routes require the matching session/certificate binding at application admission. Completion proof must cover TLS-only listener, no-cert allow-list reachability, protected-route refusal without matching cert/session, and the correct pinned TLS/client-cert path.
 
 ## Description
 
@@ -48,6 +48,10 @@ KEEP OPEN until MTLS-CLIENTAUTH lands, then run the three live assertions togeth
 the two clauses that currently pass -- the title's "mutually authenticated" claim would be false,
 which is exactly the committed-vs-running trap this task was filed to prevent.
 
+
+=== AMENDMENT 2026-08-23 (spec-keeper) ===
+The prior acceptance sentence requiring a TLS handshake refusal when no client certificate is presented is superseded by the ratified invariant-11 design now in HEAD: cmd/agent-bus/tlslisten.go uses tls.RequestClientCert. That means /healthz, /v1/info, /v1/discovery and the credential bootstrap routes remain reachable after TLS without a client certificate, while authenticated routes apply the mTLS/session cross-check at the HTTP admission layer. Do not complete this task on the plaintext-probe half alone. The required proof is now the composed proof in proof_cmd: wrapper-started TLS-only listener; RequestClientCert admits no-cert health/discovery but records presented certs; cross-check refuses a protected route without the required matching certificate/session and admits a bound agent presenting its own certificate; agent-busctl enrol/whoami --verify succeeds over pinned TLS with the client certificate path.
+
 ## Relations (authoritative)
 
 > **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
@@ -68,7 +72,7 @@ _Unknown._
 - [DEPLOY-1](../../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) — DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image (done)
 - [DEPLOY-2](../../DEPLOY/DEPLOY-2--14f8ec3b/task.md) — DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck (done)
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
-- [MTLS-CLIENTCERT](../MTLS-CLIENTCERT--0bc7a2eb/task.md) — MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certif… (in_progress)
+- [MTLS-CLIENTCERT](../MTLS-CLIENTCERT--0bc7a2eb/task.md) — MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certif… (done)
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
@@ -80,9 +84,10 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [88781750-0005-4c2f-8375-2d93dc1560b8](../../DOCS/DECISIONS.md-1302-cites-a-superseded-bus-serve.sh-line-f--88781750/task.md) — DECISIONS.md:1302 cites a superseded bus-serve.sh line for the plaintext-probe follow-on (todo)
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
-- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
 - [MTLS-EXPIRY](../MTLS-EXPIRY--3604af80/task.md) — MTLS-EXPIRY: the client never checks the pinned bus certificate validity period -- the 36… (done)
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)

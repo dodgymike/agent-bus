@@ -57,13 +57,13 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (todo)
+- [IDEM-12](../IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)
 - [IDEM-15](../IDEM-15--ab3f48b0/task.md) — IDEM-15: Relay duplicate suppression via idempotency keys (todo)
 - [IDEM-16](../IDEM-16--b6b76aeb/task.md) — IDEM-16: Exactly-once test suite -- retry storm, concurrent race under -race, and key-reu… (todo)
 - [IDEM-17-FU-CHILDNONCE](../IDEM-17-FU-CHILDNONCE--8b392400/task.md) — Per-run nonce to gate crash-injection self-SIGKILL children (repo-wide) (todo)
 - [IDEM-17-FU-CROSSAGENT](../IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) — Crash-injection coverage for cross-agent applied-key isolation across recovery (todo)
 - [IDEM-17-FU-PLACEMENT](../IDEM-17-FU-PLACEMENT--998e1c19/task.md) — Decide crash-suite package placement: internal/idem vs internal/hub (todo)
-- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (todo)
+- [IDEM-18](../IDEM-18--61f80a28/task.md) — IDEM-18: Wrappers generate the idempotency key ONCE and reuse it across retries, + AGENT_… (in_progress)
 - [IDEM-8](../IDEM-8--d1ecfc75/task.md) — IDEM-8: Proof suite -- a retried send produces exactly one message, including across a cr… (superseded)
 - [MSG-5](../../MSG/MSG-5--9d125bc6/task.md) — MSG-5: Messaging durability integration test (done)
 

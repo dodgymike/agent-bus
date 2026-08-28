@@ -5,14 +5,14 @@
 | Public id | `37993b49-e317-4dde-bcf5-abd22c97648d` |
 | Key | AUTH-10 |
 | Epic | [AUTH](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P0 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T09:09:20.872778+00:00 |
-| Updated | 2026-08-16T14:38:09.027362+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T21:59:59.700515+00:00 |
+| Completed | 2026-08-22T21:59:59.700498+00:00 |
 
 ## Proof command
 
@@ -110,7 +110,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 - [AUTH-7](../AUTH-7--4ba67a7b/task.md) — AUTH-7: Operator/admin can clear one agent's active sessions without restarting the bus (todo)
 - [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
 - [INVMINT-2](../../INVMINT/INVMINT-2--ef18b37a/task.md) — INVMINT-2: introduce an OPERATOR PRINCIPAL — a bus-scoped, non-agent identity that can au… (superseded)
@@ -126,7 +126,7 @@ _Unknown._
 - [AUTH-10-FU-CHECKPOINT](../AUTH-10-FU-CHECKPOINT--4a7289bb/task.md) — AUTH-10-FU-CHECKPOINT: OperatorRegistry is not a wal.CheckpointParticipant — operator rec… (todo)
 - [AUTH-10-FU-ENROLSEAM](../AUTH-10-FU-ENROLSEAM--a83e9a13/task.md) — AUTH-10-FU-ENROLSEAM: cross-plane certificate uniqueness is one-directional — Service.Enr… (todo)
 - [AUTH-10-FU-LABELAGREE](../AUTH-10-FU-LABELAGREE--7336077e/task.md) — AUTH-10-FU-LABELAGREE: no test asserts the label-differs-still-silent path that two docum… (todo)
-- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (in_progress)
+- [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
 - [dd2cdc20-8920-4e5b-bf0a-668f439cc3a6](../../UNASSIGNED/Reservation-counters-silently-drift-stale-and-hand-out-C--dd2cdc20/task.md) — Reservation counters silently drift stale and hand out COLLIDING task keys (RELAY, DOCS,… (todo)
 
 ---

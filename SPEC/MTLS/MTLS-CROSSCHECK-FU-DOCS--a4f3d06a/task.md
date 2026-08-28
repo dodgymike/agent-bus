@@ -5,14 +5,14 @@
 | Public id | `a4f3d06a-dc0c-4f49-a24e-cdc0e75645d5` |
 | Key | MTLS-CROSSCHECK-FU-DOCS |
 | Epic | [MTLS](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | docs |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T20:58:31.061312+00:00 |
-| Updated | 2026-08-14T21:18:49.044249+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T19:14:12.468343+00:00 |
+| Completed | 2026-08-23T19:14:12.468326+00:00 |
 
 ## Proof command
 
@@ -44,7 +44,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -53,7 +53,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (in_progress)
+- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
 
 ---
 

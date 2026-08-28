@@ -41,7 +41,7 @@ _Unknown._
 
 
 - [0fb4d032-efff-4815-ac2b-4b8f1682ba08](../../PROCESS/Four-proof_cmds-are-UNVERIFIABLE-BY-CONSTRUCTION-ACK-3-A--0fb4d032/task.md) — Four proof_cmds are UNVERIFIABLE BY CONSTRUCTION (ACK-3, ACK-4, LIVE-3, AGENTIF-10) -- un… (todo)
-- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (in_progress)
+- [ACK-13](../ACK-13--a998ae43/task.md) — ACK-13: the closed ACK vocabulary is declared TWICE with different underlying types (done)
 - [RELAY-52](../../RELAY/RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
 
 ---

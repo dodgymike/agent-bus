@@ -5,19 +5,19 @@
 | Public id | `0bc7a2eb-c436-49ca-92d3-17be58fdd5bd` |
 | Key | MTLS-CLIENTCERT |
 | Epic | [MTLS](../epic.md) |
-| Status | in_progress |
+| Status | done |
 | Priority | P1 |
 | Component | agentif |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T21:12:51.035037+00:00 |
-| Updated | 2026-08-08T14:47:53.734436+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T20:08:24.076125+00:00 |
+| Completed | 2026-08-23T20:08:24.076109+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestClientGeneratesClientCert|TestClientTLSKeyIs0600' ./client/...
+go test -race -run 'TestClientGeneratesClientCert|TestClientTLSKeyIs0600' ./client/... && grep -nE 'agent-busctl client-cert \[--identity .+\] \[--json\]' AGENT_PROTOCOL.md && grep -nE 'reads or mints .*client-tls/\{cert\.pem,key\.pem\}' AGENT_PROTOCOL.md && grep -nE 'Exit codes: .*local client-certificate material missing, unreadable or' AGENT_PROTOCOL.md && grep -nE '\ok\: true,' CONTRACTS-CLI.md && grep -nE 'Always  on success\.' CONTRACTS-CLI.md && grep -nE 'LoadOrCreateClientCertificate\(\)' CONTRACTS-CLI.md && grep -nE 'The on-disk files under .*client-tls/' CONTRACTS-CLI.md
 ```
 
 ## Status note
@@ -79,12 +79,13 @@ _Unknown._
 
 - [2ca053dd-1b63-42b5-a485-f57b623722ac](../../RELAY/internal-relay-guards_test.go-912-says-the-RELAY-6-subst--2ca053dd/task.md) — internal/relay/guards_test.go:912 says the RELAY-6 substitution 'IS NOT RECORDED IN DECIS… (done)
 - [4b51635d-336f-4f25-94c2-64c53578859d](../../AGENTIF/AGENT_PROTOCOL.md-is-missing-the-CLI-11-key-export-publi--4b51635d/task.md) — AGENT_PROTOCOL.md is missing the CLI-11 (key export-public) and CLI-6 (log) sections -- b… (todo)
+- [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
 - [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
 - [MTLS-DESIGN](../MTLS-DESIGN--39dcdcff/task.md) — MTLS-DESIGN: record the decided certificate lifecycle in DECISIONS.md -- key locations, h… (done)
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
-- [MTLS-MIGRATE](../MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (todo)
+- [MTLS-MIGRATE](../MTLS-MIGRATE--59883178/task.md) — MTLS-MIGRATE: pin add cannot migrate a pre-TLS (http-enrolled) identity onto TLS; its own… (done)
 - [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)
-- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 - [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../../RELAY/RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 - [c716f8e7-ad9c-4af9-9fac-1bdb75c8f900](../../DOCS/PROTOCOL.md-1002-says-internal-relay-is-imported-by-noth--c716f8e7/task.md) — PROTOCOL.md:1002 says internal/relay is 'imported by nothing' -- false since ed77bba (int… (todo)

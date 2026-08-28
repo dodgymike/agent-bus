@@ -50,6 +50,7 @@ _Unknown._
 
 
 - [7a197025-93f9-470b-a69b-bad494eeae94](../../MTLS/MTLS-re-bind-route-an-agent-renews-its-client-certificat--7a197025/task.md) — MTLS re-bind route: an agent renews its client certificate against its EXISTING agent id,… (todo)
+- [AUTH-8-FU-MSGKEY-POP](../AUTH-8-FU-MSGKEY-POP--576a794d/task.md) — AUTH-8-FU-MSGKEY-POP: enrolment does not prove possession of the MESSAGING private key (A… (todo)
 - [ENROL-SHAPE](../../INVITE/ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
 - [RELAY-13-FU-MSGKEYPOP](../../RELAY/RELAY-13-FU-MSGKEYPOP--59db5455/task.md) — RELAY-13-FU-MSGKEYPOP: no proof-of-possession of the messaging private key at enrolment,… (todo)
 

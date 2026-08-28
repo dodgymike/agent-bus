@@ -5,13 +5,13 @@
 | Public id | `95c580aa-529b-4da8-9990-b7dafe8d1d75` |
 | Key | ZZB-secondha |
 | Epic | [UNASSIGNED](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | — |
 | Component | — |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T11:09:36.072349+00:00 |
-| Updated | 2026-08-16T11:09:36.072349+00:00 |
+| Updated | 2026-08-21T14:30:12.920511+00:00 |
 | Completed | — |
 
 ## Description

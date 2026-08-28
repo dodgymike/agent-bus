@@ -5,19 +5,19 @@
 | Public id | `2b0791d4-6d49-4d84-bca5-c2e91083a8b9` |
 | Key | AUTH-5 |
 | Epic | [AUTH](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | auth |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T09:05:49.545848+00:00 |
-| Updated | 2026-08-02T09:05:49.545848+00:00 |
-| Completed | — |
+| Updated | 2026-08-22T22:55:38.994553+00:00 |
+| Completed | 2026-08-22T22:55:38.994538+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestAuthCrashRecovery ./internal/auth
+go test -race -run "TestAuthCrashRecovery" ./internal/auth
 ```
 
 ## Description
@@ -32,6 +32,15 @@ End-to-end crash-injection test: enrol an agent, simulate a crash before/after t
 
 
 _Unknown._
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [AUTH-5-FU-REVOCATION](../AUTH-5-FU-REVOCATION--fa579717/task.md) — AUTH-5-FU-REVOCATION: agent-level revocation-recovery crash-injection test, blocked on AU… (todo)
 
 ---
 

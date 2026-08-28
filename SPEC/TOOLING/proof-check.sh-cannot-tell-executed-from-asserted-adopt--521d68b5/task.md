@@ -65,6 +65,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [315899be-dd43-4462-baf4-eae2fd94364b](../../PROCESS/scripts-backlog-drift.sh-read-only-detector-listing-in_p--315899be/task.md) — scripts/backlog-drift.sh: read-only detector listing in_progress/todo tasks whose stored… (todo)
 - [HANDOVER-BACKLOG-RECONCILE](../../HANDOVER/HANDOVER-BACKLOG-RECONCILE--43d14776/task.md) — HANDOVER-BACKLOG-RECONCILE: the inherited backlog stops lying about what is in flight (todo)
 
 ---

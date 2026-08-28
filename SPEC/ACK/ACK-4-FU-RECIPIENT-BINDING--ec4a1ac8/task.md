@@ -5,14 +5,20 @@
 | Public id | `ec4a1ac8-d490-4723-9f00-d34ca64c44f6` |
 | Key | ACK-4-FU-RECIPIENT-BINDING |
 | Epic | [ACK](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | ack |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T13:51:00.722444+00:00 |
-| Updated | 2026-08-16T13:51:00.722444+00:00 |
-| Completed | — |
+| Updated | 2026-08-23T12:16:09.440000+00:00 |
+| Completed | 2026-08-23T12:16:09.439984+00:00 |
+
+## Proof command
+
+```sh
+go test -race -run "^TestAckDirectArmBindsRecipientHomeBus$" ./internal/relay
+```
 
 ## Description
 
@@ -36,7 +42,17 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (in_progress)
+- [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
+
+## Referenced by other tasks (derived, not authoritative)
+
+> Derived by matching task keys, title prefixes and public-id fragments in free text.
+> The export has NO dependency field, so this is best-effort and NOT authoritative;
+> a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
+
+
+- [ACK-5-FU-ONDISK-STALEREF](../ACK-5-FU-ONDISK-STALEREF--a299d922/task.md) — ACK-5-FU-ONDISK-STALEREF: CONTRACTS-ONDISK.md still forward-references intermediate ACK r… (todo)
+- [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
 
 ---
 

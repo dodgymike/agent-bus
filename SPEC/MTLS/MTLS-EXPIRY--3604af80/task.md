@@ -49,7 +49,7 @@ _Unknown._
 - [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
 - [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)
 - [MTLS-ROTATE](../MTLS-ROTATE--c2e8df5b/task.md) — MTLS-ROTATE: a client accepts a SET of pinned bus certificates so a rotation does not for… (done)
-- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: fix scripts/bus-serve.sh's plaintext health probe AND prove a RUNNING bus is… (in_progress)
+- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 - [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -60,7 +60,7 @@ _Unknown._
 
 
 - [083c468e-7dbd-4d1f-93fc-53617e28421f](../CONTRACTS-CLI.md-client-export-table-is-missing-the-thre--083c468e/task.md) — CONTRACTS-CLI.md client export table is missing the three symbols MTLS-EXPIRY added (todo)
-- [10e93262-8e34-4738-b435-bfe23d880057](../Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (in_progress)
+- [10e93262-8e34-4738-b435-bfe23d880057](../Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md) — Derive the bus fingerprint from the certificate, not the log; correct the CONTRACTS-CLI e… (done)
 - [3cb182dc-9bd2-489b-8a91-0d8529f77200](../No-behavioural-test-asserts-that-a-resumed-TLS-handshake--3cb182dc/task.md) — No behavioural test asserts that a resumed TLS handshake still re-verifies the pinned bus… (todo)
 - [51710f76-ea92-42fd-bbc3-b86415fbc8e1](../../CLI/Latent-data-race-in-cmd-agent-busctl-enrol_test.go-serve--51710f76/task.md) — Latent data race in cmd/agent-busctl/enrol_test.go: server stderr buffer is read while os… (done)
 - [CONTEXT-CLI-SECTIONS](../../CONTEXT/CONTEXT-CLI-SECTIONS--3b4bd434/task.md) — CONTEXT-CLI-SECTIONS: CONTRACTS-CLI.md's 857-line mega-section becomes real, range-readab… (todo)
