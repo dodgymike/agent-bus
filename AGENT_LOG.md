@@ -6437,3 +6437,38 @@ Regenerated SPEC.md / SPEC/ (gen-spec-mirror.sh --no-relations) to reflect the d
 (commit 2622a25) — ACK epic now 0 open P0. Mirror-only housekeeping, generated artifact. security —
 SKIPPED under the docs-and-tests carve-out (generated docs, no guard/control-plane path); paths: SPEC.md,
 SPEC/, AGENT_LOG.md. No product code.
+
+## 2026-08-29 — CONV golden-path rulings: CONV-VS-THREAD, CONV-ID-SHAPE, CONV-NAME-INV6 (+ wal-entry-kind noted)
+
+Produced the three design rulings that gate the CONV (conversations) golden path and recorded them in
+DECISIONS.md (one 2026-08-29 section, pure append). No product code — this is a DECISIONS + reservation
+task; CONV-RECORD implements next.
+
+- Ruling 1 CONV-VS-THREAD (`c31d1c40`): MOOT. COMMS epic cancelled by operator 2026-08-29, so there is
+  no measurement gate to supersede or defer to. Model = durable server-side conversation record
+  addressed by a server-minted id; threading-by-convention not pursued. Resolution class INDEPENDENT.
+- Ruling 2 CONV-ID-SHAPE (`8914a5d8`): BUS_QUALIFIED. Id shape `<bus-id>.<uuid-v4>`
+  (e.g. `bus-alpha-11.550e8400-e29b-41d4-a716-446655440000`). Server-authoritative (invariant 1),
+  never needs reshaping when cross-bus lands, matches invariant 2's fully-qualified-id discipline.
+  Prefix is attribution, not authentication — cross-checked at the trust boundary when cross-bus lands.
+- Ruling 3 CONV-NAME-INV6 (`a11d59cd`): NAME_IS_METADATA, earned entirely by the bound. MAX_NAME_BYTES
+  128; CHARSET valid UTF-8, single-line, printable (reject C0/C1 controls U+0000-001F/U+007F-009F,
+  U+2028/U+2029, invalid UTF-8); AT_REST_EXPOSURE YES (log unencrypted, name durable/readable forever,
+  no body-retention window; document as non-confidential). Optional; refuse — not truncate — on
+  violation; bound enforced on handler AND disk-decode paths (CONV-RECORD). Recorded as the explicit
+  interpretation of invariant 6: a bounded single-line label is not a body.
+- Reservation: `wal-entry-kind` = 3 = `"conversation"` ALREADY EXISTS (reserved 2026-08-15 by
+  spec-keeper; 4 = `"convmember"` reserved for the deferred CONV-MEMBER-CHANGE). Deliberately did NOT
+  POST a new reservation — it would allocate value 5 mapping to nothing and burn a number. CONV-RECORD
+  uses the exact string `"conversation"` and reserves NO numeric record-type (business records ride the
+  existing TypePrepare/TypeCommit frames).
+- Invariants read IN FULL: 1 (server-authoritative ids, never reused), 2 (fully-qualified
+  `<bus-id>.<agent-id>`), 6 (append-only log = metadata/routing only, never bodies).
+- Gates: reviewer sanity pass was NOT run — the authoring agent hit the session limit before
+  dispatching it, and no reviewer verdict is in the CONV journals (an earlier draft of this line
+  overclaimed one; corrected 2026-08-29). In its place the OPERATOR approved all three rulings
+  verbatim on 2026-08-29 (id shape `<bus-id>.<uuid-v4>`; name metadata capped at 128 bytes;
+  CONV-VS-THREAD moot). security — SKIPPED under the docs-and-tests-only carve-out; paths: DECISIONS.md,
+  AGENT_LOG.md — neither is a guard file (no AST guard, no `*guard*_test.go`, no invariant-check test)
+  nor a control-plane file (not CLAUDE/AGENTS/INVARIANTS.md, not `.claude/**`, not a check/gate script
+  or `docs/*.tsv`); DECISIONS.md records rationale and gates nothing. No product code, no test change.

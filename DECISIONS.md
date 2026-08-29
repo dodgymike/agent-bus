@@ -7980,3 +7980,165 @@ Evidence at HEAD when this note was written:
 **Invariant 4 is satisfied by the synchronous chain, not by a local write.** On the transit arm nothing durable changes on this bus. The recipient is not answered `accepted` until the forward hop has answered, and each hop answers only after ITS next hop, so the guarantee holds end to end through the chain to the origin's own fsync. This is why the transit arm needs no retry queue and no local spool. There is ONE documented arm that falsifies the end-to-end `accepted` reading: an intermediate ABSORBS a 409 from the hop above and answers its downstream 200, so on a chain of two or more backward hops a recipient can be told `accepted` for an outcome the origin FINALLY refused with 409 ("no obligation binds that recipient", nothing durable anywhere). That absorb is deliberate and was recorded for ACK-5 (2026-08-21): re-offering a finally-refused frame is the retry amplification §9.3 exists to stop, and forwarding the 409 verbatim would make the hop an oracle for whether the origin holds a row for a named recipient — the uniform-answer property `ErrAckNotBound` protects. Every OTHER final upstream status (404, 403, 400) means the upstream decided nothing and is answered "not now" (503). Nobody is disconnected on any arm (§12, invariant 10).
 
 **Guards updated.** `TestSettleAckDisposition` and `TestSettleAckCorrelatesToTheDurableRecord` (`cmd/agent-bus/acktransit_test.go`, `cmd/agent-bus/ackwiring_ack3_test.go`) encoded the pre-ACK-12 `ErrNoRecord` semantics: a foreign-origin key with a row settled LOCALLY and was not forwarded. Those foreign-origin assertions are updated to the new truth (authorise + forward as transit, not settle-local). The safety property the guards protect — "a row is the sole authority; a settled row must NOT ALSO be forwarded (no settle-AND-forward double action), and the disposition must not move above the settle" — is PRESERVED by re-asserting it for a LOCAL-ORIGIN key, which still reaches `Settle` and must settle-locally-not-forward exactly as before.
+
+---
+
+## 2026-08-29 — CONV golden path: the three rulings that gate CONV-RECORD (CONV-VS-THREAD, CONV-ID-SHAPE, CONV-NAME-INV6)
+
+Three decision tasks in the CONV (conversations) epic must rule before `CONV-RECORD` can fix the
+durable conversation record format. They are recorded together here because they are the same design
+increment: the minimum single-bus, fixed-membership conversation — a client asks the server to CREATE
+a conversation with a recipient list, receives a server-minted id, and SENDS messages to that id;
+members receive them without tracking participants. Cross-bus, member-change, and lifecycle are
+DEFERRED to v2. Invariants read IN FULL before ruling: 1 (server-authoritative ids, never reused),
+2 (fully-qualified `<bus-id>.<agent-id>` ids), 6 (append-only log records metadata and routing only,
+never bodies).
+
+### Ruling 1 — CONV-VS-THREAD (`c31d1c40-4be7-499b-b935-6b5e4129c064`): the conflict is MOOT
+
+**Context.** CONV was filed into an existing deliberate COMMS decision: COMMS-THREAD-TRIAL trialled
+threading BY CONVENTION with no new wire field, and COMMS-THREAD-FIELD was left `blocked` on purpose
+so a heavier wire field would not be added without measurement. A server-tracked durable conversation
+object is strictly heavier than the `thread_id` field COMMS refused to add un-measured, so an agent
+must not silently overrule that gate.
+
+**Decision.** The COMMS epic is CANCELLED by operator decision (2026-08-29). The
+CONV-vs-COMMS-threading conflict is therefore MOOT: there is no live measurement gate left to
+supersede or defer to. The chosen model is a durable server-side conversation record addressed by a
+server-minted id (rulings 2 and 3 below). Threading-by-convention is NOT pursued.
+Resolution class: the ruling in `CONV-VS-THREAD`'s own DoD would read `RULING: INDEPENDENT` — CONV
+(membership + addressing) and threading (reply structure) are orthogonal concerns; with COMMS
+cancelled, threading is simply not built, and CONV proceeds on its own merits.
+
+**Consequences.** CONV proceeds without waiting on any COMMS trial. No `supersedes` edge to
+COMMS-THREAD-FIELD is required because that task is being cancelled with its epic, not superseded by
+CONV. If threading is ever revived it is a fresh, independently-justified feature, not a CONV
+sub-concern. The observation that would retire this ruling: an operator reinstating COMMS, at which
+point CONV and any threading feature are re-evaluated as independent tracks.
+
+### Ruling 2 — CONV-ID-SHAPE (`8914a5d8-40c5-4c3c-936c-55d3b4f0c4e7`): BUS_QUALIFIED — `<bus-id>.<uuid>`
+
+**Context.** The operator asked for a "server-supplied uuid" (invariant 1: the server is
+authoritative on every id). Settled: the id is server-minted, never client-supplied, never reused.
+The open question was the SHAPE — a bare UUID vs a namespaced `<bus-id>.<conv-id>`. This is about
+ATTRIBUTION, not collision: a UUID does not collide, but a bare UUID off the wire is not attributable
+to a minting bus, and attribution is exactly the property invariant 2 provides for agent ids
+(`<bus-id>.<agent-id>`) and the reason buses have ids at all.
+
+**Decision.** `RULING: BUS_QUALIFIED`. The conversation id is `<bus-id>.<conv-id>`, where `<bus-id>`
+is the minting bus's own server id and `<conv-id>` is a server-minted RFC 4122 UUIDv4. The separator
+is `.`, identical to the agent-id qualification. Exact string shape:
+
+```
+<bus-id>.<uuid-v4>
+e.g.  bus-alpha-11.550e8400-e29b-41d4-a716-446655440000
+```
+
+**Why this shape.** (a) Server-authoritative: the whole string is minted server-side — the prefix is
+the server's own bus id, the suffix a server-generated UUID; no byte of it is client input (invariant
+1). (b) Never needs reshaping when cross-bus conversation tracking lands in v2: attribution is
+STRUCTURAL from day one, so a conversation id minted by the MVP is already answerable to "which bus
+minted this" without a migration. A bare UUID would force a later reshape or a side table mapping
+UUID→bus, which is the property loss invariant 2 was written to prevent. (c) Matches invariant 2's
+fully-qualified-id discipline: a conversation is a routing/addressing object of the same class as an
+agent, and every other id in the system carries its minting bus.
+
+**What the prefix is and is NOT.** The `<bus-id>` prefix is an ATTRIBUTION claim, not an
+authentication token — exactly as for `<bus-id>.<agent-id>`. On a single bus (MVP) it is trivially
+self-attributing. When cross-bus lands, a conversation id arriving from a peer is a claim to be
+cross-checked at the trust boundary by the existing peer-principal / relay machinery (the TLS peer
+principal), never trusted from the string alone. Baking the prefix in now costs nothing and preserves
+the option; omitting it forecloses structural attribution.
+
+**Consequences.** `CONV-RECORD` mints the id as `<busID> + "." + uuidv4()` and stores it as the
+record's server-authoritative identity. The conv-id component MUST be a UUIDv4 (not a sequence, not a
+counter) so it is unguessable and independent of any other minted sequence. Bound the whole id on the
+disk-decode path like every other decoded field.
+
+### Ruling 3 — CONV-NAME-INV6 (`a11d59cd-d53b-41b6-9864-5732ca35df02`): NAME_IS_METADATA, hard-bounded
+
+**Context.** The operator wants a user-supplied NAME that labels the conversation. Invariant 6: the
+append-only log records METADATA AND ROUTING ONLY — never message bodies (the 2026-08-02 reasoning is
+that the audit trail must stay compatible with end-to-end-encrypted, forward-secret payloads, so it
+holds no plaintext bodies). The conversation record legitimately lives in that log — id, creator,
+recipient list are all routing/identity metadata. The sharp question: is a user-supplied NAME
+legitimate metadata, or a body wearing metadata's clothes? The distinguishing test: metadata is
+bounded, structural, and identity/routing-bearing; a body is unbounded free-form content. A 64 KiB
+"name" is plainly a body; a short slug plainly is not. The answer must be a BOUND, not a vibe.
+
+**Decision.** `RULING: NAME_IS_METADATA` — but the ruling is EARNED ENTIRELY BY THE BOUND, and
+without the bound the answer flips to body. The name is a bounded, single-line, structural LABEL on a
+routing object (the conversation), of the same nature as an id or a channel name; it is not
+per-message content. Concretely:
+
+```
+RULING: NAME_IS_METADATA
+MAX_NAME_BYTES: 128
+CHARSET: valid UTF-8, single line, printable — reject any C0/C1 control codepoint
+         (U+0000-U+001F, U+007F-U+009F), reject U+2028 and U+2029, reject invalid UTF-8
+AT_REST_EXPOSURE: YES
+```
+
+The name is OPTIONAL; an empty name is permitted. When present it MUST satisfy the bound above, and a
+name that exceeds 128 bytes or carries a disallowed codepoint is REFUSED (not truncated — truncation
+would silently alter operator-supplied identity).
+
+**Why 128 bytes.** The test is "can this field carry a MESSAGE?" A message body here caps at
+`store.MaxBodyBytes = 64 << 10 = 65536` bytes. 128 bytes is 512× smaller — three orders of magnitude
+below the body cap, which the task names as the sanity check ("a name bound anywhere near
+`MaxBodyBytes` is evidence the ruling is wrong"). 128 bytes is large enough for a human-meaningful
+multi-word label ("incident-4821 responders", "release-triage coordination") including some UTF-8
+multibyte characters, and far too small to carry a message. It sits in the established
+conversation/channel-name band (Slack channel names ≤ 80 chars, Discord channel names ≤ 100, DNS
+label 63, hostname 255) and is a round power of two. 32 bytes was rejected as too tight for a useful
+multi-word UTF-8 label; 256 was rejected because it begins to admit a tweet-sized sentence — a short
+body. The bound is on BYTES (not runes) because it is the on-disk footprint that matters for the log
+and it removes any rune-counting ambiguity across encodings.
+
+**Why the charset bound.** The name is written verbatim into the append-only audit log and is
+readable at rest by anyone with the data directory. Permitting control characters would allow log
+injection (an embedded newline forging a second audit line), audit-line spoofing, and terminal escape
+sequences that mis-render when an operator reads the log. Restricting to valid UTF-8, single-line,
+printable codepoints makes the name a safe structural label and closes those channels. This is a
+character bound, mandated by the task independently of the length bound.
+
+**AT_REST_EXPOSURE: YES — stated, not hidden.** The append-only log is NOT encrypted. A conversation
+name is therefore durably readable by anyone who can read the data directory, FOREVER, and is NOT
+covered by any body-retention/pruning window that applies to message bodies. This is an accepted,
+bounded exposure: 128 bytes of operator-chosen label per conversation, not user message content. The
+operator supplying a name must treat it as non-confidential; the CLI/`CONV-CREATE` surface should say
+so. This exposure is the price of persisting the label at all, and it is acceptable precisely because
+the bound keeps it a label rather than content.
+
+**Relay export.** In the MVP (single-bus) there is no relay export of conversations, so the name is
+not exported to any peer. When cross-bus lands (deferred v2), the name is peer-visible bounded
+metadata of the same 128-byte class and its export must be reconsidered THEN with the same at-rest
+reasoning; it is NOT silently exported by this MVP.
+
+**Why this does not weaken invariant 6.** Invariant 6 bars BODIES from the log. It does not bar
+bounded structural identity fields — the log already records sender, recipients, and the content HASH,
+all bounded metadata. The name joins that class ONLY because it is hard-capped at 128 bytes,
+single-line, and printable, which makes it structurally incapable of being a message-carrying channel.
+This is recorded here as the explicit INTERPRETATION of invariant 6 its own "a change that weakens one
+needs a decision recorded" clause requires: the name is metadata iff it is ≤ 128 bytes and single-line
+printable UTF-8; anything larger or with control characters is refused and never reaches the log.
+
+**Consequences for CONV-RECORD.** The record carries an optional `Name` field bounded at 128 bytes,
+validated for charset, enforced on BOTH the handler path and the disk-decode path (each with a test,
+per `store.Record`'s existing "bound everything decoded from disk" discipline). Refuse — do not
+truncate — on violation. The creator remains a fully-qualified agent id (uncontested metadata). The
+name is durable and unencrypted; the operator-facing surface documents it as non-confidential.
+
+### Reserved resource — `wal-entry-kind` = 3 = `"conversation"` (ALREADY RESERVED, not re-reserved)
+
+`CONV-RECORD` needs `wal.Entry.Kind = "conversation"`. That reservation ALREADY EXISTS: the
+`wal-entry-kind` namespace holds value **3 = `"conversation"`**, reserved by spec-keeper on
+2026-08-15 (alongside 1 = `"message"`, 2 = `"seqfloor"`, and 4 = `"convmember"` for the deferred
+membership-change record). A NEW reservation was deliberately NOT taken here — POSTing would allocate
+value 5, which maps to nothing and burns a number ("an unspent reservation is cheap, a collision is
+not"). `CONV-RECORD` MUST use the exact string `"conversation"` as `wal.Entry.Kind` and MUST NOT
+reserve a numeric `record-type`: a business record rides inside the existing `TypePrepare`/`TypeCommit`
+WAL frames and consumes no `record-type` number, exactly as `"message"` and `"seqfloor"` do. If the
+design later needs a new WAL FRAME type, a standalone on-disk file, or a relay wire change, reserve
+from `record-type` / `ondisk-format-version` / `relay-wire-version` at THAT point via the reservations
+API — never by eyeballing the ledger.
