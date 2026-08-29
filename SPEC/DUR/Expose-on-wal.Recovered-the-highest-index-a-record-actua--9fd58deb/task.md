@@ -32,12 +32,16 @@ SCOPE: internal/wal only. Coordate with whichever agent has DUR-5 (append-only a
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [18eac796-d1fd-4619-94cb-1164bf989634](../seq-floor-guard-predicate-keys-on-discard-not-on-account--18eac796/task.md)
+- **blocks** [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md)
+- **blocks** [e120153b-9d8a-4b6a-bd4e-89431954496b](../Fix-WAL-recovery-reissuing-a-discarded-tail-record-index--e120153b/task.md)
+- **relates to** [259b7033-2191-423f-bb7b-cff8c6b59dc1](../Bound-the-wal-index-floor-reserved-value-the-same-way-as--259b7033/task.md)
+- **relates to** [2a38cdec-528f-47ef-8f38-7f83465b0213](../CONTRACTS-ONDISK.md-and-four-sibling-Go-comments-oversta--2a38cdec/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

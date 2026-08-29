@@ -52,12 +52,13 @@ RELATED, NOT DUPLICATE: DOCS-4-FU-BUDGET (721b51ef, owns the ceiling number deci
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up** [3d1b47d9-1395-4f61-a848-e1c06ced2ff8](../../CONTEXT/PITFALLS.md-has-no-row-in-doc-budgets.tsv-so-the-prose-r--3d1b47d9/task.md)
+- **relates to** [6a5ece85-5006-4f86-9c61-a33f15a069dc](../Audit-AGENTS.md-vs-CLAUDE.md-drift-and-fix-the-sync-mech--6a5ece85/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

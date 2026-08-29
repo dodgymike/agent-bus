@@ -32,12 +32,12 @@ BLOCKED BY T-03.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [b2567ffd-190d-4aff-8cc2-f6a2eb2d613e](../scripts-change-tier.sh-diff-basis-contract-output-format--b2567ffd/task.md)
 
 ---
 

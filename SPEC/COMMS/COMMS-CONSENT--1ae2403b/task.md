@@ -5,13 +5,13 @@
 | Public id | `1ae2403b-ee9b-4ee3-b69f-49793939b309` |
 | Key | COMMS-CONSENT |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P1 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:11:59.417389+00:00 |
-| Updated | 2026-08-08T17:11:59.417389+00:00 |
+| Updated | 2026-08-29T14:26:33.736273+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 bash scripts/comms-consent-check.sh docs/comms/CONSENT.md
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -59,12 +63,16 @@ per-agent labelling or trial.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
+- **blocks** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
+- **blocks** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
+- **blocks** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
+- **blocks** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -73,12 +81,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -87,12 +95,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ---
 

@@ -26,12 +26,12 @@ cmd/agent-bus/busservewrapper_test.go:133 asserts only strings.Contains(out, "fi
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up of** [10e93262-8e34-4738-b435-bfe23d880057](../Derive-the-bus-fingerprint-from-the-certificate-not-the--10e93262/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

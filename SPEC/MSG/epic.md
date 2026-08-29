@@ -10,17 +10,17 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 7bdf6c98-a1a5-488c-af70-4b2332b101df | Acceptance criterion for the first durable-write HTTP handler (MSG-2/MSG-3): wal.ErrClose… | todo | P1 | [task.md](Acceptance-criterion-for-the-first-durable-write-HTTP-ha--7bdf6c98/task.md) | _not fetched_ | [DUR-9](../DUR/DUR-9--8234db61/task.md) [MSG-3](MSG-3--2655c6ae/task.md) [MSG-2](MSG-2--50995c75/task.md) |
+| 7bdf6c98-a1a5-488c-af70-4b2332b101df | Acceptance criterion for the first durable-write HTTP handler (MSG-2/MSG-3): wal.ErrClose… | todo | P1 | [task.md](Acceptance-criterion-for-the-first-durable-write-HTTP-ha--7bdf6c98/task.md) | — | [DUR-9](../DUR/DUR-9--8234db61/task.md) [MSG-3](MSG-3--2655c6ae/task.md) [MSG-2](MSG-2--50995c75/task.md) |
 
 ## Closed tasks (5) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| MSG-1 | MSG-1: GET /v1/agents -- roster listing | done | P1 | [task.md](MSG-1--fbe35d10/task.md) | _not fetched_ | — |
-| MSG-2 | MSG-2: POST /v1/broadcast | done | P1 | [task.md](MSG-2--50995c75/task.md) | _not fetched_ | — |
-| MSG-3 | MSG-3: POST /v1/send -- direct message | done | P1 | [task.md](MSG-3--2655c6ae/task.md) | _not fetched_ | — |
-| MSG-4 | MSG-4: Cursor semantics + GET /v1/messages history | done | P1 | [task.md](MSG-4--25ebcbc9/task.md) | _not fetched_ | — |
-| MSG-5 | MSG-5: Messaging durability integration test | done | P1 | [task.md](MSG-5--9d125bc6/task.md) | _not fetched_ | [IDEM-17](../IDEM/IDEM-17--8b1e85fd/task.md) [IDEM-12](../IDEM/IDEM-12--26dd5625/task.md) [IDEM-11](../IDEM/IDEM-11--8e2c4de3/task.md) |
+| MSG-1 | MSG-1: GET /v1/agents -- roster listing | done | P1 | [task.md](MSG-1--fbe35d10/task.md) | — | — |
+| MSG-2 | MSG-2: POST /v1/broadcast | done | P1 | [task.md](MSG-2--50995c75/task.md) | — | — |
+| MSG-3 | MSG-3: POST /v1/send -- direct message | done | P1 | [task.md](MSG-3--2655c6ae/task.md) | — | — |
+| MSG-4 | MSG-4: Cursor semantics + GET /v1/messages history | done | P1 | [task.md](MSG-4--25ebcbc9/task.md) | — | — |
+| MSG-5 | MSG-5: Messaging durability integration test | done | P1 | [task.md](MSG-5--9d125bc6/task.md) | — | [IDEM-17](../IDEM/IDEM-17--8b1e85fd/task.md) [IDEM-12](../IDEM/IDEM-12--26dd5625/task.md) [IDEM-11](../IDEM/IDEM-11--8e2c4de3/task.md) |
 
 ## Epic description
 

@@ -38,12 +38,15 @@ in this task is superseded; see T-01 (4d990ef4-23ee-4971-ab00-84eb5ec137ae) ruli
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [4d990ef4-23ee-4971-ab00-84eb5ec137ae](../Write-docs-CHANGE-TIERS.md-the-normative-tier-and-signal--4d990ef4/task.md)
+- **relates to** [727dc387-dd95-48e4-9616-9b9b1584ac90](../Security-re-gates-must-be-delta-scoped-citing-the-prior--727dc387/task.md)
+- **relates to** [97a315af-70b3-4a64-8456-92335d8c9631](../Make-security-skip-the-default-for-docs-and-tests-only-c--97a315af/task.md)
+- **relates to** [aeae5c7d-33f0-4ba1-a420-873bec8203d1](../claude-agents-integrator.md-the-commit-gate-must-consult--aeae5c7d/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

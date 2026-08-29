@@ -54,12 +54,17 @@ Invariants read in full: 4 and 10 (1, 5, 6 consulted).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
+- **blocked by** [ACK-2](../ACK-2--9564f953/task.md)
+- **blocked by** [ACK-3](../ACK-3--263c47fe/task.md)
+- **blocks** [ACK-12](../ACK-12--17406b3a/task.md)
+- **blocks** [ACK-8](../ACK-8--bc12541b/task.md)
+- **follow-up of** [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

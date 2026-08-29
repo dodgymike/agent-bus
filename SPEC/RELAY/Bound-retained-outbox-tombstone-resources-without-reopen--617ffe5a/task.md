@@ -40,12 +40,14 @@ V8 gate remediation (2026-08-09): generation-scoped omission IDs alone are insuf
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [a1cbef29-400a-4a1e-9638-cc14d38a7ebf](../../UNASSIGNED/WAL-foundation-authenticated-multi-applier-checkpoints-o--a1cbef29/task.md)
+- **blocks** [ACK-2](../../ACK/ACK-2--9564f953/task.md)
+- **blocks** [RELAY-19](../RELAY-19--24e0bd11/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

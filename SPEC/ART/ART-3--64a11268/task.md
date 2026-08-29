@@ -26,12 +26,15 @@ Authenticate sender/recipient, require recipient consent policy before storage/r
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ART-1](../ART-1--55490a33/task.md)
+- **blocked by** [ART-2](../ART-2--d8b2b551/task.md)
+- **blocks** [ART-11](../ART-11--756fdfa2/task.md)
+- **blocks** [ART-7](../ART-7--5286d0c9/task.md)
 
 ---
 

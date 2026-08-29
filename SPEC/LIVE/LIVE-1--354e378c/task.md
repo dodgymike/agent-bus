@@ -26,12 +26,25 @@ Define unknown/alive/suspect/dead/recovered states, strict alive rule observed a
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [LIVE-10](../LIVE-10--e06af8b7/task.md)
+- **blocks** [LIVE-11](../LIVE-11--3662e698/task.md)
+- **blocks** [LIVE-12](../LIVE-12--26b77c70/task.md)
+- **blocks** [LIVE-13](../LIVE-13--f24219e0/task.md)
+- **blocks** [LIVE-14](../LIVE-14--d4e8063c/task.md)
+- **blocks** [LIVE-15](../LIVE-15--c9e65431/task.md)
+- **blocks** [LIVE-2](../LIVE-2--c0f4db11/task.md)
+- **blocks** [LIVE-3](../LIVE-3--c5c0a210/task.md)
+- **blocks** [LIVE-4](../LIVE-4--6376660b/task.md)
+- **blocks** [LIVE-5](../LIVE-5--7f62eeee/task.md)
+- **blocks** [LIVE-6](../LIVE-6--5825cf57/task.md)
+- **blocks** [LIVE-7](../LIVE-7--09bc72d0/task.md)
+- **blocks** [LIVE-8](../LIVE-8--742dd0ec/task.md)
+- **blocks** [LIVE-9](../LIVE-9--8fa73253/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

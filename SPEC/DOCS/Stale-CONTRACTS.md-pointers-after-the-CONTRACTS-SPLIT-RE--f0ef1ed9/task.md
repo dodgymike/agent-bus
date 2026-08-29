@@ -40,12 +40,13 @@ PROOF STRENGTHENED 2026-08-02 (spec-keeper): the original proof_cmd was three ne
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [CONTEXT-DRIFT-WRAPPERS](../../CONTEXT/CONTEXT-DRIFT-WRAPPERS--1a9bf503/task.md)
+- **blocks** [HANDOVER-README](../../HANDOVER/HANDOVER-README--1dc9cf90/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

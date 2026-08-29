@@ -26,12 +26,18 @@ Persist authenticated observation facts and reconstruct conservative status acro
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [AUTH-3](../../AUTH/AUTH-3--d53e3b21/task.md)
+- **blocked by** [LIVE-1](../LIVE-1--354e378c/task.md)
+- **blocked by** [LIVE-2](../LIVE-2--c0f4db11/task.md)
+- **blocked by** [LIVE-3](../LIVE-3--c5c0a210/task.md)
+- **blocks** [LIVE-10](../LIVE-10--e06af8b7/task.md)
+- **blocks** [LIVE-15](../LIVE-15--c9e65431/task.md)
+- **blocks** [LIVE-8](../LIVE-8--742dd0ec/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

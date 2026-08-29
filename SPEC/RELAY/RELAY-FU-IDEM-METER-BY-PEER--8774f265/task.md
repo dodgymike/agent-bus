@@ -95,12 +95,18 @@ PROOF_CMD: unchanged, still names TestAppliedKeyMeteredByAuthenticatedPeer in ./
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
+- **relates to** [CONV-PEERQUOTA](../../CONV/CONV-PEERQUOTA--35cb7dc6/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+- **relates to** [RELAY-24-BLOCKER-HUBINGEST](../RELAY-24-BLOCKER-HUBINGEST--9ee98866/task.md)
+- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
+- **relates to** [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md)
+- **relates to** [ff38f871-988a-4f2c-aa9a-febee4f3b15a](../../DOCS/AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -69,12 +69,14 @@ Related, not duplicate: ACK-7 (b7bf9631) is the task this scope was cut FROM (re
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up** [ACK-7](../ACK-7--b7bf9631/task.md)
+- **relates to** [ACK-14](../ACK-14--1884218d/task.md)
+- **relates to** [ACK-5-FU-TRANSIT-503-IS-PERMANENT](../ACK-5-FU-TRANSIT-503-IS-PERMANENT--ce287d71/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -5,13 +5,13 @@
 | Public id | `a37a180f-0a57-4eed-9bb5-17fd2ae1ec63` |
 | Key | COMMS-TOKENS |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P1 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:11:59.157599+00:00 |
-| Updated | 2026-08-08T17:11:59.157599+00:00 |
+| Updated | 2026-08-29T14:26:33.345431+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 bash scripts/comms-tokens-audit.sh --project agent-bus
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -55,12 +59,12 @@ Depends on: nothing.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -69,7 +73,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
 
 ---
 

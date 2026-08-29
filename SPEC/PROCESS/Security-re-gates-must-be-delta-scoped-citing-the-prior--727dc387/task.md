@@ -32,12 +32,13 @@ Do not collapse security review into a single commit-time pass like integrator. 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [4d990ef4-23ee-4971-ab00-84eb5ec137ae](../Write-docs-CHANGE-TIERS.md-the-normative-tier-and-signal--4d990ef4/task.md)
+- **relates to** [748f6366-1a46-462e-b452-f024f607976b](../claude-agents-security.md-scope-the-security-gate-by-tie--748f6366/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

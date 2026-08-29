@@ -26,12 +26,28 @@ Define inline versus chunked/resumable transfer, ownership, transfer states, ato
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [ART-10](../ART-10--39a7d2e3/task.md)
+- **blocks** [ART-11](../ART-11--756fdfa2/task.md)
+- **blocks** [ART-12](../ART-12--89ac19f3/task.md)
+- **blocks** [ART-13](../ART-13--7ffa42c5/task.md)
+- **blocks** [ART-14](../ART-14--46b4219e/task.md)
+- **blocks** [ART-15](../ART-15--b88c1c59/task.md)
+- **blocks** [ART-16](../ART-16--a311e367/task.md)
+- **blocks** [ART-17](../ART-17--0495302c/task.md)
+- **blocks** [ART-18](../ART-18--ef028209/task.md)
+- **blocks** [ART-2](../ART-2--d8b2b551/task.md)
+- **blocks** [ART-3](../ART-3--64a11268/task.md)
+- **blocks** [ART-4](../ART-4--3e01fc93/task.md)
+- **blocks** [ART-5](../ART-5--7c470cb1/task.md)
+- **blocks** [ART-6](../ART-6--62a0a213/task.md)
+- **blocks** [ART-7](../ART-7--5286d0c9/task.md)
+- **blocks** [ART-8](../ART-8--9cc8fc4e/task.md)
+- **blocks** [ART-9](../ART-9--f6864354/task.md)
 
 ---
 

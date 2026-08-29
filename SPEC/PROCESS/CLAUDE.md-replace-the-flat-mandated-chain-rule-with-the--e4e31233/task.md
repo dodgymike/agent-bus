@@ -75,12 +75,16 @@ in this task is superseded; see T-01 (4d990ef4-23ee-4971-ab00-84eb5ec137ae) ruli
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [4d990ef4-23ee-4971-ab00-84eb5ec137ae](../Write-docs-CHANGE-TIERS.md-the-normative-tier-and-signal--4d990ef4/task.md)
+- **blocked by** [a94dee14-fea7-406c-9c4f-485736f434c4](../claude-ORCHESTRATION.md-the-tier-to-agent-routing-table--a94dee14/task.md)
+- **relates to** [6a5ece85-5006-4f86-9c61-a33f15a069dc](../Audit-AGENTS.md-vs-CLAUDE.md-drift-and-fix-the-sync-mech--6a5ece85/task.md)
+- **relates to** [85c9854b-6c34-470f-bffe-3eed1116f2b0](../docs-doc-budgets.tsv-give-AGENTS.md-its-own-ceiling-row--85c9854b/task.md)
+- **supersedes** [97a315af-70b3-4a64-8456-92335d8c9631](../Make-security-skip-the-default-for-docs-and-tests-only-c--97a315af/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

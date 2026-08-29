@@ -59,12 +59,15 @@ re-scoped to this client.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [2b4ecf0b-7f01-436b-8135-811ff4963a0e](../busctl-send-broadcast-lose-the-minted-idempotency-key-on--2b4ecf0b/task.md)
+- **relates to** [797fb15f-27d8-4671-8d27-c8bd38bfb1f6](../busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md)
+- **supersedes** [AGENTIF-4](../../AGENTIF/AGENTIF-4--715fc1b8/task.md)
+- **supersedes** [AGENTIF-5](../../AGENTIF/AGENTIF-5--8109ab88/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -86,12 +86,16 @@ clean overlay of HEAD for the separate reason that the script is untracked there
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
+- **relates to** [CONTEXT-STALE-INPLACE](../CONTEXT-STALE-INPLACE--ec7fc25e/task.md)
+- **relates to** [INVITE-CLIENT-FU-DOCSTALE](../../INVITE/INVITE-CLIENT-FU-DOCSTALE--66266b5f/task.md)
+- **relates to** [INVITE-GATE-ENFORCE-FU-CLIENTREMEDY](../../INVITE/INVITE-GATE-ENFORCE-FU-CLIENTREMEDY--d4ff825f/task.md)
+- **relates to** [INVITE-GATE-ENFORCE-FU-INVITEDOCS](../../INVITE/INVITE-GATE-ENFORCE-FU-INVITEDOCS--47c7bae9/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

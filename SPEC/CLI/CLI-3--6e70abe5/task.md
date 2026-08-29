@@ -62,12 +62,13 @@ incremental-streaming property, because a --json flag that buffers would pass a 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [797fb15f-27d8-4671-8d27-c8bd38bfb1f6](../busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md)
+- **supersedes** [AGENTIF-6](../../AGENTIF/AGENTIF-6--31c1257c/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

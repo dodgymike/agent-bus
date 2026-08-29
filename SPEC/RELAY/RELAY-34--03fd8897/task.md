@@ -36,12 +36,14 @@ RELATE TO RELAY-17: the keystone builds its cross-bus trust anchor on this recor
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-17](../RELAY-17--817649ce/task.md)
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
+- **follow-up of** [RELAY-10](../RELAY-10--7e9a5b63/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

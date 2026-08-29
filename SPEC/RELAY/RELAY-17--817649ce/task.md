@@ -43,12 +43,20 @@ every relayed message is ErrUnpeeredBus/403 by construction until a trust chain 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [RELAY-10](../RELAY-10--7e9a5b63/task.md)
+- **blocked by** [RELAY-14](../RELAY-14--7db695ee/task.md)
+- **blocked by** RELAY-27 (unresolved)
+- **blocked by** [RELAY-34](../RELAY-34--03fd8897/task.md)
+- **blocked by** [RELAY-7](../RELAY-7--756655f3/task.md)
+- **blocked by** [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md)
+- **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
+- **blocks** [RELAY-22](../RELAY-22--b4e45cda/task.md)
+- **blocks** [RELAY-23](../RELAY-23--220d36f4/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

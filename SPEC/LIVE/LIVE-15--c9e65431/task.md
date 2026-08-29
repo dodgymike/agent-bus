@@ -26,12 +26,25 @@ Exercise real authenticated single-bus and multi-bus topology: strict boundary, 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [DEPLOY-3](../../DEPLOY/DEPLOY-3--9eaf2d19/task.md)
+- **blocked by** [LIVE-1](../LIVE-1--354e378c/task.md)
+- **blocked by** [LIVE-10](../LIVE-10--e06af8b7/task.md)
+- **blocked by** [LIVE-11](../LIVE-11--3662e698/task.md)
+- **blocked by** [LIVE-12](../LIVE-12--26b77c70/task.md)
+- **blocked by** [LIVE-13](../LIVE-13--f24219e0/task.md)
+- **blocked by** [LIVE-14](../LIVE-14--d4e8063c/task.md)
+- **blocked by** [LIVE-3](../LIVE-3--c5c0a210/task.md)
+- **blocked by** [LIVE-4](../LIVE-4--6376660b/task.md)
+- **blocked by** [LIVE-5](../LIVE-5--7f62eeee/task.md)
+- **blocked by** [LIVE-6](../LIVE-6--5825cf57/task.md)
+- **blocked by** [LIVE-7](../LIVE-7--09bc72d0/task.md)
+- **blocked by** [LIVE-8](../LIVE-8--742dd0ec/task.md)
+- **blocked by** [LIVE-9](../LIVE-9--8fa73253/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -5,19 +5,19 @@
 | Public id | `c31d1c40-4be7-499b-b935-6b5e4129c064` |
 | Key | CONV-VS-THREAD |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:53:07.534625+00:00 |
-| Updated | 2026-08-15T08:53:07.534625+00:00 |
-| Completed | — |
+| Updated | 2026-08-29T18:00:48.594333+00:00 |
+| Completed | 2026-08-29T18:00:48.594316+00:00 |
 
 ## Proof command
 
 ```sh
-test -f docs/conv/VS-THREAD-DECISION.md && grep -qE '^RULING: (CONV_SUPERSEDES_THREAD_FIELD|COMMS_TRIAL_FIRST|INDEPENDENT)$' docs/conv/VS-THREAD-DECISION.md && grep -q 'COMMS-THREAD-FIELD' docs/conv/VS-THREAD-DECISION.md && echo CONV_VS_THREAD_OK
+bash scripts/doc-check.sh section DECISIONS.md "2026-08-29 — CONV golden path: the three rulings that gate CONV-RECORD (CONV-VS-THREAD, CONV-ID-SHAPE, CONV-NAME-INV6)" "CONV-VS-THREAD"
 ```
 
 ## Description
@@ -59,12 +59,13 @@ Parallel-safety: design only.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md)
+- **relates to** [COMMS-THREAD-TRIAL](../../COMMS/COMMS-THREAD-TRIAL--3a7705b8/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -74,7 +75,7 @@ _Unknown._
 
 
 - [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
-- [COMMS-THREAD-TRIAL](../../COMMS/COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [COMMS-THREAD-TRIAL](../../COMMS/COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
 
 ---
 

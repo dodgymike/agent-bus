@@ -30,12 +30,13 @@ GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md e
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CRYPTO-1](../CRYPTO-1--30570fb9/task.md)
+- **superseded by** [SIGN-3](../../SIGN/SIGN-3--f2daa6bc/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

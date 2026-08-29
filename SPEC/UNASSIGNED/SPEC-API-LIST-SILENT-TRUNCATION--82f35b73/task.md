@@ -139,12 +139,14 @@ finding 1 changed.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [73b29060-f595-4f4d-90a9-3f13d231b909](../../CONTEXT/Spec-Server-warn-on-likely-duplicate-task-titles-at-crea--73b29060/task.md)
+- **relates to** [CONTEXT-KEY-IDENTITY](../../CONTEXT/CONTEXT-KEY-IDENTITY--73dec684/task.md)
+- **supersedes** [9e6544a1-d606-4e65-8c43-0764ac3f0aa4](../../TOOLING/spec-cloud.sh-task-list-workflow-GET-...-tasks-silently--9e6544a1/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

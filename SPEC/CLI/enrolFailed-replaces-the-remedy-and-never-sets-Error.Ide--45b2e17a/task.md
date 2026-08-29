@@ -26,12 +26,12 @@ client/enrol.go:349-367 REPLACES e.Remedy on a failed enrolment, so `enrol` agai
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **supersedes** [799aea40-c05e-4351-bdb9-e408a6ecd4f3](../client-enrol.go-enrolFailed-does-not-compose-the-remedy--799aea40/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

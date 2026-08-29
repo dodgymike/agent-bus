@@ -26,12 +26,15 @@ Expose durable sender-visible acknowledgement status, terminal result and safe d
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
+- **blocked by** [ACK-2](../ACK-2--9564f953/task.md)
+- **blocked by** [ACK-3](../ACK-3--263c47fe/task.md)
+- **blocks** [ACK-12](../ACK-12--17406b3a/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

@@ -26,12 +26,23 @@ Define precise semantics: local acceptance vs peer-hop receipt vs recipient deli
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [ACK-10](../ACK-10--cf417e18/task.md)
+- **blocks** [ACK-11](../ACK-11--5567f490/task.md)
+- **blocks** [ACK-12](../ACK-12--17406b3a/task.md)
+- **blocks** [ACK-2](../ACK-2--9564f953/task.md)
+- **blocks** [ACK-3](../ACK-3--263c47fe/task.md)
+- **blocks** [ACK-4](../ACK-4--aeb32123/task.md)
+- **blocks** [ACK-5](../ACK-5--5991ee1a/task.md)
+- **blocks** [ACK-6](../ACK-6--d3c50d33/task.md)
+- **blocks** [ACK-7](../ACK-7--b7bf9631/task.md)
+- **blocks** [ACK-8](../ACK-8--bc12541b/task.md)
+- **blocks** [ACK-9](../ACK-9--08f9987f/task.md)
+- **blocks** [ART-11](../../ART/ART-11--756fdfa2/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

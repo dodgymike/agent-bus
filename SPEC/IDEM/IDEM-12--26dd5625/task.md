@@ -32,12 +32,14 @@ GATED on IDEM-10, IDEM-11, MSG-2 (POST /v1/broadcast) and MSG-3 (POST /v1/send).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [IDEM-18](../IDEM-18--61f80a28/task.md)
+- **follow-up of** [IDEM-12-FU-BROADCAST](../IDEM-12-FU-BROADCAST--facdd241/task.md)
+- **relates to** [RELAY-16-FU-RETRY404](../../RELAY/RELAY-16-FU-RETRY404--7f515d76/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

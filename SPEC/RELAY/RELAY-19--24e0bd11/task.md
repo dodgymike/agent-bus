@@ -35,12 +35,17 @@ paths).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md)
+- **blocked by** [617ffe5a-db42-4aeb-89bb-d9b0889f6c19](../Bound-retained-outbox-tombstone-resources-without-reopen--617ffe5a/task.md)
+- **blocked by** [RELAY-15](../RELAY-15--663be37c/task.md)
+- **blocked by** [RELAY-8](../RELAY-8--206a89d1/task.md)
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
+- **relates to** [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

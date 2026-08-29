@@ -42,12 +42,12 @@ PROOF STATE OBSERVED (spec-keeper, HEAD 16da89f, not assumed): `bash scripts/pro
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up of** [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

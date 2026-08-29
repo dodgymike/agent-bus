@@ -46,12 +46,13 @@ Definition of done: the two files (or the generated/symlinked replacement for AG
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [e4e31233-cabe-4af4-986b-f28c84347214](../CLAUDE.md-replace-the-flat-mandated-chain-rule-with-the--e4e31233/task.md)
+- **relates to** [f4bd3c9f-3af8-4438-bcb0-18203b857255](../Deep-dive-audit-and-refactor-the-repo-s-tracked-.md-file--f4bd3c9f/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

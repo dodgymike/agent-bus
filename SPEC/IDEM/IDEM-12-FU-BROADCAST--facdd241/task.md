@@ -36,12 +36,13 @@ Related: follow_up of IDEM-12 (26dd5625-ddb2-4b68-a114-dadc1c5364b0); blocked by
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [SIGN-3](../../SIGN/SIGN-3--f2daa6bc/task.md)
+- **follow-up** [IDEM-12](../IDEM-12--26dd5625/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

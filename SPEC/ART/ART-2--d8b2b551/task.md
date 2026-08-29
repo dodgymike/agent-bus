@@ -26,12 +26,16 @@ Define/version canonical manifest: server-minted transfer ID, sender/recipients,
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ART-1](../ART-1--55490a33/task.md)
+- **blocks** [ART-3](../ART-3--64a11268/task.md)
+- **blocks** [ART-4](../ART-4--3e01fc93/task.md)
+- **blocks** [ART-5](../ART-5--7c470cb1/task.md)
+- **blocks** [ART-6](../ART-6--62a0a213/task.md)
 
 ---
 

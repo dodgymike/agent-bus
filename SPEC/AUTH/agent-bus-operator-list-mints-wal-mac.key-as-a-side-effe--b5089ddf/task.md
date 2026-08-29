@@ -149,12 +149,13 @@ mistyped-directory case is already caught by the pre-lock presence check. CONFIR
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../../RELAY/agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md)
+- **relates to** [RELAY-54](../../RELAY/RELAY-54--911841af/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

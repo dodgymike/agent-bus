@@ -52,12 +52,14 @@ Blocks RELAY-24-BLOCKER-EGRESS.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [RELAY-24-FU-STOREMSGLOOKUP-DOCS](../RELAY-24-FU-STOREMSGLOOKUP-DOCS--e02aa062/task.md)
+- **blocks** [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+- **relates to** [RELAY-24-FU-STOREMSGLOOKUP-BYIDGUARD](../RELAY-24-FU-STOREMSGLOOKUP-BYIDGUARD--4d5c1267/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

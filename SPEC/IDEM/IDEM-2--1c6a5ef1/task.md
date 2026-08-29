@@ -30,12 +30,16 @@ GATED on IDEM-1. Invariant 10 says the server's memory of applied keys "survives
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [IDEM-1](../IDEM-1--3cac3349/task.md)
+- **blocks** [IDEM-3](../IDEM-3--e34f9c31/task.md)
+- **blocks** [IDEM-4](../IDEM-4--d9c00d0d/task.md)
+- **blocks** [IDEM-7](../IDEM-7--1c490a08/task.md)
+- **blocks** [IDEM-8](../IDEM-8--d1ecfc75/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

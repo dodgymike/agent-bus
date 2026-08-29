@@ -51,12 +51,13 @@ it on the API-gap fix alone.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [RELAY-24-BLOCKER-EGRESS](../../RELAY/RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+- **relates to** [ed3537a8-9c5f-489e-8aa8-8d3f61514d5f](../Correct-0f8c5332-the-relation-delete-endpoint-EXISTS--ed3537a8/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

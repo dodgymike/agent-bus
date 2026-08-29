@@ -5,13 +5,13 @@
 | Public id | `e7210d98-a308-47a4-aa39-1b57fc56368d` |
 | Key | COMMS-MULTI |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:00.534108+00:00 |
-| Updated | 2026-08-08T17:12:00.534108+00:00 |
+| Updated | 2026-08-29T14:26:35.016056+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 go test -race -run TestMultiRecipientSend ./internal/httpapi ./internal/hub
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -45,12 +49,14 @@ Depends on: COMMS-MULTI-DESIGN.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md)
+- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
+- **blocks** [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -59,7 +65,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
+- [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -68,8 +74,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-MULTI-DESIGN](../COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (cancelled)
 - [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md) — CONV-MULTI-CLI: expose multi-recipient send through the CLI -- COMMS-MULTI owns the handl… (todo)
 

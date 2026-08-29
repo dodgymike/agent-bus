@@ -66,12 +66,13 @@ broken proofs in this backlog and closed 2 tasks on targets that never existed.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [INVMINT-1](../INVMINT-1--1bed65a8/task.md)
+- **blocked by** [INVMINT-3](../INVMINT-3--8555e659/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

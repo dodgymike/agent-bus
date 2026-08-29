@@ -9,7 +9,7 @@
 > - `SPEC/<EPIC>/epic.md` — every task in the epic, open first, then closed
 > - `SPEC/<EPIC>/<task>/task.md` — the full record for one task
 
-**849 tasks in 32 epics — 555 open, 294 closed.**
+**849 tasks in 32 epics — 540 open, 309 closed.**
 
 | Epic | Open | Total | Summary | Tasks |
 | --- | ---: | ---: | --- | --- |
@@ -19,9 +19,9 @@
 | ART | 18 | 18 | Planning epic for secure small inline and resumable chunked artifact transfer, including federated buses. Git… | [SPEC/ART/epic.md](SPEC/ART/epic.md) |
 | AUTH | 19 | 39 | Agent submits a key, server signs it and returns a bearer token; token verification middleware; revocation/le… | [SPEC/AUTH/epic.md](SPEC/AUTH/epic.md) |
 | CLI | 14 | 36 | A first-class command-line client for PEOPLE, distinct from the scripts/bus-*.sh agent wrappers. The wrappers… | [SPEC/CLI/epic.md](SPEC/CLI/epic.md) |
-| COMMS | 12 | 13 | Inter-agent communication over the bus: establish by measurement, not assertion, what a well-formed message b… | [SPEC/COMMS/epic.md](SPEC/COMMS/epic.md) |
+| COMMS | 0 | 13 | Inter-agent communication over the bus: establish by measurement, not assertion, what a well-formed message b… | [SPEC/COMMS/epic.md](SPEC/COMMS/epic.md) |
 | CONTEXT | 30 | 36 | Cut the token cost of this repo's documentation without losing the rationale that stops agents breaking thing… | [SPEC/CONTEXT/epic.md](SPEC/CONTEXT/epic.md) |
-| CONV | 18 | 18 | Server-minted, server-tracked, multi-party CONVERSATIONS: a durable first-class object a client | [SPEC/CONV/epic.md](SPEC/CONV/epic.md) |
+| CONV | 15 | 18 | Server-minted, server-tracked, multi-party CONVERSATIONS: a durable first-class object a client | [SPEC/CONV/epic.md](SPEC/CONV/epic.md) |
 | CORE | 4 | 22 | go.mod, cmd/agent-bus main, config/flags, and the two unauthenticated liveness/info routes. Foundation every… | [SPEC/CORE/epic.md](SPEC/CORE/epic.md) |
 | CRYPTO | 10 | 12 | User ask (2026-08-02, verbatim): "Add to the backlog to add a mechanism to validate messages in the agent scr… | [SPEC/CRYPTO/epic.md](SPEC/CRYPTO/epic.md) |
 | DEPLOY | 5 | 9 | agent-bus ships as a container and runs under Docker Compose (user instruction, 2026-08-02). Covers the Docke… | [SPEC/DEPLOY/epic.md](SPEC/DEPLOY/epic.md) |
@@ -52,6 +52,6 @@ what makes them unique, since `key` is null for a third of the backlog. Use the 
 does not exist server-side.
 
 The tree shows task-to-task links in two clearly separated forms, and they are not the
-same thing: **relations** are authoritative edges from the Spec Server (`blocks`, `supersedes`, `relates`, `follow_up` — skipped for this run), while
+same thing: **relations** are authoritative edges from the Spec Server (`blocks`, `supersedes`, `relates`, `follow_up` — fetched for this run), while
 **referenced (derived)** links are merely key-shaped strings matched in description free
 text. Derived links are best-effort and must not be read as a dependency list.

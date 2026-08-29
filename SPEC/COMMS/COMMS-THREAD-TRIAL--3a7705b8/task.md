@@ -5,13 +5,13 @@
 | Public id | `3a7705b8-4664-4885-9f43-3c00c109d647` |
 | Key | COMMS-THREAD-TRIAL |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:00.777832+00:00 |
-| Updated | 2026-08-08T17:12:00.777832+00:00 |
+| Updated | 2026-08-29T14:26:35.356756+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 test -f docs/comms/THREAD-TRIAL.md && grep -qE 'RECOMMENDATION: (CONVENTION_SUFFICIENT|WIRE_FIELD_NEEDED)' docs/comms/THREAD-TRIAL.md && echo TRIAL_OK
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -44,12 +48,15 @@ Depends on: COMMS-CONSENT. Blocks COMMS-THREAD-FIELD and COMMS-DOC.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md)
+- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
+- **blocks** [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md)
+- **relates to** [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -58,10 +65,10 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
 - [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -71,12 +78,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
 - [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
-- [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (todo)
+- [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (done)
 
 ---
 

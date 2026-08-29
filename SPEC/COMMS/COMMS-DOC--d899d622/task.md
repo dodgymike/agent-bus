@@ -5,13 +5,13 @@
 | Public id | `d899d622-e3c0-462c-8e48-5fdc0d3fd1be` |
 | Key | COMMS-DOC |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:02.157913+00:00 |
-| Updated | 2026-08-08T17:12:02.157913+00:00 |
+| Updated | 2026-08-29T14:26:36.532463+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 test -f docs/comms/COMMS_FINDINGS.md && grep -qi 'retiring observation' docs/comms/COMMS_FINDINGS.md && echo FINDINGS_OK
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -47,12 +51,18 @@ COMMS-TOKENS, COMMS-MULTI.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
+- **blocked by** [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md)
+- **blocked by** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
+- **blocked by** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
+- **blocked by** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
+- **blocked by** [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md)
+- **blocked by** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -61,14 +71,14 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
-- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
+- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
 - [COMMS-THREAD-FIELD](../COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md) — Fix the kind=model cost channel -- make token counts real (independently justified, survi… (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [COMMS-TOKENS](../COMMS-TOKENS--a37a180f/task.md) — Fix the kind=model cost channel -- make token counts real (independently justified, survi… (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -77,10 +87,10 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ---
 

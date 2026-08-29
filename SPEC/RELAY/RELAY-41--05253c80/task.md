@@ -50,12 +50,15 @@ PROOF STATE AT FILING. `bash scripts/proof-check.sh` reports verdict=VACUOUS cla
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [MTLS-CLIENTAUTH](../../MTLS/MTLS-CLIENTAUTH--cc9558a8/task.md)
+- **blocks** [RELAY-20](../RELAY-20--701dc54d/task.md)
+- **blocks** [RELAY-45](../RELAY-45--4be32336/task.md)
+- **blocks** [RELAY-44](../RELAY-44--cec27a90/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -94,12 +94,12 @@ ACCEPTED AS A KNOWN GAP for the 97a315af carve-out commit rather than a blocker 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [212e695b-c11c-485b-aaa4-730d2f0ebd13](../change-tier.sh-guard-file-and-verification-infrastructur--212e695b/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

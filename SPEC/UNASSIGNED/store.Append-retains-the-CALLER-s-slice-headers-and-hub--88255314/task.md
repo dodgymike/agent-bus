@@ -62,12 +62,12 @@ RELATES: RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY (6e13a7d9-6ff0-49bb-a102-6ee1b69e9b5
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+_None recorded._
 
 ## Referenced in description (derived, not authoritative)
 

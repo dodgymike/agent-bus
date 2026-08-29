@@ -98,12 +98,13 @@ NOT reserve a numbered CONTEXT-N key; it uses a descriptive title and the server
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up of** [f4bd3c9f-3af8-4438-bcb0-18203b857255](../../PROCESS/Deep-dive-audit-and-refactor-the-repo-s-tracked-.md-file--f4bd3c9f/task.md)
+- **relates to** [DOCS-4-FU-BUDGET](../DOCS-4-FU-BUDGET--721b51ef/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

@@ -46,12 +46,13 @@ RED verification observed (2026-08-08): confirmed via a REAL check (not file-abs
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [521d68b5-4181-4df6-b3c2-ef660ff5461d](../../TOOLING/proof-check.sh-cannot-tell-executed-from-asserted-adopt--521d68b5/task.md)
+- **blocked by** [a9a433dd-4ae0-4a0d-a6f3-6c804105fbcd](../../TOOLING/Conjunction-masking-vacuous-proof-family-filtered-clause--a9a433dd/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

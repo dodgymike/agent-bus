@@ -36,12 +36,12 @@ RED verification observed (2026-08-08): scripts/gen-decisions-index.sh and DECIS
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [HANDOVER-DECISIONS-READINGLIST](../HANDOVER-DECISIONS-READINGLIST--bd438101/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

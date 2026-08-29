@@ -14,8 +14,8 @@ _None._
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| ZZ-SCRATCH-RELATIONS-A | ZZ-SCRATCH-RELATIONS-A: scratch task, relations-endpoint probe (spec-keeper, safe to igno… | cancelled | P3 | [task.md](ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) | _not fetched_ | [CONTEXT-SPEC-DEPS](../CONTEXT/CONTEXT-SPEC-DEPS--8280358d/task.md) |
-| ZZ-SCRATCH-RELATIONS-B | ZZ-SCRATCH-RELATIONS-B: scratch task, relations-endpoint probe (spec-keeper, safe to igno… | cancelled | P3 | [task.md](ZZ-SCRATCH-RELATIONS-B--50b6857a/task.md) | _not fetched_ | [CONTEXT-SPEC-DEPS](../CONTEXT/CONTEXT-SPEC-DEPS--8280358d/task.md) |
+| ZZ-SCRATCH-RELATIONS-A | ZZ-SCRATCH-RELATIONS-A: scratch task, relations-endpoint probe (spec-keeper, safe to igno… | cancelled | P3 | [task.md](ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) | blocked by [ZZ-SCRATCH-RELATIONS-B](ZZ-SCRATCH-RELATIONS-B--50b6857a/task.md)<br>blocks [ZZ-SCRATCH-RELATIONS-B](ZZ-SCRATCH-RELATIONS-B--50b6857a/task.md) | [CONTEXT-SPEC-DEPS](../CONTEXT/CONTEXT-SPEC-DEPS--8280358d/task.md) |
+| ZZ-SCRATCH-RELATIONS-B | ZZ-SCRATCH-RELATIONS-B: scratch task, relations-endpoint probe (spec-keeper, safe to igno… | cancelled | P3 | [task.md](ZZ-SCRATCH-RELATIONS-B--50b6857a/task.md) | blocked by [ZZ-SCRATCH-RELATIONS-A](ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md)<br>blocks [ZZ-SCRATCH-RELATIONS-A](ZZ-SCRATCH-RELATIONS-A--08b120b6/task.md) | [CONTEXT-SPEC-DEPS](../CONTEXT/CONTEXT-SPEC-DEPS--8280358d/task.md) |
 
 ---
 

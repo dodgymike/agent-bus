@@ -57,12 +57,22 @@ OUT OF SCOPE: writing any of the implementation. CRYPTO-2..CRYPTO-12 carry that.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [CRYPTO-10](../CRYPTO-10--68ff679d/task.md)
+- **blocks** [CRYPTO-11](../CRYPTO-11--0047e5b7/task.md)
+- **blocks** [CRYPTO-12](../CRYPTO-12--eb1827ff/task.md)
+- **blocks** [CRYPTO-2](../CRYPTO-2--0ad37da2/task.md)
+- **blocks** [CRYPTO-3](../CRYPTO-3--dd1066af/task.md)
+- **blocks** [CRYPTO-4](../CRYPTO-4--13f3947e/task.md)
+- **blocks** [CRYPTO-5](../CRYPTO-5--9f3f8065/task.md)
+- **blocks** [CRYPTO-6](../CRYPTO-6--260e6003/task.md)
+- **blocks** [CRYPTO-7](../CRYPTO-7--f90d7889/task.md)
+- **blocks** [CRYPTO-8](../CRYPTO-8--2b1068eb/task.md)
+- **blocks** [CRYPTO-9](../CRYPTO-9--0a4562fc/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

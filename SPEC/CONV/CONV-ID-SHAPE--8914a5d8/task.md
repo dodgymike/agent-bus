@@ -5,19 +5,19 @@
 | Public id | `8914a5d8-40c5-4c3c-936c-55d3b4f0c4e7` |
 | Key | CONV-ID-SHAPE |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:53:06.918009+00:00 |
-| Updated | 2026-08-15T08:53:06.918009+00:00 |
-| Completed | — |
+| Updated | 2026-08-29T18:00:58.793426+00:00 |
+| Completed | 2026-08-29T18:00:58.793408+00:00 |
 
 ## Proof command
 
 ```sh
-test -f docs/conv/ID-SHAPE-DECISION.md && grep -qE '^RULING: (BARE_UUID|BUS_QUALIFIED)$' docs/conv/ID-SHAPE-DECISION.md && grep -q 'invariant 2' docs/conv/ID-SHAPE-DECISION.md && echo CONV_ID_SHAPE_OK
+bash scripts/doc-check.sh section DECISIONS.md "2026-08-29 — CONV golden path: the three rulings that gate CONV-RECORD (CONV-VS-THREAD, CONV-ID-SHAPE, CONV-NAME-INV6)" "BUS_QUALIFIED"
 ```
 
 ## Description
@@ -56,12 +56,14 @@ Parallel-safety: design only, writes no production code, no live bus needed.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md)
+- **blocks** [CONV-TRACK-ON-RECEIPT](../CONV-TRACK-ON-RECEIPT--ed1e70ac/task.md)
+- **supersedes** [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

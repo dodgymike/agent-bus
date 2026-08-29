@@ -40,12 +40,14 @@ RED verification observed (2026-08-08): the named test TestUnwiredSurfacesHaveNo
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [HANDOVER-CHECK](../HANDOVER-CHECK--0f909b6c/task.md)
+- **blocks** [HANDOVER-MAP-DOC](../HANDOVER-MAP-DOC--a52d4a99/task.md)
+- **blocks** [HANDOVER-REGISTER](../HANDOVER-REGISTER--7fddae9d/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

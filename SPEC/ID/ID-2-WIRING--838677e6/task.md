@@ -67,12 +67,14 @@ PROOF. `go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-b
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ID-2-WIRING-OBSERVER](../ID-2-WIRING-OBSERVER--c31f6999/task.md)
+- **blocked by** [ID-2-WIRING-SCHEMA](../ID-2-WIRING-SCHEMA--80b54ee4/task.md)
+- **blocked by** [ID-2-WIRING-SEAL](../ID-2-WIRING-SEAL--8c9b6489/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

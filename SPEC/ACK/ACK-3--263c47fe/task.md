@@ -30,12 +30,21 @@ Specify and implement relay peer-hop ACK/NACK frames, correlation to the durable
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ACK-1](../ACK-1--e0ac42e1/task.md)
+- **blocked by** [ACK-2](../ACK-2--9564f953/task.md)
+- **blocked by** [ACK-4](../ACK-4--aeb32123/task.md)
+- **blocked by** [RELAY-23](../../RELAY/RELAY-23--220d36f4/task.md)
+- **blocks** [ACK-10](../ACK-10--cf417e18/task.md)
+- **blocks** [ACK-5](../ACK-5--5991ee1a/task.md)
+- **blocks** [ACK-7](../ACK-7--b7bf9631/task.md)
+- **blocks** [ACK-8](../ACK-8--bc12541b/task.md)
+- **blocks** [ACK-9](../ACK-9--08f9987f/task.md)
+- **relates to** [ACK-4-FU-RECIPIENT-BINDING](../ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

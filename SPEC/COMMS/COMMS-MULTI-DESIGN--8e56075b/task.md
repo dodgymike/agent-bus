@@ -5,13 +5,13 @@
 | Public id | `8e56075b-0e4f-4a77-a1c1-2875990e6492` |
 | Key | COMMS-MULTI-DESIGN |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:00.257332+00:00 |
-| Updated | 2026-08-08T17:12:00.257332+00:00 |
+| Updated | 2026-08-29T14:26:34.715986+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 test -f docs/comms/MULTI-SEND-DESIGN.md && grep -q 'SIGN-3' docs/comms/MULTI-SEND-DESIGN.md && echo DESIGN_OK
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -54,12 +58,12 @@ Depends on: nothing. Blocks COMMS-MULTI.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -68,7 +72,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
+- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (cancelled)
 - [SIGN-3](../../SIGN/SIGN-3--f2daa6bc/task.md) — SIGN-3: Broadcast signature covers the recipient set (prevents split-content broadcasts) (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -78,7 +82,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
+- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (cancelled)
 - [CONV-MULTI-CLI](../../CONV/CONV-MULTI-CLI--16686141/task.md) — CONV-MULTI-CLI: expose multi-recipient send through the CLI -- COMMS-MULTI owns the handl… (todo)
 
 ---

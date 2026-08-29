@@ -49,12 +49,14 @@ Depends on: COMMS-THREAD-TRIAL (hard blocker -- filed with status=blocked).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md)
+- **relates to** [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md)
+- **superseded by** [CONV-ID-SHAPE](../../CONV/CONV-ID-SHAPE--8914a5d8/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -63,8 +65,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [COMMS-MULTI](../COMMS-MULTI--e7210d98/task.md) — Implement true multi-recipient /v1/send per COMMS-MULTI-DESIGN (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
 - [SIGN-3](../../SIGN/SIGN-3--f2daa6bc/task.md) — SIGN-3: Broadcast signature covers the recipient set (prevents split-content broadcasts) (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -74,9 +76,9 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (todo)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [CONV-VS-THREAD](../../CONV/CONV-VS-THREAD--c31d1c40/task.md) — CONV-VS-THREAD: resolve the governance conflict with COMMS-THREAD-TRIAL/COMMS-THREAD-FIEL… (done)
 
 ---
 

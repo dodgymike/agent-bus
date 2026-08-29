@@ -26,12 +26,14 @@ GATED on SIGN-1/SIGN-2. Replaces the encryption-specific scope of superseded CRY
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [IDEM-12-FU-BROADCAST](../../IDEM/IDEM-12-FU-BROADCAST--facdd241/task.md)
+- **supersedes** [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md)
+- **supersedes** [RATCHET-4](../../RATCHET/RATCHET-4--58fd8bc3/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -55,7 +57,7 @@ _Unknown._
 
 
 - [ACK-BROADCAST-NO-LIFECYCLE-ROW](../../ACK/ACK-BROADCAST-NO-LIFECYCLE-ROW--e8510bb3/task.md) — ACK-BROADCAST-NO-LIFECYCLE-ROW: a same-bus BROADCAST opens no lifecycle row, so agent-bus… (todo)
-- [COMMS-MULTI-DESIGN](../../COMMS/COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (todo)
+- [COMMS-MULTI-DESIGN](../../COMMS/COMMS-MULTI-DESIGN--8e56075b/task.md) — Design: widen /v1/send to true multi-recipient (Finding A) without touching SIGN-3 (cancelled)
 - [COMMS-THREAD-FIELD](../../COMMS/COMMS-THREAD-FIELD--35db4a7b/task.md) — Add a wire-level thread/reply field -- ONLY if COMMS-THREAD-TRIAL shows convention is ins… (superseded)
 - [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md) — CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path (deferred)
 - [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)

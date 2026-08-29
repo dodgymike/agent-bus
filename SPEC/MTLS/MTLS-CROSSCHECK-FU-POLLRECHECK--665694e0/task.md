@@ -20,12 +20,13 @@ MTLS-CROSSCHECK adds a SECOND property that a parked long poll can outlive. The 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up** [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md)
+- **superseded by** [AUTH-2-FU-POLLEXPIRY](../../AUTH/AUTH-2-FU-POLLEXPIRY--03d7ca66/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

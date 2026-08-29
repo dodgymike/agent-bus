@@ -36,12 +36,14 @@ RED verification observed (2026-08-08): confirmed via a REAL check (not file-abs
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [HANDOVER-CONTRIBUTING](../HANDOVER-CONTRIBUTING--39484b80/task.md)
+- **blocked by** [HANDOVER-DOCMAP](../HANDOVER-DOCMAP--e5802f9d/task.md)
+- **blocked by** [HANDOVER-RUNBOOK-DOC](../HANDOVER-RUNBOOK-DOC--a0e009e1/task.md)
 
 ---
 

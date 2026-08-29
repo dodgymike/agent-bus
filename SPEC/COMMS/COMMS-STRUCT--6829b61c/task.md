@@ -5,13 +5,13 @@
 | Public id | `6829b61c-23ab-4f63-9156-f238c3aa2bd3` |
 | Key | COMMS-STRUCT |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:12:01.577213+00:00 |
-| Updated | 2026-08-08T17:12:01.577213+00:00 |
+| Updated | 2026-08-29T14:26:35.872511+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 PREREG_TS=$(git log --format=%aI -1 -- docs/comms/STRUCT-PREREG.md) && FIRST_MSG_TS=$(jq -r '.timestamp' docs/comms/struct-trial.ndjson | sort | head -1) && [ -n "$PREREG_TS" ] && [ -n "$FIRST_MSG_TS" ] && [ "$(date -d "$PREREG_TS" +%s)" -lt "$(date -d "$FIRST_MSG_TS" +%s)" ] && echo PREREG_BEFORE_TRIAL_OK
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -50,12 +54,14 @@ Depends on: COMMS-CORPUS, COMMS-CONSENT. Blocks COMMS-DOC.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md)
+- **blocked by** [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md)
+- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -64,10 +70,10 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -76,11 +82,11 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
 
 ---
 

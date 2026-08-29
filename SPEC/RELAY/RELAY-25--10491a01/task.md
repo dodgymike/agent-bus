@@ -52,12 +52,27 @@ three-host run over actual SSH tunnels; the loopback smoke does not substitute f
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CLI-11](../../UNASSIGNED/CLI-11--bf966c07/task.md)
+- **blocked by** [CLI-6](../../CLI/CLI-6--47001cb4/task.md)
+- **blocked by** [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md)
+- **blocked by** [INVITE-CLIENT](../../INVITE/INVITE-CLIENT--4123e25d/task.md)
+- **blocked by** [RELAY-24](../RELAY-24--e303c624/task.md)
+- **blocked by** [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+- **blocked by** [RELAY-24-BLOCKER-PEERCERTFLAG](../RELAY-24-BLOCKER-PEERCERTFLAG--0e6b5a49/task.md)
+- **blocked by** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
+- **blocked by** [SIGN-1-FU-OUTOFORDER-POISON](../../SIGN/SIGN-1-FU-OUTOFORDER-POISON--bbd81523/task.md)
+- **blocked by** [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md)
+- **follow-up** [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md)
+- **follow-up of** [RELAY-25-FU-INBOUNDBIND](../RELAY-25-FU-INBOUNDBIND--336c3b76/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-HANDSHAKE](../RELAY-24-BLOCKER-EGRESS-HANDSHAKE--0ab31d26/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-ATTEST](../RELAY-24-BLOCKER-EGRESS-ATTEST--3334677e/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE](../RELAY-24-BLOCKER-EGRESS-FU-FEDSMOKE--3e96dae2/task.md)
+- **relates to** [RELAY-25-FU-REALHOST](../RELAY-25-FU-REALHOST--8708f7c9/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

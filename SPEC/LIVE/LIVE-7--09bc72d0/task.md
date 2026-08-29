@@ -26,12 +26,16 @@ Authorize who may view/subscribe to each agent status; prevent roster/status enu
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [LIVE-1](../LIVE-1--354e378c/task.md)
+- **blocked by** [LIVE-3](../LIVE-3--c5c0a210/task.md)
+- **blocks** [LIVE-15](../LIVE-15--c9e65431/task.md)
+- **blocks** [LIVE-6](../LIVE-6--5825cf57/task.md)
+- **blocks** [LIVE-8](../LIVE-8--742dd0ec/task.md)
 
 ## Referenced by other tasks (derived, not authoritative)
 

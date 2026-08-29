@@ -36,12 +36,12 @@ Wrapper for POST /v1/send (DM). Pairs with the direct-message task; per invarian
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **superseded by** [CLI-4](../../CLI/CLI-4--137465b9/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

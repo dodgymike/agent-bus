@@ -36,12 +36,13 @@ in this task is superseded; see T-01 (4d990ef4-23ee-4971-ab00-84eb5ec137ae) ruli
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [4d990ef4-23ee-4971-ab00-84eb5ec137ae](../Write-docs-CHANGE-TIERS.md-the-normative-tier-and-signal--4d990ef4/task.md)
+- **blocks** [e4e31233-cabe-4af4-986b-f28c84347214](../CLAUDE.md-replace-the-flat-mandated-chain-rule-with-the--e4e31233/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

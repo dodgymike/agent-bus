@@ -45,12 +45,15 @@ fix, priced at P1 for that reason alone, not for its (negligible) token saving.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CONTEXT-DOCCHECK](../CONTEXT-DOCCHECK--b3b28f45/task.md)
+- **blocked by** [CONTEXT-DONEGATE-CANON](../CONTEXT-DONEGATE-CANON--b9b0c654/task.md)
+- **blocked by** [f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78](../../DOCS/Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md)
+- **blocks** [CONTEXT-LOG-RETIRE](../CONTEXT-LOG-RETIRE--116179c8/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

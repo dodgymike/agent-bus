@@ -44,12 +44,14 @@ implementing, most likely by superseding ef6c4645 into this numbered task.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-19](../RELAY-19--24e0bd11/task.md)
+- **relates to** [ef6c4645-b454-417f-a4a7-c75843bbcbd0](../Relay-forwarder-s-PeerBaseURL-callback-give-Registry-a-c--ef6c4645/task.md)
+- **supersedes** [ef6c4645-b454-417f-a4a7-c75843bbcbd0](../Relay-forwarder-s-PeerBaseURL-callback-give-Registry-a-c--ef6c4645/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

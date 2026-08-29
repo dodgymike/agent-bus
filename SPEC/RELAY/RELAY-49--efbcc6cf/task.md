@@ -52,12 +52,13 @@ RELATES: RELAY-47, RELAY-47-FU-FANOUT, RELAY-42 (Registry busID case handling), 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **follow-up of** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
+- **relates to** [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

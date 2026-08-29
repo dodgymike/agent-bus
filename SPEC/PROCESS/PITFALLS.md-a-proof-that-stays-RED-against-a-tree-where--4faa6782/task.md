@@ -94,12 +94,12 @@ the reason for the change -- which is this task's OWN rule, applied to itself.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [4a24853a-d5f4-4099-97d7-fedb15e38e67](../PITFALLS.md-section-2-a-correction-placed-BELOW-the-text--4a24853a/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

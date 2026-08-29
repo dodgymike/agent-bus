@@ -69,12 +69,16 @@ Parallel-safety: touches internal/store; coordinate with DUR work in flight.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md)
+- **blocked by** [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md)
+- **blocks** [CONV-CRASH](../CONV-CRASH--3078ad4e/task.md)
+- **blocks** [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md)
+- **blocks** [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -84,9 +88,9 @@ _Unknown._
 
 
 - [CONV-CRASH](../CONV-CRASH--3078ad4e/task.md) — CONV-CRASH: crash-injection proof that conversation create + membership change recover to… (todo)
-- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (todo)
+- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (done)
 - [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md) — CONV-MEMBER-CHANGE: the change event -- a REMOVED participant gets exactly ONE final mess… (todo)
-- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (todo)
+- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -96,9 +100,9 @@ _Unknown._
 
 
 - [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (todo)
-- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (todo)
+- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (done)
 - [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md) — CONV-MEMBER-CHANGE: the change event -- a REMOVED participant gets exactly ONE final mess… (todo)
-- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (todo)
+- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (done)
 
 ---
 

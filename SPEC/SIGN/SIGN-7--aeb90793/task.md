@@ -48,12 +48,14 @@ this, and keep the live cross-bus clause as the thing that holds it open.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-17](../../RELAY/RELAY-17--817649ce/task.md)
+- **relates to** [IDEM-7](../../IDEM/IDEM-7--1c490a08/task.md)
+- **relates to** [SIGN-1](../SIGN-1--43fd21ae/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

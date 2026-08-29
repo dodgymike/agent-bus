@@ -5,19 +5,19 @@
 | Public id | `a11d59cd-d53b-41b6-9864-5732ca35df02` |
 | Key | CONV-NAME-INV6 |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:53:07.174353+00:00 |
-| Updated | 2026-08-15T08:53:07.174353+00:00 |
-| Completed | — |
+| Updated | 2026-08-29T18:00:59.156646+00:00 |
+| Completed | 2026-08-29T18:00:59.156630+00:00 |
 
 ## Proof command
 
 ```sh
-test -f docs/conv/NAME-INV6-DECISION.md && grep -qE '^RULING: NAME_IS_(METADATA|BODY)$' docs/conv/NAME-INV6-DECISION.md && grep -qE '^MAX_NAME_BYTES: [0-9]+$' docs/conv/NAME-INV6-DECISION.md && grep -qE '^CHARSET: .+$' docs/conv/NAME-INV6-DECISION.md && grep -qE '^AT_REST_EXPOSURE: (YES|NO)$' docs/conv/NAME-INV6-DECISION.md && echo CONV_NAME_OK
+bash scripts/doc-check.sh section DECISIONS.md "2026-08-29 — CONV golden path: the three rulings that gate CONV-RECORD (CONV-VS-THREAD, CONV-ID-SHAPE, CONV-NAME-INV6)" "NAME_IS_METADATA" "128"
 ```
 
 ## Description
@@ -58,12 +58,12 @@ Parallel-safety: design only. No live bus needed.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

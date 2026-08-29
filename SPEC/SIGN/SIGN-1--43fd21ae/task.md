@@ -32,12 +32,18 @@ CONSTRAINT ADDED 2026-08-02 (RATCHET-7 fallout): Ed25519 signs the message itsel
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [SIGN-2](../SIGN-2--1c183f10/task.md)
+- **blocks** [SIGN-6](../SIGN-6--c9e4aea1/task.md)
+- **blocks** [SIGN-8](../SIGN-8--71ef73d5/task.md)
+- **relates to** [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md)
+- **relates to** [RATCHET-6](../../RATCHET/RATCHET-6--fd0f3ca3/task.md)
+- **relates to** [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md)
+- **relates to** [SIGN-7](../SIGN-7--aeb90793/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

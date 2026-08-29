@@ -32,12 +32,13 @@ retry horizon must stay inside idem.PeerOutageBudget (24h).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-19](../RELAY-19--24e0bd11/task.md)
+- **relates to** [RELAY-2-FU-DURABLE-OUTBOX](../RELAY-2-FU-DURABLE-OUTBOX--2309e7ed/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

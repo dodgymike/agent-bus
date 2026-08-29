@@ -45,12 +45,17 @@ RED verification observed (2026-08-08): scripts/check.sh does not exist at HEAD 
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [cea09b96-72db-40f1-84b4-c2e227eae1cf](../../TOOLING/proof-check.sh-subtest-SKIP-PASS-lines-invisible-to-plai--cea09b96/task.md)
+- **blocks** [CONTEXT-BUDGET-WIRE](../../CONTEXT/CONTEXT-BUDGET-WIRE--be76c7e2/task.md)
+- **blocks** [HANDOVER-CONTRIBUTING](../HANDOVER-CONTRIBUTING--39484b80/task.md)
+- **blocks** [HANDOVER-MAP-CHECK](../HANDOVER-MAP-CHECK--dce30493/task.md)
+- **blocks** [HANDOVER-WIRED](../HANDOVER-WIRED--6d85978f/task.md)
+- **relates to** [HANDOVER-MAP-DOC](../HANDOVER-MAP-DOC--a52d4a99/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

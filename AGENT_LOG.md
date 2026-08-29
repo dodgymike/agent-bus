@@ -6472,3 +6472,23 @@ task; CONV-RECORD implements next.
   AGENT_LOG.md — neither is a guard file (no AST guard, no `*guard*_test.go`, no invariant-check test)
   nor a control-plane file (not CLAUDE/AGENTS/INVARIANTS.md, not `.claude/**`, not a check/gate script
   or `docs/*.tsv`); DECISIONS.md records rationale and gates nothing. No product code, no test change.
+
+### spec-keeper close-out (2026-08-29, API mutations only)
+
+Flipped the three CONV decision tasks to `done` via the Spec Server API — `c31d1c40` (CONV-VS-THREAD),
+`8914a5d8` (CONV-ID-SHAPE), `a11d59cd` (CONV-NAME-INV6) — commit_sha `f6411146`. All three had
+`owner:null` (never claimed), so `complete` required no `agent`/`on_behalf_of` assertion. Each task's
+stored `proof_cmd` pointed at a `docs/conv/*-DECISION.md` file that was never created (the ruling
+landed in DECISIONS.md instead), so `proof_cmd` was updated on completion to a section-scoped
+`doc-check.sh` assertion against the actual DECISIONS.md heading
+(`2026-08-29 — CONV golden path: the three rulings that gate CONV-RECORD (...)`), run and confirmed
+PASS before completing:
+- CONV-VS-THREAD: needle `CONV-VS-THREAD` — PASS (lines 7986-8144).
+- CONV-ID-SHAPE: needle `BUS_QUALIFIED` — PASS (lines 7986-8144).
+- CONV-NAME-INV6: needles `NAME_IS_METADATA` + `128` — PASS (lines 7986-8144).
+
+Posted `kind=report` + `kind=model` notes on each task. Regenerated the mirror
+(`gen-spec-mirror.sh`, full relations fetch — 849 tasks, 32 epics). CONV epic afterward: 18 total,
+15 open, 3 done (the three closed here); `CONV-RECORD` remains `todo`, now unblocked on the ruling
+side. security — SKIPPED under the docs-and-tests-only carve-out; paths: AGENT_LOG.md, SPEC.md,
+SPEC/ (generated mirror). No product code, no guard/control-plane file touched.

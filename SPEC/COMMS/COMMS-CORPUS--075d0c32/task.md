@@ -5,13 +5,13 @@
 | Public id | `075d0c32-b2bf-4e83-9c15-759f4c41bbad` |
 | Key | COMMS-CORPUS |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P1 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:11:58.817353+00:00 |
-| Updated | 2026-08-08T17:11:58.817353+00:00 |
+| Updated | 2026-08-29T14:26:19.805970+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 bash scripts/comms-corpus-extract.sh --verify
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -63,12 +67,16 @@ Depends on: nothing (first task in the epic; several later tasks depend on it).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md)
+- **blocks** [COMMS-READER](../COMMS-READER--07a4aa0c/task.md)
+- **blocks** [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md)
+- **blocks** [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md)
+- **blocks** [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -77,11 +85,11 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-THREAD-TRIAL](../COMMS-THREAD-TRIAL--3a7705b8/task.md) — Trial threading via convention (no wire field) and measure whether it's enough (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -90,12 +98,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (todo)
-- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (todo)
-- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-METRICS](../COMMS-METRICS--ee18aa5f/task.md) — Define measurable message-quality metrics against the corpus, honestly denominated (cancelled)
+- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (cancelled)
+- [COMMS-RETRACT](../COMMS-RETRACT--dd4b739c/task.md) — Determine whether message retraction needs explicit protocol marking (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ---
 

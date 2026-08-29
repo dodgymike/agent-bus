@@ -31,12 +31,15 @@ RELAY-25 SECURITY AMENDMENT (2026-08-14): the existing `client/wedge_test.go` pr
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CRYPTO-1](../CRYPTO-1--30570fb9/task.md)
+- **blocked by** [CRYPTO-4](../CRYPTO-4--13f3947e/task.md)
+- **blocked by** [SIGN-5](../../SIGN/SIGN-5--5cedc580/task.md)
+- **blocks** [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

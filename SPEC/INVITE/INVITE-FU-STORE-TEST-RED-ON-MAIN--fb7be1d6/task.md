@@ -36,12 +36,12 @@ PROOF NOTE: unusually, the stored proof_cmd names a test that ALREADY EXISTS and
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [d7a0e7c4-6ea8-4fa7-8db5-c8044dce3a8d](../TestInviteNotDurableIsRefused-is-a-time-bomb-hardcoded-2--d7a0e7c4/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

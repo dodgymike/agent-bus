@@ -57,12 +57,13 @@ Parallel-safety: internal/relay + internal/hub, heavily contended by RELAY. Coor
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md)
+- **blocked by** [CONV-PEERQUOTA](../CONV-PEERQUOTA--35cb7dc6/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -71,7 +72,7 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (todo)
+- [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (done)
 - [CONV-PEERQUOTA](../CONV-PEERQUOTA--35cb7dc6/task.md) — CONV-PEERQUOTA: bound conversation tracking per PEER on DISTINCT CONVERSATION IDS -- the… (todo)
 - [RELAY-FU-IDEM-METER-BY-PEER](../../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) — RELAY-FU-IDEM-METER-BY-PEER: Meter the applied-key table by the AUTHENTICATED PEER, not t… (done)
 

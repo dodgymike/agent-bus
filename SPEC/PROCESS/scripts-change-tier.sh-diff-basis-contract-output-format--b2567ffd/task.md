@@ -259,12 +259,21 @@ this task, not eleven.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [4d990ef4-23ee-4971-ab00-84eb5ec137ae](../Write-docs-CHANGE-TIERS.md-the-normative-tier-and-signal--4d990ef4/task.md)
+- **blocks** [1aa8c031-6e46-49a5-b572-70d53a1d64ba](../change-tier.sh-concurrency-primitive-signal--1aa8c031/task.md)
+- **blocks** [212e695b-c11c-485b-aaa4-730d2f0ebd13](../change-tier.sh-guard-file-and-verification-infrastructur--212e695b/task.md)
+- **blocks** [255bdc5a-f36e-4cfb-a484-199fbd6d16ab](../change-tier.sh-package-to-invariant-plane-partition-with--255bdc5a/task.md)
+- **blocks** [3c9c28d9-a02e-465b-b13b-6f9d29056eb4](../Decide-and-implement-the-client-exported-API-signal-or-r--3c9c28d9/task.md)
+- **blocks** [4604ae4d-a8b3-4272-9226-67557de66de3](../change-tier.sh-irreversible-surface-pinned-record-wire-v--4604ae4d/task.md)
+- **blocks** [4629eb94-5ddb-4acb-98a1-125230ca5afe](../change-tier.sh-credential-bearing-files-floor-at-T3-inde--4629eb94/task.md)
+- **blocks** [4d211a11-5b39-4c80-986e-54371eec1813](../change-tier.sh-new-HTTP-route-new-status-code-or-new-dis--4d211a11/task.md)
+- **blocks** [9921c55d-d8a0-460c-ac5f-91a6bb6adcf2](../change-tier.sh-test-removal-signal-the-missing-signal--9921c55d/task.md)
+- **blocks** [aeae5c7d-33f0-4ba1-a420-873bec8203d1](../claude-agents-integrator.md-the-commit-gate-must-consult--aeae5c7d/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

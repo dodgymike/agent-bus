@@ -34,12 +34,22 @@ NEVER a registered-503).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [RELAY-17](../RELAY-17--817649ce/task.md)
+- **blocked by** [RELAY-18](../RELAY-18--fa5d1b0d/task.md)
+- **blocked by** [RELAY-22](../RELAY-22--b4e45cda/task.md)
+- **blocked by** [RELAY-41](../RELAY-41--05253c80/task.md)
+- **blocked by** [RELAY-45](../RELAY-45--4be32336/task.md)
+- **blocked by** [RELAY-45-FU-CLI](../RELAY-45-FU-CLI--b9d645be/task.md)
+- **blocked by** [ca356fde-0613-42cb-ac85-a629609d9c78](../../MTLS/Certificate-expiry-enforcement-is-now-present-on-the-pin--ca356fde/task.md)
+- **blocked by** [RELAY-44](../RELAY-44--cec27a90/task.md)
+- **blocks** [RELAY-21](../RELAY-21--f5ce883e/task.md)
+- **blocks** [RELAY-23](../RELAY-23--220d36f4/task.md)
+- **blocks** [RELAY-24](../RELAY-24--e303c624/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

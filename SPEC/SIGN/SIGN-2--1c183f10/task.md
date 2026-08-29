@@ -28,12 +28,15 @@ ACCEPTANCE CRITERION ADDED 2026-08-02 (RATCHET-7 fallout, verified first-hand by
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md)
+- **blocked by** [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md)
+- **blocked by** [SIGN-1](../SIGN-1--43fd21ae/task.md)
+- **supersedes** [CRYPTO-6](../../CRYPTO/CRYPTO-6--260e6003/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

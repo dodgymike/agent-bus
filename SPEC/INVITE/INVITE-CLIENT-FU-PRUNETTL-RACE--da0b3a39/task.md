@@ -40,12 +40,13 @@ NOT A REGRESSION: pre-existing behaviour, untouched by INVITE-CLIENT-FU-PENDINGI
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **relates to** [CONTRACTS-CLI-1632-STALE](../../DOCS/CONTRACTS-CLI-1632-STALE--ae5011bf/task.md)
+- **relates to** [INVITE-CLIENT-FU-PENDINGINVITE](../INVITE-CLIENT-FU-PENDINGINVITE--7bb6edf0/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

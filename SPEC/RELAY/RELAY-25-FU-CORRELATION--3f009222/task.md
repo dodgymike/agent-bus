@@ -65,12 +65,18 @@ RELATES: RELAY-25 (owner), RELAY-47, RELAY-48, RELAY-24-BLOCKER-EGRESS-FU-FEDSMO
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md)
+- **follow-up of** [RELAY-25](../RELAY-25--10491a01/task.md)
+- **relates to** [RELAY-25-FU-CORRELATION-FU-WATCHLINK](../RELAY-25-FU-CORRELATION-FU-WATCHLINK--037a9860/task.md)
+- **relates to** [RELAY-25-FU-CORRELATION-FU-DAMAGEDIAG](../RELAY-25-FU-CORRELATION-FU-DAMAGEDIAG--273b43fe/task.md)
+- **relates to** [RELAY-25-FU-CORRELATION-FU-GUARDFIELD](../RELAY-25-FU-CORRELATION-FU-GUARDFIELD--44601098/task.md)
+- **relates to** [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md)
+- **relates to** [RELAY-47](../RELAY-47--dd69c4d3/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

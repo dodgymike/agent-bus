@@ -5,13 +5,13 @@
 | Public id | `ee18aa5f-d16a-48b8-812d-2068a4982f54` |
 | Key | COMMS-METRICS |
 | Epic | [COMMS](../epic.md) |
-| Status | todo |
+| Status | cancelled |
 | Priority | P2 |
 | Component | comms |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:11:59.998122+00:00 |
-| Updated | 2026-08-08T17:11:59.998122+00:00 |
+| Updated | 2026-08-29T14:26:34.376528+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -19,6 +19,10 @@
 ```sh
 test -f docs/comms/METRICS.md && [ "$(grep -c 'NOT COMPUTABLE' docs/comms/METRICS.md)" -ge 1 ] && echo METRICS_OK
 ```
+
+## Status note
+
+operator decision 2026-08-29: COMMS epic dropped in favour of CONV golden path
 
 ## Description
 
@@ -62,12 +66,14 @@ Depends on: COMMS-CORPUS, COMMS-CONSENT.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md)
+- **blocked by** [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md)
+- **blocks** [COMMS-DOC](../COMMS-DOC--d899d622/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -76,8 +82,8 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -86,12 +92,12 @@ _Unknown._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (todo)
-- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (todo)
-- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (todo)
-- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (todo)
-- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (todo)
-- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (todo)
+- [COMMS-CONSENT](../COMMS-CONSENT--1ae2403b/task.md) — Ask consent from the non-orchestrator agents whose messages are in the corpus (cancelled)
+- [COMMS-CORPUS](../COMMS-CORPUS--075d0c32/task.md) — Extract a real inter-agent message corpus (mechanical, not asserted) (cancelled)
+- [COMMS-DOC](../COMMS-DOC--d899d622/task.md) — Write up the COMMS epic findings and recommendations (cancelled)
+- [COMMS-READER](../COMMS-READER--07a4aa0c/task.md) — Build a corpus reader tool for message-exchange review (cancelled)
+- [COMMS-STRUCT](../COMMS-STRUCT--6829b61c/task.md) — Measure whether heavy message structure pays off -- pre-registered, mechanically ordered (cancelled)
+- [COMMS-TYPES](../COMMS-TYPES--f17ec5ab/task.md) — Define a message verdict-class / type taxonomy from measured corpus usage (cancelled)
 
 ---
 

@@ -153,12 +153,13 @@ be written once it does. This task remains `todo`.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [564ad853-0c54-4797-9bda-85a253a6a646](../Amend-the-Cloudflare-WAF-to-permit-a-scoped-test-path-he--564ad853/task.md)
+- **relates to** [c65a5051-678c-487c-bdae-37183e01f049](../scripts-spec-cloud.sh-a-caller-supplied-w-breaks-status--c65a5051/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

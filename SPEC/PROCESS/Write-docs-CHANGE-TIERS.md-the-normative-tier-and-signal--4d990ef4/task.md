@@ -245,12 +245,25 @@ Amendment B on T-03.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [016508f4-b57b-4bf1-8a7d-186e1fe82a7f](../claude-agents-implementer.md-require-a-measured-tier-rep--016508f4/task.md)
+- **blocks** [24d3e2b5-0d12-484b-8430-6f421a10c275](../spec-keeper-and-planner-record-the-ESTIMATED-tier-when-a--24d3e2b5/task.md)
+- **blocks** [3c9c28d9-a02e-465b-b13b-6f9d29056eb4](../Decide-and-implement-the-client-exported-API-signal-or-r--3c9c28d9/task.md)
+- **blocks** [445b17af-98c6-4013-8a4c-9faff3774dd1](../Detect-and-record-estimate-vs-measure-tier-drift--445b17af/task.md)
+- **blocks** [4e8af108-11e2-4a1b-9193-722309c63dda](../claude-agents-reviewer.md-the-reviewer-owns-any-lowering--4e8af108/task.md)
+- **blocks** [51e0993f-76e0-40fd-b6a0-cd7d83d83548](../DECISIONS.md-record-the-tiered-review-chain-and-the-rais--51e0993f/task.md)
+- **blocks** [748f6366-1a46-462e-b452-f024f607976b](../claude-agents-security.md-scope-the-security-gate-by-tie--748f6366/task.md)
+- **blocks** [a94dee14-fea7-406c-9c4f-485736f434c4](../claude-ORCHESTRATION.md-the-tier-to-agent-routing-table--a94dee14/task.md)
+- **blocks** [aeae5c7d-33f0-4ba1-a420-873bec8203d1](../claude-agents-integrator.md-the-commit-gate-must-consult--aeae5c7d/task.md)
+- **blocks** [b2567ffd-190d-4aff-8cc2-f6a2eb2d613e](../scripts-change-tier.sh-diff-basis-contract-output-format--b2567ffd/task.md)
+- **blocks** [e4e31233-cabe-4af4-986b-f28c84347214](../CLAUDE.md-replace-the-flat-mandated-chain-rule-with-the--e4e31233/task.md)
+- **relates to** [727dc387-dd95-48e4-9616-9b9b1584ac90](../Security-re-gates-must-be-delta-scoped-citing-the-prior--727dc387/task.md)
+- **relates to** [97a315af-70b3-4a64-8456-92335d8c9631](../Make-security-skip-the-default-for-docs-and-tests-only-c--97a315af/task.md)
+- **relates to** [ed6853d4-b5de-437a-a3dc-430e1d38243f](../Establish-a-periodic-repo-wide-security-sweep-additive-t--ed6853d4/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

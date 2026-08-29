@@ -58,12 +58,13 @@ server -- never hand-written curl.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md)
+- **relates to** [CONV-SUCCESSION](../CONV-SUCCESSION--422be55b/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
@@ -73,7 +74,7 @@ _Unknown._
 
 
 - [CONV-AUTHZ-ADMIN](../CONV-AUTHZ-ADMIN--70dd573a/task.md) — CONV-AUTHZ-ADMIN: the ADMIN arm of membership change -- BLOCKED, there is no admin princi… (blocked)
-- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (todo)
+- [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (done)
 - [CONV-SUCCESSION](../CONV-SUCCESSION--422be55b/task.md) — CONV-SUCCESSION: creator-only mutation freezes a conversation when the creator's agent id… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

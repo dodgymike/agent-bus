@@ -62,12 +62,13 @@ Also depends transitively on T-03, which creates the acceptance file itself.
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [255bdc5a-f36e-4cfb-a484-199fbd6d16ab](../change-tier.sh-package-to-invariant-plane-partition-with--255bdc5a/task.md)
+- **blocked by** [4604ae4d-a8b3-4272-9226-67557de66de3](../change-tier.sh-irreversible-surface-pinned-record-wire-v--4604ae4d/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

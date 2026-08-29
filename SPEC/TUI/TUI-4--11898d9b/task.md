@@ -69,12 +69,15 @@ proof-check.sh classifies them as an unfilled template and REFUSES TO RUN IT (ca
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [TUI-1](../TUI-1--3ea68265/task.md)
+- **blocked by** [TUI-3](../TUI-3--140aadf7/task.md)
+- **relates to** [ADMIN-8](../../ADMIN/ADMIN-8--7f550309/task.md)
+- **relates to** [LIVE-6](../../LIVE/LIVE-6--5825cf57/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

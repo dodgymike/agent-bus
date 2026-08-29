@@ -77,12 +77,15 @@ counter row exists and only burns numbers).
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [AUTH-7](../AUTH-7--4ba67a7b/task.md)
+- **blocks** [CONV-AUTHZ-ADMIN](../../CONV/CONV-AUTHZ-ADMIN--70dd573a/task.md)
+- **blocks** [INVMINT-3](../../INVMINT/INVMINT-3--8555e659/task.md)
+- **follow-up** [AUTH-10](../AUTH-10--37993b49/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

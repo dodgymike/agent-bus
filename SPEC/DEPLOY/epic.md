@@ -10,20 +10,20 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| DEPLOY-REDEPLOY | DEPLOY-REDEPLOY: recreate the Compose bus fresh (volume included) and prove two agents ex… | todo | P1 | [task.md](DEPLOY-REDEPLOY--f801d128/task.md) | _not fetched_ | [CLI-BUSCTL-IMAGE](../CLI/CLI-BUSCTL-IMAGE--9be2105d/task.md) |
-| DEPLOY-3 | DEPLOY-3: multi-bus Compose profile (2+ peered buses) for RELAY end-to-end testing | todo | P2 | [task.md](DEPLOY-3--9eaf2d19/task.md) | _not fetched_ | [RELAY-1](../RELAY/RELAY-1--9bc9d6c4/task.md) [DEPLOY-2](DEPLOY-2--14f8ec3b/task.md) |
-| DEPLOY-4 | DEPLOY-4: Go toolchain pin -- go.mod + builder image (no longer crypto-gated) | todo | P2 | [task.md](DEPLOY-4--48b5d5b4/task.md) | _not fetched_ | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-5](DEPLOY-5--259a6a55/task.md) |
-| DEPLOY-5 | DEPLOY-5: container build/test check (CI or make/script target) | todo | P2 | [task.md](DEPLOY-5--259a6a55/task.md) | _not fetched_ | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2](DEPLOY-2--14f8ec3b/task.md) [DEPLOY-4](DEPLOY-4--48b5d5b4/task.md) [RATCHET-7](../RATCHET/RATCHET-7--aaa7cddc/task.md) |
-| DEPLOY-7 | DEPLOY-7: gate docker build . in the normal check loop so a broken image build surfaces a… | todo | P2 | [task.md](DEPLOY-7--5f965453/task.md) | _not fetched_ | [DEPLOY-6](DEPLOY-6--e12b75cd/task.md) |
+| DEPLOY-REDEPLOY | DEPLOY-REDEPLOY: recreate the Compose bus fresh (volume included) and prove two agents ex… | todo | P1 | [task.md](DEPLOY-REDEPLOY--f801d128/task.md) | blocks [HANDOVER-RUNBOOK-SMOKE](../HANDOVER/HANDOVER-RUNBOOK-SMOKE--5906705d/task.md) | [CLI-BUSCTL-IMAGE](../CLI/CLI-BUSCTL-IMAGE--9be2105d/task.md) |
+| DEPLOY-3 | DEPLOY-3: multi-bus Compose profile (2+ peered buses) for RELAY end-to-end testing | todo | P2 | [task.md](DEPLOY-3--9eaf2d19/task.md) | blocks [ACK-12](../ACK/ACK-12--17406b3a/task.md)<br>blocks [ART-18](../ART/ART-18--ef028209/task.md)<br>blocks [LIVE-15](../LIVE/LIVE-15--c9e65431/task.md)<br>relates to [ORCH-5](../ORCH/ORCH-5--c4634621/task.md) | [RELAY-1](../RELAY/RELAY-1--9bc9d6c4/task.md) [DEPLOY-2](DEPLOY-2--14f8ec3b/task.md) |
+| DEPLOY-4 | DEPLOY-4: Go toolchain pin -- go.mod + builder image (no longer crypto-gated) | todo | P2 | [task.md](DEPLOY-4--48b5d5b4/task.md) | — | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-5](DEPLOY-5--259a6a55/task.md) |
+| DEPLOY-5 | DEPLOY-5: container build/test check (CI or make/script target) | todo | P2 | [task.md](DEPLOY-5--259a6a55/task.md) | — | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2](DEPLOY-2--14f8ec3b/task.md) [DEPLOY-4](DEPLOY-4--48b5d5b4/task.md) [RATCHET-7](../RATCHET/RATCHET-7--aaa7cddc/task.md) |
+| DEPLOY-7 | DEPLOY-7: gate docker build . in the normal check loop so a broken image build surfaces a… | todo | P2 | [task.md](DEPLOY-7--5f965453/task.md) | — | [DEPLOY-6](DEPLOY-6--e12b75cd/task.md) |
 
 ## Closed tasks (4) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
-| DEPLOY-1 | DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image | done | P1 | [task.md](DEPLOY-1--fa0c5a4e/task.md) | _not fetched_ | [DEPLOY-4](DEPLOY-4--48b5d5b4/task.md) [DUR-12](../DUR/DUR-12--cbc9ab0c/task.md) |
-| DEPLOY-2 | DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck | done | P1 | [task.md](DEPLOY-2--14f8ec3b/task.md) | _not fetched_ | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2-FU-CONTAINERNAME](DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) |
-| DEPLOY-2-FU-CONTAINERNAME | DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… | done | P1 | [task.md](DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) | _not fetched_ | [DEPLOY-3](DEPLOY-3--9eaf2d19/task.md) [637fca2f-0fa6-439a-b6eb-361b681cdf80](../TOOLING/ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) |
-| DEPLOY-6 | DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook | done | P1 | [task.md](DEPLOY-6--e12b75cd/task.md) | _not fetched_ | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [ORCH-6](../ORCH/ORCH-6--6cfe7288/task.md) [DEPLOY-3](DEPLOY-3--9eaf2d19/task.md) |
+| DEPLOY-1 | DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image | done | P1 | [task.md](DEPLOY-1--fa0c5a4e/task.md) | — | [DEPLOY-4](DEPLOY-4--48b5d5b4/task.md) [DUR-12](../DUR/DUR-12--cbc9ab0c/task.md) |
+| DEPLOY-2 | DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck | done | P1 | [task.md](DEPLOY-2--14f8ec3b/task.md) | — | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2-FU-CONTAINERNAME](DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) |
+| DEPLOY-2-FU-CONTAINERNAME | DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… | done | P1 | [task.md](DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) | — | [DEPLOY-3](DEPLOY-3--9eaf2d19/task.md) [637fca2f-0fa6-439a-b6eb-361b681cdf80](../TOOLING/ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) |
+| DEPLOY-6 | DEPLOY-6: host-reachable Dockerfile CMD + THREE-BUS-DOCKER.md federated runbook | done | P1 | [task.md](DEPLOY-6--e12b75cd/task.md) | — | [DEPLOY-1](DEPLOY-1--fa0c5a4e/task.md) [ORCH-6](../ORCH/ORCH-6--6cfe7288/task.md) [DEPLOY-3](DEPLOY-3--9eaf2d19/task.md) |
 
 ## Epic description
 

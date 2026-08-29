@@ -26,12 +26,24 @@ Run real CLI/Compose acceptance for inline and resumable chunked artifacts: cons
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocked by** [ACK-12](../../ACK/ACK-12--17406b3a/task.md)
+- **blocked by** [ART-1](../ART-1--55490a33/task.md)
+- **blocked by** [ART-10](../ART-10--39a7d2e3/task.md)
+- **blocked by** [ART-11](../ART-11--756fdfa2/task.md)
+- **blocked by** [ART-13](../ART-13--7ffa42c5/task.md)
+- **blocked by** [ART-14](../ART-14--46b4219e/task.md)
+- **blocked by** [ART-15](../ART-15--b88c1c59/task.md)
+- **blocked by** [ART-16](../ART-16--a311e367/task.md)
+- **blocked by** [ART-17](../ART-17--0495302c/task.md)
+- **blocked by** [ART-7](../ART-7--5286d0c9/task.md)
+- **blocked by** [ART-8](../ART-8--9cc8fc4e/task.md)
+- **blocked by** [ART-9](../ART-9--f6864354/task.md)
+- **blocked by** [DEPLOY-3](../../DEPLOY/DEPLOY-3--9eaf2d19/task.md)
 
 ## Referenced in description (derived, not authoritative)
 

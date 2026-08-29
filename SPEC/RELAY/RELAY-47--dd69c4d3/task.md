@@ -135,12 +135,23 @@ Per invariant 7, any agent-visible surface change ships with its `cmd/agent-busc
 
 ## Relations (authoritative)
 
-> **NOT FETCHED** — real edges are UNKNOWN here, not absent. This tree was built
-> with `--no-relations`, which skips one rate-limited request per task. Re-run
-> `bash scripts/gen-spec-mirror.sh` (no flag, ~70s) to render them.
+> Authoritative, from the Spec Server's relations resource. `blocks` is inert
+> metadata — it never changes a task's status, so the status shown is always the
+> task's own field.
 
 
-_Unknown._
+- **blocks** [RELAY-25](../RELAY-25--10491a01/task.md)
+- **follow-up** [RELAY-47-FU-DOCS](../RELAY-47-FU-DOCS--6f7281e8/task.md)
+- **follow-up** [RELAY-47-FU-FANOUT](../RELAY-47-FU-FANOUT--1cbdcc37/task.md)
+- **follow-up** [RELAY-47-FU-IDEMFINGERPRINT](../RELAY-47-FU-IDEMFINGERPRINT--b666cd5a/task.md)
+- **follow-up** [RELAY-48](../RELAY-48--9887b0eb/task.md)
+- **follow-up** [RELAY-49](../RELAY-49--efbcc6cf/task.md)
+- **follow-up** [RELAY-50](../RELAY-50--c4a1bd15/task.md)
+- **relates to** [RELAY-11-FU-INGEST-LOOPGUARD](../RELAY-11-FU-INGEST-LOOPGUARD--a41c273c/task.md)
+- **relates to** [RELAY-21](../RELAY-21--f5ce883e/task.md)
+- **relates to** [RELAY-24-BLOCKER-EGRESS](../RELAY-24-BLOCKER-EGRESS--85ae8b32/task.md)
+- **relates to** [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md)
+- **relates to** [RELAY-FU-IDEM-METER-BY-PEER](../RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md)
 
 ## Referenced in description (derived, not authoritative)
 
