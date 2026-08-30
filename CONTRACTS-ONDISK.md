@@ -19,6 +19,7 @@ the on-disk format has been bumped once (`ondisk-format-version` namespace):
 | `record-type` | `1`=`TypePrepare`, `2`=`TypeCommit`, `3`=`TypeAbort`, `4`=`TypeAuditMessage` | WAL frame types (`internal/wal/format.go`) |
 | `ondisk-format-version` | `1` (legacy, read-only), `2` (current WAL frames), `3` (`agent-suffixes`, `internal/ids/suffixstore.go`), `4` (`wal-index-floor`, `internal/wal/indexfloor.go`), `5` (`message-seq-floor`, `internal/hub/seqfloorfile.go`), `6` (`peer-withdrawal-floor`, `internal/relay/peerstore.go`), `7` (authenticated WAL checkpoint generations, `internal/wal/checkpoint.go`) | **The namespace covers every ON-DISK FILE FORMAT this project defines, not only the WAL frame layout.** `1`/`2` are the WAL file/frame layout (`internal/wal/format.go`'s `FormatVersion`); version 2 replaced the unkeyed CRC32C of version 1 with a keyed HMAC-SHA256 (DUR-12). `3` is the per-name agent-id suffix floor file's own format (see "The durable applied-key store" and neighbouring sections below). `4` is the durable WAL record-index floor file's format (see the 2026-08-07 subsection below). `5` is the durable MESSAGE-SEQUENCE floor file's format — a DIFFERENT counter from `4`, and the distinction is load-bearing (see the `message-seq-floor` subsection below). `6` is the durable PEER WITHDRAWAL floor file's format (RELAY-34, reserved 2026-08-08 — see the `peer-withdrawal-floor` subsection below). `7` is the authenticated checkpoint-generation directory/manifest/snapshot format described below; its tail still uses WAL frame version 2. |
 | `cursor-format-version` | `1` (superseded), `2` (current, `internal/hub/cursor.go`) | The version prefix inside the OPAQUE read cursor. **Not an on-disk server format** — the cursor is a client-held token — but it is reserved from the same ledger because two agents bumping it independently would produce two incompatible `v2`s. `1` was the sequence-based cursor; `2` is the delivery-position cursor introduced by `SIGN-1-FU-REORDER-WATERMARK` (2026-08-14). A cursor carrying an unrecognised version is **accepted and remapped to position 0**, never rejected — see `CONTRACTS-HTTP.md`. Value `1` was allocated retrospectively to cover the already-shipped v1, exactly as `store-record-version` was seeded. |
+| `wal-entry-kind` | `1`=`"message"`, `2`=`"seqfloor"`, `3`=`"conversation"` (CONV-RECORD), `4`=`"convmember"` (reserved for CONV-MEMBER-CHANGE, unspent) | The STRING `wal.Entry.Kind` discriminator that rides INSIDE the `TypePrepare`/`TypeCommit` payload (`internal/wal/log.go`). **This namespace coordinates the string discriminator, not a numbered frame type — it consumes no `record-type` number.** It was introduced to this doc by CONV-RECORD and seeded RETROSPECTIVELY with `1`=`"message"` (`store.RecordKind`, already shipped) and `2`=`"seqfloor"` (`hub.SeqFloorRecordKind`, already shipped); the other in-use kinds (`"agent"`, `"invite"`, `"agent+invite"`, `"ack"`, the relay peer/bustrust/outbox kinds) predate the namespace and are documented in their own sections below. `3`=`"conversation"` was reserved 2026-08-15 (spec-keeper) and is spent by CONV-RECORD; `4`=`"convmember"` is reserved and unspent. A NEW kind is added by reserving from this namespace, never by hand-picking a string. |
 
 Both tables are confirmed against the Spec Server reservations for this project (`GET
 /api/v1/projects/agent-bus/reservations?namespace=record-type` and `...=ondisk-format-version`) —
@@ -2834,3 +2835,58 @@ itself. `agent-bus operator add|revoke` takes the data directory's exclusive loc
 revoking an operator means stopping the bus — a revocation is in effect from the next start, not
 immediately — and nothing on the wire consumes an operator principal yet (`AUTH-7`, `INVMINT`,
 `CONV-AUTHZ-ADMIN`).
+
+## `wal.Entry.Kind = "conversation"` — the durable conversation record (`CONV-RECORD`, 2026-08-29)
+
+**Nothing numeric was reserved, and nothing needed to be.** The STRING discriminator was reserved:
+`wal-entry-kind` = **3** = `"conversation"` (spec-keeper, 2026-08-15 — see the reservations table at
+the top of this file). `store.ConversationRecordKind = "conversation"` (`internal/store/conversation.go`)
+rides INSIDE the existing `TypePrepare`/`TypeCommit` frames exactly as `"message"` and `"seqfloor"`
+do, so there is **no `record-type` reservation, no `ondisk-format-version` bump, no new on-disk FILE,
+no relay-wire change, and no HTTP route** (the CREATE route + `agent-busctl` subcommand are the NEXT
+task, `CONV-CREATE-CLI`). The three gating rulings — id shape, name-as-metadata, and the
+CONV-vs-COMMS conflict — are in `DECISIONS.md` 2026-08-29.
+
+### What it records, and what it is deliberately NOT
+
+One record is one durable, single-bus, fixed-membership conversation: a server-minted id, its
+creator, an optional bounded name, and the recipient (membership) list. It is METADATA AND ROUTING
+ONLY (invariant 6) — it carries **no message content of any kind**, and no `Pos` field
+(`store.Message.Pos` is deliberately absent for the reason `message.go` gives; the same reasoning
+binds this record — a conversation's delivery position, if ever needed, is the
+`wal.Committed.CommitIndex` derived at recovery, never a second stored copy).
+
+### The record
+
+`Entry.Body` is compact JSON, no HTML escaping, `record_version` **1**, the timestamp RFC3339Nano in
+UTC — so a record can be read straight out of the WAL. Every field is bounded on BOTH the
+construction path (`ConversationRecord.Encode`) AND the disk-decode path
+(`store.DecodeConversationRecord`); the decoder is strict — unknown fields refused, trailing data
+refused, every field re-validated — because it reads whatever the FILE holds, not whatever a handler
+validated.
+
+| field | type | rule |
+| --- | --- | --- |
+| `record_version` | int | `1`. A different value is REFUSED, never read with today's field meanings. |
+| `conversation_id` | string | server-minted `<bus-id>.<uuid-v4>` (ruling 2), `<= 101` bytes (`store.MaxConversationIDLen`). The whole string is minted server-side (invariant 1): the prefix is this bus's own id, the suffix a crypto/rand-backed RFC 4122 UUIDv4 minted lowercase-canonical by `store.NewConversationID`. The bus half must satisfy `BusIDPattern` (no `.`), so the first `.` separates the halves; the uuid half must be a canonical lowercase v4 UUID (version nibble `4`, variant nibble one of `8,9,a,b`). |
+| `creator` | string | fully-qualified `<bus-id>.<agent-id>` (invariant 2), `<= ids.MaxAgentIDLen`. |
+| `name` | string, omitempty | OPTIONAL bounded LABEL (ruling 3, `CONV-NAME-INV6`). Empty permitted and omitted from the body. When present: `<= 128` bytes (`store.MaxConversationNameBytes`), valid UTF-8, single-line printable — **any C0/C1 control (U+0000–U+001F, U+007F–U+009F), U+2028, U+2029, or invalid UTF-8 is REFUSED, never truncated.** The dual (construct + decode) enforcement is the crux: the name is metadata only because this bound holds everywhere it can enter the log, including a tampered one. **AT-REST EXPOSURE: the log is unencrypted, so a name is durably operator-readable — non-confidential by design.** |
+| `recipients` | []string | the membership list: `1..64` (`store.MaxConversationRecipients` = `store.MaxRecipients`) fully-qualified agent ids, no duplicates. Routing metadata, not content. |
+| `created_at` | RFC3339Nano | required. When this bus minted the conversation, by this bus's clock, UTC. |
+
+### Durability and recovery
+
+Written through the existing two-phase `wal.Log.Write` (Begin→fsync PREPARE, Commit→fsync COMMIT):
+nothing is acknowledged before durable (invariant 4). `store.ConversationStore` is a `wal.Applier`
+built BEFORE `wal.Open` and `Attach`ed after — the same build→replay→Attach three-step
+`ack.Store`/`invite.Store`/`relay.Outbox` use — so replay rebuilds the serving copy before the first
+live write. A torn or uncommitted-tail record is discarded by recovery and the bus still starts, and
+the WAL index advances past the burned index rather than rewinding (invariant 1). A committed record
+whose body fails the bounds on replay is DISCARDED and logged at ERROR (invariant 6 — the silent
+discard is the defect), never trusted. `store.MaxConversations` (65536) hard-caps the serving copy,
+enforced fail-closed on the live create path only (evicting nothing); replay never refuses a durable
+record for a memory cap. **`ConversationStore` is not yet wired into `cmd/agent-bus` — there is no
+production writer until `CONV-CREATE-CLI` adds the route, so no `"conversation"` record reaches a
+live WAL yet; the record format, write path and recovery are proven by
+`internal/store/conversation_test.go` and the SIGKILL crash-injection tests in
+`internal/store/conversation_crash_test.go`.**
