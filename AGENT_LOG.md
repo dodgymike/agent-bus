@@ -6551,3 +6551,60 @@ durable write path, recovery/replay, and the SIGKILL crash-injection proof. NOT 
 - **Not live:** `ConversationStore` is NOT wired into `cmd/agent-bus` — no production writer until
   CONV-CREATE-CLI adds the route, so no `"conversation"` record reaches a live WAL yet. Format, write
   path and recovery are proven by the package tests, not by production behaviour.
+
+## 2026-08-30 — CONV-CREATE-CLI (`627d20e0-c784-4bd7-9f60-a6b786a49cda`): documentation-only follow-up (documentation)
+
+The code (`POST /v1/conversations`, `agent-busctl conversation create`, `client.CreateConversation`)
+was already implemented and gated; a reviewer flagged the AGENT_PROTOCOL.md/CONTRACTS-*.md entries
+as the only missing piece (invariant 7 — a capability without its CLI surface AND its
+AGENT_PROTOCOL.md entry is the missing half of the task). No `.go` file touched.
+
+- **AGENT_PROTOCOL.md:** new `## Conversations: agent-busctl conversation create` section (between
+  "Listing agents" and "Sending"): what a conversation is, the server-minted `<bus-id>.<uuid-v4>` id
+  and server-derived creator (invariant 1), the fully-qualified-recipient requirement (invariant 2),
+  the durability guarantee (invariant 4), the idempotency-key retry contract — same key/same payload
+  replays with exit 0, same key/different payload is 409 without disconnecting (invariant 10) — and
+  the documented exit codes.
+- **CONTRACTS-HTTP.md:** new `## Conversation route: POST /v1/conversations` section (placed after
+  the Messaging section, before Headers): route registration condition (`Options.Conversations`),
+  the allow-list statement (not on it — authenticated by default-deny, invariant 3), a status table
+  (201 mint / 201+replay / 400 / 401 / 409 / 503 with the actual sentinel each maps from —
+  `store.ErrInvalidConversation`, `store.ErrConversationKeyReused`, `store.ErrConversationCapacity`,
+  `store.ErrConversationNotDurable`, `idem.Err*`), and the body-size cap.
+- **CONTRACTS-CLI.md:** added the `conversation create` row to the Subcommands table; corrected the
+  registered-command count from fourteen to fifteen (`cmd/agent-busctl/root.go:173` now registers
+  `conversationCommand()` — verified by reading `root.go`, not by trusting the old prose count, per
+  the count-in-prose trap this same paragraph already warns about); added a `conversation create`
+  bullet to the Exit codes section (`7` on a 409 key-reuse-with-different-payload, `0` on a replayed
+  retry, no new code minted, no `8` because the route always mints or replays).
+- **Verified against the code, not assumed:** read `internal/httpapi/conversations.go`,
+  `cmd/agent-busctl/conversation.go`, `client/conversation.go`, `internal/store/conversationcreate.go`
+  and `conversationstore.go` for the exact status codes, error sentinels, limits
+  (`MaxConversationRecipients`=64, `MaxConversationNameBytes`=128, `MaxConversations`=65536,
+  `MaxConversationRequestBytes`=32 KiB) and exit codes before writing any of the above; confirmed
+  `/v1/conversations` is NOT in `authmw.go`'s `unauthenticatedRoutes`; confirmed the route IS wired
+  live in `cmd/agent-bus/main.go` (`ConversationStore` built, `Attach`ed, passed as
+  `Options.Conversations`) via `git diff HEAD -- cmd/agent-bus/main.go`.
+- **Proofs:** the task's own stored `proof_cmd` — `go test -race -run 'TestConversationCreate'
+  ./internal/httpapi && grep -q 'conversation create' AGENT_PROTOCOL.md && echo CONV_CREATE_OK` —
+  run through `scripts/proof-check.sh`: `verdict=PASS class=test,file-assertion exit=0
+  tests_run=10 top_level=1 skipped=0 failed=0 empty_pkgs=0`. `grep -q 'conversation create'
+  AGENT_PROTOCOL.md` GREEN (was RED pre-change, confirmed via `git stash`).
+  `bash scripts/doc-check.sh section CONTRACTS-HTTP.md "Conversation route: \`POST
+  /v1/conversations\` — mint a durable, multi-party object (\`CONV-CREATE-CLI\`, added
+  2026-08-30)" "/v1/conversations" "conversation create"` — PASS (lines 535-567), confirmed RED
+  before this change. `bash scripts/doc-check.sh section CONTRACTS-CLI.md "Subcommands (as of
+  2026-08-02)" "conversation create" "/v1/conversations"` — PASS (lines 1462-1494), confirmed RED
+  before this change. `bash scripts/doc-check.sh budget` — PASS (3 files within ceiling; both
+  AGENT_PROTOCOL.md and CONTRACTS-*.md are uncapped by design, per `docs/doc-budgets.tsv`).
+- **Invariants read in full:** 1 (server-authoritative ids — the response's `creator`/
+  `conversation_id` fields), 2 (fully-qualified ids for every recipient), 3 (allow-list — confirmed
+  `/v1/conversations` is absent from `unauthenticatedRoutes`), 4 (durable-before-ack — the create
+  call returns only once committed), 7 (CLI-plus-AGENT_PROTOCOL.md-in-the-same-task, which is the
+  entire reason this follow-up exists), 10 (the three idempotency cases, none collapsed, no
+  disconnect on the 409 case).
+- **Gates:** reviewer — required next (documentation-only change, no product code). security —
+  SKIPPED under the docs-and-tests-only carve-out: paths are AGENT_PROTOCOL.md, CONTRACTS-HTTP.md,
+  CONTRACTS-CLI.md, AGENT_LOG.md — no GUARD file, no CONTROL-PLANE file (`{CLAUDE,AGENTS,
+  INVARIANTS}.md`, `.claude/**`, `docs/*.tsv`, `scripts/{doc,proof}-check.sh` are all untouched).
+  No commit made by this agent — `documentation` does not commit; `integrator` does.

@@ -214,10 +214,11 @@ func TestIdempotencyKey(t *testing.T) {
 		}
 	})
 
-	t.Run("MutatingOperations enumerates exactly the six mutating routes", func(t *testing.T) {
+	t.Run("MutatingOperations enumerates exactly the mutating routes", func(t *testing.T) {
 		want := map[idem.Operation]bool{
 			idem.OpEnrol: true, idem.OpSend: true, idem.OpBroadcast: true,
 			idem.OpLeave: true, idem.OpPeerEnrol: true, idem.OpRelay: true,
+			idem.OpConversationCreate: true,
 		}
 		if len(idem.MutatingOperations) != len(want) {
 			t.Fatalf("MutatingOperations has %d entries, want %d", len(idem.MutatingOperations), len(want))

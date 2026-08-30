@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/wal"
@@ -58,8 +59,19 @@ type ConversationDurableLog interface {
 // lock, releases it, writes, and folds the canonical record in — the same shape
 // ack.Store's mutating methods use.
 type ConversationStore struct {
-	// mu guards every field below.
+	// mu guards records and durable. It is NEVER held across a durable write —
+	// wal.Log.Write calls this Store's Apply synchronously, so holding mu across
+	// the write would self-deadlock (see the type doc above).
 	mu sync.Mutex
+
+	// createMu serialises the WHOLE of CreateIdempotent — the applied-key
+	// lookup, the durable write and the remember — so two concurrent creates
+	// under the same idempotency key cannot both pass the lookup and both write
+	// a conversation. It is this plane's equivalent of hub.writeMu, and it is a
+	// DIFFERENT lock from mu: createMu is held ACROSS the durable write (mu must
+	// not be), and it is taken FIRST. Lock order: createMu -> mu. Nothing takes
+	// createMu while holding mu.
+	createMu sync.Mutex
 
 	log   *logging.Logger
 	now   func() time.Time
@@ -70,6 +82,17 @@ type ConversationStore struct {
 	// records maps a conversation id to its record. Keys are unique by invariant 1
 	// — ids are server-minted and never reused — so an insert is unconditional.
 	records map[string]ConversationRecord
+
+	// idem is this plane's OWN durable applied-key table (invariant 10). It is
+	// NOT the hub's: each plane owns its applied-key table (the auth plane owns
+	// enrol's, the hub owns send's), so a conversation create is metered and
+	// deduplicated without coupling to the messaging surface. A create's
+	// applied-key record rides in the SAME wal.Entry as the conversation record
+	// (wal.Entry.Idem), so the key becomes durable when — and only when — the
+	// conversation does, in one fsync; Apply recovers it on replay, which is what
+	// makes a retry after a restart return the ORIGINAL conversation rather than
+	// minting a second (invariant 10, durable across restart).
+	idem *idem.Store
 }
 
 // ConversationStoreOptions configures NewConversationStore.
@@ -109,6 +132,17 @@ func NewConversationStore(o ConversationStoreOptions) (*ConversationStore, error
 	if s.now == nil {
 		s.now = time.Now
 	}
+	// The applied-key table shares s.now, so a test's injected clock expires
+	// conversation records and their idempotency keys against the SAME "now" —
+	// two clocks would let one expire while the other did not. NewStoreForBus
+	// (not NewStore) so fair-share metering is peer-safe and fails closed on a
+	// bad bus id; the create path is local-only today, but the safe constructor
+	// costs nothing and matches how the hub builds its own table.
+	idemStore, err := idem.NewStoreForBus(o.BusID, idem.StoreOptions{Now: s.now})
+	if err != nil {
+		return nil, fmt.Errorf("store: conversation applied-key table: %w", err)
+	}
+	s.idem = idemStore
 	return s, nil
 }
 
@@ -216,12 +250,17 @@ func (s *ConversationStore) Apply(c wal.Committed) error {
 	}
 	r, err := DecodeConversationRecord(c.Entry.Body)
 	if err != nil {
-		s.log.Error("DISCARDING a conversation record that could not be decoded off the log; the conversation will not be served. A record that fails the bounds Encode enforced was written by another version or the log was tampered with — either way it is refused, not trusted (invariant 6)",
+		// The conversation record is DISCARDED. Its applied-key record (if any)
+		// is discarded WITH it, deliberately: remembering the key for a
+		// conversation that will not be served would let a retry return
+		// OutcomeRetry and then fail to find the conversation. Discarding both
+		// together lets the retry mint a fresh conversation instead. Either way
+		// the discard is logged loudly and specifically (invariant 6).
+		s.log.Error("DISCARDING a conversation record that could not be decoded off the log; the conversation will not be served, and its applied-key record is discarded with it. A record that fails the bounds Encode enforced was written by another version or the log was tampered with — either way it is refused, not trusted (invariant 6)",
 			"prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex, "err", err)
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if prev, ok := s.records[r.ID]; ok && !conversationsEqual(prev, r) {
 		// Two DIFFERENT records under one id. Ids are server-minted and never
 		// reused (invariant 1), so this cannot happen without a server bug or a
@@ -231,6 +270,31 @@ func (s *ConversationStore) Apply(c wal.Committed) error {
 			"conversation_id", r.ID, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex)
 	}
 	s.records[r.ID] = r
+	s.mu.Unlock()
+
+	// RECOVER THE APPLIED-KEY RECORD, if this entry carried one. It rides in the
+	// same wal.Entry as the conversation (CreateIdempotent writes both), so
+	// replaying it here is what makes a retry after a restart return the ORIGINAL
+	// conversation rather than minting a second (invariant 10, durable across
+	// restart). It is done OUTSIDE s.mu — s.idem has its own lock and is a leaf
+	// with respect to mu, so nothing takes mu while holding it.
+	//
+	// Recover, not Remember: a record on disk proves admission already succeeded,
+	// so the per-agent fair share is not re-adjudicated at replay (idem.Store's
+	// contract). A record that will not decode is DISCARDED and logged, exactly
+	// as a message's applied-key record is on the hub's replay path.
+	if len(c.Entry.Idem) > 0 {
+		rec, derr := idem.DecodeRecord(c.Entry.Idem)
+		if derr != nil {
+			s.log.Error("DISCARDING a conversation applied-key record that could not be decoded off the log; a retry of its idempotency key after this start will mint a NEW conversation rather than replaying the original. The conversation record itself was applied. Written by another version or a tampered log — refused, not trusted (invariant 6)",
+				"conversation_id", r.ID, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex, "err", derr)
+			return nil
+		}
+		if rerr := s.idem.Recover(rec); rerr != nil {
+			s.log.Error("DISCARDING a conversation applied-key record refused by the applied-key table on replay; a retry of its idempotency key after this start will mint a NEW conversation. The conversation record itself was applied (invariant 6)",
+				"conversation_id", r.ID, "prepare_index", c.PrepareIndex, "commit_index", c.CommitIndex, "err", rerr)
+		}
+	}
 	return nil
 }
 

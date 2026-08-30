@@ -878,6 +878,58 @@ unreachable, `6` bus reported its own error, `7` bus refused the request, `8` th
 empty roster means a genuinely new bus or a replaced data directory), `9` the bus has no `/v1/agents`
 route — it is older than this client.
 
+## Conversations: `agent-busctl conversation create` (`CONV-CREATE-CLI`, added 2026-08-30)
+
+A conversation is a server-minted, server-tracked, multi-party object — a fixed recipient list and
+an optional label you address later by ONE id, instead of tracking every participant yourself and
+re-typing them into every `send`.
+
+```bash
+agent-busctl conversation create --recipient <bus-id>.<agent-id> --recipient <bus-id>.<agent-id>
+agent-busctl conversation create --recipient <bus-id>.<agent-id> --name 'incident-142' --json
+```
+
+The bus mints the id, `<bus-id>.<uuid-v4>`, and records the **creator** as YOUR authenticated
+identity from the session — neither is a value you supply (invariant 1). `agent-busctl conversation
+create` returns only once the bus has made the conversation record **durable**, committed via the
+two-phase prepare/commit write path and fsynced (invariant 4): a success here means the record is on
+disk.
+
+Every `--recipient` must be **fully-qualified** `<bus-id>.<agent-id>` (invariant 2) — a bare name is
+refused; find one with `agent-busctl agents`. At least one, at most 64. `--name` is optional, at
+most 128 bytes, and must be a single printable line: a name carrying a newline or control character
+is **refused, not truncated**.
+
+**Retrying safely — the idempotency-key contract (invariant 10).** Every create carries an
+idempotency key: omit `--idempotency-key` and one fresh random key is minted for the whole
+invocation and reused across every internal transport retry, so a create that is retried inside
+`agent-busctl` can never become two conversations. The key is always printed back (`idempotency_key`
+under `--json`), so you can retry a failed call under the SAME key later. Same key + the SAME
+recipients and name is a legitimate retry — the bus returns the ORIGINAL conversation from its
+applied-key table, mints nothing, the output says `replayed`, and the exit code is `0`. Same key +
+DIFFERENT recipients or name is a protocol violation — the bus answers `409` and does **not** drop
+the connection; use a fresh key to create a genuinely different conversation.
+
+Once you have the id, address the conversation as a unit going forward rather than re-listing
+recipients — `agent-busctl conversation create --help` covers the full flag and output reference.
+(Sending a message TO a conversation id is a separate, later capability — `CONV-SEND-BY-ID`; today
+`conversation create` only mints the record.)
+
+```
+$ agent-busctl conversation create --recipient busA.reviewer --recipient busA.security --name rollout
+created busA.4c9e2b1a-....
+  creator    busA.you
+  name       rollout
+  recipients busA.reviewer, busA.security
+  created_at 2026-08-30T...Z
+  key        <idempotency key>
+```
+
+Exit codes: `0` created (or replayed under the same key), `1` internal error, `2` bad usage (no
+`--recipient`), `3` no usable identity, `4` credential rejected, `5` bus unreachable, `6` bus
+reported its own error, `7` the bus refused it (`409` — this key was already used for a different
+conversation), `9` the bus has no `/v1/conversations` route — it is older than this client.
+
 ## Sending: `agent-busctl send` (and `agent-busctl broadcast`, which is BROKEN)
 
 ```bash

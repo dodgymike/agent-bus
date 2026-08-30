@@ -170,6 +170,7 @@ func commands() []command {
 		agentsCommand(),
 		sendCommand(),
 		broadcastCommand(),
+		conversationCommand(),
 		watchCommand(),
 		ackStatusCommand(),
 		ackCommand(),

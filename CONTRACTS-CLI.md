@@ -1476,11 +1476,13 @@ damaged.
 | `watch` | Long-poll and stream messages addressed to you until stopped | yes — `GET /v1/messages`, `GET /v1/wait` |
 | `ack-status <correlation-key>` | (`ACK-9`, added 2026-08-16) Report the sender-visible delivery status of a message you sent — one row per recipient, `--wait <dur>` to park until it settles | yes — `GET /v1/ack/<correlation-key>` |
 | `ack <message-id>` | (`ACK-15`, added 2026-08-21) Acknowledge a message you RECEIVED: `delivered` by default, `--refuse <class>` for one of the three recipient classes. Signs the canonical acknowledgement bytes with the agent's **messaging** key. **Nothing else can move a row to `delivered`.** | yes — `POST /v1/ack` |
+| `conversation create --recipient <id> [--recipient <id> ...] [--name <label>] [--idempotency-key <key>]` | (`CONV-CREATE-CLI`, added 2026-08-30) Mint a server-tracked, multi-party conversation: the bus mints the id and records the CREATOR as the authenticated caller (invariant 1), never a value the client supplies. `--recipient` is repeatable, 1..64, each a fully-qualified `<bus-id>.<agent-id>` (invariant 2). Idempotent (invariant 10) — see `AGENT_PROTOCOL.md`'s conversations section for the retry contract. | yes — `POST /v1/conversations` |
 
 **There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand.** `cmd/agent-busctl/root.go`
-registers **fourteen** commands: the thirteen rows above (eleven before `ack-status`, `ACK-9`,
-2026-08-16; twelve before `ack`, `ACK-15`, 2026-08-21; thirteen after `leave`, `AUTH-4`, 2026-08-22)
-plus `session`, which has its own section. **The count above previously said the
+registers **fifteen** commands: the fourteen rows above (eleven before `ack-status`, `ACK-9`,
+2026-08-16; twelve before `ack`, `ACK-15`, 2026-08-21; thirteen after `leave`, `AUTH-4`, 2026-08-22;
+fourteen after `conversation`, `CONV-CREATE-CLI`, 2026-08-30) plus `session`, which has its own
+section. **The count above previously said the
 table WAS the registry, which it never was** — corrected 2026-08-21 (`ACK-15` reviewer,
 minor/pre-existing). What matters is the claim the paragraph is actually making: `keygen` and `trust`
 are in NEITHER list. This matters because several error remedies in
@@ -1875,6 +1877,13 @@ No code changes meaning; some commands give one a more specific sense:
   addressed in, and a malformed id (§13.3) — it is NOT an error and NOT a permission failure. A
   duplicate of the SAME outcome is exit `0` (invariant 10's legitimate retry). The result object is
   printed BEFORE the exit code is decided, including under `--json`.
+
+- `7` — **`conversation create` (`CONV-CREATE-CLI`, added 2026-08-30) mints NO new code.** A `409`
+  (the idempotency key was already used for a DIFFERENT recipient list or name) is `ExitRejected`;
+  the bus does not disconnect (invariant 10), so the failure is ordinary and retryable under a fresh
+  key. A retry under the SAME key with the SAME payload is a replayed success and exits `0` — the
+  output says `replayed` and prints the ORIGINAL conversation, nothing is minted twice. There is no
+  `8`: the route always either mints or replays, never returns an empty result.
 
 ### JSON shapes — CONTRACT
 

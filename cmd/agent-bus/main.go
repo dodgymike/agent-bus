@@ -30,6 +30,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/invite"
 	"github.com/dodgymike/agent-bus/internal/logging"
 	"github.com/dodgymike/agent-bus/internal/relay"
+	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -689,11 +690,30 @@ func run(cfg Config) error {
 	// writing no status at all, which is the one topology this build actually
 	// exercises.
 	ackStore := ack.NewStore(ack.Options{Logger: lg})
+	// The CONVERSATION store (CONV-CREATE-CLI). It is an applier of the same
+	// three-step shape as the tables above: built HERE, before wal.Open, so replay
+	// finds it in the applier map — otherwise the multiplexer passes over every
+	// "conversation" record in the log in complete silence, the discard invariant
+	// 6 rates as the defect. It is handed its durable log in the third step below
+	// (Attach), and until then every create refuses with
+	// store.ErrConversationNotDurable. It carries its OWN applied-key table
+	// (invariant 10); its create records and their applied-key records are
+	// replayed together by ConversationStore.Apply.
+	//
+	// A construction failure is FATAL: it validates only its own bounds against
+	// this bus's id (there is no operator file behind it), so a failure is a
+	// wiring fault in this build, and starting without the applier would skip
+	// every conversation record in the log.
+	conversationStore, err := store.NewConversationStore(store.ConversationStoreOptions{BusID: busID, Logger: lg})
+	if err != nil {
+		return fmt.Errorf("creating the conversation store: %w", err)
+	}
 	appliers := map[string]wal.Applier{
-		auth.RecordKind:         authRoster,
-		auth.OperatorRecordKind: operatorRegistry,
-		invite.RecordKind:       inviteStore,
-		ack.RecordKind:          ackStore,
+		auth.RecordKind:              authRoster,
+		auth.OperatorRecordKind:      operatorRegistry,
+		invite.RecordKind:            inviteStore,
+		ack.RecordKind:               ackStore,
+		store.ConversationRecordKind: conversationStore,
 	}
 	// The RELAY DELIVERY OUTBOX is the third applier of this shape, and it is
 	// registered here for the reason the other two are: it is an applier, so it
@@ -929,6 +949,16 @@ func run(cfg Config) error {
 	// serving, which is after both.
 	if err := ackStore.Attach(walLog); err != nil {
 		return fmt.Errorf("attaching the durable delivery lifecycle table to the write-ahead log: %w", err)
+	}
+	// The same third step for the conversation store, and FATAL for the same
+	// reason: an unattached store refuses every create with
+	// store.ErrConversationNotDurable, so a bus that reached here with one would
+	// answer 503 to every conversation create while looking healthy. Replay ran
+	// inside wal.Open above; this line makes the store writable, and the first
+	// live create cannot be written until the server is serving, which is after
+	// this.
+	if err := conversationStore.Attach(walLog); err != nil {
+		return fmt.Errorf("attaching the durable conversation store to the write-ahead log: %w", err)
 	}
 	// The same third step for the operator registry -- and NOT for the same
 	// reason as the four above, which is why this comment does not say "the same
@@ -1726,6 +1756,13 @@ func run(cfg Config) error {
 		// replays, so a status read and a peer ACK can never disagree about a
 		// row — there is one table, not a serving copy of one.
 		AckStatus: ackStore,
+		// Registers POST /v1/conversations (CONV-CREATE-CLI): mint a durable,
+		// idempotent conversation. It is the same *store.ConversationStore the WAL
+		// replays and attaches above, so a create and a recovery can never
+		// disagree about a conversation — one table, not a serving copy of one. It
+		// authenticates like every other messaging route and takes the creator
+		// from the session, never a request field (invariant 1).
+		Conversations: conversationStore,
 		// The BACKWARD hop for a TRANSIT acknowledgement (ACK-5,
 		// ACK-CONTRACT.md §9.4): a local recipient acknowledging a message that
 		// was RELAYED here settles no row on this bus, so POST /v1/ack carries

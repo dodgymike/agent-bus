@@ -532,6 +532,39 @@ passes the hub as the WAL's `Applier`:
 - a rebuild **failure cannot be fatal**, because `New` returns no error — it is logged at ERROR and
   the messaging routes are simply not registered, rather than serving a store disk does not justify.
 
+## Conversation route: `POST /v1/conversations` — mint a durable, multi-party object (`CONV-CREATE-CLI`, added 2026-08-30)
+
+Registered in `internal/httpapi/conversations.go`, **only when the composition root wires a
+`ConversationCreator`** (`Options.Conversations`) — in `cmd/agent-bus` that is
+`*store.ConversationStore`, the same table `wal.Open` replays and attaches, so a create and a
+recovery can never disagree about a conversation (one table, not a serving copy of one). When no
+creator is wired the route is not registered at all and 404s like any other unserved path, the same
+convention the messaging and ack routes follow.
+
+**It authenticates like every other route: it is NOT on the allow-list**
+(`httpapi.UnauthenticatedRoutes()` — enrolment, session begin/complete, `/healthz`, `/v1/info`,
+`/v1/discovery` only), so it is reachable only after `authMiddleware`'s default-deny resolves a live
+session (invariant 3).
+
+| Method | Path | Auth | Status | Response |
+| --- | --- | --- | --- | --- |
+| `POST` | `/v1/conversations` | bearer | 201 | `{"conversation_id":"<bus-id>.<uuid-v4>","creator":"<bus>.<agent>","name":"...","recipients":["<bus>.<agent>",...],"created_at":"<RFC3339Nano UTC>"}`. The server MINTS `conversation_id` and derives `creator` from the authenticated session (invariant 1) — request body: `{"recipients":["<bus>.<agent>",...],"name":"...","idempotency_key":"..."}`. **There is no `creator` field in the request and there never may be one** — an unknown field is rejected by the strict decoder (400), the same rule `SendRequestBody`'s absent `sender`-as-identity field follows. |
+| `POST` | `/v1/conversations` | bearer | 201 + `Idempotency-Replayed: true` | A repeat of the same `(creator, idempotency_key)` with the SAME `recipients`/`name` returns the ORIGINAL record from the applied-key table, body byte-for-byte identical, and mints nothing (invariant 10). |
+| `POST` | `/v1/conversations` | bearer | 400 | `store.ErrInvalidConversation` — a recipient id that is not a well-formed fully-qualified `<bus-id>.<agent-id>` (invariant 2), an empty or duplicate recipient list, more than `store.MaxConversationRecipients` (64) recipients, or a `name` over `store.MaxConversationNameBytes` (128) bytes, carrying a newline/control codepoint, or otherwise not a single-line printable label — REFUSED, never truncated (`CONV-NAME-INV6`). Also 400: no `idempotency_key` (`idem.ErrMissingKey`), or a key that is empty, over 128 bytes, or outside `[A-Za-z0-9._-]` (`idem.ErrInvalidKey`/`idem.ErrInvalidAgent`). |
+| `POST` | `/v1/conversations` | bearer | 401 | No authenticated principal — the same `authMiddleware` default-deny every other messaging route gets, since this path is not on the allow-list. |
+| `POST` | `/v1/conversations` | bearer | 409 | `store.ErrConversationKeyReused` — the SAME `idempotency_key` presented with a DIFFERENT `recipients`/`name` payload: a protocol violation, not a retry. Rejected and logged; **the connection is KEPT** (invariant 10 — the key is the caller's own, so this is overwhelmingly a buggy client, not an attacker). |
+| `POST` | `/v1/conversations` | bearer | 503 | `idem.ErrCapacity` / `idem.ErrAgentQuota` / `store.ErrConversationCapacity` (the store's hard cap, `store.MaxConversations` = 65536, live create only — replay of an already-durable record is never refused) — `Retry-After` set, retryable; **or** `store.ErrConversationNotDurable` — this bus cannot durably record a conversation (the store exists but is not yet `Attach`ed to a WAL), refused rather than acknowledged undurably (invariant 4), **no** `Retry-After` because that is not transient. |
+
+`ConversationCreateRequestBody` / `ConversationCreateResponseBody` live in
+`internal/httpapi/conversations.go`. The route body is capped at
+`httpapi.MaxConversationRequestBytes` (32 KiB) before it reaches the decoder — comfortable headroom
+over the largest legitimate request (64 recipients × up to 150 bytes each, a 128-byte name, a
+128-byte idempotency key, JSON overhead) and still finite; the STORE enforces the real bounds
+(recipient count, id shape, name).
+
+CLI (invariant 7): `agent-busctl conversation create` — see `CONTRACTS-CLI.md`'s Subcommands table
+and `AGENT_PROTOCOL.md`'s conversations section.
+
 ## Headers
 
 | Header | Direction | Rule |

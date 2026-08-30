@@ -170,6 +170,22 @@ type Options struct {
 	// that cmd/agent-bus cannot make.
 	AckStatus AckStatusSource
 
+	// Conversations mints durable, idempotent conversations (CONV-CREATE-CLI).
+	// When it is non-nil, POST /v1/conversations is registered. It is satisfied
+	// by *store.ConversationStore.
+	//
+	// It may be nil, in which case the route is NOT REGISTERED AT ALL and 404s
+	// through the catch-all like any other path this build does not serve — the
+	// same choice, for the same reason, as Hub and AckStatus above: a route that
+	// exists and refuses is a claim the surface is there.
+	//
+	// It is an INTERFACE, so it has the TYPED-NIL TRAP: assigning a nil
+	// *store.ConversationStore to it yields a non-nil interface and the route
+	// registers over a nil store. Pass a store or pass nothing; do not pass a
+	// nil-valued variable of a concrete type. cmd/agent-bus assigns it from an
+	// interface-typed local set only on the branch that built one.
+	Conversations ConversationCreator
+
 	// AckTransit forwards a terminal outcome ONE HOP BACK toward the origin bus,
 	// for an acknowledgement this bus holds no durable row for because the
 	// message was RELAYED here (ACK-CONTRACT.md §9.4, ACK-5). POST /v1/ack calls
@@ -294,6 +310,10 @@ type Server struct {
 	// transit arm of handleAck.
 	ackTransit AckTransit
 
+	// conversations mints durable, idempotent conversations, or nil when this
+	// build does not serve the conversation surface; see Options.Conversations.
+	conversations ConversationCreator
+
 	// peerPrincipals resolves an inbound peer bus's client certificate; see
 	// Options.PeerPrincipals. A nil value means this bus can authorise no peer
 	// bus, and RequirePeerPrincipal refuses everything.
@@ -359,6 +379,11 @@ func New(opts Options) *Server {
 		auth:        opts.Auth,
 		invites:     opts.Invites,
 		ackStatus:   opts.AckStatus,
+		// Nil means the conversation surface is not served (the route is not
+		// registered); there is no default, for the same reason Hub and AckStatus
+		// have none — a stand-in would be a route that refuses, i.e. a claim the
+		// surface exists.
+		conversations: opts.Conversations,
 		// NO DEFAULT: a stand-in that answered nil would report a terminal
 		// outcome as carried while nothing left this bus, which is the silent
 		// loss the whole ACK plane exists to prevent. Nil means 501, loudly.
@@ -505,6 +530,19 @@ func New(opts Options) *Server {
 	// can still answer for messages it already accepted.
 	if s.ackStatus != nil {
 		s.route(mux, RouteAckStatus, s.handleAckStatus)
+	}
+
+	// The CONVERSATION surface (CONV-CREATE-CLI). Registered only when there is a
+	// conversation store to serve it; see Options.Conversations.
+	//
+	// It is registered through s.route like everything else, which is what
+	// authenticates it: authMiddleware is default-deny and this pattern is NOT on
+	// unauthenticatedRoutes, so the route is protected by being registered rather
+	// than by anyone remembering to protect it. The creator is taken from the
+	// authenticated session, never a request field (invariant 1), so an
+	// unauthenticated caller could not create a conversation "as" anyone.
+	if s.conversations != nil {
+		s.route(mux, RouteConversations, s.handleConversationCreate)
 	}
 
 	// The FEDERATION ingress (RELAY-20). Registered only when Options.Peer

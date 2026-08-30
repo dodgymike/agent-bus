@@ -25,17 +25,27 @@ const (
 	OpLeave     Operation = "leave"
 	OpPeerEnrol Operation = "peer-enrol"
 	OpRelay     Operation = "relay"
+
+	// OpConversationCreate scopes the idempotency of "mint a conversation"
+	// (CONV-CREATE-CLI). It is a SEPARATE operation, not a reuse of OpSend, for
+	// the same domain-separation reason every constant here is distinct: one
+	// agent reusing the same idempotency key for a send AND a conversation
+	// create must not collide with itself (doc.go point 3). Its applied-key
+	// records live in the conversation plane's own idem.Store
+	// (internal/store.ConversationStore), the same way OpEnrol's live in the
+	// auth plane's — each plane owns its own applied-key table.
+	OpConversationCreate Operation = "conversation-create"
 )
 
 // MutatingOperations lists every Operation constant, in the order doc.go
 // point 6 enumerates them. It exists so a caller (a test, or a future
 // httpapi route table) can range over "every mutating operation" without
 // hand-copying the list and risking it drifting from the constants above.
-var MutatingOperations = []Operation{OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay}
+var MutatingOperations = []Operation{OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay, OpConversationCreate}
 
 func (op Operation) valid() bool {
 	switch op {
-	case OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay:
+	case OpEnrol, OpSend, OpBroadcast, OpLeave, OpPeerEnrol, OpRelay, OpConversationCreate:
 		return true
 	default:
 		return false
