@@ -6608,3 +6608,13 @@ AGENT_PROTOCOL.md entry is the missing half of the task). No `.go` file touched.
   CONTRACTS-CLI.md, AGENT_LOG.md — no GUARD file, no CONTROL-PLANE file (`{CLAUDE,AGENTS,
   INVARIANTS}.md`, `.claude/**`, `docs/*.tsv`, `scripts/{doc,proof}-check.sh` are all untouched).
   No commit made by this agent — `documentation` does not commit; `integrator` does.
+
+## 2026-08-31 — CONV-GOLDEN-PATH-HANDOVER.md: durable handover for the CONV golden path
+
+Process scaffolding (no product code). Records the CONV golden-path state so the next session resumes
+if tokens run out: committed steps (rulings f6411146, CONV-RECORD 0683f2f, CONV-CREATE-CLI fb65ad8),
+the in-flight CONV-SEND-BY-ID (`a4529b7`), the three rulings + the participant-only send-authz default,
+the live-CLI proof recipe, the known enrol flake (23d4e264), and salvage instructions if the CONV-SEND
+worktree is lost. Committed by the orchestrator directly (not integrator) as a durability measure under
+token pressure — a standalone doc, no code. security — SKIPPED under the docs-and-tests carve-out
+(docs-only, no guard/control-plane file); paths: CONV-GOLDEN-PATH-HANDOVER.md, AGENT_LOG.md.
