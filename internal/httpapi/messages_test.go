@@ -880,6 +880,49 @@ func TestWaitRoute(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("a second concurrent poll for the same agent is refused 409, not parked", func(t *testing.T) {
+		// Message delivery is single-active per agent id
+		// (POLL-CONCURRENT-WAITERS). One poll for beta parks and holds the slot;
+		// a SECOND concurrent poll for the SAME identity is refused with 409, and
+		// the first is undisturbed and still receives its message.
+		cursor := hubStartCursor(t, srv, beta)
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			done <- authed(t, srv, beta, http.MethodGet, httpapi.RouteWait+"?timeout=30&cursor="+cursor, "")
+		}()
+
+		// The first poll must actually park before the second is tried, so the
+		// second hits the single-active refusal rather than the fast path.
+		waitForWaiters(t, srv, 1)
+
+		rec := authed(t, srv, beta, http.MethodGet, httpapi.RouteWait+"?timeout=30&cursor="+cursor, "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("the second concurrent poll gave %d, want 409 Conflict", rec.Code)
+		}
+		if ra := rec.Header().Get("Retry-After"); ra != "" {
+			t.Fatalf("the 409 carried Retry-After %q; it must not, or the CLI would retry the refusal instead of stopping", ra)
+		}
+		if e, _ := decodeBody(t, rec)["error"].(string); !strings.Contains(e, "already active") {
+			t.Fatalf("409 body error = %q, want it to say another long poll is already active", e)
+		}
+
+		// The FIRST poll is undisturbed: it still receives its own message —
+		// delivery is whole, not split with the refused second poll.
+		sendOK(t, srv, alpha, beta.id, b64("still mine"), "wait-single")
+		select {
+		case first := <-done:
+			if first.Code != http.StatusOK {
+				t.Fatalf("the first parked poll got %d, want 200", first.Code)
+			}
+			msgs, _ := decodeBody(t, first)["messages"].([]interface{})
+			if len(msgs) != 1 {
+				t.Fatalf("the first poll got %d messages, want 1", len(msgs))
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the first parked poll was never woken after the second was refused")
+		}
+	})
 }
 
 // hubStartCursor returns a's CURRENT position, so a test can park a poll

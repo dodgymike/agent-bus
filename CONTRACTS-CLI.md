@@ -1755,8 +1755,10 @@ argument, and the flag may appear before or after it — `ack-status` parses in 
 reason (`cmd/agent-busctl/ackstatus.go`), the same accommodation `send`'s `parseWithPositionals` makes
 above. A negative `--wait` is refused locally (exit `2`), as is a correlation key containing
 whitespace or more than one positional argument. At most **32** `--wait` calls may be parked
-per agent at once (`maxParkedAckStatusPerAgent`, `internal/httpapi/ackstatus.go` — the ack-status
-twin of `hub.MaxWaitersPerAgent`); the bus refuses the 33rd with `429` + `Retry-After: 1`. That is
+per agent at once (`maxParkedAckStatusPerAgent`, `internal/httpapi/ackstatus.go` — a RESOURCE cap; it
+is NOT a twin of `hub.MaxWaitersPerAgent`, which since `POLL-CONCURRENT-WAITERS` is `1` for a
+correctness reason, single-active message delivery); the bus refuses the 33rd with `429` +
+`Retry-After: 1`. That is
 a **transient** capacity failure, so `client.retryable` retries it automatically (3 attempts,
 honouring `Retry-After`); only if every attempt is refused does it surface, as **exit `6`**
 (`KindServer`) — **not** exit `7`, because being at capacity is not the bus refusing the request on
@@ -2033,6 +2035,14 @@ This is the load-bearing part of `watch`, and it applies whether the output is h
 - `--replay` and `--cursor <c>` are **both start positions**; giving both is a usage error (exit `2`)
   rather than one silently winning over the other — the same "refuse an ambiguous instruction rather
   than guess" rule `send`/`broadcast` apply to a body given twice.
+- **A watch is single-active per identity (`POLL-CONCURRENT-WAITERS`, 2026-09-01).** The bus allows
+  only ONE `/v1/wait` long poll per agent id at a time (`hub.MaxWaitersPerAgent` = 1). If a watch is
+  already running for this identity, a second concurrent `watch` gets a `409` from the bus, which the
+  client surfaces as a non-retryable refusal (`KindRejected`, **exit `7`**) with a remedy explaining
+  single-active delivery — it does **not** loop retrying, and it does **not** disturb the first
+  watch. The refusal is not a network or server fault: it means another poller holds the slot. Run
+  two identities if you need two independent streams. The slot frees the instant the holding watch
+  returns, times out or disconnects.
 
 ### Credential storage
 

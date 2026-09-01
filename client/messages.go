@@ -927,7 +927,7 @@ func (c *Client) Read(ctx context.Context, opts ReadOptions) (Batch, error) {
 		// A full batch is far larger than the generic response bound allows.
 		maxResponse: maxBatchResponseBytes,
 	}); err != nil {
-		return Batch{}, err
+		return Batch{}, annotatePollActive(op, err)
 	}
 	if err := validateBatch(op, &batch); err != nil {
 		return Batch{}, err
@@ -1377,6 +1377,37 @@ func annotateIdempotencyConflict(op, key string, err error) error {
 	// logged, connection kept open. That is the positive half of invariant
 	// 10's narrowing, not just the negative one.
 	e.Remedy = "use a FRESH idempotency key for new content — reusing one with different content is a protocol violation: the bus rejects it with this 409 and logs it, but does NOT drop the connection (invariant 10), so this session and any other request pipelined on it remain usable; to RETRY the original message, resend it byte for byte under the same key"
+	return e
+}
+
+// annotatePollActive replaces the transport's generic 409 wording — which talks
+// about idempotency keys — with the specific reason a long poll gets a 409.
+//
+// The wait route (GET /v1/wait) does not carry an idempotency key, so the only
+// 409 it can answer is hub.ErrPollActive: this identity already has an active
+// long poll, and message delivery is single-active per agent id
+// (POLL-CONCURRENT-WAITERS). The bus's own detail already says so, but the
+// transport's default remedy — "an idempotency key was reused with different
+// content" — is meaningless here and would send the reader looking in the wrong
+// place. This is scoped to op == "wait" (the poll form of Read) precisely so it
+// cannot mislabel any other route's 409.
+//
+// It stays KindRejected, so the watch loop treats it as a non-retryable refusal
+// (watchShouldRetry) and stops with exit 7 rather than looping — running two
+// pollers on one identity should surface, not silently retry.
+func annotatePollActive(op string, err error) error {
+	if op != "wait" {
+		return err
+	}
+	// errors.As, not a type assertion: a wrapped *Error would otherwise slip
+	// through and keep the generic wording.
+	var e *Error
+	if !errors.As(err, &e) || e.Status != http.StatusConflict {
+		return err
+	}
+	e.Kind = KindRejected
+	e.Message = "the bus refused this long poll: another long poll for this identity is already active"
+	e.Remedy = "message delivery is single-active per agent: the bus allows only ONE /v1/wait long poll per identity at a time, so a second is refused rather than splitting delivery with the first. Do not run two watches on the same identity; stop the other poll, or retry this one once it returns."
 	return e
 }
 

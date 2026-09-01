@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The tests in this file cover CLI-4 (send / broadcast) and CLI-5 (agents) at
@@ -931,6 +932,54 @@ func TestWriteFailedEmptyRemedyBranch(t *testing.T) {
 		" so the retry is the SAME message rather than a second one (invariant 10)"
 	if e.Remedy != wantRemedy {
 		t.Fatalf("Remedy = %q, want exactly %q — the empty-remedy branch must stand the clause alone with no leading separator", e.Remedy, wantRemedy)
+	}
+}
+
+// TestWaitSurfacesPollActiveAsNonRetryableRefusal checks that a 409 on the long
+// poll route (GET /v1/wait) — which the bus answers with hub.ErrPollActive when
+// this identity already has an active poll (POLL-CONCURRENT-WAITERS) — is
+// surfaced as a clean, non-retryable refusal with a remedy about single-active
+// delivery, NOT the transport's generic "idempotency key reused" wording.
+//
+// Non-retryable matters: watchShouldRetry must return false, or `agent-busctl
+// watch` would loop on the refusal forever instead of stopping and telling the
+// operator not to run two watches on one identity.
+func TestWaitSurfacesPollActiveAsNonRetryableRefusal(t *testing.T) {
+	bus := newStubBus(t, "bus-x.agent-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != routeWait {
+			t.Errorf("stub bus: unexpected path %q, want %q", r.URL.Path, routeWait)
+		}
+		stubWriteJSON(w, http.StatusConflict, map[string]string{
+			"error": "another long poll is already active for this agent; only one /v1/wait may be active per agent at a time — retry once the other poll returns",
+		})
+	})
+	c := bus.client(t, nil)
+
+	_, err := c.Read(context.Background(), ReadOptions{Wait: 30 * time.Second})
+	if err == nil {
+		t.Fatal("Read(Wait>0) answered a 409 poll-active with nil error, want one")
+	}
+	if KindOf(err) != KindRejected {
+		t.Fatalf("KindOf(err) = %q, want %q", KindOf(err), KindRejected)
+	}
+	if got := ExitCode(err); got != ExitRejected {
+		t.Fatalf("ExitCode(err) = %d, want %d (a refusal, exit 7)", got, ExitRejected)
+	}
+	// The watch loop must NOT retry this: a second poller should surface, not
+	// spin. This is the property that a 409 (KindRejected), not a 503
+	// (KindServer), buys.
+	if watchShouldRetry(err) {
+		t.Fatal("watchShouldRetry(pollActive) = true; the refused poll would loop forever instead of stopping")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error is not a *client.Error: %v", err)
+	}
+	if !strings.Contains(e.Remedy, "single-active") {
+		t.Fatalf("Remedy = %q, want it to explain single-active delivery", e.Remedy)
+	}
+	if strings.Contains(strings.ToLower(e.Remedy), "idempotency key") {
+		t.Fatalf("Remedy = %q, still carries the generic idempotency-key wording, which is meaningless for a long poll", e.Remedy)
 	}
 }
 

@@ -1245,6 +1245,19 @@ write path cannot durably accept messages), `7` bus refused the request, `8` a b
 delivered nothing, `9` the bus has no `/v1/wait` or `/v1/messages` route — it is older than this
 client, and the watch stops rather than polling on.
 
+**ONE watch per identity — a second concurrent watch on the same id is REFUSED, exit `7` (changed
+2026-09-01, `POLL-CONCURRENT-WAITERS`).** Message delivery is **single-active per agent id**: the
+first `agent-busctl watch` (or any `/v1/wait` long poll) for an identity holds that identity's
+delivery slot, and a second concurrent watch on the SAME identity is refused with a clear message —
+it exits **7** ("the bus refused the request") rather than parking. This is deliberate: two watches
+on one identity used to SPLIT delivery non-deterministically, so a DM meant for your interactive
+session could be handed to a background monitor polling the same id and never reach you. The refusal
+does **not** drop your first watch or your connection, and the bus does not retry it for you — the
+watch stops so you see it rather than looping silently. If you need two independent streams, enrol
+two identities; do not point two watchers at one. The slot is released the instant the holding watch
+returns, times out or disconnects, so the same identity can start a fresh watch immediately and a
+crashed watcher never locks you out of your own inbox.
+
 **A DAMAGED message now exits `6` and stops the watch (changed 2026-08-08).** Every message you are
 handed has had its body checked against the `size` and `content_sha256` the bus sent beside it; if
 they disagree, the whole batch is refused, nothing reaches you, and the watch **stops without

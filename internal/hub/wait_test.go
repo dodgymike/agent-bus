@@ -491,12 +491,13 @@ func TestWaiterWakeup(t *testing.T) {
 
 func TestPollConcurrency(t *testing.T) {
 	t.Run("VanishedClientsLeakNothing", func(t *testing.T) {
-		// One agent PER PARKED POLL. hub.MaxWaitersPerAgent caps a single agent at
-		// 32 concurrent long polls, so parking 50 for one id would be refused with
-		// ErrCapacity and this would stop being a leak test at all. The cap itself
-		// is asserted in PerAgentWaiterCapFailsClosed below; here the point is
-		// that a vanished client releases its waiter and its goroutine, which is a
-		// per-connection property and is unchanged by how the ids are spread.
+		// One agent PER PARKED POLL. Message delivery is single-active per agent
+		// (hub.MaxWaitersPerAgent == 1), so parking 50 polls for ONE id would see
+		// 49 refused with ErrPollActive and this would stop being a leak test at
+		// all. The single-active refusal itself is asserted in
+		// SingleActiveWaiterPerAgent below; here the point is that a vanished
+		// client releases its waiter and its goroutine, which is a per-connection
+		// property and is unchanged by how the ids are spread.
 		const n = 50
 		names := make([]string, 0, n)
 		for i := 0; i < n; i++ {
@@ -558,45 +559,52 @@ func TestPollConcurrency(t *testing.T) {
 		}
 	})
 
-	t.Run("PerAgentWaiterCapFailsClosed", func(t *testing.T) {
-		// hub.MaxWaitersPerAgent bounds how many long polls ONE agent may have
-		// parked at once. The cost it bounds is notify's scan, which runs under
-		// writeMu on the critical path of every send — so without it one agent
-		// parking thousands of polls slows every OTHER agent's durable write.
+	t.Run("SingleActiveWaiterPerAgent", func(t *testing.T) {
+		// Message delivery is SINGLE-ACTIVE per agent id
+		// (hub.MaxWaitersPerAgent == 1, POLL-CONCURRENT-WAITERS). The FIRST
+		// /v1/wait poll for an agent holds the delivery slot; a SECOND concurrent
+		// poll for the SAME id is REFUSED with hub.ErrPollActive rather than
+		// parked, because two parked polls on one id split delivery
+		// non-deterministically — a DM meant for one session gets stolen by
+		// another poller on the same id.
 		//
-		// The two halves both matter. It must FAIL CLOSED (refuse the new poll),
-		// and it must EVICT NOTHING: evicting would let one connection of an agent
-		// kill another's, so the already-parked polls have to come back normally.
-		h, _, _ := newTestHub(t, "alpha", "beta")
+		// The properties that matter, all asserted below: the second poll is
+		// refused fast and does not park; the refusal EVICTS NOTHING (the holding
+		// poll is untouched); a DIFFERENT agent id is unaffected; the holding poll
+		// still receives its own message; and the slot is RELEASED on return, so
+		// the same agent can poll again.
+		if hub.MaxWaitersPerAgent != 1 {
+			t.Fatalf("hub.MaxWaitersPerAgent = %d; this test asserts single-active delivery (== 1)", hub.MaxWaitersPerAgent)
+		}
+
+		h, _, _ := newTestHub(t, "alpha", "beta", "sender")
 		a := agentID(t, h.BusID(), "alpha")
 		b := agentID(t, h.BusID(), "beta")
-
-		if hub.MaxWaitersPerAgent <= 0 {
-			t.Fatalf("hub.MaxWaitersPerAgent = %d; there is no cap to test", hub.MaxWaitersPerAgent)
-		}
+		sender := agentID(t, h.BusID(), "sender")
 
 		type outcome struct {
 			batch hub.Batch
 			err   error
 		}
-		out := make(chan outcome, hub.MaxWaitersPerAgent)
-		var wg sync.WaitGroup
-		for i := 0; i < hub.MaxWaitersPerAgent; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				batch, err := h.Wait(context.Background(), b, 0, 10, 20*time.Second)
-				out <- outcome{batch, err}
-			}()
-		}
-		waitForWaiters(t, h, hub.MaxWaitersPerAgent, "the agent must fill its bucket to exactly the cap")
 
-		// One over. It is refused BEFORE it parks, so it returns immediately.
+		// Agent A parks the single active poll.
+		aOut := make(chan outcome, 1)
+		go func() {
+			batch, err := h.Wait(context.Background(), a, 0, 10, 20*time.Second)
+			aOut <- outcome{batch, err}
+		}()
+		waitForWaiters(t, h, 1, "agent A must hold the single active slot before a second poll is tried")
+
+		// A SECOND concurrent poll for the SAME id is refused BEFORE it parks, so
+		// it returns immediately.
 		start := time.Now()
-		batch, err := h.Wait(context.Background(), b, 0, 10, 20*time.Second)
+		batch, err := h.Wait(context.Background(), a, 0, 10, 20*time.Second)
 		elapsed := time.Since(start)
-		if !errors.Is(err, hub.ErrCapacity) {
-			t.Fatalf("the %dth concurrent poll for one agent gave err = %v, want ErrCapacity", hub.MaxWaitersPerAgent+1, err)
+		if !errors.Is(err, hub.ErrPollActive) {
+			t.Fatalf("the second concurrent poll for one agent gave err = %v, want ErrPollActive", err)
+		}
+		if errors.Is(err, hub.ErrCapacity) {
+			t.Fatal("the single-active refusal must NOT satisfy ErrCapacity: that maps to a 503 + Retry-After and would loop the refused poller")
 		}
 		if elapsed > 5*time.Second {
 			t.Fatalf("the refused poll took %v; it parked instead of failing closed", elapsed)
@@ -607,57 +615,47 @@ func TestPollConcurrency(t *testing.T) {
 		if batch.Cursor != 0 {
 			t.Fatalf("a refused poll returned cursor %d, want the cursor it was given (0)", batch.Cursor)
 		}
-		// EVICTS NOTHING: the parked waiters are all still there.
-		if got := h.WaiterCount(); got != hub.MaxWaitersPerAgent {
-			t.Fatalf("after the refusal WaiterCount() = %d, want the %d already-parked waiters untouched", got, hub.MaxWaitersPerAgent)
+		// EVICTS NOTHING: agent A's parked poll is untouched.
+		if got := h.WaiterCount(); got != 1 {
+			t.Fatalf("after the refusal WaiterCount() = %d, want the 1 already-parked waiter untouched", got)
 		}
 
-		// A DIFFERENT agent is unaffected — the bucket is per-agent, so a flooder
-		// can only fill its own.
-		if _, err := h.Wait(context.Background(), a, 0, 10, 50*time.Millisecond); err != nil {
-			t.Fatalf("another agent's poll was refused while %s was at its cap: %v", b, err)
+		// A DIFFERENT agent id polls fine in parallel — the slot is per identity,
+		// so one agent holding its slot cannot refuse another.
+		if _, err := h.Wait(context.Background(), b, h.Store().PosHead(), 10, 50*time.Millisecond); err != nil {
+			t.Fatalf("a different agent's poll was refused while %s held its slot: %v", a, err)
 		}
 
-		// And the already-parked waiters are UNDISTURBED: one broadcast still
-		// wakes every one of them, normally.
-		res, err := mintedBroadcast(t, h, hub.BroadcastRequest{Sender: a, Body: []byte("still working"), IdempotencyKey: "k-cap"})
+		// A's own parked poll still receives its DM — delivery is whole, not split.
+		res, err := mintedSend(t, h, hub.SendRequest{Sender: sender, To: a, Body: []byte("for alpha only"), IdempotencyKey: "k-single"})
 		if err != nil {
-			t.Fatalf("Broadcast: %v", err)
+			t.Fatalf("Send: %v", err)
 		}
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
 		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Fatalf("the capped agent's parked waiters were never woken; %d are still parked", h.WaiterCount())
-		}
-		close(out)
-
-		woken := 0
-		for got := range out {
+		case got := <-aOut:
 			if got.err != nil {
-				t.Fatalf("a parked waiter returned err = %v after the cap was hit", got.err)
-			}
-			if got.batch.TimedOut {
-				t.Fatal("a waiter parked before the cap was hit timed out; the refusal disturbed it")
+				t.Fatalf("agent A's parked poll returned err = %v", got.err)
 			}
 			if len(got.batch.Messages) != 1 || got.batch.Messages[0].ID != res.MessageID {
-				t.Fatalf("a woken waiter got %v, want exactly %s", got.batch.Messages, res.MessageID)
+				t.Fatalf("agent A's poll got %v, want exactly %s", got.batch.Messages, res.MessageID)
 			}
-			woken++
+		case <-time.After(20 * time.Second):
+			t.Fatalf("agent A's parked poll was never woken by its DM; %d still parked", h.WaiterCount())
 		}
-		if woken != hub.MaxWaitersPerAgent {
-			t.Fatalf("%d of %d parked waiters were woken", woken, hub.MaxWaitersPerAgent)
-		}
+
+		// SLOT RELEASED on return: the count is back to zero and a fresh poll for
+		// A now SUCCEEDS (parks and times out) rather than being refused. This is
+		// what stops a crashed or returned poller from permanently locking an
+		// agent out of its own inbox.
 		if got := h.WaiterCount(); got != 0 {
-			t.Fatalf("after the herd returned, WaiterCount() = %d, want 0", got)
+			t.Fatalf("after A's poll returned, WaiterCount() = %d, want 0", got)
 		}
-		// The bucket drains, so the cap is a CONCURRENCY bound and not a lifetime
-		// quota: the same agent can poll again.
-		// Polled from the HEAD POSITION, so this is a park-and-time-out rather
-		// than a fast-path read. Stats's head is a sequence and would not do.
-		if _, err := h.Wait(context.Background(), b, h.Store().PosHead(), 10, 50*time.Millisecond); err != nil {
-			t.Fatalf("after its waiters drained, %s was still refused: %v", b, err)
+		fresh, err := h.Wait(context.Background(), a, h.Store().PosHead(), 10, 50*time.Millisecond)
+		if err != nil {
+			t.Fatalf("after its poll returned, %s was still refused: %v", a, err)
+		}
+		if !fresh.TimedOut {
+			t.Fatalf("the fresh poll for A returned %+v, want a timed-out empty batch", fresh)
 		}
 	})
 

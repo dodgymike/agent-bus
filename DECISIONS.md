@@ -8188,3 +8188,43 @@ conversation, participant-checks, and returns the reservation PLUS the member li
 Membership is fixed at create today (change deferred to a later task), so the mint-time and send-time
 sets agree. Both routes are off the `internal/httpapi/authmw.go` allow-list and authenticate like
 every other messaging route (invariant 3).
+
+## 2026-09-01 — POLL-CONCURRENT-WAITERS: the message long poll is single-active per agent id, and a second concurrent poll is refused with 409
+
+Two concurrent `/v1/wait` long polls on the SAME agent id split delivery non-deterministically: the
+wake loop (`Hub.notify`) sends a message to every entitled parked waiter, and with two waiters on one
+identity a DM meant for an interactive session could be woken on a background monitor polling the
+same id and never reach the session. An external security tester reported this against the live bus.
+Before this task the per-agent bound (`hub.MaxWaitersPerAgent`) was 32 — several parked polls per
+identity were allowed, and delivery split among them.
+
+**Decision: message delivery is SINGLE-ACTIVE per agent id.** `hub.MaxWaitersPerAgent` is now `1`.
+The FIRST `/v1/wait` poll for an agent holds the delivery slot; a SECOND concurrent poll for the SAME
+authenticated principal is REFUSED, not parked. Enforced in `internal/hub/wait.go` (`Hub.Wait`, the
+`waitersByAgent[agentID] >= MaxWaitersPerAgent` check), keyed on the fully-qualified authenticated id
+(invariants 2, 3), so a same-name agent on a different bus has its own slot.
+
+**The refusal is a distinct sentinel, `hub.ErrPollActive`, mapped to HTTP 409 Conflict with NO
+`Retry-After`.** The status was chosen deliberately, not defaulted:
+- It is a REFUSE-AND-RESPOND, never a disconnect (invariant 10): the caller is a buggy client running
+  two pollers on one identity — a merely buggy client can reach this line and the connection carries
+  only that one principal's traffic, so both of invariant 10's disconnect questions answer "do not
+  disconnect".
+- 409, not the 503 + `Retry-After: 5` that `ErrCapacity` returns, because the client maps 409 →
+  `KindRejected` (non-retryable, exit 7) and 503 → `KindServer` (transient, retried indefinitely by
+  `client.watchShouldRetry`). Reusing `ErrCapacity` would make the refused `agent-busctl watch` loop
+  forever instead of stopping with a clear message. `ErrPollActive` is a separate sentinel precisely
+  so it does not inherit that mapping.
+
+**Slot release is on EVERY exit path**, which is what stops a crashed or disconnected poller from
+permanently locking an agent out of its own inbox. The existing deferred cleanup in `Hub.Wait`
+(decrement `waitersByAgent`, delete the map entry, under `waitMu`) already runs on normal return,
+timeout, context cancel and panic; the single-active check runs BEFORE registration, so a refused
+poll never registers and never double-decrements. No new release path was added — the security-
+critical guarantee reuses the one POLL-3 already proves.
+
+**The ack-status parked-wait cap (`maxParkedAckStatusPerAgent` = 32) is UNCHANGED.** It is a separate
+constant in `internal/httpapi/ackstatus.go` and a different kind of limit: a RESOURCE bound on how
+many ack-status probes one agent can park, answered 429. It used to be described as "mirroring"
+`hub.MaxWaitersPerAgent`; since they now diverge (1 for correctness vs 32 for resources), the
+comments that claimed the mirror were corrected, but the ack-status behaviour was not touched.

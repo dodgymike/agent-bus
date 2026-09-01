@@ -363,8 +363,12 @@ func TestAckStatusRefusesAnOutOfRangeWait(t *testing.T) {
 // ack.Store's global mutex for the full ceiling. Without a cap, one authenticated
 // agent can hold arbitrarily many, and the mutex it wakes onto every tick is the
 // same one Accept takes inside Hub.publish — so the cost lands on every writer
-// on the bus. /v1/wait bounds the equivalent at hub.MaxWaitersPerAgent; this is
-// the same bound for the same reason.
+// on the bus. This route caps parked ack-status waits at maxParkedAckStatusPerAgent
+// (32) for that resource reason. NOTE the /v1/wait MESSAGE poll is a different
+// bound for a different reason: since POLL-CONCURRENT-WAITERS it is single-active
+// (hub.MaxWaitersPerAgent == 1), because two message polls on one id would split
+// delivery — a correctness limit, not a resource one. Do not re-tune this cap to
+// match it.
 //
 // The refusal must NOT depend on the key: it is decided from the principal's own
 // parked count, so it says something about the caller's concurrency and nothing

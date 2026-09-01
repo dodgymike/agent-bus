@@ -87,16 +87,25 @@ const (
 	// authenticated caller pinning server resources indefinitely.
 	MaxPollTimeout = 5 * time.Minute
 
-	// MaxWaitersPerAgent bounds how many long polls ONE agent may have parked
-	// at once. See the check in Wait for why the bound is per-agent, why an
-	// agent-id key is safe on this authenticated route, and why the real cost
-	// it bounds is notify's scan rather than memory.
+	// MaxWaitersPerAgent bounds how many /v1/wait long polls ONE agent may have
+	// parked at once. It is 1: message delivery is SINGLE-ACTIVE per agent id.
 	//
-	// 32 matches auth.DefaultMaxActiveSessionsPerAgent, and for the same
-	// reason: a well-behaved agent needs one or two, and the slack is for an
-	// agent driven from several processes or one that reconnects before its
-	// old poll has drained.
-	MaxWaitersPerAgent = 32
+	// The bound was 32 until POLL-CONCURRENT-WAITERS. Allowing several parked
+	// polls for one identity meant notify SPLIT delivery among them
+	// non-deterministically — a DM meant for an interactive session could be
+	// woken on a background monitor polling the SAME id instead, and the
+	// interactive session would never see it. A live sec-tester reported exactly
+	// that. Making the poll single-active removes the split: the FIRST poll
+	// holds the slot and a SECOND concurrent poll for the same id is REFUSED
+	// (hub.ErrPollActive, HTTP 409), not parked. See the check in Wait for why
+	// the bound is per-agent, why an agent-id key is safe on this authenticated
+	// route, and why the refusal is a clean response rather than a disconnect
+	// (invariant 10).
+	//
+	// It is NOT a lifetime quota: the slot is released on every exit path of the
+	// holding poll (return, timeout, cancel, panic), so the same agent can poll
+	// again the instant its previous poll returns.
+	MaxWaitersPerAgent = 1
 )
 
 // DurableLog is the hub's view of the two-phase durable write path

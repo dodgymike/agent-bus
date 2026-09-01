@@ -250,21 +250,33 @@ func (h *Hub) Wait(ctx context.Context, agentID string, after uint64, limit int,
 	w := &waiter{agentID: agentID, after: after, enrolledAt: epoch, ch: make(chan struct{}, 1)}
 
 	h.waitMu.Lock()
-	// The PER-AGENT PARK CAP. It is not primarily about memory — a waiter is a
-	// few words and no goroutine of its own — it is about notify: that loop
-	// runs under writeMu, on the critical path of every send, and is O(parked
-	// waiters). Without a cap, one agent parking thousands of polls slows down
-	// every OTHER agent's durable write, which is attacker-controlled
-	// amplification rather than self-harm.
+	// SINGLE-ACTIVE per agent id (MaxWaitersPerAgent == 1). The FIRST poll for
+	// an agent holds the delivery slot; a SECOND concurrent poll for the SAME
+	// authenticated principal is REFUSED here, before it registers.
+	//
+	// Why refuse rather than park a second waiter: notify SPLITS a message among
+	// the waiters entitled to see it, so two parked polls on one identity divide
+	// that agent's inbox non-deterministically — a DM meant for an interactive
+	// session can be delivered to a background monitor polling the same id and
+	// never reach the session. Refusing the second poll keeps delivery whole.
 	//
 	// Keyed on the agent id, which is safe HERE for exactly the reason
 	// auth.MaxActiveSessionsPerAgent is safe and the pending-session cap was
-	// not: this is an AUTHENTICATED route, so the key is a proven identity and
-	// a flooder can only fill its own bucket. It fails closed and evicts
-	// nothing — evicting would let one connection of an agent kill another's.
+	// not: this is an AUTHENTICATED route, so the key is a PROVEN, fully-
+	// qualified identity (invariants 2, 3) and one identity can only refuse
+	// itself. A same-name agent on a DIFFERENT bus has a different qualified id
+	// and its own slot. It fails closed and EVICTS NOTHING — evicting the
+	// holding poll would let one connection of an agent kill another's.
+	//
+	// This is a REFUSE-AND-RESPOND, not a disconnect: the caller is a buggy
+	// client running two pollers on one identity, which invariant 10 says must
+	// not be dropped. ErrPollActive is a DISTINCT sentinel from ErrCapacity so
+	// the HTTP layer can answer 409 (a clean, non-retryable refusal) instead of
+	// the 503 + Retry-After a capacity limit gets, which would loop the refused
+	// poller forever.
 	if h.waitersByAgent[agentID] >= MaxWaitersPerAgent {
 		h.waitMu.Unlock()
-		return Batch{Cursor: after}, fmt.Errorf("%w: agent %q already has %d parked long polls, the per-agent limit", ErrCapacity, agentID, MaxWaitersPerAgent)
+		return Batch{Cursor: after}, fmt.Errorf("%w: agent %q already has an active long poll; only one may be active at a time", ErrPollActive, agentID)
 	}
 	h.waiters[w] = struct{}{}
 	h.waitersByAgent[agentID]++

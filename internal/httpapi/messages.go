@@ -1083,6 +1083,23 @@ func (s *Server) writeHubError(w http.ResponseWriter, r *http.Request, op string
 		s.log.Warn("a message was refused: the authenticated sender is not on the roster", kv...)
 		s.writeJSON(w, r, http.StatusForbidden, ErrorResponse{Error: "sender is not enrolled on this bus"})
 
+	case errors.Is(err, hub.ErrPollActive):
+		// 409 Conflict: this agent already has an active /v1/wait long poll, and
+		// message delivery is single-active per agent id (hub.Wait). A second
+		// concurrent poll is REFUSED rather than parked, because two parked polls
+		// on one identity split delivery non-deterministically.
+		//
+		// It is a clean refusal, NOT a disconnect (invariant 10): the caller is a
+		// buggy client running two pollers on one id, which must keep its
+		// connection. And deliberately NO Retry-After — 409, not the 503 that
+		// ErrCapacity gets — so the CLI (client.watchShouldRetry) treats it as a
+		// non-retryable refusal that stops with exit 7, rather than looping. The
+		// body names the remedy: retry once the other poll returns.
+		s.log.Debug("long poll refused: the agent already has an active long poll", kv...)
+		s.writeJSON(w, r, http.StatusConflict, ErrorResponse{
+			Error: "another long poll is already active for this agent; only one /v1/wait may be active per agent at a time — retry once the other poll returns",
+		})
+
 	case errors.Is(err, hub.ErrCapacity):
 		w.Header().Set("Retry-After", pollRetryAfterSeconds)
 		s.log.Warn("message refused at a capacity limit", kv...)

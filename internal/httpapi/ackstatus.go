@@ -58,9 +58,13 @@ const ackStatusPollInterval = 200 * time.Millisecond
 // caller. There is no global connection limit anywhere in this tree to fall back
 // on.
 //
-// The value MIRRORS hub.MaxWaitersPerAgent (32), which bounds parked /v1/wait
-// requests for the same reason. It is spelled here rather than imported so this
-// route's bound is not silently re-tuned by a change to the messaging poll.
+// The value is 32, a RESOURCE bound: it caps how many ack-status probes one
+// authenticated agent can park at once. It is spelled here rather than imported
+// so this route's bound is not silently re-tuned by a change to the messaging
+// poll. Do NOT conflate it with hub.MaxWaitersPerAgent: since
+// POLL-CONCURRENT-WAITERS the /v1/wait MESSAGE poll is single-active (== 1) for
+// a CORRECTNESS reason — two message polls on one id split delivery — which is a
+// different limit for a different reason, not this one.
 //
 // # THE REFUSAL MUST NOT DEPEND ON THE KEY
 //

@@ -157,6 +157,22 @@ var (
 	// nowhere to write refuses to accept messages rather than serving from
 	// memory alone.
 	ErrNotDurable = errors.New("hub: no durable write path")
+
+	// ErrPollActive reports a SECOND concurrent /v1/wait long poll for an agent
+	// that already has one active. Message delivery is SINGLE-ACTIVE per agent
+	// id (see Wait): two long polls on the same identity would split delivery
+	// non-deterministically — a DM meant for an interactive session gets stolen
+	// by a background monitor on the same id — so the first poll holds the slot
+	// and a second is refused rather than parked.
+	//
+	// It is a REFUSE-AND-RESPOND, never a disconnect: a merely buggy client
+	// running two pollers on one identity must keep its connection (invariant
+	// 10). The HTTP layer maps it to 409 Conflict, which the CLI treats as a
+	// clean, non-retryable refusal (exit 7) rather than a transient error to
+	// loop on. It is a DISTINCT sentinel from ErrCapacity precisely so it does
+	// NOT inherit that error's 503 + Retry-After mapping, which would make the
+	// refused poller retry forever.
+	ErrPollActive = errors.New("hub: an active long poll already holds this agent's delivery slot")
 )
 
 // agentQuotaError is the refusal returned when an agent is at its fair share of
