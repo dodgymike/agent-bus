@@ -6644,69 +6644,6 @@ token pressure — a standalone doc, no code. security — SKIPPED under the doc
   recipient list frozen at send time (the deliberate opposite of a broadcast's flag — a conversation
   audience is explicit and bounded, and the send-time membership is what authorised delivery);
   bounded by `store.MaxRecipients` = 64.
-
-## 2026-09-01 — POLL-CONCURRENT-WAITERS (`f6268dab-98f9-402a-a42f-57a3641d0d21`): the message long poll is single-active per agent id (feature-runner, implemented inline)
-
-- **Task:** two concurrent `/v1/wait` long polls on the SAME agent id split delivery
-  non-deterministically — a DM meant for an interactive session gets stolen by a background monitor
-  on the same identity (reported live by the external sec-tester). Fix: make the message long poll
-  SINGLE-ACTIVE per agent id; refuse the second concurrent poll with a clear response instead of
-  parking it and splitting delivery.
-- **What shipped (product code):**
-  - `internal/hub/hub.go` — `MaxWaitersPerAgent` changed `32 → 1`; doc rewritten to explain
-    single-active delivery and per-exit-path slot release.
-  - `internal/hub/errors.go` — new sentinel `ErrPollActive`, distinct from `ErrCapacity` so the HTTP
-    layer answers 409 (non-retryable) rather than 503 + Retry-After (which the CLI would loop on).
-  - `internal/hub/wait.go` — the per-agent check now refuses the second concurrent poll with
-    `ErrPollActive`; keyed on the fully-qualified authenticated id; the check runs BEFORE
-    registration, and the existing deferred cleanup (decrement + map delete under `waitMu`) releases
-    the slot on EVERY exit path (return, timeout, cancel, panic). No new release path added.
-  - `internal/httpapi/messages.go` — `writeHubError` maps `ErrPollActive → 409 Conflict`, no
-    Retry-After, connection KEPT (invariant 10), body naming the remedy.
-  - `client/messages.go` — `annotatePollActive` replaces the transport's generic 409 "idempotency
-    key reused" wording (meaningless on the poll route) with a single-active remedy; stays
-    `KindRejected` so `watchShouldRetry` returns false (exit 7, no loop).
-  - Comment corrections where two now-divergent bounds were described as mirrors:
-    `internal/httpapi/ackstatus.go` and `ackstatus_test.go` (ack-status cap stays 32, a RESOURCE
-    bound; behaviour untouched).
-- **Tests:** `internal/hub/wait_test.go` — rewrote `PerAgentWaiterCapFailsClosed` →
-  `SingleActiveWaiterPerAgent` (A parks; a second poll for A gets `ErrPollActive` fast and does not
-  park; refusal evicts nothing; a DIFFERENT agent polls fine; A receives its DM whole; slot released
-  so a fresh poll for A succeeds; asserts the refusal does NOT satisfy `ErrCapacity`).
-  `internal/httpapi/messages_test.go` — new `TestWaitRoute` subtest: a second concurrent `/v1/wait`
-  gives 409 with "already active", no Retry-After, first poll undisturbed and still delivered.
-  `client/messages_test.go` — `TestWaitSurfacesPollActiveAsNonRetryableRefusal`: a 409 on the wait op
-  is `KindRejected`, exit 7, `watchShouldRetry` false, remedy mentions single-active and not
-  idempotency keys.
-- **Decision:** DECISIONS.md 2026-09-01 — status 409 (not 503), distinct sentinel, refuse-not-
-  disconnect (invariant 10), release on every exit path, ack-status cap deliberately unchanged.
-- **Invariants read in full:** 10 (the refused second poll is REJECT-AND-RESPOND, never a
-  disconnect — a buggy client running two pollers reaches this line and the connection carries one
-  principal, so both disconnect questions answer "do not"), 3 (the slot key is the authenticated
-  principal taken from the session context, never a field), 2 (the slot keys on the fully-qualified
-  `<bus>.<agent>` id, so a same-name agent on another bus has its own slot), 7 (the CLI `watch`
-  surfaces the refusal as a stable exit 7 with a clear message and no hang/loop).
-- **Verification:**
-  - Clean HEAD overlay proof: `bash scripts/proof-check.sh "go test -race -run
-    'TestPollConcurrency|TestWaitRoute|TestWaitSurfacesPollActiveAsNonRetryableRefusal'
-    ./internal/hub ./internal/httpapi ./client"` →
-    `verdict=PASS class=test tests_run=11 top_level=3 skipped=1 failed=0` (the 1 skip is the
-    pre-existing SIGN-3 broadcast skip in `ThunderingHerd…`, unrelated).
-  - Full `go test -race ./...` at working tree @ `408f2f5` — all packages ok, including the known
-    flake package `cmd/agent-busctl` (`TestCLIEnrolEndToEnd`, filed `23d4e264`) which passed.
-  - `go build ./...` green, `go vet` clean, `gofmt -l` on changed files EMPTY output.
-  - Live-CLI two-watch proof (invariant 7) on a real TLS bus under `/tmp`: enrolled `planner`;
-    watch1 held the poll; a SECOND `agent-busctl watch --json` on the SAME identity returned exit
-    **7** with `{"kind":"rejected","status":409,"error":"…another long poll for this identity is
-    already active",…}`; watch1 stayed alive (undisturbed); after watch1 stopped, a fresh watch for
-    planner exited **8** (bounded, nothing arrived), NOT 7 — proving the slot was released.
-- **Docs:** CONTRACTS-HTTP.md (the `/v1/wait` 409 row + the `hub.MaxWaitersPerAgent`=1 constant row +
-  the ack-status row that used to claim a mirror), AGENT_PROTOCOL.md (watch single-active behaviour,
-  exit 7), CONTRACTS-CLI.md (watch cursor-contract bullet), DECISIONS.md, this log.
-- **Gates:** reviewer — REQUIRED (product code). security — REQUIRED (delivery semantics + auth +
-  refusal path + lockout risk; the docs-and-tests-only carve-out does NOT apply). documentation —
-  done inline. No skips taken, so no skip lines are required. No commit by this agent —
-  `feature-runner` writes source only; `integrator` commits.
 - **Invariants read in full:** 1 (server mints message id/seq; the recipient set comes from the
   durable record, never the request), 2 (every member a fully-qualified `<bus>.<agent>`), 3
   (both routes off the `authmw.go` allow-list, default-deny; participant check restricts a send to a
@@ -6734,3 +6671,44 @@ token pressure — a standalone doc, no code. security — SKIPPED under the doc
   participant authz + delivery + idempotency; the docs-and-tests-only carve-out does NOT apply). Both
   run by `feature-runner` before completion; verdicts recorded in the task journal.
 - No commit made by this agent — `feature-runner` writes source only; `integrator` commits.
+
+## 2026-08-28 — RELAY-23 + RELAY-53: relay envelope wire version + two-resolver coexistence
+
+**Tasks:** RELAY-23 (`220d36f4-e420-4dfc-9f82-b2af1b8653e6`), RELAY-53
+(`d5bbdec9-0659-423e-a420-183133ab9818`) — co-landed.
+
+**Change (production, `internal/relay`):**
+- `message.go`: added `RelayRequest.ProtocolVersion int json:"protocol_version,omitempty"` (first
+  field); `WireVersion = 1` (spends reserved `relay-wire-version = 1`), `relayWireVersionAbsent = 0`,
+  `ErrUnsupportedRelayVersion`, `resolveWireVersion`; `RelayedMessage.ProtocolVersion` (resolved
+  provenance); `ValidateRelayRequest` check 0 resolves the version before any field it governs
+  (refuses unknown, never defaults); `Forward` stamps `WireVersion` on egress. MaxRelayBytes
+  derivation comment updated (+25 bytes, still ~2.5x headroom under 256 KiB).
+- `handshake.go`: `CodeUnsupportedRelayVersion = "unsupported_relay_version"`.
+- `peer.go`: `ErrorCode` maps `ErrUnsupportedRelayVersion` → `CodeUnsupportedRelayVersion`, above the
+  SIGN-7/`ErrInvalidRelay` arms so it is not shadowed by a vaguer code.
+- `client.go`: `peerErrorCode` allow-list carries `CodeUnsupportedRelayVersion` (partial-rollout
+  legibility, mirroring the ACK code).
+- `wireversion_relay23_test.go` (new): round-trip of `protocol_version:1` and the distinct-key
+  assertion (RELAY-23 proof `TestRelayEnvelopeCarriesDistinctWireVersionKey`); resolver behaviour,
+  two-resolver independent coexistence, ingest refusal (validate + HTTP 400, no disconnect), absent
+  reads as 1, egress stamping (RELAY-53 proof regex `TestWireVersion`).
+
+**RELAY-53 decision:** the two resolvers COEXIST (distinct names/sentinels/codes), NOT collapsed. See
+DECISIONS.md 2026-08-28. No compile collision — ACK-3 named `resolveAckWireVersion` defensively.
+
+**Invariants read in full:** 1 (version reserved not chosen; server authoritative on egress version),
+2 (FQ ids, unchanged), 6 (envelope = metadata/framing only; version is outside the signature like
+bus_path), 10 (unrecognised version REFUSED not defaulted; reject-and-log, 400 not 503, no disconnect).
+
+**Verification:** `go build ./...` green, `go vet ./internal/relay/` clean, gofmt empty output.
+RED-before evidence (feature-runner): mutation A (default unknown → 1) fails the resolver + ingest
+proofs; mutation B (JSON key → "version") fails the distinct-key proof; both restored green. Full
+`go test -race ./...` and mutation coverage handed to test-engineer; reviewer + security gates run
+before completion (verdicts in the task journal).
+
+**Gates:** reviewer — REQUIRED (new product code). security — REQUIRED (touches
+CONTROL-PLANE-adjacent wire versioning / downgrade surface; not docs-and-tests-only). documentation —
+DONE (PROTOCOL.md §10, CONTRACTS-ONDISK.md wire-version section, CONTRACTS-HTTP.md peer/relay table).
+
+No commit by this agent — feature-runner writes source only; integrator commits.

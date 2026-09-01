@@ -328,7 +328,12 @@ func peerErrorCode(buf []byte) string {
 		// Omitted from this list it would arrive as "unrecognised error code",
 		// which is the one message guaranteed to send them looking in the wrong
 		// place. A security gate caught the omission (ACK-3, 2026-08-16).
-		CodeUnsupportedAckVersion:
+		CodeUnsupportedAckVersion,
+		// RELAY-23's envelope version refusal, the sibling of the ACK one above and
+		// listed for the identical reason: it is emitted during a PARTIAL ROLLOUT
+		// when the two buses run different binaries, failJSON puts only the code on
+		// the wire, and omitted here it would arrive as "unrecognised error code".
+		CodeUnsupportedRelayVersion:
 		return body.Error
 	default:
 		return "unrecognised error code"

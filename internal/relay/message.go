@@ -23,13 +23,88 @@ import (
 // attaching a handler to a mux.
 const PeerRelayPath = "/v1/peer/relay"
 
-// The relay envelope deliberately carries NO wire-protocol version field, for
-// the reason set out in doc.go's "No wire protocol version field, on purpose"
-// section: versions are RESERVED through the Spec Server reservations API and
-// never chosen by the agent writing the code, none has been reserved, and
-// because nothing serves this handler the format is not yet on any wire, so
-// there is nothing to stay compatible with. The task that first REGISTERS this
-// handler reserves a version and adds the field to BOTH surfaces at once.
+// ---------------------------------------------------------------------------
+// Versioning (RELAY-23)
+// ---------------------------------------------------------------------------
+
+// WireVersion is the wire-protocol version of the relay envelope below.
+//
+// IT SPENDS THE ALREADY-RESERVED `relay-wire-version` = 1 AND RESERVES NOTHING.
+// Value 1 was allocated through the Spec Server `relay-wire-version` namespace on
+// 2026-08-08 for RELAY-23 to spend. The ACK frame (AckWireVersion, ackframe.go)
+// spends the SAME reserved value: the ACK frame and the relay envelope are two
+// frames of one peer protocol, versioned together, so there is ONE reserved
+// value and two constants that both equal it — never two allocations. Nobody
+// picks the next one by reading this line: bump it only against a fresh
+// reservation (invariant 1 — versions are RESERVED, never chosen by the code that
+// spends them).
+const WireVersion = 1
+
+// relayWireVersionAbsent is what an envelope carrying NO protocol_version decodes
+// to, because encoding/json leaves an absent int at its zero value and this
+// envelope has no way to tell "absent" from "explicitly 0" without a pointer.
+//
+// The two are treated identically ON PURPOSE: nobody may transmit 0, so the only
+// producer of a 0 here is an envelope written before the field existed.
+const relayWireVersionAbsent = 0
+
+// ErrUnsupportedRelayVersion reports a relay envelope whose declared
+// wire-protocol version this bus does not implement.
+//
+// It is its own sentinel, the twin of ErrUnsupportedAckVersion for the second
+// frame of the same protocol. The error TEXT never crosses the wire — failJSON
+// puts only CodeUnsupportedRelayVersion in the body — so folding it into
+// ErrInvalidRelay would send a peer's operator hunting a malformed field it does
+// not have, when the real remedy is to upgrade one of the two buses.
+//
+// IT IS A 400, NOT A 503. A retry cannot change the verdict: the envelope is well
+// formed and we do not speak its format, and no amount of resending installs a
+// new binary at either end. See resolveWireVersion.
+var ErrUnsupportedRelayVersion = errors.New("relay: unsupported relay wire-protocol version")
+
+// resolveWireVersion maps a relay envelope's declared version onto the version
+// this bus will interpret it as, or refuses it.
+//
+// # AN UNRECOGNISED VERSION IS REJECTED, NEVER DEFAULTED (invariant 10)
+//
+// resolveAckWireVersion's posture exactly, applied to the second frame of the
+// same protocol. Guessing turns a corrupt or FUTURE-FORMAT envelope into a
+// plausible-looking valid one, and the fields of a format we do not implement
+// have meanings we do not know. Fail closed and make an operator upgrade one of
+// the two buses; that remedy is reachable and a misrouted or misattributed
+// message read under the wrong rules is not.
+//
+// # AN ABSENT VERSION READS AS 1, AND THE 1 BELOW IS A LITERAL ON PURPOSE
+//
+// Version 1 IS the format being introduced here, so an envelope that omits the
+// field is a version-1 envelope by definition. THE LITERAL 1 MUST NOT BE
+// RESPELLED AS WireVersion: when the version is bumped to 2 against a fresh
+// reservation, a versionless envelope is STILL a v1 envelope — it was encoded by
+// a binary that had never heard of v2 — and spelling this as the constant would
+// silently reinterpret every legacy envelope as the new format on the day of the
+// bump. That is the same defect as defaulting an unrecognised version, arriving
+// by a different door.
+//
+// # WHY THIS COEXISTS WITH resolveAckWireVersion RATHER THAN COLLAPSING (RELAY-53)
+//
+// RELAY-53 flagged that internal/relay would hold TWO wire-version resolvers.
+// They COEXIST under DISTINCT names — resolveWireVersion here, resolveAckWireVersion
+// in ackframe.go — with distinct sentinels (ErrUnsupportedRelayVersion /
+// ErrUnsupportedAckVersion) and distinct wire codes (CodeUnsupportedRelayVersion /
+// CodeUnsupportedAckVersion). That is deliberate and is NOT the "collapse" the
+// task originally sketched: two codes let a peer operator read WHICH FRAME the far
+// end could not parse rather than guessing, and the two frames version
+// independently. There is no compile collision — ACK-3 named its resolver
+// defensively for exactly this reason — so nothing needs merging. See DECISIONS.md.
+func resolveWireVersion(declared int) (int, error) {
+	switch declared {
+	case relayWireVersionAbsent, 1:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("%w: the envelope declares relay wire-protocol version %d and this bus speaks version %d; a version this bus does not implement is refused rather than guessed at, because the fields of an unknown format have unknown meaning and interpreting them under the wrong rules would misroute or misattribute the message (invariant 10)",
+			ErrUnsupportedRelayVersion, declared, WireVersion)
+	}
+}
 
 // DropLoop is the RelayResponse.DroppedReason for a message dropped because it
 // had already traversed this bus (RELAY-3).
@@ -64,6 +139,7 @@ const DropLoop = "loop"
 //
 // It is DERIVED, not guessed, exactly as MaxHandshakeBytes is:
 //
+//	proto_ver   protocol_version int, key + value                    =     25
 //	body        store.MaxBodyBytes (65,536) base64-expanded by 4/3 = 87,384
 //	recipients  store.MaxRecipients (64) x (ids.MaxAgentIDLen 150 + 3 for two
 //	            quotes and a comma)                                  =  9,792
@@ -74,7 +150,7 @@ const DropLoop = "loop"
 //	fixed       origin_bus (64) + message_id (85) + sender (150) +
 //	            content_sha256 (64) + timestamp_unix_ms (20) +
 //	            size (10) + the flags and every field name           = ~1,024
-//	                                                         total  ~ 102,888
+//	                                                         total  ~ 102,913
 //
 // 256 KiB leaves ~2.5x headroom, so a legal maximum-size relayed message can
 // always be encoded and can never be rejected by this cap — while an unbounded
@@ -106,6 +182,25 @@ var (
 // idem.HeaderName header, internal/idem's one canonical carrier — and for
 // relay it must equal MessageID, which ValidateRelayRequest enforces.
 type RelayRequest struct {
+	// ProtocolVersion is the relay wire-protocol version of this envelope. It is
+	// FIRST because it governs the reading of every field below it, and it is
+	// resolved before any of them is looked at (ValidateRelayRequest step 0).
+	//
+	// THE JSON KEY IS "protocol_version" AND IT MUST NEVER BE "version".
+	// RosterUpdate already owns the key "version" on a neighbouring peer envelope
+	// and that one is NOT a protocol version — it is the peer's monotonic ROSTER
+	// EPOCH. Two meanings on one key is how a peer ends up applying a roster epoch
+	// as a format number. The ACK frame (PeerAckRequest) pins the same spelling;
+	// the two frames of one protocol must not disagree about the name of their
+	// version field.
+	//
+	// It is `omitempty` so the zero value is ABSENT rather than an explicit 0: 0
+	// is not a version anyone may transmit, only ever the shape of an envelope
+	// written before this field existed (see relayWireVersionAbsent). Egress
+	// always sets it — Forward writes WireVersion — so every envelope this bus
+	// emits carries it.
+	ProtocolVersion int `json:"protocol_version,omitempty"`
+
 	// OriginBus is the bus that ACCEPTED the message from its own agent. It is
 	// the authority for MessageID and for Sender's namespace.
 	OriginBus string `json:"origin_bus"`
@@ -227,6 +322,13 @@ type RelayResponse struct {
 // its declared size and hash, and the path is well-formed and does not include
 // us. Nothing here asserts the sending bus was allowed to send it.
 type RelayedMessage struct {
+	// ProtocolVersion is the RESOLVED relay wire version: what resolveWireVersion
+	// made of the declared one. It is never 0 on a value this package returns — an
+	// absent declaration resolves to 1, and an unrecognised one never produces a
+	// RelayedMessage at all. It is PROVENANCE, worth logging during a rollout, and
+	// it is not an input to any decision below.
+	ProtocolVersion int
+
 	// OriginBus is the validated bus id of the bus that accepted the message
 	// from its own agent. It is not ours and it is BusPath[0].
 	OriginBus string
@@ -468,8 +570,14 @@ func relayFingerprint(originBus, messageID, sender string, broadcast bool, recip
 //
 // # The order of the checks IS the design; each position is security-relevant
 //
-//  1. The idempotency key's SHAPE, first, because everything after it depends
-//     on the key being a legal key.
+//  0. THE WIRE VERSION, before any field it governs is read (RELAY-23). The
+//     fields of a format we do not implement have meanings we do not know, so an
+//     unrecognised version is REFUSED, not defaulted (invariant 10) — and it is
+//     refused even before the loop drop, because bus_path is one of those fields.
+//     It costs one integer comparison.
+//
+//  1. The idempotency key's SHAPE, because everything after it depends on the
+//     key being a legal key.
 //
 //  2. The PATH — validate and loop-drop — BEFORE any of the per-field work
 //     below. A looping message is the expected steady state of a cycle and
@@ -556,6 +664,20 @@ func relayFingerprint(originBus, messageID, sender string, broadcast bool, recip
 // break that relationship, which is why TestRelayIdempotencyKeyIsTheOriginMessageID
 // pins it.
 func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, trust CrossBusTrust) (RelayedMessage, error) {
+	// 0. THE WIRE VERSION, before any field it governs is read (invariant 10, and
+	// resolveAckWireVersion's posture on the sibling frame). The fields of a format
+	// we do not implement have meanings we do not know, so validating them under
+	// v1's rules would validate the wrong question. It costs one integer
+	// comparison, so it runs even before the cheap loop drop below: an envelope
+	// whose format we cannot read is REFUSED rather than interpreted — and its
+	// bus_path, which the loop check would otherwise trust, is one of the fields
+	// whose meaning we would be guessing at. An unrecognised version is refused
+	// with ErrUnsupportedRelayVersion (400), never defaulted.
+	version, err := resolveWireVersion(req.ProtocolVersion)
+	if err != nil {
+		return RelayedMessage{}, err
+	}
+
 	// 1. The key's shape.
 	if err := idem.ValidateKey(idempotencyKey); err != nil {
 		return RelayedMessage{}, err
@@ -707,6 +829,7 @@ func ValidateRelayRequest(localBusID, idempotencyKey string, req RelayRequest, t
 	// verification, and verifying bytes somebody else can still mutate is a
 	// time-of-check/time-of-use hole in the one check that carries the trust.
 	m := RelayedMessage{
+		ProtocolVersion:    version,
 		OriginBus:          req.OriginBus,
 		OriginMessageID:    req.MessageID,
 		OriginSeq:          seq,
@@ -769,6 +892,12 @@ func (m RelayedMessage) Forward(localBusID string) (RelayRequest, error) {
 		return RelayRequest{}, err
 	}
 	return RelayRequest{
+		// THIS BUS STAMPS ITS OWN version, never echoing m.ProtocolVersion: egress
+		// speaks the format this binary implements (WireVersion), and the version
+		// is server-authoritative (invariant 1), not a value carried in from a
+		// peer. On the wire today the two are equal — only 1 is accepted at ingest
+		// — but stamping the constant keeps that true across a future bump.
+		ProtocolVersion:    WireVersion,
 		OriginBus:          m.OriginBus,
 		MessageID:          m.OriginMessageID,
 		Sender:             m.Sender,

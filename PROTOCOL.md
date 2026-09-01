@@ -1033,10 +1033,30 @@ is nothing to stay compatible with. Against the shape RELAY-2 first described:
 | **removed** | `sent_at_unix_ns` | the ORIGIN BUS's nanosecond clock reading — a different quantity, from a different source, in a different unit from the one the signature covers. An envelope carrying it did not carry the sender's signed clock at all, so a receiving bus **could not reconstruct the canonical bytes**: byte-exactness was impossible, not merely unimplemented. |
 | **added** | `timestamp_unix_ms` (`int64`) | the SENDING AGENT's signed wall clock — the exact integer `signing.Message.TimestampUnixMilli` covers. **One timestamp, the signed one, and nothing on the path converts it**; every conversion between the wire form and the signed form is a place the two sides drift. Milliseconds, not nanoseconds, because the value must be exactly representable as a JSON number (§8.3). |
 | **added** | `signature` (64 bytes, base64 in JSON) | the origin agent's detached Ed25519 signature over `Canonicalize`'s output, carried **verbatim on every hop**. `ed25519.SignatureSize` exactly; any other length is treated as no signature at all. |
+| **added** (RELAY-23) | `protocol_version` (`int`, `omitempty`) | the relay wire-protocol version, `relay.WireVersion` = the already-reserved `relay-wire-version = 1` (`CONTRACTS-ONDISK.md`). See the paragraph below: it is resolved before any field it governs, an absent value reads as 1, and an unrecognised value is refused with `unsupported_relay_version` (400), never defaulted. It is envelope framing **outside** the signature (invariant 6, like `bus_path`), not signed content, and egress stamps `WireVersion` rather than echoing a peer's declared value (invariant 1). |
 
 `Forward` re-emits every other field unchanged, including the signature and the signed timestamp: the
-**only** field that changes on a hop is `bus_path`, which is the one field that is outside the
-signature and can never be inside it, because it grows on every hop (§8.5).
+**only** two fields that change on a hop are `bus_path`, which grows by one hop, and `protocol_version`,
+which egress re-stamps with **this** bus's `WireVersion`. Both are outside the signature; neither can
+ever be inside it — `bus_path` because it grows on every hop (§8.5), `protocol_version` because it is
+per-hop framing, not the origin agent's signed content.
+
+**The relay wire version (`protocol_version`, RELAY-23).** The envelope declares its wire-protocol
+version under the key `protocol_version` — **never `version`**, which is the peer roster epoch on a
+neighbouring envelope; two meanings on one key is how a peer applies an epoch as a format number. The
+value is `relay.WireVersion` = the already-reserved `relay-wire-version = 1` (reserved via the Spec
+Server, not chosen in code — invariant 1). `ValidateRelayRequest` resolves it as **check 0**, before
+any field it governs is read — including `bus_path`, whose meaning under an unknown format we could not
+trust — with the same rule the ACK frame's `resolveAckWireVersion` applies (§ below): an **absent**
+value reads as 1 (a versionless envelope was written by a binary that predates the field, so it is a
+v1 envelope by definition), an explicit **1** reads as 1, and **any other value is refused**, never
+defaulted, with `ErrUnsupportedRelayVersion` → `unsupported_relay_version` (**400**, final; a retry
+installs no new binary at either end). This is the fail-closed rule invariant 10 requires:
+interpreting an unknown format under v1's rules would misroute or misattribute the message. The refusal
+is a plain JSON error on the same connection — the peer is **not** disconnected. The relay envelope's
+`resolveWireVersion` and the ACK frame's `resolveAckWireVersion` **coexist** in `internal/relay` under
+distinct names, sentinels and wire codes (RELAY-53) — two codes let a peer operator read *which* frame
+the far end could not parse — rather than being collapsed into one.
 
 **`timestamp_unix_ms` is PROVENANCE and must NEVER become the local `store.Message.SentAt`.**
 `store.Message.VisibleTo` compares `SentAt` against an agent's **enrolment instant** — "you do not

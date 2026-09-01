@@ -103,6 +103,23 @@ const (
 	// parse, rather than having to guess. A follow-up may collapse them if an
 	// operator would rather read one string.
 	CodeUnsupportedAckVersion = "unsupported_ack_version"
+
+	// CodeUnsupportedRelayVersion (400) is CodeUnsupportedAckVersion's twin for
+	// the RELAY ENVELOPE (RELAY-23): the envelope declares a relay wire-protocol
+	// version this bus does not implement (ErrUnsupportedRelayVersion,
+	// message.go). Nothing was interpreted beyond the version itself — an
+	// unrecognised version is refused, never defaulted (invariant 10).
+	//
+	// It is a SEPARATE code from CodeUnsupportedAckVersion on purpose, and
+	// RELAY-53 CONFIRMED that separation rather than collapsing it: the two
+	// resolvers coexist in this package under distinct names (resolveWireVersion /
+	// resolveAckWireVersion) with distinct sentinels and distinct codes, so a peer
+	// operator reads WHICH FRAME the far end could not parse. It is FINAL and a
+	// 400, never a 503, for the identical reasons the ACK code is: a retry installs
+	// no new binary at either end, and failJSON puts only this code on the wire, so
+	// a code pointing at a malformed field would be the entire — and entirely wrong
+	// — diagnosis the far-end operator ever sees.
+	CodeUnsupportedRelayVersion = "unsupported_relay_version"
 )
 
 // ErrPeerRejected is what an AcceptPeer callback returns to DECLINE a peer that

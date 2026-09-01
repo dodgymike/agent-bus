@@ -1282,6 +1282,7 @@ here rather than left to the code.
 | Method | Path | Auth | Status | Response |
 | --- | --- | --- | --- | --- |
 | `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 404 | `{"error":"unknown_recipient"}` — the relayed message names an agent in **this bus's** namespace that this bus's roster does not hold. **Nothing is written**, and the answer is **FINAL**. `14eafd9` added both the check and this code; before it there was no production `AcceptRelay` callback, and any unclassified callback failure fell into the generic 503 bucket — so this is a **new** classification, not a changed wire answer (no build ever served the 503). |
+| `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 400 | `{"error":"unsupported_relay_version"}` — the envelope's `protocol_version` is a relay wire-protocol version this bus does not implement (`RELAY-23`). Resolved as **check 0** of `ValidateRelayRequest`, before any field it governs — an **absent** value reads as 1, an unrecognised one is **REFUSED, never defaulted** (invariant 10). **FINAL** (a retry installs no new binary) and the peer is **not** disconnected. Distinct from the ACK frame's `unsupported_ack_version` on purpose (`RELAY-53`): two codes let an operator read *which* frame the far end could not parse. |
 
 **`Nothing is written` is a durability claim.** `relay.Acceptor.Accept` asks the roster *before* the
 durable write, so a name nobody holds costs this bus nothing permanent — an id admitted by anything

@@ -2634,7 +2634,7 @@ entry in this change — invariant 7 binds the task that adds the ROUTE, and thi
 `ack.Store.Settle` and `ack.Store.MarkInFlight` exist and are tested but have **no production
 caller** in this build.
 
-## `relay-wire-version = 1` IS NOW SPENT — the peer ACK frame carries it (`ACK-3`, added 2026-08-16)
+## `relay-wire-version = 1` IS NOW SPENT — BOTH peer frames carry it (`ACK-3` 2026-08-16, `RELAY-23` 2026-08-28)
 
 The `relay-wire-version` namespace is a **wire** protocol version, not an on-disk format, and it is
 recorded here because this file is where this project's reserved numbers live and because two agents
@@ -2642,7 +2642,7 @@ bumping it independently would produce two incompatible `v1`s.
 
 | namespace | reserved values | meaning |
 | --- | --- | --- |
-| `relay-wire-version` | `1` — reserved 2026-08-08 (note: *"FEDERATION phase, RELAY-23 will spend this"*), **SPENT by `ACK-3` on 2026-08-16** | The wire-protocol version of the **bus-to-bus peer frames**: the ACK frame at `POST /v1/peer/ack` (`relay.AckWireVersion`, JSON key `protocol_version`) and — when `RELAY-23` lands — the relay envelope at `POST /v1/peer/relay` (`relay.WireVersion`, same key). |
+| `relay-wire-version` | `1` — reserved 2026-08-08 (note: *"FEDERATION phase, RELAY-23 will spend this"*), **SPENT by `ACK-3` on 2026-08-16 and by `RELAY-23` on 2026-08-28** | The wire-protocol version of the **bus-to-bus peer frames**: the ACK frame at `POST /v1/peer/ack` (`relay.AckWireVersion`, JSON key `protocol_version`) and the relay envelope at `POST /v1/peer/relay` (`relay.WireVersion`, same key). Both now carry it; both spend the SAME reserved value 1. |
 
 **ONE reserved value covers BOTH frames, and `ACK-3` did NOT reserve a second.** `ACK-CONTRACT.md`
 §10 rules that the ACK frame and the relay envelope are two frames of one peer protocol and are
@@ -2662,27 +2662,37 @@ constant** — a bump needs a fresh reservation through
   future-format frame into a plausible-looking valid one. On the ACK frame the stakes are higher than
   for an outbox row, because the frame carries a **TERMINAL** outcome and terminal is **absorbing** —
   a v2 frame read under v1's rules could durably settle a message in a way that can never afterwards
-  be corrected. The wire answer is `400 {"error":"unsupported_ack_version"}`.
+  be corrected. On the **relay envelope** the same fail-closed rule applies for a different concrete
+  harm: `resolveWireVersion` (`internal/relay/message.go`) runs as **check 0** of
+  `ValidateRelayRequest`, before any field it governs — including `bus_path` — is read, because
+  interpreting an unknown format under v1's rules would misroute or misattribute the message. The wire
+  answer is `400 {"error":"unsupported_relay_version"}`. Both are 400, not 503, and neither
+  disconnects (invariant 10): a retry installs no new binary at either end.
 - **The literal `1` in the "absent reads as 1" rule must NOT be respelled as the version constant.**
   When the version is bumped to 2 against a fresh reservation, a versionless frame is *still* a v1
   frame — it was encoded by a binary that had never heard of v2 — and spelling it as the constant
   would silently reinterpret every legacy frame as the new format on the day of the bump. That is the
   same defect as defaulting an unrecognised version, arriving by a different door.
 
-### A KNOWN, TEMPORARY DUPLICATION, recorded rather than papered over
+### TWO RESOLVERS THAT COEXIST BY DESIGN — the duplication was RESOLVED, not collapsed (`RELAY-23`/`RELAY-53`, 2026-08-28)
 
 `ACK-3` declares `relay.AckWireVersion` and `resolveAckWireVersion` in `internal/relay/ackframe.go`.
-`RELAY-23` declares `relay.WireVersion` and `resolveWireVersion` in `internal/relay/message.go`, and
-was **unmerged** when `ACK-3` landed. Declaring one name in two files of one package produces a build
-break that **git cannot flag as a conflict** — no overlapping text, so the merge succeeds and the
-package stops compiling. The ACK-scoped spelling merges cleanly and compiles. **A follow-up must
-collapse the two onto one constant once `RELAY-23` lands.** The RULES above are what matters and they
-are identical on both sides; only the spellings differ.
+`RELAY-23` (landed 2026-08-28) declares `relay.WireVersion` and `resolveWireVersion` in
+`internal/relay/message.go`. `RELAY-53` was filed against the fear that the two would collide on one
+name and produce a build break **git cannot flag as a conflict**. That collision **did not occur**:
+`ACK-3` named its resolver defensively (`resolveAckWireVersion`, not `resolveWireVersion`) for exactly
+this reason, so the two names, sentinels and codes are already distinct and the package compiles with
+both present.
 
-Likewise `ACK-3` adds `relay.CodeUnsupportedAckVersion = "unsupported_ack_version"` beside
-`RELAY-23`'s `CodeUnsupportedRelayVersion = "unsupported_relay_version"`. Two codes is arguably the
-better answer — a peer operator reads *which frame* the far end could not parse — but if an operator
-would rather read one string, collapsing them is a one-line change.
+**They COEXIST deliberately and are NOT collapsed** (decision recorded in `DECISIONS.md`,
+2026-08-28). The earlier prose here said a follow-up "must collapse the two onto one constant"; that
+obligation is **discharged by the decision NOT to collapse**. Two constants
+(`WireVersion` / `AckWireVersion`, both equal to the one reserved value 1), two sentinels
+(`ErrUnsupportedRelayVersion` / `ErrUnsupportedAckVersion`) and two wire codes
+(`CodeUnsupportedRelayVersion = "unsupported_relay_version"` /
+`CodeUnsupportedAckVersion = "unsupported_ack_version"`) let a peer operator read **which frame** the
+far end could not parse, and let the two frames of the protocol version independently in future. The
+RULES above are identical on both sides; only the spellings differ, and that difference is the point.
 
 ---
 
