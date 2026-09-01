@@ -9,9 +9,9 @@ import (
 	"github.com/dodgymike/agent-bus/client"
 )
 
-// conversationCommand is the `conversation` command group. Today it has one
-// subcommand, `create` (CONV-CREATE-CLI); membership change and send-by-id are
-// separate tasks and land as further subcommands here.
+// conversationCommand is the `conversation` command group. It has two
+// subcommands: `create` (CONV-CREATE-CLI) and `send` (CONV-SEND-BY-ID);
+// membership change is a separate task and lands as a further subcommand here.
 func conversationCommand() command {
 	return command{
 		name:    "conversation",
@@ -20,9 +20,12 @@ func conversationCommand() command {
 
 USAGE
   agent-busctl conversation create --recipient <id> [--recipient <id> ...] [flags]
+  agent-busctl conversation send <conversation-id> --body <text> [flags]
 
 SUBCOMMANDS
   create   mint a new conversation with a recipient list and an optional name
+  send     send one message to a conversation by its id; the bus resolves who
+           the members are, so you do not track the participants yourself
 
 WHAT A CONVERSATION IS
   A server-minted, server-tracked, multi-party object. The bus assigns the id
@@ -31,7 +34,8 @@ WHAT A CONVERSATION IS
   making the request. You address the conversation later by that id instead of
   tracking every participant yourself.
 
-  Run ` + "`agent-busctl conversation create --help`" + ` for the create flags.
+  Run ` + "`agent-busctl conversation create --help`" + ` or
+  ` + "`agent-busctl conversation send --help`" + ` for each subcommand's flags.
 
 EXIT CODES
   0 ok                          5 the bus is unreachable
@@ -72,12 +76,14 @@ func runConversation(ctx context.Context, env *cliEnv, args []string) error {
 	switch action {
 	case "create":
 		return runConversationCreate(ctx, env, operands)
+	case "send":
+		return runConversationSend(ctx, env, operands)
 	default:
 		return &client.Error{
 			Kind:    client.KindUsage,
 			Op:      "conversation",
 			Message: fmt.Sprintf("unknown subcommand %q", action),
-			Remedy:  "known subcommands: create",
+			Remedy:  "known subcommands: create, send",
 		}
 	}
 }
@@ -231,4 +237,203 @@ func emitConversationResult(env *cliEnv, res client.ConversationResult) error {
 			fmt.Fprintf(w, "  note       replayed — the bus had already created this conversation under this key, so nothing was minted and this is the ORIGINAL record\n")
 		}
 	})
+}
+
+func conversationSendCommandHelp() string {
+	return `agent-busctl conversation send — send one message to a conversation by id.
+
+USAGE
+  agent-busctl conversation send <conversation-id> --body <text> [flags]
+  agent-busctl conversation send <conversation-id> [body] [flags]
+  echo 'hello' | agent-busctl conversation send <conversation-id>
+
+WHAT IT DOES
+  Sends ONE message to a conversation, addressing it by the id the bus returned
+  from ` + "`agent-busctl conversation create`" + `. The BUS resolves who the members are
+  at send time and delivers to each of them — you do NOT enumerate or track the
+  participants. Returns only once the bus has made the message DURABLE
+  (invariant 4).
+
+  Only a MEMBER of the conversation may send to it (the creator or one of the
+  recipients). A conversation you are not a member of, and one that does not
+  exist, both answer the same way, so a non-member cannot tell them apart.
+
+  You do NOT receive your own message back — the bus excludes a sender from its
+  own copy, exactly as for a direct message. Every OTHER member receives it.
+
+  A conversation has at most 64 members. A message to a larger conversation is
+  refused (its membership exceeds the durable recipient bound).
+
+WHERE THE BODY COMES FROM
+  Exactly ONE source, and it is an error to give two:
+
+    --body <text>           the body as a single string argument
+    a positional argument   agent-busctl conversation send <id> 'hello' (quote it)
+    --file <path>           read the body from a file; '-' means stdin
+    --stdin                 read the body from stdin
+    none of them            stdin is read anyway when it is a pipe or a redirect
+
+  A body is sent VERBATIM — every byte, including a trailing newline. An EMPTY
+  body is refused locally, exit 2. The limit is 65536 bytes DECODED.
+
+FLAGS
+  --body <text>            the message body as a single string
+  --file <path>            read the body from a file ('-' is stdin)
+  --stdin                  read the body from stdin
+  --idempotency-key <key>  retry a specific earlier send under its own key
+
+IDEMPOTENCY — HOW TO RETRY SAFELY
+  Every send carries an idempotency key. Omit --idempotency-key and one fresh
+  random key is minted for the whole invocation and reused across both legs of
+  the handshake and every internal transport retry, so a send that is retried
+  inside agent-busctl can never become two messages. The key is always printed
+  back.
+
+  Same key + byte-identical body = a legitimate retry: the bus returns the
+  ORIGINAL result, re-applies nothing, and the output says "replayed"; exit 0.
+  Same key + DIFFERENT body = a protocol violation: the bus answers 409, rejects
+  and logs it, and does NOT drop the connection (invariant 10). Use a fresh key
+  for new content.
+
+OUTPUT
+  Human: the message id, sequence, recipients, timestamp, content hash and key.
+  --json: one object with message_id, seq, from, broadcast, to, sent_at,
+  content_sha256, replayed, idempotency_key, ok.
+
+EXIT CODES
+  0 accepted and durable        5 the bus is unreachable
+  1 internal error              6 the bus reported an error of its own
+  2 bad usage: no conversation   7 the bus refused it (you are not a member, the
+    id, no body, two body sources   conversation does not exist, or a 409: this
+  3 no usable identity             key was used with different content)
+  4 credential rejected         9 the bus has no route: it is older than this client
+`
+}
+
+// runConversationSend sends one message to a conversation by id. The membership
+// is resolved by the bus; this command never enumerates participants.
+func runConversationSend(ctx context.Context, env *cliEnv, args []string) error {
+	fs, diagnostics := newCommandFlagSet("conversation send", env.g)
+	var bodyFlag, file, key string
+	var stdin bool
+	fs.StringVar(&bodyFlag, "body", "", "the message body as a single string")
+	fs.StringVar(&file, "file", "", "read the message body from this file ('-' is stdin)")
+	fs.BoolVar(&stdin, "stdin", false, "read the message body from stdin")
+	fs.StringVar(&key, "idempotency-key", "", "retry a specific earlier send under its own key")
+
+	rest, err := parseWithPositionals(fs, args)
+	if err != nil {
+		if err == flagErrHelp {
+			// `conversation send --help` prints the send help, not the group's.
+			fmt.Fprint(env.stdout, conversationSendCommandHelp())
+			return printedHelp{}
+		}
+		return flagError("agent-busctl conversation send", diagnostics, err)
+	}
+	env.out.json = env.g.json
+
+	if len(rest) == 0 {
+		return &client.Error{
+			Kind:    client.KindUsage,
+			Op:      "agent-busctl conversation send",
+			Message: "no conversation id",
+			Remedy:  "pass the conversation id as the first argument: `agent-busctl conversation send <conversation-id> --body '…'`; create one with `agent-busctl conversation create`",
+		}
+	}
+	conversationID := rest[0]
+	positional := rest[1:]
+
+	body, err := resolveConversationSendBody(ctx, env, bodyFlag, positional, file, stdin)
+	if err != nil {
+		return err
+	}
+
+	c, err := env.client()
+	if err != nil {
+		return err
+	}
+	res, err := c.SendToConversation(ctx, client.ConversationSendOptions{
+		ConversationID: conversationID,
+		Body:           body,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return err
+	}
+	return emitSendResult(env, res)
+}
+
+// resolveConversationSendBody resolves the body from exactly one source, failing
+// if two are named. It mirrors bodySource.read but adds the --body flag, which
+// `send` and `broadcast` do not carry, so it is kept local rather than pushed
+// into the shared bodySource.
+func resolveConversationSendBody(ctx context.Context, env *cliEnv, bodyFlag string, positional []string, file string, stdin bool) ([]byte, error) {
+	const op = "agent-busctl conversation send"
+
+	if len(positional) > 1 {
+		// A body is bytes; silently concatenating argv would send something the
+		// caller did not write.
+		return nil, &client.Error{
+			Kind:    client.KindUsage,
+			Op:      op,
+			Message: fmt.Sprintf("unexpected argument %q after the message body", positional[1]),
+			Remedy:  "quote the whole body as ONE argument, or use --body '…', or pipe it",
+		}
+	}
+
+	named := make([]string, 0, 4)
+	if bodyFlag != "" {
+		named = append(named, "--body")
+	}
+	if len(positional) == 1 {
+		named = append(named, "a positional argument")
+	}
+	if file != "" {
+		named = append(named, "--file")
+	}
+	if stdin {
+		named = append(named, "--stdin")
+	}
+	if len(named) > 1 {
+		return nil, &client.Error{
+			Kind:    client.KindUsage,
+			Op:      op,
+			Message: "the message body was given twice: " + strings.Join(named, " and "),
+			Remedy:  "give exactly one of: --body '…', a quoted positional body, --file <path>, or --stdin",
+		}
+	}
+
+	var (
+		body []byte
+		err  error
+	)
+	switch {
+	case bodyFlag != "":
+		body = []byte(bodyFlag)
+	case len(positional) == 1:
+		body = []byte(positional[0])
+	case file != "" && file != "-":
+		body, err = readBodyFile(ctx, op, file)
+	default:
+		// --stdin, --file -, or nothing at all. "Nothing at all" reads stdin too,
+		// which is what makes `echo hi | agent-busctl conversation send <id>` compose;
+		// a real terminal is announced first so the command does not appear to hang.
+		if env.stdinIsTTY {
+			fmt.Fprintf(env.stderr, "agent-busctl: reading the message body from the terminal; end with Ctrl-D\n")
+		}
+		body, err = readBodyStream(ctx, op, env.stdin, "stdin")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if len(body) == 0 {
+		return nil, &client.Error{
+			Kind:    client.KindUsage,
+			Op:      op,
+			Message: "the message body is empty",
+			Remedy:  "pass a non-empty body with --body '…', as a quoted argument, with --file <path>, or on stdin; an empty send is refused rather than delivered",
+		}
+	}
+	return body, nil
 }

@@ -912,8 +912,8 @@ the connection; use a fresh key to create a genuinely different conversation.
 
 Once you have the id, address the conversation as a unit going forward rather than re-listing
 recipients — `agent-busctl conversation create --help` covers the full flag and output reference.
-(Sending a message TO a conversation id is a separate, later capability — `CONV-SEND-BY-ID`; today
-`conversation create` only mints the record.)
+To send a message TO the conversation, use `agent-busctl conversation send <conversation-id>`
+(`CONV-SEND-BY-ID`), documented in the next section.
 
 ```
 $ agent-busctl conversation create --recipient busA.reviewer --recipient busA.security --name rollout
@@ -929,6 +929,51 @@ Exit codes: `0` created (or replayed under the same key), `1` internal error, `2
 `--recipient`), `3` no usable identity, `4` credential rejected, `5` bus unreachable, `6` bus
 reported its own error, `7` the bus refused it (`409` — this key was already used for a different
 conversation), `9` the bus has no `/v1/conversations` route — it is older than this client.
+
+## Send to a conversation: `agent-busctl conversation send` (`CONV-SEND-BY-ID`, added 2026-08-31)
+
+Send ONE message to a conversation by its id. **The bus resolves who the members are at send time —
+you do not enumerate or track the participants.** That is the whole point: you send "using the uuid
+rather than tracking the other participants".
+
+```bash
+agent-busctl conversation send <bus-id>.<uuid> --body 'ship it'
+echo 'ship it' | agent-busctl conversation send <bus-id>.<uuid>          # or pipe the body
+agent-busctl conversation send <bus-id>.<uuid> --body 'ship it' --json
+```
+
+`<conversation-id>` is the `<bus-id>.<uuid-v4>` the bus returned from `agent-busctl conversation
+create`. The body comes from exactly ONE source — `--body <text>`, a quoted positional argument,
+`--file <path>`, or stdin — an empty body is refused (exit `2`) and the limit is 65536 bytes; giving
+two sources is an error. `agent-busctl conversation send` returns only once the bus has made the
+message **durable** (invariant 4).
+
+**Who may send, and who receives.** Only a **member** of the conversation may send to it — the
+creator or one of the recipients. A conversation you are not a member of, and one that does not
+exist, both answer the **same** way (`404`), so a non-member cannot even tell whether the
+conversation exists. You do **not** receive your own message back — the bus excludes a sender from
+its own copy, exactly as a direct `send` does — but every OTHER member receives it on
+`agent-busctl wait`/`watch`. A conversation has at most **64 members** (the creator plus its
+recipients, deduplicated); a send to a larger conversation is refused.
+
+The message rides the ordinary durable message path: it is delivered to each member and recorded with
+the **expanded member list** as its recipients, frozen at send time — which is exactly the audience
+that authorised it (`DECISIONS.md`, `CONV-SEND-BY-ID`). It is **signed**, like every message, and the
+signature covers that member list; `agent-busctl` handles the two-step (resolve membership, sign,
+send) for you, so you never see or type the participants.
+
+**Retrying safely (invariant 10).** Every send carries an idempotency key: omit `--idempotency-key`
+and one fresh random key is minted for the whole invocation and reused across both legs of the
+handshake and every internal transport retry, so a retried send can never become two messages. Same
+key + byte-identical body is a legitimate retry — the bus returns the ORIGINAL result, the output
+says `replayed`, exit `0`. Same key + DIFFERENT body is a protocol violation — `409`, rejected and
+logged, the connection kept; use a fresh key for new content.
+
+Exit codes: `0` accepted (or replayed under the same key), `1` internal error, `2` bad usage (no
+conversation id, no body, two body sources), `3` no usable identity, `4` credential rejected, `5`
+bus unreachable, `6` bus reported its own error, `7` the bus refused it (you are not a member, the
+conversation does not exist, or a `409`: the key was used with different content), `9` the bus has no
+`/v1/conversations/send` route — it is older than this client.
 
 ## Sending: `agent-busctl send` (and `agent-busctl broadcast`, which is BROKEN)
 

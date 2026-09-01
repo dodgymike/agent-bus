@@ -6618,3 +6618,56 @@ the live-CLI proof recipe, the known enrol flake (23d4e264), and salvage instruc
 worktree is lost. Committed by the orchestrator directly (not integrator) as a durability measure under
 token pressure — a standalone doc, no code. security — SKIPPED under the docs-and-tests carve-out
 (docs-only, no guard/control-plane file); paths: CONV-GOLDEN-PATH-HANDOVER.md, AGENT_LOG.md.
+
+## 2026-08-31 — CONV-SEND-BY-ID: address a conversation by id to send (route + CLI + protocol, full chain)
+
+- **Task:** `CONV-SEND-BY-ID` (`ce8bff7b-0717-4c03-b4f7-e93e55c82288`), the final golden-path step —
+  "clients send using the uuid rather than tracking the other participants." Built end-to-end by
+  `feature-runner` (implemented inline).
+- **What shipped:** a message addressed by conversation id, resolved to the current membership
+  server-side and delivered through the existing hub fan-out. New surface:
+  - `internal/hub/conversationsend.go` — `Hub.SendConversation` + `ConversationSendRequest`: a thin
+    wrapper over the SAME `publish` path `Send` uses, taking an explicit recipient SET. No second
+    delivery mechanism (invariants 4, 6, 10 hold by construction).
+  - `internal/httpapi/conversationsend.go` — `POST /v1/conversations/mint` (resolve + participant
+    check + reserve id/seq via `hub.Mint`, returns the member list to sign) and `POST
+    /v1/conversations/send` (re-resolve membership at send time, `checkSignedMint` shape policy,
+    publish). Participant-only; a non-member and an unknown id BOTH return 404 (leak-less). New
+    `ConversationLookup` interface + `Options.ConversationLookup`, registered only when the lookup
+    AND a hub are wired; server.go + cmd/agent-bus/main.go wire the same `*store.ConversationStore`.
+  - `client/conversationsend.go` — `Client.SendToConversation`: reserve (learn membership) → sign →
+    send, one idempotency key across both legs.
+  - `cmd/agent-busctl/conversation.go` — `conversation send <conversation-id> [--body|positional|
+    --file|--stdin] [--idempotency-key]`, `--json`, exit codes 0-9, never interactive.
+- **Decision** (DECISIONS.md 2026-08-31, posted to the task journal early as `kind=response`):
+  participant-only with a 404 (not 403) for non-members; the durable record stores the EXPANDED
+  recipient list frozen at send time (the deliberate opposite of a broadcast's flag — a conversation
+  audience is explicit and bounded, and the send-time membership is what authorised delivery);
+  bounded by `store.MaxRecipients` = 64.
+- **Invariants read in full:** 1 (server mints message id/seq; the recipient set comes from the
+  durable record, never the request), 2 (every member a fully-qualified `<bus>.<agent>`), 3
+  (both routes off the `authmw.go` allow-list, default-deny; participant check restricts a send to a
+  member), 6 (body rides the message path; the conversation record holds routing metadata only), 7
+  (CLI + AGENT_PROTOCOL.md in the same task; client package embeddable), 10 (idempotency reused from
+  the send path — three cases, none collapsed, no disconnect on the 409).
+- **Verification:**
+  - `bash scripts/proof-check.sh "go test -race -run 'TestConversationSendByID' ./internal/httpapi
+    ./internal/hub && grep -q 'conversation send' AGENT_PROTOCOL.md && echo CONV_SEND_OK"` →
+    `verdict=PASS class=test,file-assertion tests_run=11 top_level=2 skipped=0 failed=0`.
+  - `go build ./...` green, `go vet` clean, `gofmt -l` on every changed file EMPTY.
+  - Doc proofs (`scripts/doc-check.sh section`), each confirmed RED before / GREEN after against HEAD
+    copies: AGENT_PROTOCOL.md "Send to a conversation…" (needles `conversation send`,
+    `at most **64 members**`); CONTRACTS-HTTP.md "Conversation send routes…" (`/v1/conversations/send`,
+    `store.MaxRecipients`); CONTRACTS-CLI.md "Subcommands (as of 2026-08-02)"
+    (`conversation send <conversation-id>`).
+  - **Live-CLI golden path** (two real agents, real TLS bus on a throwaway `/tmp` dir): built both
+    binaries; primed + minted two invites (bus stopped) + `chmod 0600`; enrolled alice
+    (`bus-…​.alice-1`) and bob (`bus-…​.bob-1`); `conversation create --recipient <bob> --json` →
+    `bus-….0003065f-…`; `conversation send <conv-id> --body 'hello from alice' --json` →
+    `message_id bus-…-5`, `to=[alice,bob]`; bob's `watch --replay` received `bus-…-5`,
+    `from=alice`, body "hello from alice" (signature verified client-side). `CONV_SEND_E2E_OK`.
+  - Full `go test -race ./...` — see the gate note below.
+- **Gates:** reviewer — REQUIRED (new product code). security — REQUIRED (new authenticated route +
+  participant authz + delivery + idempotency; the docs-and-tests-only carve-out does NOT apply). Both
+  run by `feature-runner` before completion; verdicts recorded in the task journal.
+- No commit made by this agent — `feature-runner` writes source only; `integrator` commits.

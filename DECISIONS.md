@@ -8142,3 +8142,49 @@ WAL frames and consumes no `record-type` number, exactly as `"message"` and `"se
 design later needs a new WAL FRAME type, a standalone on-disk file, or a relay wire change, reserve
 from `record-type` / `ondisk-format-version` / `relay-wire-version` at THAT point via the reservations
 API — never by eyeballing the ledger.
+
+## 2026-08-31 — CONV-SEND-BY-ID: address a conversation by id — participant-only, expanded recipient list, one signed multi-recipient message on the existing path
+
+Sending to a conversation id (`CONV-SEND-BY-ID`) resolves the CURRENT membership server-side; the
+client addresses the conversation by its uuid and never enumerates or tracks the participants. Three
+decisions, each with the reasoning the task asked for.
+
+**1. Sender authorisation: participant-only, and a non-member gets 404, not 403.** A send is
+authorised iff the authenticated sender is a MEMBER of the conversation — its creator or one of its
+recipients (invariants 2, 3). A non-member is refused with the SAME `404 conversation not found` a
+nonexistent conversation returns. 404 leaks less than 403: a 403 confirms the conversation exists, so
+a non-member could probe for valid conversation ids it has no business knowing about. The two cases
+are distinguished only in the server log (Debug). The alternative — 403 for a real conversation — was
+rejected because the conversation id must not become an existence oracle. Enforced in
+`internal/httpapi/conversationsend.go` `resolveConversationMembers`, applied on BOTH the mint and the
+send legs.
+
+**2. The durable record stores the EXPANDED recipient list, not a conversation-id reference — the
+deliberate OPPOSITE of a broadcast.** `store.Message.Broadcast` is a FLAG precisely so a broadcast
+does not freeze the roster-at-send-time into the durable record (`internal/store/message.go`). A
+conversation is the opposite case, and the contrast is the whole argument: a conversation's audience
+is EXPLICIT and BOUNDED, and freezing the send-time membership into the signed, auditable record is
+CORRECT, because the membership at send time is exactly what authorised delivery. Storing a bare
+conversation-id reference instead would (a) make the durable message unverifiable on its own — the
+signature covers the recipient SET (`internal/signing/canonical.go`), and a recipient reconstructs
+the signed bytes from the stored `to`; (b) make a delivered message's audience depend on a second,
+mutable object, so the audit trail could no longer say who a past message went to. The expanded list
+stays within `store.MaxRecipients` (**64**, the operative durable bound — NOT
+`signing.MaxRecipients` = 4096; `internal/relay/signed_test.go` asserts store ≤ signing). A
+conversation therefore has at most 64 members (creator plus recipients, de-duplicated); a send whose
+membership would exceed 64 is refused with a clean 400.
+
+**3. Delivery reuses the ONE existing publish path; the send is a two-step like `/v1/mint` +
+`/v1/send`.** A conversation send is ONE directed message whose recipient set is the membership,
+delivered through `hub.SendConversation` — a thin wrapper over the same `hub.publish` fan-out
+`hub.Send` uses (`internal/hub/conversationsend.go`). There is deliberately no second delivery
+mechanism (invariants 4, 6, 10 all hold by construction because there is one write path).
+`store.Message.VisibleTo` already excludes a sender from its own copy, so the sender does not receive
+its own conversation message while every other member does. Because SIGN-6 makes a signature
+mandatory and the bus never verifies it (shape only), the client must SIGN the membership, which
+means the bus must first TELL it the membership: `POST /v1/conversations/mint` resolves the
+conversation, participant-checks, and returns the reservation PLUS the member list to sign; `POST
+/v1/conversations/send` re-resolves the membership server-authoritatively at send time and publishes.
+Membership is fixed at create today (change deferred to a later task), so the mint-time and send-time
+sets agree. Both routes are off the `internal/httpapi/authmw.go` allow-list and authenticate like
+every other messaging route (invariant 3).

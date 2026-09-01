@@ -1477,12 +1477,15 @@ damaged.
 | `ack-status <correlation-key>` | (`ACK-9`, added 2026-08-16) Report the sender-visible delivery status of a message you sent — one row per recipient, `--wait <dur>` to park until it settles | yes — `GET /v1/ack/<correlation-key>` |
 | `ack <message-id>` | (`ACK-15`, added 2026-08-21) Acknowledge a message you RECEIVED: `delivered` by default, `--refuse <class>` for one of the three recipient classes. Signs the canonical acknowledgement bytes with the agent's **messaging** key. **Nothing else can move a row to `delivered`.** | yes — `POST /v1/ack` |
 | `conversation create --recipient <id> [--recipient <id> ...] [--name <label>] [--idempotency-key <key>]` | (`CONV-CREATE-CLI`, added 2026-08-30) Mint a server-tracked, multi-party conversation: the bus mints the id and records the CREATOR as the authenticated caller (invariant 1), never a value the client supplies. `--recipient` is repeatable, 1..64, each a fully-qualified `<bus-id>.<agent-id>` (invariant 2). Idempotent (invariant 10) — see `AGENT_PROTOCOL.md`'s conversations section for the retry contract. | yes — `POST /v1/conversations` |
+| `conversation send <conversation-id> [--body <text>] [body] [--file <path>] [--stdin] [--idempotency-key <key>]` | (`CONV-SEND-BY-ID`, added 2026-08-31) Send ONE message to a conversation by its id; the bus resolves the membership server-side, so the client never enumerates participants. Only a MEMBER (creator or a recipient) may send — a non-member and a nonexistent conversation both `404` (leak-less). Body from exactly one of `--body`/positional/`--file`/`--stdin`; at most 64 members; the sender is excluded from its own copy. Two-step signed send under the hood (resolve→sign→send), idempotent (invariant 10). See `AGENT_PROTOCOL.md`'s "Send to a conversation" section. | yes — `POST /v1/conversations/mint` + `POST /v1/conversations/send` |
 
 **There is no `agent-busctl keygen` and no `agent-busctl trust` subcommand.** `cmd/agent-busctl/root.go`
 registers **fifteen** commands: the fourteen rows above (eleven before `ack-status`, `ACK-9`,
 2026-08-16; twelve before `ack`, `ACK-15`, 2026-08-21; thirteen after `leave`, `AUTH-4`, 2026-08-22;
 fourteen after `conversation`, `CONV-CREATE-CLI`, 2026-08-30) plus `session`, which has its own
-section. **The count above previously said the
+section. The `conversation send` row (`CONV-SEND-BY-ID`, 2026-08-31) adds a SUBCOMMAND, not a new
+command — `conversation` is one registered command with two subcommands (`create`, `send`), so the
+count is unchanged. **The count above previously said the
 table WAS the registry, which it never was** — corrected 2026-08-21 (`ACK-15` reviewer,
 minor/pre-existing). What matters is the claim the paragraph is actually making: `keygen` and `trust`
 are in NEITHER list. This matters because several error remedies in

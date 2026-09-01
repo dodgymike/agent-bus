@@ -565,6 +565,52 @@ over the largest legitimate request (64 recipients × up to 150 bytes each, a 12
 CLI (invariant 7): `agent-busctl conversation create` — see `CONTRACTS-CLI.md`'s Subcommands table
 and `AGENT_PROTOCOL.md`'s conversations section.
 
+## Conversation send routes: `POST /v1/conversations/mint` + `POST /v1/conversations/send` — address a message by conversation id (`CONV-SEND-BY-ID`, added 2026-08-31)
+
+Registered in `internal/httpapi/conversationsend.go`, **only when the composition root wires a
+`ConversationLookup` AND a `Hub`** (`Options.ConversationLookup`, `Options.Hub`) — in `cmd/agent-bus`
+the lookup is the same `*store.ConversationStore` as `Options.Conversations`, so a create and a send
+can never disagree about a conversation's membership. When either is absent the two routes are not
+registered and 404 like any other unserved path.
+
+Send-to-a-conversation is a **two-step, exactly like `/v1/mint` + `/v1/send`**, and for the same
+reason: SIGN-6 requires every message to carry a signature, the signature covers the recipient SET,
+and the bus never verifies it — so the client must SIGN the membership, which means the bus must
+first TELL it the membership. `mint` resolves the conversation, checks the caller is a member, and
+returns the reservation **plus the resolved member list to sign**; `send` re-resolves the membership
+server-authoritatively at send time and publishes one directed multi-recipient message through the
+hub's existing fan-out (`hub.SendConversation`, a thin wrapper over the same `publish` path `Send`
+uses — there is no second delivery mechanism).
+
+The **member set** is the conversation's creator plus its recipients, de-duplicated. The durable
+message record stores that **expanded set** as its `recipients`, frozen at send time — the deliberate
+OPPOSITE of a broadcast (which stores a FLAG to avoid freezing the roster), because for a conversation
+the membership at send time is exactly what authorised delivery (`DECISIONS.md`, `CONV-SEND-BY-ID`).
+The sender is excluded from its own copy by `store.Message.VisibleTo`, so every OTHER member receives
+it. The set is bounded by `store.MaxRecipients` (**64**), not `signing.MaxRecipients`.
+
+**Both routes authenticate**: neither is on the allow-list (`httpapi.UnauthenticatedRoutes()`), so
+both are reachable only after `authMiddleware`'s default-deny resolves a live session (invariant 3).
+
+| Method | Path | Auth | Status | Response |
+| --- | --- | --- | --- | --- |
+| `POST` | `/v1/conversations/mint` | bearer | 201 | `{"message_id":"<bus>-<seq>","seq":<n>,"sender":"<bus>.<agent>","op":"send","conversation_id":"<bus>.<uuid>","recipients":["<bus>.<agent>",...],"expires_at":"<RFC3339Nano UTC>"}`. Resolves the conversation, checks the caller is a MEMBER, reserves the id+sequence (`hub.Mint`, op `send`), and returns the member SET to sign. Request body: `{"conversation_id":"<bus>.<uuid>","idempotency_key":"..."}` — **no sender field** (invariant 1). |
+| `POST` | `/v1/conversations/mint` | bearer | 201 + `Idempotency-Replayed: true` | A re-mint under the same `(sender, op, idempotency_key)` returns the SAME reservation, body byte-identical, allocating nothing (invariant 10). |
+| `POST` | `/v1/conversations/send` | bearer | 201 | `{"message_id":...,"seq":...,"from":...,"broadcast":false,"to":[<the member set>],"sent_at":...,"content_sha256":...}` — the same `SendResponseBody` `/v1/send` returns. Request body: `{"conversation_id","body"(base64),"idempotency_key","sender","message_id","seq","timestamp_ms","signature"}` — the same signed fields as `/v1/send` with `to` replaced by `conversation_id`; **there is no `recipients` field** — the bus resolves the member set from the conversation (invariant 1). |
+| `POST` | `/v1/conversations/send` | bearer | 201 + `Idempotency-Replayed: true` | Same key + byte-identical body is a legitimate retry: the ORIGINAL result from the applied-key table, nothing re-applied (invariant 10). |
+| both | `/v1/conversations/{mint,send}` | bearer | 404 | The conversation does not exist, **or** the caller is not a member. The two are **byte-identical** on purpose: 404 leaks less than 403, so a non-member cannot probe for conversation ids it is not in (invariants 1–3; the distinction is logged server-side at Debug). |
+| `POST` | `/v1/conversations/send` | bearer | 400 | The membership exceeds `store.MaxRecipients` (64) — a 64-recipient conversation whose creator is a 65th member cannot be delivered as one message; **or** the usual signed-send shape failures (`checkSignedMint`): signature not base64, not 64 bytes, absent; `message_id`/`seq` malformed or from another bus; `timestamp_ms` ≤ 0. |
+| `POST` | `/v1/conversations/send` | bearer | 403 | `checkSignedMint` check (d): the `sender` field is not the authenticated caller. As on `/v1/send`, a well-formed id for a DIFFERENT agent also drops the connection (invariant 10's replay clause); a malformed claim keeps it. |
+| `POST` | `/v1/conversations/send` | bearer | 404/409/503 | The recipient/idempotency/durability outcomes of the underlying send (`writeHubError`): `ErrUnknownRecipient` (a member left the roster) → 404; `ErrIdempotencyKeyReused`/`ErrUnknownMint`/`ErrMintMismatch` → 409; capacity/`ErrNotDurable` → 503. |
+
+The mint body is capped at `httpapi.MaxConversationRequestBytes` (32 KiB) and the send body at
+`httpapi.MaxMessageRequestBytes` (128 KiB) before the decoder. `ConversationMintRequestBody` /
+`ConversationMintResponseBody` / `ConversationSendRequestBody` live in
+`internal/httpapi/conversationsend.go`.
+
+CLI (invariant 7): `agent-busctl conversation send` — see `CONTRACTS-CLI.md`'s Subcommands table and
+`AGENT_PROTOCOL.md`'s "Send to a conversation" section.
+
 ## Headers
 
 | Header | Direction | Rule |

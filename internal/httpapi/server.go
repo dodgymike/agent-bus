@@ -186,6 +186,17 @@ type Options struct {
 	// interface-typed local set only on the branch that built one.
 	Conversations ConversationCreator
 
+	// ConversationLookup resolves a conversation by id for the SEND surface
+	// (CONV-SEND-BY-ID). When it AND Hub are both non-nil, POST
+	// /v1/conversations/mint and POST /v1/conversations/send are registered. It is
+	// satisfied by the same *store.ConversationStore as Conversations, and
+	// cmd/agent-bus wires both from one store so a create and a send can never
+	// disagree about a conversation's membership.
+	//
+	// It carries the SAME typed-nil trap as Conversations: pass a store or pass
+	// nothing, never a nil-valued *store.ConversationStore.
+	ConversationLookup ConversationLookup
+
 	// AckTransit forwards a terminal outcome ONE HOP BACK toward the origin bus,
 	// for an acknowledgement this bus holds no durable row for because the
 	// message was RELAYED here (ACK-CONTRACT.md §9.4, ACK-5). POST /v1/ack calls
@@ -314,6 +325,10 @@ type Server struct {
 	// build does not serve the conversation surface; see Options.Conversations.
 	conversations ConversationCreator
 
+	// conversationLookup resolves a conversation by id for the send surface, or
+	// nil when this build does not serve it; see Options.ConversationLookup.
+	conversationLookup ConversationLookup
+
 	// peerPrincipals resolves an inbound peer bus's client certificate; see
 	// Options.PeerPrincipals. A nil value means this bus can authorise no peer
 	// bus, and RequirePeerPrincipal refuses everything.
@@ -384,6 +399,10 @@ func New(opts Options) *Server {
 		// have none — a stand-in would be a route that refuses, i.e. a claim the
 		// surface exists.
 		conversations: opts.Conversations,
+		// Wired from the same store as conversations; the send routes register
+		// only when this AND the hub are present. Nil means the send surface is
+		// not served (invariant 7's missing half would be a route that refuses).
+		conversationLookup: opts.ConversationLookup,
 		// NO DEFAULT: a stand-in that answered nil would report a terminal
 		// outcome as carried while nothing left this bus, which is the silent
 		// loss the whole ACK plane exists to prevent. Nil means 501, loudly.
@@ -543,6 +562,18 @@ func New(opts Options) *Server {
 	// unauthenticated caller could not create a conversation "as" anyone.
 	if s.conversations != nil {
 		s.route(mux, RouteConversations, s.handleConversationCreate)
+	}
+
+	// The SEND-TO-A-CONVERSATION surface (CONV-SEND-BY-ID): mint a reservation
+	// against a conversation's membership, then send one signed multi-recipient
+	// message to it. Registered only when a conversation resolver AND a hub are
+	// both present — the mint reserves a sequence and the send publishes, both of
+	// which need the hub. Both patterns authenticate by being registered behind
+	// the default-deny middleware and are NOT on unauthenticatedRoutes; the
+	// participant check inside the handlers is what restricts a send to a member.
+	if s.conversationLookup != nil && s.hub != nil {
+		s.route(mux, RouteConversationMint, s.handleConversationMint)
+		s.route(mux, RouteConversationSend, s.handleConversationSend)
 	}
 
 	// The FEDERATION ingress (RELAY-20). Registered only when Options.Peer

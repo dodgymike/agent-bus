@@ -1763,6 +1763,13 @@ func run(cfg Config) error {
 		// authenticates like every other messaging route and takes the creator
 		// from the session, never a request field (invariant 1).
 		Conversations: conversationStore,
+		// Registers POST /v1/conversations/mint and POST /v1/conversations/send
+		// (CONV-SEND-BY-ID): address a message by conversation id and let the bus
+		// resolve the membership at send time. It is the SAME *store.ConversationStore
+		// as Conversations above, so a create and a send can never disagree about a
+		// conversation's members. The send routes register only alongside the hub,
+		// which mints the sequence and publishes the message.
+		ConversationLookup: conversationStore,
 		// The BACKWARD hop for a TRANSIT acknowledgement (ACK-5,
 		// ACK-CONTRACT.md §9.4): a local recipient acknowledging a message that
 		// was RELAYED here settles no row on this bus, so POST /v1/ack carries
