@@ -6810,3 +6810,14 @@ the pre-RELAY-17 "no pin source, ErrUnpeeredBus by construction, nothing served"
   no docs-and-tests-only carve-out — product code changed). Both run by `feature-runner` before
   completion; verdicts in the task journal.
 - No commit made by this agent — source only; `integrator` commits.
+
+## 2026-09-03 — 52196a49 RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED
+
+hub.Apply's apply-branch discard (a message record that decodes but store.Append refuses — e.g. a
+duplicate sequence at recovery) was logged loudly but NOT counted, so noteRecoveredIdentities' INCOMPLETE
+INPUT summary silently omitted it. Added `h.unappliableMessages` counter (incremented once in the correct
+branch, alongside the existing loud log), and roster.go now reports `unappliable_message_records` as its
+own field (kept separate from undecodable_message_records — these decoded). Invariants 6 (discard logged
+AND counted) + 5. reviewer PASS + security PASS (2026-09-03). Test `discard_applydiscard_test.go`
+(TestApplyDiscardIsCountedTowardIncompleteInputSummary, RED-before). Reconciled onto HEAD (hub.go
+3-way-merged with POLL-CONCURRENT-WAITERS). security carve-out N/A — production hub code, security ran.

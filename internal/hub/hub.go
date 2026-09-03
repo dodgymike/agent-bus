@@ -506,6 +506,22 @@ type Hub struct {
 	// recovered map and opposite in what they mean.
 	undecodableMessages int
 
+	// unappliableMessages counts the message records recovery DISCARDED because
+	// they DECODED but store.Append refused them — a DUPLICATE SEQUENCE, the one
+	// store.Append error replay can reach (see Apply). Written only during Open,
+	// before anything can reach the hub.
+	//
+	// It is SEPARATE from undecodableMessages on purpose. Those records did not
+	// decode; these did. Folding an apply-discard into the undecodable count would
+	// claim a record-schema problem that did not happen and misdirect an operator
+	// reading the INCOMPLETE INPUT summary. But it feeds the SAME summary, because
+	// an apply-discard drops a record BEFORE its ids are harvested (the harvest
+	// runs only after store.Append succeeds), so the id-reuse check's input is
+	// incomplete for exactly the reason that summary exists to report. Without
+	// this counter that incompleteness is invisible and the id-reuse detector
+	// reports a clean result having silently skipped the discarded record's ids.
+	unappliableMessages int
+
 	// replayedSeqFloor is the highest floor claimed by a SeqFloorRecordKind
 	// record replayed from disk (see mint.go). Written only during Open, by
 	// applySeqFloor, before anything can reach the hub.
@@ -1132,6 +1148,15 @@ func (h *Hub) Apply(c wal.Committed) error {
 	// window.
 	m.Pos = c.CommitIndex
 	if err := h.store.Append(m); err != nil {
+		// COUNTED, not merely logged. This record decoded, so its ids WOULD have
+		// been harvested below — but the harvest runs only after a successful
+		// Append, so discarding here drops a record the id-reuse check never sees.
+		// noteRecoveredIdentities folds this count into its INCOMPLETE INPUT
+		// summary so that skip is reported rather than silent (invariant 6). It is
+		// deliberately a DIFFERENT counter from undecodableMessages: these records
+		// decoded, and inflating the undecodable count would claim a record-schema
+		// problem that did not happen.
+		h.unappliableMessages++
 		h.log.Error("DISCARDING a message record that could not be applied during recovery; it is not in this bus's history and will not be delivered",
 			"prepare_index", c.PrepareIndex,
 			"message_id", m.ID,

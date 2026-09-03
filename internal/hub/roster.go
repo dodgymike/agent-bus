@@ -348,9 +348,19 @@ func (h *Hub) noteRecoveredIdentities() {
 	// understands 2, so every one of them is refused by store.Decode — the exact
 	// start on which this detector is supposed to fire, and on which it would
 	// otherwise report success having examined nothing.
-	if h.undecodableMessages > 0 {
-		h.log.Error("THE AGENT-ID REUSE CHECK RAN ON INCOMPLETE INPUT: message records were discarded during recovery, so the ids they named were never harvested and an id being reused could not be detected. Treat a clean result below as UNPROVEN, not as an all-clear. On the first start after a store record-schema change this is expected and every message record is discarded; at any other time it means message records were damaged",
+	//
+	// BOTH discard classes make the input incomplete, and each has its OWN count.
+	// An UNDECODABLE record contributed no ids because store.Decode refused it; an
+	// UNAPPLIABLE record decoded but store.Append refused it, and its ids were
+	// never harvested because the harvest runs only after a successful Append (see
+	// Apply). They are reported as separate fields rather than summed because they
+	// mean different things to an operator — a record-schema change versus a
+	// duplicated sequence — but either one alone makes a clean result below
+	// UNPROVEN.
+	if h.undecodableMessages > 0 || h.unappliableMessages > 0 {
+		h.log.Error("THE AGENT-ID REUSE CHECK RAN ON INCOMPLETE INPUT: message records were discarded during recovery, so the ids they named were never harvested and an id being reused could not be detected. Treat a clean result below as UNPROVEN, not as an all-clear. Records that would not DECODE (undecodable_message_records) are expected on the first start after a store record-schema change, when every message record is discarded; records that decoded but could not be APPLIED (unappliable_message_records) mean a sequence was written to the log twice (invariant 1) and are never expected",
 			"undecodable_message_records", h.undecodableMessages,
+			"unappliable_message_records", h.unappliableMessages,
 			"ids_recovered", len(h.recovered),
 		)
 	}
