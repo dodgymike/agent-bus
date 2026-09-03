@@ -6712,3 +6712,76 @@ CONTROL-PLANE-adjacent wire versioning / downgrade surface; not docs-and-tests-o
 DONE (PROTOCOL.md §10, CONTRACTS-ONDISK.md wire-version section, CONTRACTS-HTTP.md peer/relay table).
 
 No commit by this agent — feature-runner writes source only; integrator commits.
+
+## 2026-09-02 — Reconcile three stale relay-trust doc claims with shipped PeerStore-backed CrossBusTrust (documentation)
+
+Doc-only reconciliation across three tasks — `45af210c` (PROTOCOL.md §8.5), `6a4f6f47`
+(CONTRACTS-AGENT.md fed-smoke.sh wording), `4988156c` / RELAY-FU-DOCGO-CROSSBUSTRUST-STALE
+(`internal/relay/doc.go`) — all traced to RELAY-17 landing PeerStore as the real CrossBusTrust
+implementation, and RELAY-20/RELAY-24 mounting and wiring relay ingest, after docs kept describing
+the pre-RELAY-17 "no pin source, ErrUnpeeredBus by construction, nothing served" state.
+
+- **Read against shipped code**, not summaries: `internal/relay/trust.go` (`var _ CrossBusTrust =
+  (*PeerStore)(nil)`, `PinnedBusSigningKeys`, `AttestedSignerKey`), `internal/relay/peerstore.go`
+  (`BusTrustRecord.SigningKeys`, the durable withdrawal floor), `cmd/agent-bus/peer.go`
+  (`agent-bus peer add -signing-key` writes the pin, off-wire), `cmd/agent-bus/relaywiring.go:1362-1367`
+  (`relay.NewRelayHandler(relay.RelayConfig{..., Trust: opts.Peers, ...})`), `cmd/agent-bus/main.go:525`
+  (`openBusCertMaterial` on the startup path) and `:745` (`relay.NewPeerStore` at startup),
+  `cmd/agent-bus/main.go:1542-1606` (`newFederation` builds and mounts the peer surface whenever
+  `bindablePeerCount(peerStore) > 0`), `internal/httpapi/peermount.go` (RELAY-20's one mount site,
+  gated by `RequirePeerPrincipal`). Confirmed `TestHandshakeHandlerIsNotWiredIntoAnyMux` (cited by the
+  stale PROTOCOL.md text) was retired at RELAY-18 (`internal/relay/guards_test.go:231`).
+- **PROTOCOL.md §8.5** ("SIGN-7 shipped the mechanism, and it is CODE ONLY — nothing below is served",
+  the "KNOWN GAP — no pin can be established" paragraph) and **§10**'s header/preamble ("NOT SERVED",
+  "registers nothing and the peer paths answer 404") corrected to describe the shipped pin source
+  (`BusTrustRecord.SigningKeys`, operator-written via `agent-bus peer add -signing-key`, never on the
+  peering wire) and that relay ingest **is** served once an operator configures at least one bindable
+  peer — not live unconditionally, and not "not served" either.
+- **CONTRACTS-AGENT.md** line 29 (`scripts/fed-smoke.sh` row): NOT already-satisfied by RELAY-51 —
+  the row still read "it still fails loudly at the first UNAVAILABLE step", which matches the task's
+  proof regex (`fails loudly at the first unavailable step`, case-insensitive) even though the
+  surrounding sentence was accurate. Reworded to "aborts loudly the moment a step it needs is missing,
+  but none is missing today" to keep the meaning and drop the literal stale phrase. Confirmed the
+  task's own proof command was RED before (`verdict=FAIL`) and PASS after.
+- **`internal/relay/doc.go`**: corrected the ":148-150" "separate, narrower blocker" paragraph (RELAY-17
+  is done; PeerStore is the CrossBusTrust implementation), the ":295" sentence's first clause only
+  ("ships NO implementation of CrossBusTrust" → ships PeerStore as its implementation; left "and no
+  [separate] default, deliberately" as still true and untouched), and gap 8's opening line + conclusion
+  (closed by RELAY-10 + RELAY-17; kept the still-valid TLS-key-vs-signing-key distinction but dropped
+  the superseded "INVITE-PEERGUARD must add the key to the wire" remedy, since RELAY-10 shipped a
+  different, already-live mechanism — an operator-configured durable record, deliberately off-wire).
+  Comment-only; no behaviour change.
+- **Invariants read:** 1 (server-minted ids/seq unaffected — not touched by this doc change, checked
+  because relay ingest text references message-id minting), 2 (fully-qualified agent ids in the
+  relayed envelope — unchanged), 3 (peer routes are NOT on the unauthenticated allow-list — verified
+  against `internal/httpapi/authmw.go` before writing "gated behind an authenticated adjacent-bus
+  principal"), 9 (Ed25519 signing/verification claims in §8.5 — verified against `crypto/ed25519`
+  usage in trust.go, not asserted from memory), 10 (idempotency/duplicate-suppression prose in §10 and
+  doc.go's "Key reuse is REJECT-AND-LOG" section — read but NOT edited, and the guard test that
+  detects a revived withdrawn-disconnect claim was run and confirmed still green), 11 (mTLS/RELAY-45
+  inbound certificate binding cited as the gate that replaced INVITE-PEERGUARD/MTLS-RELAYGUARD —
+  verified against `internal/httpapi/peermount.go`'s own comment before repeating it).
+- **Verification:**
+  - Task 1 proof: `! grep -qF 'no bus signing key and no certificate fingerprint' PROTOCOL.md && !
+    grep -qF 'registers nothing and the' PROTOCOL.md && grep -qF 'peerstore.go' PROTOCOL.md` —
+    RED before (missing `peerstore.go`, both stale phrases present), GREEN after
+    (`PROTOCOL_RELAY_TRUST_RECONCILED`). `doc-check.sh section` on §8.5 with needle
+    `internal/relay/peerstore.go`: RED on the HEAD copy, PASS after.
+  - Task 2 proof via `proof-check.sh`: `verdict=PASS class=file-assertion exit=0` (was
+    `verdict=FAIL exit=1` on HEAD).
+  - Task 3 proof: `grep -qF 'no implementation of CrossBusTrust exists (RELAY-17 owns'
+    internal/relay/doc.go` → `FIXED` (was `STILL_STALE` on HEAD).
+  - `go build ./internal/relay/...` green, `go vet ./internal/relay/...` clean, `gofmt -l
+    internal/relay/doc.go` empty.
+  - `go test -race -run "TestPackageDocDoesNotReviveTheWithdrawnDisconnect" ./internal/relay`
+    via `proof-check.sh`: `verdict=PASS class=test tests_run=1 top_level=1 skipped=0 failed=0` — the
+    doc.go co-occurrence guard is intact after the comment edits.
+  - `go test -race -run "TestPackageDocCitesTheRulingThatGovernsMounting" ./internal/relay`: PASS.
+  - Full `go test -race ./internal/relay/...`: `ok` (29.1s), no regressions.
+  - `bash scripts/doc-check.sh budget`: PASS (3 files within ceiling, 5 preserved phrases present).
+- **Gates:** security skipped — docs-only change (PROTOCOL.md, CONTRACTS-AGENT.md,
+  `internal/relay/doc.go` comment block), no GUARD file edited (the co-occurrence guard TEST itself
+  was read and run, not modified) and no CONTROL-PLANE file touched. Reviewer still applies per the
+  standard chain.
+- Files changed: `PROTOCOL.md`, `CONTRACTS-AGENT.md`, `internal/relay/doc.go`. No commit made by this
+  agent (`documentation` role) — reports findings for the integrator/orchestrator to commit.

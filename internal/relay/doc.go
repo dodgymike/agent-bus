@@ -145,16 +145,20 @@
 // invite. Invariant 3 says an invite is the only way onto the bus "including for
 // peer buses", so that difference is real and is NOT closed by this mount.
 //
-// A SEPARATE, NARROWER BLOCKER SITS ON RELAY INGEST SPECIFICALLY, and it is not
-// waived by either: no implementation of CrossBusTrust exists (RELAY-17 owns
-// it), so every relayed message is ErrUnpeeredBus by construction. Note that
-// gap 8 below, written before RELAY-10, gives a reason that has since changed:
-// it says no pin can ever be ESTABLISHED because the peering handshake carries
-// no bus signing key. RELAY-10 (f1a787c) landed the pin's source of truth as an
-// operator-configured durable record — BusTrustRecord.SigningKeys in
-// peerstore.go — deliberately NOT on the wire. So the gap's conclusion still
-// holds and its stated cause no longer does; correcting the numbered list is
-// RELAY-17's to do, since it owns the seam that closes it.
+// THE NARROWER BLOCKER THAT ONCE SAT ON RELAY INGEST SPECIFICALLY IS NOW CLOSED.
+// RELAY-17 (817649ce) landed PeerStore (peerstore.go, trust.go) as the
+// CrossBusTrust implementation — var _ CrossBusTrust = (*PeerStore)(nil) at
+// trust.go:13 is the compile-time evidence, and PinnedBusSigningKeys (trust.go)
+// is a real method reading a real durable table — so a relayed message from a
+// bus this operator has pinned verifies, and ErrUnpeeredBus answers only a bus
+// with NO recorded pin, not every bus by construction. Gap 8 below, written
+// before RELAY-10, gave a reason that has since changed: it said no pin could
+// ever be ESTABLISHED because the peering handshake carries no bus signing key.
+// RELAY-10 (f1a787c) landed the pin's source of truth as an operator-configured
+// durable record — BusTrustRecord.SigningKeys in peerstore.go, written by
+// `agent-bus peer add -signing-key` — deliberately NOT on the wire, and
+// RELAY-17 wired PinnedBusSigningKeys to read it. Gap 8's numbered entry below
+// is corrected to match; the two must not be left to drift apart again.
 //
 // The authority is DECISIONS.md, 2026-08-08, "FEDERATION (RELAY-6): deployment
 // assumptions and what they defer", landed at 77d2b73, AS AMENDED by the
@@ -292,7 +296,8 @@
 //     WHAT REMAINS is (a) the peering field that would give PinnedBusSigningKeys
 //     a source of truth — item 8, owned by INVITE-PEERGUARD — and (b) CRYPTO-4's
 //     attested-bundle format, its transport and `key_epoch`. This package ships
-//     NO implementation of CrossBusTrust and no default, deliberately.
+//     PeerStore (trust.go) as ITS CrossBusTrust implementation and no separate
+//     permissive or default one, deliberately.
 //
 //     WHY THE RESOLVER IS LOAD-BEARING RATHER THAN A REFINEMENT — this is the
 //     attack a wrong one re-opens, unchanged from before SIGN-7: if a peer can
@@ -408,37 +413,38 @@
 //     should map idem.ErrAgentQuota / idem.ErrCapacity to a back-off-shaped
 //     answer instead.
 //
-//  8. THE PEERING HANDSHAKE CARRIES NO BUS SIGNING KEY, SO NO PIN CAN EVER BE
-//     ESTABLISHED — AND RELAY INGEST THEREFORE CANNOT BE SERVED.
+//  8. CLOSED BY RELAY-10 (f1a787c) AND RELAY-17 (817649ce). "NO PIN CAN EVER BE
+//     ESTABLISHED, SO RELAY INGEST CANNOT BE SERVED" WAS TRUE WHEN WRITTEN AND
+//     IS FALSE NOW.
 //
-//     PeerEnrollRequest and PeerEnrollResponse (peer.go) carry ONLY bus_id and
-//     agents. They carry NO BUS SIGNING KEY AND NO TLS CERTIFICATE FINGERPRINT,
-//     so there is today NO MOMENT AT WHICH A PIN IS ESTABLISHED: the peering
-//     material that the cross-bus trust ruling requires does not exist on the
-//     wire. Until it does, CrossBusTrust.PinnedBusSigningKeys has NO SOURCE OF
-//     TRUTH, every relayed message is ErrUnpeeredBus by construction, and the
-//     relay ingest cannot be served at all.
+//     PeerEnrollRequest and PeerEnrollResponse (peer.go) still carry ONLY
+//     bus_id and agents — NO BUS SIGNING KEY AND NO TLS CERTIFICATE FINGERPRINT
+//     — and that is UNCHANGED AND DELIBERATE, not an outstanding gap:
+//     RELAY-10 decided the pin does not travel on the peering wire at all. The
+//     pin's source of truth is the durable, OPERATOR-configured
+//     BusTrustRecord (peerstore.go), written with `agent-bus peer add
+//     -signing-key ...` and read by PeerStore.PinnedBusSigningKeys (trust.go).
+//     RELAY-17 made PeerStore the CrossBusTrust implementation — var _
+//     CrossBusTrust = (*PeerStore)(nil), trust.go:13 — so a bus this operator
+//     has pinned verifies; ErrUnpeeredBus now fires only for a bus with NO
+//     active BusTrustRecord pin, which is the intended refusal (the remedy is
+//     to complete the peering), not a structural block on serving relay
+//     ingest at all.
 //
-//     THE PEERING MATERIAL MUST CARRY THE PEER'S BUS SIGNING KEY. That is a
-//     DIFFERENT KEY from the TLS certificate whose fingerprint travels in the
-//     invite blob, and the invite's fingerprint DOES NOT SUBSTITUTE for it
-//     (DECISIONS.md 2026-08-07, "Bus TLS key and bus signing key are separate").
-//     The TLS key authenticates the CONNECTION and is pinned by CLIENTS from the
-//     invite; the SIGNING key attests AGENT KEY BUNDLES and is pinned by PEERS at
-//     peering time. A peer pins TWO THINGS, OBTAINED AT DIFFERENT MOMENTS, and
-//     they must never be conflated in code, in a field name or in a doc phrase —
-//     which is why nothing here is called "busKey". Their rotations differ in
-//     blast radius (a TLS rotation is one bus's clients and rolls over on two
-//     certificates; a SIGNING-key rotation invalidates the pins held by every
-//     peer bus) and so do their compromises (a TLS key impersonates the bus to
-//     CLIENTS; a signing key forges attestations for ANY AGENT ON THE BUS).
-//
-//     INVITE-PEERGUARD (f5d91dbe) OWNS THE PEERING HANDSHAKE AND THEREFORE OWNS
-//     ADDING IT. It is not relay's to add unilaterally: the field is peering
-//     material, it must be delivered over the same operator-mediated channel the
-//     invite uses, and adding a key field to this envelope without that channel
-//     would be trust-on-first-use wearing a field name — precisely what the
-//     ruling forbids.
+//     THE TLS KEY AND THE SIGNING KEY ARE STILL SEPARATE, and that distinction
+//     is unaffected by the above: the TLS key authenticates the CONNECTION and
+//     is pinned by CLIENTS from the invite blob's fingerprint; the SIGNING key
+//     attests AGENT KEY BUNDLES and is pinned by THIS BUS'S OPERATOR, out of
+//     band, via `agent-bus peer add -signing-key` — never over the peering
+//     wire, which is exactly what keeps it a PIN rather than trust-on-first-use
+//     (DECISIONS.md 2026-08-07, "Bus TLS key and bus signing key are
+//     separate"). Their rotations differ in blast radius (a TLS rotation is
+//     one bus's clients and rolls over on two certificates; a SIGNING-key
+//     rotation invalidates the pins held by every peer bus) and so do their
+//     compromises (a TLS key impersonates the bus to CLIENTS; a signing key
+//     forges attestations for ANY AGENT ON THE BUS). Nothing here is called
+//     "busKey" for that reason, and no future field, comment or variable may
+//     conflate them.
 //
 // # No wire protocol version field, on purpose
 //

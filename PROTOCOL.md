@@ -593,15 +593,19 @@ implementation does transmit the canonical bytes as an opaque blob, it MUST pars
 only the parsed contents; the envelope's copy of a covered field is then decoration, and any
 disagreement is a rejection.
 
-**SIGN-7 shipped the mechanism, and it is CODE ONLY — nothing below is served.** `internal/relay`
-(`signed.go`, `message.go`) now carries the signed relay envelope, the re-derivation and a mandatory
-verification at ingest. It registers no handler on any mux and is imported by nothing outside itself
-(a guard test, `TestHandshakeHandlerIsNotWiredIntoAnyMux` in `internal/relay/guards_test.go`, walks
-the repository and fails if any other package imports it), and it is gated
-behind `INVITE-PEERGUARD` (`f5d91dbe`) and `MTLS-RELAYGUARD` (`8192c3c7`), neither of which has
-landed. **No relayed signature is verified in production and no cross-bus message flows at all
-today.** Everything from here to the end of §8.5 is the contract the gate and wiring tasks must
-implement against; §10 carries the concrete envelope, the caps and the status codes.
+**SIGN-7 shipped the mechanism; RELAY-17, RELAY-20 and RELAY-24 shipped the wiring that serves it.**
+`internal/relay` (`signed.go`, `message.go`) carries the signed relay envelope, the re-derivation and
+a mandatory verification at ingest. `internal/httpapi/peermount.go` (RELAY-20) is now the one
+permitted mount site for the three peer routes, gated behind an authenticated adjacent-bus principal
+(`RequirePeerPrincipal`, `MTLS-CLIENTAUTH` + RELAY-45's inbound certificate binding) rather than the
+originally-planned `INVITE-PEERGUARD` (`f5d91dbe`) / `MTLS-RELAYGUARD` (`8192c3c7`) pair — see
+`DECISIONS.md`'s 2026-08-14 FEDERATION amendment for the substitution and why. **A relayed signature
+IS verified in production once an operator has configured at least one bindable peer**
+(`agent-bus peer add -signing-key ...`); `cmd/agent-bus` (RELAY-24) constructs the mount and wires
+`relay.PeerStore` in as the `CrossBusTrust` implementation at server startup, and a bus with no
+bindable peer configured serves no peer route at all rather than a registered refusal. Everything
+from here to the end of §8.5 is the contract that wiring implements against; §10 carries the concrete
+envelope, the caps and the status codes.
 
 **Byte-exactness comes from RE-DERIVATION, never from carrying the signed bytes.** The relay envelope
 transports the covered field *values* and no pre-serialised canonical byte string — so there is
@@ -705,17 +709,22 @@ against the message signature, which would be verifying an agent's message with 
 are stdlib per invariant 9: `crypto/ed25519` for signing, `crypto/tls` + `crypto/x509` for the
 certificate. Neither is hand-rolled.
 
-**KNOWN GAP — no pin can be established today, so relay ingest cannot be served at all.** The peering
-handshake (`PeerEnrollRequest` / `PeerEnrollResponse`, `internal/relay/peer.go`) carries only `bus_id`
-and `agents`: **no bus signing key and no certificate fingerprint**. There is therefore no moment at
-which a pin is established, `PinnedBusSigningKeys` has no source of truth, and every relayed message
-is `ErrUnpeeredBus` by construction. Adding that field belongs to `INVITE-PEERGUARD` (`f5d91dbe`),
-which owns the peering handshake: the key is peering material and must arrive over the same
-operator-mediated channel the invite uses, because a key field added without that channel is
-trust-on-first-use wearing a field name. `internal/relay/doc.go` handoff item 8 is the full text.
-Separately, `internal/buscert` (`MTLS-BUSCERT`) *does* mint and load both key files — `bus-tls.key`
-and `bus-signing.key` — but as of this writing nothing on the startup path imports it, so a running
-bus produces neither.
+**RESOLVED — the pin's source of truth is a durable, operator-configured record, deliberately kept off
+the peering wire.** The peering handshake (`PeerEnrollRequest` / `PeerEnrollResponse`,
+`internal/relay/peer.go`) still carries only `bus_id` and `agents` — no bus signing key and no
+certificate fingerprint — and that is unchanged **by design**, not an outstanding gap. RELAY-10
+(`f1a787c`) landed the pin as `BusTrustRecord.SigningKeys`, a durable record in
+`internal/relay/peerstore.go` that an operator writes with `agent-bus peer add -signing-key ...` and
+never over the wire, because a key field added to the handshake without the invite's
+operator-mediated channel would be trust-on-first-use wearing a field name. RELAY-17 (`817649ce`)
+made `relay.PeerStore` the `CrossBusTrust` implementation that reads it
+(`PinnedBusSigningKeys`, `internal/relay/trust.go`), and `cmd/agent-bus` (RELAY-24) wires it into the
+running server. `ErrUnpeeredBus` now fires only for a bus with no active pin recorded for it — the
+intended refusal (the remedy is to complete the peering), not a construction-time certainty for
+every bus. `internal/relay/doc.go` handoff item 8 carries the full corrected text. Separately,
+`internal/buscert` (`MTLS-BUSCERT`) mints and loads both key files — `bus-tls.key` and
+`bus-signing.key` — and `cmd/agent-bus/main.go`'s startup path (`openBusCertMaterial`) now loads
+them, so a running bus produces both.
 
 ### 8.6 One byte sequence, two consumers — DUR-5 must not fork it
 
@@ -939,15 +948,20 @@ server-minted id, and inherits nothing of the departed agent's history. This is 
 guarantee this section already states for an ordinary restart, extended to cover a deliberate
 departure rather than only a crash.
 
-## 10. Loop prevention and the relay envelope (RELAY-2 / RELAY-3 / SIGN-7, 2026-08-07 — NOT SERVED)
+## 10. Loop prevention and the relay envelope (RELAY-2 / RELAY-3 / SIGN-7, 2026-08-07; served since RELAY-20/RELAY-24)
 
-Reference implementation: `internal/relay` (`path.go`, `message.go`, `signed.go`). **Nothing in this section is on
-the wire today.** `internal/relay` registers no handler on any mux and is imported by nothing outside
-itself (a guard test in `internal/relay/guards_test.go` walks the repository and enforces this); it is gated behind two unlanded
-tasks, `INVITE-PEERGUARD` (`f5d91dbe`) and `MTLS-RELAYGUARD` (`8192c3c7`). This section documents the
-format those gate tasks — and the wiring task that eventually registers the handlers — must implement
-against; see `CONTRACTS.md`'s 2026-08-07 entry for the JSON shapes and status codes, and
-`internal/relay/doc.go` for the full design rationale. §8.5 above already settles the trust model this
+Reference implementation: `internal/relay` (`path.go`, `message.go`, `signed.go`). **This format is on
+the wire.** `internal/relay` is mounted at the three peer routes by `internal/httpapi/peermount.go`
+(RELAY-20), the one permitted mount site — `internal/relay/guards_test.go` bounds it to that one
+file rather than banning the import outright, which is a narrowing of an earlier blanket ban RELAY-18
+retired — gated behind an authenticated adjacent-bus principal rather than the two tasks this section
+originally named: `DECISIONS.md`'s 2026-08-14 FEDERATION amendment substitutes `MTLS-CLIENTAUTH`
+(`a97f854`) plus RELAY-45's inbound certificate binding for `INVITE-PEERGUARD` (`f5d91dbe`) and
+`MTLS-RELAYGUARD` (`8192c3c7`). `cmd/agent-bus` (RELAY-24) wires the handlers to a real
+`CrossBusTrust` (`relay.PeerStore`), a real applied-key store and a real forwarder at server startup.
+This section documents the format those handlers implement; see `CONTRACTS.md`'s 2026-08-07 entry for
+the JSON shapes and status codes, and `internal/relay/doc.go` for the full design rationale, including
+the gaps that remain open there. §8.5 above already settles the trust model this
 section builds on — the traversed bus path is outside the signature and cannot ever be inside it, the
 verifier re-derives the canonical bytes rather than trusting a transported blob, and cross-bus trust
 rests on the origin bus's signing key pinned at peering. This section does not restate those
@@ -1020,13 +1034,15 @@ application will silently double-deliver in exactly that diamond topology; one w
 application but without loop prevention will burn unbounded traffic circulating a message around any
 cycle in the peer graph forever. Both are required, and neither is optional because the other exists.
 
-**The envelope changed for SIGN-7, and it is NOT a compatibility break.** `internal/relay` is now
-imported — `internal/httpapi/peermount.go` carries the only permitted mount site for the peer routes
-(`ed77bba`, and `internal/relay/guards_test.go` bounds it to that one file), and the offline
-operator CLI `cmd/agent-bus/peer.go` uses its `PeerStore` — but it is still **served by nothing**: no
-binary in `cmd/` constructs an `httpapi.PeerSurface`, so `mountPeerSurface` registers nothing and the
-peer paths answer 404 until RELAY-24 wires one. This format is therefore not yet on any wire and there
-is nothing to stay compatible with. Against the shape RELAY-2 first described:
+**The envelope changed for SIGN-7, and it is NOT a compatibility break — it landed before the format
+went on any wire.** `internal/relay` is imported — `internal/httpapi/peermount.go` carries the only
+permitted mount site for the peer routes (`ed77bba`, and `internal/relay/guards_test.go` bounds it to
+that one file), and the offline operator CLI `cmd/agent-bus/peer.go` uses its `PeerStore` — and
+`cmd/agent-bus` (RELAY-24) now constructs the `httpapi.PeerSurface` and wires `relay.PeerStore` in as
+its `CrossBusTrust`, so the peer routes ARE registered and served once an operator has configured at
+least one bindable peer (`agent-bus peer add`); a bus with none configured serves no peer route at
+all rather than a registered refusal. This format has therefore been on the wire since RELAY-24, so a
+future change to it now needs its own compatibility story. Against the shape RELAY-2 first described:
 
 | Change | Field | Why |
 |---|---|---|

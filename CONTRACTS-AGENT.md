@@ -26,7 +26,7 @@ scripts/` lists six), and only one of them is agent-facing:
 | `scripts/proof-check.sh` | no | Runs a task's `proof_cmd` and refuses to call it a pass unless it demonstrated something |
 | `scripts/proof-check_test.sh` | no | Guard test for `proof-check.sh` — pins the caller-cwd resolution fix (`535876c`) |
 | `scripts/gen-spec-mirror.sh` | no | Regenerates the backlog mirror: `SPEC.md` (epic index) **and** the `SPEC/` tree. The ONLY supported way to write either. |
-| `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Every compiled surface it depends on has since landed, so it now PASSES (`verdict=PASS`); it still fails loudly at the first UNAVAILABLE step, but none is unavailable. Also the mixed-version rollout VERIFIER — `FED_SMOKE_SERVE_A/_B/_C` run each bus on a DIFFERENT build (RELAY-51). See its subsection below. |
+| `scripts/fed-smoke.sh` | no | Three-bus federation smoke test (RELAY-25). Every compiled surface it depends on has since landed, so it now PASSES (`verdict=PASS`); it still aborts loudly the moment a step it needs is missing, but none is missing today. Also the mixed-version rollout VERIFIER — `FED_SMOKE_SERVE_A/_B/_C` run each bus on a DIFFERENT build (RELAY-51). See its subsection below. |
 
 ### `scripts/bus-serve.sh` — the health probe is now https, and verified (`MTLS-LISTENER`/`MTLS-VERIFY`, 2026-08-07)
 
