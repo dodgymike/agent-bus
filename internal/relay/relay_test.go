@@ -447,6 +447,22 @@ func TestMessageRelay(t *testing.T) {
 				t.Errorf("got %d/%q, want %d/%q: a peer must be able to tell 'not now' from 'never'", status, code, http.StatusServiceUnavailable, CodeUnavailable)
 			}
 		})
+
+		// RELAY-24-FU-RELAYHTTP-4XX. The last-hop binding refusal is bound at the
+		// wiring site (checkPeerIsLastHop) and reaches the callback wrapped in
+		// ErrPeerRejected. It is a PERMANENT peer-claim refusal — the peer cannot
+		// fix a mis-stamped path by resending — so it must be a final 403, not the
+		// retryable 503 default it fell through to before. RED before the arm was
+		// added: the refusal hit the 503 default (CodeUnavailable), telling an
+		// honest peer to retry forever.
+		t.Run("a peer-claim mismatch is a final 403, not a retryable 503", func(t *testing.T) {
+			remote := newRelayResponder(t, localBus, nil)
+			remote.failWith(fmt.Errorf("the authenticated peer is not the last hop: %w", ErrPeerRejected))
+			status, code, _ := remote.postRelay(t, relayFixture())
+			if status != http.StatusForbidden || code != CodePeerRejected {
+				t.Errorf("got %d/%q, want %d/%q: a last-hop claim mismatch is PERMANENT and a 503 would have an honest peer retry a refusal it can never satisfy (invariant 10 reject-and-respond)", status, code, http.StatusForbidden, CodePeerRejected)
+			}
+		})
 	})
 
 	// THE STATUS THAT MATTERS MOST. A 4xx/5xx here would make retry/backoff

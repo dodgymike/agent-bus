@@ -254,6 +254,14 @@ func (h *RelayHandler) Stats() RelayStats {
 //     nothing, DISCONNECT NOBODY. Punishing a retry would break exactly the
 //     peers doing the right thing.
 //
+//   - A PEER-CLAIM MISMATCH is 403 CodePeerRejected (RELAY-24-FU-RELAYHTTP-4XX):
+//     the authenticated peer does not match the last hop it claimed in the
+//     traversed bus path (invariant 2, bound at the wiring site), so nothing was
+//     written. It is FINAL rather than 503 for the same reason as the 404 above —
+//     the peer cannot fix a mis-stamped path by resending — and it matches the
+//     two sibling claim-mismatch surfaces (403 on enrol, 403 on roster). See
+//     ErrPeerRejected.
+//
 //   - Any other callback failure is 503, so a peer can tell "not now" from
 //     "never" and knows retrying is the correct response.
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -369,6 +377,23 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"sender", m.Sender,
 			)
 			h.fail(w, http.StatusConflict, CodeIdempotencyViolation, err)
+			return
+		}
+		if errors.Is(err, ErrPeerRejected) {
+			// 403, AND NOT 503, FOR THE SAME PERMANENT-VS-RETRYABLE REASON AS THE
+			// 404 ABOVE. The authenticated peer does not match the last hop it
+			// claimed in the traversed bus path (invariant 2, bound at the wiring
+			// site): the request cannot be attributed to the bus it names, and
+			// nothing was written. A 503 would tell the peer's retry machinery to
+			// resend for its whole retry horizon a refusal it can never satisfy —
+			// the claim is fixed only by stamping the path correctly, never by
+			// resending the same bytes. This is the SAME final-403 answer the two
+			// sibling claim-mismatch surfaces already give: ErrPeerRejected on the
+			// handshake (handshake.go) and ErrUnknownPeer on roster sync
+			// (rosterhttp.go). It is a REJECT-AND-RESPOND that does NOT disconnect
+			// the peer (invariant 10): a merely buggy peer can mis-stamp a hop, and
+			// this link multiplexes a whole peer roster's traffic.
+			h.fail(w, http.StatusForbidden, CodePeerRejected, err)
 			return
 		}
 		h.fail(w, http.StatusServiceUnavailable, CodeUnavailable, err)

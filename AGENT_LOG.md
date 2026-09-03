@@ -6785,3 +6785,28 @@ the pre-RELAY-17 "no pin source, ErrUnpeeredBus by construction, nothing served"
   standard chain.
 - Files changed: `PROTOCOL.md`, `CONTRACTS-AGENT.md`, `internal/relay/doc.go`. No commit made by this
   agent (`documentation` role) — reports findings for the integrator/orchestrator to commit.
+
+## 2026-09-02 — RELAY-24-FU-RELAYHTTP-4XX: last-hop binding refusal answers a final 403, not a retryable 503
+
+- **Task:** the relay-ingest last-hop bus-path binding refusal (authenticated peer != claimed last
+  hop in `RelayedMessage.BusPath`) reached the peer as a retryable 503, so an honest peer that
+  mis-stamped its hop retried a permanent refusal for its whole retry horizon.
+- **Invariants read in full (INVARIANTS.md):** 10 (idempotency/disconnects — reject-and-respond, a
+  peer/client error is a final 4xx, never a disconnect on a link that multiplexes a whole roster),
+  2 (fully-qualified `<bus-id>.<agent-id>` ids; the last-hop bind is invariant 2 applied to a claim),
+  3 (the request carries an authenticated peer principal).
+- **Fix:** `cmd/agent-bus/relaywiring.go` `acceptRelayFrom` wraps the `checkPeerIsLastHop` refusal in
+  `relay.ErrPeerRejected` (was bare `errPeerClaimMismatch`); `internal/relay/relayhttp.go` adds an
+  `errors.Is(err, ErrPeerRejected) -> 403 CodePeerRejected` arm to the post-callback switch, ahead of
+  the 503 default. Doc comments (the KNOWN GAP block and the ServeHTTP status map) updated to match.
+- **Tests:** new wire-level subtest `TestMessageRelay/maps_every_outcome_to_a_status_a_peer_can_act_on/
+  a_peer-claim_mismatch_is_a_final_403,_not_a_retryable_503` (`internal/relay/relay_test.go`) — RED
+  before the arm (got 503/`unavailable`), GREEN after. `TestRefusalsAreFinalRatherThanRetryable`
+  (`cmd/agent-bus/relaywiring_relay24_test.go`) updated from a KNOWN-GAP negative assertion to a
+  positive `errors.Is(relayErr, relay.ErrPeerRejected)` assertion.
+- **Docs:** `CONTRACTS-HTTP.md` — added the 403 `peer_rejected` row to the `/v1/peer/relay` table and
+  the "403 rather than 503 for the last-hop mismatch" paragraph.
+- **Gates:** reviewer — REQUIRED (product code). security — REQUIRED (relay ingest status semantics;
+  no docs-and-tests-only carve-out — product code changed). Both run by `feature-runner` before
+  completion; verdicts in the task journal.
+- No commit made by this agent — source only; `integrator` commits.

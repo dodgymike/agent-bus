@@ -1634,17 +1634,15 @@ func (f *federation) acceptRelay(ctx context.Context, m relay.RelayedMessage) (r
 // duplicate, or a failure — so invariant 10's legitimate retry costs the peer
 // nothing.
 //
-// # KNOWN GAP, RECORDED RATHER THAN LEFT TO BE DISCOVERED
+// # THE LAST-HOP REFUSAL IS A FINAL 4xx (RELAY-24-FU-RELAYHTTP-4XX)
 //
-// The last-hop refusal reaches the peer as 503 CodeUnavailable, which is
-// RETRYABLE, because relayhttp.go's post-callback switch classifies only
-// ErrUnknownLocalRecipient (404) and ErrIdempotencyViolation (409) and sends
-// everything else to the 503 default. A claim mismatch is PERMANENT and should be
-// a final 4xx like its two sibling surfaces (403 on enrol, 403 on roster) — a
-// peer that lies about the path will be told to try again for its whole retry
-// horizon. Closing it needs a sentinel and an arm inside internal/relay, which is
-// outside this task's file boundary; it is filed rather than silently accepted,
-// and step 2 above is what bounds the cost in the meantime.
+// The last-hop mismatch is wrapped in relay.ErrPeerRejected, so relayhttp.go's
+// post-callback switch answers it 403 CodePeerRejected — final, not retryable —
+// like its two sibling claim-mismatch surfaces (403 on enrol, 403 on roster). It
+// was previously returned as bare errPeerClaimMismatch, which fell through to the
+// 503 default and told an honest peer that mis-stamped its hop to retry a refusal
+// it can never satisfy. A claim mismatch is PERMANENT: it can only be fixed by
+// the peer stamping the path correctly, never by resending the same bytes.
 func (f *federation) acceptRelayFrom(ctx context.Context, peerBusID string, m relay.RelayedMessage) (relay.RelayAcceptance, error) {
 	if peerBusID == "" {
 		// Checked before the meter because there is no peer to meter it against:
@@ -1673,7 +1671,15 @@ func (f *federation) acceptRelayFrom(ctx context.Context, peerBusID string, m re
 			"origin_message_id", m.OriginMessageID,
 			"path_hops", len(m.BusPath),
 		)
-		return relay.RelayAcceptance{}, err
+		// Wrapped in relay.ErrPeerRejected so relayhttp.go's post-callback switch
+		// answers it a final 403 CodePeerRejected rather than the retryable 503
+		// default (RELAY-24-FU-RELAYHTTP-4XX). A last-hop mismatch is PERMANENT —
+		// the peer lied about, or mis-stamped, the path — and can never be fixed
+		// by resending, so it must not reach the peer as a retryable status class
+		// (invariant 10: reject-and-respond, never disconnect). This matches the
+		// two sibling claim-mismatch refusals: ErrPeerRejected on enrol (403) and
+		// ErrUnknownPeer on roster (403).
+		return relay.RelayAcceptance{}, fmt.Errorf("%w: %v", relay.ErrPeerRejected, err)
 	}
 
 	refund, err := f.admission.reserve(peerBusID)

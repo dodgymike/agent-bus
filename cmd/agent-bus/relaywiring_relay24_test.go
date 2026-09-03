@@ -990,13 +990,13 @@ func TestRefusalsAreFinalRatherThanRetryable(t *testing.T) {
 		t.Errorf("a roster claim mismatch (%v) is not ErrUnknownPeer, so it is answered 503 instead of a final 403", rosterErr)
 	}
 
-	// RELAY INGEST — THE KNOWN GAP, PINNED SO IT CANNOT BE FORGOTTEN.
-	// relayhttp.go classifies only ErrUnknownLocalRecipient (404) and
-	// ErrIdempotencyViolation (409) and sends everything else to a 503 default,
-	// so a PERMANENT claim mismatch is currently answered as retryable. Closing it
-	// needs an arm inside internal/relay, outside this task's boundary. This
-	// assertion documents the gap and goes RED the day it is fixed, which is the
-	// prompt to update it and the note in acceptRelayFrom.
+	// RELAY INGEST — relayhttp.go answers ErrPeerRejected with a final 403
+	// (RELAY-24-FU-RELAYHTTP-4XX). The last-hop binding refusal wraps
+	// ErrPeerRejected so a PERMANENT claim mismatch is answered final rather than
+	// as the retryable 503 default it fell through to before — an honest peer that
+	// mis-stamped its hop is no longer told to retry a refusal it can never
+	// satisfy. This is the same final answer the enrol and roster siblings above
+	// already give.
 	to := localAgent(t, "bravo")
 	local := &stubIngest{enrolled: map[string]bool{to: true}, outcome: idem.OutcomeNew}
 	metered := newWiringFederation(t, local, 0, 0)
@@ -1004,8 +1004,8 @@ func TestRefusalsAreFinalRatherThanRetryable(t *testing.T) {
 	if relayErr == nil {
 		t.Fatal("the last-hop mismatch was not refused")
 	}
-	if errors.Is(relayErr, relay.ErrUnknownLocalRecipient) || errors.Is(relayErr, relay.ErrIdempotencyViolation) {
-		t.Errorf("the relay last-hop refusal now matches a sentinel relayhttp classifies (%v): the KNOWN GAP note in acceptRelayFrom and this assertion both need updating", relayErr)
+	if !errors.Is(relayErr, relay.ErrPeerRejected) {
+		t.Errorf("the relay last-hop refusal (%v) is not ErrPeerRejected, so relayhttp answers it a retryable 503 and the peer retries a mis-stamped path it can only fix by re-stamping, never by resending", relayErr)
 	}
 }
 

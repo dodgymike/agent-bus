@@ -1283,6 +1283,7 @@ here rather than left to the code.
 | --- | --- | --- | --- | --- |
 | `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 404 | `{"error":"unknown_recipient"}` — the relayed message names an agent in **this bus's** namespace that this bus's roster does not hold. **Nothing is written**, and the answer is **FINAL**. `14eafd9` added both the check and this code; before it there was no production `AcceptRelay` callback, and any unclassified callback failure fell into the generic 503 bucket — so this is a **new** classification, not a changed wire answer (no build ever served the 503). |
 | `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 400 | `{"error":"unsupported_relay_version"}` — the envelope's `protocol_version` is a relay wire-protocol version this bus does not implement (`RELAY-23`). Resolved as **check 0** of `ValidateRelayRequest`, before any field it governs — an **absent** value reads as 1, an unrecognised one is **REFUSED, never defaulted** (invariant 10). **FINAL** (a retry installs no new binary) and the peer is **not** disconnected. Distinct from the ACK frame's `unsupported_ack_version` on purpose (`RELAY-53`): two codes let an operator read *which* frame the far end could not parse. |
+| `POST` | `/v1/peer/relay` | peer principal (TLS client certificate — see above) | 403 | `{"error":"peer_rejected"}` — the authenticated peer does not match the **last hop** it claimed in the traversed bus path (`RelayedMessage.BusPath`); the request cannot be attributed to the bus it names (invariant 2). **Nothing is written**, and the answer is **FINAL**. The refusal is bound at the composition root (`cmd/agent-bus/relaywiring.go`, `checkPeerIsLastHop`) and wrapped in `relay.ErrPeerRejected`; `relayhttp.go`'s post-callback switch maps that sentinel to this code (`relay.CodePeerRejected`). **CHANGED 2026-09-02 (`RELAY-24-FU-RELAYHTTP-4XX`):** this refusal previously fell through to the generic 503 default (`unavailable`, retryable), so an honest peer that mis-stamped its hop retried a refusal it could never satisfy; it is now a final 403 like its two sibling claim-mismatch surfaces (403 on `/v1/peer/enroll`, 403 on the roster surface). |
 
 **`Nothing is written` is a durability claim.** `relay.Acceptor.Accept` asks the roster *before* the
 durable write, so a name nobody holds costs this bus nothing permanent — an id admitted by anything
@@ -1298,6 +1299,15 @@ constant is `relay.CodeUnknownRecipient`. It is deliberately **not** `invalid_re
 well formed and its signature verified, so a peer told "invalid" would hunt a malformed field it does
 not have. It leaks no roster membership to anyone who could not already ask — only a peered bus
 reaches this handler, and peers exchange full rosters over the roster-sync surface by design.
+
+**403 rather than 503 for the last-hop mismatch, for the same reason as the 404.** A last-hop claim
+mismatch is PERMANENT: the peer can fix it only by stamping the traversed path correctly, never by
+resending the same bytes. A 503 would drive its retry machinery for the whole retry horizon. It is a
+REJECT-AND-RESPOND, never a disconnect (invariant 10) — a merely buggy peer can mis-stamp a hop, and
+this link multiplexes an entire peer roster's traffic. The sentinel is `relay.ErrPeerRejected` and
+the code constant is `relay.CodePeerRejected`; the two sibling claim-mismatch surfaces answer the
+same way, the enrol handshake with `ErrPeerRejected` and the roster surface with `ErrUnknownPeer`,
+both 403.
 
 ### Panic log records (added 2026-08-08 — CORE-14, CORE-6)
 
