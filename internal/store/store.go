@@ -818,7 +818,9 @@ func (s *Store) HasVisibleAfter(agentID string, enrolledAt time.Time, after uint
 	return false
 }
 
-// copyMessage deep-copies the two slices a Message carries out of the store.
+// copyMessage deep-copies every slice and slice-bearing field a Message
+// carries out of the store: Body, Recipients, BusPath, Signature, and
+// OriginAttestation's nested key/signature bytes.
 //
 // NewMessage copies carefully on the way IN, for the reason given there; a
 // caller that could reach into the stored slices on the way OUT would defeat
@@ -830,16 +832,17 @@ func copyMessage(m Message) Message {
 	out.Body = append([]byte(nil), m.Body...)
 	out.Recipients = append([]string(nil), m.Recipients...)
 	out.BusPath = append([]string(nil), m.BusPath...)
+	// Message.Signature is the sender's detached Ed25519 signature — routing/audit
+	// metadata (invariant 6) that the store must never hand out aliased. Struct
+	// assignment alone leaves out.Signature pointing at the stored backing array,
+	// so a caller mutating or reusing one slice would silently corrupt the other.
+	// Deep-copy it exactly like the other []byte fields (RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY).
+	out.Signature = append([]byte(nil), m.Signature...)
 	// The origin attestation is a VALUE with two byte slices inside it, so struct
 	// assignment alone would hand every caller a view onto the stored key and
 	// signature bytes. Its consumer is the ONWARD relay envelope
 	// (RELAY-48), which is exactly the sort of hold-then-send that a
 	// time-of-check/time-of-use mutation would poison.
-	//
-	// NOTE what is still shallow here and is NOT this task's to fix:
-	// Message.Signature. That is RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY, filed and
-	// owned separately, and relayegress.envelope copies it defensively at the one
-	// place it matters today.
 	out.OriginAttestation = cloneAttestation(m.OriginAttestation)
 	return out
 }

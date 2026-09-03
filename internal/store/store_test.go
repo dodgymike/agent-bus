@@ -764,12 +764,20 @@ func TestStoreSinceReturnsDeepCopies(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("Since returned %d messages, want 1", len(first))
 	}
-	if len(first[0].Body) == 0 || len(first[0].Recipients) == 0 || len(first[0].BusPath) == 0 {
-		t.Fatalf("the fixture message has an empty Body/Recipients/BusPath (%+v), so mutating them would prove nothing", first[0])
+	if len(first[0].Body) == 0 || len(first[0].Recipients) == 0 || len(first[0].BusPath) == 0 || len(first[0].Signature) == 0 {
+		t.Fatalf("the fixture message has an empty Body/Recipients/BusPath/Signature (%+v), so mutating them would prove nothing", first[0])
 	}
+	// Snapshot what the SIGNATURE should still read as, before mutating the
+	// returned copy. mkMessage stamps every fixture with testSignature(t), so
+	// this is the sender's detached signature bytes — the same field ByID's
+	// deep-copy is pinned for in TestStoreLookupByMessageID
+	// ("TheReturnedMessageIsADeepCopy"). Since is the higher-traffic live read
+	// path and had no equivalent assertion (RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY).
+	wantSignature := append([]byte(nil), first[0].Signature...)
 	first[0].Body[0] = 'X'
 	first[0].Recipients[0] = "clobbered"
 	first[0].BusPath[0] = "clobbered"
+	first[0].Signature[0] ^= 0xFF
 
 	second, _, _ := s.Since(b, noEpoch, 0, 10)
 	if len(second) != 1 {
@@ -787,6 +795,9 @@ func TestStoreSinceReturnsDeepCopies(t *testing.T) {
 	}
 	if second[0].BusPath[0] != testBusID {
 		t.Fatalf("mutating a returned BusPath changed the store's copy: %v", second[0].BusPath)
+	}
+	if !bytes.Equal(second[0].Signature, wantSignature) {
+		t.Fatalf("the store's SIGNATURE was mutated through the batch Since returned: %x, want %x — Since must return a deep copy of Message.Signature", second[0].Signature, wantSignature)
 	}
 	if second[0].ContentSHA256 != store.ContentHash([]byte("original")) {
 		t.Fatalf("the store's ContentSHA256 no longer matches the body it still holds")

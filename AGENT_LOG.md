@@ -6821,3 +6821,96 @@ own field (kept separate from undecodable_message_records — these decoded). In
 AND counted) + 5. reviewer PASS + security PASS (2026-09-03). Test `discard_applydiscard_test.go`
 (TestApplyDiscardIsCountedTowardIncompleteInputSummary, RED-before). Reconciled onto HEAD (hub.go
 3-way-merged with POLL-CONCURRENT-WAITERS). security carve-out N/A — production hub code, security ran.
+
+---
+
+## 2026-09-02 — Task: RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY (defect 6e13a7d9)
+
+**Chain run: spec-keeper → implementer (inline) → test-engineer → reviewer → security.**
+Documentation: not required — no agent-facing surface, CLI, route, env var, on-disk record or
+contract changed; a comment-only note in `copyMessage` plus a test assertion. Invariants read in
+full before coding: invariant 6 (the append-only log records metadata and routing only; a
+signature is metadata that must not be silently corrupted). The aliasing is a correctness/integrity
+defect, not a design change — no DECISIONS.md entry needed.
+
+- **Fix:** `internal/store/store.go` `copyMessage()` deep-copies `Message.Signature` —
+  `out.Signature = append([]byte(nil), m.Signature...)` — matching the existing `[]byte` idiom used
+  for `Body`. Before the fix, struct assignment left `out.Signature` aliasing the stored backing
+  array, so a caller mutating/reusing the returned slice corrupted the store's signature (and vice
+  versa). Replaced the stale "NOT this task's to fix" note.
+- **Test:** `internal/store/originlookup_relay24fu_test.go` — extended the A4 deep-copy subtest
+  `TestStoreLookupByMessageID/TheReturnedMessageIsADeepCopy` to snapshot the signature, mutate the
+  returned copy's `Signature[0]`, and assert the stored signature is unchanged on a second `ByID`;
+  widened the fixture guard to require a non-empty signature.
+- **RED-before demonstrated:** removing the fix line makes the subtest FAIL with "the store's
+  SIGNATURE was mutated through the value ByID returned"; with the fix it passes.
+- **Proof:** `bash scripts/proof-check.sh 'go test -race -run "TestStoreLookupByMessageID"
+  ./internal/store'` → `verdict=PASS class=test tests_run=12 top_level=1 skipped=0 failed=0`.
+  `go build ./...` green, `go vet ./internal/store` clean, `gofmt -l` on both changed files EMPTY.
+  Full `go test -race ./...` (working tree = HEAD 408f2f5 + these two files): 19 packages ok, 0
+  FAIL, 0 panic (known flake TestCLIEnrolEndToEnd did not fire).
+- **Gates:** reviewer — REQUIRED (product code). security — REQUIRED (store record path + a
+  cryptographic signature field; the docs-and-tests-only carve-out does NOT apply). Both run before
+  completion; verdicts recorded in the task journal.
+- No commit made by this agent — `feature-runner` writes source only; `integrator` commits.
+
+---
+
+## 2026-09-03 — Task: 6e13a7d9 (RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY) — close two reviewer-found gaps
+
+A reviewer pass on the entry above returned CHANGES-REQUESTED against two acceptance items that were
+not yet met, plus a doc-comment undercount found on re-review. This entry supersedes the file/proof
+list above; the code fix itself (`out.Signature = append([]byte(nil), m.Signature...)` in
+`copyMessage`, `internal/store/store.go`) is unchanged and was not re-implemented.
+
+Chain: implementer (inline, gap-closing only) → reviewer (re-confirmation, `opus`). Documentation:
+not required — no agent-facing surface, CLI, route, env var or on-disk record changed; a test
+extension and two comment corrections. Security: not re-run — tests-only extension plus a
+comment-only fix to already-security-passed code, no guard file, no control-plane file; the original
+code fix already had a REQUIRED security pass recorded above and this entry does not reopen it.
+Invariants re-read: 5 (memory is the serving copy — this is what the aliasing bug broke and the fix
+restores) and 6 (metadata/routing only, keyed MAC — Signature is exactly that field).
+
+- **Gap 1 — Since exit point untested.** `TestStoreSinceReturnsDeepCopies`
+  (`internal/store/store_test.go:755`) previously asserted Body/Recipients/BusPath independence
+  across two `Since` calls but not Signature. Extended it (`store_test.go:767-801`): the fixture
+  guard now also requires `len(first[0].Signature) != 0`; `wantSignature` is snapshotted with
+  `append([]byte(nil), first[0].Signature...)` before mutation; `first[0].Signature[0] ^= 0xFF` is
+  added alongside the existing Body/Recipients/BusPath mutations; the second `Since` call's
+  `Signature` is compared against the snapshot with `bytes.Equal` (import already present).
+- **Gap 2 — vacuous `proof_cmd`.** The task's stored `proof_cmd` names
+  `TestCopyMessageDeepCopiesSignatureOnEveryExitPoint`, which does not exist anywhere in the repo —
+  `go test -run` on it matches nothing and exits 0 with `[no tests to run]`. Corrected value, which
+  spec-keeper should store on completion:
+  `go test -race -count=1 -run "TestStoreLookupByMessageID|TestStoreSinceReturnsDeepCopies" ./internal/store`
+  — covers BOTH exit points (`TestStoreLookupByMessageID/TheReturnedMessageIsADeepCopy` for
+  ByID/ByOriginMessageID, `TestStoreSinceReturnsDeepCopies` for Since).
+  `bash scripts/proof-check.sh '<that command>'` → `verdict=PASS class=test tests_run=13 top_level=2
+  skipped=0 failed=0 empty_pkgs=0`.
+- **Gap 3 (found on re-review) — stale doc comment.** `copyMessage`'s doc comment
+  (`internal/store/store.go:821`) still read "deep-copies the two slices a Message carries out of
+  the store" after the function grew to four slices plus `OriginAttestation`'s nested bytes.
+  Corrected to name all five: "deep-copies every slice and slice-bearing field a Message carries out
+  of the store: Body, Recipients, BusPath, Signature, and OriginAttestation's nested key/signature
+  bytes."
+- **RED-before, both exit points:** reverted only the `out.Signature = append(...)` line in
+  `copyMessage` (replaced with a no-op comment) — `TestStoreSinceReturnsDeepCopies` FAILED
+  ("the store's SIGNATURE was mutated through the batch Since returned: 54abab...ab, want
+  ab...ab" — the 0xAB→0x54 byte proves the mutation wrote through the serving copy) and
+  `TestStoreLookupByMessageID/TheReturnedMessageIsADeepCopy` also FAILED. Restored the line
+  (diff-verified identical to the pre-revert state) — both PASS again. A reviewer independently
+  reproduced this same RED-before result from a clean `git archive HEAD` overlay.
+- **Verification:** `go build ./internal/store/...`, `go vet ./internal/store/...` clean;
+  `test -z "$("$(go env GOROOT)/bin/gofmt" -l internal/store/store.go internal/store/store_test.go)"`
+  → empty. Full package suite `go test -race -count=1 ./internal/store/...` → ok, 8.5s, no
+  regressions.
+- **Reviewer re-confirmation (opus):** first pass CHANGES-REQUESTED (gap 3 above, found on
+  re-review — not part of the original brief); after the doc-comment fix, gaps 1 and 2 independently
+  reproduced and confirmed PASS by the reviewer's own run in a clean overlay. Verdict posted to the
+  task journal as `reviewer`.
+- Files changed by this entry: `internal/store/store_test.go` (Since-path Signature assertion),
+  `internal/store/store.go` (doc-comment correction only — the functional fix line is untouched),
+  `AGENT_LOG.md` (this section).
+- No commit made by this agent — `feature-runner` writes source only; `integrator` commits. Task
+  remains `todo` in the Spec Server pending spec-keeper: store the corrected `proof_cmd` above and
+  flip to `done` once the integrator has committed.

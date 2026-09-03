@@ -299,17 +299,19 @@ func TestStoreLookupByMessageID(t *testing.T) {
 		wantBody := append([]byte(nil), appended.Body...)
 		wantRecipients := append([]string(nil), appended.Recipients...)
 		wantBusPath := append([]string(nil), appended.BusPath...)
+		wantSignature := append([]byte(nil), appended.Signature...)
 
 		got, ok := s.ByID(appended.ID)
 		if !ok {
 			t.Fatalf("ByID(%q) reported NOT FOUND for a message just appended", appended.ID)
 		}
-		if len(got.Body) == 0 || len(got.Recipients) == 0 || len(got.BusPath) == 0 {
-			t.Fatalf("the fixture is not exercising all three copied slices: body=%d recipients=%d bus_path=%d", len(got.Body), len(got.Recipients), len(got.BusPath))
+		if len(got.Body) == 0 || len(got.Recipients) == 0 || len(got.BusPath) == 0 || len(got.Signature) == 0 {
+			t.Fatalf("the fixture is not exercising all four copied slices: body=%d recipients=%d bus_path=%d signature=%d", len(got.Body), len(got.Recipients), len(got.BusPath), len(got.Signature))
 		}
 		got.Body[0] = 'X'
 		got.Recipients[0] = "testbus.attacker-1"
 		got.BusPath[0] = "attackerbus"
+		got.Signature[0] ^= 0xFF
 
 		again, ok := s.ByID(appended.ID)
 		if !ok {
@@ -323,6 +325,13 @@ func TestStoreLookupByMessageID(t *testing.T) {
 		}
 		if !reflect.DeepEqual(again.BusPath, wantBusPath) {
 			t.Fatalf("the store's BUS PATH was mutated through the value ByID returned: %v, want %v — that is the provenance field invariant 6 names, rewritten after acceptance", again.BusPath, wantBusPath)
+		}
+		// Signature is the sender's detached Ed25519 signature — metadata invariant
+		// 6 names, and copyMessage aliased it before RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY.
+		// Without the deep copy, mutating the returned slice rewrites the stored
+		// signature and this assertion fails (RED-before-fix).
+		if !bytes.Equal(again.Signature, wantSignature) {
+			t.Fatalf("the store's SIGNATURE was mutated through the value ByID returned: %x, want %x — copyMessage must deep-copy Message.Signature", again.Signature, wantSignature)
 		}
 	})
 
