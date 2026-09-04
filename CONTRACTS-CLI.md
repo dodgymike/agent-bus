@@ -59,6 +59,26 @@ bare `HTTP/1.0 400 Bad Request` + `Client sent an HTTP request to an HTTPS serve
 and closes it, before any handler or auth middleware runs — see `CONTRACTS-HTTP.md`'s `## Routes` for
 what those handlers answer once TLS has completed.
 
+**Startup refusal: non-loopback `-listen` on a federated bus with invite-gating off (`RELAY-26`,
+landed 2026-09-04).** The server **refuses to start**, returns a non-zero exit, and logs a specific
+error naming all three conditions and the remedy when ALL THREE of these hold at once: (a) `-listen`
+resolves to a **non-loopback** host — anything but `127.0.0.1`/`::1`/`localhost`, INCLUDING the empty
+host of `:8080`, which binds all interfaces; (b) this bus has **federation configured** — at least
+one peer route or bus-trust record in `-data-dir` (checked after WAL replay, before serving); and
+(c) **invite-gating is off**. This enforces, as a startup precondition, the SSH-tunnel deployment
+assumption recorded in `DECISIONS.md` FEDERATION (a)/(b) (`RELAY-6`): a federated bus exposed on a
+real interface without invite-gating leaves the anonymous enrolment route reachable by non-operators.
+The remedy the error states: bind `-listen` to a loopback address (e.g. `127.0.0.1:8080`) and reach
+the bus only through an SSH tunnel, OR enable invite-gating. It does **not** change the loopback
+default (invariant 11 — the default stays `127.0.0.1:8080`); any one of a loopback bind, no peer
+records, or invite-gating on independently allows startup. There is deliberately **no flag to
+suppress it** (invariant 11: never ship a flag that disables a safety check). It is **vacuous in the
+shipped build today**: `enrolmentInviteRequired` is a constant `true`, so condition (c) never holds
+and the refusal is unreachable through the running server; the check exists and is tested against all
+combinations so it holds for any build that turns invite-gating off. Enforced in `run()` via
+`listenExposureError` (`cmd/agent-bus/main.go`); federation presence is `peerRecordsExist`
+(`cmd/agent-bus/relaywiring.go`).
+
 **The listener REQUESTS a client certificate and never REQUIRES one** (`MTLS-CLIENTAUTH`, landed
 2026-08-14). `ClientAuth: tls.RequestClientCert`, paired with a `VerifyPeerCertificate` callback
 (`admitClientCertificate`, `cmd/agent-bus/tlslisten.go`). The contract, in the terms a caller needs:

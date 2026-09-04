@@ -8217,3 +8217,63 @@ needs a fresh reservation, never a code edit. Shared parse/validate logic was NO
 private helper: each resolver is a three-line switch with its own sentinel and message, and a shared
 helper would couple the two frames' version handling — the opposite of the independence this decision
 buys.
+
+
+---
+
+## 2026-09-04 — RELAY-26: refuse a non-loopback -listen on a federated bus with invite-gating off
+
+**Context.** RELAY-6 (DECISIONS.md, 2026-08-08 FEDERATION) recorded that invite-gating was allowed
+not to block the federation epic ONLY because of ruling (a): every bus-to-bus link is an SSH tunnel
+and no bus listens publicly. Ruling (b) stated the reversal trigger mechanically — "any bus bound to
+a non-loopback interface, or a tunnel endpoint shared with a non-operator." Until now that trigger
+was a comment: nothing in the code refused the exact combination it names, so a federated bus could
+be started bound to a real interface with the anonymous /v1/enroll route open, and the pre-auth
+attacker RELAY-6 (b) reasoned away would exist.
+
+**Decision.** Enforce it as a STARTUP PRECONDITION (invariant 3 is the boundary; this makes it a
+precondition rather than a runtime hope). `run()` refuses to start — non-zero exit, one specific
+error naming all three conditions and the remedy — when ALL THREE hold at once: (a) `-listen` is a
+non-loopback address (anything but 127.0.0.1/::1/localhost, INCLUDING the empty host of `:8080`,
+which binds all interfaces); (b) the bus has federation configured (at least one peer route or
+bus-trust record, read after WAL replay); and (c) invite-gating is off. The decision lives in the
+pure function `listenExposureError` (`cmd/agent-bus/main.go`), called with
+`peerRecordsExist(peerStore)` (`cmd/agent-bus/relaywiring.go`) and the existing
+`enrolmentInviteRequired` constant. The check is placed right after `wal.Open` returns — the earliest
+point at which the replayed peer store reflects the durable federation config — and before anything
+can serve, so a dangerous exposure fails fast and loudly.
+
+Three sub-decisions, each recorded because the obvious alternative is wrong:
+
+1. **No opt-out flag (invariant 11).** The definition of done is a REFUSAL, not a configurable
+   warning. A `-allow-public-federation` flag would be exactly the "flag that disables a safety
+   check" invariant 11 forbids — a documented hole is not better than a hidden one. A deployment that
+   genuinely needs this combination must change one of the three inputs (bind loopback and tunnel, or
+   enable invite-gating), which is the honest way to own the decision.
+
+2. **Federation-configured is BROADER than `bindablePeerCount` — `peerRecordsExist` counts any peer
+   route OR any bus-trust record, not only inbound-bindable trust.** `bindablePeerCount` gates the
+   peer INGRESS surface (a trust record must carry an inbound client-certificate fingerprint to be
+   bindable). But an egress-only or half-configured peer set is still a multi-party deployment that
+   the no-public-listener assumption covered: the question here is "is this a federated deployment",
+   not "does this bus serve a peer route right now". Using the narrower count would let a
+   non-loopback, invite-gate-off bus with outbound-only peer routes start unrefused — the exact
+   exposure this guards. A nil peer store (federation disabled for the run because the store failed
+   to build) reports false: with no store this bus serves no peer route, verifies no relayed message
+   and dials nobody, so there is no federation to protect.
+
+3. **Does NOT change the loopback default (invariant 11).** `-listen` still defaults to
+   127.0.0.1:8080; a loopback bind, no peers, OR invite-gating on each independently allows startup.
+   This refuses a dangerous non-default COMBINATION, it does not narrow the default.
+
+**Consequences.** The refusal is **vacuous in the shipped build today**: `enrolmentInviteRequired` is
+a constant `true` (invariant 3), so condition (c) never holds and `run()` never reaches the refusal.
+The task carried the `vacuous-today` tag for this reason. The value is forward-looking: any build
+that turns invite-gating off (e.g. one built from the packages, which CLAUDE.md notes is the honest
+way to own open enrolment) inherits the precondition. The decision is factored into a pure function
+tested against all listen/federation/invite-gate combinations
+(`TestStartupRefusesNonLoopbackListenWithPeersAndInviteGateOff`,
+`cmd/agent-bus/relay26_listenexposure_test.go`), so the logic is verified even though the running
+server cannot exercise it. If `enrolmentInviteRequired` is ever flipped to false,
+`TestListenExposureUsesTheShippedInviteGateConstant` fails, forcing a deliberate look at whether the
+refusal and invariant 3 are both intended for that build.

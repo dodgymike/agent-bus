@@ -425,6 +425,50 @@ func (c Config) validate() error {
 	return nil
 }
 
+// listenExposureError enforces the SSH-tunnel deployment assumption RELAY-6
+// recorded (DECISIONS.md FEDERATION (a)/(b)) as a STARTUP PRECONDITION rather
+// than leaving it a comment (RELAY-26).
+//
+// It returns a non-nil, FATAL error when ALL THREE of these hold at once:
+//
+//	(a) listen is a NON-loopback address — anything but 127.0.0.1/::1/localhost,
+//	    INCLUDING the empty host of ":8080", which binds all interfaces;
+//	(b) federationConfigured is true — this bus has at least one peer record, so
+//	    it participates in federation; and
+//	(c) inviteGatingOn is false — the anonymous /v1/enroll route is open.
+//
+// That combination is the exact exposure RELAY-6 (b) reasoned away: invite-gating
+// was allowed not to block the federation epic ONLY because no bus listens
+// publicly, so the moment a federated bus is reachable by a non-operator with an
+// open enrolment route, the premise is gone. RELAY-6 (b) stated the reversal
+// trigger mechanically — "any bus bound to a non-loopback interface" — and this
+// is where it is enforced.
+//
+// It does NOT change the loopback DEFAULT (invariant 11): -listen still defaults
+// to 127.0.0.1:8080, and a loopback bind, a bus with no peers, OR invite-gating
+// on each independently makes this return nil. It is a REFUSAL of a dangerous
+// non-default combination, and there is deliberately NO flag to suppress it
+// (invariant 11: never ship a flag that disables a safety check). Reachability of
+// this refusal in the shipped build depends on enrolmentInviteRequired, which is
+// a constant true today; the check is written and tested against all combinations
+// so it holds for any build that turns invite-gating off.
+func listenExposureError(listen string, federationConfigured, inviteGatingOn bool) error {
+	if inviteGatingOn || !federationConfigured {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		// Config.validate already rejects a -listen that does not split, so this
+		// is unreachable from run(); do NOT refuse on an address we cannot parse
+		// and leave the single validated error path to speak for it.
+		return nil
+	}
+	if isLoopbackHost(host) {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: -listen %q is a NON-loopback address while this bus has federation configured (peer records exist) and invite-gating is off. This is the public exposure the SSH-tunnel deployment assumption rules out (DECISIONS.md FEDERATION (a)/(b), RELAY-6): the anonymous enrolment route would be reachable by non-operators. Remedy: bind -listen to a loopback address (e.g. 127.0.0.1:8080) and reach this bus only through an SSH tunnel, OR enable invite-gating", listen)
+}
+
 func run(cfg Config) error {
 	lg := logging.New(os.Stderr, cfg.LogLevel)
 
@@ -878,6 +922,19 @@ func run(cfg Config) error {
 		"discard_count", rec.Repaired.DiscardCount,
 		"discarded_bytes", rec.Repaired.DiscardedBytes,
 	)
+
+	// STARTUP PRECONDITION (RELAY-26): refuse a non-loopback -listen on a bus that
+	// federates while invite-gating is off — the exposure the SSH-tunnel
+	// deployment assumption rules out (RELAY-6). Enforced HERE, strictly after
+	// wal.Open has replayed the peer store (so peerRecordsExist reflects the
+	// durable federation config) and before anything can serve, so a dangerous
+	// exposure fails fast and loudly rather than coming up. See listenExposureError
+	// for the three conditions and why there is no flag to suppress it (invariant
+	// 11). enrolmentInviteRequired is a constant true today, so this never fires in
+	// the shipped build; it guards any build that turns invite-gating off.
+	if err := listenExposureError(cfg.Listen, peerRecordsExist(peerStore), enrolmentInviteRequired); err != nil {
+		return err
+	}
 
 	// The enrolment and session authority. It is built AFTER the bus id is
 	// resolved (every agent id it mints is qualified with that id, invariant 2)

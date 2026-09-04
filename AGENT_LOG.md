@@ -6914,3 +6914,45 @@ restores) and 6 (metadata/routing only, keyed MAC — Signature is exactly that 
 - No commit made by this agent — `feature-runner` writes source only; `integrator` commits. Task
   remains `todo` in the Spec Server pending spec-keeper: store the corrected `proof_cmd` above and
   flip to `done` once the integrator has committed.
+
+## 2026-09-04 — RELAY-26 (`d72a1e04-466b-44c3-9425-1a73411e23bb`): startup refusal on non-loopback -listen with peers and invite-gating off (feature-runner)
+
+**Task.** Refuse to start when ALL THREE hold: (a) `-listen` non-loopback, (b) peer records exist
+(federation configured), (c) invite-gating off — enforcing RELAY-6’s SSH-tunnel deployment assumption
+(DECISIONS.md FEDERATION (a)/(b)) as a startup precondition. NOT an opt-out flag; must not change the
+loopback default (invariant 11).
+
+**Invariants read in full:** 3 (invite-only enrolment is the exposure boundary this precondition
+protects) and 11 (TLS-only, loopback default STAYS, never ship a flag that disables a safety check).
+
+**Change (smallest that completes the task).**
+- `cmd/agent-bus/main.go` — new pure `listenExposureError(listen string, federationConfigured,
+  inviteGatingOn bool) error` (after `validate()`), returning a specific fatal error naming all three
+  conditions + the remedy only when non-loopback AND federation-configured AND invite-gating-off. It is
+  called in `run()` right after the `wal.Open` recovery-summary log and before anything serves:
+  `listenExposureError(cfg.Listen, peerRecordsExist(peerStore), enrolmentInviteRequired)`.
+- `cmd/agent-bus/relaywiring.go` — new `peerRecordsExist(store *relay.PeerStore) bool` (true if any
+  ActivePeers OR TrustedBuses; nil store => false), deliberately BROADER than `bindablePeerCount` so an
+  outbound-only federated bus is not let through.
+- `cmd/agent-bus/relay26_listenexposure_test.go` — table test of all listen/federation/gate
+  combinations, plus `TestListenExposureUsesTheShippedInviteGateConstant` (fails if invite-gating is
+  flipped off) and `TestPeerRecordsExistDetectsFederationConfig`.
+- Docs: `CONTRACTS-CLI.md` (startup behaviour) + `DECISIONS.md` (dated rationale).
+
+**Vacuous-today.** `enrolmentInviteRequired` is a constant `true`, so condition (c) never holds and the
+refusal is unreachable through the running server today (task tag `vacuous-today`). The decision is
+factored into a pure function tested against every combination, so it holds for any build that turns
+invite-gating off.
+
+**Verify.** `go build ./...` green; `go vet ./cmd/agent-bus` clean; `gofmt -l` EMPTY on all four Go
+files. proof-check `TestStartupRefusesNonLoopbackListenWithPeersAndInviteGateOff ./cmd/agent-bus` =>
+verdict=PASS, 13 tests ran, 0 skipped (non-vacuous); a mutation removing the refusal made it RED.
+Clean-overlay build of HEAD 408f2f5 + owned files: BUILD OK, VET OK, proof PASS. Full `go test -race
+./...` run ONCE: all packages PASS except the pre-existing unrelated flake `TestCLIEnrolEndToEnd`
+(cmd/agent-busctl, package not touched — "priming server exited badly: signal: terminated").
+
+**Gates.** reviewer — REQUIRED (new product code): COMPLETED, PASS. security — REQUIRED (startup
+security precondition; NOT docs-and-tests-only): COMPLETED, PASS (fail-closed, no bypass, no opt-out,
+loopback default intact). No skips taken, so no carve-out line is needed.
+
+**No commit by this agent** — feature-runner writes source only; integrator commits the fileset.

@@ -1842,6 +1842,31 @@ func bindablePeerCount(store *relay.PeerStore) int {
 	return n
 }
 
+// peerRecordsExist reports whether this bus has ANY federation configured — at
+// least one peer ROUTE record or one bus-TRUST record. It is the "does this bus
+// participate in federation at all" signal RELAY-26's startup precondition gates
+// on (listenExposureError condition (b)).
+//
+// It is DELIBERATELY BROADER than bindablePeerCount, which counts only trust
+// records carrying an inbound client-certificate binding — the subset that mounts
+// the peer INGRESS surface. An egress-only or half-configured peer set (routes
+// but no inbound binding, or a route this bus dials out through) is still a
+// federated deployment for the purpose of the SSH-tunnel exposure rule: the
+// question here is "is this a multi-party deployment that the no-public-listener
+// assumption covered", not "does this bus serve a peer route right now". Using
+// the narrower count would let a non-loopback, invite-gate-off bus with outbound
+// peer routes start unrefused, which is the exact exposure this guards.
+//
+// A nil store (federation disabled for the run because the peer store failed to
+// build) reports false: with no store this bus serves no peer route, verifies no
+// relayed message and dials nobody, so there is no federation to protect.
+func peerRecordsExist(store *relay.PeerStore) bool {
+	if store == nil {
+		return false
+	}
+	return len(store.ActivePeers()) > 0 || len(store.TrustedBuses()) > 0
+}
+
 // discardWriter is an io.Writer that drops everything, for the nil-logger
 // default. It is a type rather than io.Discard so this file does not need an io
 // import for one expression.
