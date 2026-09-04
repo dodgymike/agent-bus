@@ -178,3 +178,7 @@ session-*.json.INSECURE
 .worktrees/
 .codex/
 .claude/RESUME.md
+
+# Spec Keeper enrollment credentials for this runtime (elastic-agent-spec-keeper).
+# Single-use enrollment output: username/password/refresh_token. NEVER commit.
+elastic-agent-spec-keeper-local.json
