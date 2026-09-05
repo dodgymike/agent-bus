@@ -182,3 +182,7 @@ session-*.json.INSECURE
 # Spec Keeper enrollment credentials for this runtime (elastic-agent-spec-keeper).
 # Single-use enrollment output: username/password/refresh_token. NEVER commit.
 elastic-agent-spec-keeper-local.json
+
+# Local Spec Keeper workspace mapping (.spec-keeper/config -> projectSlug/credentialFile).
+# Runtime-local routing metadata; the directory can also hold a credential file. NEVER commit.
+/.spec-keeper/
