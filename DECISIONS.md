@@ -8277,3 +8277,66 @@ tested against all listen/federation/invite-gate combinations
 server cannot exercise it. If `enrolmentInviteRequired` is ever flipped to false,
 `TestListenExposureUsesTheShippedInviteGateConstant` fails, forcing a deliberate look at whether the
 refusal and invariant 3 are both intended for that build.
+
+## 2026-09-04 — RELAY-28: verifier-side attestation lifetime ceiling, and its derivation
+
+**Decision.** `internal/attest.Verify` now enforces a VERIFIER-SIDE ceiling on how far into the
+future an attestation may still be trusted. An attestation whose remaining validity
+(`NotAfter - now`, measured against the verifier's own clock) exceeds
+`attest.MaxAttestationLifetime` is REFUSED with the new sentinel `attest.ErrLifetimeExceeded`,
+regardless of the `NotAfter` the minter wrote. Enforced at `internal/attest/attest.go` check 5,
+after the signature and the expiry check.
+
+**Why this is load-bearing, not defence in depth.** Revocation across a non-adjacent link is UNSOLVED
+(`FEDERATION_TRUST_DEEPDIVE.md` §4.4; follow-up RELAY-29). So `NotAfter` is the ONLY bound on a
+compromised agent messaging key — once a verifier trusts the key, nothing but expiry stops it. Until
+this change `NotAfter` was trusted entirely at the minter's discretion (RELAY-14 gate finding P2-3):
+a minter (compromised, buggy, or misconfigured) writing `NotAfter = year 292278994` made that key
+eternal, and no downstream verifier could tell. The ceiling is the verifier refusing to be bound by a
+number it did not compute; it caps the exposure at a value it derives itself.
+
+**The derivation — the reasoning is the deliverable, per the deepdive's "an unjustified constant is a
+defect" (P1-5).**
+
+    MaxAttestationLifetime = idem.PeerOutageBudget + ClockSkewAllowance   ( = 24h + 5m = 24h5m )
+
+- **`idem.PeerOutageBudget` (24h) is the maximum window an HONEST bus in this federation ever mints.**
+  `FEDERATION_TRUST_DEEPDIVE.md` §4.2 (P1-5) and `attest.Sign`'s own doc REQUIRE the minter derive
+  `NotAfter` from the maximum relay retention/retry window, never a picked constant ("the 24h in an
+  earlier draft was picked, which is the same defect class as picking a migration number"). The
+  egress minter (`cmd/agent-bus/relayegress.go:535`) obeys exactly:
+  `notAfter = issuedAt + relay.RetryHorizonCeiling`, and `relay.RetryHorizonCeiling` IS
+  `idem.PeerOutageBudget` (`internal/relay/forward.go:72`). So sourcing the ceiling from the same
+  constant means the verifier's bound tracks the minter's maximum by construction, not by a repeated
+  literal. `attest` cannot import `relay` (relay imports attest — a cycle, and
+  `internal/relay/guards_test.go` forbids the reverse), so it imports the underlying
+  `idem.PeerOutageBudget` directly, and the ceiling therefore moves only if `idem.PeerOutageBudget`
+  moves. The remaining link — that the minter's actual constant `relay.RetryHorizonCeiling` still
+  equals the window term — is pinned by the drift guard `TestMaxAttestationLifetimeTracksMinter`
+  (`internal/relay/attestlifetime_drift_test.go`, package `relay`, which may import `attest`). It
+  asserts `attest.MaxAttestationLifetime == relay.RetryHorizonCeiling + attest.ClockSkewAllowance`
+  and fails loudly the day `relay.RetryHorizonCeiling` stops equalling `idem.PeerOutageBudget`.
+- **`+ ClockSkewAllowance` (5m), added once.** The check is `NotAfter - now`, and the verifier's clock
+  may LAG the minter's by up to `ClockSkewAllowance` (the same tolerance the expiry check already
+  grants in the other direction). At the earliest a verifier can observe a freshly-minted attestation
+  its clock lags by the full allowance, so `now = issuedAt - skew` and
+  `NotAfter - now = PeerOutageBudget + skew`. Without this term the honest maximum-window case,
+  verified immediately on a lagging clock, would be wrongly refused. This is the margin, not a
+  budget, so it is added once, not doubled.
+
+**Why `NotAfter - now`, not `NotAfter - IssuedAt`.** `IssuedAt` is minter-controlled too, so a minter
+could set a far-future `NotAfter` and a far-future `IssuedAt` beside it, keeping the
+`(NotAfter - IssuedAt)` window small while the key stays trusted far into the future — a bypass. `now`
+is the verifier's own clock and nothing in the blob can move it, so `NotAfter - now` is the honest
+measure of "how long will I keep trusting this key". `time.Time.Sub` saturates to the maximum
+`Duration` rather than overflowing, so a year-292278994 `NotAfter` yields a huge positive remaining
+and is refused rather than wrapping negative. The comparison is strict (`>`), so an attestation
+sitting exactly at the ceiling still verifies (proved by the boundary case and by
+`TestHonestMaximumWindowVerifiesUnderAdverseSkew`).
+
+**No new crypto (invariant 9).** The change is a `time.Duration` comparison around the existing
+ed25519 verification; it adds no primitive, construction, or key handling. `ErrLifetimeExceeded` is a
+distinct sentinel from `ErrExpired` deliberately: `ErrExpired` is the benign, common case (a genuine
+attestation that grew old in a queue), while an over-ceiling `NotAfter` is anomalous and points at a
+misbehaving origin bus; collapsing them would let an operator read a policy refusal as ordinary
+expiry.

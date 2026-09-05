@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dodgymike/agent-bus/internal/idem"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/signing"
 )
@@ -21,6 +22,70 @@ import (
 // applying, and so a test can reason about the boundary without duplicating the
 // number.
 const ClockSkewAllowance = 5 * time.Minute
+
+// MaxAttestationLifetime is the VERIFIER-SIDE ceiling on how far into the future
+// an attestation may still be trusted, measured from the verifier's own clock
+// (NotAfter - now). An attestation whose remaining validity exceeds this is
+// REFUSED at Verify with ErrLifetimeExceeded, REGARDLESS of the NotAfter the
+// minter wrote — the whole point is that the minter does not get to choose it.
+//
+// # Why this exists (RELAY-28)
+//
+// NotAfter is minted by the ORIGIN bus and, until this ceiling, was trusted
+// entirely at its discretion. Revocation across a non-adjacent link is UNSOLVED
+// (FEDERATION_TRUST_DEEPDIVE.md §4.4, follow-up RELAY-29), so NotAfter is the
+// ONLY bound on a compromised agent messaging key: once the key is trusted, only
+// its expiry stops it. A minter that writes NotAfter = year 292278994 — whether
+// compromised, buggy, or misconfigured — makes that key eternal, and no verifier
+// downstream can tell. This ceiling is the verifier refusing to be bound by a
+// number it did not compute: it independently caps the exposure at a value it
+// derives itself, so an absurd NotAfter buys the attacker at most this window
+// rather than forever. With revocation unsolved this is the load-bearing control,
+// not defence in depth.
+//
+// # The derivation — every term is traceable, none is picked
+//
+// FEDERATION_TRUST_DEEPDIVE.md §4.2 (P1-5) and Sign's own doc REQUIRE that an
+// honest minter derive NotAfter from the maximum relay retention/retry window,
+// never from a plausible-sounding constant — "the 24h in an earlier draft was
+// picked, which is the same defect class as picking a migration number". The
+// egress minter (cmd/agent-bus/relayegress.go) obeys this exactly:
+//
+//	notAfter = issuedAt + relay.RetryHorizonCeiling
+//
+// and relay.RetryHorizonCeiling IS idem.PeerOutageBudget (internal/relay/
+// forward.go:72). So the LARGEST validity window an honest bus in this federation
+// ever mints is exactly idem.PeerOutageBudget. The verifier's ceiling is that
+// same federation-trust bound, plus one ClockSkewAllowance:
+//
+//		MaxAttestationLifetime = idem.PeerOutageBudget + ClockSkewAllowance
+//
+//	  - idem.PeerOutageBudget is the maximum honestly-minted window. This ceiling
+//	    imports it DIRECTLY, the same constant relay.RetryHorizonCeiling is defined
+//	    as (internal/relay/forward.go:72), so the ceiling cannot silently loosen: it
+//	    moves only if idem.PeerOutageBudget moves. attest cannot import
+//	    internal/relay (relay imports attest — a guard, internal/relay/
+//	    guards_test.go, forbids the reverse), so the assertion that this ceiling
+//	    still tracks the minter's constant lives on the relay side:
+//	    TestMaxAttestationLifetimeTracksMinter (internal/relay, package relay)
+//	    fails the day relay.RetryHorizonCeiling + ClockSkewAllowance stops equalling
+//	    attest.MaxAttestationLifetime.
+//	  - + ClockSkewAllowance because the check is NotAfter - now, and the verifier's
+//	    clock may LAG the minter's by up to ClockSkewAllowance (the same tolerance
+//	    the expiry check already grants in the other direction). At the earliest a
+//	    verifier can observe a freshly-minted attestation, now = issuedAt - skew, so
+//	    NotAfter - now = PeerOutageBudget + skew. Without this term an honest
+//	    attestation verified immediately on a lagging clock would be wrongly
+//	    refused. It is added ONCE, not doubled: this is the margin, not a budget.
+//
+// The check bounds NotAfter - now rather than NotAfter - IssuedAtUnixMilli
+// deliberately. IssuedAt is minter-controlled too, so a minter setting NotAfter
+// to the far future could set IssuedAt to the far future beside it and keep the
+// (NotAfter - IssuedAt) window small — a bypass. now is the verifier's OWN clock
+// and nothing in the blob can move it, so NotAfter - now is the honest measure of
+// "how long will I keep trusting this key". The comparison is strict ( > ), so an
+// attestation sitting exactly at the ceiling still verifies.
+const MaxAttestationLifetime = idem.PeerOutageBudget + ClockSkewAllowance
 
 // The failure taxonomy. Every one is matchable with errors.Is, and they are
 // DISTINCT on purpose.
@@ -92,6 +157,20 @@ var (
 	// cannot re-mint. Folding it into ErrVerify sends an operator hunting an
 	// attacker who does not exist.
 	ErrExpired = errors.New("attest: attestation has expired")
+
+	// ErrLifetimeExceeded reports an attestation that verified but whose remaining
+	// validity (NotAfter - now) exceeds MaxAttestationLifetime — the verifier-side
+	// ceiling this bus enforces regardless of the NotAfter the minter wrote
+	// (RELAY-28).
+	//
+	// IT IS ITS OWN SENTINEL, DISTINCT FROM ErrExpired. ErrExpired is the benign,
+	// common case — a genuinely bus-signed attestation that grew old in a queue.
+	// This is the opposite and anomalous case: a NotAfter so far in the future that
+	// no honest minter in this federation could have produced it, which points at a
+	// compromised, buggy or misconfigured origin bus rather than a stale message.
+	// Folding the two together would let an operator read a policy refusal as
+	// ordinary expiry and miss the anomaly.
+	ErrLifetimeExceeded = errors.New("attest: attestation validity window exceeds the maximum permitted lifetime")
 )
 
 // Subject is what the CALLER is about to act on: the identity it will attribute
@@ -209,6 +288,12 @@ func Sign(busSigningKey ed25519.PrivateKey, busID, agentID string, msgPub ed2551
 // rotation need not be simultaneous. It is not a general-purpose list to be
 // stuffed with anything we might like to accept.
 //
+// A FIFTH check, the verifier-side lifetime ceiling (check 5 below), runs after
+// binding check 4: an attestation whose remaining validity (NotAfter - now)
+// exceeds MaxAttestationLifetime is refused with ErrLifetimeExceeded no matter
+// what NotAfter the minter wrote. See MaxAttestationLifetime's doc for RELAY-28
+// and the derivation.
+//
 // # THE FOUR BINDING CHECKS, AND WHY CHECK 1 IS LOAD-BEARING
 //
 //  1. a.AgentID == want.FQAgentID, byte for byte.
@@ -271,6 +356,10 @@ func Sign(busSigningKey ed25519.PrivateKey, busID, agentID string, msgPub ed2551
 //     timestamp and be told "expired", so ErrExpired would stop meaning "a
 //     genuinely bus-signed attestation grew old" — which is the whole reason it
 //     is a separate sentinel.
+//  9. Check 5: the lifetime ceiling — ErrLifetimeExceeded. Also after the
+//     signature, and for the same reason: it must only ever name a genuinely
+//     bus-signed attestation, never unsigned garbage carrying a far-future
+//     timestamp.
 //
 // # THE RETURNED KEY IS THE KEY THE SIGNATURE COVERED
 //
@@ -393,6 +482,25 @@ func Verify(pins []ed25519.PublicKey, a Attestation, want Subject, now time.Time
 	notAfter := time.UnixMilli(checked.NotAfterUnixMilli)
 	if now.Add(-ClockSkewAllowance).After(notAfter) {
 		return nil, fmt.Errorf("%w: subject %q, not-after %s, now %s (allowing %s of clock skew); an intermediate forwards verbatim and cannot re-mint, so this is far more often a queued message than a forgery", ErrExpired, checked.AgentID, notAfter.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), ClockSkewAllowance)
+	}
+
+	// 10. CHECK 5 — the VERIFIER-SIDE lifetime ceiling (RELAY-28). NotAfter was
+	// minted by the origin bus and, with revocation across a non-adjacent link
+	// unsolved, is the ONLY bound on a compromised agent messaging key. A minter
+	// that writes an absurd NotAfter would make that key eternal; this bus refuses
+	// to be bound by a number it did not compute and caps the exposure itself.
+	//
+	// The measure is NotAfter - now, from THIS bus's own clock, not
+	// NotAfter - IssuedAt: IssuedAt is minter-controlled too, so a far-future
+	// NotAfter beside a far-future IssuedAt would keep that window small and slip
+	// past. now is ours and nothing in the blob can move it. time.Time.Sub
+	// saturates to the maximum Duration rather than overflowing, so even a
+	// year-292278994 NotAfter yields a huge positive remaining and is refused here
+	// rather than wrapping negative. Strict ">", so a window sitting exactly at the
+	// ceiling still verifies. Placed after the signature so ErrLifetimeExceeded, like
+	// ErrExpired, only ever names a genuinely bus-signed attestation.
+	if remaining := notAfter.Sub(now); remaining > MaxAttestationLifetime {
+		return nil, fmt.Errorf("%w: subject %q, not-after %s, now %s, remaining %s exceeds the %s ceiling this verifier enforces regardless of the minter's not-after", ErrLifetimeExceeded, checked.AgentID, notAfter.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), remaining, MaxAttestationLifetime)
 	}
 
 	// The snapshot itself, which nothing else holds a reference to. It is the

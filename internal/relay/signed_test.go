@@ -103,10 +103,19 @@ func (k *testKeyring) agent(fqAgentID string) attestedAgent {
 	if err != nil {
 		panic("relay test: generating an agent messaging key: " + err.Error())
 	}
+	// Mint the validity window the way the real egress minter does
+	// (cmd/agent-bus/relayegress.go): issued now, valid for RetryHorizonCeiling.
+	// These fixtures are verified at time.Now() (testTrust.AttestedSignerKey and
+	// the accept-relay fakes both use the real clock), so the window must be a
+	// realistic one an honest bus actually mints. A fixed far-future NotAfter — the
+	// old 9999-01-01 — is now refused by attest.Verify's verifier-side lifetime
+	// ceiling (RELAY-28: NotAfter - now may not exceed MaxAttestationLifetime), and
+	// no honest minter produces one.
+	issuedAt := time.Now()
 	signedAttestation, err := attest.Sign(
 		k.busSigningKeyLocked(busID), busID, fqAgentID, pub, 1,
-		time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
+		issuedAt,
+		issuedAt.Add(RetryHorizonCeiling),
 	)
 	if err != nil {
 		panic("relay test: signing an agent attestation: " + err.Error())

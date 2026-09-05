@@ -6956,3 +6956,36 @@ security precondition; NOT docs-and-tests-only): COMPLETED, PASS (fail-closed, n
 loopback default intact). No skips taken, so no carve-out line is needed.
 
 **No commit by this agent** — feature-runner writes source only; integrator commits the fileset.
+
+## 2026-09-04 — RELAY-28 (`ddbc0a0e-e4f5-4256-8d4d-0f8a29afc5d8`): verifier-side attestation lifetime ceiling (feature-runner)
+
+- **Task:** `internal/attest.Verify` trusted the attestation `NotAfter` entirely at the minter's
+  discretion (RELAY-14 security gate finding P2-3): an attestation minted valid until year 292278994
+  was accepted. Add a VERIFIER-SIDE `MaxAttestationLifetime` ceiling so an attestation whose remaining
+  validity exceeds a DERIVED bound is refused regardless of the minter's `NotAfter`. With cross-link
+  revocation unsolved (RELAY-29), expiry is the only bound on a compromised agent key, so this ceiling
+  is the load-bearing control.
+- **Invariants read in full:** 9 (never write own crypto — confirmed the change is a `time.Duration`
+  comparison around existing ed25519 verification, no new primitive/construction/key handling), 11
+  (TLS/trust boundary — this is application-layer federation trust, unchanged transport), plus the
+  federation-trust reasoning in `FEDERATION_TRUST_DEEPDIVE.md` §4.2 and §4.4.
+- **Change:** `internal/attest/attest.go` — new `MaxAttestationLifetime = idem.PeerOutageBudget +
+  ClockSkewAllowance` (24h5m) with full derivation, new sentinel `ErrLifetimeExceeded`, and check 5 in
+  `Verify` (after the signature and expiry): `if remaining := notAfter.Sub(now); remaining >
+  MaxAttestationLifetime` → refuse. Measure is `NotAfter - now` (not `NotAfter - IssuedAt`, which is
+  minter-controlled and bypassable). Derivation recorded in `DECISIONS.md` (2026-09-04). Tests:
+  `internal/attest/lifetime_test.go` (within/boundary/over/year-292278994, after-signature ordering,
+  and the honest-max-window-under-adverse-skew boundary) and the drift guard
+  `internal/relay/attestlifetime_drift_test.go` (`TestMaxAttestationLifetimeTracksMinter`, package
+  `relay` — it may import `attest`; attest may not import relay) asserting
+  `attest.MaxAttestationLifetime == relay.RetryHorizonCeiling + attest.ClockSkewAllowance`. Relay
+  fixtures that minted far-future `NotAfter` (`signed_test.go` 9999, `trust_test.go` 9998) conformed
+  to now-relative windows so the new ceiling accepts them.
+- **Verification:** RED-before confirmed (ceiling disabled → the over-ceiling and year-292278994 cases
+  are accepted, exactly the RELAY-28 defect). GREEN after. Clean-overlay proof-check verdict PASS (10
+  tests, 0 skipped). `go build ./...` and `go vet ./internal/attest` clean; `gofmt -l` empty output.
+  Full `go test -race ./...` run once — see gate note.
+- **Gates:** reviewer — REQUIRED (product code change). security — REQUIRED and central (this IS a
+  security control: the only bound on a compromised key; the docs-and-tests carve-out does NOT apply).
+  Both run by `feature-runner` before completion; verdicts in the task journal.
+- No commit made by this agent — `feature-runner` writes source only; `integrator` commits.

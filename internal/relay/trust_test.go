@@ -15,7 +15,14 @@ import (
 	"github.com/dodgymike/agent-bus/internal/attest"
 )
 
-var relay17Now = time.Date(2026, 8, 8, 22, 0, 0, 0, time.UTC)
+// relay17Now is the fixed verification clock for the RELAY-17 PeerStore tests. It
+// tracks the real clock rather than a hardcoded historical date so it stays
+// consistent with the shared attestation fixture (testKeyring.agent), which mints
+// its validity window relative to time.Now(). A fixed past date would sit outside
+// the now-relative fixture's window once attest.Verify's verifier-side lifetime
+// ceiling (RELAY-28) refuses a remaining validity over MaxAttestationLifetime.
+// Initialised at package load, so it is at or before every fixture mint.
+var relay17Now = time.Now().UTC()
 
 func relay17OpenStore(t *testing.T, busID string) (*PeerStore, func()) {
 	t.Helper()
@@ -203,7 +210,7 @@ func TestCrossBusTrustVerifiesAttestedEnvelope(t *testing.T) {
 		}
 		a := testKeys.agent(req.Sender)
 		fresh, err := attest.Sign(testKeys.busSigningKey(originBus), originBus, req.Sender, a.pub, 2,
-			relay17Now.Add(-time.Minute), time.Date(9998, 1, 1, 0, 0, 0, 0, time.UTC))
+			relay17Now.Add(-time.Minute), relay17Now.Add(RetryHorizonCeiling))
 		if err != nil {
 			t.Fatalf("minting a second valid attestation: %v", err)
 		}
