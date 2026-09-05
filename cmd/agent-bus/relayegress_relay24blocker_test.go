@@ -332,9 +332,11 @@ type egFixture struct {
 }
 
 // newEgFixture assembles hub + registry + relayEgress + relay.Forwarder exactly
-// as the composition root does. wireEgress=false omits hub.Options.Egress and
-// NOTHING else, so the "a bus with no egress behaves as before" arm is the same
-// call with one field dropped.
+// as the composition root does. wireEgress=false is a NOT-FEDERATED bus: it omits
+// BOTH hub.Options.RemoteRouter and hub.Options.Egress, because they are the two
+// halves of one seam and hub.Open refuses a router wired without its egress
+// carrier (RELAY-16-FU-SEQUENCING) — production wires the pair together on the
+// one peer-store branch.
 func newEgFixture(t *testing.T, wireEgress bool) *egFixture {
 	t.Helper()
 
@@ -391,8 +393,21 @@ func newEgFixture(t *testing.T, wireEgress bool) *egFixture {
 	// INTERFACE-TYPED, exactly as main.go declares them: handing hub.Options a
 	// typed nil would produce a non-nil interface holding a nil pointer, and
 	// forwardOnward would call Forward on it.
-	var egress hub.Egress
+	//
+	// THE ROUTER AND THE EGRESS ARE WIRED AS A PAIR (RELAY-16-FU-SEQUENCING). They
+	// are the two halves of one seam — the router ADMITS a recipient behind a peer
+	// bus, the egress CARRIES the committed message there — and hub.Open now
+	// REFUSES a router wired without its egress carrier, because that config admits
+	// a remote recipient it can only make durable and never deliver. Production
+	// wires both together on the one peer-store branch, so wireEgress=false is a
+	// genuinely NOT-FEDERATED bus (neither wired), which is what "behaves as before
+	// the seam" actually means.
+	var (
+		remoteRouter hub.RemoteRouter
+		egress       hub.Egress
+	)
 	if wireEgress {
+		remoteRouter = f.registry
 		egress = f.egress
 	}
 
@@ -408,7 +423,7 @@ func newEgFixture(t *testing.T, wireEgress bool) *egFixture {
 		Replay:       func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
 		NextIndex:    lg.Recovered().NextIndex,
 		Roster:       roster,
-		RemoteRouter: f.registry,
+		RemoteRouter: remoteRouter,
 		Egress:       egress,
 		Logger:       logging.New(io.Discard, logging.LevelError),
 	})
@@ -960,26 +975,39 @@ See relay.outboxCheckpointReclaims.`, egPeerBusID, err, retained)
 		}
 	})
 
-	t.Run("with no egress wired the send behaves exactly as it did before the seam", func(t *testing.T) {
-		// The cheap negative that pins the seam's contract: nil Egress is the
-		// correct value for a bus that is not federated, and it must be
-		// behaviourally identical to the bus before the seam existed — including
-		// not panicking on the nil interface.
+	t.Run("a not-federated bus refuses a remote recipient and forwards nothing, exactly as before the seams", func(t *testing.T) {
+		// The cheap negative that pins the seam's contract. nil RemoteRouter AND
+		// nil Egress is the correct — and, since RELAY-16-FU-SEQUENCING, the only
+		// legal — not-federated configuration: hub.Open refuses a router with no
+		// egress carrier, so "behaves exactly as before the seams" is the
+		// pre-RELAY-16 bus. A remote recipient is refused with the honest 404 and
+		// nothing is written for it; a local send still succeeds, is durable, and
+		// reaches the nil egress seam zero times without panicking.
 		f := newEgFixture(t, false)
-		res, err := f.send(t, f.remote, []byte("no egress here"), "egress-nil")
+
+		// The remote recipient gets the pre-RELAY-16 answer: with no router this
+		// bus admits nobody behind a peer, so the honest refusal stands and nothing
+		// is written.
+		if _, err := f.send(t, f.remote, []byte("no egress here"), "egress-nil-remote"); !errors.Is(err, hub.ErrUnknownRecipient) {
+			t.Fatalf("Send to remote %q on a not-federated bus = %v, want hub.ErrUnknownRecipient; with no router wired the pre-RELAY-16 answer is the honest 404, not accepted-and-never-delivered", f.remote, err)
+		}
+
+		// A LOCAL send is unaffected and exercises forwardOnward's nil-egress guard
+		// without a panic.
+		res, err := f.send(t, f.local, []byte("local still works"), "egress-nil-local")
 		if err != nil {
-			t.Fatalf("Send with Options.Egress nil = %v, want the send to succeed exactly as before", err)
+			t.Fatalf("local Send on a not-federated bus = %v, want it to succeed exactly as before", err)
 		}
 		if _, ok := f.hub.Store().ByID(res.MessageID); !ok {
-			t.Fatalf("message %s is not in the serving copy", res.MessageID)
+			t.Fatalf("local message %s is not in the serving copy", res.MessageID)
 		}
 		if !egWALHasMessage(t, f.dir, res.MessageID) {
-			t.Fatalf("message %s is not in the durable log", res.MessageID)
+			t.Fatalf("local message %s is not in the durable log", res.MessageID)
 		}
 		if envs := f.seam.envelopes(); len(envs) != 0 {
 			t.Fatalf("the egress seam was reached %d times on a hub built without one", len(envs))
 		}
-		f.peer.quiet(t, 0, "a bus with no Egress wired must forward nothing")
+		f.peer.quiet(t, 0, "a not-federated bus must forward nothing")
 	})
 }
 

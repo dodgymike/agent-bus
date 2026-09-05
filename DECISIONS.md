@@ -8340,3 +8340,52 @@ distinct sentinel from `ErrExpired` deliberately: `ErrExpired` is the benign, co
 attestation that grew old in a queue), while an over-ceiling `NotAfter` is anomalous and points at a
 misbehaving origin bus; collapsing them would let an operator read a policy refusal as ordinary
 expiry.
+## 2026-09-04 — RELAY-16-FU-SEQUENCING: the RemoteRouter/Egress pairing is a hub construction-time precondition, not a doc comment
+
+**The sequencing constraint that a `RemoteRouter` may not be wired into an admitting hub before the
+durable egress path exists is now ENFORCED in `hub.Open`, not merely stated in a comment.** RELAY-16
+added `hub.Options.RemoteRouter`, the egress-admission seam: it answers "is this recipient reachable
+through a peer, and which peer" BEFORE the durable write, so a recipient nobody can reach costs
+nothing durable and gets the honest 404. `roster.go`'s "# THE SEQUENCING CONSTRAINT — DO NOT INJECT
+A ROUTER EARLY" note recorded the precondition — no router until the egress path that carries an
+admitted message onward exists and is durable — but ONLY as prose. A router wired without its egress
+admits a recipient behind a peer, `hub.publish` makes the message durable (invariant 4), and
+`forwardOnward` then finds a nil egress and DROPS it: the honest 404 the client would have received
+is replaced by silent accepted-and-never-delivered, the one outcome the seam exists to prevent
+(invariants 6 and 10).
+
+**Enforcement chosen: a HARD refusal in `hub.Open` when `RemoteRouter != nil && Egress == nil`**
+(`internal/hub/hub.go`, immediately after the roster and data-directory preconditions). Rationale:
+
+1. **Guard-in-the-hub over restructure-the-wiring.** The wiring in `cmd/agent-bus/main.go` already
+   assigns `remoteRouter` and `hubEgress` together, on the one `peerStore != nil` branch, AFTER the
+   forwarder (whose durable outbox is built and attached above) is constructed — so production order
+   is already correct. What was missing was protection against a FUTURE edit splitting the pair. A
+   guard at the point where both fields converge (`hub.Open`) is the smallest change that makes such
+   a split a startup FATAL and a test failure, and it is testable without standing up a server. A
+   restructure that fused the two into one paired parameter would be a larger, cross-package change
+   for the same guarantee.
+
+2. **`Egress` is the hub-visible proxy for the durable egress path.** The hub cannot see the relay
+   outbox (a relay-layer concern), but `Egress` is its contract-level stand-in: in the composition
+   root it is the `relayEgress` adapter over the forwarder whose durable outbox was built and
+   attached before it. Requiring `Egress` whenever a router is wired is the pairing the existing
+   `hub.go` doc already describes as binding ("a router wired without an Egress accepts messages it
+   has no way to deliver").
+
+3. **Hard refusal, not a warning.** The failure it prevents is SILENT and durable — a message
+   accepted for nowhere leaves no honest error for the client and no way to un-write the record.
+   Failing construction is loud, immediate and recoverable; admitting the message is none of those.
+   This matches the existing hard preconditions in `hub.Open` (nil roster, missing data dir), whose
+   shared property is that the failure they prevent is silent.
+
+**Test-side consequence.** Two existing test call sites deliberately wired a router with no egress to
+exercise the RELAY-16 admission seam in isolation, and both are now paired with an egress:
+`internal/hub/remoterouter_test.go`'s helper takes a no-op `Egress` (admission and durability are
+settled before `Egress.Forward` is called, so the assertions are unchanged), and
+`cmd/agent-bus/relayegress_relay24blocker_test.go`'s `newEgFixture(wireEgress=false)` now wires
+NEITHER half — a genuinely not-federated bus, which is what "behaves as before the seam" actually
+means, since the pre-RELAY-16 bus had no router either. That arm now asserts a remote recipient is
+refused with the honest 404 (not accepted-and-never-delivered) while a local send still succeeds
+durably and forwards nothing. `TestHubRefusesRemoteRouterWithoutEgress` pins the guard and is RED on
+HEAD without it (`hub.Open` accepts the router-without-egress hub).

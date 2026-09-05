@@ -6989,3 +6989,13 @@ loopback default intact). No skips taken, so no carve-out line is needed.
   security control: the only bound on a compromised key; the docs-and-tests carve-out does NOT apply).
   Both run by `feature-runner` before completion; verdicts in the task journal.
 - No commit made by this agent — `feature-runner` writes source only; `integrator` commits.
+
+## 2026-09-05 — 83ef0b67 RELAY-16-FU-SEQUENCING: RemoteRouter sequencing made structural
+
+The "DO NOT INJECT A ROUTER EARLY" constraint (roster.go doc comment) is now a construction-time refusal:
+hub.Open returns a fatal error if RemoteRouter != nil && Egress == nil (hub.go:634), before the Hub is
+assembled — so a router wired before its durable egress carrier fails at startup, never silently admits
+a message it can make durable but never deliver (the accepted-and-never-delivered window). Fields are
+private, assigned only in Open, no post-construction setter → the unsafe combination is unrepresentable.
+Guard-in-hub over restructure (DECISIONS.md 2026-09-04). Invariants 4/6/10. reviewer PASS + security PASS
+(2026-09-05, window closed on every path, fail-closed). security carve-out N/A — production hub code.

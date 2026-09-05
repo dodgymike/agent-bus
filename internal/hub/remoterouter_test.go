@@ -27,6 +27,7 @@ import (
 	"github.com/dodgymike/agent-bus/internal/hub"
 	"github.com/dodgymike/agent-bus/internal/ids"
 	"github.com/dodgymike/agent-bus/internal/logging"
+	"github.com/dodgymike/agent-bus/internal/store"
 	"github.com/dodgymike/agent-bus/internal/wal"
 )
 
@@ -83,11 +84,85 @@ func (r *fakeRouter) Route(agentID string) (string, bool) {
 	return r.answer(agentID)
 }
 
+// noopEgress is the CARRIER half of the RELAY-16 seam, stubbed. hub.Open refuses
+// a RemoteRouter with no Egress (RELAY-16-FU-SEQUENCING), so a hub wired for
+// egress admission must supply one. It records nothing and does nothing: these
+// tests assert ADMISSION and DURABILITY, both of which are settled before
+// Egress.Forward is called (see hub.forwardOnward), so a no-op carrier leaves
+// every assertion here unchanged while satisfying the pairing precondition.
+type noopEgress struct{}
+
+func (noopEgress) Forward(store.Message) {}
+
 // questions returns every id the router was asked about, in order.
 func (r *fakeRouter) questions() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.asked...)
+}
+
+// ---------------------------------------------------------------------------
+// RELAY-16-FU-SEQUENCING — the router/egress pairing is a construction-time
+// precondition, not a doc comment
+// ---------------------------------------------------------------------------
+
+// TestHubRefusesRemoteRouterWithoutEgress is the structural proof: hub.Open
+// REFUSES a RemoteRouter wired with no Egress, turning RemoteRouter's own "DO NOT
+// INJECT A ROUTER EARLY" note from an advisory comment into an enforced
+// precondition. The router ADMITS a recipient behind a peer bus and the Egress
+// CARRIES the committed message there, so a router with no egress admits a message
+// this bus makes durable and can never deliver — the accepted-and-never-delivered
+// window this task closes (invariants 4, 6, 10).
+//
+// RED BEFORE THE GUARD: without the check in hub.Open this returns a nil error and
+// a usable hub that admits a remote send, makes it durable, and forwards nothing.
+func TestHubRefusesRemoteRouterWithoutEgress(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	path := lg.Path()
+	h, err := hub.Open(hub.Options{
+		BusID:        testBusID,
+		DataDir:      filepath.Dir(path),
+		Durable:      lg,
+		Replay:       func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+		NextIndex:    lg.Recovered().NextIndex,
+		Roster:       hub.NewStaticRoster(),
+		RemoteRouter: routeAlwaysTo(peerBusID),
+		// Egress DELIBERATELY OMITTED: this is the early-injection the guard refuses.
+	})
+	if err == nil {
+		t.Fatalf("hub.Open ACCEPTED a RemoteRouter with no Egress (hub=%v); that hub admits a recipient behind a peer, makes the message durable and has no egress to deliver it — the accepted-and-never-delivered window RELAY-16-FU-SEQUENCING closes (invariants 4, 6, 10)", h != nil)
+	}
+	// The message must name the pairing, so the wiring fault is diagnosable rather
+	// than a bare failure.
+	if !strings.Contains(err.Error(), "RemoteRouter") || !strings.Contains(err.Error(), "Egress") {
+		t.Fatalf("hub.Open error = %q, want it to name the RemoteRouter/Egress pairing", err)
+	}
+}
+
+// TestHubAcceptsRemoteRouterWithEgress is the positive half: the correctly
+// ordered wiring — the router paired with its egress carrier — is accepted, so the
+// guard refuses only the unsafe order and never the legitimate federated one.
+func TestHubAcceptsRemoteRouterWithEgress(t *testing.T) {
+	dir := t.TempDir()
+	lg := openTestLog(t, dir, true)
+	path := lg.Path()
+	h, err := hub.Open(hub.Options{
+		BusID:        testBusID,
+		DataDir:      filepath.Dir(path),
+		Durable:      lg,
+		Replay:       func(fn func(wal.Committed) error) (wal.Recovered, error) { return wal.Replay(path, fn) },
+		NextIndex:    lg.Recovered().NextIndex,
+		Roster:       hub.NewStaticRoster(),
+		RemoteRouter: routeAlwaysTo(peerBusID),
+		Egress:       noopEgress{},
+	})
+	if err != nil {
+		t.Fatalf("hub.Open with a router AND its egress carrier = %v, want it accepted; the guard must refuse only the router-without-egress order", err)
+	}
+	if h == nil {
+		t.Fatal("hub.Open returned a nil hub without an error")
+	}
 }
 
 // openHubWithRouter opens a real, durable Hub over a fresh wal.Log with router
@@ -119,7 +194,13 @@ func openHubWithRouterLogging(t *testing.T, router hub.RemoteRouter, logs io.Wri
 		NextIndex:    lg.Recovered().NextIndex,
 		Roster:       roster,
 		RemoteRouter: router,
-		Logger:       logging.New(logs, logging.LevelError),
+		// The egress CARRIER is required whenever a router is wired
+		// (RELAY-16-FU-SEQUENCING): a router with no egress admits messages this
+		// bus can make durable but never deliver. A no-op carrier is enough here —
+		// these tests assert admission and durability, both settled before Forward
+		// is called.
+		Egress: noopEgress{},
+		Logger: logging.New(logs, logging.LevelError),
 	})
 	if err != nil {
 		t.Fatalf("hub.Open: %v", err)
@@ -543,6 +624,8 @@ func TestRecoveredForeignRecipientsAreNotReportedAsIdReuse(t *testing.T) {
 		NextIndex:    lg.Recovered().NextIndex,
 		Roster:       roster,
 		RemoteRouter: routeTo(remote, peerBusID),
+		// Router requires its egress carrier (RELAY-16-FU-SEQUENCING).
+		Egress: noopEgress{},
 	})
 	if err != nil {
 		t.Fatalf("hub.Open: %v", err)

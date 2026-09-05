@@ -656,6 +656,33 @@ func Open(o Options) (*Hub, error) {
 		// and nothing downstream able to tell. See Options.DataDir.
 		return nil, errors.New("hub: open: a data directory is REQUIRED for a hub with a durable write path; it is where the message sequence floor (" + SeqFloorFileName + ") lives, and without it a WAL quarantine would reissue sequence numbers already handed to — and already signed by — a client (invariant 1)")
 	}
+	if o.RemoteRouter != nil && o.Egress == nil {
+		// THE SEQUENCING CONSTRAINT, MADE STRUCTURAL (RELAY-16-FU-SEQUENCING).
+		//
+		// RemoteRouter and Egress are the two halves of one seam: the router ADMITS
+		// a recipient behind a peer bus, the Egress CARRIES the committed message
+		// there. A router wired without an Egress admits a message this bus cannot
+		// deliver — publish makes it durable (invariant 4), forwardOnward finds a
+		// nil egress and drops it, and the honest 404 the client would have got is
+		// replaced by silent accepted-and-never-delivered. That is the one outcome
+		// RemoteRouter's own "DO NOT INJECT A ROUTER EARLY" note exists to prevent,
+		// and it was enforced only by that doc comment until this check.
+		//
+		// It is a HARD refusal at construction, not a warning, because the failure
+		// it prevents is SILENT and durable: a message accepted for nowhere leaves
+		// no honest error for the client and no way to un-write the record. Failing
+		// the wiring is loud, immediate and recoverable; admitting the message is
+		// none of those (invariants 6 and 10). A future edit that assigns a router
+		// without its egress carrier now fails to START rather than losing traffic.
+		//
+		// The Egress is the hub-visible proxy for the durable egress path: in the
+		// composition root it is the relayEgress adapter over the forwarder whose
+		// durable outbox was built and attached before it, and the router and the
+		// egress are assigned together on the one peer-store branch (see
+		// cmd/agent-bus/main.go). This check makes splitting them a startup error
+		// instead of a runtime surprise.
+		return nil, errors.New("hub: open: a RemoteRouter was wired without an Egress; the router ADMITS recipients behind a peer bus and the Egress CARRIES the committed message there, so a router with no egress accepts messages it can make durable but has no way to deliver — the accepted-and-never-delivered outcome RemoteRouter's sequencing note forbids (invariants 4, 6, 10). Wire the egress path (backed by its durable outbox) first, or wire neither")
+	}
 	h := &Hub{
 		busID:          o.BusID,
 		durable:        o.Durable,
