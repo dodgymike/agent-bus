@@ -24,6 +24,7 @@ Two binaries live here:
 | `-auth-rate-limit` | `5` | Sustained per-SOURCE request rate (req/s) of the token bucket in front of the three unauthenticated credential routes `/v1/enroll`, `/v1/session/begin`, `/v1/session/complete` (`AUTH-1-FU-RATELIMIT`). A throttled source is answered **429 + `Retry-After`**, never disconnected (invariant 10). Must be `> 0` when `-auth-rate-burst > 0`. |
 | `-auth-rate-burst` | `60` | Per-SOURCE burst capacity (bucket size) for those three routes. **`0` DISABLES rate limiting entirely** (historical unlimited behaviour). |
 | `-bus-id` | *(empty → placeholder `bus-local`)* | **TEST-ONLY.** Validated against `^[A-Za-z0-9_-]{1,64}$`; `.` rejected (qualification separator, invariant 2). Using it logs a runtime `WARN`. See `DECISIONS.md`. |
+| `-require-federation` | `false` | **NEW (`RELAY-55`, 2026-08-28).** REFUSE to start when this bus has peer records but the peer ingress surface did not mount — the "silently deaf" federation deploy that `/healthz` reports as healthy. Off by default: an unset flag never changes startup. See the startup-refusal subsection below. |
 
 **Per-source rate limit (`AUTH-1-FU-RATELIMIT`).** The three routes above cannot authenticate
 (invariant 3 — they are how a credential is obtained) and every admission cap behind them is GLOBAL,
@@ -78,6 +79,24 @@ and the refusal is unreachable through the running server; the check exists and 
 combinations so it holds for any build that turns invite-gating off. Enforced in `run()` via
 `listenExposureError` (`cmd/agent-bus/main.go`); federation presence is `peerRecordsExist`
 (`cmd/agent-bus/relaywiring.go`).
+
+**Startup refusal: `-require-federation` on a bus that is silently deaf to the federation (`RELAY-55`,
+2026-08-28).** With `-require-federation` set, the server **refuses to start**, returns a non-zero
+exit, and logs a specific error with the remedy when BOTH: (a) this bus has **peer records** — at
+least one peer route or bus-trust record in `-data-dir` (`peerRecordsExist`, checked after WAL replay,
+before serving); and (b) the peer **ingress surface did not mount**, which happens exactly when no
+adjacent bus has an inbound client-certificate binding (`bindablePeerCount == 0`). That combination is
+the "silently deaf" state: `/healthz` stays green while every cross-bus message is dropped. It serves
+the **orchestrator**, which cannot authenticate to `GET /v1/readyz` and so needs the mis-deploy
+delivered as a startup failure before the container is put in rotation; the operator-facing
+counterpart is `GET /v1/readyz` (`CONTRACTS-HTTP.md`). Default off: an unset flag never changes
+startup. It is **scoped to the records-present case on purpose** — a bus with no peer records is not
+deaf to federation, it simply does not federate, so the flag is a no-op there. **Unlike the RELAY-26
+refusal above, this one is REACHABLE in the shipped build**: `agent-bus peer add -url … -tls-fingerprint …`
+or a bus-trust record with no inbound `-peer-client-fingerprint` binding leaves records present and
+the surface unmounted. Enforced in `run()` via `requireFederationError` (`cmd/agent-bus/main.go`),
+which reads live peer-store state (`peerRecordsExist` and whether the ingress mounted), not a
+compile-time constant. `docs/THREE-BUS-DOCKER.md` names this flag as the rollout gate.
 
 **The listener REQUESTS a client certificate and never REQUIRES one** (`MTLS-CLIENTAUTH`, landed
 2026-08-14). `ClientAuth: tls.RequestClientCert`, paired with a `VerifyPeerCertificate` callback

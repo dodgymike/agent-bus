@@ -555,6 +555,34 @@ gate agent-bus:emitting
 Downstream-first (`c b a`) within each stage for the reason §3.6 gives. Neither stage needs a
 drain or a maintenance window; that is the point of splitting them.
 
+#### THE ROLLOUT GATE IS `-require-federation` (RELAY-55, 2026-08-28)
+
+The definitive rollout gate for a bus that MUST federate is the **`-require-federation` server flag**,
+not the `grep`-based `gate()` above. Start each federating bus with `-require-federation` and the bus
+**refuses to start** — non-zero exit, container never becomes `healthy` — whenever it has peer records
+but its peer ingress surface did not mount (the silently-deaf state: `bindablePeerCount == 0`). Because
+`roll()` above already waits for `healthy` and times out otherwise, adding `-require-federation` to the
+bus's command turns that existing wait into the gate: a deaf bus never passes `roll()`, so no
+downstream stage can proceed on one. This is stronger than the log-grep, which is an
+absence-of-announcement heuristic (and historically an inoperative one — see the 2026-08-21 correction
+below).
+
+Two signals, two audiences, and this runbook names both:
+
+- **`-require-federation` is the ORCHESTRATOR/rollout gate.** A container healthcheck cannot
+  authenticate, so the readiness endpoint is unavailable to it; the flag delivers the verdict as a
+  startup failure instead, before the container is ever put in rotation. Add it to the bus `command:`
+  for any deployment where federation is required.
+- **`GET /v1/readyz` is the OPERATOR's live check.** It is authenticated (off the allow-list), so an
+  operator holding a session can query federation readiness between stages: `{"federation":"ready"}`
+  (200) when the surface mounted, `{"federation":"unserved"}` (503) when records exist but it did not,
+  `{"federation":"not_configured"}` (200) on a non-federating bus. See `CONTRACTS-HTTP.md`.
+
+The `gate()` function below remains as the fallback for a build NOT started with `-require-federation`
+(e.g. an intentionally egress-only or non-federating bus), and its correction history is retained
+because the failure mode it documents — a rollout gate that cannot fire — is exactly what
+`-require-federation` was designed to end.
+
 **"Healthy" does not mean "federating", and this is the trap the gate above exists to catch.**
 Peer-route registration is all-or-nothing at the surface level: when the peer surface is absent or
 incomplete the server registers **no peer route at all** and *every* `/v1/peer/` path — relay

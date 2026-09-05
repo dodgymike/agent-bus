@@ -6999,3 +6999,54 @@ a message it can make durable but never deliver (the accepted-and-never-delivere
 private, assigned only in Open, no post-construction setter → the unsafe combination is unrepresentable.
 Guard-in-hub over restructure (DECISIONS.md 2026-09-04). Invariants 4/6/10. reviewer PASS + security PASS
 (2026-09-05, window closed on every path, fail-closed). security carve-out N/A — production hub code.
+
+## 2026-09-05 — RELAY-55 (`0a571a02-2f1f-41b7-8137-1a085c30f5e1`): authenticated `GET /v1/readyz` + `-require-federation` startup gate (feature-runner)
+
+**Problem.** A bus can be healthy on `/healthz` yet silently deaf to the entire federation: peer
+records exist but the peer ingress surface did not mount (no adjacent bus has an inbound
+client-certificate binding, `bindablePeerCount == 0`), so every `/v1/peer/` path is unserved and
+cross-bus messages are dropped while `/healthz` stays green. `/healthz`'s body is drained to
+`io.Discard` by the container healthcheck, so no `/healthz` field could ever move the container
+verdict.
+
+**Shipped (ratified design, "build EXACTLY this").**
+1. Authenticated `GET /v1/readyz` — registered through `s.route`, NOT added to
+   `internal/httpapi/authmw.go` `unauthenticatedRoutes`. Body `{status, federation}` with
+   `federation` ∈ `ready` (surface mounted, 200) / `not_configured` (no peer records, 200) /
+   `unserved` (records present, surface absent — silently deaf, 503, `status:not_ready`).
+   `Options.FederationExpected` is read by the composition root from `peerRecordsExist(peerStore)`;
+   the mounted-surface fact is `Server.peerSurfaceMounted()` (reads `s.peerRoutes` inside
+   `peermount.go`, the sole file the AST guard `TestPeerRoutesSetHasExactlyOneWriter` allows —
+   `handleReadyz` calls the predicate, never the map).
+2. `-require-federation` server flag, default off — refuses to start when peer records exist but the
+   surface did not mount. Enforced in `run()` by the pure func
+   `requireFederationError(require, federationConfigured, peerSurfaceMounted, dataDir)`.
+
+**The guard CAN fire (operator's caution).** Unlike RELAY-26's const-true refusal, this reads live
+peer-store state. Reachable via `agent-bus peer add -url … -tls-fingerprint …` or a bus-trust record
+with no inbound `-peer-client-fingerprint` binding (records present, `bindablePeerCount == 0`).
+`TestRequireFederationRefusesStartupWhenPeerSurfaceIncomplete` stands up a real `relay.PeerStore` in
+that state and observes the refusal firing; a mutation removing the refusal turns it RED (verified).
+The `unserved` branch of `handleReadyz` was likewise verified RED-before via mutation.
+
+**Invariants read IN FULL:** 3 (auth/allow-list — an authenticated route adds nothing to the
+unauthenticated enumeration, so no invariant-3 amendment is owed; the design deliberately avoids one),
+6, 10. Also 7: `/v1/readyz` is operator-facing, not agent-facing — no `AGENT_PROTOCOL.md` entry and no
+`cmd/agent-busctl` subcommand ship here; a readiness subcommand is filed as follow-up
+`RELAY-55-FU-READYZ-CLI` (recorded in `DECISIONS.md`), not folded in as scope creep.
+
+**Files.** cmd/agent-bus/main.go; internal/httpapi/server.go; internal/httpapi/peermount.go;
+internal/httpapi/readyz_relay55_test.go (new); internal/httpapi/readyz_relay55_external_test.go (new);
+cmd/agent-bus/relay55_requirefederation_test.go (new); CONTRACTS-HTTP.md; CONTRACTS-CLI.md;
+docs/THREE-BUS-DOCKER.md (names `-require-federation` as the rollout gate); DECISIONS.md; this log.
+
+**Verify.** `go build ./...` + `go vet ./cmd/agent-bus ./internal/httpapi` clean; gofmt output empty.
+Full `go test -race ./...` = EXIT 0, 19 packages ok, 0 fail (working-tree @ 652e60c3). proof-check in a
+clean HEAD overlay (owned files only): PASS, tests_run=19 top_level=5 skipped=0 failed=0, for
+`go test -race -run "TestReadyz|TestRequireFederationRefusesStartupWhenPeerSurfaceIncomplete" ./internal/httpapi ./cmd/agent-bus`.
+
+**Gates.** reviewer — REQUIRED (product code): dispatched. security — REQUIRED (new authenticated
+route + startup gate; NOT docs-and-tests-only): dispatched. No skips taken, so no carve-out line is
+needed. (Verdicts recorded on the Spec Server task notes.)
+
+**No commit by this agent** — feature-runner writes source only; integrator commits the fileset.

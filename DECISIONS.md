@@ -8389,3 +8389,60 @@ means, since the pre-RELAY-16 bus had no router either. That arm now asserts a r
 refused with the honest 404 (not accepted-and-never-delivered) while a local send still succeeds
 durably and forwards nothing. `TestHubRefusesRemoteRouterWithoutEgress` pins the guard and is RED on
 HEAD without it (`hub.Open` accepts the router-without-egress hub).
+
+## 2026-08-28 — RELAY-55: authenticated `GET /v1/readyz` + `-require-federation` startup gate for a bus that is silently deaf to the federation
+
+**Problem.** A bus can be healthy on `/healthz` (the process is up) yet silently deaf to the entire
+federation: if peer records exist on disk but no adjacent bus has an inbound client-certificate
+binding, `mountPeerSurface` registers no peer route, every `/v1/peer/` path is unserved, and cross-bus
+messages are dropped — while `/healthz` stays green (its body is drained to `io.Discard` by
+`cmd/agent-bus/healthcheck.go`, which branches only on the status code, so no `/healthz` body field
+could ever move the container verdict). RELAY-51 needed a rollout gate and `/healthz` is worthless for
+it.
+
+**Ratified design (operator-ratified in conversation, recorded on the task).** Two signals:
+
+1. **Authenticated `GET /v1/readyz`**, registered through `s.route` and NOT added to
+   `internal/httpapi/authmw.go` `unauthenticatedRoutes`. It reports `federation`: `ready` (surface
+   mounted, 200), `not_configured` (no peer records, 200 — a non-federating bus is ready), or
+   `unserved` (records present, surface absent — the silently-deaf state, 503, `status: not_ready`).
+   `FederationExpected` is a construction-time bit the composition root reads from the peer store
+   (`peerRecordsExist(peerStore)`); the mounted-surface fact is read from `len(s.peerRoutes)`, so the
+   route cannot disagree with what actually mounted.
+
+2. **`-require-federation` server flag, default off**, that refuses to start (non-zero exit) when peer
+   records exist but the peer surface did not mount. Enforced in `run()` by the pure function
+   `requireFederationError(require, federationConfigured, peerSurfaceMounted, dataDir)`.
+
+**Why an AUTHENTICATED route, and why NO invariant-3 amendment is owed.** An authenticated endpoint
+adds nothing to invariant 3's unauthenticated enumeration — the allow-list is unchanged, so there is
+no enumeration to amend and no `DECISIONS.md` invariant-3 entry is owed by this choice. Both
+alternatives considered would have required amending it: a field on `/v1/info` (unauthenticated, and
+its field set is double-pinned by `healthz_info_test.go` and `durable_test.go`), or an unauthenticated
+`/readyz`. The body is deliberately coarse — no peer id, count or fingerprint — and federation
+existence is already observable to an authenticated caller through the peer routes, so the route adds
+no capability an attacker did not already have.
+
+**The guard CAN fire — the load-bearing part.** RELAY-26 shipped a startup refusal whose first branch
+tested a compile-time `const true`, so it always short-circuited and could never fire.
+`-require-federation` refuses on **live peer-store state**, and its refuse-condition is REACHABLE
+through supported configuration: `agent-bus peer add -url … -tls-fingerprint …`, or a bus-trust record
+with no inbound `-peer-client-fingerprint` binding, leaves records present (`peerRecordsExist == true`)
+and the surface unmounted (`bindablePeerCount == 0`) — the third case of `run()`'s ingress switch.
+`TestRequireFederationRefusesStartupWhenPeerSurfaceIncomplete` stands up a real `relay.PeerStore` in
+that state, asserts the premise (`peerRecordsExist` true, `bindablePeerCount` 0), and observes the
+refusal firing; a mutation that removes the refusal turns it RED (verified). It is scoped to the
+records-present case on purpose: a bus with no peer records is not deaf, it simply does not federate.
+
+**Two audiences.** `/v1/readyz` serves the OPERATOR (holds a session, checks readiness live);
+`-require-federation` serves the ORCHESTRATOR (a container healthcheck cannot authenticate, so the flag
+fails a mis-wired deploy at startup before rotation). `docs/THREE-BUS-DOCKER.md` names
+`-require-federation` as the rollout gate.
+
+**Invariant 7 — CLI subcommand DEFERRED, recorded rather than skipped silently.** `/v1/readyz` is
+operator-facing, not agent-facing: agents do not check federation readiness, so no `AGENT_PROTOCOL.md`
+entry and no `cmd/agent-busctl` subcommand ships in this task, and the ratified design specifies only
+the route + flag ("build EXACTLY this"). Invariant 7's "every capability ships with a CLI subcommand"
+still applies to the operator's ability to reach an authenticated route without hand-writing mTLS
+HTTP, so a readiness subcommand is filed as a follow-up (`RELAY-55-FU-READYZ-CLI`) rather than folded
+in here as scope creep.

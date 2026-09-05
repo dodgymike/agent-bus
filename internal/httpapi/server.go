@@ -251,6 +251,24 @@ type Options struct {
 	// nobody.
 	PeerPrincipals InboundPeerPrincipals
 
+	// FederationExpected is true when this bus has peer records on disk — at
+	// least one peer ROUTE record or one bus-TRUST record (RELAY-55). It is a
+	// CONSTRUCTION-TIME bit read from the peer store by the composition root
+	// (cmd/agent-bus passes peerRecordsExist(peerStore)), NOT runtime state and
+	// NOT derived from the routes registered here.
+	//
+	// It is the ONE fact GET /v1/readyz cannot infer from the mounted surface
+	// alone: an empty peer surface is identical on the wire whether this bus was
+	// never meant to federate (no records) or was meant to and mis-wired so the
+	// ingress did not mount (records present, no inbound client-certificate
+	// binding — the "silently deaf" state a healthy /healthz cannot reveal, which
+	// is the whole defect RELAY-55 addresses). readyz reports "not_configured" in
+	// the first case and the not-ready "unserved" in the second, and only this
+	// bit tells them apart.
+	//
+	// Default false, which is correct for every non-federating build.
+	FederationExpected bool
+
 	// Peer is the federation ingress: the three /v1/peer/ handlers plus the
 	// registry and cross-bus trust whose presence is the precondition for
 	// serving them (RELAY-20). It is satisfied by the composition root.
@@ -351,6 +369,12 @@ type Server struct {
 	// isPeerRoute short-circuits on that.
 	peerRoutes map[string]struct{}
 
+	// federationExpected records whether this bus has peer records on disk; see
+	// Options.FederationExpected. It is the input GET /v1/readyz uses to tell a
+	// bus that never meant to federate apart from one that meant to and did not
+	// mount its peer surface (RELAY-55). Written once in New, read-only after.
+	federationExpected bool
+
 	// discovery is the STATIC protocol-discovery document served by
 	// GET /v1/discovery, built once in New and never mutated afterwards.
 	// Holding it here rather than assembling it per request is what makes
@@ -415,6 +439,9 @@ func New(opts Options) *Server {
 		// NO DEFAULT either, and for a stronger reason: a stand-in federation
 		// surface would be three unauthenticated handlers on the wire.
 		peer: opts.Peer,
+		// A plain bool read from the peer store by the composition root; see
+		// Options.FederationExpected and handleReadyz.
+		federationExpected: opts.FederationExpected,
 	}
 	if s.identity == nil {
 		s.identity = StaticIdentity(DefaultBusID)
@@ -488,6 +515,18 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	s.route(mux, "/healthz", s.handleHealthz)
 	s.route(mux, "/v1/info", s.handleInfo)
+	// GET /v1/readyz: federation readiness (RELAY-55). Registered through
+	// s.route like every other route, and that registration is the whole of its
+	// authentication: it is NOT on unauthenticatedRoutes, so authMiddleware's
+	// default-deny requires a bearer session. It is deliberately authenticated —
+	// unlike /healthz, which probes call before any agent exists — because it
+	// serves the OPERATOR (who holds a session), not a container liveness probe
+	// (which cannot authenticate; that is what the -require-federation startup
+	// flag is for). Keeping it off the allow-list means it adds NOTHING to
+	// invariant 3's unauthenticated enumeration, which is why the ratified design
+	// chose an authenticated route over a /v1/info field or an unauthenticated
+	// /readyz. See handleReadyz.
+	s.route(mux, RouteReadyz, s.handleReadyz)
 	// Unauthenticated by necessity: it is how a caller holding only a URL
 	// learns to enrol. It is static and carries no bus state; see discovery.go.
 	s.route(mux, RouteDiscovery, s.handleDiscovery)
@@ -725,6 +764,89 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, r, http.StatusOK, HealthResponse{Status: "ok"})
+}
+
+// RouteReadyz is the pattern the federation-readiness route is registered at
+// (RELAY-55). Unlike /healthz it is AUTHENTICATED (not on unauthenticatedRoutes):
+// it serves an operator holding a session, and the container liveness probe that
+// cannot authenticate is served instead by /healthz and by the -require-federation
+// startup flag.
+const RouteReadyz = "/v1/readyz"
+
+// federation readiness states reported by GET /v1/readyz. They are the coarse,
+// authenticated-caller-safe words for the three shapes a bus's peer surface can
+// be in; none of them names a peer, a count or a fingerprint.
+const (
+	// federationReady: the peer ingress surface mounted, so this bus can accept
+	// relayed traffic.
+	federationReady = "ready"
+	// federationNotConfigured: this bus has no peer records, so it was never meant
+	// to federate. Reported at 200 — a non-federating bus is a healthy bus.
+	federationNotConfigured = "not_configured"
+	// federationUnserved: this bus HAS peer records but the peer surface did not
+	// mount, so it is silently deaf to the federation. Reported at 503 — the
+	// negative case /healthz cannot see. This is exactly the state
+	// -require-federation refuses to start in.
+	federationUnserved = "unserved"
+)
+
+// ReadyResponse is the body of GET /v1/readyz.
+//
+// It is deliberately COARSE. The route is authenticated, so only an enrolled
+// agent on THIS bus reaches it, but even so it discloses no peer id, no route
+// count and no fingerprint — only whether THIS bus's own peer surface is
+// serving. That is the operator's diagnostic and nothing more; the existence of
+// federation is already observable to an authenticated caller through the peer
+// routes, so this adds no capability an attacker did not have.
+type ReadyResponse struct {
+	// Status is "ready" (HTTP 200) or "not_ready" (HTTP 503). It mirrors the
+	// status code so a caller that reads only the body still gets the verdict.
+	Status string `json:"status"`
+	// Federation is one of federationReady, federationNotConfigured or
+	// federationUnserved.
+	Federation string `json:"federation"`
+}
+
+// handleReadyz serves GET /v1/readyz: federation readiness (RELAY-55).
+//
+// It answers the question /healthz cannot: a bus can be healthy (the process is
+// up, /healthz is green) yet silently deaf to the entire federation because its
+// peer ingress surface never mounted — peer records exist on disk but no adjacent
+// bus has an inbound client-certificate binding, so mountPeerSurface registered
+// nothing. From outside, that bus is indistinguishable from a healthy one.
+//
+// The mounted-surface fact comes from s.peerSurfaceMounted(), which reads the
+// SAME set mountPeerRoute writes, so this route cannot disagree with what
+// actually mounted. Whether federation was EXPECTED is read from
+// s.federationExpected, the peer-store bit the composition root supplied — the
+// one fact the surface alone cannot reveal.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGET(w, r) {
+		return
+	}
+	status := http.StatusOK
+	var fed string
+	switch {
+	case s.peerSurfaceMounted():
+		// The surface is serving, whether or not FederationExpected was set: a
+		// mounted surface is the strongest possible witness that this bus can
+		// federate, and it is read from the routes themselves.
+		fed = federationReady
+	case s.federationExpected:
+		// Records exist but nothing mounted: the silently-deaf state. This is the
+		// only not-ready verdict this route returns.
+		fed = federationUnserved
+		status = http.StatusServiceUnavailable
+	default:
+		// No records and no surface: an ordinary non-federating bus, which is
+		// ready — it is doing exactly what it was configured to do.
+		fed = federationNotConfigured
+	}
+	readiness := "ready"
+	if status != http.StatusOK {
+		readiness = "not_ready"
+	}
+	s.writeJSON(w, r, status, ReadyResponse{Status: readiness, Federation: fed})
 }
 
 // handleInfo serves GET /v1/info: bus id, version and uptime, no auth.

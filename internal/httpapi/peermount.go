@@ -271,6 +271,16 @@ func (s *Server) PeerRoutes() []string {
 	return out
 }
 
+// peerSurfaceMounted reports whether this build registered any peer-bus route,
+// i.e. the federation ingress is being served (RELAY-55). It reads s.peerRoutes
+// HERE, in peermount.go — the sole file TestPeerRoutesSetHasExactlyOneWriter
+// permits to name that field — so handleReadyz can report federation readiness
+// without touching the map directly. A boolean, not a copy of the set: the
+// caller only needs "did it mount", and no membership escapes.
+func (s *Server) peerSurfaceMounted() bool {
+	return len(s.peerRoutes) > 0
+}
+
 // isPeerRoute reports whether path is a registered peer-bus route.
 //
 // Matching is EXACT string equality against r.URL.Path — no prefix match, no

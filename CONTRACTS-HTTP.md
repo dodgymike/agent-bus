@@ -33,6 +33,8 @@ caller sees that one 400, identically, for every path including `/healthz`.
 | `GET` | `/healthz` | none | 200 | `{"status":"ok"}` |
 | `GET` | `/v1/info` | none | 200 | `{"bus_id":"...","version":"...","uptime_seconds":0.0,"discovery":"/v1/discovery"}` |
 | `GET` | `/v1/discovery` | none | 200 | **NEW 2026-08-07 (DISCOVERY-DOC).** The bounded, STATIC protocol-discovery document — observed ~6.1 KB in practice (varies only with the length of `bus_id`), well under the 16 KiB ceiling `discovery_test.go` enforces. See `### Discovery document` below for the full shape. |
+| `GET` | `/v1/readyz` | **bearer** | 200 | **NEW 2026-08-28 (RELAY-55).** Federation readiness. `{"status":"ready","federation":"ready"}` when the peer ingress surface mounted, or `{"status":"ready","federation":"not_configured"}` on a bus with no peer records (a non-federating bus is a ready bus). It is the signal `/healthz` cannot give: a bus can be healthy yet silently deaf to the entire federation. **AUTHENTICATED — it is NOT on the allow-list** (`httpapi.UnauthenticatedRoutes()`), so an anonymous caller gets the ordinary default-deny 401. That is the ratified design (RELAY-55): an authenticated route adds nothing to invariant 3's unauthenticated enumeration, so no `DECISIONS.md` invariant-3 amendment is owed. The body is deliberately COARSE — it names no peer, count or fingerprint, only whether THIS bus's own peer surface is serving. It serves the OPERATOR; the orchestrator, which cannot authenticate, is served by the `-require-federation` startup flag (`CONTRACTS-CLI.md`). See `### Federation readiness` below. |
+| `GET` | `/v1/readyz` | **bearer** | 503 | **NEW 2026-08-28 (RELAY-55).** `{"status":"not_ready","federation":"unserved"}` — this bus HAS peer records but the peer ingress surface did not mount (no adjacent bus has an inbound client-certificate binding), so it is the silently-deaf state. This is the one not-ready verdict, and it is exactly the state `-require-federation` refuses to start in. |
 | `HEAD` | `/healthz`, `/v1/info`, `/v1/discovery` | none | 200 | **CHANGED 2026-08-08 (CORE-7): HEAD is now ACCEPTED on every GET route** and was a 405 before. Same status as the corresponding `GET`, and the same `Content-Type` / `X-Content-Type-Options`, with **no body** — `writeJSON`/`writePreformattedJSON` suppress it. **`Content-Length` is absent** (measured: `GET /healthz` sends `Content-Length: 16`, `HEAD /healthz` sends none), because net/http computes it from bytes written and the handler writes none. Legal under RFC 9110 §8.6, which permits omitting it; do not read "same headers" more strongly than this row states. Probes (load balancers, container healthchecks, uptime monitors) commonly issue `HEAD /healthz`; that used to be a false alarm from the one route whose job is to report liveness honestly. |
 | other | `/healthz`, `/v1/info`, `/v1/discovery` | none | 405 | `{"error":"method not allowed"}`, `Allow: GET, HEAD` — the `Allow` value changed with CORE-7 and now names every method the route serves |
 | `POST` | `/v1/enroll` | none (unauthenticated by necessity — this is how the credential is obtained; only registered when `Options.Auth != nil`, see AUTH-1 section below) | 201 | `{"agent_id":"...","bus_id":"...","name":"...","enrolled_at":"<RFC3339Nano UTC>"}` — the SAME body, byte for byte, on an idempotent replay (see `Idempotency-Replayed` header) |
@@ -372,6 +374,43 @@ to protect it individually, which closes the exact risk AUTH-6 flagged (routes w
 easy to forget on the next addition). The allow-list is exactly the six paths named in the routes
 above (added 2026-08-07: `/v1/discovery`); see `## Authentication` further down for the full
 contract.
+
+### Federation readiness — `GET /v1/readyz` (RELAY-55, added 2026-08-28)
+
+A bus can be healthy on `/healthz` (the process is up) yet **silently deaf to the entire
+federation**: if peer records exist on disk but no adjacent bus has an inbound client-certificate
+binding, the peer ingress surface does not mount, every `/v1/peer/` path is unserved, and cross-bus
+messages are dropped — while `/healthz` stays green. `GET /v1/readyz` is the signal that distinguishes
+the two. Its `federation` field is one of:
+
+- `ready` — the peer ingress surface mounted (HTTP 200). Read from the actually-registered peer
+  routes, so it cannot disagree with what mounted.
+- `not_configured` — this bus has no peer records, so it was never meant to federate (HTTP 200). A
+  non-federating bus is a ready bus.
+- `unserved` — peer records exist but the surface did not mount: the silently-deaf state (HTTP 503,
+  `status: not_ready`). This is the only not-ready verdict.
+
+`status` mirrors the code: `ready` at 200, `not_ready` at 503. `HEAD` is accepted (pure read); any
+other method is 405 with `Allow: GET, HEAD`.
+
+**It is AUTHENTICATED — off the allow-list** (`httpapi.UnauthenticatedRoutes()`). That is the
+ratified design: an authenticated route adds nothing to invariant 3's unauthenticated enumeration, so
+no `DECISIONS.md` invariant-3 amendment is owed (contrast a `/v1/info` field or an unauthenticated
+`/readyz`, both of which would have amended it). The body is deliberately COARSE — it discloses no
+peer id, route count or fingerprint, only whether THIS bus's own surface is serving, and the
+existence of federation is already observable to an authenticated caller through the peer routes, so
+this adds no capability an attacker did not already have.
+
+**Two audiences, two signals.** `/v1/readyz` serves the **operator**, who holds a session and can
+check readiness live between deploy stages. The **orchestrator** — a container healthcheck that
+CANNOT authenticate — is served instead by the `-require-federation` startup flag
+(`CONTRACTS-CLI.md`), which fails a mis-wired deploy at startup with a non-zero exit before the
+container is put in rotation. `docs/THREE-BUS-DOCKER.md` names `-require-federation` as the rollout
+gate.
+
+*(Invariant 7 note: `/v1/readyz` is operator-facing, not agent-facing, and ships without a
+`cmd/agent-busctl` subcommand in this task; a readiness subcommand is filed as a follow-up. Agents do
+not check federation readiness — operators and orchestrators do.)*
 
 ## Messaging: delivery guarantee, cursors, retention (added 2026-08-02)
 

@@ -206,6 +206,21 @@ type Config struct {
 	// has issued and a derivation from the log is structurally a lower bound (see
 	// openSuffixAllocator). Never needed in normal operation.
 	BackfillSuffixFloors bool
+	// RequireFederation makes startup REFUSE when this bus has peer records on
+	// disk but the peer ingress surface did not mount (RELAY-55) — the "silently
+	// deaf" state in which /healthz stays green while every cross-bus message is
+	// dropped. Default false: an unset flag never changes startup.
+	//
+	// It serves the ORCHESTRATOR, which cannot authenticate to /v1/readyz: it
+	// fails a mis-wired deploy at startup, before the container is put in
+	// rotation. The operator-facing counterpart is GET /v1/readyz.
+	//
+	// The condition it refuses on is REACHABLE through supported configuration —
+	// `agent-bus peer add -url … -tls-fingerprint …` with no inbound
+	// `-peer-client-fingerprint` binding leaves an ACTIVE peer route (records
+	// exist) that mounts no ingress surface (bindablePeerCount == 0). It is NOT a
+	// guard gated on a compile-time constant: it reads live peer-store state.
+	RequireFederation bool
 }
 
 func main() {
@@ -369,6 +384,7 @@ func parseFlags(prog string, args []string, out io.Writer) (Config, error) {
 	// quotes, so "`agent-suffixes`" would render -h as though this boolean took
 	// an agent-suffixes argument.
 	fs.BoolVar(&cfg.BackfillSuffixFloors, "backfill-suffix-floors", false, "one-time operator opt-in permitting the agent-id suffix floors to be BACKFILLED from the durable log on a data directory that has history but no agent-suffixes file; never needed in normal operation")
+	fs.BoolVar(&cfg.RequireFederation, "require-federation", false, "REFUSE to start when this bus has peer records but the peer ingress surface did not mount (RELAY-55): a mis-wired federation deploy that /healthz reports as healthy. Default off; the operator-facing counterpart is the authenticated GET /v1/readyz")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -467,6 +483,46 @@ func listenExposureError(listen string, federationConfigured, inviteGatingOn boo
 		return nil
 	}
 	return fmt.Errorf("refusing to start: -listen %q is a NON-loopback address while this bus has federation configured (peer records exist) and invite-gating is off. This is the public exposure the SSH-tunnel deployment assumption rules out (DECISIONS.md FEDERATION (a)/(b), RELAY-6): the anonymous enrolment route would be reachable by non-operators. Remedy: bind -listen to a loopback address (e.g. 127.0.0.1:8080) and reach this bus only through an SSH tunnel, OR enable invite-gating", listen)
+}
+
+// requireFederationError enforces the -require-federation startup gate
+// (RELAY-55): a bus can be healthy on /healthz yet silently deaf to the entire
+// federation because its peer ingress surface never mounted, and an orchestrator
+// that cannot authenticate to /v1/readyz needs that mis-deploy delivered as a
+// non-zero exit before the container is put in rotation.
+//
+// It returns a non-nil, FATAL error when ALL THREE of these hold at once:
+//
+//	(a) require is true — the operator passed -require-federation; and
+//	(b) federationConfigured is true — this bus has at least one peer ROUTE or
+//	    bus-TRUST record on disk (peerRecordsExist); and
+//	(c) peerSurfaceMounted is false — the ingress switch in run() registered no
+//	    peer route, which happens exactly when no adjacent bus has an inbound
+//	    client-certificate binding (bindablePeerCount == 0).
+//
+// # THIS IS A GUARD THAT CAN FIRE, AND THAT IS THE POINT
+//
+// RELAY-26 shipped a startup refusal whose first branch tested a compile-time
+// const true, so it always short-circuited and could never fire. This one refuses
+// on RUNTIME peer-store state, and its refuse-condition is REACHABLE through
+// supported configuration: `agent-bus peer add -url … -tls-fingerprint …` OR a
+// bus-trust record with no inbound `-peer-client-fingerprint` binding leaves
+// records present (b true) and the surface unmounted (c true), which is the third
+// case of run()'s ingress switch. TestRequireFederationRefusesStartupWhenPeerSurfaceIncomplete
+// drives that real config and observes the refusal firing; deleting this refusal
+// turns it RED.
+//
+// It is scoped to the records-present case on purpose (b): a bus with NO peer
+// records is not deaf to federation, it simply does not federate, so this does
+// not refuse it — federationConfigured is false and the gate is a no-op. The
+// separate case where the peer store could not be built at all is already
+// reported LOUDLY at ERROR in run(); peerRecordsExist(nil) is false there, so
+// this gate does not double-report it.
+func requireFederationError(require, federationConfigured, peerSurfaceMounted bool, dataDir string) error {
+	if !require || !federationConfigured || peerSurfaceMounted {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: -require-federation is set and this bus has peer records, but the peer INGRESS surface did not mount, so this bus would be healthy on /healthz while silently deaf to the federation (RELAY-55). This is a mis-wired federation deploy: at least one peer is configured but no adjacent bus has an INBOUND CLIENT CERTIFICATE binding, so no peer could authenticate and no peer route was registered. Remedy: bind each adjacent bus's inbound client certificate with `agent-bus peer add -data-dir %s -bus-id <peer bus id> -signing-key <that bus's pinned Ed25519 signing key, base64> -peer-client-fingerprint <64 lowercase hex>`, then restart; OR, if this bus is intentionally egress-only, remove -require-federation", dataDir)
 }
 
 func run(cfg Config) error {
@@ -1772,6 +1828,14 @@ func run(cfg Config) error {
 			"bus_id", busID)
 	}
 
+	// -require-federation: REFUSE to start when this bus has peer records but the
+	// peer ingress surface did not mount (RELAY-55). peerSurface != nil is exactly
+	// the "the switch above mounted the ingress" fact; requireFederationError owns
+	// the decision so every combination stays testable. See requireFederationError.
+	if err := requireFederationError(cfg.RequireFederation, peerRecordsExist(peerStore), peerSurface != nil, cfg.DataDir); err != nil {
+		return err
+	}
+
 	// rootCtx is the SERVER-LIFETIME context. http.Server.BaseContext hands it
 	// to every connection, so each request context descends from it: cancelling
 	// it releases handlers parked on a long-poll instead of leaving them
@@ -1846,6 +1910,12 @@ func run(cfg Config) error {
 		// to register for exactly that reason.
 		Peer:           peerSurface,
 		PeerPrincipals: peerPrincipals,
+		// The peer-store bit GET /v1/readyz needs to tell "this bus does not
+		// federate" apart from "this bus was meant to federate but its ingress did
+		// not mount" (RELAY-55). It is the SAME peerRecordsExist(peerStore) the
+		// -require-federation refusal above reads, so the endpoint and the flag
+		// agree on when federation was expected.
+		FederationExpected: peerRecordsExist(peerStore),
 		// PER-SOURCE RATE LIMIT on the three unauthenticated credential routes
 		// (AUTH-1-FU-RATELIMIT). Enabled by default; -auth-rate-burst 0 disables
 		// it. A throttled source is answered 429 + Retry-After and never
