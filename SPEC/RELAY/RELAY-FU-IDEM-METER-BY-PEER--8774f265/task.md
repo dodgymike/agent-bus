@@ -130,9 +130,9 @@ PROOF_CMD: unchanged, still names TestAppliedKeyMeteredByAuthenticatedPeer in ./
 - [CONV-TRACK-ON-RECEIPT](../../CONV/CONV-TRACK-ON-RECEIPT--ed1e70ac/task.md) — CONV-TRACK-ON-RECEIPT: a bus starts tracking a conversation on first receipt -- gated by… (todo)
 - [IDEM-17-FU-CROSSAGENT](../../IDEM/IDEM-17-FU-CROSSAGENT--0cd0ce79/task.md) — Crash-injection coverage for cross-agent applied-key isolation across recovery (todo)
 - [IDEM-19](../../IDEM/IDEM-19--82b79094/task.md) — IDEM-19: expiry-queue compaction is O(retained) -- 48.4s vs 32ms measured, on the every-s… (done)
-- [POLL-CONCURRENT-WAITERS](../../POLL/POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (todo)
+- [POLL-CONCURRENT-WAITERS](../../POLL/POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (done)
 - [RELAY-47](../RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
-- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
+- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (done)
 - [RELAY-FU-INGEST-RATELIMIT](../RELAY-FU-INGEST-RATELIMIT--e7c66d83/task.md) — RELAY-FU-INGEST-RATELIMIT: no rate limit, quota or concurrency cap of any kind on relayed… (superseded)
 - [ff38f871-988a-4f2c-aa9a-febee4f3b15a](../../DOCS/AGENT_LOG-entry-skipped-doc-gate-justification-for-the-2--ff38f871/task.md) — AGENT_LOG entry + skipped-doc-gate justification for the 2026-08-14 internal/idem comment… (todo)
 

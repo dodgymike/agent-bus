@@ -52,7 +52,7 @@ _None recorded._
 - [AUTH-6](../AUTH-6--1640e0b4/task.md) — AUTH-6: Auth FAIL-OPEN risk -- wrap the mux with auth + an explicit unauthenticated allow… (superseded)
 - [CLI-2](../../CLI/CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
 - [CORE-12](../../CORE/CORE-12--ae000d92/task.md) — CORE-12: defaultListen=":8080" binds all interfaces -- prefer 127.0.0.1:8080 (superseded)
-- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 
 ---
 

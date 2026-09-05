@@ -103,7 +103,7 @@ _None recorded._
 - [CLI-3](../CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
 - [CLI-4](../CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [CLI-5](../CLI-5--86dea094/task.md) — CLI-5: agents -- roster listing (replaces bus-agents.sh) (done)
-- [CLI-6](../CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
+- [CLI-6](../CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (in_progress)
 - [CLI-7](../CLI-7--e600bde6/task.md) — CLI-7: peers -- relay topology and health (replaces bus-peer.sh) (todo)
 - [CLI-8](../CLI-8--ae4caacc/task.md) — CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure (todo)
 - [CLI-9](../CLI-9--93973755/task.md) — CLI-9: shell completion + man/usage polish (todo)

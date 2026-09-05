@@ -69,7 +69,7 @@ cmd/agent-busctl/enrol.go, CONTRACTS-HTTP.md (wave-2 exclusive), new msgkey_test
 - [RELAY-13-FU-DOCS](../RELAY-13-FU-DOCS--7f3a4b80/task.md) — RELAY-13-FU-DOCS: three docs/comments assert the opposite of shipped RELAY-13 behaviour -… (done)
 - [RELAY-13-FU-KEYGEN](../../UNASSIGNED/RELAY-13-FU-KEYGEN--518b18c0/task.md) — RELAY-13-FU-KEYGEN: 3 error-message remedy strings name the nonexistent agent-busctl keyg… (todo)
 - [RELAY-13-FU-MSGKEYPOP](../RELAY-13-FU-MSGKEYPOP--59db5455/task.md) — RELAY-13-FU-MSGKEYPOP: no proof-of-possession of the messaging private key at enrolment,… (todo)
-- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (todo)
+- [RELAY-FU-DOCGO-CROSSBUSTRUST-STALE](../RELAY-FU-DOCGO-CROSSBUSTRUST-STALE--4988156c/task.md) — internal/relay/doc.go asserts relay ingest is structurally blocked (no CrossBusTrust impl… (done)
 - [c716f8e7-ad9c-4af9-9fac-1bdb75c8f900](../../DOCS/PROTOCOL.md-1002-says-internal-relay-is-imported-by-noth--c716f8e7/task.md) — PROTOCOL.md:1002 says internal/relay is 'imported by nothing' -- false since ed77bba (int… (todo)
 - [fbb16f9b-1b81-4fd0-a60f-5b2a76806bff](../internal-httpapi-peermount.go-pre-auth-prober-does-not-e--fbb16f9b/task.md) — internal/httpapi/peermount.go: 'pre-auth prober does not exist' overstates ruling (h), an… (todo)
 

@@ -69,7 +69,7 @@ _None recorded._
 
 
 - [804fa84c-e97b-4737-8866-801f87468da4](../../DUR/Document-what-the-bus-does-with-an-UNKNOWN-WAL-record-ty--804fa84c/task.md) — Document what the bus does with an UNKNOWN WAL record type -- the answer is now discard-a… (todo)
-- [DUR-12](../../DUR/DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (done)
+- [DUR-12](../../DUR/DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (in_progress)
 - [DUR-4-FU-DOCS](../../DUR/DUR-4-FU-DOCS--0b6d5c11/task.md) — DUR-4-FU-DOCS: state invariants 4/6 as explicit NARROWINGS + document the WAL recovery AP… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)

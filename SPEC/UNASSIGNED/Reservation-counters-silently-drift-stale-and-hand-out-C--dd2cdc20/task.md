@@ -231,9 +231,9 @@ _None recorded._
 - [DOCS-6](../../DOCS/DOCS-6--76879ad1/task.md) — DOCS-6: README is unusable: quickstart 403s, "what works today" curls a TLS port in plain… (todo)
 - [RELAY-45-FU-CLI](../../RELAY/RELAY-45-FU-CLI--b9d645be/task.md) — RELAY-45-FU-CLI: operator CLI surface for the inbound peer client-certificate binding (done)
 - [RELAY-52](../../RELAY/RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
-- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (done)
 - [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
-- [RELAY-55](../../RELAY/RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
+- [RELAY-55](../../RELAY/RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (done)
 - [TOOLING-1](../../TOOLING/TOOLING-1--eeb4109b/task.md) — TOOLING-1: read-only linter for mechanically broken stored proof_cmd values (done)
 - [TOOLING-2](../../TOOLING/TOOLING-2--87d9e8d1/task.md) — TOOLING-2: make docs/THREE-BUS-DOCKER.md's bash blocks a repeatable executable check (todo)
 

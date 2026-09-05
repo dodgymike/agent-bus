@@ -93,7 +93,7 @@ BLOCKING: THIS TASK BLOCKS RELAY-24 AND RELAY-25. hub.IngestRelayed landed in e7
 
 
 - [IDEM-14](../../IDEM/IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
-- [POLL-CONCURRENT-WAITERS](../../POLL/POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (todo)
+- [POLL-CONCURRENT-WAITERS](../../POLL/POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (done)
 - [RATCHET-2](../../RATCHET/RATCHET-2--ade31a62/task.md) — RATCHET-2: Threat model -- what Ed25519 signing defends against, and explicitly what it d… (todo)
 - [SIGN-1-FU-REORDER-WATERMARK](../SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) — SIGN-1-FU-REORDER-WATERMARK: a late-arriving lower sequence is never delivered to a reade… (todo)
 - [SIGN-4](../SIGN-4--33fa35d8/task.md) — SIGN-4: Replay/freshness -- enforced SERVER-SIDE at ingest, never by recipient-side seque… (todo)

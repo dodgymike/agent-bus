@@ -62,7 +62,6 @@ _None recorded._
 
 
 - [68c1788f-6043-4c2d-b409-887f71507d69](../Invert-stale-internal-hub-hub.go-quarantine-reissue-perm--68c1788f/task.md) — Invert stale internal/hub/hub.go quarantine reissue-permitted assertions once MSG-FU-SEQH… (todo)
-- [ID-2-WIRING](../../ID/ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (superseded)
 - [ID-2-WIRING-OBSERVER](../../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
 - [b7ac3580-d4ff-44f0-9d10-a734ef4a6043](../internal-hub-hub.go-590-s-no-floor-file-quarantine-ERROR--b7ac3580/task.md) — internal/hub/hub.go:590's no-floor-file quarantine ERROR promises the file will be writte… (todo)
 - [db350e39-3dde-4166-b241-b21fa4635359](../Whole-log-quarantine-reissued-EVERY-sequence-number-ever--db350e39/task.md) — Whole-log quarantine reissued EVERY sequence number ever minted -- fixed by a durable ind… (done)

@@ -5,19 +5,19 @@
 | Public id | `52196a49-9fb0-4f0c-958e-5b63ec413e7f` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | hub |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T14:25:19.100241+00:00 |
-| Updated | 2026-08-21T14:25:19.100241+00:00 |
-| Completed | — |
+| Updated | 2026-09-03T06:23:22.550370+00:00 |
+| Completed | 2026-09-03T06:23:22.550354+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestApplyDiscardIsCountedTowardIncompleteInputSummary' ./internal/hub
+go test -race -run "TestApplyDiscardIsCountedTowardIncompleteInputSummary" ./internal/hub
 ```
 
 ## Description

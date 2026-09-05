@@ -88,6 +88,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
+- [23d4e264-a6ae-4fd6-ae4f-1a41a56097de](../TestCLIEnrolEndToEnd-flakes-1-3-under-race--23d4e264/task.md) — TestCLIEnrolEndToEnd flakes ~1/3 under -race (todo)
 - [ACK-17-FU-CONTRACT-CITATION](../ACK-17-FU-CONTRACT-CITATION--327f7cf7/task.md) — ACK-17-FU-CONTRACT-CITATION: pin CONTRACTS-HTTP.md per-principal parked-wait cap claim to… (todo)
 - [ACK-17-FU-ENROL-FLAKE](../ACK-17-FU-ENROL-FLAKE--c20c15c8/task.md) — ACK-17-FU-ENROL-FLAKE: TestCLIEnrolEndToEnd is flaky at HEAD (SIGTERM race before handler… (todo)
 - [ACK-17-FU-FOREIGNPREFIX](../ACK-17-FU-FOREIGNPREFIX--f9c6d8b0/task.md) — ACK-17-FU-FOREIGNPREFIX: tripwire -- auth.WALRoster.Apply does not filter foreign bus pre… (todo)

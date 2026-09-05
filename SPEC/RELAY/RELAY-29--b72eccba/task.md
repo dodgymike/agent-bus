@@ -41,7 +41,7 @@ _None recorded._
 
 
 - [RELAY-28](../RELAY-28--c0a26f95/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (cancelled)
-- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (todo)
+- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -51,7 +51,7 @@ _None recorded._
 
 
 - [RELAY-28](../RELAY-28--c0a26f95/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (cancelled)
-- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (todo)
+- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (done)
 
 ---
 

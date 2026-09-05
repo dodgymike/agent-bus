@@ -166,7 +166,7 @@ mistyped-directory case is already caught by the pre-lock presence check. CONFIR
 
 - [8cfd52e7-6cbd-4d29-b34d-c3dee87e73e5](../../RELAY/agent-bus-peer-list-mints-wal-mac.key-as-a-side-effect-o--8cfd52e7/task.md) — agent-bus peer list mints wal-mac.key as a side effect of a read-only command (todo)
 - [AUTH-10-WIRING](../AUTH-10-WIRING--b11ef24c/task.md) — AUTH-10-WIRING: wire the operator principal into cmd/agent-bus/main.go — until this lands… (done)
-- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
+- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (in_progress)
 - [RELAY-54](../../RELAY/RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

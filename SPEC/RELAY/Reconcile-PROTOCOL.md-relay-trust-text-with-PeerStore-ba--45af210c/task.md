@@ -5,14 +5,14 @@
 | Public id | `45af210c-2520-4a3a-9444-31f8e020bab1` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | documentation |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T23:15:22.824020+00:00 |
-| Updated | 2026-08-16T10:39:16.381775+00:00 |
-| Completed | — |
+| Updated | 2026-09-03T06:23:07.470406+00:00 |
+| Completed | 2026-09-03T06:23:07.470389+00:00 |
 
 ## Proof command
 

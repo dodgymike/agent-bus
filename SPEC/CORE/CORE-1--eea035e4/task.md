@@ -80,7 +80,7 @@ _None recorded._
 - [CORE-7](../CORE-7--60f49022/task.md) — CORE-7: HEAD is 405'd by requireGET while writeJSON still guards MethodHead -- dead code,… (done)
 - [CORE-8](../CORE-8--1e9dae04/task.md) — CORE-8: Unmatched paths return ServeMux's text/plain 404, breaking the JSON error contract (done)
 - [CORE-9](../CORE-9--a1f74fcc/task.md) — CORE-9: Set IdleTimeout + MaxHeaderBytes on http.Server -- and deliberately leave Read/Wr… (done)
-- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 - [CRYPTO-2](../../CRYPTO/CRYPTO-2--0ad37da2/task.md) — CRYPTO-2: Adopt the crypto primitive layer chosen by the spike (internal/cryptobox + go.m… (superseded)
 - [SPEC-API-LIST-SILENT-TRUNCATION](../../UNASSIGNED/SPEC-API-LIST-SILENT-TRUNCATION--82f35b73/task.md) — Task-list API silently truncates at 200 with no total, no next and no working pagination… (todo)
 - [c0a5bdb6-8b57-4382-adb1-db6657850818](../Re-verify-CORE-1-s-gofmt-proof-with-the-corrected-go-env--c0a5bdb6/task.md) — Re-verify CORE-1's gofmt proof with the corrected ($(go env GOROOT)/bin/gofmt) invocation… (done)

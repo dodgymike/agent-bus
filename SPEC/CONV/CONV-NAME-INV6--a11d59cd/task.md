@@ -72,7 +72,7 @@ Parallel-safety: design only. No live bus needed.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -82,7 +82,7 @@ Parallel-safety: design only. No live bus needed.
 
 
 - [CONV-AUTHZ-CREATOR](../CONV-AUTHZ-CREATOR--4abd8589/task.md) — CONV-AUTHZ-CREATOR: only the creator may change the recipient list -- the arm that can sh… (todo)
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ---
 

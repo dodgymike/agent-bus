@@ -55,7 +55,7 @@ RESCOPED 2026-08-02 per user instruction ("keep it simple, standard sign/verify;
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 
 ---
 

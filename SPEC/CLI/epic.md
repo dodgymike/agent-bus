@@ -2,11 +2,11 @@
 
 [← all epics](../../SPEC.md)
 
-**14 open / 36 total.** Full records live in `SPEC/CLI/<task>/task.md`.
+**15 open / 36 total.** Full records live in `SPEC/CLI/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (14)
+## Open tasks (15)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -17,6 +17,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | DISCOVERY-DOC-FU-CLI | DISCOVERY-DOC-FU-CLI: \`agent-busctl\` subcommand that fetches and renders the bus discover… | todo | P1 | [task.md](DISCOVERY-DOC-FU-CLI--b123c098/task.md) | blocked by [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md)<br>blocks [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) | [DISCOVERY-DOC](../CORE/DISCOVERY-DOC--2d7ce37b/task.md) |
 | CLI-13 | CLI-13: TestCLIEnrolEndToEnd SIGTERMs the priming server before it installs a handler --… | todo | P2 | [task.md](CLI-13--c66dd902/task.md) | — | [DOCS-22](../DOCS/DOCS-22--2f8ae959/task.md) |
 | CLI-2-FU-TLSSEAM | CLI-2-FU-TLSSEAM: The client transport is built before the identity is resolved | todo | P2 | [task.md](CLI-2-FU-TLSSEAM--e4d60d97/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
+| CLI-6 | CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… | in_progress | P2 | [task.md](CLI-6--47001cb4/task.md) | blocks [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) | [DUR-4-FU-TOOLING](../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) [CLI-8](CLI-8--ae4caacc/task.md) [DUR-5](../DUR/DUR-5--a7123e88/task.md) [CLI-1](CLI-1--0495d133/task.md) [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) |
 | CLI-7 | CLI-7: peers -- relay topology and health (replaces bus-peer.sh) | todo | P2 | [task.md](CLI-7--e600bde6/task.md) | supersedes [AGENTIF-8](../AGENTIF/AGENTIF-8--3837e7fd/task.md) | [AGENTIF-8](../AGENTIF/AGENTIF-8--3837e7fd/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-8 | CLI-8: doctor -- diagnose a broken setup with a specific remedy per failure | todo | P2 | [task.md](CLI-8--ae4caacc/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-BUSCTL-IMAGE | CLI-BUSCTL-IMAGE: Ship the busctl binary in the container image | todo | P2 | [task.md](CLI-BUSCTL-IMAGE--9be2105d/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) [DEPLOY-1](../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) [DEPLOY-2](../DEPLOY/DEPLOY-2--14f8ec3b/task.md) [CLI-1-FU-BINARYNAME](CLI-1-FU-BINARYNAME--6a1eb5fa/task.md) |
@@ -25,7 +26,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CLI-6-FU-NITS | CLI-6-FU-NITS: three non-blocking nits in \`agent-bus log\` raised by the reviewer and secu… | todo | P3 | [task.md](CLI-6-FU-NITS--643749b3/task.md) | — | [CLI-6](CLI-6--47001cb4/task.md) |
 | CLI-9 | CLI-9: shell completion + man/usage polish | todo | P3 | [task.md](CLI-9--93973755/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-8](CLI-8--ae4caacc/task.md) |
 
-## Closed tasks (22) — done, cancelled, superseded
+## Closed tasks (21) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -36,7 +37,7 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | 797fb15f-27d8-4671-8d27-c8bd38bfb1f6 | busctl watch help documents a fatal 503 under exit 5 but client.ExitCode yields 6 | done | P1 | [task.md](busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md) | relates to [CLI-3](CLI-3--6e70abe5/task.md)<br>relates to [CLI-4](CLI-4--137465b9/task.md) | — |
 | 8949b094-66ab-4704-8c8d-39dd54981ca1 | cmd/agent-busctl/cli_test.go valid-exit-code map omits client.ExitVersionSkew(9) -- laten… | superseded | P1 | [task.md](cmd-agent-busctl-cli_test.go-valid-exit-code-map-omits-c--8949b094/task.md) | relates to [52930611-1b7e-479f-a2d3-cd72fa09044e](client-404-on-a-route-the-client-depends-on-reports-as-v--52930611/task.md)<br>superseded by INVITE-CLIENT-FU-EXIT9 (unresolved) | [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--970e2a81/task.md) [INVITE-CLIENT-FU-EXIT9](../INVITE/INVITE-CLIENT-FU-EXIT9--9c85d8df/task.md) [52930611-1b7e-479f-a2d3-cd72fa09044e](client-404-on-a-route-the-client-depends-on-reports-as-v--52930611/task.md) |
 | CLI-1-FU-BINARYNAME | CLI-1-FU-BINARYNAME: Decide the INSTALLED name of the client binary | done | P1 | [task.md](CLI-1-FU-BINARYNAME--6a1eb5fa/task.md) | — | [CLI-BUSCTL-IMAGE](CLI-BUSCTL-IMAGE--9be2105d/task.md) |
-| CLI-3 | CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… | done | P1 | [task.md](CLI-3--6e70abe5/task.md) | relates to [797fb15f-27d8-4671-8d27-c8bd38bfb1f6](busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md)<br>supersedes [AGENTIF-6](../AGENTIF/AGENTIF-6--31c1257c/task.md) | [AGENTIF-6](../AGENTIF/AGENTIF-6--31c1257c/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) [IDEM-11](../IDEM/IDEM-11--8e2c4de3/task.md) |
+| CLI-3 | CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… | done | P1 | [task.md](CLI-3--6e70abe5/task.md) | relates to [797fb15f-27d8-4671-8d27-c8bd38bfb1f6](busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md)<br>supersedes [AGENTIF-6](../AGENTIF/AGENTIF-6--31c1257c/task.md) | [AGENTIF-6](../AGENTIF/AGENTIF-6--31c1257c/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |
 | CLI-4 | CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… | done | P1 | [task.md](CLI-4--137465b9/task.md) | relates to [2b4ecf0b-7f01-436b-8135-811ff4963a0e](busctl-send-broadcast-lose-the-minted-idempotency-key-on--2b4ecf0b/task.md)<br>relates to [797fb15f-27d8-4671-8d27-c8bd38bfb1f6](busctl-watch-help-documents-a-fatal-503-under-exit-5-but--797fb15f/task.md)<br>supersedes [AGENTIF-4](../AGENTIF/AGENTIF-4--715fc1b8/task.md)<br>supersedes [AGENTIF-5](../AGENTIF/AGENTIF-5--8109ab88/task.md) | [AGENTIF-4](../AGENTIF/AGENTIF-4--715fc1b8/task.md) [AGENTIF-5](../AGENTIF/AGENTIF-5--8109ab88/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) [IDEM-18](../IDEM/IDEM-18--61f80a28/task.md) [CLI-3](CLI-3--6e70abe5/task.md) +2 more |
 | CLI-5 | CLI-5: agents -- roster listing (replaces bus-agents.sh) | done | P1 | [task.md](CLI-5--86dea094/task.md) | supersedes [AGENTIF-3](../AGENTIF/AGENTIF-3--6f1ebe02/task.md) | [AGENTIF-3](../AGENTIF/AGENTIF-3--6f1ebe02/task.md) [MSG-1](../MSG/MSG-1--fbe35d10/task.md) [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) [CLI-3](CLI-3--6e70abe5/task.md) [DEPLOY-2-FU-CONTAINERNAME](../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) +1 more |
 | 2cf20abf-b209-4829-bac1-bda07ddd9ed5 | client.canonicalHost drops IPv6 brackets when removing a default port | done | P2 | [task.md](client.canonicalHost-drops-IPv6-brackets-when-removing-a--2cf20abf/task.md) | — | [INVITE-MINT](../INVITE/INVITE-MINT--1d0d0e60/task.md) [MTLS-ROTATE](../MTLS/MTLS-ROTATE--c2e8df5b/task.md) |
@@ -46,7 +47,6 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | CLI-3-FU-SAFETEXT | CLI-3-FU-SAFETEXT: export the terminal-safe renderer from client/ and delete busctl's copy | done | P2 | [task.md](CLI-3-FU-SAFETEXT--e4baf8c5/task.md) | relates to [TUI-5](../TUI/TUI-5--b2a44ce9/task.md) | [CLI-3](CLI-3--6e70abe5/task.md) |
 | CLI-3-FU-STOREDEDUP | CLI-3-FU-STOREDEDUP: collapse cursorstore.go's duplicated atomic-save and lock discipline… | done | P2 | [task.md](CLI-3-FU-STOREDEDUP--be8c763c/task.md) | — | [CLI-3](CLI-3--6e70abe5/task.md) |
 | CLI-3-FU-URLKEY | CLI-3-FU-URLKEY: watch cursor is keyed by bus_url INCLUDING SCHEME, so a TLS flip replays… | done | P2 | [task.md](CLI-3-FU-URLKEY--6979c651/task.md) | — | [CLI-3](CLI-3--6e70abe5/task.md) |
-| CLI-6 | CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… | done | P2 | [task.md](CLI-6--47001cb4/task.md) | blocks [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) | [DUR-4-FU-TOOLING](../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) [CLI-8](CLI-8--ae4caacc/task.md) [DUR-5](../DUR/DUR-5--a7123e88/task.md) [CLI-1](CLI-1--0495d133/task.md) [RELAY-25](../RELAY/RELAY-25--10491a01/task.md) [CLI-11](../UNASSIGNED/CLI-11--bf966c07/task.md) +2 more |
 | CLI-FU-SEEDREDACT | CLI-FU-SEEDREDACT: pendingEnrolment holds a raw private-key seed with no redacting String… | done | P2 | [task.md](CLI-FU-SEEDREDACT--85da3164/task.md) | — | — |
 | 76ec4aa1-0e8e-4913-b77f-bc7f61914ed5 | writeFailed's empty-Remedy branch is unreachable-by-fixture and untested | done | P3 | [task.md](writeFailed-s-empty-Remedy-branch-is-unreachable-by-fixt--76ec4aa1/task.md) | — | — |
 | CLI-2-FU-GITIGNORE | CLI-2-FU-GITIGNORE: Add the credential store to .gitignore | done | P3 | [task.md](CLI-2-FU-GITIGNORE--6fb7f295/task.md) | — | [CLI-1](CLI-1--0495d133/task.md) [CLI-2](CLI-2--39318208/task.md) |

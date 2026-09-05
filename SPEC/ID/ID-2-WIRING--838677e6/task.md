@@ -5,13 +5,13 @@
 | Public id | `838677e6-d424-45ed-8580-924cb2da28a6` |
 | Key | _(null in the export)_ |
 | Epic | [ID](../epic.md) |
-| Status | superseded |
+| Status | done |
 | Priority | P0 |
 | Component | id |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T14:02:19.994673+00:00 |
-| Updated | 2026-08-07T20:39:13.002014+00:00 |
+| Updated | 2026-09-05T12:03:59.944340+00:00 |
 | Completed | — |
 
 ## Proof command
@@ -22,22 +22,7 @@ go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-bus
 
 ## Status note
 
-CORRECTED 2026-08-07 (spec-keeper). Disposition UNCHANGED (still SUPERSEDED, not reopened) but the REASON recorded a few hours earlier in this same field was WRONG and is replaced here, because a later reader would otherwise inherit a disproved argument.
-
-WHAT WAS WRONG. The 20:12 note closing this task argued the hazard was closed transitively: "internal/hub derives its sequence floor from wal.Recovered.NextIndex-1 ... the WAL record index ... already bounds the sequence transitively (each message burns 1 sequence + 2 indices, so an index floor bounds the sequence floor)." That is the counting argument, and it is FALSE the moment a sequence can be handed out before any WAL record carries it.
-
-THE DISPROOF, MEASURED (2026-08-07, after this task was closed). SIGN-2/SIGN-6 shipped `POST /v1/mint`: a client now receives a message id+sequence BEFORE any record is written, and the mint burns a batch of `hub.MintBatchSize = 256` sequences per durable claim. Sweeping every truncation offset of a WAL and reading the resumed sequence via a REAL mint call (internal/hub/seqhighwater_test.go, run first-hand: `go test -race -run TestSequenceHighWaterSurvivesDeepDamage ./internal/hub` -> PASS, 3 subtests):
-  - with the durable `<data-dir>/message-seq-floor` file PRESENT -> 0 of 248 offsets reissued a sequence.
-  - with it REMOVED, relying on wal-index-floor alone (exactly the mechanism the 20:12 note credited) -> 247 of 248 reissued.
-Reproduced independently by the security gate per the brief that prompted this correction. The codebase already said so in capitals before this task was ever closed, at internal/hub/hub.go:477-491 ("That argument is RETIRED... wal's own durable index floor no longer covers this one transitively either") and internal/hub/seqfloorfile.go:93-98 ("Before the batch existed, every sequence was <= the WAL index... THAT IS THE ARGUMENT THE BATCH BROKE"). The 20:12 closing note did not check this before writing the transitive-bound claim.
-
-THE ACTUAL, CORRECT REASON THIS TASK IS SUPERSEDED. Not wal-index-floor. It is internal/hub/seqfloorfile.go -- a DEDICATED, atomically-replaced, fsynced file (`<data-dir>/message-seq-floor`, on-disk format version 5, reserved through the Spec Server `ondisk-format-version` namespace) that records the message-sequence high-water mark OUTSIDE the log, written AHEAD of any sequence it authorises, exactly the shape ids.DurableNameSuffixes already uses for agent-id suffixes. It landed under commit aad611c (2026-08-07T16:23:26Z) and is genuinely wired into hub.Open (hub.go:513-517, :524-525, :620-633) -- not merely present in the tree. This is a DIFFERENT structural fix than the one this task specified: this task's own scope (T4 in ID2_WIRING_DEEPDIVE.md) was to derive the floor by folding an observer over every WAL prepare body (Option A'), decoding the sequence out of message content. The floor file makes that unnecessary for the authoritative path -- the sequence is durable BEFORE any message body exists at all, so there is nothing left in a message record for an observer to derive it from. Nothing in ID2_WIRING_DEEPDIVE.md's analysis survives as an open steady-state gap: its root cause (a dangling PREPARE burns a number that committed-only replay cannot see) is closed structurally, not by a better derivation.
-
-RESIDUAL, UNCHANGED BY THIS CORRECTION. MSG-FU-SEQHIGHWATER (6ebe51be, still todo) tracks the one acknowledged open gap: the first-run migration window for a data directory written before message-seq-floor existed (hub.go:537-544 logs this loudly and is NOT silent, per invariant 6) -- and, as of this correction, that task's own proof test now exists in the working tree (internal/hub/seqhighwater_test.go, uncommitted) and is the same test used to measure the 247/0 result above. See that task's own notes for its current state; this correction does not complete it and does not change its disposition.
-
-ID-2-WIRING-OBSERVER (c31f6999) -- separately corrected in its own notes/description by this same pass: still open, still P0, but re-scoped -- it is NOT needed for the primary derivation any more (nothing derives the message sequence from prepare bodies now), but IS still the only honest way to close the legacy-data-directory migration-window gap for both this task's residual and AUTH-3/MSG-FU-SUFFIXFLOOR's analogous suffix-floor residual. See its own record for the corrected scope.
-
-Filed per an explicit request to correct reasoning that had been measurably disproved, not to re-litigate the disposition: SUPERSEDED stands, for the right reason now.
+Step 1 completed. Located the agent-bus source repo at /mnt/sdb4/mike/mike/source/agent-bus (fallback /home/mike/source/agent-bus also exists). The .worktrees/agent-bus-spec-keeper-worktree exists, is registered, on branch spec-keeper-phased-20260905-114702 at HEAD 6aaed56, and is clean — so it was adopted for reuse.
 
 ## Description
 
@@ -83,15 +68,10 @@ PROOF. `go test -race -run TestRunRefusesAnUnprovableSequenceFloor ./cmd/agent-b
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [AUTH-3](../../AUTH/AUTH-3--d53e3b21/task.md) — AUTH-3: Roster persistence & recovery (done)
 - [ID-2](../ID-2--a3a5edc4/task.md) — ID-2: Monotonic sequence allocator (drives message ids) (done)
 - [ID-2-WIRING-OBSERVER](../ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
 - [ID-2-WIRING-SCHEMA](../ID-2-WIRING-SCHEMA--80b54ee4/task.md) — ID-2-WIRING-SCHEMA: DECIDE and record where the message sequence high-water mark lives on… (done)
 - [ID-2-WIRING-SEAL](../ID-2-WIRING-SEAL--8c9b6489/task.md) — ID-2-WIRING-SEAL: Sequence refuses to issue from an UNSEALED floor (the only half impleme… (done)
-- [MSG-FU-SEQHIGHWATER](../../DUR/MSG-FU-SEQHIGHWATER--6ebe51be/task.md) — MSG-FU-SEQHIGHWATER: persist the message-sequence high-water mark so deep log damage cann… (done)
-- [MSG-FU-SUFFIXFLOOR](../MSG-FU-SUFFIXFLOOR--94159d93/task.md) — MSG-FU-SUFFIXFLOOR: resume per-name agent-id suffix counters from disk (agent ids are now… (in_progress)
-- [SIGN-2](../../SIGN/SIGN-2--1c183f10/task.md) — SIGN-2: Sign on the send path (Ed25519 detached signature travels with the message) (todo)
-- [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
 

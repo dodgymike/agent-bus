@@ -5,19 +5,19 @@
 | Public id | `f6268dab-98f9-402a-a42f-57a3641d0d21` |
 | Key | _(null in the export)_ |
 | Epic | [POLL](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | poll |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T09:23:41.437598+00:00 |
-| Updated | 2026-08-15T09:23:45.941286+00:00 |
-| Completed | — |
+| Updated | 2026-09-01T15:51:36.443948+00:00 |
+| Completed | 2026-09-01T15:51:36.443931+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestWatch_ConcurrentWaitersSameAgentID_DeliverySemantics ./cmd/agent-busctl/...
+go test -race -run "TestPollConcurrency|TestWaitRoute|TestWaitSurfacesPollActiveAsNonRetryableRefusal" ./internal/hub ./internal/httpapi ./client
 ```
 
 ## Status note

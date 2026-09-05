@@ -54,7 +54,7 @@ EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BIND | BLOCKS: MTL
 - [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 - [RELAY-20](../../RELAY/RELAY-20--701dc54d/task.md) — RELAY-20: Mount /v1/peer/{enroll,relay,roster} behind a PEER principal (done)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
-- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
+- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -74,7 +74,6 @@ EPIC: a1b628fb-8cbf-47e8-9682-034fda8636c7 | DEPENDS ON: MTLS-BIND | BLOCKS: MTL
 - [MTLS-CROSSCHECK-FU-POLLRECHECK](../MTLS-CROSSCHECK-FU-POLLRECHECK--665694e0/task.md) — AUTH-2-FU-POLLEXPIRY must re-evaluate the certificate cross-check mid-poll, not only the… (superseded)
 - [RELAY-45](../../RELAY/RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-FU-PEERBUSID-CROSSCHECK](../../RELAY/RELAY-FU-PEERBUSID-CROSSCHECK--b2c28232/task.md) — RELAY-FU-PEERBUSID-CROSSCHECK: invariant 11's PEER cross-check is documented but unimplem… (done)
-- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
 - [ca356fde-0613-42cb-ac85-a629609d9c78](../Certificate-expiry-enforcement-is-now-present-on-the-pin--ca356fde/task.md) — Certificate-expiry enforcement is now present on the pinned-bus, agent, peer, and bus-sta… (todo)
 
 ---

@@ -2,14 +2,15 @@
 
 [← all epics](../../SPEC.md)
 
-**37 open / 56 total.** Full records live in `SPEC/ACK/<task>/task.md`.
+**38 open / 57 total.** Full records live in `SPEC/ACK/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (37)
+## Open tasks (38)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
+| 23d4e264-a6ae-4fd6-ae4f-1a41a56097de | TestCLIEnrolEndToEnd flakes ~1/3 under -race | todo | P1 | [task.md](TestCLIEnrolEndToEnd-flakes-1-3-under-race--23d4e264/task.md) | — | [ACK-17](ACK-17--d4a2d828/task.md) [CONV-CREATE-CLI](../CONV/CONV-CREATE-CLI--627d20e0/task.md) |
 | ACK-10 | ACK-10: ACK/NACK compatibility, version negotiation and downgrade safety | todo | P1 | [task.md](ACK-10--cf417e18/task.md) | blocked by [ACK-1](ACK-1--e0ac42e1/task.md)<br>blocked by [ACK-3](ACK-3--263c47fe/task.md)<br>blocks [ACK-12](ACK-12--17406b3a/task.md) | — |
 | ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY | ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY: client.Message.signingMessage feeds the L… | todo | P1 | [task.md](ACK-12-FU-WATCH-CORRELATION-KEY-FU-RELAYVERIFY--7e23e90f/task.md) | — | [ACK-12-FU-WATCH-CORRELATION-KEY](ACK-12-FU-WATCH-CORRELATION-KEY--f423959c/task.md) |
 | ACK-14 | ACK-14: retry exhaustion must BOUNCE to the sender -- today the horizon expires and nobod… | todo | P1 | [task.md](ACK-14--1884218d/task.md) | relates to [ACK-RETRY-ENGINE](ACK-RETRY-ENGINE--81ce7331/task.md) | [ACK-3](ACK-3--263c47fe/task.md) [ACK-6](ACK-6--d3c50d33/task.md) [ACK-9](ACK-9--08f9987f/task.md) [ACK-RETRY-ENGINE](ACK-RETRY-ENGINE--81ce7331/task.md) [ACK-5](ACK-5--5991ee1a/task.md) |

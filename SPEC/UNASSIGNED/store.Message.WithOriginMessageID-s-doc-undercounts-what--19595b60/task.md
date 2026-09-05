@@ -75,7 +75,7 @@ _None recorded._
 
 
 - [88255314-6658-4bba-b1cd-76ebeec9806a](../store.Append-retains-the-CALLER-s-slice-headers-and-hub--88255314/task.md) — store.Append retains the CALLER's slice headers, and hub.publish keeps using the same Mes… (todo)
-- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (todo)
+- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (done)
 
 ---
 

@@ -63,7 +63,7 @@ absolute and overrides stdlib-first and every simplicity argument).
 - [RELAY-27](../RELAY-27--f417c6a0/task.md) — RELAY-27: fix internal/relay/signed.go:306 to wrap attest.Verify errors with %w, not %v (cancelled)
 - [RELAY-27](../RELAY-27--c2486740/task.md) — RELAY-27: relay error taxonomy collapses ALL FIVE attest sentinels to ErrNoSignerKey/bad_… (done)
 - [RELAY-28](../RELAY-28--c0a26f95/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (cancelled)
-- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (todo)
+- [RELAY-28](../RELAY-28--ddbc0a0e/task.md) — RELAY-28: derive a verifier-side MaxAttestationLifetime ceiling for attest.Verify (done)
 - [RELAY-30](../RELAY-30--8c87cb14/task.md) — RELAY-30: pin the attest.Canonicalize / internal/signing encoder-deviation condition with… (cancelled)
 - [RELAY-30](../RELAY-30--81aaad16/task.md) — RELAY-30: pin the attest.Canonicalize / internal/signing encoder-deviation condition with… (todo)
 - [RELAY-31](../RELAY-31--e010e163/task.md) — RELAY-31: CONTRACTS-ONDISK.md / DECISIONS.md / AGENT_LOG.md entries for internal/attest (cancelled)

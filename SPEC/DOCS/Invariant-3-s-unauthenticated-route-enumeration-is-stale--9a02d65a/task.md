@@ -70,7 +70,7 @@ _None recorded._
 - [DOCS-30](../DOCS-30--a311a067/task.md) — DOCS-30: clientcert help says the bus ignores the client certificate; the bus refuses 409… (todo)
 - [DOCS-5](../DOCS-5--051a9829/task.md) — DOCS-5: \`/v1/discovery\` limitation 5 is false on the wire: cross-bus relay IS served (todo)
 - [HANDOVER-MAP-DOC](../../HANDOVER/HANDOVER-MAP-DOC--a52d4a99/task.md) — HANDOVER-MAP-DOC: INVARIANTS.md -- each of the 11 invariants, its real status at HEAD, an… (todo)
-- [RELAY-55](../../RELAY/RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
+- [RELAY-55](../../RELAY/RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (done)
 
 ---
 

@@ -64,7 +64,7 @@ before the durable write, or a peer can permanently exhaust an agent name."​
 - [RELAY-11](../RELAY-11--07824e55/task.md) — RELAY-11: store/hub can record a MULTI-HOP bus path (done)
 - [RELAY-16-FU-RECOVEREDPRUNE](../RELAY-16-FU-RECOVEREDPRUNE--c3902098/task.md) — RELAY-16-FU-RECOVEREDPRUNE: Hub.recovered is never pruned of foreign ids its only consume… (todo)
 - [RELAY-16-FU-RETRY404](../RELAY-16-FU-RETRY404--7f515d76/task.md) — RELAY-16-FU-RETRY404: retry of an already-committed send can 404 if the recipient stopped… (todo)
-- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (todo)
+- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (done)
 - [RELAY-2-FU-BROADCAST-FANOUT](../RELAY-2-FU-BROADCAST-FANOUT--8b5319e1/task.md) — RELAY-2-FU-BROADCAST-FANOUT: Forwarder.targets fans broadcasts out to peers that always 4… (todo)
 
 ---

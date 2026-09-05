@@ -72,7 +72,7 @@ Parallel-safety: design only, writes no production code, no live bus needed.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -81,7 +81,7 @@ Parallel-safety: design only, writes no production code, no live bus needed.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 - [CONV-TRACK-ON-RECEIPT](../CONV-TRACK-ON-RECEIPT--ed1e70ac/task.md) — CONV-TRACK-ON-RECEIPT: a bus starts tracking a conversation on first receipt -- gated by… (todo)
 
 ---

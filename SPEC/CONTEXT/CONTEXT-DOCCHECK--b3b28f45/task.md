@@ -137,7 +137,7 @@ proof_cmds are trustworthy until this lands.
 - [CONTEXT-STALE-NOTYET](../CONTEXT-STALE-NOTYET--67b42913/task.md) — CONTEXT-STALE-NOTYET: a doc-check \`forbid\` mode, so a "not yet implemented" note cannot o… (todo)
 - [DOCS-4-FU-BUDGET](../DOCS-4-FU-BUDGET--721b51ef/task.md) — DOCS-4-FU-BUDGET: aade191 grew CLAUDE.md 678 bytes past its own recorded 28781-byte ratch… (todo)
 - [RELAY-25](../../RELAY/RELAY-25--10491a01/task.md) — RELAY-25: fed-smoke.sh: the epic's deliverable -- three-bus loopback federation smoke test (done)
-- [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../../RELAY/RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md) — RELAY-25-FU-CORRELATION-FU-AGENTDOCS: CONTRACTS-AGENT.md still says fed-smoke.sh is 'expe… (todo)
+- [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../../RELAY/RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md) — RELAY-25-FU-CORRELATION-FU-AGENTDOCS: CONTRACTS-AGENT.md still says fed-smoke.sh is 'expe… (done)
 
 ---
 

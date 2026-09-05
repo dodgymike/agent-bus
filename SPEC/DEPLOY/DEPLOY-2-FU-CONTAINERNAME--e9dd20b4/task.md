@@ -55,7 +55,6 @@ _None recorded._
 
 
 - [637fca2f-0fa6-439a-b6eb-361b681cdf80](../../TOOLING/ENV-docker-CLI-needs-an-explicit-socket-binary-shim-for--637fca2f/task.md) — ENV: docker CLI needs an explicit socket+binary shim for agent shells (workaround known,… (todo)
-- [CLI-3](../../CLI/CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [CLI-5](../../CLI/CLI-5--86dea094/task.md) — CLI-5: agents -- roster listing (replaces bus-agents.sh) (done)
 - [DEPLOY-2](../DEPLOY-2--14f8ec3b/task.md) — DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck (done)

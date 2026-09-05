@@ -47,7 +47,7 @@ _None recorded._
 - [CORE-11](../../CORE/CORE-11--fd330606/task.md) — CORE-11: shutdownGrace (10s) &lt; defaultPollTimeout (30s) -- record the ctx.Done() contract… (done)
 - [IDEM-14](../../IDEM/IDEM-14--b0facce9/task.md) — IDEM-14: Idempotency violation path -- key reuse with a different payload rejects, logs a… (todo)
 - [IDEM-5](../../IDEM/IDEM-5--9631dfcb/task.md) — IDEM-5: Same key + DIFFERENT payload is a protocol violation -- reject, log, and disconne… (superseded)
-- [POLL-CONCURRENT-WAITERS](../POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (todo)
+- [POLL-CONCURRENT-WAITERS](../POLL-CONCURRENT-WAITERS--f6268dab/task.md) — POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… (done)
 
 ---
 

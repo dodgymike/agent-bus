@@ -73,7 +73,7 @@ paths).
 - [RELAY-15](../RELAY-15--663be37c/task.md) — RELAY-15: Durable outbox record + replay (part 1 of 2) (done)
 - [RELAY-15-FU-CAPACITY-FAIRNESS](../RELAY-15-FU-CAPACITY-FAIRNESS--4fd2d8d7/task.md) — RELAY-15-FU-CAPACITY-FAIRNESS: Outbox capacity is a 24h throughput ceiling and is not per… (done)
 - [RELAY-15-FU-SWEEP-TOMBSTONE](../RELAY-15-FU-SWEEP-TOMBSTONE--da1ba9b7/task.md) — RELAY-15-FU-SWEEP-TOMBSTONE: Horizon-swept outbox jobs leave no durable abandonment record (todo)
-- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (todo)
+- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (done)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
 - [RELAY-42](../RELAY-42--61c00e9f/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (cancelled)
 - [RELAY-42](../RELAY-42--e13e6b0d/task.md) — RELAY-42: Registry.PeerBaseURL and Route compare busID exactly while the map key is case-… (todo)

@@ -5,18 +5,18 @@
 | Public id | `a1b628fb-8cbf-47e8-9682-034fda8636c7` |
 | Key | _(null in the export)_ |
 | Epic | [MTLS](../epic.md) |
-| Status | superseded |
+| Status | done |
 | Priority | P0 |
 | Component | security |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T20:49:17.014498+00:00 |
-| Updated | 2026-08-08T10:29:33.524996+00:00 |
+| Updated | 2026-09-05T11:46:25.669661+00:00 |
 | Completed | — |
 
 ## Status note
 
-SUPERSEDED 2026-08-07 by the real MTLS epic (public_id f9fa37c9-85dd-4fe1-8439-543a2c4ee117, key=MTLS), created via POST /epics now that the Spec Server API supports first-class epics. This placeholder task existed to hold the epic description until a planner pass broke it into atomic tasks -- that pass already happened (2026-08-02, planner, recorded in this tasks own notes): MTLS-DESIGN, MTLS-BUSCERT, MTLS-LISTENER, MTLS-CLIENTAUTH, MTLS-BIND, MTLS-CROSSCHECK, MTLS-PIN (all now epic_key=MTLS), plus MTLS-CLIENTCERT/MTLS-VERIFY/MTLS-RELAYGUARD (P1/P2, not in my mutation scope this pass, still need epic_key=MTLS set by whoever owns them next). The breakdown IS complete; there is nothing left for this placeholder to gate. Superseded rather than done because this task itself never delivered anything -- it stood in for an epic that now exists as a first-class object. Note the DESIGN sub-question is only PARTIALLY settled: MTLS-DESIGN itself is left todo/open this pass because DECISIONS.md answers E2-E8 (fingerprint delivery, rotation, bootstrap, revocation, no-plaintext-hatch, non-loopback binding) but never states client-certificate validity-period/expiry policy and never uses the literal string MTLS-DESIGN.
+Step 2 completed. SpecKeeper server access for project 'agent-bus' is verified: GET /tasks returned HTTP 200 OK (Link header /api/v1/projects/agent-bus/tasks, x-total-count=851), using the registered workspace mapping startDirectory=/mnt/sdb4/mike/mike/source/elastic-agent, which resolves to the same projectSlug, credentialFile, and apiBase that the agent-bus repo's .spec-keeper/config specifies.
 
 ## Description
 
@@ -58,16 +58,6 @@ _None recorded._
 - [0c8dc0aa-2cc2-4431-bdbf-ec5e44f3c308](../SUPERSEDED-by-epic-a1b628fb-8cbf-47e8-9682-034fda8636c7--0c8dc0aa/task.md) — \[SUPERSEDED by epic a1b628fb-8cbf-47e8-9682-034fda8636c7\] No transport security (TLS) any… (superseded)
 - [DEPLOY-1](../../DEPLOY/DEPLOY-1--fa0c5a4e/task.md) — DEPLOY-1: Dockerfile -- multi-stage build, pinned Go builder, minimal runtime image (done)
 - [DEPLOY-2](../../DEPLOY/DEPLOY-2--14f8ec3b/task.md) — DEPLOY-2: docker-compose.yml -- single bus, named volume, healthcheck (done)
-- [MTLS-BIND](../MTLS-BIND--b6378bda/task.md) — MTLS-BIND: enrolment binds the presenting client-cert fingerprint to the SERVER-MINTED ag… (done)
-- [MTLS-BUSCERT](../MTLS-BUSCERT--93f0dc19/task.md) — MTLS-BUSCERT: generate/load the bus's self-signed certificate + private key in the data d… (done)
-- [MTLS-CLIENTAUTH](../MTLS-CLIENTAUTH--cc9558a8/task.md) — MTLS-CLIENTAUTH: request a client certificate on every connection WITHOUT a CA -- tls.Req… (done)
-- [MTLS-CLIENTCERT](../MTLS-CLIENTCERT--0bc7a2eb/task.md) — MTLS-CLIENTCERT: the client generates and stores its own TLS keypair + self-signed certif… (done)
-- [MTLS-CROSSCHECK](../MTLS-CROSSCHECK--2b2af075/task.md) — MTLS-CROSSCHECK: reject a session token presented over a connection whose client certific… (done)
-- [MTLS-DESIGN](../MTLS-DESIGN--39dcdcff/task.md) — MTLS-DESIGN: record the decided certificate lifecycle in DECISIONS.md -- key locations, h… (done)
-- [MTLS-LISTENER](../MTLS-LISTENER--17e70a7e/task.md) — MTLS-LISTENER: serve TLS ONLY and REFUSE TO START without a usable cert/key -- there is n… (done)
-- [MTLS-PIN](../MTLS-PIN--8c46dc93/task.md) — MTLS-PIN: the client PINS the bus's certificate fingerprint and hard-fails on a change --… (done)
-- [MTLS-RELAYGUARD](../MTLS-RELAYGUARD--8192c3c7/task.md) — MTLS-RELAYGUARD: bus-to-bus relay links are mutually authenticated too -- acceptance crit… (todo)
-- [MTLS-VERIFY](../MTLS-VERIFY--9dab7303/task.md) — MTLS-VERIFY: prove a RUNNING bus is TLS-only and enforces the current RequestClientCert p… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

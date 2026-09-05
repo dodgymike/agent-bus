@@ -77,7 +77,7 @@ _None recorded._
 
 
 - [RELAY-24-FU-STOREMSGLOOKUP](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP--c6530638/task.md) — RELAY-24-FU-STOREMSGLOOKUP: internal/store needs a lookup-by-message-id and an OriginMess… (done)
-- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (todo)
+- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../../RELAY/RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

@@ -44,7 +44,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [ID-2-WIRING](../ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (superseded)
+- [ID-2-WIRING](../ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (done)
 - [ID-3](../ID-3--745cce13/task.md) — ID-3: Agent id minting \`&lt;bus-id&gt;.&lt;name&gt;-&lt;n&gt;\` (done)
 
 ---

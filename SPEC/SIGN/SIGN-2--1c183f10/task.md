@@ -66,7 +66,6 @@ ACCEPTANCE CRITERION ADDED 2026-08-02 (RATCHET-7 fallout, verified first-hand by
 - [CRYPTO-2](../../CRYPTO/CRYPTO-2--0ad37da2/task.md) — CRYPTO-2: Adopt the crypto primitive layer chosen by the spike (internal/cryptobox + go.m… (superseded)
 - [CRYPTO-3](../../CRYPTO/CRYPTO-3--dd1066af/task.md) — CRYPTO-3: Enrolment mints and registers the second (messaging) keypair, bound to the serv… (todo)
 - [CRYPTO-6](../../CRYPTO/CRYPTO-6--260e6003/task.md) — CRYPTO-6: Double Ratchet encrypt/decrypt on the direct-message send path (deferred)
-- [ID-2-WIRING](../../ID/ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (superseded)
 - [ID-2-WIRING-OBSERVER](../../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
 - [RATCHET-6](../../RATCHET/RATCHET-6--fd0f3ca3/task.md) — RATCHET-6: RFC 8032 Ed25519 known-answer tests wired into the sign/verify implementation (todo)
 - [RATCHET-7](../../RATCHET/RATCHET-7--aaa7cddc/task.md) — RATCHET-7: Choose and supply-chain-review the Ed25519 implementation (stdlib crypto/ed255… (done)

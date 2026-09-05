@@ -60,7 +60,7 @@ Specify and implement relay peer-hop ACK/NACK frames, correlation to the durable
 - [ACK-4-FU-RECIPIENT-BINDING](../ACK-4-FU-RECIPIENT-BINDING--ec4a1ac8/task.md) — ACK-4-FU-RECIPIENT-BINDING: the obligation binding does not bind the RECIPIENT to the ack… (done)
 - [ACK-RETRY-ENGINE](../ACK-RETRY-ENGINE--81ce7331/task.md) — ACK-RETRY-ENGINE: sender-side retry of an unacknowledged relayed message, with a defined… (todo)
 - [RELAY-51](../../RELAY/RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (done)
-- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (done)
 
 ---
 

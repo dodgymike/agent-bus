@@ -56,7 +56,7 @@ Define precise semantics: local acceptance vs peer-hop receipt vs recipient deli
 - [ACK-15](../ACK-15--a63b133d/task.md) — ACK-15: POST /v1/ack has no CLI subcommand -- until it does, no row can ever reach delive… (done)
 - [ACK-6](../ACK-6--d3c50d33/task.md) — ACK-6: Recipient delivery acknowledgement boundary (done)
 - [RELAY-47](../../RELAY/RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)
-- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (done)
 
 ---
 

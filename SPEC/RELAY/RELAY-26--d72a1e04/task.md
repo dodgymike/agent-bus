@@ -5,19 +5,19 @@
 | Public id | `d72a1e04-466b-44c3-9425-1a73411e23bb` |
 | Key | RELAY-26 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | core |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:48.583975+00:00 |
-| Updated | 2026-08-08T15:56:48.583975+00:00 |
-| Completed | — |
+| Updated | 2026-09-04T07:25:48.285550+00:00 |
+| Completed | 2026-09-04T07:25:48.285532+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestStartupRefusesNonLoopbackListenWithPeersAndInviteGateOff ./cmd/agent-bus
+go test -race -run "TestStartupRefusesNonLoopbackListenWithPeersAndInviteGateOff" ./cmd/agent-bus
 ```
 
 ## Description
@@ -54,7 +54,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-55](../RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
+- [RELAY-55](../RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (done)
 
 ---
 

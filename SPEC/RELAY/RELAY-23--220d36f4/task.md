@@ -5,19 +5,19 @@
 | Public id | `220d36f4-e420-4dfc-9f82-b2af1b8653e6` |
 | Key | RELAY-23 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | vacuous-today |
 | Created | 2026-08-08T15:56:47.538033+00:00 |
-| Updated | 2026-08-08T15:56:47.538033+00:00 |
-| Completed | — |
+| Updated | 2026-09-01T20:59:35.520248+00:00 |
+| Completed | 2026-09-01T20:59:35.520231+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestRelayEnvelopeCarriesDistinctWireVersionKey ./internal/relay
+go test -race -run "TestWireVersion|TestRelayEnvelopeCarriesDistinctWireVersionKey" ./internal/relay
 ```
 
 ## Description
@@ -58,7 +58,7 @@ and two meanings on one key is how a peer applies an epoch as a format number.
 
 - [ACK-3-FU-COLLAPSE-WIREVERSION](../../ACK/ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) — ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… (todo)
 - [RELAY-51](../RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (done)
-- [RELAY-53](../RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
+- [RELAY-53](../RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (done)
 
 ---
 

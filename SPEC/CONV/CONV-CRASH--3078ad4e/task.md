@@ -78,7 +78,7 @@ Coordinate before starting.
 
 - [CONV-JOINPOINT](../CONV-JOINPOINT--b18c8710/task.md) — CONV-JOINPOINT: NO BACKFILL -- define the join point as a durable POSITION, atomic with t… (todo)
 - [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md) — CONV-MEMBER-CHANGE: the change event -- a REMOVED participant gets exactly ONE final mess… (todo)
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ---
 

@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T14:24:29.382823+00:00 |
-| Updated | 2026-08-07T12:42:32.059333+00:00 |
+| Updated | 2026-09-05T12:08:26.186257+00:00 |
 | Completed | 2026-08-07T12:42:32.059316+00:00 |
 
 ## Proof command
@@ -22,7 +22,7 @@ go test -race -run TestWALResyncSurvivesALargeIndexHole ./internal/wal
 
 ## Status note
 
-OPEN ITEM ONLY: the security-blocking stage-2 resync fix (index-density-hole data-loss BLOCKER) is committed and regression-tested (salvage.go resyncFrom stage 2, TestWALResyncSurvivesALargeIndexHole, both confirmed present at HEAD) and reviewer P1-1/P1-3/P1-4 are independently confirmed fixed in committed code (main.go:236-250 corrected comment, doc.go cascade caveat, main.go quarantined/discard_count/discarded_bytes startup fields) with P1-2 correctly carved out to its own tracked task (5b178dde, DUR-11-FU-CONTRACTS) -- but no reviewer or security agent has posted a post-fix PASS kind=response confirming the BLOCKER is actually cleared, so the mandated gate has not run; do not complete until one does.
+Step 2 completed. Classified every prompt section as stable prefix vs dynamic suffix across the prompt family. Opening prompt: Mission/Operating loop/Engineering standards/Operating constraints/Starting-directory block are stable (all ride inside ${claudeInstructions}, which is already first); recent command-line prompts, tool-call TLDRs, current prompt, memory, and tool-use responses are dynamic. Self-modification section is fixed/flag-gated content currently appended trailing. Memory is currently prepended (violation); task-mode prompt starts with dynamic content (violation). No code changes were made in this classification step.
 
 ## Description
 
@@ -113,7 +113,6 @@ _None recorded._
 
 
 - [DUR-10](../DUR-10--bab09b2e/task.md) — DUR-10: Review the RepairTail truncation veto -- half is already in \`main\` UNREVIEWED (la… (done)
-- [DUR-11-FU-CONTRACTS](../../DOCS/DUR-11-FU-CONTRACTS--5b178dde/task.md) — DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy… (todo)
 - [DUR-4](../DUR-4--59c36769/task.md) — DUR-4: Corrupt-tail detection & truncation (superseded)
 - [DUR-4-FU-TOOLING](../DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
 
@@ -129,7 +128,7 @@ _None recorded._
 - [DUR-10](../DUR-10--bab09b2e/task.md) — DUR-10: Review the RepairTail truncation veto -- half is already in \`main\` UNREVIEWED (la… (done)
 - [DUR-11-FU-CONTRACTS](../../DOCS/DUR-11-FU-CONTRACTS--5b178dde/task.md) — DUR-11-FU-CONTRACTS: CONTRACTS.md still documents the reverted refuse-to-start WAL policy… (todo)
 - [DUR-11-FU-STAGE2SHORTCIRCUIT](../DUR-11-FU-STAGE2SHORTCIRCUIT--b792fa34/task.md) — DUR-11-FU-STAGE2SHORTCIRCUIT: resyncFrom never runs the sound stage-2 scan after a stage-… (todo)
-- [DUR-12](../DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (done)
+- [DUR-12](../DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (in_progress)
 - [DUR-4](../DUR-4--59c36769/task.md) — DUR-4: Corrupt-tail detection & truncation (superseded)
 - [DUR-4-FU-DECISIONS](../DUR-4-FU-DECISIONS--180f11f8/task.md) — DUR-4-FU-DECISIONS: record the SHIPPED damage-class taxonomy in DECISIONS.md -- which cla… (todo)
 - [DUR-4-FU-DOCS](../DUR-4-FU-DOCS--0b6d5c11/task.md) — DUR-4-FU-DOCS: state invariants 4/6 as explicit NARROWINGS + document the WAL recovery AP… (todo)

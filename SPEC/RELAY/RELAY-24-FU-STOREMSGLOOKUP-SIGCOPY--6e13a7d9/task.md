@@ -5,19 +5,19 @@
 | Public id | `6e13a7d9-6ff0-49bb-a102-6ee1b69e9b51` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | store |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T07:09:22.560274+00:00 |
-| Updated | 2026-08-16T10:41:07.945222+00:00 |
-| Completed | — |
+| Updated | 2026-09-03T06:33:34.090364+00:00 |
+| Completed | 2026-09-03T06:33:34.090346+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -count=1 -run TestCopyMessageDeepCopiesSignatureOnEveryExitPoint ./internal/store
+go test -race -count=1 -run "TestStoreLookupByMessageID|TestStoreSinceReturnsDeepCopies" ./internal/store
 ```
 
 ## Description

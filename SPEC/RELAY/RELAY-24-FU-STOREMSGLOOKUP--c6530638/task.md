@@ -86,7 +86,7 @@ Blocks RELAY-24-BLOCKER-EGRESS.
 - [RELAY-24-FU-STOREMSGLOOKUP-BYIDGUARD](../RELAY-24-FU-STOREMSGLOOKUP-BYIDGUARD--4d5c1267/task.md) — RELAY-24-FU-STOREMSGLOOKUP-BYIDGUARD: byID's insert/prune are unconditional on local-id u… (todo)
 - [RELAY-24-FU-STOREMSGLOOKUP-DOCS](../RELAY-24-FU-STOREMSGLOOKUP-DOCS--e02aa062/task.md) — RELAY-24-FU-STOREMSGLOOKUP-DOCS: CONTRACTS-ONDISK.md + DECISIONS.md + AGENT_LOG.md entrie… (done)
 - [RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP](../RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP--0e045086/task.md) — RELAY-24-FU-STOREMSGLOOKUP-GUARDGAP: AST guard bans store point-lookups by selector name… (todo)
-- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (todo)
+- [RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY](../RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY--6e13a7d9/task.md) — RELAY-24-FU-STOREMSGLOOKUP-SIGCOPY: store.copyMessage does not deep-copy Signature -- ali… (done)
 - [RELAY-24-FU-STOREMSGLOOKUP-THROTTLE](../RELAY-24-FU-STOREMSGLOOKUP-THROTTLE--cc7a463e/task.md) — RELAY-24-FU-STOREMSGLOOKUP-THROTTLE: duplicate-origin log throttle is process-wide and bu… (todo)
 - [RELAY-48](../RELAY-48--9887b0eb/task.md) — RELAY-48: onward relay is NOT crash-safe -- a pending onward hop is durably ABANDONED at… (done)
 

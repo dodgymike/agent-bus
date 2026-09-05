@@ -2,15 +2,16 @@
 
 [← all epics](../../SPEC.md)
 
-**36 open / 53 total.** Full records live in `SPEC/DUR/<task>/task.md`.
+**37 open / 53 total.** Full records live in `SPEC/DUR/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (36)
+## Open tasks (37)
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 4f276d2a-88d5-45fd-90e1-810429b3fb78 | maxPlausibleSeqFloor is enforced on the READ path only -- hub can persist a floor its own… | deferred | P0 | [task.md](maxPlausibleSeqFloor-is-enforced-on-the-READ-path-only-h--4f276d2a/task.md) | follow-up of [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md) | [DUR-12-FU-V1LAUNDER](DUR-12-FU-V1LAUNDER--daf18983/task.md) [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md) [259b7033-2191-423f-bb7b-cff8c6b59dc1](Bound-the-wal-index-floor-reserved-value-the-same-way-as--259b7033/task.md) |
+| DUR-12 | DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… | in_progress | P0 | [task.md](DUR-12--cbc9ab0c/task.md) | — | [ID-2-WIRING-SCHEMA](../ID/ID-2-WIRING-SCHEMA--80b54ee4/task.md) [DUR-10](DUR-10--bab09b2e/task.md) [DUR-4](DUR-4--59c36769/task.md) [DUR-11](DUR-11--884d3da4/task.md) |
 | DUR-4-FU-DOCS | DUR-4-FU-DOCS: state invariants 4/6 as explicit NARROWINGS + document the WAL recovery AP… | todo | P0 | [task.md](DUR-4-FU-DOCS--0b6d5c11/task.md) | blocks [CONTEXT-PROTOCOL-WALFLOOR-DEDUP](../CONTEXT/CONTEXT-PROTOCOL-WALFLOOR-DEDUP--1e9cec15/task.md) | [DOCS-2](../DOCS/DOCS-2--41c52cfa/task.md) [DUR-11](DUR-11--884d3da4/task.md) [804fa84c-e97b-4737-8866-801f87468da4](Document-what-the-bus-does-with-an-UNKNOWN-WAL-record-ty--804fa84c/task.md) [bd3cc650-da3f-483d-a48d-321ab2a8d1dd](CONTRACTS.md-55-is-stale-says-no-WAL-record-types-wire-v--bd3cc650/task.md) |
 | e120153b-9d8a-4b6a-bd4e-89431954496b | Fix WAL recovery reissuing a discarded tail record index (invariant 1 violation, NOT a na… | in_progress | P0 | [task.md](Fix-WAL-recovery-reissuing-a-discarded-tail-record-index--e120153b/task.md) | blocked by [9fd58deb-6fb8-4d4e-8bf1-6df01329c3b2](Expose-on-wal.Recovered-the-highest-index-a-record-actua--9fd58deb/task.md) | [ID-2-WIRING-SCHEMA](../ID/ID-2-WIRING-SCHEMA--80b54ee4/task.md) [DUR-11](DUR-11--884d3da4/task.md) [DUR-12](DUR-12--cbc9ab0c/task.md) |
 | 0d0c54a0-85b8-4117-bb1f-2e7c56df153a | existedAtOpen() is not a snapshot -- it returns a field persistLocked mutates, so reorder… | todo | P1 | [task.md](existedAtOpen-is-not-a-snapshot-it-returns-a-field-persi--0d0c54a0/task.md) | follow-up of [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md) | [be447589-6583-4d5c-a9d4-ec9d9fef0f1c](../CORE/Enforce-data-directory-permissions-at-startup-and-bound--be447589/task.md) |
@@ -47,15 +48,14 @@ _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (de
 | DUR-12-FU-READONLYKEY | DUR-12-FU-READONLYKEY: read-only fsck paths (ScanAll, Replay) create wal-mac.key as a sid… | todo | P3 | [task.md](DUR-12-FU-READONLYKEY--6816a914/task.md) | — | — |
 | DUR-7 | DUR-7: Snapshot/compaction follow-up (bounds WAL replay time) | todo | P3 | [task.md](DUR-7--ba6739e6/task.md) | — | — |
 
-## Closed tasks (17) — done, cancelled, superseded
+## Closed tasks (16) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 9160ba8d-09f8-4510-bd0c-dcf1b22b82a5 | Startup summary silently omits whole-log quarantine (quarantined/discard_count/discarded_… | done | P0 | [task.md](Startup-summary-silently-omits-whole-log-quarantine-quar--9160ba8d/task.md) | — | [DUR-11](DUR-11--884d3da4/task.md) [DUR-11-FU-CONTRACTS](../DOCS/DUR-11-FU-CONTRACTS--5b178dde/task.md) |
 | DUR-1 | DUR-1: WAL record framing + writer | done | P0 | [task.md](DUR-1--c51e1959/task.md) | — | — |
 | DUR-10 | DUR-10: Review the RepairTail truncation veto -- half is already in \`main\` UNREVIEWED (la… | done | P0 | [task.md](DUR-10--bab09b2e/task.md) | — | [DUR-11](DUR-11--884d3da4/task.md) [DUR-8](DUR-8--6f099429/task.md) [DUR-4](DUR-4--59c36769/task.md) [DUR-6](DUR-6--d56a997d/task.md) |
-| DUR-11 | DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record… | done | P0 | [task.md](DUR-11--884d3da4/task.md) | — | [DUR-4](DUR-4--59c36769/task.md) [DUR-4-FU-TOOLING](DUR-4-FU-TOOLING--26c2ce16/task.md) [DUR-10](DUR-10--bab09b2e/task.md) [DUR-11-FU-CONTRACTS](../DOCS/DUR-11-FU-CONTRACTS--5b178dde/task.md) |
-| DUR-12 | DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… | done | P0 | [task.md](DUR-12--cbc9ab0c/task.md) | — | [ID-2-WIRING-SCHEMA](../ID/ID-2-WIRING-SCHEMA--80b54ee4/task.md) [DUR-10](DUR-10--bab09b2e/task.md) [DUR-4](DUR-4--59c36769/task.md) [DUR-11](DUR-11--884d3da4/task.md) |
+| DUR-11 | DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record… | done | P0 | [task.md](DUR-11--884d3da4/task.md) | — | [DUR-4](DUR-4--59c36769/task.md) [DUR-4-FU-TOOLING](DUR-4-FU-TOOLING--26c2ce16/task.md) [DUR-10](DUR-10--bab09b2e/task.md) |
 | DUR-2 | DUR-2: Two-phase prepare-&gt;commit write path | done | P0 | [task.md](DUR-2--4132b879/task.md) | — | — |
 | DUR-3 | DUR-3: Replay/recovery on start | done | P0 | [task.md](DUR-3--d8a991ea/task.md) | — | — |
 | DUR-4 | DUR-4: Corrupt-tail detection & truncation | superseded | P0 | [task.md](DUR-4--59c36769/task.md) | — | [DUR-10](DUR-10--bab09b2e/task.md) [DUR-11](DUR-11--884d3da4/task.md) [DUR-12](DUR-12--cbc9ab0c/task.md) [DUR-4-FU-DOCS](DUR-4-FU-DOCS--0b6d5c11/task.md) [DUR-4-FU-DECISIONS](DUR-4-FU-DECISIONS--180f11f8/task.md) [DUR-4-FU-TOOLING](DUR-4-FU-TOOLING--26c2ce16/task.md) +1 more |

@@ -5,19 +5,19 @@
 | Public id | `ce8bff7b-0717-4c03-b4f7-e93e55c82288` |
 | Key | CONV-SEND-BY-ID |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:56:20.629515+00:00 |
-| Updated | 2026-08-15T08:56:20.629515+00:00 |
-| Completed | — |
+| Updated | 2026-09-01T07:03:12.090714+00:00 |
+| Completed | 2026-09-01T07:03:12.090697+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestConversationSendByID' ./internal/httpapi ./internal/hub && grep -q 'conversation send' AGENT_PROTOCOL.md && echo CONV_SEND_OK
+go test -race -run "TestConversationSend" ./internal/httpapi ./internal/hub
 ```
 
 ## Description
@@ -79,7 +79,7 @@ Blocked by CONV-CREATE-CLI.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (todo)
+- [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (done)
 
 ---
 

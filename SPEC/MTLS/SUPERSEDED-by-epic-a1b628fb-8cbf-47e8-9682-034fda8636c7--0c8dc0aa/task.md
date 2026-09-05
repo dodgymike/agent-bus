@@ -54,7 +54,7 @@ _None recorded._
 
 
 - [AUTH-1-FU-LISTENADDR](../../AUTH/AUTH-1-FU-LISTENADDR--c27f9439/task.md) — AUTH-1-FU-LISTENADDR: default listen address is :8080 (all interfaces) but DECISIONS.md s… (done)
-- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
+- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -63,7 +63,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (superseded)
+- [a1b628fb-8cbf-47e8-9682-034fda8636c7](../EPIC-mutual-TLS-with-self-signed-certs-no-CA-required-tr--a1b628fb/task.md) — EPIC: mutual TLS with self-signed certs, no CA -- required transport, no plaintext listen… (done)
 
 ---
 

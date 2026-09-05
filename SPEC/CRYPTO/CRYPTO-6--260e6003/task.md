@@ -45,7 +45,7 @@ GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md e
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 - [CRYPTO-7](../CRYPTO-7--f90d7889/task.md) — CRYPTO-7: Ratchet-state durability and recovery (CRASH-INJECTION TEST REQUIRED) (deferred)
 - [MSG-3](../../MSG/MSG-3--2655c6ae/task.md) — MSG-3: POST /v1/send -- direct message (done)
 - [SIGN-2](../../SIGN/SIGN-2--1c183f10/task.md) — SIGN-2: Sign on the send path (Ed25519 detached signature travels with the message) (todo)

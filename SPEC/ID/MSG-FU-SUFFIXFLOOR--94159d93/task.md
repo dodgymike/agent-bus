@@ -77,7 +77,6 @@ residual gap in.
 - [2db4a36f-561d-4ecb-8ba6-6329183c36cd](../Wire-the-durable-agent-id-suffix-floors-into-server-star--2db4a36f/task.md) — Wire the durable agent-id suffix floors into server startup (superseded)
 - [3e46d43b-ac93-4c69-89cc-e299133791b4](../Amortise-the-agent-suffixes-write-reserve-a-block-of-suf--3e46d43b/task.md) — Amortise the agent-suffixes write: reserve a block of suffixes per name instead of one fi… (todo)
 - [7befde72-488e-4cf4-a05b-b16e2c2ffd15](../../PROCESS/Integrator-flips-the-task-to-done-atomically-after-a-suc--7befde72/task.md) — Integrator flips the task to done atomically after a successful commit -- close the commi… (todo)
-- [ID-2-WIRING](../ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (superseded)
 - [ID-2-WIRING-OBSERVER](../ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
 - [ID-2-WIRING-SEAL-FU-NAMESUFFIXES](../ID-2-WIRING-SEAL-FU-NAMESUFFIXES--1c207a62/task.md) — ID-2-WIRING-SEAL-FU-NAMESUFFIXES: NameSuffixes has the identical inert-floor-guard defect… (done)
 - [MSG-FU-SUFFIXFLOOR-FU-DOCS](../../DOCS/MSG-FU-SUFFIXFLOOR-FU-DOCS--e5fa08ba/task.md) — MSG-FU-SUFFIXFLOOR-FU-DOCS: PROTOCOL.md and internal/ids docs still say the suffix wiring… (todo)

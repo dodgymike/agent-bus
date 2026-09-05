@@ -5,13 +5,13 @@
 | Public id | `30570fb9-c5dd-40cd-b0f7-858a250d23b7` |
 | Key | CRYPTO-1 |
 | Epic | [CRYPTO](../epic.md) |
-| Status | done |
+| Status | in_progress |
 | Priority | P1 |
 | Component | crypto |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T09:41:19.512596+00:00 |
-| Updated | 2026-08-02T14:10:52.955327+00:00 |
+| Updated | 2026-09-05T12:08:26.663219+00:00 |
 | Completed | 2026-08-02T13:01:39.211318+00:00 |
 
 ## Proof command
@@ -22,7 +22,7 @@ test -s CRYPTO_DEEPDIVE.md && grep -q 'Message auth/integrity only' DECISIONS.md
 
 ## Status note
 
-Deliverable (CRYPTO_DEEPDIVE.md) completed and stands as historical background, but its recommendation (adopt go.mau.fi/libsignal, bump toolchain, full X3DH+Double Ratchet) is SUPERSEDED by user instruction (2026-08-02): keep it simple, standard sign/verify via libsodium-equivalent (crypto/ed25519). No further action on this task. See SIGN epic.
+Executing plan step 3.
 
 ## Description
 

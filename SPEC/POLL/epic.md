@@ -2,23 +2,22 @@
 
 [← all epics](../../SPEC.md)
 
-**1 open / 4 total.** Full records live in `SPEC/POLL/<task>/task.md`.
+**0 open / 4 total.** Full records live in `SPEC/POLL/<task>/task.md`.
 
 _Relations (real)_ are authoritative edges from the Spec Server. _Referenced (derived)_ are guesses parsed out of description free text — useful, but not a dependency list.
 
-## Open tasks (1)
+## Open tasks (0)
 
-| Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
-| --- | --- | --- | --- | --- | --- | --- |
-| POLL-CONCURRENT-WAITERS | POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… | todo | P1 | [task.md](POLL-CONCURRENT-WAITERS--f6268dab/task.md) | — | [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) [POLL-1](POLL-1--1b0635b9/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) |
+_None._
 
-## Closed tasks (3) — done, cancelled, superseded
+## Closed tasks (4) — done, cancelled, superseded
 
 | Key | Title | Status | Prio | Task | Relations (real) | Referenced (derived) |
 | --- | --- | --- | --- | --- | --- | --- |
 | POLL-1 | POLL-1: GET /v1/wait -- long-poll endpoint | done | P1 | [task.md](POLL-1--1b0635b9/task.md) | — | — |
 | POLL-2 | POLL-2: Wake-on-new-message wiring | done | P1 | [task.md](POLL-2--e558fd69/task.md) | — | — |
 | POLL-3 | POLL-3: Poll concurrency test suite (goroutine leak + thundering herd) | done | P1 | [task.md](POLL-3--9b634f75/task.md) | — | — |
+| POLL-CONCURRENT-WAITERS | POLL-CONCURRENT-WAITERS: two long-polls on ONE agent id can split delivery non-determinis… | done | P1 | [task.md](POLL-CONCURRENT-WAITERS--f6268dab/task.md) | — | [RELAY-FU-IDEM-METER-BY-PEER](../RELAY/RELAY-FU-IDEM-METER-BY-PEER--8774f265/task.md) [POLL-1](POLL-1--1b0635b9/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--c829af9a/task.md) [SIGN-1-FU-REORDER-WATERMARK](../SIGN/SIGN-1-FU-REORDER-WATERMARK--86c7d368/task.md) |
 
 ## Epic description
 

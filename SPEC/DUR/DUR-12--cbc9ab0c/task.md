@@ -5,13 +5,13 @@
 | Public id | `cbc9ab0c-3b34-48d0-acd8-5eabd4dc4a02` |
 | Key | DUR-12 |
 | Epic | [DUR](../epic.md) |
-| Status | done |
+| Status | in_progress |
 | Priority | P0 |
 | Component | durability |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T17:57:06.513981+00:00 |
-| Updated | 2026-08-07T12:08:09.114924+00:00 |
+| Updated | 2026-09-05T11:59:07.486772+00:00 |
 | Completed | 2026-08-07T12:08:09.114907+00:00 |
 
 ## Proof command
@@ -22,7 +22,7 @@ n/a - bookkeeping correction only, see original proof_cmd
 
 ## Status note
 
-UNBLOCKED 2026-08-02 by explicit user decision (DECISIONS.md "Five decisions" #1, CLAUDE.md invariant 6): the MAC key is a file in the DATA DIR, mode 0600. A missing or wrong key at startup is FATAL -- a deliberate, named exception to the always-restart policy, because a wrong key fails verification on EVERY record, so discard-the-unverifiable would destroy the whole log over mere misconfiguration rather than media damage. Accepted limit that MUST be stated in PROTOCOL.md: this construction completely defeats remote-client forgery but buys nothing against an attacker who already has data-directory write access (such an attacker can read the key and forge freely). ondisk-format-version=2 remains reserved for this change; do not reuse it. A feature-runner has been dispatched against this task.
+Executing plan step 6.
 
 ## Description
 

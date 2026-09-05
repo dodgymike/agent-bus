@@ -106,7 +106,7 @@ further; whoever picks it up should feel free to file per-line sub-tasks if that
 
 - [RELAY-52](../RELAY-52--67c6248d/task.md) — RELAY-52: invariant 6's loud-discard line at hub.go:1104 has no test anywhere in the repo (done)
 - [RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK](../RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK--2c7da802/task.md) — RELAY-52-FU-HUBDISCARDS-FU-APPLIEDSEQ-XCHECK: cross-check test fixture appliedSeq against… (todo)
-- [RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED](../RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED--52196a49/task.md) — RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED: apply-branch discard increments no cou… (todo)
+- [RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED](../RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED--52196a49/task.md) — RELAY-52-FU-HUBDISCARDS-FU-APPLYDISCARD-UNCOUNTED: apply-branch discard increments no cou… (done)
 - [RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED](../RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED--d858bf19/task.md) — RELAY-52-FU-HUBDISCARDS-FU-IDEMDISCARD-UNCAPPED: the two applied-key discard lines are un… (todo)
 - [TRIAGE-LOCK](../../PROCESS/TRIAGE-LOCK--25f0eac6/task.md) — TRIAGE-LOCK: backlog-triage mutex (in_progress)
 

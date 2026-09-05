@@ -5,19 +5,19 @@
 | Public id | `0a571a02-2f1f-41b7-8137-1a085c30f5e1` |
 | Key | RELAY-55 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-21T10:09:03.131878+00:00 |
-| Updated | 2026-08-21T14:14:18.149966+00:00 |
-| Completed | — |
+| Updated | 2026-09-05T12:10:07.663190+00:00 |
+| Completed | 2026-09-05T12:10:07.663173+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestRequireFederationRefusesStartupWhenPeerSurfaceIncomplete ./cmd/agent-bus
+go test -race -run "Readyz|RequireFederation|Relay55" ./internal/httpapi ./cmd/agent-bus
 ```
 
 ## Description
@@ -168,7 +168,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (todo)
+- [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (done)
 - [RELAY-51](../RELAY-51--0135d297/task.md) — RELAY-51: RELAY-23 rollout -- a PARTIAL deploy of the wire-version field abandons message… (done)
 
 ## Referenced by other tasks (derived, not authoritative)

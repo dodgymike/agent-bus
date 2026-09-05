@@ -5,19 +5,19 @@
 | Public id | `cd3524c2-3c65-4b53-8584-9f6dd7fa91b7` |
 | Key | CONV-RECORD |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:54:46.835127+00:00 |
-| Updated | 2026-08-15T08:54:46.835127+00:00 |
-| Completed | — |
+| Updated | 2026-08-30T10:40:08.294984+00:00 |
+| Completed | 2026-08-30T10:40:08.294964+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestConversationRecord' ./internal/store
+go test -race -run "TestConversation|TestDecodeConversation" ./internal/store
 ```
 
 ## Description
@@ -99,7 +99,7 @@ Parallel-safety: touches internal/store; coordinate with DUR work in flight.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (todo)
+- [CONV-CREATE-CLI](../CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (done)
 - [CONV-ID-SHAPE](../CONV-ID-SHAPE--8914a5d8/task.md) — CONV-ID-SHAPE: decide the conversation id shape -- bare UUID vs &lt;bus-id&gt;.&lt;conv-id&gt; (ATTRI… (done)
 - [CONV-MEMBER-CHANGE](../CONV-MEMBER-CHANGE--03ebeed2/task.md) — CONV-MEMBER-CHANGE: the change event -- a REMOVED participant gets exactly ONE final mess… (todo)
 - [CONV-NAME-INV6](../CONV-NAME-INV6--a11d59cd/task.md) — CONV-NAME-INV6: is a user-supplied conversation NAME metadata, or a body wearing metadata… (done)

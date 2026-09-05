@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T14:22:51.786582+00:00 |
-| Updated | 2026-08-02T17:53:02.488662+00:00 |
+| Updated | 2026-09-05T11:48:49.152073+00:00 |
 | Completed | 2026-08-02T17:53:02.488646+00:00 |
 
 ## Proof command
@@ -22,7 +22,7 @@ go test -race -run 'TestCrashInjection|TestWALRepairTail' ./internal/wal
 
 ## Status note
 
-DUR-10 dispatched by backlog-triage-pass5-b828c013: reviewer(opus)+security(opus) running READ-ONLY on the working-tree internal/wal delta. Delta stays UNCOMMITTED until both gates report.
+Step 3 completed. Created a dedicated git worktree for the agent-bus repo at /mnt/sdb4/mike/mike/source/agent-bus/.worktrees/agent-bus-spec-keeper-worktree on branch spec-keeper-phased-20260905-114702 (HEAD 6aaed56ab8cceb8c5596ddb10b5f331d176b914d). Recorded the base branch (main, ahead 4, dirty) and verified the new worktree is clean.
 
 ## Description
 
@@ -138,7 +138,7 @@ _None recorded._
 
 
 - [DUR-11](../DUR-11--884d3da4/task.md) — DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record… (done)
-- [DUR-12](../DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (done)
+- [DUR-12](../DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (in_progress)
 - [DUR-4](../DUR-4--59c36769/task.md) — DUR-4: Corrupt-tail detection & truncation (superseded)
 - [DUR-4-FU-TOOLING](../DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
 - [DUR-9](../DUR-9--8234db61/task.md) — DUR-9: Wire the WAL into server startup (open, replay, hold for process lifetime, expose… (done)

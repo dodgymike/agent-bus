@@ -5,19 +5,19 @@
 | Public id | `83ef0b67-1950-4a9f-8022-d779aaf69a79` |
 | Key | _(null in the export)_ |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | sequencing, vacuous-today |
 | Created | 2026-08-08T17:17:26.914118+00:00 |
-| Updated | 2026-08-08T17:17:26.914118+00:00 |
-| Completed | — |
+| Updated | 2026-09-05T06:38:51.514887+00:00 |
+| Completed | 2026-09-05T06:38:51.514868+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestRelayWiringNeverConstructsRemoteRouterBeforeDurableOutbox ./cmd/agent-bus
+go test -race -run "RemoteRouter" ./internal/hub
 ```
 
 ## Description

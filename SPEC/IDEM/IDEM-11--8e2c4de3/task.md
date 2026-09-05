@@ -78,7 +78,6 @@ PRIORITY P0 (escalated from the epic default of P1): every other IDEM task's cor
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CLI-3](../../CLI/CLI-3--6e70abe5/task.md) — CLI-3: watch -- long-poll tail, human-readable for a person and NDJSON for a pipe (replac… (done)
 - [CLI-4](../../CLI/CLI-4--137465b9/task.md) — CLI-4: send + broadcast, incl. stdin and interactive (replaces bus-send.sh and bus-broadc… (done)
 - [CLI-5](../../CLI/CLI-5--86dea094/task.md) — CLI-5: agents -- roster listing (replaces bus-agents.sh) (done)
 - [HUB-FU-RECOVER-IDEM-RELAY-ARM](../../RELAY/HUB-FU-RECOVER-IDEM-RELAY-ARM--5e74485a/task.md) — HUB-FU-RECOVER-IDEM-RELAY-ARM: recoverIdemRecord has no relay arm, and a lost relay appli… (todo)

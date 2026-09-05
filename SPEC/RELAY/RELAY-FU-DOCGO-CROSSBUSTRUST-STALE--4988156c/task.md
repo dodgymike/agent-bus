@@ -5,19 +5,19 @@
 | Public id | `4988156c-26ba-4fe8-b871-e5922a0eb8cf` |
 | Key | RELAY-FU-DOCGO-CROSSBUSTRUST-STALE |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T18:14:29.504069+00:00 |
-| Updated | 2026-08-14T18:14:29.504069+00:00 |
-| Completed | — |
+| Updated | 2026-09-03T06:22:54.346447+00:00 |
+| Completed | 2026-09-03T06:22:54.346428+00:00 |
 
 ## Proof command
 
 ```sh
-grep -qF 'no implementation of CrossBusTrust exists (RELAY-17 owns' internal/relay/doc.go && echo STILL_STALE || echo FIXED
+go test -race -run "TestPackageDocDoesNotReviveTheWithdrawnDisconnect" ./internal/relay
 ```
 
 ## Description

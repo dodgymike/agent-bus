@@ -83,7 +83,6 @@ This is the epic's crux and the root fix for the pre-auth attack family. interna
 - [ADMIN-C3](../../ADMIN/ADMIN-C3--ca0653e3/task.md) — ADMIN-C3: console issues/renews telemetry leases and renders the stream -- A REFUSAL MUST… (todo)
 - [AUTH-3-FU-ROSTERDOS-DOCS](../../AUTH/AUTH-3-FU-ROSTERDOS-DOCS--d5197abb/task.md) — AUTH-3-FU-ROSTERDOS-DOCS: extend session.go availability analysis (untargeted/unamplified… (todo)
 - [AUTH-ROSTER-RECLAIM](../../AUTH/AUTH-ROSTER-RECLAIM--b418638c/task.md) — AUTH-ROSTER-RECLAIM: operator-side "agent-bus roster remove &lt;id&gt;" escape hatch -- filesys… (todo)
-- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
 - [DISCOVERY-DOC](../../CORE/DISCOVERY-DOC--2d7ce37b/task.md) — DISCOVERY-DOC: self-describing unauthenticated discovery document so an agent with only a… (in_progress)
 - [ENROL-SHAPE](../ENROL-SHAPE--8942c8c8/task.md) — ENROL-SHAPE: settle the FINAL /v1/enroll wire shape and auth.RosterEntry field set ONCE,… (done)
 - [HANDOVER-CHECK](../../HANDOVER/HANDOVER-CHECK--0f909b6c/task.md) — HANDOVER-CHECK: one command that tells you the health of this repo, plus its recorded out… (todo)

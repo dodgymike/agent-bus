@@ -36,7 +36,7 @@ _None recorded._
 
 
 - [ACK-3](../ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
-- [RELAY-23](../../RELAY/RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
+- [RELAY-23](../../RELAY/RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -45,7 +45,7 @@ _None recorded._
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (todo)
+- [RELAY-53](../../RELAY/RELAY-53--d5bbdec9/task.md) — RELAY-53: RELAY-23 will merge cleanly and then fail to compile -- two wire-version resolv… (done)
 
 ---
 

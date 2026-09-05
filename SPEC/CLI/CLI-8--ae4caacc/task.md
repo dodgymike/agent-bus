@@ -77,7 +77,7 @@ _None recorded._
 
 - [CLI-1](../CLI-1--0495d133/task.md) — CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single clien… (done)
 - [CLI-10](../CLI-10--aba6e399/task.md) — CLI-10: Rewrite AGENT_PROTOCOL.md against CLI subcommands (it currently documents shell w… (todo)
-- [CLI-6](../CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
+- [CLI-6](../CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (in_progress)
 - [CLI-9](../CLI-9--93973755/task.md) — CLI-9: shell completion + man/usage polish (todo)
 - [DUR-4-FU-TOOLING](../../DUR/DUR-4-FU-TOOLING--26c2ce16/task.md) — DUR-4-FU-TOOLING: Operator tooling for a WAL that refuses to start (superseded)
 - [fc8cd234-d275-43a1-9cb0-d10bca4a4086](../../PROCESS/Backfill-non-vacuous-proof_cmd-across-the-14-actionable--fc8cd234/task.md) — Backfill non-vacuous proof_cmd across the 14 actionable tasks that have none (CLI-1..9 +… (todo)

@@ -87,7 +87,7 @@ Blocked by CONV-AUTHZ-CREATOR (who may make the change) and CONV-RECORD.
 - [CONV-CRASH](../CONV-CRASH--3078ad4e/task.md) — CONV-CRASH: crash-injection proof that conversation create + membership change recover to… (todo)
 - [CONV-IDEM](../CONV-IDEM--aae5f71e/task.md) — CONV-IDEM: conversation create + membership change idempotency -- three cases, NOT collap… (todo)
 - [CONV-JOINPOINT](../CONV-JOINPOINT--b18c8710/task.md) — CONV-JOINPOINT: NO BACKFILL -- define the join point as a durable POSITION, atomic with t… (todo)
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -97,7 +97,7 @@ Blocked by CONV-AUTHZ-CREATOR (who may make the change) and CONV-RECORD.
 
 
 - [CONV-JOINPOINT](../CONV-JOINPOINT--b18c8710/task.md) — CONV-JOINPOINT: NO BACKFILL -- define the join point as a durable POSITION, atomic with t… (todo)
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 
 ---
 

@@ -62,9 +62,8 @@ RELAY-25 SECURITY AMENDMENT (2026-08-14): the receive-side requirement is produc
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-CREATE-CLI](../../CONV/CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (todo)
+- [CONV-CREATE-CLI](../../CONV/CONV-CREATE-CLI--627d20e0/task.md) — CONV-CREATE-CLI: mint a conversation -- HTTP route + agent-busctl subcommand + AGENT_PROT… (done)
 - [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)
-- [ID-2-WIRING](../../ID/ID-2-WIRING--838677e6/task.md) — ID-2-WIRING: Derive the sequence resume floor from ALL prepares, never from committed his… (superseded)
 - [ID-2-WIRING-OBSERVER](../../ID/ID-2-WIRING-OBSERVER--c31f6999/task.md) — ID-2-WIRING-OBSERVER: wal offers EVERY prepare (committed, aborted AND dangling) to an ob… (todo)
 - [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)
 - [IDEM-12-FU-BROADCAST](../../IDEM/IDEM-12-FU-BROADCAST--facdd241/task.md) — IDEM-12-FU-BROADCAST: broadcast idempotency is untestable until SIGN-3 defines a canonica… (todo)

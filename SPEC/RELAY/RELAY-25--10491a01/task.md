@@ -84,7 +84,7 @@ three-host run over actual SSH tunnels; the loopback smoke does not substitute f
 - [CONTEXT-DOCCHECK](../../CONTEXT/CONTEXT-DOCCHECK--b3b28f45/task.md) — CONTEXT-DOCCHECK: doc-check.sh -- the instrument every other proof in this epic depends on (done)
 - [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)
 - [RELAY-24](../RELAY-24--e303c624/task.md) — RELAY-24: Composition root: wire federation into cmd/agent-bus/main.go (done)
-- [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md) — RELAY-25-FU-CORRELATION-FU-AGENTDOCS: CONTRACTS-AGENT.md still says fed-smoke.sh is 'expe… (todo)
+- [RELAY-25-FU-CORRELATION-FU-AGENTDOCS](../RELAY-25-FU-CORRELATION-FU-AGENTDOCS--6a4f6f47/task.md) — RELAY-25-FU-CORRELATION-FU-AGENTDOCS: CONTRACTS-AGENT.md still says fed-smoke.sh is 'expe… (done)
 - [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 - [SIGN-7](../../SIGN/SIGN-7--aeb90793/task.md) — SIGN-7: Cross-bus relay preserves the signed envelope byte-exact -- an intermediate bus c… (done)
 
@@ -97,7 +97,7 @@ three-host run over actual SSH tunnels; the loopback smoke does not substitute f
 
 - [AGENTIF-10](../../AGENTIF/AGENTIF-10--1e837ac9/task.md) — AGENTIF-10: bus-serve pidfile process identity and PID-reuse-safe final stop (todo)
 - [CLI-11](../../UNASSIGNED/CLI-11--bf966c07/task.md) — CLI-11: export the bus signing public key from the operator CLI (done)
-- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
+- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (in_progress)
 - [CRYPTO-10](../../CRYPTO/CRYPTO-10--68ff679d/task.md) — CRYPTO-10: \`agent-bus verify\` helper + scripts/bus-*.sh validate-before-accept + AGENT_PR… (todo)
 - [INVITE-CLIENT](../../INVITE/INVITE-CLIENT--4123e25d/task.md) — INVITE-CLIENT: the Go client/CLI redeems an invite at enrol (+ AGENT_PROTOCOL.md entry) -… (done)
 - [INVITE-GATE](../../INVITE/INVITE-GATE--05a5216d/task.md) — INVITE-GATE: POST /v1/enroll REQUIRES a valid invite and fails closed; invite consumption… (done)
@@ -111,7 +111,7 @@ three-host run over actual SSH tunnels; the loopback smoke does not substitute f
 - [RELAY-24-BLOCKER-PEERCERTFLAG](../RELAY-24-BLOCKER-PEERCERTFLAG--0e6b5a49/task.md) — RELAY-24-BLOCKER-PEERCERTFLAG: agent-bus peer add has no flag to bind a peer's inbound cl… (done)
 - [RELAY-25-FU-CORRELATION](../RELAY-25-FU-CORRELATION--3f009222/task.md) — RELAY-25-FU-CORRELATION: fed-smoke.sh asserts the SAME message_id string in A's, B's and… (done)
 - [RELAY-25-FU-REALHOST](../RELAY-25-FU-REALHOST--8708f7c9/task.md) — RELAY-25-FU-REALHOST: Real three-host SSH-tunnel federation run -- loopback smoke does no… (todo)
-- [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (todo)
+- [RELAY-26](../RELAY-26--d72a1e04/task.md) — RELAY-26: Startup refusal: non-loopback -listen with peer records and invite-gating off (done)
 - [RELAY-44](../RELAY-44--cec27a90/task.md) — RELAY-44: Inbound peer-certificate binding record -- bind a presented CLIENT certificate… (superseded)
 - [RELAY-45](../RELAY-45--4be32336/task.md) — RELAY-45: Bind inbound peer TLS certificate to the adjacent bus principal (done)
 - [RELAY-47](../RELAY-47--dd69c4d3/task.md) — RELAY-47: ONWARD RELAY -- WIRE an intermediate bus to forward a relayed message to a THIR… (done)

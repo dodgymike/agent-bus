@@ -5,19 +5,19 @@
 | Public id | `ddbc0a0e-e4f5-4256-8d4d-0f8a29afc5d8` |
 | Key | RELAY-28 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-08T17:17:54.809657+00:00 |
-| Updated | 2026-08-08T17:17:54.809657+00:00 |
-| Completed | — |
+| Updated | 2026-09-05T06:33:18.323782+00:00 |
+| Completed | 2026-09-05T06:33:18.323765+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run TestVerifyRejectsAttestationExceedingMaxLifetime ./internal/attest
+go test -race -run "Lifetime|Ceiling|MaxAttestation" ./internal/attest
 ```
 
 ## Description

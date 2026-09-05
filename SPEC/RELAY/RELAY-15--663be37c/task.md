@@ -59,7 +59,7 @@ retry horizon must stay inside idem.PeerOutageBudget (24h).
 
 
 - [RELAY-15-FU-JOBID-CASE](../RELAY-15-FU-JOBID-CASE--8f53c693/task.md) — RELAY-15-FU-JOBID-CASE: Normalise bus-id case at the outbox enqueue boundary (todo)
-- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (todo)
+- [RELAY-16-FU-SEQUENCING](../RELAY-16-FU-SEQUENCING--83ef0b67/task.md) — RELAY-16-FU-SEQUENCING: RemoteRouter must not be wired before the durable outbox exists (done)
 - [RELAY-19](../RELAY-19--24e0bd11/task.md) — RELAY-19: Forwarder writes and settles outbox records (part 2 of 2) (done)
 - [WAL-APPLIER-DOC-STALE](../../DUR/WAL-APPLIER-DOC-STALE--c65a50d1/task.md) — WAL-APPLIER-DOC-STALE: internal/wal/log.go Applier doc contradicts replay.go on Apply err… (todo)
 

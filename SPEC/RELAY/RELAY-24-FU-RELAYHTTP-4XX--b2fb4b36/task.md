@@ -5,19 +5,19 @@
 | Public id | `b2fb4b36-ff4f-4c03-9d71-3a9a8d4d19a1` |
 | Key | RELAY-24-FU-RELAYHTTP-4XX |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | relay |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-14T22:01:44.485457+00:00 |
-| Updated | 2026-08-16T10:37:23.638415+00:00 |
-| Completed | — |
+| Updated | 2026-09-03T06:23:22.250494+00:00 |
+| Completed | 2026-09-03T06:23:22.250478+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -count=1 -run 'TestRelayLastHopMismatchIsAFinal4xx|TestRefusalsAreFinalRatherThanRetryable' ./internal/relay ./cmd/agent-bus
+go test -race -count=1 -run "TestMessageRelay|TestRefusalsAreFinalRatherThanRetryable" ./internal/relay ./cmd/agent-bus
 ```
 
 ## Description

@@ -46,7 +46,7 @@ _None recorded._
 
 - [7bdf6c98-a1a5-488c-af70-4b2332b101df](../Acceptance-criterion-for-the-first-durable-write-HTTP-ha--7bdf6c98/task.md) — Acceptance criterion for the first durable-write HTTP handler (MSG-2/MSG-3): wal.ErrClose… (todo)
 - [CORE-9](../../CORE/CORE-9--a1f74fcc/task.md) — CORE-9: Set IdleTimeout + MaxHeaderBytes on http.Server -- and deliberately leave Read/Wr… (done)
-- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../../CRYPTO/CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 - [CRYPTO-8](../../CRYPTO/CRYPTO-8--2b1068eb/task.md) — CRYPTO-8: Broadcast to N agents -- authenticated encryption for the fan-out path (deferred)
 - [IDEM-1](../../IDEM/IDEM-1--3cac3349/task.md) — IDEM-1: The idempotency-key contract -- format, transport, scope, and which operations re… (superseded)
 - [IDEM-12](../../IDEM/IDEM-12--26dd5625/task.md) — IDEM-12: Idempotent send/broadcast -- retries return the original result, no new sequence… (in_progress)

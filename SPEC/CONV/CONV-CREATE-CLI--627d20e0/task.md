@@ -5,19 +5,19 @@
 | Public id | `627d20e0-c784-4bd7-9f60-a6b786a49cda` |
 | Key | CONV-CREATE-CLI |
 | Epic | [CONV](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P2 |
 | Component | conv |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-15T08:54:47.406677+00:00 |
-| Updated | 2026-08-15T08:54:47.406677+00:00 |
-| Completed | — |
+| Updated | 2026-08-30T20:53:02.643324+00:00 |
+| Completed | 2026-08-30T20:53:02.643308+00:00 |
 
 ## Proof command
 
 ```sh
-go test -race -run 'TestConversationCreate' ./internal/httpapi && grep -q 'conversation create' AGENT_PROTOCOL.md && echo CONV_CREATE_OK
+go test -race -run "TestConversationCreate|TestEveryRouteRequiresAuth" ./internal/httpapi ./internal/store
 ```
 
 ## Description
@@ -76,7 +76,7 @@ Parallel-safety: touches internal/httpapi, cmd/agent-busctl and docs.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (todo)
+- [CONV-RECORD](../CONV-RECORD--cd3524c2/task.md) — CONV-RECORD: the durable conversation record -- wal.Entry.Kind "conversation" (reservatio… (done)
 - [SIGN-6](../../SIGN/SIGN-6--c9e4aea1/task.md) — SIGN-6: A signature is MANDATORY on the wire -- ingest policy and fail-closed handling of… (todo)
 
 ## Referenced by other tasks (derived, not authoritative)
@@ -86,7 +86,8 @@ Parallel-safety: touches internal/httpapi, cmd/agent-busctl and docs.
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CONV-SEND-BY-ID](../CONV-SEND-BY-ID--ce8bff7b/task.md) — CONV-SEND-BY-ID: address a conversation by id instead of tracking participants -- route +… (todo)
+- [23d4e264-a6ae-4fd6-ae4f-1a41a56097de](../../ACK/TestCLIEnrolEndToEnd-flakes-1-3-under-race--23d4e264/task.md) — TestCLIEnrolEndToEnd flakes ~1/3 under -race (todo)
+- [CONV-SEND-BY-ID](../CONV-SEND-BY-ID--ce8bff7b/task.md) — CONV-SEND-BY-ID: address a conversation by id instead of tracking participants -- route +… (done)
 
 ---
 

@@ -7050,3 +7050,11 @@ route + startup gate; NOT docs-and-tests-only): dispatched. No skips taken, so n
 needed. (Verdicts recorded on the Spec Server task notes.)
 
 **No commit by this agent** — feature-runner writes source only; integrator commits the fileset.
+
+## 2026-09-05 — SPEC mirror refresh after the RELAY wire-version + robustness push
+
+Regenerated SPEC.md / SPEC/ (gen-spec-mirror.sh) reflecting this push's closes: RELAY-23, RELAY-53,
+45af210c, 6a4f6f47, RELAY-FU-DOCGO-CROSSBUSTRUST-STALE (wire-version); RELAYHTTP4XX, APPLYDISCARD,
+SIGCOPY (6e13a7d9), RELAY-26, 83ef0b67, RELAY-55 (robustness); RELAY-28 (attestation ceiling).
+Mirror-only housekeeping, generated artifact. security — SKIPPED under the docs-and-tests carve-out
+(generated docs, no guard/control-plane path); paths: SPEC.md, SPEC/, AGENT_LOG.md. No product code.

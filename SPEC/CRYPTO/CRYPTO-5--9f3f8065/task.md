@@ -44,7 +44,7 @@ GATED: do not start until CRYPTO-1 (design spike) is done and its DECISIONS.md e
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (done)
+- [CRYPTO-1](../CRYPTO-1--30570fb9/task.md) — CRYPTO-1: DESIGN SPIKE -- Signal-style E2E crypto for agent-bus (CRYPTO_DEEPDIVE.md + DEC… (in_progress)
 - [CRYPTO-2](../CRYPTO-2--0ad37da2/task.md) — CRYPTO-2: Adopt the crypto primitive layer chosen by the spike (internal/cryptobox + go.m… (superseded)
 - [CRYPTO-4](../CRYPTO-4--13f3947e/task.md) — CRYPTO-4: Key-distribution endpoint -- server-attested messaging key bundles (todo)
 - [CRYPTO-6](../CRYPTO-6--260e6003/task.md) — CRYPTO-6: Double Ratchet encrypt/decrypt on the direct-message send path (deferred)

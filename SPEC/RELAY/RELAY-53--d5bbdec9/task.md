@@ -5,19 +5,19 @@
 | Public id | `d5bbdec9-0659-423e-a420-183133ab9818` |
 | Key | RELAY-53 |
 | Epic | [RELAY](../epic.md) |
-| Status | todo |
+| Status | done |
 | Priority | P1 |
 | Component | BE |
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-16T15:41:16.094565+00:00 |
-| Updated | 2026-08-16T15:41:16.094565+00:00 |
-| Completed | — |
+| Updated | 2026-09-01T20:59:35.839237+00:00 |
+| Completed | 2026-09-01T20:59:35.839222+00:00 |
 
 ## Proof command
 
 ```sh
-go build ./internal/relay && go test -race -run 'TestWireVersion' ./internal/relay
+go build ./internal/relay && go test -race -run "TestWireVersion" ./internal/relay
 ```
 
 ## Description
@@ -94,7 +94,7 @@ _None recorded._
 - [ACK-1](../../ACK/ACK-1--e0ac42e1/task.md) — ACK-1: Define end-to-end ACK/NACK delivery contract and terminal state machine (done)
 - [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
 - [ACK-3-FU-COLLAPSE-WIREVERSION](../../ACK/ACK-3-FU-COLLAPSE-WIREVERSION--8c6d6765/task.md) — ACK-3-FU-COLLAPSE-WIREVERSION: collapse relay.AckWireVersion onto relay.WireVersion once… (todo)
-- [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
+- [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

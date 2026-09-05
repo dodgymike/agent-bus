@@ -89,7 +89,7 @@ _None recorded._
 
 
 - [ACK-3](../../ACK/ACK-3--263c47fe/task.md) — ACK-3: Authenticated peer-hop ACK/NACK wire semantics and correlation (done)
-- [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (todo)
+- [RELAY-23](../RELAY-23--220d36f4/task.md) — RELAY-23: Relay wire protocol version (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 
@@ -99,7 +99,7 @@ _None recorded._
 
 
 - [RELAY-54](../RELAY-54--911841af/task.md) — RELAY-54: an abandoned outbox job is invisible to every subcommand -- the drain a rollout… (done)
-- [RELAY-55](../RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (todo)
+- [RELAY-55](../RELAY-55--0a571a02/task.md) — RELAY-55: a bus can be healthy and silently deaf to the entire federation -- /healthz is… (done)
 
 ---
 

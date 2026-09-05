@@ -11,7 +11,7 @@
 | Section | backlog |
 | Tags | — |
 | Created | 2026-08-02T12:44:33.115083+00:00 |
-| Updated | 2026-08-07T18:08:45.641635+00:00 |
+| Updated | 2026-09-05T12:06:35.059866+00:00 |
 | Completed | 2026-08-07T12:07:08.316530+00:00 |
 
 ## Proof command
@@ -22,7 +22,7 @@ go test -race -run 'TestCLIWatch' ./client/... ./cmd/agent-busctl/... && go test
 
 ## Status note
 
-DISPATCHED by triage-20260802-c3d-breadth-pass3. Boundaries: CLI-3/4/5 -> client,cmd/busctl,CONTRACTS-CLI.md | DEPLOY-2-FU-CONTAINERNAME -> docker-compose.yml | NAMESUFFIXES -> internal/ids | IDEM-11 -> internal/idem,internal/wal(additive),internal/hub,CONTRACTS-ONDISK.md. All DISJOINT. No agent writes DECISIONS.md/AGENT_LOG.md/SPEC.md this wave.
+Step 1 completed. Located the prompt assembly code and tests: prompt-builder.ts (buildPrompt/renderPrompt), prompts/build-prompt-skeleton.txt (golden skeleton), prompts/self-modification-section.txt, CLAUDE.md (stable sections), workspace-init.ts (start-directory block), main.ts call sites, and the existing tests test/prompt-builder.test.ts plus related memory/workspace-init tests. Confirmed memory is currently prepended by llm/multi-turn-runtime.ts and that PROMPTS.md already documents the canonical stable-first ordering.
 
 ## Description
 
@@ -80,8 +80,6 @@ incremental-streaming property, because a --json flag that buffers would pass a 
 - [AGENTIF-6](../../AGENTIF/AGENTIF-6--31c1257c/task.md) — AGENTIF-6: scripts/bus-wait.sh + AGENT_PROTOCOL.md entry (superseded)
 - [CLI-1](../CLI-1--0495d133/task.md) — CLI-1: client package (NOT under internal/) + CLI subcommand skeleton -- the single clien… (done)
 - [CLI-2](../CLI-2--39318208/task.md) — CLI-2: identity -- enrol, whoami, use, logout (ABSORBS AGENTIF-2; there is no bus-enrol.s… (done)
-- [DEPLOY-2-FU-CONTAINERNAME](../../DEPLOY/DEPLOY-2-FU-CONTAINERNAME--e9dd20b4/task.md) — DEPLOY-2-FU-CONTAINERNAME: docker-compose.yml hardcodes container_name, collides with any… (done)
-- [IDEM-11](../../IDEM/IDEM-11--8e2c4de3/task.md) — IDEM-11: Durable applied-key store, recovered via WAL replay, with a bounded retention wi… (done)
 
 ## Referenced by other tasks (derived, not authoritative)
 

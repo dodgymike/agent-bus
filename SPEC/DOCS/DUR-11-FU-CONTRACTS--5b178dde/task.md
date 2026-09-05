@@ -48,7 +48,7 @@ _None recorded._
 
 - [CONTRACTS-SPLIT](../CONTRACTS-SPLIT--360a2679/task.md) — CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every pro… (done)
 - [DUR-11](../../DUR/DUR-11--884d3da4/task.md) — DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record… (done)
-- [DUR-12](../../DUR/DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (done)
+- [DUR-12](../../DUR/DUR-12--cbc9ab0c/task.md) — DUR-12: Replace CRC32C with an HMAC-SHA256 keyed MAC (ON-DISK FORMAT CHANGE, reserved ond… (in_progress)
 - [db350e39-3dde-4166-b241-b21fa4635359](../../DUR/Whole-log-quarantine-reissued-EVERY-sequence-number-ever--db350e39/task.md) — Whole-log quarantine reissued EVERY sequence number ever minted -- fixed by a durable ind… (done)
 - [e120153b-9d8a-4b6a-bd4e-89431954496b](../../DUR/Fix-WAL-recovery-reissuing-a-discarded-tail-record-index--e120153b/task.md) — Fix WAL recovery reissuing a discarded tail record index (invariant 1 violation, NOT a na… (in_progress)
 
@@ -61,7 +61,6 @@ _None recorded._
 
 - [9160ba8d-09f8-4510-bd0c-dcf1b22b82a5](../../DUR/Startup-summary-silently-omits-whole-log-quarantine-quar--9160ba8d/task.md) — Startup summary silently omits whole-log quarantine (quarantined/discard_count/discarded_… (done)
 - [CONTRACTS-SPLIT](../CONTRACTS-SPLIT--360a2679/task.md) — CONTRACTS-SPLIT: split CONTRACTS.md into per-plane files (pure move) + retarget every pro… (done)
-- [DUR-11](../../DUR/DUR-11--884d3da4/task.md) — DUR-11: Close security's two OPEN HIGH truncation holes -- anchor the tail veto on record… (done)
 - [f0ef1ed9-cbcb-4ddd-9dec-394e1800ae78](../Stale-CONTRACTS.md-pointers-after-the-CONTRACTS-SPLIT-RE--f0ef1ed9/task.md) — Stale CONTRACTS.md pointers after the CONTRACTS-SPLIT: README.md:88, AGENT_PROTOCOL.md:12… (todo)
 
 ---

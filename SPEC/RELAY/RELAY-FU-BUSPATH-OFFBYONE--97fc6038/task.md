@@ -58,7 +58,7 @@ SCOPE: diff the two boundary checks, determine which one is off by one (or wheth
 > a real `depends_on` field is tracked by CONTEXT-SPEC-DEPS.
 
 
-- [RELAY-24-FU-RELAYHTTP-4XX](../RELAY-24-FU-RELAYHTTP-4XX--b2fb4b36/task.md) — RELAY-24-FU-RELAYHTTP-4XX: bus-path last-hop binding refusal answers a retryable 503 inst… (todo)
+- [RELAY-24-FU-RELAYHTTP-4XX](../RELAY-24-FU-RELAYHTTP-4XX--b2fb4b36/task.md) — RELAY-24-FU-RELAYHTTP-4XX: bus-path last-hop binding refusal answers a retryable 503 inst… (done)
 - [RELAY-FU-DOCGO-GAP7-BACKOFF](../RELAY-FU-DOCGO-GAP7-BACKOFF--8aacfd4c/task.md) — internal/relay/doc.go gap 7: a fair-share or capacity refusal from AcceptRelay becomes a… (todo)
 
 ---

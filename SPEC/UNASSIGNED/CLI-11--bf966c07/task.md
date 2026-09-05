@@ -59,7 +59,6 @@ CORRECTION 2026-08-14 -- OFFLINE ONLY, not "against a running bus": the original
 - [CLI-11-FU-BUSIDBOUND](../CLI-11-FU-BUSIDBOUND--82f9e452/task.md) — CLI-11-FU-BUSIDBOUND: internal/ids reads the bus-id file with an unbounded os.ReadFile (todo)
 - [CLI-11-FU-LOADONLY](../CLI-11-FU-LOADONLY--b140724b/task.md) — CLI-11-FU-LOADONLY: load-only accessors for bus key material and the bus id, so a READ ca… (todo)
 - [CLI-11-FU-STATERR](../CLI-11-FU-STATERR--555967a6/task.md) — CLI-11-FU-STATERR: invite mint tells an operator to restore a file that is present but un… (todo)
-- [CLI-6](../../CLI/CLI-6--47001cb4/task.md) — CLI-6: log -- read the append-only audit log (metadata only; also absorbs the WAL-dumper… (done)
 - [CLI-6-FU-FOLLOW](../../CLI/CLI-6-FU-FOLLOW--03a09254/task.md) — CLI-6-FU-FOLLOW: decide what log --follow means for an offline, dirlock-taking reader (todo)
 - [RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC](../../RELAY/RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC--7126f08b/task.md) — RELAY-24-BLOCKER-HUBINGEST-FU-AUDITHASH-DOC: Record the relayed audit content-hash decisi… (done)
 - [de0fc1df-a948-4b44-95a4-4b9d01cab267](../../TOOLING/DECISIONS.md-HTML-comment-section-fences-are-imbalanced--de0fc1df/task.md) — DECISIONS.md HTML-comment section fences are imbalanced (6 BEGIN / 8 END) -- introduced b… (todo)
